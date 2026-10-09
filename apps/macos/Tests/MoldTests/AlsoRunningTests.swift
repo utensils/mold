@@ -130,7 +130,7 @@ struct AlsoRunningTests {
     }
 
     @Test func displayedAutoChainsUseTheirOwnCancellationAndResumeAuthority() {
-        for phase in ["queued", "held", "paused", "running", "preparing"] {
+        for phase in ["queued", "held", "paused", "running", "loading", "preparing"] {
             let chain = rows([item("c", kind: "generation", phase: phase, execution: "chain")])[0]
             #expect(chain.canCancel)
             #expect(chain.canResume == (phase == "paused"))
@@ -143,6 +143,8 @@ struct AlsoRunningTests {
         let parked = rows([item("c", kind: "generation", phase: "paused", canCancel: false, execution: "chain")])[0]
         #expect(parked.canResume)
         #expect(!parked.canCancel)
+        let loading = rows([item("c", kind: "generation", phase: "loading", canCancel: false, execution: "chain")])[0]
+        #expect(!loading.canCancel)
         let stale = AlsoRunningRow(host: workstation, work: .reported(reported([item("c", kind: "generation", execution: "chain")], stale: true)[0]))
         #expect(!stale.canCancel)
     }

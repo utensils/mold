@@ -3315,10 +3315,10 @@ function canCancelFleetActivity(row: FleetActiveWork): boolean {
     row.kind === "generation" &&
     row.can_cancel &&
     (row.execution === "chain" ||
-      !["running", "preparing"].includes(row.phase) ||
+      !["running", "loading", "preparing"].includes(row.phase) ||
       serverCapabilities[row.hostId]?.queue?.cooperative_cancellation === true) &&
     fleetQueueAuthority(row) !== null &&
-    ["queued", "paused", "held", "running", "preparing"].includes(row.phase)
+    ["queued", "paused", "held", "running", "loading", "preparing"].includes(row.phase)
   );
 }
 const fallbackCancelArmed = ref(false);
@@ -3341,7 +3341,7 @@ async function cancelFleetActivity(row: FleetActiveWork): Promise<void> {
     const current = activity.items.find((item) => item.id === row.id && item.kind === row.kind);
     if (
       !current?.can_cancel ||
-      !["queued", "paused", "held", "running", "preparing"].includes(current.phase)
+      !["queued", "paused", "held", "running", "loading", "preparing"].includes(current.phase)
     )
       throw new Error(
         "This job has already stopped or cannot be cancelled. Refresh its machine details.",
@@ -3351,7 +3351,7 @@ async function cancelFleetActivity(row: FleetActiveWork): Promise<void> {
         "This job is no longer held. Reopen its details before stopping running work.",
       );
     if (
-      ["running", "preparing"].includes(current.phase) &&
+      ["running", "loading", "preparing"].includes(current.phase) &&
       row.execution !== "chain" &&
       serverCapabilities[row.hostId]?.queue?.cooperative_cancellation !== true
     )

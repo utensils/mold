@@ -262,13 +262,13 @@ export function useQueueCommands(): QueueCommands {
       if (
         fresh.instance_id !== row.instanceId ||
         !current?.can_cancel ||
-        !["queued", "paused", "held", "running", "preparing"].includes(current.phase) ||
+        !["queued", "paused", "held", "running", "loading", "preparing"].includes(current.phase) ||
         (row.phase === "held" && current.phase !== "held")
       )
         throw new Error("This job or machine changed. Reopen its details before stopping work.");
       if (
         row.execution !== "chain" &&
-        ["running", "preparing"].includes(current.phase) &&
+        ["running", "loading", "preparing"].includes(current.phase) &&
         queueFor(row.hostId)?.caps?.canCancelRunning !== true
       )
         throw new Error("This machine cannot stop a running job.");
@@ -385,9 +385,11 @@ export function useQueueCommands(): QueueCommands {
       return (
         row.shared.kind === "generation" &&
         row.shared.can_cancel &&
-        ["queued", "paused", "held", "running", "preparing"].includes(row.shared.phase) &&
+        ["queued", "paused", "held", "running", "loading", "preparing"].includes(
+          row.shared.phase,
+        ) &&
         (row.shared.execution === "chain" ||
-          !["running", "preparing"].includes(row.shared.phase) ||
+          !["running", "loading", "preparing"].includes(row.shared.phase) ||
           queueFor(row.shared.hostId)?.caps?.canCancelRunning === true) &&
         !row.shared.stale &&
         !cancellingShared.value.includes(row.shared.key)

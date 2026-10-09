@@ -849,3 +849,5 @@ allows cancellation, and resume a paused chain. Its controls recheck the machine
 and activity before acting. Existing clip-upscale Pause, Resume and Cancel
 controls also reject disconnected machines, stale rows and duplicate requests.
 Durable authored sequence controls remain available in the machine's web app.
+
+Shared generation jobs keep supported Cancel controls during model loading; automatic chains use their own cancellation authority.

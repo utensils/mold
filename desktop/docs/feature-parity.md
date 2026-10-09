@@ -539,3 +539,5 @@ host’s advertised support; completed, cancelled and failed jobs remain read-on
 Busy, offline or changed-machine rows keep Details accessible. On current Mold
 servers, Held cancellation remains held-only even if another client starts the
 job before the request arrives.
+
+Shared generation activity includes model loading as an executing phase. Cancel remains capability-gated for ordinary jobs and follows chain-owned authority for automatic chains; terminal, cancelling, and unknown phases stay read-only. Native iOS receives loading jobs as `running` through the ordinary queue endpoint and uses its existing running cancellation capability.

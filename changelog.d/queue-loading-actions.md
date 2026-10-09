@@ -1,0 +1,1 @@
+- Keep cancellation available while shared generation jobs load models in Tauri and native macOS, respecting the machine's cancellation capability and the job's current authority.
