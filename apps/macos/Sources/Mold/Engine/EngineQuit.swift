@@ -24,9 +24,11 @@ final class EngineQuit {
         panel.title = "Quitting Mold"
         panel.isFloatingPanel = true
         panel.hidesOnDeactivate = false
-        panel.contentView = Self.content(seconds: seconds, quitNow: { [weak self] in
+        let content = Self.content(seconds: seconds, quitNow: { [weak self] in
             self?.reply()
         })
+        panel.contentView = content
+        panel.setContentSize(content.fittingSize)
         panel.center()
         panel.makeKeyAndOrderFront(nil)
         self.panel = panel
@@ -54,6 +56,7 @@ final class EngineQuit {
         label.font = .preferredFont(forTextStyle: .body)
 
         let button = NSButton(title: "Quit Now", target: QuitNowTarget.shared, action: nil)
+        button.bezelStyle = .rounded
         QuitNowTarget.shared.attach(button, quitNow)
         button.keyEquivalent = "\u{1b}"
 
@@ -64,8 +67,20 @@ final class EngineQuit {
         stack.orientation = .vertical
         stack.alignment = .trailing
         stack.spacing = 12
-        stack.edgeInsets = NSEdgeInsets(top: 16, left: 20, bottom: 16, right: 20)
-        return stack
+        // A stack used directly as a window's content view does not preserve
+        // its edge insets. Pin the stack inside an ordinary container instead.
+        let content = NSView()
+        content.addSubview(stack)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            content.widthAnchor.constraint(equalToConstant: 360),
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
+            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 16),
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
+            row.widthAnchor.constraint(equalTo: stack.widthAnchor),
+        ])
+        return content
     }
 }
 

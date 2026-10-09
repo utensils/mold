@@ -38,6 +38,7 @@ import Testing
         defer { session.stop(in: emptyLibrary) }
         emptyLibrary.localSaveReport = "Sync complete. All prints are already saved on This Mac."
         try await capture(LibraryActivityStatus().environment(emptyLibrary), name: "mac-library-sync-complete-countdown", height: 180)
+        try await capture(LibrarySyncReportSheet().environment(emptyLibrary), name: "mac-library-sync-clean-details", height: 180)
         emptyLibrary.localSaveFailures = ["Legacy fixture.mov: Original input is unavailable on the source machine."]
         emptyLibrary.localSaveIssueKeys = ["fixture": "fixture-unchanged-issue"]
         try await capture(LibrarySyncReportSheet().environment(emptyLibrary), name: "mac-library-sync-issue-acknowledgment", height: 500)
