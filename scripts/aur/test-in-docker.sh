@@ -7,12 +7,20 @@
 #   scripts/aur/test-in-docker.sh mold-ai-bin
 #   scripts/aur/test-in-docker.sh mold-ai
 #   scripts/aur/test-in-docker.sh mold-ai-git
+#   scripts/aur/test-in-docker.sh mold-ai-desktop
+#   scripts/aur/test-in-docker.sh mold-ai-desktop-bin
 #   scripts/aur/test-in-docker.sh --version 0.31.0 [pkg]  # target a release
 #                                                   # (default: the latest
 #                                                   # GitHub release; the
 #                                                   # in-tree pkgver is a
 #                                                   # placeholder CI rewrites)
 #   scripts/aur/test-in-docker.sh --archive /path/to/cpu.tar.gz mold-ai-bin
+#   scripts/aur/test-in-docker.sh --archive /path/to/desktop-cpu.tar.gz mold-ai-desktop-bin
+#   scripts/aur/test-in-docker.sh --archive /path/to/src.tar.gz mold-ai-desktop
+#                                                   # (a source tarball whose top
+#                                                   # directory is mold-<pkgver>/,
+#                                                   # e.g. `git archive
+#                                                   # --prefix=mold-0.33.0/ HEAD`)
 #   scripts/aur/test-in-docker.sh --as-is [pkg]     # keep the in-tree pkgver
 #   scripts/aur/test-in-docker.sh --rebuild [pkg]   # force image rebuild
 #   scripts/aur/test-in-docker.sh --shell [pkg]     # drop into a shell
@@ -25,6 +33,11 @@
 # `libcudart.so.12: cannot open shared object file` (#1742). Only then are
 # the runtime dependencies pulled in for `pacman -U` and the `mold --version`
 # smoke, whose loader state is reported by `ldd` when it fails.
+#
+# mold-ai-desktop-bin follows the same two phases for the GPU-free desktop
+# app. The desktop packages never launch the GUI here (the image has no
+# display); they check the installed file layout, that the loader resolves
+# every library, and that the .desktop entry validates.
 set -euo pipefail
 
 IMAGE="mold-aur-test"
@@ -70,10 +83,10 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     -h|--help)
-      sed -n '2,27p' "$0" >&2
+      sed -n '2,40p' "$0" >&2
       exit 0
       ;;
-    mold-ai-bin|mold-ai|mold-ai-git)
+    mold-ai-bin|mold-ai|mold-ai-git|mold-ai-desktop|mold-ai-desktop-bin)
       pkgname="$1"
       ;;
     *)
@@ -94,8 +107,28 @@ pkgname="${pkgname:-mold-ai-bin}"
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 cp -a "${REPO_ROOT}/packaging/aur/${pkgname}/." "$stage/"
-if [ -n "$archive" ]; then
-  [ "$pkgname" = mold-ai-bin ] || { echo '--archive requires mold-ai-bin' >&2; exit 64; }
+if [ -n "$archive" ] && [ "$pkgname" != mold-ai-bin ]; then
+  case "$pkgname" in
+    mold-ai-desktop-bin) archive_field=source_x86_64; archive_name=mold-desktop-x86_64-unknown-linux-gnu-cpu.tar.gz ;;
+    mold-ai-desktop)     archive_field=source;        archive_name=mold-ai-desktop-src.tar.gz ;;
+    *) echo '--archive requires mold-ai-bin, mold-ai-desktop-bin or mold-ai-desktop' >&2; exit 64 ;;
+  esac
+  if [ -n "$version" ] || "$as_is"; then echo '--archive conflicts with --version/--as-is' >&2; exit 64; fi
+  cp "$archive" "$stage/$archive_name"
+  python3 - "$stage" "$archive_field" "$archive_name" <<'PYDESKTOP'
+import hashlib
+from pathlib import Path
+import re
+import sys
+stage, field, filename = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+sums = "sha256sums_x86_64" if field == "source_x86_64" else "sha256sums"
+s = (stage / "PKGBUILD").read_text()
+checksum = hashlib.sha256((stage / filename).read_bytes()).hexdigest()
+s = re.sub(rf"^{field}=.*$", f"{field}=('{filename}')", s, flags=re.M)
+s = re.sub(rf"^{sums}=.*$", f"{sums}=('{checksum}')", s, flags=re.M)
+(stage / "PKGBUILD").write_text(s)
+PYDESKTOP
+elif [ -n "$archive" ]; then
   if [ -n "$version" ] || "$as_is"; then echo '--archive conflicts with --version/--as-is' >&2; exit 64; fi
   cp "$archive" "$stage/mold-x86_64-unknown-linux-gnu-cpu.tar.gz"
   cp "$REPO_ROOT/LICENSE" "$stage/LICENSE"
@@ -188,6 +221,68 @@ python3 /workspace/scripts/tests/cpu-release-smoke.py /usr/bin/mold
 echo "✓ ${pkgname} builds, installs, runs without CUDA"
 INNER
 )
+elif [ "$pkgname" = mold-ai-desktop ] || [ "$pkgname" = mold-ai-desktop-bin ]; then
+  # Shared by both desktop packages: the installed layout, the loader, and
+  # the .desktop entry. `libcuda.so.1` is dlopened by cudarc at runtime, so it
+  # never shows up in ldd and the source package's check needs no driver.
+  desktop_checks=$(cat <<'DESKTOP'
+for member in    usr/bin/mold-desktop    usr/share/applications/com.utensils.mold.desktop    usr/share/metainfo/com.utensils.mold.metainfo.xml    usr/share/icons/hicolor/128x128/apps/com.utensils.mold.png    usr/share/icons/hicolor/512x512/apps/com.utensils.mold.png; do
+  bsdtar -tf "$pkgfile" | grep -qx "$member"      || { echo "error: $pkgfile is missing $member" >&2; exit 1; }
+done
+DESKTOP
+)
+  desktop_smoke=$(cat <<'DESKTOP'
+if ldd /usr/bin/mold-desktop | grep 'not found'; then
+  echo "error: mold-desktop has unresolved libraries" >&2
+  exit 1
+fi
+desktop-file-validate /usr/share/applications/com.utensils.mold.desktop
+DESKTOP
+)
+  if [ "$pkgname" = mold-ai-desktop-bin ]; then
+    build_cmd=$(cat <<INNER
+set -euo pipefail
+workdir=\$(mktemp -d)
+cp -a /pkgbuild/. "\$workdir/"
+cd "\$workdir"
+
+echo "==> phase 1: package creation with no CUDA library on the box"
+if ldconfig -p | grep -q 'libcudart\\.so'; then
+  echo "error: the test image already carries a CUDA runtime; it cannot prove package() needs none" >&2
+  exit 1
+fi
+echo "==> makepkg --noconfirm --nodeps (pkg: ${pkgname})"
+makepkg --noconfirm --nodeps
+pkgfile=\$(ls -1 ./*.pkg.tar.* | head -n 1)
+${desktop_checks}
+echo "✓ ${pkgname} package created without executing the payload"
+
+echo "==> phase 2: install with runtime dependencies, then smoke"
+sudo pacman -Syu --noconfirm
+sudo pacman -U --noconfirm --needed "\$pkgfile"
+${desktop_smoke}
+if sudo pacman -Qq | grep -Ei '^(cuda|cudnn|nvidia)(-|$)'; then
+  echo "error: GPU-free desktop package installed NVIDIA dependencies" >&2
+  exit 1
+fi
+echo "✓ ${pkgname} builds, installs, and resolves every library without CUDA"
+INNER
+)
+  else
+    build_cmd=$(cat <<INNER
+set -euo pipefail
+workdir=\$(mktemp -d)
+cp -a /pkgbuild/. "\$workdir/"
+cd "\$workdir"
+echo "==> makepkg -si --noconfirm --needed (pkg: ${pkgname})"
+makepkg -si --noconfirm --needed
+pkgfile=\$(ls -1 ./*.pkg.tar.* | head -n 1)
+${desktop_checks}
+${desktop_smoke}
+echo "✓ ${pkgname} builds, installs, and resolves every library"
+INNER
+)
+  fi
 else
   build_cmd=$(cat <<INNER
 set -euo pipefail

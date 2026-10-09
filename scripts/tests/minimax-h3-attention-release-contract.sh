@@ -83,7 +83,8 @@ release_feature_sources="$({
     Dockerfile \
     flake.nix \
     packaging/aur/mold-ai/PKGBUILD \
-    packaging/aur/mold-ai-git/PKGBUILD
+    packaging/aur/mold-ai-git/PKGBUILD \
+    packaging/aur/mold-ai-desktop/PKGBUILD
   sed -n '/^[[:space:]]*releaseFeatures =/,/^[[:space:]]*completionFeatures =/p' flake.nix
 } || true)"
 
@@ -151,7 +152,7 @@ grep -Fq '"cuda,flash-attn"' flake.nix \
 # anti-pattern, which is precisely the kind of false positive that gets a
 # guard deleted.
 enabled_feature_lists() {
-  grep -Eho -- '--features[= ]+"?[A-Za-z0-9_,-]+' "$@" \
+  grep -Eho -- '--features[= ]+"?[A-Za-z0-9_,/-]+' "$@" \
     | sed -E 's/^--features[= ]+"?//'
 }
 
@@ -161,6 +162,7 @@ h3_recipe_files=(
   Dockerfile
   packaging/aur/mold-ai/PKGBUILD
   packaging/aur/mold-ai-git/PKGBUILD
+  packaging/aur/mold-ai-desktop/PKGBUILD
   scripts/ci-local.sh
 )
 

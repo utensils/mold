@@ -296,7 +296,7 @@ if wants contracts; then
                   desktop-candle-nix-source-hash desktop-dmg-packaging \
                   desktop-linuxdeploy-pins windows-toolchain-pins \
                   cuda-distribution-contract \
-                  install-cuda-arch install-cpu aur-smoke-script cuda-qualification-contract \
+                  install-cuda-arch install-cpu aur-smoke-script aur-desktop-contract cuda-qualification-contract \
                   minimax-h3-attention-release-contract bench-qwen-parse bench-qwen21-parse \
                   qwen21-metal-uat \
                   regression-matrix-aggregate-failures regression-matrix-concurrency \

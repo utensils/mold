@@ -71,6 +71,12 @@ Linux builds are currently source/CI distributions: `nix build
 `desktop-build` produces the native package on NixOS and a CUDA AppImage on
 conventional Linux. Tagged releases do not publish the AppImage yet.
 
+Tagged releases do publish a GPU-free Linux desktop archive for remote GPU
+hosts, `mold-desktop-x86_64-unknown-linux-gnu-cpu.tar.gz` (a `usr/` tree with
+the binary, launcher entry and icons). On Arch Linux, install it from the AUR
+as `mold-ai-desktop-bin`, or build the CUDA app from source with
+`mold-ai-desktop` (see [Arch Linux / AUR](/guide/installation#arch-linux-aur)).
+
 Windows currently ships through the rolling nightly release. The
 `Windows Nightly` workflow (`.github/workflows/windows-nightly.yml`) publishes
 the self-signed installer, the CLI zip, and the public certificate to the

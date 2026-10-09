@@ -923,7 +923,8 @@ release_feature_sources="$({
     Dockerfile \
     flake.nix \
     packaging/aur/mold-ai/PKGBUILD \
-    packaging/aur/mold-ai-git/PKGBUILD
+    packaging/aur/mold-ai-git/PKGBUILD \
+    packaging/aur/mold-ai-desktop/PKGBUILD
   sed -n '/^[[:space:]]*releaseFeatures =/,/^[[:space:]]*completionFeatures =/p' flake.nix
 } || true)"
 if LC_ALL=C tr -cs '[:alnum:]_-' '\n' <<<"$release_feature_sources" \

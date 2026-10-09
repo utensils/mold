@@ -26,6 +26,7 @@ RUN pacman-key --init && pacman-key --populate archlinux
 # pulls in makepkg, fakeroot, gcc, etc. `rust` + `cargo` cover the
 # source-build PKGBUILDs. `git` is needed for VCS sources; `sudo` for
 # makepkg's `pacman -U` step under the unprivileged builder user.
+# `desktop-file-utils` validates the desktop packages' .desktop entry.
 RUN pacman -Sy --noconfirm archlinux-keyring && \
     pacman -Syu --noconfirm \
         base-devel \
@@ -34,6 +35,7 @@ RUN pacman -Sy --noconfirm archlinux-keyring && \
         rust \
         cargo \
         pkgconf \
+        desktop-file-utils \
         python && \
     rm -rf /var/cache/pacman/pkg/*
 

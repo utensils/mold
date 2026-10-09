@@ -6,7 +6,8 @@
 # Usage:
 #   scripts/aur/update-pkgbuild.sh <pkgname> <version>
 #
-#   <pkgname>  one of: mold-ai-bin, mold-ai
+#   <pkgname>  one of: mold-ai-bin, mold-ai, mold-ai-desktop,
+#              mold-ai-desktop-bin
 #   <version>  the release version without the leading `v` (e.g. 0.10.0)
 #
 # Side effects:
@@ -94,7 +95,17 @@ case "${pkgname}" in
     rewrite "${pkgbuild}" "s|^sha256sums_x86_64=.*|sha256sums_x86_64=('${sha_x86_64}')|"
     ;;
 
-  mold-ai)
+  mold-ai-desktop-bin)
+    base="https://github.com/utensils/mold/releases/download/v${version}"
+    echo "==> fetching sha256 for GPU-free desktop tarball"
+    sha_x86_64="$(fetch_sha "${base}/mold-desktop-x86_64-unknown-linux-gnu-cpu.tar.gz")"
+
+    rewrite "${pkgbuild}" "s/^pkgver=.*/pkgver=${version}/"
+    rewrite "${pkgbuild}" "s/^pkgrel=.*/pkgrel=1/"
+    rewrite "${pkgbuild}" "s|^sha256sums_x86_64=.*|sha256sums_x86_64=('${sha_x86_64}')|"
+    ;;
+
+  mold-ai|mold-ai-desktop)
     src="https://github.com/utensils/mold/archive/refs/tags/v${version}.tar.gz"
     echo "==> fetching sha256 for source tarball"
     sha="$(fetch_sha "${src}")"

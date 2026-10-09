@@ -1,16 +1,23 @@
 # Arch User Repository (AUR) packaging
 
-mold is published to the AUR as three packages. The binary is `mold` (which
-matches the well-known [extra/mold](https://archlinux.org/packages/extra/x86_64/mold/)
-linker by rui314) — to avoid collision, the AUR packages are namespaced as
-`mold-ai*` and each declares `conflicts=('mold')`. You cannot install both the
-linker and these packages simultaneously.
+mold is published to the AUR as three CLI packages and two desktop app
+packages. The CLI binary is `mold` (which matches the well-known
+[extra/mold](https://archlinux.org/packages/extra/x86_64/mold/) linker by
+rui314) — to avoid collision, the AUR packages are namespaced as `mold-ai*` and
+each CLI package declares `conflicts=('mold')`. You cannot install both the
+linker and a CLI package simultaneously.
+
+The desktop packages install only `/usr/bin/mold-desktop` plus its `.desktop`
+entry, AppStream metainfo and icons, so they install alongside any CLI package
+and the linker. They conflict only with each other.
 
 | Package                                 | Source                                                                                                        | Update cadence                                | Audience                                                                             |
 | --------------------------------------- | ------------------------------------------------------------------------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------ |
 | [`mold-ai-bin`](./mold-ai-bin/PKGBUILD) | Repackages the upstream `mold-x86_64-unknown-linux-gnu-cpu.tar.gz` (GPU-free remote CLI) from GitHub Releases | Every tagged release (automatic via CI)       | Remote clients — no CUDA or compilation                                              |
 | [`mold-ai`](./mold-ai/PKGBUILD)         | Builds from the release tarball with CUDA features                                                            | Every tagged release (automatic via CI)       | Users who need a different `CUDA_COMPUTE_CAP` (for example sm_86, sm_100, or sm_120) |
 | [`mold-ai-git`](./mold-ai-git/PKGBUILD) | Builds from `main` HEAD                                                                                       | Pushed manually when the build recipe changes | Bleeding-edge users tracking `main`                                                  |
+| [`mold-ai-desktop-bin`](./mold-ai-desktop-bin/PKGBUILD) | Repackages the upstream `mold-desktop-x86_64-unknown-linux-gnu-cpu.tar.gz` (GPU-free desktop app) from GitHub Releases | Every tagged release (automatic via CI) | Desktop users generating on remote GPU hosts — no CUDA or compilation |
+| [`mold-ai-desktop`](./mold-ai-desktop/PKGBUILD) | Builds the desktop app from the release tarball with CUDA features | Every tagged release (automatic via CI) | Desktop users generating on the local NVIDIA GPU (`CUDA_COMPUTE_CAP` 86, 89 or 120) |
 
 The PKGBUILDs here are the source of truth. The AUR git repos
 (`ssh://aur@aur.archlinux.org/<pkgname>.git`) are downstream mirrors
@@ -39,11 +46,17 @@ CUDA_COMPUTE_CAP=86 paru -S mold-ai
 `CUDA_COMPUTE_CAP=100 makepkg -si` directly. Architecture-specific binary
 packages remain separate qualification work; `mold-ai-bin` is the remote client.
 
+The desktop app follows the same split: `mold-ai-desktop-bin` is the GPU-free
+app for remote hosts, and `mold-ai-desktop` builds the CUDA app from source
+(`CUDA_COMPUTE_CAP=86`, `89` or `120`; B200/B300 is server-only, so the desktop
+recipe refuses `100` — install `mold-ai` on that host and connect to it).
+
 ## Release flow
 
 On a tag push (`v*`), `.github/workflows/release.yml` builds the
 release artifacts as usual, then runs a `publish-aur` matrix job (one
-entry per AUR package, currently `mold-ai-bin` and `mold-ai`). The job:
+entry per AUR package, currently `mold-ai-bin`, `mold-ai`,
+`mold-ai-desktop-bin` and `mold-ai-desktop`). The job:
 
 1. Checks out the tagged commit.
 2. Runs [`scripts/aur/update-pkgbuild.sh`](../../scripts/aur/update-pkgbuild.sh)
