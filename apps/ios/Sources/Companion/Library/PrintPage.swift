@@ -228,6 +228,7 @@ struct NativeVideoPlayer: UIViewControllerRepresentable {
         let controller = AVPlayerViewController()
         controller.player = player
         controller.showsPlaybackControls = true
+        controller.videoGravity = .resizeAspect
         return controller
     }
 

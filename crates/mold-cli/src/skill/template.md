@@ -16,7 +16,9 @@ Mold Studio Companion (`apps/ios`) is remote-only. In Generate, tap **Model**
 below the prompt to search installed models and choose the output kind, recipe
 and machine. **Get More Models…** opens model management. Options uses separate
 rows for large text; clip/3-D drafts restore after profiles arrive. The viewer
-hides the main tabs to expose its media actions. Info has Done, and sharing
+hides the main tabs to expose its media actions. On iPhone, landscape clips use
+the full display with native controls and Close; portrait restores the actions.
+Info has Done, and sharing
 preserves media filenames. Offline Generate/Queue explain unavailable data;
 saved drafts wait for their model profiles until an explicit new choice. For development,
 `nix develop -c companion-dev` watches native/shared Swift sources and

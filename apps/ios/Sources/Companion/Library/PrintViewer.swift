@@ -15,6 +15,7 @@ struct PrintViewer: View {
     @State private var current: PrintID?
     @State private var pageAnchor: PrintID?
     @State private var chrome = true
+    @State private var viewportSize = CGSize.zero
     @State private var showsInfo = false
     @State private var deleting: LibraryEntry?
 
@@ -27,8 +28,10 @@ struct PrintViewer: View {
     var body: some View {
         let entry = projection.entry(current ?? start)
         let anchor = projection.anchor(for: current ?? start, preferred: pageAnchor ?? start)
-        let visibleChrome = UIDevice.current.userInterfaceIdiom == .phone
-            || Self.showsChrome(for: entry?.print.kind, requested: chrome)
+        let landscapePlayback = Self.usesLandscapePlayback(
+            kind: entry?.print.kind, isPhone: UIDevice.current.userInterfaceIdiom == .phone, size: viewportSize)
+        let visibleChrome = !landscapePlayback && (UIDevice.current.userInterfaceIdiom == .phone
+            || Self.showsChrome(for: entry?.print.kind, requested: chrome))
         return TabView(selection: Binding(get: { current ?? start }, set: { select($0) })) {
             ForEach(projection.pages(around: anchor)) { page in
                 Group {
@@ -52,9 +55,26 @@ struct PrintViewer: View {
         .id(anchor)
         .tabViewStyle(.page(indexDisplayMode: .never))
         .background(.black)
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { viewportSize = $0 }
         .ignoresSafeArea(edges: visibleChrome ? [] : .all)
         .toolbar(visibleChrome ? .visible : .hidden, for: .navigationBar, .bottomBar)
         .toolbarVisibility(.hidden, for: .tabBar)
+        .statusBarHidden(landscapePlayback)
+        .overlay(alignment: .top) {
+            if landscapePlayback {
+                Button { dismiss() } label: {
+                    Label("Close", systemImage: "xmark")
+                        .labelStyle(.iconOnly)
+                        .padding(12)
+                        .frame(minWidth: 44, minHeight: 44)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white)
+                .background(.black.opacity(0.7), in: .circle)
+                .accessibilityIdentifier("landscape-playback-close")
+                .padding()
+            }
+        }
         .navigationTitle(entry.map(title) ?? "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -111,6 +131,12 @@ struct PrintViewer: View {
     private func select(_ id: PrintID) {
         if projection.shouldRecenter(selected: id, anchor: pageAnchor ?? start) { pageAnchor = id }
         current = id
+    }
+
+    /// Use available window geometry so both phone landscape orientations work
+    /// without device notifications, orientation forcing or rebuilding the player.
+    static func usesLandscapePlayback(kind: PrintKind?, isPhone: Bool, size: CGSize) -> Bool {
+        isPhone && kind == .clip && size.width > size.height && size.height > 0
     }
 
     /// Still-image chrome can be hidden; interactive media must retain the

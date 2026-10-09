@@ -199,7 +199,9 @@ Linux desktop builds are source/CI distributions for now — `nix build
 On iPhone and iPad, **Mold Studio Companion** is the native app beside Mold
 Studio for Mac: pair by scanning the Mac's code, generate on your machines,
 and follow renders from the Lock Screen. Generation options adapt to large text,
-and the full-screen viewer keeps its media actions accessible. It is in TestFlight while it is new.
+and the full-screen viewer keeps its media actions accessible. Rotate an iPhone
+horizontally for landscape video across the display; rotate upright to restore
+gallery actions, or tap Close to return to the Library. It is in TestFlight while it is new.
 [Mold Studio for iPhone & iPad guide](https://utensils.io/mold/guide/companion)
 
 The native iOS companion uses concise render notifications with its app icon; tapping opens the finished print from the background or a cold launch, with notification activation completed on the main thread. Library long-press and drag previews retain their thumbnail loader, and source selection prefers a reachable machine copy; the notification icon keeps the same authored colors in light and dark appearances. Its Live Activity uses the system background material with matching semantic text, a full-width progress row, and a separate machine/queue footer. Generate Options marks the selected aspect with a checkmark; attaching the first/start frame chooses the closest supported aspect, and a closing frame preserves it. Options shows proportionate aspect icons, source-image fitting (centered Crop to fill by default), and an explicit Random seed default.

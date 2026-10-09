@@ -55,6 +55,11 @@ large text sizes.
 Stop is its own small button beside the progress sentence, e.g.
 "Adding detail — about 12s left" over `denoise 18/28`.
 
+On iPhone, rotate a playing clip horizontally to use the full display. Video
+keeps its proportions; narrow black bars may remain for a different aspect
+ratio. Rotate upright to restore gallery actions, or tap Close to return to
+the Library while horizontal. Native playback controls remain available.
+
 The full-screen viewer hides the main tabs so **Share**, **Favourite**, **Info**
 and **Delete** remain reachable; use Back to return to the Library. Info has a
 **Done** button. Clips play when their page appears and pause when you page
