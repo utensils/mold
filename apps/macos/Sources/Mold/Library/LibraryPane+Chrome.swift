@@ -23,6 +23,11 @@ extension LibraryPane {
                 library.markLibrarySeen()
                 revealIfNeeded()
             }
+            .onChange(of: viewing, initial: true) { _, id in
+                guard let id, !navigation.scope.isTrash else { return }
+                if let tile = library.tile(containing: id) { newMediaVisit?.markViewed(tile.print.filename) }
+                library.markViewed(id)
+            }
             .onDisappear { library.markLibrarySeen() }
             .onChange(of: undoManager) { _, manager in library.undo.manager = manager }
             .onChange(of: navigation.scope) { _, _ in clearSelection() }

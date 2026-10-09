@@ -11,10 +11,25 @@ import MoldClient
 @Observable
 final class LibraryStore {
     var newMedia = LibraryNewMedia()
+    var unreadMedia: LibraryUnreadLedger
+    let readDefaults: UserDefaults
+    var unreadCount: Int { unreadMedia.count }
+    @ObservationIgnored var unreadCountChanged: ((Int) -> Void)?
+
+    func markViewed(_ id: PrintID) {
+        guard let tile = tile(containing: id) else { return }
+        unreadMedia.view(tile)
+        unreadMedia.save(to: readDefaults)
+        unreadCountChanged?(unreadCount)
+    }
 
     func markLibrarySeen() {
         guard !perHost.isEmpty else { return }
         newMedia.markSeen(items.map { $0.print.filename })
+        let previous = unreadMedia
+        unreadMedia.markSeen(items)
+        if unreadMedia != previous { unreadMedia.save(to: readDefaults) }
+        if unreadMedia.count != previous.count { unreadCountChanged?(unreadCount) }
     }
 
     /// The one object that knows which machines exist and how to reach them.
@@ -83,9 +98,13 @@ final class LibraryStore {
     /// How many times the rows have changed. See `LibraryRevision`.
     let rows = LibraryRevision()
 
-    init(hosts: HostStore, syncSession: LibrarySyncSession = LibrarySyncSession()) {
+    init(hosts: HostStore, syncSession: LibrarySyncSession = LibrarySyncSession(), readDefaults: UserDefaults = AppStorageSuite.defaults) {
         self.hosts = hosts
         self.syncSession = syncSession
+        self.readDefaults = readDefaults
+        unreadMedia = LibraryUnreadLedger.load(from: readDefaults)
+        unreadMedia.retainHosts(Set(hosts.hosts.map(\.id)))
+        unreadMedia.save(to: readDefaults)
         // Listening starts with the store, not with a pane. The Library used
         // to register on appearing, so a print made while Generate was showing
         // reached nobody and the timeline only caught up on the next ⌘R.

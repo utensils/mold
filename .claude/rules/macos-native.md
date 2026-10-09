@@ -47,7 +47,13 @@ behavior is Mac-only; preserve the existing scalar-only iOS persistence path.
 
 Library New badges compare filenames with the previous session visit, using the
 whole active pool and a stable per-view snapshot. First visit establishes a
-baseline; viewer navigation preserves the visit. Badge rows must fit machine
+baseline; selected viewer media immediately calls `Visit.markViewed`, preserving
+unopened badges within the visit and the previous next-visit clearing behavior.
+`LibraryUnreadLedger` persists device-local icon counts across launches. Count the
+merged visible active inventory, excluding hidden collections and Trash; retain
+offline read state. Opening Library uses its existing whole-pool seen behavior
+to clear the icon count. iOS serializes badge writes and flushes background
+refresh; macOS updates the Dock. Badge rows must fit machine
 labels beside playback without overlap, including narrow tiles.
 
 **Visible reuse media.** Restore supported legacy retained roles into ordinary authoring wells before allowing submission, including all endpoint/keyframe and reference-image inputs. Preserve list order, exact frame indices, manual canvas, continuation overlap and explicit reference strength. Retire each materialized or superseded legacy role, including the mask paired with a replaced source; removal must never revive an archived fallback. Fence every asynchronous operation by reuse identity, immutable origin route/instance, per-role monotonic attachment revisions and component lifetime. Scalar edits remain live. Keep restoration failures blocking until deliberate recovery/discard; descriptor-only typed references retain their exact-set authority.

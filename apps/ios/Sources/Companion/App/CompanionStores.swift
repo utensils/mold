@@ -59,6 +59,10 @@ final class CompanionStores {
             await library.flush()
         }
         nearby = NearbyBrowser()
+        library.unreadCountChanged = { [weak self] count in
+            guard let self else { return }
+            notifier.iconBadge.update(count, allowPrompt: isForeground)
+        }
     }
 
     /// The foreground: reconcile everything, then keep it live.
@@ -66,6 +70,7 @@ final class CompanionStores {
         isForeground = true
         // The saved library first: the grid is there before any machine
         // answers, and stays there if none does.
+        notifier.iconBadge.update(library.unreadCount, allowPrompt: true)
         await library.restoreSaved()
         await hosts.refreshAll()
         guard isForeground else { return }
@@ -82,6 +87,7 @@ final class CompanionStores {
         for batch in generate.ledger.batches where batch.clientBatchId != generate.activeBatch?.clientBatchId {
             await reconcile(batch)
         }
+        await notifier.iconBadge.flush()
         await widgets.refresh()
         // The newest prints' thumbnails, kept for offline browsing: what is
         // already saved is skipped, so this costs nothing on a quiet day.

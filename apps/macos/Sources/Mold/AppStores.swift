@@ -85,6 +85,8 @@ final class AppStores {
         notifications = MoldNotifications(
             landedPrints: landedPrints, queue: queue, hosts: hosts, library: library)
         heartbeat = HostHeartbeat(hosts: hosts, queue: queue)
+        library.unreadCountChanged = { count in NSApplication.shared.dockTile.badgeLabel = count > 0 ? String(count) : nil }
+        NSApplication.shared.dockTile.badgeLabel = library.unreadCount > 0 ? String(library.unreadCount) : nil
         // Last, once every store that reads the machine list exists. The
         // probe runs off the main actor, so the window opens meanwhile.
         if EngineAutostart.atLaunch() { engine.start() }

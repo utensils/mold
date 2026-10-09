@@ -10,6 +10,17 @@ import MoldClient
 @Observable
 final class LibraryStore {
     var newMedia = LibraryNewMedia()
+    private(set) var unreadMedia: LibraryUnreadLedger
+    var unreadCount: Int { unreadMedia.count }
+    @ObservationIgnored private let readDefaults: UserDefaults
+    @ObservationIgnored var unreadCountChanged: ((Int) -> Void)?
+
+    func markViewed(_ id: PrintID) {
+        guard let entry = pool.first(where: { $0.everyCopy.contains { $0.id == id } }) else { return }
+        unreadMedia.view(entry)
+        unreadMedia.save(to: readDefaults)
+        unreadCountChanged?(unreadCount)
+    }
     var machineID: MoldHost.ID?
     var collectionInventoryAvailable: Set<MoldHost.ID> = []
     let collectionVisibility = CollectionVisibilityLedger.load(from: .standard, key: "library.collectionVisibility")
@@ -19,6 +30,10 @@ final class LibraryStore {
     func markLibrarySeen() {
         guard !live.isEmpty else { return }
         newMedia.markSeen(pool.map { $0.print.filename })
+        let previous = unreadMedia
+        unreadMedia.markSeen(pool)
+        if unreadMedia != previous { unreadMedia.save(to: readDefaults) }
+        if unreadMedia.count != previous.count { unreadCountChanged?(unreadCount) }
     }
 
     private(set) var pool: [LibraryEntry] = []
@@ -64,9 +79,13 @@ final class LibraryStore {
     /// The focused window's, so ⌘Z and shake-to-undo reach `undo()`.
     @ObservationIgnored weak var undoManager: UndoManager?
 
-    init(hosts: HostStore, snapshots: LibrarySnapshots = .standard) {
+    init(hosts: HostStore, snapshots: LibrarySnapshots = .standard, readDefaults: UserDefaults = .standard) {
         self.hosts = hosts
         self.snapshots = snapshots
+        self.readDefaults = readDefaults
+        unreadMedia = LibraryUnreadLedger.load(from: readDefaults)
+        unreadMedia.retainHosts(Set(hosts.hosts.map(\.id)))
+        unreadMedia.save(to: readDefaults)
         hosts.listen { [weak self] id, event in self?.heard(event, from: id) }
     }
 
@@ -236,7 +255,18 @@ final class LibraryStore {
         }
         knownTags = Array(Set(pool.flatMap(\.tags)))
             .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        refreshUnreadMedia()
         revision += 1
+    }
+
+    func refreshUnreadMedia() {
+        let previous = unreadMedia
+        unreadMedia.retainHosts(Set(hosts.hosts.map(\.id)))
+        let query = LibraryScope.all.resolve(LibraryQuery(), shelves: shelves, hiddenCollectionIDs: hiddenCollectionIDs)
+        unreadMedia.observe(entries: pool, visible: query.apply(to: pool),
+                            loadedHosts: Set(live.keys), presentHosts: Set(hosts.hosts.map(\.id)))
+        if unreadMedia != previous { unreadMedia.save(to: readDefaults) }
+        if unreadMedia.count != previous.count { unreadCountChanged?(unreadCount) }
     }
 
     /// In machine-list order, so the merge is stable across reloads.

@@ -22,6 +22,8 @@ final class Notifier: NSObject {
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let center: UNUserNotificationCenter?
 
+    @ObservationIgnored let iconBadge: AppIconBadge
+
     static let finishedCategory = "finished"
     static let heldCategory = "held"
     static let failedCategory = "failed"
@@ -31,6 +33,12 @@ final class Notifier: NSObject {
     init(defaults: UserDefaults = .standard, center: UNUserNotificationCenter? = .current()) {
         self.defaults = defaults
         self.center = center
+        iconBadge = AppIconBadge(write: { count in
+            try? await center?.setBadgeCount(count)
+        }, authorize: {
+            guard let center, await center.notificationSettings().authorizationStatus == .notDetermined else { return }
+            _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
+        })
         super.init()
         center?.delegate = self
         center?.setNotificationCategories([

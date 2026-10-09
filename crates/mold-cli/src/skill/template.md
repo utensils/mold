@@ -18,6 +18,11 @@ and machine. **Get More Models…** opens model management. Options uses separat
 rows for large text; clip/3-D drafts restore after profiles arrive. The viewer
 hides the main tabs to expose its media actions. On iPhone, landscape clips use
 the full display with native controls and Close; portrait restores the actions.
+Both native galleries immediately clear the selected media's New badge while
+keeping the previous visit baseline and next-visit clearing. New media counts
+appear on the iOS Home Screen/macOS Dock until Library opens; hidden collections
+and Trash are excluded. Icon state is local and durable; iOS refresh is
+opportunistic while backgrounded and needs notification badge permission.
 Info has Done, and sharing
 preserves media filenames. Offline Generate/Queue explain unavailable data;
 saved drafts wait for their model profiles until an explicit new choice. For development,

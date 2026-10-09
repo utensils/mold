@@ -152,12 +152,16 @@ final class FixtureMachine: @unchecked Sendable {
         }
     }
 
-    func addNewClip() async {
+    func addNewClip() async { await addNewMedia(filename: "fixture-new.mp4", title: "New clip", clip: true) }
+
+    func addNewMedia(filename: String, title: String, clip: Bool = false) async {
         await withCheckedContinuation { continuation in
             queue.async { [self] in
                 var rows = (try? JSONSerialization.jsonObject(with: gallery)) as? [[String: Any]] ?? []
-                rows.insert(["filename": "fixture-new.mp4", "timestamp": Int(Date().timeIntervalSince1970) + 1,
-                             "metadata": ["prompt": "New clip", "frames": 270, "fps": 30]], at: 0)
+                var metadata: [String: Any] = ["prompt": title]
+                if clip { metadata["frames"] = 270; metadata["fps"] = 30 }
+                rows.insert(["filename": filename, "timestamp": Int(Date().timeIntervalSince1970) + 1,
+                             "metadata": metadata], at: 0)
                 gallery = (try? JSONSerialization.data(withJSONObject: rows)) ?? gallery
                 continuation.resume()
             }
