@@ -70,7 +70,12 @@ Queue input inspection is model-independent: `/api/queue/:id/inputs` lists seale
 
 **Error presentation.** `mold_core::user_error` owns concise server summaries at
 HTTP/SSE/queue wire boundaries. Keep original diagnostics in logs and durable
-records, not presentation strings. Stage records reused in portable manifests
+records, not presentation strings. Authenticated queue listing/detail and batch
+children carry additive `error_detail` from the current durable reason, while
+`error` / `held_reason` stay formatted; deriving details from the current error
+clears them on retry without a second store. H3 invalid-evidence boundaries retain
+the complete diagnostic cause chain without changing admission policy.
+Stage records reused in portable manifests
 must stay raw; format their wire projections only. Do not classify retryability
 or admission from formatted prose. Cross-language fixtures live in
 `docs/contracts/user-errors.json`; native `MoldClient.UserFacingError` and

@@ -25,6 +25,7 @@ public struct BatchChild: Codable, Hashable, Sendable, Identifiable {
     public let jobId: String
     public let state: BatchChildState
     public let error: String?
+    public var errorDetail: String? = nil
     public let errorCode: String?
     public let retryable: Bool?
     /// THE ordering token. Not `updatedAtMs` -- see `supersedes`.

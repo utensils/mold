@@ -271,3 +271,39 @@ describe("Queue inspection", () => {
     );
   });
 });
+
+it("inspects a retained durable held child before the activity listing hydrates", async () => {
+  const { subject } = setup();
+  const local = {
+    job: {
+      id: "local",
+      serverId: "job",
+      hostId: "box",
+      hostLabel: "Box",
+      state: "running",
+      holdError: "Model refused the render",
+      request: { model: "flux-dev", prompt: "Retained prompt" },
+      durableBatch: {
+        expectedInstanceId: "instance",
+        serverBatchId: "batch",
+        clientBatchId: "client",
+        childIndex: 1,
+      },
+    } as Job,
+    cancel: vi.fn().mockResolvedValue(undefined),
+    retry: vi.fn(),
+  };
+  api.get.mockResolvedValue({
+    job: {
+      ...entry().job,
+      metadata: null,
+      error_detail: "CUDA invalid argument",
+    },
+  });
+  await subject.openLocal(local);
+  expect(subject.model.value?.prompt).toBe("Retained prompt");
+  expect(subject.model.value?.technicalDetail).toBe("CUDA invalid argument");
+  expect(subject.model.value?.cancel.available).toBe(true);
+  await subject.act("cancel");
+  expect(local.cancel).toHaveBeenCalledOnce();
+});

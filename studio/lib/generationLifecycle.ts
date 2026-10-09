@@ -55,6 +55,7 @@ export interface GenerationLifecycleJob {
   error: string | null;
   /** Typed cause of a held child; `null` when the machine gave none. */
   errorCode: string | null;
+  errorDetail?: string | null;
   terminalError: unknown;
   result: { filename?: string; originalFilename?: string } | null;
 }
@@ -227,6 +228,14 @@ function lifecycleJob(
       revision: revision ?? childRevision(child),
     },
     error: child.error ?? null,
+    errorDetail:
+      child.error_detail ??
+      (typeof child.terminal_error === "object" &&
+      child.terminal_error !== null &&
+      "message" in child.terminal_error &&
+      typeof child.terminal_error.message === "string"
+        ? child.terminal_error.message
+        : null),
     errorCode: child.error_code ?? null,
     terminalError: child.terminal_error ?? null,
     result: child.result

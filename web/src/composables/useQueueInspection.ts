@@ -245,6 +245,48 @@ export function useQueueInspection(
       }
     }
   }
+  async function openLocal(
+    provenance: LocalQueueInspection,
+    source?: HTMLElement,
+  ) {
+    const job = provenance.job;
+    const host = routing.hosts.value.find(
+      (candidate) => candidate.id === job.hostId,
+    );
+    const instanceId = job.durableBatch?.expectedInstanceId;
+    if (
+      !host ||
+      !instanceId ||
+      !job.serverId ||
+      job.chain ||
+      job.state !== "running"
+    ) {
+      toast(
+        "error",
+        "This job has stopped or its original machine is unavailable. Refresh its machine details.",
+      );
+      return;
+    }
+    await open(
+      {
+        id: job.serverId,
+        key: `${host.id}:generation:${job.serverId}`,
+        hostId: host.id,
+        hostLabel: host.label,
+        routeUrl: host.url,
+        instanceId,
+        kind: "generation",
+        phase: job.holdError ? "held" : "queued",
+        created_at_unix_ms: job.startedAt,
+        updated_at_unix_ms: job.startedAt,
+        can_cancel: true,
+        stale: host.status !== "ready",
+        hostError: null,
+      },
+      provenance,
+      source,
+    );
+  }
   function schedule(row: FleetActiveWork, ticket: number) {
     if (ticket !== epoch) return;
     timer = setTimeout(async () => {
@@ -303,9 +345,16 @@ export function useQueueInspection(
           throw new Error(
             "This machine cannot cancel this job in its current state.",
           );
+        if (row.phase === "held" && job.state !== "held")
+          throw new Error(
+            "This job is no longer held. Reopen its details before stopping running work.",
+          );
         mutationStarted = true;
         if (provenance) await provenance.cancel();
-        else await cancelQueueJob(fresh.target, row.id);
+        else
+          await cancelQueueJob(fresh.target, row.id, {
+            onlyHeld: row.phase === "held",
+          });
       } else if (action === "retry") {
         if (provenance) {
           const authority = provenance.job.durableBatch;
@@ -377,6 +426,7 @@ export function useQueueInspection(
     pendingAction,
     canPause,
     open,
+    openLocal,
     close,
     act,
     snapshot,

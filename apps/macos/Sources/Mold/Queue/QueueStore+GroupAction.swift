@@ -14,7 +14,8 @@ extension QueueStore {
     /// even when it rides along in `group.rows`.
     func act(_ action: QueueRow.Action, onLiveChildrenOf group: QueueGroup, host: MoldHost.ID) async {
         guard !refuseIfFixture(host, doing: groupVerb(action)) else { return }
-        guard let client = hosts.backend(for: host) else { return }
+        guard let machine = hosts.host(host), hosts.isUp(machine), let client = hosts.backend(for: host) else { return }
+        let instance = hosts.instanceID(of: host)
         // Each child asked again, through the same authority its own row
         // drew from: a batch with one waiting and one running child pauses
         // the waiting one and leaves the other alone, rather than sending a
@@ -22,9 +23,14 @@ extension QueueStore {
         let capabilities = hosts.capabilities[host]
         for entry in group.rows
         where QueueRowActions.resolve(entry, on: capabilities).offers(action) {
+            guard hosts.host(host) == machine, hosts.instanceID(of: host) == instance,
+                  let current = entries(on: host).first(where: { $0.id == entry.id }),
+                  current.state == entry.state else { continue }
             do {
                 switch action {
-                case .cancel: try await client.cancelJob(id: entry.id)
+                case .cancel:
+                    if current.state == .held { _ = try await client.cancelHeldJob(id: entry.id) }
+                    else { try await client.cancelJob(id: entry.id) }
                 case .pause: try await client.pauseJob(id: entry.id)
                 case .resume: try await client.resumeJob(id: entry.id)
                 // Retry needs a `QueueAuthority` per row, not a bare id, and

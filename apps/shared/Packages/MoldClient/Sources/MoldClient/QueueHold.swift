@@ -16,7 +16,7 @@ public enum QueueHold: Hashable, Sendable {
     public func summary(modelName: String, hostName: String) -> String {
         switch self {
         case .missingModel: "\(modelName) isn’t installed on \(hostName)."
-        case .prose(let sentence, _): sentence.isEmpty ? "The machine put this job aside." : sentence
+        case .prose(let sentence, _): sentence.isEmpty ? "The machine put this job aside." : UserFacingError.message(sentence)
         }
     }
 

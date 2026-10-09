@@ -1669,6 +1669,7 @@ describe("useGenerateStream host routing", () => {
       { baseUrl: "http://studio:7680", apiKey: "sk-studio" },
       expect.objectContaining({ instanceId: "instance-1" }),
       "cancel",
+      { onlyHeld: false },
     );
     expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("canceled");
   });

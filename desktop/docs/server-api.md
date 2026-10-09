@@ -374,3 +374,13 @@ remain authoritative. See [the presentation audit](../../docs/error-presentation
 Direct-generation failures carry additive `recovery.job_id`, `batch_id` and
 `retryable` fields instead of embedding recovery routes in the displayed sentence.
 License refusals retain their structured terms and give concise review guidance.
+
+Queue listings, individual queue jobs, and generation batch children may carry
+`error_detail`, the unabridged diagnostic for the current failure. Clients keep
+`error` and `held_reason` as the readable summary and expose **Technical details**
+with the job and machine identity; older batch children can supply
+`terminal_error.message` instead. Retrying clears the old diagnostic.
+Current servers enforce `DELETE /api/queue/:id?only_held=true` atomically and
+refuse a job that has left Held. Older servers may ignore the query; update them
+for this safeguard. Clients must never widen a held-only cancellation intent
+after a failure or state change.

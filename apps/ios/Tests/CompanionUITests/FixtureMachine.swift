@@ -39,6 +39,9 @@ final class FixtureMachine: @unchecked Sendable {
     private var downloadLicenseAccepted = false
     private var queueDownloadStarted = false
     private var queueDownloadComplete = false
+    private let queueFailureFixture: Bool
+    private let enrichedQueue = Mutex(false)
+    func enrichQueueFailure() { enrichedQueue.withLock { $0 = true } }
     private let queueControls: Bool
     private var jobStates = ["fixture-video": "queued", "fixture-held": "held"]
     private var clearedHistory = false
@@ -47,7 +50,7 @@ final class FixtureMachine: @unchecked Sendable {
     private let modelMemoryFixture: Bool
     private var residentModels: Set<String> = []
 
-    init(exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, retainedFrameFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil, queueDownloadFixture: Bool = false, requiresDownloadLicense: Bool = false, trashFixture: Bool = false) throws {
+    init(exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, retainedFrameFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil, queueDownloadFixture: Bool = false, requiresDownloadLicense: Bool = false, trashFixture: Bool = false, queueFailureFixture: Bool = false) throws {
         self.exportFixture = exportFixture
         self.unsupportedExportFormats = unsupportedExportFormats
         self.aspectFixture = aspectFixture
@@ -60,6 +63,7 @@ final class FixtureMachine: @unchecked Sendable {
         self.queueDownloadFixture = queueDownloadFixture
         self.requiresDownloadLicense = requiresDownloadLicense
         self.queueControls = queueControls
+        self.queueFailureFixture = queueFailureFixture
         self.memoryErrorFixture = memoryErrorFixture
         self.collectionFixture = collectionFixture
         modelMemoryFixture = loadedModels
@@ -189,6 +193,11 @@ final class FixtureMachine: @unchecked Sendable {
             if patchCollection,
                let object = try? JSONSerialization.jsonObject(with: Data(bodyText.utf8)) as? [String: Any],
                let hidden = object["hidden"] as? Bool { collectionHidden = hidden }
+            if queueControls, request.first == "DELETE", path.hasPrefix("/api/queue/") {
+                queueRequests.withLock { $0.append(String(request[1])) }
+                let job = String(path.split(separator: "/").last ?? "")
+                jobStates[job] = "cancelled"
+            }
             if queueControls, path == "/api/history", request.first == "DELETE" { clearedHistory = true }
             if queueControls, request.first == "POST", path.hasPrefix("/api/queue/") {
                 queueRequests.withLock { $0.append(path) }
@@ -251,7 +260,10 @@ final class FixtureMachine: @unchecked Sendable {
 
     private func queueRow(_ id: String) -> [String: Any] {
         let missing = queueDownloadFixture && id == "fixture-held"
-        return ["id": id, "state": jobStates[id] ?? "queued", "model": missing ? "flux-dev:q4" : "ltx-2.5-22b-distilled:bf16",
+        if queueFailureFixture, id == "fixture-held", !enrichedQueue.withLock({ $0 }) {
+            return ["id": id, "state": jobStates[id] ?? "held", "model": "minimax-h3", "held_reason": "The render failed.", "error_detail": "CUDA_ERROR_ILLEGAL_ADDRESS in attention", "retryable": false]
+        }
+        var row: [String: Any] = ["id": id, "state": jobStates[id] ?? "queued", "model": missing ? "flux-dev:q4" : "ltx-2.5-22b-distilled:bf16",
          "model_display_name": "A legacy verbose title that must not appear",
          "position": id == "fixture-video" ? 0 : 1, "durable": true,
          "batch_id": id, "client_batch_id": "client-" + id, "retryable": true,
@@ -260,6 +272,11 @@ final class FixtureMachine: @unchecked Sendable {
          "error": memoryErrorFixture ?? "Temporary machine pressure",
          "metadata": ["prompt": id == "fixture-video" ? "A coastal path at sunrise" : "A quiet mountain lake",
                       "model": "ltx-2.5-22b-distilled:bf16", "seed": 42, "steps": 8, "width": 768, "height": 512, "frames": 49, "fps": 24]]
+        if queueFailureFixture, id == "fixture-held" {
+            row["held_reason"] = "The render failed."
+            row["error_detail"] = "CUDA_ERROR_ILLEGAL_ADDRESS in attention"
+        }
+        return row
     }
 
     private func collection() -> Data {

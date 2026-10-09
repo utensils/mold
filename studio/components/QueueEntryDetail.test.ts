@@ -160,7 +160,7 @@ describe("QueueEntryDetail", () => {
     const wrapper = mount(QueueEntryDetail, { props: { model: held } });
 
     expect(wrapper.get('[data-test="queue-detail-problem"]').text()).toContain(
-      "The render failed. Check the machine’s logs for details.",
+      "The graphics device could not finish the render. Retry the job or move it to another machine.",
     );
     expect(
       wrapper.get('[data-test="queue-detail-retry"]').attributes("disabled"),
@@ -246,4 +246,32 @@ it("renders retained inputs for the captured host independently of denoise previ
   expect(inputs.exists()).toBe(true);
   expect(inputs.props("jobId")).toBe("job-1");
   expect(inputs.props("detailed")).toBe(true);
+});
+
+it("shows the machine diagnostic without settings and retains held cancellation", () => {
+  const diagnostic = "CUDA kernel launch failed: invalid argument";
+  const view = mount(QueueEntryDetail, {
+    props: {
+      model: model(
+        {
+          state: "held",
+          error: "The render failed.",
+          error_detail: diagnostic,
+        },
+        { metadata: null },
+      ),
+    },
+  });
+  expect(view.get('[data-test="queue-technical-details"]').text()).toContain(
+    diagnostic,
+  );
+  expect(view.get('[data-test="queue-technical-details"]').text()).toContain(
+    "plato",
+  );
+  expect(view.get('[data-test="queue-technical-details"]').text()).toContain(
+    "job-1",
+  );
+  expect(
+    view.get('[data-test="queue-detail-cancel"]').attributes("disabled"),
+  ).toBeUndefined();
 });

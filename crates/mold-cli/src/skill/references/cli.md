@@ -373,6 +373,8 @@ settlement. Re-read the affected row or batch and describe the observed final
 state. `mold queue cancel --all --yes` is intentionally absent from routine
 examples because it is a broad destructive action.
 
+Queue listing, job detail and batch-child JSON may include `error_detail`, the original diagnostic for the current failure, alongside plain-English summaries. Inspect `mold queue show JOB-ID --json` for a held job's saved details. Retrying clears previous details; older servers may omit the field. Native, web and Tauri queues expose those details with machine/job identity. Held-job Cancel remains available before metadata loads and always sends the held-only guard without widening its intent. Current Mold servers enforce held-only cancellation, preventing stale Held actions from stopping a render. Update older machines for this safeguard.
+
 ## Model and library management
 
 ```bash

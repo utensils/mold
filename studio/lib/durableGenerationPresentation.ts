@@ -24,6 +24,7 @@ type Arm<K extends GenerationChildPresentation["kind"]> = Extract<
  */
 export interface DurableRowHold {
   holdError?: string | null;
+  holdErrorDetail?: string | null;
   holdCode?: string | null;
   retryable?: boolean;
   retrying?: boolean;
@@ -31,6 +32,7 @@ export interface DurableRowHold {
 
 export function clearHold(row: DurableRowHold): void {
   row.holdError = null;
+  row.holdErrorDetail = null;
   row.holdCode = null;
   row.retryable = false;
   row.retrying = false;
@@ -67,6 +69,7 @@ export function applyDurablePresentationWith<J extends DurableRowHold>(
         return;
       case "held":
         job.holdError = p.error;
+        job.holdErrorDetail = p.errorDetail ?? null;
         job.holdCode = p.code;
         job.retryable = p.retryable;
         surface.held(job, p);

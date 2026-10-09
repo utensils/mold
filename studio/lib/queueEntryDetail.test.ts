@@ -242,7 +242,7 @@ describe("queueEntryDetailModel", () => {
     });
     expect(detail.problem?.detail).toContain("dispatch budget exhausted");
     expect(detail.problem?.detail).toContain(
-      "The render failed. Check the machine’s logs for details.",
+      "The graphics device could not finish the render. Retry the job or move it to another machine.",
     );
     expect(detail.copyText).toContain("illegal memory access");
   });
@@ -415,3 +415,23 @@ it("discloses ordered references, identity sets, and frame positions without med
     value: "Frame 24 · end.png",
   });
 });
+
+it.each(["complete", "completed", "failed", "cancelled", "canceled", "done"])(
+  "does not offer cancellation for terminal %s details",
+  (state) => {
+    const detail = queueEntryDetailModel({
+      entry: {
+        id: "settled",
+        model: "flux",
+        state,
+        started_at_unix_ms: 1,
+        position: 0,
+      },
+      hostLabel: "hal9000",
+      modelLabel: "FLUX",
+      nowMs: 2,
+    });
+    expect(detail.cancel.applicable).toBe(false);
+    expect(detail.cancel.available).toBe(false);
+  },
+);

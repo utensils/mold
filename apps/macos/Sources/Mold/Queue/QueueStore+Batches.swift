@@ -109,10 +109,14 @@ extension QueueStore {
     /// row with no batch at all -- still resolves from the row's own
     /// sentence, the state the pane has shipped in since M1.
     func hold(for entry: QueueEntry, on host: MoldHost.ID) -> QueueHold? {
-        let child = entry.batchId
+        let child = child(for: entry, on: host)
+        return QueueHold.resolve(entry: entry, child: child)
+    }
+
+    func child(for entry: QueueEntry, on host: MoldHost.ID) -> BatchChild? {
+        entry.batchId
             .flatMap { children[host]?[$0] }
             .flatMap { rows in rows.first { $0.jobId == entry.id } }
-        return QueueHold.resolve(entry: entry, child: child)
     }
 
     /// This machine's queue as the pane draws it: a flat row, or a batch and

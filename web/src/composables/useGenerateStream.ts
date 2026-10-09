@@ -110,9 +110,12 @@ export interface Job {
    * terminal outcome wins. This survives ambiguous admission, where the
    * client UUID is known before the server job UUID is. */
   cancelRequested?: boolean;
+  /** Frozen intent: a failed held-only DELETE must never broaden on retry. */
+  cancelOnlyHeld?: boolean;
   /** Durable hold details remain visible without turning the live job into a
    * terminal canvas error. Retry is offered only when the host owns it. */
   holdError?: string | null;
+  holdErrorDetail?: string | null;
   /** Typed cause of the hold (`MODEL_NOT_FOUND`, …); what the pull offer reads. */
   holdCode?: string | null;
   retryable?: boolean;
@@ -508,6 +511,8 @@ interface PersistedJob {
   detached?: boolean;
   durableBatch?: Job["durableBatch"];
   cancelRequested?: boolean;
+  /** Frozen intent: a failed held-only DELETE must never broaden on retry. */
+  cancelOnlyHeld?: boolean;
 }
 
 const JOB_STORAGE_VERSION = 1;
@@ -638,6 +643,7 @@ function loadPersistedState(raw: string | null): LoadedJobsState {
         state,
         cancelling: p.cancelRequested === true && state === "running",
         cancelRequested: p.cancelRequested === true,
+        cancelOnlyHeld: p.cancelOnlyHeld === true,
         // This boot just discovered that a formerly-running row lost its
         // stream, so keep its recovery row present and dismissible from now.
         // Genuinely settled history retains its original age.
@@ -740,6 +746,7 @@ function persistedJobsJson(jobs: Job[]): string {
     detached: j.detached === true,
     durableBatch: j.durableBatch,
     cancelRequested: j.cancelRequested === true,
+    cancelOnlyHeld: j.cancelOnlyHeld === true,
   }));
   const payload: PersistedJobs = {
     version: JOB_STORAGE_VERSION,
@@ -794,6 +801,7 @@ function persistedJobsJsonFor(source: readonly Job[]): string {
     detached: j.detached === true,
     durableBatch: j.durableBatch,
     cancelRequested: j.cancelRequested === true,
+    cancelOnlyHeld: j.cancelOnlyHeld === true,
   }));
   return JSON.stringify({ version: JOB_STORAGE_VERSION, jobs: serializable });
 }
@@ -2299,6 +2307,7 @@ function markCancellationConfirmed(job: Job): void {
   job.state = "canceled";
   job.cancelling = false;
   job.cancelRequested = false;
+  job.cancelOnlyHeld = false;
   job.settledAt = Date.now();
   job.previewUrl = null;
   if (job.durableBatch) {
@@ -2314,6 +2323,8 @@ async function confirmDurableCancellation(job: Job): Promise<void> {
     return;
   const active = durableCancellations.get(job.id);
   if (active) return active;
+  job.cancelOnlyHeld ??= Boolean(job.holdError);
+  const onlyHeld = job.cancelOnlyHeld;
   job.cancelRequested = true;
   job.cancelling = true;
   persistDurableRecoveryBatch(durable.clientBatchId);
@@ -2333,6 +2344,7 @@ async function confirmDurableCancellation(job: Job): Promise<void> {
       jobId: job.serverId,
     },
     "cancel",
+    { onlyHeld },
   )
     .then(() => {
       // Complete/failed/cancelled authority may have arrived during DELETE.
@@ -2343,6 +2355,16 @@ async function confirmDurableCancellation(job: Job): Promise<void> {
         // Keep the intent and tracker. A later exact lifecycle snapshot can
         // expose the final outcome or retry the exact DELETE.
         job.cancelling = false;
+        if (
+          onlyHeld &&
+          typeof error === "object" &&
+          error !== null &&
+          "status" in error &&
+          error.status === 409
+        ) {
+          job.cancelRequested = false;
+          job.cancelOnlyHeld = false;
+        }
         if (job.durableBatch) {
           persistDurableRecoveryBatch(job.durableBatch.clientBatchId);
         }
@@ -2363,6 +2385,7 @@ async function cancelJob(id: string): Promise<void> {
   if (!job || job.state !== "running") return;
   if (job.cancelling && !job.cancelRequested) return;
   if (job.durableBatch) {
+    if (!job.cancelRequested) job.cancelOnlyHeld = Boolean(job.holdError);
     job.cancelRequested = true;
     job.cancelling = true;
     persistDurableRecoveryBatch(job.durableBatch.clientBatchId);

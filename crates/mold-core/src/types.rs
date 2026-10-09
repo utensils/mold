@@ -4540,6 +4540,10 @@ pub struct QueueJobEntryWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(serialize_with = "crate::user_error::serialize_optional")]
     pub error: Option<String>,
+    /// Original job-scoped diagnostic for a technical detail inspector.
+    /// Older servers omit this; `error` remains the presentation summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_detail: Option<String>,
     /// Whether `POST /api/queue/{id}/retry` may safely resume this held row.
     /// A held row that answers `false` needs operator repair, not a retry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -10347,6 +10351,7 @@ mod tests {
                 job_id: "job-1".into(),
                 state: super::GenerationBatchChildState::Complete,
                 error: None,
+                error_detail: None,
                 error_code: None,
                 retryable: None,
                 created_at_ms: 10,
@@ -11240,6 +11245,10 @@ pub struct GenerationBatchChild {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(serialize_with = "crate::user_error::serialize_optional")]
     pub error: Option<String>,
+    /// Original job-scoped diagnostic for a technical detail inspector.
+    /// Older servers omit this; `error` remains the presentation summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_detail: Option<String>,
     /// Typed cause of a `held` child — the preparation refusal's own code
     /// (`MODEL_NOT_FOUND`, `UNKNOWN_MODEL`, …) beside its sentence, so a
     /// client can offer the pull-and-resume instead of matching prose.

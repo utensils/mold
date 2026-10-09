@@ -1217,6 +1217,72 @@ describe("MobileApp generation lifecycle", () => {
     expect(text.indexOf("newer developing print")).toBeLessThan(text.indexOf("older queued print"));
   });
 
+  it.each(["unchanged", "replaced", "running"])(
+    "offers confirmed held cancellation before queue details hydrate (replacement %s)",
+    async (outcome) => {
+      let reportedInstance = status.instance_id;
+      let phase = "held";
+      apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+        if (path === "/api/capabilities")
+          return Promise.resolve({ queue: { cooperative_cancellation: true } });
+        if (path === "/api/models") return Promise.resolve([model]);
+        if (path === "/api/gallery") return Promise.resolve([print]);
+        if (path === "/api/status")
+          return Promise.resolve({ ...status, instance_id: reportedInstance, queue_capacity: 2 });
+        if (path === "/api/activity")
+          return Promise.resolve({
+            instance_id: status.instance_id,
+            observed_at_unix_ms: 10,
+            items: [
+              {
+                id: "foreign-held",
+                kind: "generation",
+                phase,
+                model: model.name,
+                created_at_unix_ms: 1,
+                updated_at_unix_ms: 9,
+                can_cancel: true,
+              },
+            ],
+          });
+        if (path === "/api/queue?limit=2") return Promise.resolve({ entries: [], plan: null });
+        return durableApiFallback(path, init, callTarget);
+      });
+      wrapper = mountMobileApp();
+      await flushPromises();
+      await wrapper
+        .get("[data-row-test='fleet-job-studio-id:generation:foreign-held']")
+        .trigger("click");
+      await flushPromises();
+      const cancel = wrapper.get("[data-test='mobile-queue-fallback-cancel']");
+      await cancel.trigger("click");
+      expect(cancel.text()).toBe("Cancel job?");
+      expect(apiFetchTo).not.toHaveBeenCalledWith(
+        target,
+        "/api/queue/foreign-held?only_held=true",
+        {
+          method: "DELETE",
+        },
+      );
+      if (outcome === "replaced") reportedInstance = "replacement-machine";
+      if (outcome === "running") phase = "running";
+      await cancel.trigger("click");
+      await flushPromises();
+      if (outcome !== "unchanged")
+        expect(apiFetchTo).not.toHaveBeenCalledWith(
+          target,
+          "/api/queue/foreign-held?only_held=true",
+          {
+            method: "DELETE",
+          },
+        );
+      else
+        expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/foreign-held?only_held=true", {
+          method: "DELETE",
+        });
+    },
+  );
+
   it.each([
     { cooperative: true, replaced: false },
     { cooperative: false, replaced: false },
@@ -1424,6 +1490,48 @@ describe("MobileApp generation lifecycle", () => {
     const row = wrapper.get("[data-test='mobile-fleet-job']");
     const control = row.get("[data-test='swipe-action-fleet-pause']");
     expect(control.text()).toBe("Cancel");
+    await control.trigger("click");
+    await flushPromises();
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/chain-jobs/running-auto-chain/cancel", {
+      method: "POST",
+    });
+  });
+
+  it("cancels a fallback running chain without singleton cooperative capability", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/capabilities")
+        return Promise.resolve({ queue: { cooperative_cancellation: false } });
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/activity") {
+        return Promise.resolve({
+          instance_id: status.instance_id,
+          observed_at_unix_ms: 10,
+          items: [
+            {
+              id: "running-auto-chain",
+              kind: "generation",
+              execution: "chain",
+              phase: "running",
+              model: model.name,
+              created_at_unix_ms: 1,
+              updated_at_unix_ms: 9,
+              can_cancel: true,
+            },
+          ],
+        });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await wrapper
+      .get("[data-row-test='fleet-job-studio-id:generation:running-auto-chain']")
+      .trigger("click");
+    const control = wrapper.get("[data-test='mobile-queue-fallback-cancel']");
+    await control.trigger("click");
     await control.trigger("click");
     await flushPromises();
     expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/chain-jobs/running-auto-chain/cancel", {

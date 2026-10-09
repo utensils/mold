@@ -208,3 +208,5 @@ mixed hidden replicas during fresh native inventory reconciliation. Successful
 writes remain pending until a later listing confirms them. Never convert missing
 selected-trash deletion support into live deletion; preserve the server refusal
 in the operation result.
+
+Queue Cancel remains visibly available for every currently actionable row, independently of batch metadata, retryability and transfer destinations. Failure Details preserves optional `error_detail` separately from the plain-English row explanation, falling back to the older machine’s reason. Copy includes machine and job identity. Cancel rechecks current state; Held actions always use the held-only endpoint and must never widen their intent after a state change. Current servers enforce this guard atomically; older servers may ignore the query, so do not promise that safeguard on older hosts.

@@ -338,3 +338,5 @@ being presented as an empty collection. Hidden collections remain directly
 browsable, and Hide from All Prints applies to every same-slug collection across
 machines. Pending visibility changes are saved locally and retried when this app
 refreshes or reconnects; a closed app cannot reconcile other machines.
+
+Actionable held queue jobs offer Cancel independently of Retry or Move availability. Failure Details shows the machine’s saved job diagnostic and supports copying it together with the machine, model and job identifiers; it does not imply access to the complete machine log. Queue explanations remain concise and use plain English. Current Mold servers enforce held-only cancellation, preventing stale Held actions from stopping a render. Update older machines for this safeguard.

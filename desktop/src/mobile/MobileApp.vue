@@ -38,6 +38,7 @@ import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import EstimateBadge from "@studio/components/EstimateBadge.vue";
 import { estimateGeneration } from "../lib/api/estimate";
 import QueueEntryDetail from "@studio/components/QueueEntryDetail.vue";
+import { copyTextToClipboard } from "@studio/lib/notificationClipboard";
 import { queueEntryDetailModel, type QueueDetailMetadata } from "@studio/lib/queueEntryDetail";
 import MobileGenerationQueueCard from "./MobileGenerationQueueCard.vue";
 import { promptRecipeFromForm } from "../lib/promptRecipe";
@@ -3291,23 +3292,60 @@ watch(
     cleanup(stop);
   },
 );
-async function cancelQueueDetail(): Promise<void> {
-  const entry = queueDetailEntry.value;
-  const row = queueDetailRow.value;
-  if (!entry || !row || !queueDetailModel.value?.cancel.available || queueDetailBusy.value) return;
-  if (entry.kind === "local") {
-    await onMobileQueueRowAction(entry.local, "cancel");
-    return;
-  }
-  const authority = fleetQueueAuthority(entry.shared);
-  if (!authority) return;
+function canCancelFleetActivity(row: FleetActiveWork): boolean {
+  return (
+    row.kind === "generation" &&
+    row.can_cancel &&
+    fleetQueueAuthority(row) !== null &&
+    !["complete", "completed", "failed", "cancelled", "canceled", "done"].includes(row.phase)
+  );
+}
+const fallbackCancelArmed = ref(false);
+async function cancelFleetActivity(row: FleetActiveWork): Promise<void> {
+  const authority = fleetQueueAuthority(row);
+  if (!authority || !canCancelFleetActivity(row) || queueDetailBusy.value) return;
   queueDetailBusy.value = true;
   queueDetailError.value = "";
   try {
     const status = await apiJsonTo<ServerStatus>(authority.target, "/api/status");
     if (status.instance_id?.trim() !== authority.expectedInstanceId)
       throw new Error("This address now reports a different Mold server identity.");
-    await cancelQueueJob(authority.target, row.id);
+    const activity = await apiJsonTo<{
+      instance_id: string;
+      items: { id: string; kind: string; phase: string; can_cancel: boolean }[];
+    }>(authority.target, "/api/activity");
+    if (activity.instance_id !== authority.expectedInstanceId)
+      throw new Error("This address now reports a different Mold server identity.");
+    const current = activity.items.find((item) => item.id === row.id && item.kind === row.kind);
+    if (
+      !current?.can_cancel ||
+      ["complete", "completed", "failed", "cancelled"].includes(current.phase)
+    )
+      throw new Error(
+        "This job has already stopped or cannot be cancelled. Refresh its machine details.",
+      );
+    if (row.phase === "held" && current.phase !== "held")
+      throw new Error(
+        "This job is no longer held. Reopen its details before stopping running work.",
+      );
+    if (
+      current.phase === "running" &&
+      row.execution !== "chain" &&
+      serverCapabilities[row.hostId]?.queue?.cooperative_cancellation !== true
+    )
+      throw new Error("This machine cannot stop a running job. Update Mold on that machine.");
+    const latestAuthority = fleetQueueAuthority(row);
+    if (
+      !latestAuthority ||
+      latestAuthority.target.baseUrl !== authority.target.baseUrl ||
+      latestAuthority.target.apiKey !== authority.target.apiKey
+    )
+      throw new Error("The original machine changed. Reopen the job's details.");
+    if (row.execution === "chain")
+      await apiFetchTo(authority.target, `/api/chain-jobs/${encodeURIComponent(row.id)}/cancel`, {
+        method: "POST",
+      });
+    else await cancelQueueJob(authority.target, row.id, { onlyHeld: row.phase === "held" });
     await refreshMobileActivity();
   } catch (error) {
     queueDetailError.value = describeTransportError(error, authority.host.name);
@@ -3315,10 +3353,42 @@ async function cancelQueueDetail(): Promise<void> {
     queueDetailBusy.value = false;
   }
 }
+async function cancelQueueDetail(): Promise<void> {
+  const entry = queueDetailEntry.value;
+  if (!entry || !queueDetailModel.value?.cancel.available || queueDetailBusy.value) return;
+  if (entry.kind === "local") await onMobileQueueRowAction(entry.local, "cancel");
+  else await cancelFleetActivity(entry.shared);
+}
+async function copyFallbackDiagnostic(): Promise<void> {
+  const job = queueDetailJob.value;
+  if (!job?.holdErrorDetail) return;
+  const copied = await copyTextToClipboard(
+    `${queueDetailHost.value?.name ?? job.hostLabel} · Job ${job.id}\n${job.holdErrorDetail}`,
+  );
+  if (!copied)
+    queueDetailError.value = "Could not copy the details. Select the text and copy it manually.";
+}
+function cancelFallbackDetail(): void {
+  if (!fallbackCancelArmed.value) {
+    fallbackCancelArmed.value = true;
+    return;
+  }
+  fallbackCancelArmed.value = false;
+  if (queueDetailEntry.value?.kind === "shared")
+    void cancelFleetActivity(queueDetailEntry.value.shared);
+}
+function onSharedQueueRowAction(row: FleetActiveWork, action: string): void {
+  if (action === "fleet-cancel") {
+    inspectSharedQueueEntry(row);
+    return;
+  }
+  void setFleetJobPaused(row, action === "fleet-pause");
+}
 const queueDetailError = ref("");
 const queueDetailBusy = ref(false);
 function inspectQueueEntry(key: string): void {
   queueDetailError.value = "";
+  fallbackCancelArmed.value = false;
   queueDetailKey.value = key;
 }
 /**
@@ -3354,13 +3424,15 @@ function sharedQueuePosition(row: FleetActiveWork): string | null {
 
 /** Pause, Resume, or a chain's Cancel — whatever this machine will accept. */
 function sharedQueueRowActions(row: FleetActiveWork): { id: string; label: string }[] {
-  if (!canPauseFleetActivity(row)) return [];
-  return [
-    {
+  const actions: { id: string; label: string }[] = [];
+  if (canPauseFleetActivity(row))
+    actions.push({
       id: fleetQueueResumeNeeded(row) ? "fleet-resume" : "fleet-pause",
       label: fleetQueueControlLabel(row),
-    },
-  ];
+    });
+  if (canCancelFleetActivity(row) && row.execution !== "chain")
+    actions.push({ id: "fleet-cancel", label: "Cancel" });
+  return actions;
 }
 
 function inspectSharedQueueEntry(row: FleetActiveWork): void {
@@ -14041,7 +14113,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                     :label="sharedQueueTitle(entry.shared)"
                     :disabled="queueControlHostIds.has(entry.shared.hostId)"
                     data-test="mobile-fleet-job"
-                    @act="setFleetJobPaused(entry.shared, !fleetQueueResumeNeeded(entry.shared))"
+                    @act="onSharedQueueRowAction(entry.shared, $event)"
                   >
                     <MobileGenerationQueueCard
                       :source-target="retainedQueueSource(entry.shared.hostId)"
@@ -14170,11 +14242,39 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           Activity summary only. Open this machine for full work details and controls.
         </p>
       </template>
+      <details
+        v-if="!queueDetailModel && queueDetailJob?.holdErrorDetail"
+        class="mobile-queue-detail-error"
+        data-test="mobile-queue-fallback-technical"
+      >
+        <summary>Technical details</summary>
+        <p>{{ queueDetailHost?.name }} · Job {{ queueDetailJob.id }}</p>
+        <pre style="white-space: pre-wrap; overflow-wrap: anywhere; user-select: text">{{
+          queueDetailJob.holdErrorDetail
+        }}</pre>
+        <button type="button" class="secondary-button" @click="copyFallbackDiagnostic">
+          Copy details
+        </button>
+      </details>
       <p v-if="!queueDetailHost?.online || queueDetailHost?.stale" role="status">
         Last known state. Reconnect this machine before changing its work.
       </p>
       <p v-if="queueDetailError" role="alert">{{ queueDetailError }}</p>
       <div class="mobile-queue-detail-actions">
+        <button
+          v-if="
+            !queueDetailModel &&
+            queueDetailEntry?.kind === 'shared' &&
+            canCancelFleetActivity(queueDetailEntry.shared)
+          "
+          type="button"
+          class="secondary-button"
+          data-test="mobile-queue-fallback-cancel"
+          :disabled="queueDetailBusy"
+          @click="cancelFallbackDetail"
+        >
+          {{ fallbackCancelArmed ? "Cancel job?" : "Cancel job" }}
+        </button>
         <button
           v-if="!queueDetailModel && queueDetailEntry?.kind === 'shared'"
           type="button"

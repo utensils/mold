@@ -186,6 +186,8 @@ applies to paused jobs. Retry is offered only for a retryable held job with its
 original batch identity. Cancelling jobs are read-only, and controls wait for
 an in-flight change to finish.
 
+Held cards offer **Cancel** even before their source images and batch settings load. Running jobs offer cancellation only when their machine supports it. **Failure Details** opens the job's saved diagnostic with its machine and job ID, and **Copy Details** makes it easy to share for troubleshooting. These details remain available when a failed job cannot be retried. Cancelling a held job rechecks its machine and state; if it has started running, refresh the queue before choosing another action. Current Mold servers enforce held-only cancellation, preventing stale Held actions from stopping a render. Update older machines for this safeguard.
+
 Prompt History is available directly in Generate. Choose a machine and search
 its saved prompts; selecting one changes only the prompt, preserving the model,
 settings, and attached media. Loading, offline, unavailable history, and failed

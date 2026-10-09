@@ -24,6 +24,7 @@ export interface GenerationBatchChild {
   retryable?: boolean | null;
   /** Human-readable failure the lifecycle presents beside `terminal_error`. */
   error?: string | null;
+  error_detail?: string | null;
   /**
    * Typed cause of a `held` child — the machine's own refusal code
    * (`MODEL_NOT_FOUND`, `UNKNOWN_MODEL`, …) beside its sentence. This, never
@@ -253,6 +254,9 @@ export function parseGenerationBatchStatus(
       (raw.error !== undefined &&
         raw.error !== null &&
         typeof raw.error !== "string") ||
+      (raw.error_detail !== undefined &&
+        raw.error_detail !== null &&
+        typeof raw.error_detail !== "string") ||
       (raw.retryable !== undefined &&
         raw.retryable !== null &&
         typeof raw.retryable !== "boolean") ||
@@ -283,6 +287,9 @@ export function parseGenerationBatchStatus(
         ? {}
         : { completed_at_ms: raw.completed_at_ms as number | null }),
       ...(raw.error === undefined ? {} : { error: raw.error as string | null }),
+      ...(raw.error_detail === undefined
+        ? {}
+        : { error_detail: raw.error_detail as string | null }),
       ...(typeof raw.error_code === "string"
         ? { error_code: raw.error_code }
         : {}),

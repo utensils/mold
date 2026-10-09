@@ -39,6 +39,8 @@ export interface QueueEntry {
   held_reason?: string | null;
   /** Durable preparation error. Present on held protocol-v2 rows. */
   error?: string | null;
+  /** Unabridged current machine diagnostic; absent on older servers. */
+  error_detail?: string | null;
   /** Exact opt-in fence for POST /api/queue/{id}/retry. */
   retryable?: boolean | null;
   /** Durable retry authority exposed by current servers. */
@@ -405,10 +407,15 @@ export async function getQueueJob(
 export async function cancelQueueJob(
   target: ApiTarget,
   workId: string,
+  options: { onlyHeld?: boolean } = {},
 ): Promise<void> {
-  await apiFetchTo(target, `/api/queue/${encodeURIComponent(workId)}`, {
-    method: "DELETE",
-  });
+  await apiFetchTo(
+    target,
+    `/api/queue/${encodeURIComponent(workId)}${options.onlyHeld ? "?only_held=true" : ""}`,
+    {
+      method: "DELETE",
+    },
+  );
 }
 
 /** Set the host-wide queue dispatch gate on one explicit authenticated host. */
@@ -567,6 +574,7 @@ export async function mutateQueueJobOnExpectedInstance(
   target: ApiTarget,
   authority: QueueJobAuthority,
   mutation: QueueJobMutation,
+  options: { onlyHeld?: boolean } = {},
 ): Promise<void> {
   if (!authority.instanceId.trim()) {
     throw new TypeError("queue mutation requires an expected server instance");
@@ -580,7 +588,7 @@ export async function mutateQueueJobOnExpectedInstance(
     );
   }
   if (mutation === "cancel") {
-    await cancelQueueJob(target, authority.jobId);
+    await cancelQueueJob(target, authority.jobId, options);
   } else {
     await retryQueueJob(target, authority);
   }

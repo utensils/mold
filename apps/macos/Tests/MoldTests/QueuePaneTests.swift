@@ -90,7 +90,11 @@ struct QueuePaneTests {
         let fake = FakeBackend(host: workstation)
         let hosts = HostStore(hosts: [workstation]) { _ in fake }
         hosts.capabilities[workstation.id] = FakeFixtures.capabilities(cooperativeCancellation: true)
+        fake.serverStatus = FakeFixtures.serverStatus()
+        fake.queueListing = try! MoldJSON.decoder.decode(QueueListing.self, from: Data("{\"entries\":".utf8) + MoldJSON.encoder.encode(mixedBatch) + Data("}".utf8))
+        await hosts.refresh(workstation)
         let queue = QueueStore(hosts: hosts)
+        await queue.poll(workstation.id)
         let group = QueueGroup.build(mixedBatch, children: [:])[0]
 
         await queue.act(.cancel, onLiveChildrenOf: group, host: workstation.id)
@@ -107,7 +111,11 @@ struct QueuePaneTests {
         let fake = FakeBackend(host: workstation)
         let hosts = HostStore(hosts: [workstation]) { _ in fake }
         hosts.capabilities[workstation.id] = FakeFixtures.capabilities()
+        fake.serverStatus = FakeFixtures.serverStatus()
+        fake.queueListing = try! MoldJSON.decoder.decode(QueueListing.self, from: Data("{\"entries\":".utf8) + MoldJSON.encoder.encode(mixedBatch) + Data("}".utf8))
+        await hosts.refresh(workstation)
         let queue = QueueStore(hosts: hosts)
+        await queue.poll(workstation.id)
         let group = QueueGroup.build(mixedBatch, children: [:])[0]
 
         await queue.act(.cancel, onLiveChildrenOf: group, host: workstation.id)

@@ -8,6 +8,87 @@ final class PopulatedGenerationTests: XCTestCase {
         acceptCompanionPermissions()
     }
 
+    @MainActor func testThinAndEnrichedHeldRowsAlwaysOfferCancelAndFailureDetails() async throws {
+        continueAfterFailure = false
+        let machine = try FixtureMachine(queueFixture: true, queueControls: true, queueFailureFixture: true)
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        defer { app.terminate(); machine.stop() }
+        cleanUpFixture(machine, port: port, app: app)
+        app.launch()
+        XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
+        app.buttons["Add a Machine"].firstMatch.tap()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        app.textFields["machine-name"].tap()
+        app.textFields["machine-name"].typeText("Failure Fixture")
+        app.textFields["machine-address"].tap()
+        app.textFields["machine-address"].typeText("127.0.0.1:\(port)")
+        app.buttons["Add"].firstMatch.tap()
+        for enriched in [false, true] {
+            if enriched {
+                machine.enrichQueueFailure()
+                app.terminate()
+                app.launchArguments = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+                app.launch()
+            }
+            XCTAssertTrue(app.navigateToDestination("Queue", shortcut: "3"))
+            let cancel = app.buttons["queue-cancel-fixture-held"]
+            let details = app.buttons["queue-failure-details-fixture-held"]
+            let list = app.collectionViews["queue-list"]
+            XCTAssertTrue(list.waitForExistence(timeout: 10))
+            for _ in 0..<8 where !cancel.exists || !cancel.isHittable { list.swipeUp() }
+            XCTAssertTrue(cancel.waitForExistence(timeout: 5))
+            XCTAssertTrue(cancel.isHittable)
+            attach(app)
+            let maximumHeight: CGFloat = enriched ? 180 : 120
+            XCTAssertLessThan(cancel.frame.height, maximumHeight, "Cancel must keep a readable button height, including large text")
+            XCTAssertGreaterThan(cancel.frame.width, 100, "Cancel must show its words rather than only an icon")
+            if enriched { XCTAssertGreaterThan(cancel.frame.width, list.frame.width * 0.7, "Large text needs a full-width label without truncation") }
+            guard cancel.frame.height < maximumHeight, cancel.frame.width > 100 else { return }
+            for _ in 0..<6 where !details.exists || !details.isHittable { list.swipeUp() }
+            guard details.exists, details.isHittable else { attach(app); XCTFail(app.debugDescription); return }
+            attach(app)
+            details.tap()
+            guard machine.queueActionRequests().isEmpty else {
+                attach(app); XCTFail("Opening details must not mutate the queue: \(machine.queueActionRequests())"); return
+            }
+            let diagnostic = app.staticTexts["queue-failure-diagnostic"]
+            guard diagnostic.waitForExistence(timeout: 5) else { attach(app); XCTFail(app.debugDescription); return }
+            XCTAssertEqual(diagnostic.label, "CUDA_ERROR_ILLEGAL_ADDRESS in attention")
+            let copy = app.buttons["Copy Details"]
+            let failureList = app.collectionViews["queue-failure-list"]
+            for _ in 0..<6 where !copy.exists || !copy.isHittable { failureList.swipeUp() }
+            XCTAssertTrue(copy.waitForExistence(timeout: 5))
+            XCTAssertTrue(copy.isHittable)
+            attach(app)
+            copy.tap()
+            guard machine.queueActionRequests().isEmpty else { XCTFail("Copying details must not mutate the queue"); return }
+            app.buttons["Done"].firstMatch.tap()
+            guard machine.queueActionRequests().isEmpty else { XCTFail("Dismissing details must not mutate the queue"); return }
+            XCTAssertTrue(cancel.waitForExistence(timeout: 5))
+            if !enriched {
+                app.buttons["queue-open-fixture-held"].tap()
+                let nestedDetails = app.buttons["Failure Details"].firstMatch
+                for _ in 0..<6 where !nestedDetails.exists || !nestedDetails.isHittable { app.collectionViews["queue-detail"].swipeUp() }
+                guard nestedDetails.waitForExistence(timeout: 5), nestedDetails.isHittable else { attach(app); XCTFail("Job Details must expose failure details"); return }
+                nestedDetails.tap()
+                guard diagnostic.waitForExistence(timeout: 5) else { attach(app); XCTFail("Job Details must open the diagnostic sheet"); return }
+                guard machine.queueActionRequests().isEmpty else { XCTFail("Inspecting job diagnostics must not mutate the queue"); return }
+                copy.tap()
+                guard machine.queueActionRequests().isEmpty else { XCTFail("Copying job diagnostics must not mutate the queue"); return }
+                app.buttons["Done"].firstMatch.tap()
+                guard machine.queueActionRequests().isEmpty else { XCTFail("Closing job diagnostics must not mutate the queue"); return }
+                app.buttons["Done"].firstMatch.tap()
+                guard machine.queueActionRequests().isEmpty else { XCTFail("Closing Job Details must not mutate the queue"); return }
+            }
+        }
+        XCTAssertTrue(machine.queueActionRequests().isEmpty)
+        app.buttons["queue-cancel-fixture-held"].tap()
+        for _ in 0..<100 where machine.queueActionRequests().isEmpty { try await Task.sleep(for: .milliseconds(50)) }
+        XCTAssertEqual(machine.queueActionRequests(), ["/api/queue/fixture-held?only_held=true"])
+        XCTAssertTrue(machine.generationRequests.isEmpty)
+    }
+
     @MainActor func testMemoryErrorIsConciseAndFitsAtEveryTextSize() async throws {
         continueAfterFailure = false
         var root = URL(fileURLWithPath: #filePath)

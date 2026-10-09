@@ -15,6 +15,8 @@ public struct QueueEntry: Codable, Hashable, Sendable, Identifiable {
     /// to restore, a licence to accept -- and is shown as written.
     public let heldReason: String?
     public let error: String?
+    /// Machine diagnostic retained separately from the concise user-facing reason.
+    public var errorDetail: String? = nil
     public let retryable: Bool?
     public let durable: Bool?
     public let batchId: String?
