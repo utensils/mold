@@ -11,7 +11,15 @@ import SwiftUI
 @Observable
 final class LibraryNavigation {
     var scope: LibraryScope = .all {
-        didSet { remember() }
+        didSet {
+            if scope.isTrash, !oldValue.isTrash {
+                // Recoverable prints must not disappear behind a search or
+                // media/tag filter left over from the live Library.
+                query.text = ""
+                query.tokens.removeAll { if case .machine = $0 { return false }; return true }
+            }
+            remember()
+        }
     }
     var query = LibraryQuery()
     /// Thumbnail edge. A view setting, but one people expect to persist.

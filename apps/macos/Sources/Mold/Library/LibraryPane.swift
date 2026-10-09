@@ -62,7 +62,9 @@ struct LibraryPane: View {
     @State private var videoExport: VideoExportPrompt?
 
     var actions: LibraryActions {
-        LibraryActions(hosts: hosts, library: library, reuse: reuse,
+        LibraryActions(hosts: hosts, library: library,
+                       lifecycleHostIDs: selectedMachines.isEmpty ? nil : selectedMachines,
+                       reuse: reuse,
                        useAsSource: attachmentOffer.canUseAsSource
                            ? { attach($0, as: .source) } : nil,
                        addAsReference: attachmentOffer.canAddReference

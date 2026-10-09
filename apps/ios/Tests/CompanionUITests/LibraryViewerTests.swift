@@ -6,6 +6,41 @@ final class LibraryViewerTests: XCTestCase {
         acceptCompanionPermissions()
     }
 
+    @MainActor func testTrashContextMenuAndViewerRequirePermanentDeleteConfirmation() async throws {
+        continueAfterFailure = false
+        let machine = try FixtureMachine(galleryPrints: 1, libraryMutations: true, trashFixture: true)
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        cleanUpFixture(machine, port: port, app: app)
+        app.launch()
+        XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
+        app.buttons["Add a Machine"].firstMatch.tap()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        let address = app.textFields["machine-address"]
+        XCTAssertTrue(address.waitForExistence(timeout: 5))
+        address.tap(); address.typeText("127.0.0.1:\(port)")
+        app.buttons["Add"].firstMatch.tap()
+        XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
+        app.chooseLibraryShelf("Trash")
+        let print = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Fixture 0,'")).firstMatch
+        XCTAssertTrue(print.waitForExistence(timeout: 10))
+        print.press(forDuration: 1)
+        let menuDelete = app.buttons["Delete Immediately"].firstMatch
+        XCTAssertTrue(menuDelete.waitForExistence(timeout: 5)); menuDelete.tap()
+        let confirm = app.buttons["Delete Immediately"].firstMatch
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'will be removed for good'")).firstMatch.exists)
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "Trash context menu permanent deletion confirmation"; shot.lifetime = .keepAlways; add(shot)
+        app.buttons["Cancel"].firstMatch.tap()
+        XCTAssertTrue(print.waitForExistence(timeout: 5)); print.tap()
+        app.buttons["More"].firstMatch.tap()
+        app.buttons["Delete Immediately"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["Cancel"].firstMatch.waitForExistence(timeout: 5))
+        app.buttons["Cancel"].firstMatch.tap()
+        XCTAssertFalse(machine.requestLog().contains { $0.contains("delete-selected") || $0.contains("delete-forever") })
+    }
+
     @MainActor func testSavingVideoToPhotosDoesNotCrash() async throws {
         try await saveToPhotos(video: true, deny: false)
     }

@@ -9,6 +9,11 @@ import Testing
 // failure, not a URL to try anyway.
 
 private final class TicketTransport: StubTransport {
+    nonisolated(unsafe) static var requests: [URLRequest] = []
+    override func startLoading() {
+        Self.requests.append(request)
+        super.startLoading()
+    }
     nonisolated(unsafe) static var responses: [String: (status: Int, body: Data)] = [:]
     override class func response(for path: String) -> (status: Int, body: Data)? {
         responses[path]
@@ -91,4 +96,27 @@ struct MediaTokenTests {
             return true
         }
     }
+    @Test func trashedPlaybackUsesTrashViewAndPreservesTicket() async throws {
+        plant(#"{"token":"tok-trash","expires_at":1893456000,"auth_required":true}"#)
+        let backend = TicketTransport.backend(apiKey: "secret")
+        let url = try await backend.playableURL(for: "clip.mp4", trashed: true)
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        #expect(items.first { $0.name == "view" }?.value == "trash")
+        #expect(items.first { $0.name == "media_token" }?.value == "tok-trash")
+    }
+
+    @Test func trashRelayNeverPlaysTheLiveObjectAndFetchesAuthenticatedTrash() async {
+        TicketTransport.requests = []
+        plant(#"{"auth_required":true,"url":"https://live-object.example/clip.mp4"}"#)
+        TicketTransport.responses["/api/gallery/image/clip.mp4"] = (404, Data(#"{"error":"not found"}"#.utf8))
+        let backend = TicketTransport.backend(apiKey: "secret")
+        await #expect(throws: (any Error).self) {
+            _ = try await backend.playableURL(for: "clip.mp4", trashed: true)
+        }
+        let media = TicketTransport.requests.first { $0.url?.path == "/api/gallery/image/clip.mp4" }
+        #expect(media?.url?.query() == "view=trash")
+        #expect(media?.value(forHTTPHeaderField: "X-Api-Key") == "secret")
+        #expect(!TicketTransport.requests.contains { $0.url?.host == "live-object.example" })
+    }
+
 }

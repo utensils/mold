@@ -108,12 +108,12 @@ extension LibraryStore {
         }
     }
 
-    // MARK: - Recently Deleted
+    // MARK: - Trash
 
-    /// Moves prints to Recently Deleted on every machine holding a copy; a
+    /// Moves prints to Trash on every machine holding a copy; a
     /// machine without a trash deletes for good (the menu said so first).
     func trash(_ entries: [LibraryEntry]) async {
-        await perHost(entries.flatMap(\.everyCopy), doing: String(localized: "move those prints to Recently Deleted")) {
+        await perHost(entries.flatMap(\.everyCopy), doing: String(localized: "move those prints to Trash")) {
             client, host, files in
             if self.hosts.capabilities[host]?.trashEnabled == true {
                 try await client.trash(files)
@@ -131,12 +131,13 @@ extension LibraryStore {
 
     func deleteImmediately(_ entries: [LibraryEntry]) async {
         await perHost(entries.flatMap(\.everyCopy), doing: String(localized: "delete those prints")) {
-            client, _, files in try await client.deleteForever(files)
+            client, _, files in try await client.deleteTrashed(files)
         }
     }
 
-    func emptyTrash() async {
-        await perHost(trashPool.flatMap(\.everyCopy), doing: String(localized: "empty Recently Deleted")) {
+    func emptyTrash(on machineIDs: Set<MoldHost.ID> = []) async {
+        let copies = trashPool.flatMap(\.everyCopy).filter { machineIDs.isEmpty || machineIDs.contains($0.hostID) }
+        await perHost(copies, doing: String(localized: "empty Trash")) {
             client, _, _ in try await client.emptyTrash()
         }
     }

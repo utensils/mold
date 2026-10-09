@@ -858,3 +858,9 @@ Queue rows show the owning machine’s sealed conditioning images across models.
 ### Reuse input media
 
 Reuse settings restores retained opening and closing frames into editable wells, preserving keyframe indices and ordered image references. Audio, source/continuation video, identity photos and control images restore with their saved settings where the selected recipe supports them. Continuation overlap and authored reference strength (including zero) are preserved. Older prints without recorded reference strength keep the server default. The original machine must retain the inputs; missing, damaged or oversized inputs are disclosed before generation. A new attachment or explicit removal wins over a late download, and restored wells never have a hidden archive fallback that can revive removed media.
+
+## Library deletion by machine
+
+A Library machine filter scopes trash, restore, permanent deletion and Empty Trash to that machine. Copies on other machines stay in place. Choose All Machines to include every loaded copy. This applies to web, desktop and mobile Library views.
+
+Selected Trash deletion requires a host with the trash-only deletion API; older hosts show an update request. On Tauri desktop, deleting selected local trash or emptying local trash requires the local engine to be running. Offline operations refuse rather than risking a restored live file.

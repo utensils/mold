@@ -33,18 +33,25 @@ extension LibraryActions {
         })
     }
 
-    /// Empties every machine's trash at once.
+    var trashEntries: [LibraryEntry] {
+        guard let lifecycleHostIDs else { return library.trashed }
+        return library.trashed.compactMap { $0.presented(onAnyOf: lifecycleHostIDs) }
+    }
+
+    /// Empties only the machines named by the current filter.
     func emptyTrash() {
-        let waiting = library.trashed.count
+        let waiting = trashEntries.count
         guard !library.isBulkBusy, waiting > 0, let ask = confirmDestruction else { return }
+        let destinations = hosts.hosts.filter { lifecycleHostIDs?.contains($0.id) ?? true }
+        let locations = destinations.map(\.name).joined(separator: ", ")
         ask(Destruction(
             title: "Empty the Trash?",
             message: "\(waiting.formatted()) "
                 + (waiting == 1 ? "print" : "prints")
-                + " will be deleted from every machine. This cannot be undone.",
+                + " will be deleted from \(locations). This cannot be undone.",
             verb: "Empty Trash"
         ) {
-            Task { await library.emptyTrash() }
+            Task { await library.emptyTrash(on: lifecycleHostIDs) }
         })
     }
 }

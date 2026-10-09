@@ -49,7 +49,7 @@ struct InspectorActions: View {
                     Button(role: .destructive) { actions.moveToTrash(entries) } label: {
                         Label("Trash", systemImage: "trash")
                     }
-                    .help("Move the selected prints to Recently Deleted")
+                    .help("Move the selected prints to Trash")
                 }
                 .labelStyle(.iconOnly)
                 .buttonStyle(.bordered)

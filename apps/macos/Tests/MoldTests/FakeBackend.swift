@@ -958,20 +958,20 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         await pause("trash")
         if trashFailureOnCall == callCount("trash") {
             let partial = Set(filenames.prefix(trashPartialFailureCount))
-            trashedRows.append(contentsOf: prints.filter { partial.contains($0.filename) })
+            trashedRows.append(contentsOf: prints.filter { partial.contains($0.filename) }.map { FakeFixtures.trashState($0, at: 1) })
             prints.removeAll { partial.contains($0.filename) }
             throw MoldClientError.http(status: 409, code: "CONFLICT", message: "Conflict")
         }
         let names = Set(filenames)
         let moved = prints.filter { names.contains($0.filename) }
-        trashedRows.append(contentsOf: moved)
+        trashedRows.append(contentsOf: moved.map { FakeFixtures.trashState($0, at: 1) })
         prints.removeAll { names.contains($0.filename) }
     }
     func restoreFromTrash(_ filenames: [String]) async throws {
         try record("restoreFromTrash")
         await pause("restoreFromTrash")
         let names = Set(filenames)
-        prints.append(contentsOf: trashedRows.filter { names.contains($0.filename) })
+        prints.append(contentsOf: trashedRows.filter { names.contains($0.filename) }.map { FakeFixtures.trashState($0, at: nil) })
         trashedRows.removeAll { names.contains($0.filename) }
     }
     func deleteForever(_ filenames: [String]) async throws {
@@ -1080,6 +1080,11 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     func deleteTag(_ name: String) async throws {
         try record("deleteTag")
         await pause("deleteTag")
+    }
+    func deleteTrashed(_ filenames: [String]) async throws {
+        try record("deleteTrashed")
+        await pause("deleteTrashed")
+        trashedRows.removeAll { filenames.contains($0.filename) }
     }
     func emptyTrash() async throws {
         try record("emptyTrash")

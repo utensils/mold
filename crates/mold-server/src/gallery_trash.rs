@@ -480,6 +480,24 @@ fn purge_if_still_trashed_blocking(
     Ok(true)
 }
 
+/// Delete a selected Trash row while the caller holds the gallery writer.
+fn delete_selected_trashed_print_blocking(
+    dir: &Path,
+    name: &str,
+    db: &MetadataDb,
+    gate: &GalleryPublicationGate,
+    media_lifecycle: Option<&crate::queue_media_lifecycle::QueueMediaLifecycle>,
+) -> Result<(), ApiError> {
+    if !purge_if_still_trashed_blocking(dir, name, db, gate, media_lifecycle, None)? {
+        return Err(ApiError::with_code(
+            format!("{name} is not in the trash"),
+            GALLERY_NOT_TRASHED,
+            StatusCode::CONFLICT,
+        ));
+    }
+    Ok(())
+}
+
 /// The historical hard delete of a LIVE print (bytes, sidecars, row,
 /// archive tombstone). Caller holds the gallery writer. This is the whole
 /// behaviour of `DELETE /api/gallery/image/:filename` when the metadata DB
@@ -1099,9 +1117,39 @@ pub(crate) async fn delete_gallery_files_forever(
     State(state): State<AppState>,
     Json(request): Json<TrashFilenamesRequest>,
 ) -> Result<StatusCode, ApiError> {
+    delete_gallery_files(state, request, false).await
+}
+
+/// Permanently delete only selected trash rows. Never fall back to live bytes.
+#[utoipa::path(
+    post,
+    path = "/api/gallery/trash/delete-selected",
+    tag = "gallery",
+    request_body = TrashFilenamesRequest,
+    responses(
+        (status = 204, description = "Every selected trashed print was removed"),
+        (status = 409, description = "A selected print is no longer in the trash"),
+        (status = 422, description = "Empty list or invalid filename"),
+    )
+)]
+pub(crate) async fn delete_selected_gallery_trash(
+    State(state): State<AppState>,
+    Json(request): Json<TrashFilenamesRequest>,
+) -> Result<StatusCode, ApiError> {
+    delete_gallery_files(state, request, true).await
+}
+
+async fn delete_gallery_files(
+    state: AppState,
+    request: TrashFilenamesRequest,
+    trash_only: bool,
+) -> Result<StatusCode, ApiError> {
     let dir = gallery_output_dir(&state).await?;
     let names = clean_filenames(&request)?;
     let db = state.metadata_db.clone();
+    if trash_only {
+        require_metadata_db(&db)?;
+    }
     let gate = state.gallery_publication_gate.clone();
     let media_lifecycle = state.queue_journal.queue_media_lifecycle();
     let started = std::time::Instant::now();
@@ -1117,12 +1165,8 @@ pub(crate) async fn delete_gallery_files_forever(
         let result = tokio::task::spawn_blocking(move || {
             let _gallery_writer = gallery_writer;
             if let Some(db) = item_db.as_ref().as_ref() {
-                let trashed = db
-                    .get(&item_dir, &item_name)
-                    .map_err(|error| internal("metadata DB read failed", format!("{error:#}")))?
-                    .is_some_and(|row| row.trashed_at_ms.is_some());
-                if trashed {
-                    purge_trashed_print_blocking(
+                if trash_only {
+                    delete_selected_trashed_print_blocking(
                         &item_dir,
                         &item_name,
                         db,
@@ -1130,13 +1174,27 @@ pub(crate) async fn delete_gallery_files_forever(
                         item_media_lifecycle.as_deref(),
                     )?;
                 } else {
-                    hard_delete_live_print_blocking(
-                        &item_dir,
-                        &item_name,
-                        Some(db),
-                        &item_gate,
-                        item_media_lifecycle.as_deref(),
-                    )?;
+                    let trashed = db
+                        .get(&item_dir, &item_name)
+                        .map_err(|error| internal("metadata DB read failed", format!("{error:#}")))?
+                        .is_some_and(|row| row.trashed_at_ms.is_some());
+                    if trashed {
+                        purge_trashed_print_blocking(
+                            &item_dir,
+                            &item_name,
+                            db,
+                            &item_gate,
+                            item_media_lifecycle.as_deref(),
+                        )?;
+                    } else {
+                        hard_delete_live_print_blocking(
+                            &item_dir,
+                            &item_name,
+                            Some(db),
+                            &item_gate,
+                            item_media_lifecycle.as_deref(),
+                        )?;
+                    }
                 }
             } else {
                 hard_delete_live_print_blocking(
@@ -1432,6 +1490,53 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), gate.read())
             .await
             .expect("the writer is released when the blocking mutation ends");
+    }
+
+    #[test]
+    fn selected_trash_deletion_refuses_a_restored_live_print() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = MetadataDb::open_in_memory().unwrap();
+        let live = dir.path().join("restored.png");
+        std::fs::write(&live, b"restored").unwrap();
+        assert!(ensure_row_for_live_file(
+            &db,
+            dir.path(),
+            "restored.png",
+            &live
+        ));
+        let gate = GalleryPublicationGate::default();
+        assert!(delete_selected_trashed_print_blocking(
+            dir.path(),
+            "restored.png",
+            &db,
+            &gate,
+            None,
+        )
+        .is_err());
+        assert_eq!(std::fs::read(live).unwrap(), b"restored");
+        assert!(db.get(dir.path(), "restored.png").unwrap().is_some());
+    }
+
+    #[test]
+    fn selected_trash_deletion_purges_the_trashed_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = MetadataDb::open_in_memory().unwrap();
+        let live = dir.path().join("selected.png");
+        std::fs::write(&live, b"selected").unwrap();
+        assert!(ensure_row_for_live_file(
+            &db,
+            dir.path(),
+            "selected.png",
+            &live
+        ));
+        let trash = batch_transaction::ensure_gallery_trash_dir(dir.path()).unwrap();
+        std::fs::rename(&live, trash.join("selected.png")).unwrap();
+        db.mark_trashed(dir.path(), "selected.png", 1).unwrap();
+        let gate = GalleryPublicationGate::default();
+        delete_selected_trashed_print_blocking(dir.path(), "selected.png", &db, &gate, None)
+            .unwrap();
+        assert!(!trash.join("selected.png").exists());
+        assert!(db.get(dir.path(), "selected.png").unwrap().is_none());
     }
 
     #[test]

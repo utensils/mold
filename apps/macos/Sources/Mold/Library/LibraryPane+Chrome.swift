@@ -67,7 +67,7 @@ extension LibraryPane {
         if let viewing, let entry = entry(viewing, in: showing.visible) {
             LibraryViewer(entry: entry, host: host(of: entry), actions: actions,
                           scope: navigation.scope, shelves: library.shelves,
-                          enclosingShelf: enclosingShelf, trashCount: library.trashed.count,
+                          enclosingShelf: enclosingShelf, trashCount: actions.trashEntries.count,
                           onClose: { close(viewing) },
                           onStep: { step($0, in: showing.visible) })
         } else if showing.visible.isEmpty {
@@ -78,7 +78,7 @@ extension LibraryPane {
                 showsHostBadges: showsHostBadges,
                 scope: navigation.scope, actions: actions, entries: showing.visible,
                 shelves: library.shelves, enclosingShelf: enclosingShelf,
-                trashCount: library.trashed.count,
+                trashCount: actions.trashEntries.count,
                 selection: $selection,
                 returnToPrint: gridReturn?.scope == navigation.scope && gridReturn?.query == navigation.query
                     ? gridReturn?.id : nil,

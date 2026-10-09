@@ -160,7 +160,21 @@ struct LibraryMergeTests {
         let shown = query.apply(to: merged)
 
         #expect(shown.map(\.hostID) == [workstation])
-        #expect(shown[0].copies.map(\.hostID) == [local])
+        #expect(shown[0].copies.isEmpty)
+    }
+
+    @Test func aMachineFilterRestrictsActionsEvenWhenTheLeadMatches() {
+        let merged = LibraryMerge.merge([
+            entry("cat.png", on: local, name: "This Mac"),
+            entry("cat.png", on: workstation, name: "workstation"),
+            entry("cat.png", on: hal, name: "hal"),
+        ], localHost: local)
+        let localOnly = merged[0].presented(onAnyOf: [local])
+        #expect(localOnly?.everyCopy.map(\.hostID) == [local])
+        let remoteOnly = merged[0].presented(onAnyOf: [workstation, hal])
+        #expect(Set(remoteOnly?.everyCopy.map(\.hostID) ?? []) == [workstation, hal])
+        #expect(remoteOnly?.copies.allSatisfy { $0.copies.isEmpty } == true)
+        #expect(merged[0].everyCopy.count == 3)
     }
 
     @Test func aTagOnAnyCopyFindsThePrint() {

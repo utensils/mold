@@ -79,6 +79,7 @@ clients, and custom integrations on one generation contract.
 | `DELETE` | `/api/gallery/trash`                             | key           | Empty the trash now                                                                                                                                                                                                                                                                                          |
 | `POST`   | `/api/gallery/trash/restore`                     | key           | Restore trashed prints to the live gallery                                                                                                                                                                                                                                                                   |
 | `POST`   | `/api/gallery/trash/delete-forever`              | key           | Permanently delete live or trashed prints                                                                                                                                                                                                                                                                    |
+| `POST`   | `/api/gallery/trash/delete-selected`             | key           | Permanently delete selected trashed prints; refuse restored live prints                                                                                                                                                                                                                                      |
 | `POST`   | `/api/gallery/trash/sweep`                       | key           | Run one `gallery.trash_retention_days` retention pass now                                                                                                                                                                                                                                                    |
 | `POST`   | `/api/pairing/sessions`                          | key           | Mint an authenticated, one-use, two-minute mobile pairing ticket                                                                                                                                                                                                                                             |
 | `POST`   | `/api/pairing/claim`                             | none          | Redeem a pairing ticket once; the durable key is never present in the QR                                                                                                                                                                                                                                     |
@@ -1230,7 +1231,12 @@ advertised as `capabilities.gallery.trash` (`enabled`, `retention_days`).
   applied. Restoring onto a filename a live print already holds is
   `409 GALLERY_RESTORE_CONFLICT`.
 - `POST /api/gallery/trash/delete-forever` permanently removes live or trashed
-  prints; `DELETE /api/gallery/trash` empties the trash now.
+  prints. GUI Trash selections use `POST /api/gallery/trash/delete-selected`
+  with `{ "filenames": ["print.png"] }`, which refuses a restored live print
+  with `409 GALLERY_NOT_TRASHED` while holding the publication writer.
+  It requires the metadata DB. Older servers return 404; clients refuse rather
+  than falling back to live deletion. `DELETE /api/gallery/trash` empties only
+  currently trashed prints, rechecking each under the same writer.
 - `POST /api/gallery/trash/sweep` runs one retention pass immediately. The
   server also runs it at startup and hourly against
   `gallery.trash_retention_days`, read fresh from the live config (`0` keeps

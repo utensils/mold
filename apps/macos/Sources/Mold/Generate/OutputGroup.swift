@@ -16,9 +16,9 @@ struct OutputGroup: View {
             transparencySection
             upscaleSection
             Toggle("Save to library", isOn: $draft.savesToGallery)
-                .help("Keep new results in the Library. When off, they go to Recently Deleted.")
+                .help("Keep new results in the Library. When off, they go to Trash.")
             if !draft.savesToGallery {
-                Text("New prints go to Recently Deleted and remain recoverable until the trash is purged.")
+                Text("New prints go to Trash and remain recoverable until the trash is purged.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

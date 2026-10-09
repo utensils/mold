@@ -91,7 +91,7 @@ describe("IdentityWell", () => {
     );
   });
 
-  it("refuses a photo beyond the per-axis limit before it is staged", async () => {
+  it("refuses an oversized photo with invalid pixel data before it is staged", async () => {
     const form = identityForm();
     const wrapper = mountWell(form);
     wrapper
@@ -100,7 +100,9 @@ describe("IdentityWell", () => {
     await flushPromises();
 
     expect(form.identityImage).toBeNull();
-    expect(wrapper.get("[data-test='identity-conditioning-error']").text()).toContain("8192");
+    expect(wrapper.get("[data-test='identity-conditioning-error']").text()).toContain(
+      "Couldn't read the image.",
+    );
   });
 
   /*

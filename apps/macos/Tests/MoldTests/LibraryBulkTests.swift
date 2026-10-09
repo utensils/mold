@@ -137,4 +137,40 @@ struct LibraryBulkTests {
         #expect(fake.callCount("deleteForever") == 0)
     }
 
+    @Test func emptyTrashOnOneMachinePreservesOtherTrashAndLiveCopies() async {
+        let firstHost = MoldHost(name: "remote", baseURL: URL(string: "http://remote")!)
+        let secondHost = MoldHost(name: "This Mac", baseURL: URL(string: "http://local")!)
+        let first = FakeBackend(host: firstHost)
+        let second = FakeBackend(host: secondHost)
+        first.trashedRows = [FakeFixtures.print("cat.png")]
+        second.trashedRows = [FakeFixtures.print("other.png")]
+        second.prints = [FakeFixtures.print("cat.png")]
+        let hosts = HostStore(hosts: [firstHost, secondHost]) { $0.id == firstHost.id ? first : second }
+        let library = LibraryStore(hosts: hosts)
+        await library.refresh()
+        await library.refreshTrash()
+
+        await library.emptyTrash(on: [firstHost.id])
+
+        #expect(first.callCount("emptyTrash") == 1)
+        #expect(second.callCount("emptyTrash") == 0)
+        #expect(second.prints.map(\.filename) == ["cat.png"])
+        #expect(second.trashedRows.map(\.filename) == ["other.png"])
+        #expect(library.trashed.map(\.print.filename) == ["other.png"])
+    }
+
+    @Test func staleTrashDeletionCannotDeleteRestoredLivePrintOnSameHost() async {
+        let (store, fake, host) = await bench(1)
+        let stale = FakeFixtures.trashState(fake.prints[0], at: 1)
+        let entry = LibraryEntry(host: host, print: stale)
+        // The client still displays Trash, but the server has put it back.
+        store.trashPerHost[host.id] = [entry]
+        store.rebuildTrash()
+        await store.deleteForever([entry])
+        #expect(fake.callCount("deleteTrashed") == 1)
+        #expect(fake.callCount("deleteForever") == 0)
+        #expect(fake.prints.count == 1)
+        #expect(store.items.count == 1)
+    }
+
 }

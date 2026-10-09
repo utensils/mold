@@ -14,6 +14,7 @@ import {
   createCollection,
   deleteGalleryImageForever,
   deleteManyForever,
+  deleteTrashed,
   organizeGallery,
   patchGalleryImage,
   restoreTrashed,
@@ -566,6 +567,7 @@ export interface FanoutApi {
   restoreTrashed: typeof restoreTrashed;
   deleteGalleryImageForever: typeof deleteGalleryImageForever;
   deleteManyForever?: typeof deleteManyForever;
+  deleteTrashed?: typeof deleteTrashed;
   /** Hard delete for hosts without a trash (today's `DELETE`). */
   deleteGalleryImage: (target: ApiTarget, filename: string) => Promise<void>;
 }
@@ -579,6 +581,7 @@ export const defaultFanoutApi: FanoutApi = {
   restoreTrashed,
   deleteGalleryImageForever,
   deleteManyForever,
+  deleteTrashed,
   // A host without a trash hard-deletes on the plain `DELETE` it has always
   // answered; `?permanent=true` is never sent to a host that lacks the trash.
   deleteGalleryImage: (target, filename) => trashGalleryImage(target, filename),
@@ -594,7 +597,11 @@ export async function runOrganizationFanout(
   ops: readonly OrganizationFanoutOp[],
   hosts: Record<string, FanoutHost | undefined>,
   api: FanoutApi = defaultFanoutApi,
-  options: { trashHostIds?: ReadonlySet<string>; bulkHostIds?: ReadonlySet<string> } = {},
+  options: {
+    trashHostIds?: ReadonlySet<string>;
+    bulkHostIds?: ReadonlySet<string>;
+    trashOnly?: boolean;
+  } = {},
 ): Promise<FanoutResult> {
   const result: FanoutResult = { failures: [], createdCollections: [], succeededHostIds: [] };
   await Promise.all(
@@ -609,7 +616,9 @@ export async function runOrganizationFanout(
         return;
       }
       try {
-        await runHostOp(op, host, api, result, options.trashHostIds, options.bulkHostIds);
+        if (op.kind === "deleteForever" && options.trashOnly) {
+          await (api.deleteTrashed ?? deleteTrashed)(host.target, op.filenames);
+        } else await runHostOp(op, host, api, result, options.trashHostIds, options.bulkHostIds);
         result.succeededHostIds.push(host.id);
       } catch (error) {
         result.failures.push({ hostId: host.id, hostName: host.name, error });
@@ -694,4 +703,12 @@ export function fanoutFailureMessage(
   const hosts = named.length === 1 ? named[0] : `${named.length} hosts (${named.join(", ")})`;
   const first = failures[0]!;
   return `Couldn’t ${action} on ${hosts}. ${describe(first.error, first.hostName)}`;
+}
+
+/** A machine filter also scopes trash, restore and permanent deletion. */
+export function scopedLibraryCopies<T extends { hostId: string }>(
+  copies: readonly T[],
+  hostId: string | null,
+): T[] {
+  return copies.filter((copy) => hostId === null || copy.hostId === hostId);
 }

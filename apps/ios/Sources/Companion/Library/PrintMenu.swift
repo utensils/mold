@@ -13,6 +13,7 @@ struct PrintMenu: View {
     let entries: [LibraryEntry]
     let trashed: Bool
     var compact = false
+    var requestPermanentDelete: (([LibraryEntry]) -> Void)?
 
     var body: some View {
         if compact {
@@ -28,9 +29,10 @@ struct PrintMenu: View {
                 Label("Put Back", systemImage: "arrow.uturn.backward")
             }
             Divider()
-            Button(role: .destructive) { Task { await library.deleteImmediately(entries) } } label: {
+            Button(role: .destructive) { requestPermanentDelete?(entries) } label: {
                 Label("Delete Immediately", systemImage: "trash.slash")
             }
+            .disabled(requestPermanentDelete == nil)
         } else {
             if single, let entry = entries.first, entry.print.kind == .picture {
                 Button { router.useAsSource(entry) } label: {

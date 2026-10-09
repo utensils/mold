@@ -66,6 +66,7 @@ describe("ipc.pickSourceImages", () => {
         width: 64,
         height: 64,
         metadata: null,
+        mimeType: "application/octet-stream",
       },
       {
         filename: "reference.jpeg",
@@ -73,6 +74,7 @@ describe("ipc.pickSourceImages", () => {
         width: 80,
         height: 96,
         metadata: null,
+        mimeType: "application/octet-stream",
       },
     ]);
     expect(open).toHaveBeenCalledWith({

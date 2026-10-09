@@ -60,6 +60,7 @@ extension FakeBackend {
     public func mutate(_ mutation: GalleryBulkMutation) async throws { let _: Void = try await respond("mutate(_:)", [mutation]) }
     public func trash(_ filenames: [String]) async throws { let _: Void = try await respond("trash(_:)", [filenames]) }
     public func restoreFromTrash(_ filenames: [String]) async throws { let _: Void = try await respond("restoreFromTrash(_:)", [filenames]) }
+    public func deleteTrashed(_ filenames: [String]) async throws { let _: Void = try await respond("deleteTrashed(_:)", [filenames]) }
     public func deleteForever(_ filenames: [String]) async throws { let _: Void = try await respond("deleteForever(_:)", [filenames]) }
     @discardableResult public func importPrint(_ item: GalleryImport, as filename: String) async throws -> String { try await respond("importPrint(_:as:)", [item, filename]) }
     public func media(_ filename: String, trashed: Bool) async throws -> Data { try await respond("media(_:trashed:)", [filename, trashed]) }

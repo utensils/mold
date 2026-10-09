@@ -22,7 +22,7 @@ import type {
   TrashFilenamesRequest,
   TrashSweepResult,
 } from "../lib/api/galleryOrganization";
-import { apiFetchTo, apiJsonTo, type ApiTarget } from "./client";
+import { ApiError, apiFetchTo, apiJsonTo, type ApiTarget } from "./client";
 
 const JSON_HEADERS = { "content-type": "application/json" } as const;
 
@@ -243,6 +243,30 @@ export async function deleteManyForever(
     headers: JSON_HEADERS,
     body: JSON.stringify(body),
   });
+}
+
+/** Permanently removes only trash members; a restored live file is never deleted.
+ * Older hosts refuse this route rather than falling back to live deletion. */
+export async function deleteTrashed(
+  target: ApiTarget,
+  filenames: string[],
+): Promise<void> {
+  try {
+    await apiFetchTo(target, "/api/gallery/trash/delete-selected", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ filenames }),
+    });
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      throw new ApiError(
+        "Update this machine's Mold server before deleting selected trash permanently.",
+        error.status,
+        error.body,
+      );
+    }
+    throw error;
+  }
 }
 
 /** `POST /api/gallery/trash {filenames}` — bulk move to trash. */

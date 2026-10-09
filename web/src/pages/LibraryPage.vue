@@ -291,7 +291,8 @@ watch(
             .map((t) => t.trim())
             .filter(Boolean)
         : [];
-    if (next.join(" ") !== tagFilter.value.join(" ")) tagFilter.value = next;
+    if (next.join("\u0000") !== tagFilter.value.join("\u0000"))
+      tagFilter.value = next;
   },
   { immediate: true },
 );
@@ -536,7 +537,7 @@ function canOrganizeEntry(entry: GalleryImage | null): boolean {
 /** Every copy goes to a trash on delete (else the old hard delete). */
 function allCopiesTrash(entry: GalleryImage | null): boolean {
   if (!entry) return false;
-  const copies = copiesOf(entry);
+  const copies = mutationCopiesOf(entry);
   return (
     copies.length > 0 &&
     copies.every((copy) => hostTrashes(snapshots.value, copy.hostId))
@@ -652,13 +653,31 @@ function copiesOf(entry: GalleryImage): HostGalleryImage[] {
   );
 }
 
+/** Mutations target only copies on the explicitly selected machine. */
+function mutationCopiesOf(entry: GalleryImage): HostGalleryImage[] {
+  const copies = copiesOf(entry);
+  return hostFilter.value === "all"
+    ? copies
+    : copies.filter((copy) => copy.hostId === hostFilter.value);
+}
+const mutationHostLabel = computed(() =>
+  hostFilter.value === "all"
+    ? "all connected machines"
+    : (hostOptions.value.find((host) => host.id === hostFilter.value)?.label ??
+      hostFilter.value),
+);
+
 /** Expand many logical keys to every distinct physical copy. */
-function copiesOfKeys(keys: readonly string[]): HostGalleryImage[] {
+function copiesOfKeys(
+  keys: readonly string[],
+  scoped = false,
+): HostGalleryImage[] {
   const byKey = new Map<string, HostGalleryImage>();
   for (const key of keys) {
     const entry = entryForKey(key);
     if (!entry) continue;
-    for (const copy of copiesOf(entry)) byKey.set(keyOf(copy), copy);
+    for (const copy of scoped ? mutationCopiesOf(entry) : copiesOf(entry))
+      byKey.set(keyOf(copy), copy);
   }
   return [...byKey.values()];
 }
@@ -695,7 +714,9 @@ async function handleDeleteMany(keys: string[]): Promise<number> {
   const selectedTargets = keys
     .map((key) => ({ key, entry: entryForKey(key) }))
     .filter((t): t is { key: string; entry: HostGalleryImage } => !!t.entry);
-  const groups = selectedTargets.map((target) => copiesOf(target.entry));
+  const groups = selectedTargets.map((target) =>
+    mutationCopiesOf(target.entry),
+  );
   const targetsByKey = new Map<string, HostGalleryImage>();
   for (const group of groups) {
     for (const entry of group) targetsByKey.set(keyOf(entry), entry);
@@ -789,7 +810,7 @@ function markTrashedLocally(copies: readonly HostGalleryImage[]) {
 async function deleteSelected() {
   const keys = Array.from(selection.value);
   if (keys.length === 0) return;
-  const copies = copiesOfKeys(keys);
+  const copies = copiesOfKeys(keys, true);
   const reversible =
     copies.length > 0 &&
     copies.every((copy) => hostTrashes(snapshots.value, copy.hostId));
@@ -836,7 +857,7 @@ async function deleteSelected() {
   const accepted = await requestConfirm({
     title:
       keys.length === 1 ? "Delete print?" : `Delete ${keys.length} prints?`,
-    body: "Every matching copy on your connected devices will be deleted. This can't be undone.",
+    body: `Matching copies on ${mutationHostLabel.value} will be deleted. This can't be undone.`,
     confirmLabel: "Delete",
     danger: true,
   });
@@ -848,7 +869,10 @@ async function deleteAllFiltered() {
   const list = filtered.value;
   if (list.length === 0) return;
   const everything = list.length === entries.value.length;
-  const copies = copiesOfKeys(list.map((e) => keyOf(e)));
+  const copies = copiesOfKeys(
+    list.map((e) => keyOf(e)),
+    true,
+  );
   const reversible =
     copies.length > 0 &&
     copies.every((copy) => hostTrashes(snapshots.value, copy.hostId));
@@ -861,8 +885,8 @@ async function deleteAllFiltered() {
         ? `Delete all ${list.length} prints?`
         : `Delete ${list.length} filtered prints?`,
     body: reversible
-      ? "Every matching copy on your connected devices moves to that device's trash. You can restore them until they're purged."
-      : "Every matching copy on your connected devices will be deleted. This can't be undone.",
+      ? `Matching copies on ${mutationHostLabel.value} move to that machine's trash. You can restore them until they're purged.`
+      : `Matching copies on ${mutationHostLabel.value} will be deleted. This can't be undone.`,
     confirmLabel: reversible ? "Move to trash" : "Delete",
     danger: true,
   });
@@ -1146,10 +1170,10 @@ const selectionOrganizes = computed(
 );
 const selectionTrashes = computed(
   () =>
-    selectionCopies.value.length > 0 &&
-    selectionCopies.value.every((copy) =>
-      hostTrashes(snapshots.value, copy.hostId),
-    ),
+    selectedEntries.value.flatMap(mutationCopiesOf).length > 0 &&
+    selectedEntries.value
+      .flatMap(mutationCopiesOf)
+      .every((copy) => hostTrashes(snapshots.value, copy.hostId)),
 );
 const selectionAllFavorite = computed(
   () =>
@@ -1345,10 +1369,10 @@ async function restoreCopies(copies: readonly HostGalleryImage[]) {
   await refresh();
 }
 function restoreOne(item: GalleryImage) {
-  void restoreCopies(copiesOf(item));
+  void restoreCopies(mutationCopiesOf(item));
 }
 function restoreSelected() {
-  void restoreCopies(selectionCopies.value);
+  void restoreCopies(selectedEntries.value.flatMap(mutationCopiesOf));
 }
 
 async function deleteForeverCopies(
@@ -1356,6 +1380,7 @@ async function deleteForeverCopies(
   count: number,
 ) {
   if (copies.length === 0) return;
+  const trashOnly = scope.value === "trash";
   const hosts = [...new Set(copies.map((c) => c.hostLabel))].join(" · ");
   const accepted = await requestConfirm({
     title:
@@ -1368,7 +1393,7 @@ async function deleteForeverCopies(
   const result = await applyOrganizationMutation(
     copies,
     { kind: "deleteForever" },
-    mutationContext(),
+    { ...mutationContext(), trashOnly },
   );
   reportFanout(result, "delete forever");
   const okHosts = new Set(result.ok);
@@ -1388,16 +1413,25 @@ async function deleteForeverCopies(
   clearSelection();
 }
 function deleteForeverOne(item: GalleryImage) {
-  void deleteForeverCopies(copiesOf(item), 1);
+  void deleteForeverCopies(mutationCopiesOf(item), 1);
 }
 function deleteForeverSelected() {
-  void deleteForeverCopies(selectionCopies.value, selection.value.size);
+  void deleteForeverCopies(
+    selectedEntries.value.flatMap(mutationCopiesOf),
+    selection.value.size,
+  );
 }
 
 async function emptyTrash() {
-  const count = trashEntries.value.length;
+  const targetSnapshots = snapshots.value.filter(
+    (snapshot) =>
+      hostFilter.value === "all" || snapshot.hostId === hostFilter.value,
+  );
+  const count = mergeLogicalEntries(
+    targetSnapshots.flatMap((snapshot) => snapshot.trashed),
+  ).length;
   if (count === 0) return;
-  const hosts = snapshots.value
+  const hosts = targetSnapshots
     .filter((s) => s.trash?.enabled && s.trashed.length > 0)
     .map((s) => s.hostLabel)
     .join(" · ");
@@ -1408,7 +1442,7 @@ async function emptyTrash() {
     danger: true,
   });
   if (!accepted) return;
-  const result = await emptyTrashEverywhere(snapshots.value, hostById);
+  const result = await emptyTrashEverywhere(targetSnapshots, hostById);
   reportFanout(result, "empty the trash");
   const okHosts = new Set(result.ok);
   pendingTrashed.value = pendingTrashed.value.filter(
@@ -2163,7 +2197,7 @@ async function onLightboxDelete(item: GalleryImage) {
   if (!reversible) {
     const accepted = await requestConfirm({
       title: "Delete print?",
-      body: `${item.filename} will be deleted from every connected device. You can undo for a few seconds.`,
+      body: `${item.filename} will be deleted from ${mutationHostLabel.value}. You can undo for a few seconds.`,
       confirmLabel: "Delete",
       danger: true,
     });
@@ -2172,7 +2206,7 @@ async function onLightboxDelete(item: GalleryImage) {
   const key = keyOf(item);
   const entryIdx = rawEntries.value.findIndex((e) => keyOf(e) === key);
   if (entryIdx === -1) return;
-  const removed = copiesOf(item);
+  const removed = mutationCopiesOf(item);
   const removedKeys = new Set(removed.map((entry) => keyOf(entry)));
 
   // Optimistic removal; commit the DELETE only once the undo window elapses.
@@ -2192,7 +2226,11 @@ async function onLightboxDelete(item: GalleryImage) {
   }
 
   undoableAction({
-    text: reversible ? "Moved to trash" : "Print deleted everywhere",
+    text: reversible
+      ? hostFilter.value === "all"
+        ? "Moved to trash"
+        : `Moved to trash on ${mutationHostLabel.value}`
+      : `Print deleted from ${mutationHostLabel.value}`,
     undo: () => {
       clearPendingRemovals(removedKeys);
       restoreRemovedEntries(removed);
@@ -2353,7 +2391,11 @@ function onDocumentKeydown(event: KeyboardEvent) {
     if (items.length === 0 || !canTrash.value) return;
     event.preventDefault();
     if (selected.value) deleteForeverOne(selected.value);
-    else void deleteForeverCopies(selectionCopies.value, selection.value.size);
+    else
+      void deleteForeverCopies(
+        selectedEntries.value.flatMap(mutationCopiesOf),
+        selection.value.size,
+      );
     return;
   }
   if (meta || event.shiftKey) return;

@@ -38,6 +38,7 @@ import {
 import {
   createCollection as createCollectionOn,
   deleteManyForever,
+  deleteTrashed,
   deleteCollection as deleteCollectionOn,
   emptyTrash as emptyTrashOn,
   listCollections,
@@ -1042,6 +1043,13 @@ export const useGalleryStore = defineStore("gallery", {
     trashLocationsOf(entry: MergedPrint): GalleryLocation[] {
       return locationsIn(this.trashBucketIndex, entry);
     },
+    /** Destructive actions and restore inherit an explicit machine filter. */
+    mutationLocationsOf(entry: MergedPrint, trashed = false): GalleryLocation[] {
+      const locations = trashed ? this.trashLocationsOf(entry) : this.locationsOf(entry);
+      return this.filter === "all"
+        ? locations
+        : locations.filter((location) => location.sourceKey === this.filter);
+    },
     /** Live and trashed copies together — organization edits reach both. */
     allLocationsOf(entry: MergedPrint): GalleryLocation[] {
       const unique = new Map<string, GalleryLocation>();
@@ -1056,7 +1064,7 @@ export const useGalleryStore = defineStore("gallery", {
     },
     /** Hide every known copy and return the concrete locations held for undo. */
     beginDeleteEverywhere(entry: MergedPrint): GalleryLocation[] {
-      const locations = this.locationsOf(entry);
+      const locations = this.mutationLocationsOf(entry);
       for (const location of locations) {
         this.beginDelete(location.sourceKey, location.filename);
       }
@@ -1244,7 +1252,7 @@ export const useGalleryStore = defineStore("gallery", {
     async removeEntriesEverywhere(
       entries: MergedPrint[],
     ): Promise<{ deletedPrints: number; failedPrints: number; deletedCopies: number }> {
-      const groups = entries.map((entry) => this.locationsOf(entry));
+      const groups = entries.map((entry) => this.mutationLocationsOf(entry));
       const unique = new Map<string, GalleryLocation>();
       for (const group of groups) {
         for (const location of group) {
@@ -2017,7 +2025,7 @@ export const useGalleryStore = defineStore("gallery", {
     async restore(entries: MergedPrint[]): Promise<FanoutResult & { restored: number }> {
       const byHost = new Map<string, string[]>();
       for (const entry of entries) {
-        for (const location of this.trashLocationsOf(entry)) {
+        for (const location of this.mutationLocationsOf(entry, true)) {
           const list = byHost.get(location.sourceKey) ?? [];
           if (!list.includes(location.filename)) list.push(location.filename);
           byHost.set(location.sourceKey, list);
@@ -2066,7 +2074,11 @@ export const useGalleryStore = defineStore("gallery", {
       deletedCopies: number;
       error: string | null;
     }> {
-      const groups = entries.map((entry) => this.allLocationsOf(entry));
+      const groups = entries.map((entry) =>
+        (this.scope === "trash" ? this.trashLocationsOf(entry) : this.allLocationsOf(entry)).filter(
+          (location) => this.filter === "all" || location.sourceKey === this.filter,
+        ),
+      );
       const unique = new Map<string, GalleryLocation>();
       for (const group of groups) {
         for (const location of group)
@@ -2074,9 +2086,22 @@ export const useGalleryStore = defineStore("gallery", {
       }
       const locations = [...unique.values()];
       const results = await Promise.allSettled(
-        locations.map((location) =>
-          this.remove(location.sourceKey, location.filename, { permanent: true }),
-        ),
+        locations.map(async (location) => {
+          if (this.scope === "trash") {
+            const target = this.targetOf(location.sourceKey);
+            if (!target)
+              throw new Error(
+                "Start this device's engine before permanently deleting selected trash.",
+              );
+            await deleteTrashed(target, [location.filename]);
+            const row = this.trashBuckets[location.sourceKey]?.items.find(
+              (item) => item.filename === location.filename,
+            );
+            this.forgetThumbnailFor(location.sourceKey, row ?? null);
+            takeRow(this.trashBuckets[location.sourceKey], location.filename);
+            this.evictItemMedia(location.sourceKey, location.filename);
+          } else await this.remove(location.sourceKey, location.filename, { permanent: true });
+        }),
       );
       const failedKeys = new Set<string>();
       const failedOrigins = new Set<string>();
@@ -2108,6 +2133,7 @@ export const useGalleryStore = defineStore("gallery", {
       const keys =
         hostKeys ??
         this.sources
+          .filter((s) => this.filter === "all" || s.key === this.filter)
           .filter((s) => this.trashCapable(s.key) || (s.key === "local" && !this.hostFor("local")))
           .map((s) => s.key);
       let purged = 0;
@@ -2119,11 +2145,9 @@ export const useGalleryStore = defineStore("gallery", {
             const result = await emptyTrashOn(target);
             purged += result.purged;
           } else if (key === "local") {
-            // Offline: the native command purges one file at a time.
-            for (const row of trash?.items ?? []) {
-              await ipc.localGalleryDeleteForever(row.filename);
-              purged += 1;
-            }
+            // A stale trash filename may now name an active restored print.
+            // The offline per-file command cannot prove trash-only authority.
+            throw new Error("Start this device's engine before emptying its trash.");
           } else throw new Error("Host is not connected.");
           for (const row of trash?.items ?? []) {
             this.evictItemMedia(key, row.filename);

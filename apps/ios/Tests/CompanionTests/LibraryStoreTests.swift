@@ -94,6 +94,28 @@ struct LibraryStoreTests {
         #expect(library.lastEdit == nil, "the Undo button has nothing left to put back")
     }
 
+    @Test func machineFilteredDeletionPreservesTheOtherCopy() async throws {
+        let (library, hosts, one, two) = try await fleet(first: [try print("a.png")], second: [try print("a.png")])
+        let beta = try #require(hosts.hosts.first { $0.name == "beta" })
+        var query = LibraryQuery()
+        query.tokens = [.machine(id: beta.id, name: beta.name)]
+        two.stub("trash(_:)") { _ in () }
+        await library.trash(query.apply(to: library.pool))
+        #expect(two.count("trash(_:)") == 1)
+        #expect(one.count("trash(_:)") == 0)
+    }
+
+    @Test func permanentTrashDeletionUsesTheTrashOnlyAuthority() async throws {
+        let (library, hosts, one, two) = try await fleet(first: [try print("a.png")], second: [try print("a.png")])
+        two.stub("deleteTrashed(_:)") { _ in () }
+        let beta = try #require(hosts.hosts.first { $0.name == "beta" })
+        let entry = try #require(library.pool.first?.presented(onAnyOf: [beta.id]))
+        await library.deleteImmediately([entry])
+        #expect(two.count("deleteTrashed(_:)") == 1)
+        #expect(one.count("deleteTrashed(_:)") == 0)
+        #expect(two.count("deleteForever(_:)") == 0)
+    }
+
     @Test func aMachineWithoutATrashDeletesForGood() async throws {
         let (library, _, one, _) = try await fleet(first: [try print("a.png")], second: [], trash: false)
         one.stub("deleteForever(_:)") { _ in () }

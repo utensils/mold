@@ -32,6 +32,8 @@ struct LibraryGrid: View {
     @State private var nativePosition = ScrollPosition()
     @State private var frames: [PrintID: CGRect] = [:]
     @State private var dragSelection: LibraryDragSelection?
+    @State private var deleting: [LibraryEntry]?
+    @Environment(LibraryStore.self) private var library
 
     var body: some View {
         let minimum = tile.basePoints * scale
@@ -112,6 +114,18 @@ struct LibraryGrid: View {
                 nativePosition.scrollTo(y: viewport.uncover())
             }
         }
+        .alert("Delete Immediately?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })) {
+            if let deleting {
+                Button("Delete Immediately", role: .destructive) { Task { await library.deleteImmediately(deleting); self.deleting = nil } }
+            }
+            Button("Cancel", role: .cancel) { deleting = nil }
+        } message: {
+            Text("Copies on \(deletingMachines) will be removed for good. This can't be undone.")
+        }
+    }
+
+    private var deletingMachines: String {
+        Set((deleting ?? []).flatMap(\.everyCopy).compactMap { hosts.host($0.hostID)?.name }).sorted().joined(separator: ", ")
     }
 
     @ViewBuilder private func cell(_ entry: LibraryEntry, points: CGFloat, showsHost: Bool) -> some View {
@@ -136,7 +150,7 @@ struct LibraryGrid: View {
                         .environment(thumbnails)
                         .frame(width: 120, height: 120)
                 }
-                .contextMenu { PrintMenu(entries: [entry], trashed: trashed) } preview: {
+                .contextMenu { PrintMenu(entries: [entry], trashed: trashed, requestPermanentDelete: { deleting = $0 }) } preview: {
                     // UIKit hosts this preview outside the grid's environment.
                     // The drag preview above crosses the same boundary.
                     PrintThumbnail(entry: entry, points: 360, trashed: trashed)

@@ -46,8 +46,7 @@ struct SearchSuggestions: View {
     }
 }
 
-/// What a selection can do, along the bottom (DESIGN.md §5.2). Recently
-/// Deleted swaps in Put Back and Delete Immediately.
+/// What a selection can do, along the bottom (DESIGN.md §5.2). Trash swaps in Put Back and Delete Immediately.
 struct SelectionBar: View {
     @Environment(LibraryStore.self) private var library
     @Environment(PrintActions.self) private var actions
@@ -96,17 +95,23 @@ struct SelectionBar: View {
     private var allFavourite: Bool { !selected.isEmpty && selected.allSatisfy(\.print.isFavorite) }
 }
 
-/// Empty Recently Deleted, after asking.
+/// Empty Trash, after asking.
 struct EmptyTrashButton: View {
+    var machineIDs: Set<MoldHost.ID> = []
+    @Environment(HostStore.self) private var hosts
     @Environment(LibraryStore.self) private var library
     @State private var confirm = false
 
+    private var targetMachines: String {
+        hosts.hosts.filter { machineIDs.isEmpty || machineIDs.contains($0.id) }.map(\.name).joined(separator: ", ")
+    }
+
     var body: some View {
-        Button("Empty Recently Deleted…", role: .destructive) { confirm = true }
-            .confirmationDialog("Empty Recently Deleted?", isPresented: $confirm, titleVisibility: .visible) {
-                Button("Empty", role: .destructive) { Task { await library.emptyTrash() } }
+        Button("Empty Trash…", role: .destructive) { confirm = true }
+            .confirmationDialog("Empty Trash?", isPresented: $confirm, titleVisibility: .visible) {
+                Button("Empty", role: .destructive) { Task { await library.emptyTrash(on: machineIDs) } }
             } message: {
-                Text("Every print in it is removed from its machine for good.")
+                Text("Every print in Trash on \(targetMachines) is removed for good. Other machines keep their copies.")
             }
     }
 }

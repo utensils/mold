@@ -410,6 +410,7 @@ import {
   requestTitle,
   runOrganizationFanout,
   selectionDeleteKind,
+  scopedLibraryCopies,
   tagChipPlan,
   trashRetentionHosts,
   validateCollectionName,
@@ -1128,6 +1129,7 @@ const hostTags = reactive<Record<string, TagCount[]>>({});
 const galleryOrganization = ref<Map<string, OrganizationUnion>>(new Map());
 /** Per-host print counts behind the host chips (physical copies). */
 const libraryHostCounts = ref<Record<string, number>>({});
+const libraryTrashHostCounts = ref<Record<string, number>>({});
 /** Logical live prints (the Prints segment count). */
 const libraryPrintCount = ref(0);
 /** Inline (never a toast) organization failure banner. */
@@ -9183,7 +9185,10 @@ const libraryHostChips = computed(() =>
     ? connectedHosts.value.map((host) => ({
         id: host.id,
         name: host.name,
-        count: libraryHostCounts.value[host.id] ?? 0,
+        count:
+          libraryScope.value === "trash"
+            ? (libraryTrashHostCounts.value[host.id] ?? 0)
+            : (libraryHostCounts.value[host.id] ?? 0),
       }))
     : [],
 );
@@ -9295,8 +9300,8 @@ function fileUnderForFrozenRoute<T extends FiledRequest>(request: T, route: Host
 
 const libraryChipRowVisible = computed(
   () =>
-    libraryScope.value === "prints" &&
-    (libraryOrganizeEnabled.value || libraryHostChips.value.length > 0),
+    (libraryScope.value === "prints" && libraryOrganizeEnabled.value) ||
+    libraryHostChips.value.length > 0,
 );
 const activeCollection = computed(
   () =>
@@ -9353,7 +9358,9 @@ const selectedAllFavorite = computed(() => {
 });
 const selectedDeleteKind = computed<"trash" | "delete" | "delete-forever">(() => {
   if (libraryScope.value === "trash") return "delete-forever";
-  const hostIds = selectedPhysicalCopies().map((copy) => copy.hostId);
+  const hostIds = scopedLibraryCopies(selectedPhysicalCopies(), libraryFilters.hostId).map(
+    (copy) => copy.hostId,
+  );
   return selectionDeleteKind(hostIds, librarySupport.value);
 });
 const galleryDeleteCopy = computed(() =>
@@ -9425,6 +9432,11 @@ function rebuildGalleryOrganization(): void {
     if (!hidden) counts[copy.hostId] = (counts[copy.hostId] ?? 0) + 1;
   }
   libraryHostCounts.value = counts;
+  const trashCounts: Record<string, number> = {};
+  for (const copy of trashCopies) {
+    trashCounts[copy.hostId] = (trashCounts[copy.hostId] ?? 0) + 1;
+  }
+  libraryTrashHostCounts.value = trashCounts;
   const logicalPrints = groupLogicalGalleryPrints(galleryCopies);
   libraryPrintCount.value = logicalPrints.filter(
     (group) =>
@@ -9437,7 +9449,7 @@ function rebuildGalleryOrganization(): void {
 
 /** The representatives the grid pages through for the current scope + chips. */
 function visibleRepresentatives(): PendingGalleryPrint[] {
-  const copies = scopeCopies();
+  const copies = scopedLibraryCopies(scopeCopies(), libraryFilters.hostId);
   const groups = groupLogicalGalleryPrints(copies);
   const representatives = groups.map((group) => group.representative);
   const copiesByRepresentative = new Map(
@@ -9816,6 +9828,7 @@ async function executeGalleryOrganizationOp(
     {
       trashHostIds: librarySupport.value.trashHostIds,
       bulkHostIds: bulkGalleryHostIds(),
+      trashOnly: op.kind === "deleteForever",
     },
   );
   if (result.failures[0]) throw result.failures[0].error;
@@ -10500,7 +10513,7 @@ async function restoreSelectedGalleryPrints(): Promise<void> {
   galleryDeleteConfirming.value = false;
   galleryRestoring.value = true;
   try {
-    const copies = selectedPhysicalCopies();
+    const copies = scopedLibraryCopies(selectedPhysicalCopies(), libraryFilters.hostId);
     const outcome = await runLibraryMutation(copies, { kind: "restore" }, "restore these prints");
     const restored = copies.filter((copy) => !outcome.failedHostIds.has(copy.hostId));
     const keys = new Set(restored.map(galleryPrintKey));
@@ -10534,8 +10547,10 @@ async function emptyTrash(): Promise<void> {
   emptyingTrash.value = true;
   organizationError.value = "";
   try {
-    const hosts = connectedHosts.value.filter((host) =>
-      librarySupport.value.trashHostIds.has(host.id),
+    const hosts = connectedHosts.value.filter(
+      (host) =>
+        librarySupport.value.trashHostIds.has(host.id) &&
+        (libraryFilters.hostId === null || host.id === libraryFilters.hostId),
     );
     const results = await Promise.allSettled(
       hosts.map((host) => emptyHostTrash(mobileHostTarget(host))),
@@ -10551,8 +10566,11 @@ async function emptyTrash(): Promise<void> {
       );
     }
     const failedHostIds = new Set(failures.map((failure) => failure.hostId));
+    const targetedHostIds = new Set(hosts.map((host) => host.id));
     const purged = new Set(
-      trashCopies.filter((copy) => !failedHostIds.has(copy.hostId)).map(galleryPrintKey),
+      trashCopies
+        .filter((copy) => targetedHostIds.has(copy.hostId) && !failedHostIds.has(copy.hostId))
+        .map(galleryPrintKey),
     );
     await dropCopiesFromLibrary(purged, { purgeThumbnails: true });
   } finally {
@@ -10747,7 +10765,7 @@ async function collectSelectedPrint(change: {
 }
 
 async function restoreSelectedPrint(): Promise<void> {
-  const copies = viewerCopies();
+  const copies = scopedLibraryCopies(viewerCopies(), libraryFilters.hostId);
   const outcome = await runLibraryMutation(copies, { kind: "restore" }, "restore this print");
   const restored = copies.filter((copy) => !outcome.failedHostIds.has(copy.hostId));
   if (restored.length === 0) return;
@@ -10764,7 +10782,7 @@ async function restoreSelectedPrint(): Promise<void> {
 }
 
 async function deleteSelectedPrintForever(): Promise<void> {
-  const copies = viewerCopies();
+  const copies = scopedLibraryCopies(viewerCopies(), libraryFilters.hostId);
   const outcome = await runLibraryMutation(
     copies,
     { kind: "deleteForever" },
@@ -11108,7 +11126,7 @@ async function deleteSelectedGalleryPrints(): Promise<void> {
 
   const kind = selectedDeleteKind.value;
   const selected = selectedRepresentatives();
-  const copies = selectedPhysicalCopies();
+  const copies = scopedLibraryCopies(selectedPhysicalCopies(), libraryFilters.hostId);
   // One op per host: the trash on hosts that have one, today's hard
   // `DELETE` elsewhere, `?permanent=true` only from the Trash scope.
   const result = await runOrganizationFanout(
@@ -11121,6 +11139,7 @@ async function deleteSelectedGalleryPrints(): Promise<void> {
     {
       trashHostIds: librarySupport.value.trashHostIds,
       bulkHostIds: bulkGalleryHostIds(),
+      trashOnly: libraryScope.value === "trash",
     },
   );
   const failedHostIds = new Set(result.failures.map((failure) => failure.hostId));
@@ -12963,7 +12982,14 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           </button>
         </div>
         <p v-if="emptyTrashConfirming" class="status-line" data-test="mobile-library-empty-prompt">
-          Delete everything in the trash forever?
+          Delete everything in the trash on
+          {{
+            libraryFilters.hostId
+              ? (connectedHosts.find((host) => host.id === libraryFilters.hostId)?.name ??
+                libraryFilters.hostId)
+              : "all connected machines"
+          }}
+          forever?
         </p>
         <!-- Prints | Collections | Trash on the shared segmented control, with
              each scope's count inline beside its name so three of them still
@@ -12987,7 +13013,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           data-test="mobile-library-chips"
         >
           <button
-            v-if="libraryOrganizeEnabled"
+            v-if="libraryScope === 'prints' && libraryOrganizeEnabled"
             class="mobile-library-chip"
             type="button"
             :aria-pressed="libraryFilters.favoritesOnly"
@@ -12998,7 +13024,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             <span class="mobile-library-chip-heart" aria-hidden="true">♥</span>Favorites
           </button>
           <button
-            v-for="tag in libraryTagChips.visible"
+            v-for="tag in libraryScope === 'prints' ? libraryTagChips.visible : []"
             :key="`tag-${tag.name}`"
             class="mobile-library-chip"
             type="button"
@@ -13010,7 +13036,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             {{ tag.name }}<span class="mobile-library-chip-count">{{ tag.count }}</span>
           </button>
           <button
-            v-if="libraryTagChips.overflow.length"
+            v-if="libraryScope === 'prints' && libraryTagChips.overflow.length"
             class="mobile-library-chip is-more"
             type="button"
             data-test="mobile-library-chip-more"

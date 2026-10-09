@@ -16,6 +16,7 @@ struct PrintViewer: View {
     @State private var pageAnchor: PrintID?
     @State private var chrome = true
     @State private var showsInfo = false
+    @State private var deleting: LibraryEntry?
 
     init(start: PrintID, entries: [LibraryEntry], trashed: Bool, projection: LibraryGridProjection? = nil) {
         self.start = start
@@ -59,7 +60,7 @@ struct PrintViewer: View {
         .toolbar {
             if let entry {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Menu { PrintMenu(entries: [entry], trashed: trashed) } label: {
+                    Menu { PrintMenu(entries: [entry], trashed: trashed, requestPermanentDelete: { deleting = $0.first }) } label: {
                         Label("More", systemImage: "ellipsis")
                     }
                 }
@@ -68,6 +69,14 @@ struct PrintViewer: View {
         }
         .sheet(isPresented: $showsInfo) {
             if let entry { PrintInfoSheet(entry: entry, trashed: trashed) }
+        }
+        .alert("Delete Immediately?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })) {
+            if let deleting {
+                Button("Delete Immediately", role: .destructive) { Task { await library.deleteImmediately([deleting]); self.deleting = nil } }
+            }
+            Button("Cancel", role: .cancel) { deleting = nil }
+        } message: {
+            Text("Copies on \(deletingMachines) will be removed for good. This can't be undone.")
         }
         .overlay(alignment: .top) {
             if let status = actions.status {
@@ -93,6 +102,10 @@ struct PrintViewer: View {
             activity.addUserInfoEntries(from: PrintHandoff.userInfo(
                 filename: entry.print.filename, address: host.baseURL, instanceId: hosts.instanceID(of: host.id)))
         }
+    }
+
+    private var deletingMachines: String {
+        Set((deleting?.everyCopy ?? []).compactMap { hosts.host($0.hostID)?.name }).sorted().joined(separator: ", ")
     }
 
     private func select(_ id: PrintID) {
@@ -121,7 +134,7 @@ struct PrintViewer: View {
             .keyboardShortcut("i", modifiers: [.command, .option])
         Spacer()
         Button(role: .destructive) {
-            Task { trashed ? await library.deleteImmediately([entry]) : await library.trash([entry]) }
+            if trashed { deleting = entry } else { Task { await library.trash([entry]) } }
         } label: {
             Label("Delete", systemImage: "trash")
         }

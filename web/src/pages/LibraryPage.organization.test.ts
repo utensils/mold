@@ -70,6 +70,7 @@ const orgApi = vi.hoisted(() => ({
   trashMany: vi.fn(async () => undefined),
   restoreTrashed: vi.fn(async () => undefined),
   deleteGalleryImageForever: vi.fn(async () => undefined),
+  deleteTrashed: vi.fn(async () => undefined),
   emptyTrash: vi.fn(async () => ({ purged: 1 })),
   listCollections: vi.fn(async () => [] as Collection[]),
   listTags: vi.fn(async () => [] as { name: string; count: number }[]),
@@ -560,6 +561,54 @@ describe("Trash scope", () => {
     return wrapper;
   }
 
+  it.each(["restore", "delete-forever", "empty-trash"])(
+    "limits %s to the filtered machine while preserving other trash copies",
+    async (action) => {
+      const remote = {
+        id: "plato-7680",
+        name: "plato",
+        url: "http://plato:7680",
+        apiKey: "pk",
+      };
+      localStorage.setItem("mold.web.hosts.v1", JSON.stringify([remote]));
+      const wrapper = await inTrash();
+      const plato = wrapper
+        .findAll("[data-test='gallery-host-filter']")
+        .find((button) => button.text() === "plato");
+      expect(plato).toBeTruthy();
+      await plato!.trigger("click");
+      await flushPromises();
+      await wrapper
+        .get(
+          action === "empty-trash"
+            ? "[data-test='empty-trash']"
+            : `[data-test='grid-${action}']`,
+        )
+        .trigger("click");
+      await flushPromises();
+      const target = { baseUrl: remote.url, apiKey: remote.apiKey };
+      if (action === "restore") {
+        expect(orgApi.restoreTrashed).toHaveBeenCalledTimes(1);
+        expect(orgApi.restoreTrashed).toHaveBeenCalledWith(target, ["old.png"]);
+      } else if (action === "delete-forever") {
+        expect(orgApi.deleteTrashed).toHaveBeenCalledTimes(1);
+        expect(orgApi.deleteTrashed).toHaveBeenCalledWith(target, ["old.png"]);
+      } else {
+        expect(orgApi.emptyTrash).toHaveBeenCalledTimes(1);
+        expect(orgApi.emptyTrash).toHaveBeenCalledWith(target);
+        expect(vi.mocked(requestConfirm).mock.calls[0]![0].body).toContain(
+          "on plato forever",
+        );
+      }
+      const all = wrapper
+        .findAll("[data-test='gallery-host-filter']")
+        .find((button) => button.text().includes("All"));
+      await all!.trigger("click");
+      await flushPromises();
+      expect(wrapper.get("[data-test='grid-count']").text()).toBe("1");
+    },
+  );
+
   it("shows the retention banner with mono numbers", async () => {
     const wrapper = await inTrash();
     const banner = wrapper.get("[data-test='trash-banner']");
@@ -591,10 +640,9 @@ describe("Trash scope", () => {
       danger: true,
     });
     expect("typedPhrase" in options).toBe(false);
-    expect(orgApi.deleteGalleryImageForever).toHaveBeenCalledWith(
-      ORIGIN_TARGET,
+    expect(orgApi.deleteTrashed).toHaveBeenCalledWith(ORIGIN_TARGET, [
       "old.png",
-    );
+    ]);
     expect(wrapper.text()).toContain("No prints in the trash");
   });
 
