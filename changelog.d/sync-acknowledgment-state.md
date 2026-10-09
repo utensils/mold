@@ -1,1 +1,0 @@
-- **Remember sync warning choices.** Show saved acknowledgment state when reopening native Mac sync issue details; new issues remain unchecked and Reset updates the control immediately.

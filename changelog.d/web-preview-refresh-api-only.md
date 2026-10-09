@@ -1,3 +1,0 @@
-- **Stable web media previews.** Preserve source thumbnails and pending requests across unchanged activity polls, avoiding flashing and redraws.
-- **Hidden collections stay out of Recent.** Create follows the Library visibility policy and refreshes collection visibility with its gallery.
-- **API-only servers.** Add default-on `web_ui_enabled` / `MOLD_WEB_UI_ENABLED` and NixOS `services.mold.webUi.enable`; disabling the browser interface preserves all API functionality ([#1815](https://github.com/utensils/mold/issues/1815)).

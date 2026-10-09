@@ -1,1 +1,0 @@
-- **Keep Mac draft attachments across relaunch.** Save local authoring inputs privately alongside the prompt and settings, including first/last frames and parked attachments. Retained references still require validation from their original machine. Save failures are visible, and missing or corrupt saved inputs require explicit recovery before generating.
