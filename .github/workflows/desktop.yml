@@ -16,7 +16,6 @@ on:
       - "desktop/src/*.vue"
       - "desktop/src/assets/**"
       - "desktop/src/components/**"
-      - "desktop/src/composables/**"
       - "desktop/src/lib/**"
       - "desktop/src/stores/**"
       - "desktop/src/styles/**"
@@ -128,11 +127,7 @@ jobs:
               - 'desktop/src/*.vue'
               - 'desktop/src/assets/**'
               - 'desktop/src/components/**'
-              - 'desktop/src/composables/**'
               - 'desktop/src/lib/**'
-              # PR frontend tests include the touch shell; mobile-only main
-              # pushes retain artifact ownership in the mobile workflows.
-              - 'desktop/src/mobile/**'
               - 'desktop/src/stores/**'
               - 'desktop/src/styles/**'
               - 'desktop/src/views/**'

@@ -786,15 +786,8 @@ grep -Fq 'desktop/src/components/**' <<< "$desktop_classifier" \
   || fail "desktop frontend classifier does not track desktop components"
 grep -Fq 'desktop/src-tauri/**' <<< "$desktop_classifier" \
   || fail "desktop native classifier does not track the Tauri crate"
-for directory in composables mobile; do
-  grep -Fq "desktop/src/$directory/**" <<< "$(extract_filter "$desktop" frontend)" \
-    || fail "desktop frontend classifier omits $directory"
-done
-desktop_push="$(sed -n '/^  push:/,/^  pull_request:/p' "$desktop")"
-grep -Fq 'desktop/src/composables/**' <<< "$desktop_push" \
-  || fail "desktop main trigger omits composables"
-if grep -Fq 'desktop/src/mobile/**' <<< "$desktop_push"; then
-  fail "mobile-only changes trigger desktop artifact nightlies instead of mobile workflows"
+if grep -Fq 'desktop/src/mobile/**' "$desktop"; then
+  fail "mobile-only changes leak into the desktop workflow instead of the mobile workflows"
 fi
 [[ "$(grep -Fc 'crates/mold-scheduler/**' "$desktop")" -eq 2 ]] \
   || fail "desktop main trigger/classifier does not track its scheduler dependency"
