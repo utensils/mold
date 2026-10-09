@@ -823,7 +823,7 @@ run. **Stop Sync** ends repeats and lets active transfers settle. Successful run
 need no confirmation. **Details** keeps the full report available; its checkbox
 acknowledges unchanged per-media issues, while changed issues and connection or
 authentication failures still appear. **Reset Acknowledgments** restores those
-notifications. Sync continues retrying acknowledged media.
+notifications. The checkbox reflects saved choices when Details reopens, and new issues leave it unchecked. Sync continues retrying acknowledged media.
 
 Sync preserves hidden collection flags, including empty shelves. Copies already
 in This Mac’s Trash, or previously synced copies removed from its Library, stay

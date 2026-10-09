@@ -184,3 +184,5 @@ changed errors and connection/authentication failures still appear. Removed loca
 copies stay removed during Sync; use explicit Save to copy one again. An older
 server that cannot delete selected trash items must be updated; deletion reports
 that refusal without falling back to deleting live media.
+
+Reopening Sync Details shows the saved acknowledgment choice. New media issues leave the checkbox unchecked; Reset Acknowledgments clears the saved choice immediately.

@@ -18,6 +18,32 @@ struct LibrarySyncSessionTests {
         #expect(session.hasNewIssues(["old"]))
     }
 
+    @Test func reportAcknowledgmentTracksPersistedIssuesAndCanBeCleared() {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        LibrarySyncSession(defaults: defaults).acknowledge(["old"])
+        let session = LibrarySyncSession(defaults: defaults)
+        let library = LibraryStore(hosts: HostStore(hosts: []) { FakeBackend(host: $0) }, syncSession: session)
+        library.localSaveIssueKeys = ["media": "old"]
+        #expect(library.syncIssueAcknowledgment)
+        library.syncIssueAcknowledgment = false
+        #expect(session.hasNewIssues(["old"]))
+        library.syncIssueAcknowledgment = true
+        #expect(library.syncIssueAcknowledgment)
+        library.localSaveIssueKeys = ["media": "changed", "other": "old"]
+        #expect(!library.syncIssueAcknowledgment)
+        library.syncIssueAcknowledgment = true
+        library.localSaveIssueKeys = ["media": "changed"]
+        library.syncIssueAcknowledgment = false
+        #expect(!session.hasNewIssues(["old"]))
+        #expect(session.hasNewIssues(["changed"]))
+        library.localSaveIssueKeys = ["other": "old"]
+        #expect(library.syncIssueAcknowledgment)
+        session.resetAcknowledgments()
+        #expect(!library.syncIssueAcknowledgment)
+        library.localSaveIssueKeys = [:]
+        #expect(!library.syncIssueAcknowledgment)
+    }
+
     @Test func successfulSyncDoesNotPresentCompletionSheet() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let backend = FakeBackend(host: local)
