@@ -45,6 +45,15 @@ struct PlaybackAudioTests {
         #expect(PrintViewer.showsChrome(for: .picture, requested: true))
     }
 
+    @Test func landscapePhoneClipsUseTheWholeDisplay() {
+        #expect(PrintViewer.usesLandscapePlayback(kind: .clip, isPhone: true, size: CGSize(width: 852, height: 393)))
+        #expect(!PrintViewer.usesLandscapePlayback(kind: .clip, isPhone: true, size: CGSize(width: 393, height: 852)))
+        #expect(!PrintViewer.usesLandscapePlayback(kind: .picture, isPhone: true, size: CGSize(width: 852, height: 393)))
+        #expect(!PrintViewer.usesLandscapePlayback(kind: .mesh, isPhone: true, size: CGSize(width: 852, height: 393)))
+        #expect(!PrintViewer.usesLandscapePlayback(kind: .clip, isPhone: false, size: CGSize(width: 1366, height: 1024)))
+        #expect(!PrintViewer.usesLandscapePlayback(kind: nil, isPhone: true, size: .zero))
+    }
+
     @Test func pagedVideoKeepsNativeTransportControls() async throws {
         let scene = try #require(UIApplication.shared.connectedScenes.first as? UIWindowScene)
         let previous = scene.keyWindow
@@ -71,6 +80,7 @@ struct PlaybackAudioTests {
         let controller = try #require(findPlayer(in: host))
         #expect(controller.player === player)
         #expect(controller.showsPlaybackControls)
+        #expect(controller.videoGravity == .resizeAspect)
         NativeVideoPlayer.dismantleUIViewController(controller, coordinator: ())
         #expect(controller.player == nil)
     }

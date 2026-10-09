@@ -284,6 +284,10 @@ iPhone).
   or show the chrome. A clip plays as soon as its page is selected and pauses
   when paging away or closing the viewer. Returning to the grid restores the
   last visible print, including after the viewer's navigation transition.
+- On iPhone, landscape clip playback extends across the display, preserving
+  aspect ratio and native transport controls. Gallery and status bars hide; a
+  safe-area Close action returns to the Library. Portrait restores gallery bars
+  without reloading the stream.
 - The main tab bar is hidden in the viewer so its actions remain reachable.
 - Bottom bar: Share · Favourite · Info · Delete.
 - ⋯ menu: Use These Settings · Save to Photos · Copy · Add to Collection ·

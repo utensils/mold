@@ -36,6 +36,11 @@ The model search sheet keeps a Close action visible when its keyboard is open.
 More Options gives Shape, Steps, Batch and Length their own rows, including at
 large accessibility text sizes. Clip and 3-D drafts restore their kind after
 machines reconnect. A model search with no matches offers Clear Search.
+On iPhone, rotate a playing clip horizontally to use the full display. Video
+keeps its proportions; narrow black bars may remain for a different aspect
+ratio. Rotate upright to restore gallery actions, or tap Close to return to
+the Library while horizontal. Native playback controls remain available. See the [landscape video UAT record](docs/LANDSCAPE-VIDEO-UAT.md).
+
 Video playback uses the media audio session, including in silent mode. The
 viewer hides the main tabs so its Share, Favourite, Info and Delete controls
 remain accessible, while keeping phone back navigation visible. Info has a Done button, and shared files retain their original

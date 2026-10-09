@@ -89,6 +89,7 @@ uat-*
 *.mp4
 # Tiny generated AAC/H.264 fixture for native iOS playback tests.
 !apps/ios/Tests/Fixtures/playback-tone.mp4
+!apps/ios/Tests/Fixtures/landscape-playback.mp4
 # ...but the website gallery is published site content, committed on purpose.
 # The media rules above exist for scratch renders in the working tree, and
 # without this negation those posters are both tracked and ignored, which
@@ -147,3 +148,7 @@ apps/shared/**/build/
 
 # Native export UAT archive fixture.
 !apps/ios/Tests/Fixtures/export-object.zip
+
+# Checked-in visual acceptance evidence for native landscape playback.
+!apps/ios/docs/uat/landscape-video/dark-left.png
+!apps/ios/docs/uat/landscape-video/dark-right.png
