@@ -3,9 +3,9 @@ import SwiftUI
 
 struct LibrarySyncReportSheet: View {
     @Environment(LibraryStore.self) private var library
-    @State private var acknowledge = false
 
     var body: some View {
+        @Bindable var library = library
         VStack(alignment: .leading, spacing: 16) {
             Text("Sync to This Mac").font(.title2.bold())
             Text(library.localSaveReport).fixedSize(horizontal: false, vertical: true)
@@ -19,12 +19,8 @@ struct LibrarySyncReportSheet: View {
                         }
                     }
                 }
-                Toggle("Don’t show these unchanged media issues again", isOn: $acknowledge)
+                Toggle("Don’t show these unchanged media issues again", isOn: $library.syncIssueAcknowledgment)
                     .disabled(library.localSaveIssueKeys.isEmpty)
-                    .onChange(of: acknowledge) { _, enabled in
-                        if enabled { library.syncSession.acknowledge(Array(library.localSaveIssueKeys.values)) }
-                        else { library.syncSession.unacknowledge(Array(library.localSaveIssueKeys.values)) }
-                    }
                 Text("Sync keeps retrying. New or changed issues still appear; machine connection and authentication failures are always reported.")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -36,7 +32,6 @@ struct LibrarySyncReportSheet: View {
                 }
                 Button("Reset Acknowledgments") {
                     library.syncSession.resetAcknowledgments()
-                    acknowledge = false
                 }
                 Spacer()
                 Button("Done") { library.localSaveAlertPresented = false }

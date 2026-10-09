@@ -71,3 +71,20 @@ final class LibrarySyncSession {
         defaults.removeObject(forKey: Self.issueKey)
     }
 }
+
+@MainActor
+extension LibraryStore {
+    /// The report control reflects saved state, including when reopened after
+    /// an acknowledged issue recurs. New eligible issues leave it unchecked.
+    var syncIssueAcknowledgment: Bool {
+        get {
+            let keys = Array(localSaveIssueKeys.values)
+            return !keys.isEmpty && !syncSession.hasNewIssues(keys)
+        }
+        set {
+            let keys = Array(localSaveIssueKeys.values)
+            if newValue { syncSession.acknowledge(keys) }
+            else { syncSession.unacknowledge(keys) }
+        }
+    }
+}

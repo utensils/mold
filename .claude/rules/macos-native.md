@@ -74,3 +74,5 @@ or connectivity failures; preserve retries and inspectable details. Sync must no
 recreate destination trash or a recorded copy intentionally removed from the
 local listing. Explicit Save remains deliberate recovery. Copy hidden collection
 attributes for existing and empty replicas as well as newly filed outputs.
+
+The Sync report acknowledgment checkbox binds directly to eligible issue keys and the persisted session ledger; reopening, Reset, and new keys must update its visible state without a separate sheet-local toggle state.
