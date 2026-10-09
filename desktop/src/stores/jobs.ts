@@ -170,6 +170,7 @@ export function enrichQueueEntries(
 export const useJobsStore = defineStore("jobs", {
   state: () => ({
     queues: {} as Record<string, HostQueueSnapshot>,
+    mutationFlights: {} as Record<string, boolean>,
     requestGenerations: {} as Record<string, number>,
     pollTimer: null as ReturnType<typeof setTimeout> | null,
     pollRunning: false,
@@ -216,6 +217,28 @@ export const useJobsStore = defineStore("jobs", {
     },
   },
   actions: {
+    isJobBusy(hostId: string, jobId: string): boolean {
+      return this.mutationFlights[JSON.stringify([hostId, jobId])] === true;
+    },
+    async withJobMutation(
+      hostId: string,
+      jobId: string,
+      action: () => Promise<void>,
+    ): Promise<void> {
+      const key = JSON.stringify([hostId, jobId]);
+      if (this.mutationFlights[key]) throw new Error("This job already has an action in progress.");
+      this.mutationFlights[key] = true;
+      try {
+        await action();
+      } finally {
+        try {
+          const host = useHostsStore().all.find((candidate) => candidate.id === hostId);
+          if (host) await this.refreshHost(host);
+        } finally {
+          delete this.mutationFlights[key];
+        }
+      }
+    },
     targetFor(host: HostView): ApiTarget | null {
       return host.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : null;
     },
@@ -440,8 +463,15 @@ export const useJobsStore = defineStore("jobs", {
       void this.refresh();
     },
     /** Cancel one job on a host directly (used for other clients' jobs). */
-    async cancelJob(hostId: string, jobId: string) {
-      await this.queueControl(hostId, `/api/queue/${encodeURIComponent(jobId)}`, "DELETE");
+    async cancelJob(hostId: string, jobId: string, options: { onlyHeld?: boolean } = {}) {
+      const onlyHeld =
+        options.onlyHeld ??
+        this.queues[hostId]?.entries.find((entry) => entry.id === jobId)?.state === "held";
+      await this.queueControl(
+        hostId,
+        `/api/queue/${encodeURIComponent(jobId)}${onlyHeld ? "?only_held=true" : ""}`,
+        "DELETE",
+      );
       const snapshot = this.queues[hostId];
       if (snapshot) {
         snapshot.entries = snapshot.entries.filter(({ id }) => id !== jobId);
@@ -463,35 +493,36 @@ export const useJobsStore = defineStore("jobs", {
     /** Retry a server-authorized durable hold even after this app restarted.
      * Authority lives on the row and host, not in an ephemeral clientId. */
     async retryJob(hostId: string, entry: QueueEntry): Promise<void> {
-      const hosts = useHostsStore();
-      const host = hosts.all.find((candidate) => candidate.id === hostId);
-      const target = host ? this.targetFor(host) : null;
-      if (!host || !target || host.status !== "ready") {
-        throw new Error("The selected machine identity is unavailable.");
-      }
-      if (
-        entry.state !== "held" ||
-        entry.retryable !== true ||
-        !entry.batch_id ||
-        !entry.client_batch_id
-      ) {
-        throw new Error("This held generation is not retryable.");
-      }
-      const instanceId =
-        host.instanceId ??
-        (await apiJsonTo<{ instance_id?: string }>(target, "/api/status")).instance_id ??
-        null;
-      if (!instanceId) throw new Error("The selected machine identity is unavailable.");
-      const authority: QueueJobAuthority = {
-        instanceId,
-        batchId: entry.batch_id,
-        clientBatchId: entry.client_batch_id,
-        jobId: entry.id,
-      };
-      const outcome = await retryQueueJobRecoveringAmbiguity(target, authority);
-      if (outcome.kind === "uncertain") throw new Error(outcome.error);
-      await this.refreshHost(host);
-      void useGenerationStore().reconcileDurableHost(hostId);
+      await this.withJobMutation(hostId, entry.id, async () => {
+        const hosts = useHostsStore();
+        const host = hosts.all.find((candidate) => candidate.id === hostId);
+        const target = host ? this.targetFor(host) : null;
+        if (!host || !target || host.status !== "ready") {
+          throw new Error("The selected machine identity is unavailable.");
+        }
+        if (
+          entry.state !== "held" ||
+          entry.retryable === false ||
+          !entry.batch_id ||
+          !entry.client_batch_id
+        ) {
+          throw new Error("This held generation is not retryable.");
+        }
+        const instanceId =
+          host.instanceId ??
+          (await apiJsonTo<{ instance_id?: string }>(target, "/api/status")).instance_id ??
+          null;
+        if (!instanceId) throw new Error("The selected machine identity is unavailable.");
+        const authority: QueueJobAuthority = {
+          instanceId,
+          batchId: entry.batch_id,
+          clientBatchId: entry.client_batch_id,
+          jobId: entry.id,
+        };
+        const outcome = await retryQueueJobRecoveringAmbiguity(target, authority);
+        if (outcome.kind === "uncertain") throw new Error(outcome.error);
+        void useGenerationStore().reconcileDurableHost(hostId);
+      });
     },
     /**
      * Move a queued job to another GPU lane on its OWNING host via
@@ -556,16 +587,42 @@ export const useJobsStore = defineStore("jobs", {
       method: "POST" | "DELETE" | "PATCH",
       body?: unknown,
     ) {
-      const hosts = useHostsStore();
-      const host = hosts.all.find((h) => h.id === hostId);
-      const target = host ? this.targetFor(host) : null;
-      if (!target) throw new Error("Host is not connected.");
-      const init: RequestInit = { method };
-      if (body !== undefined) {
-        init.body = JSON.stringify(body);
-        init.headers = { "Content-Type": "application/json" };
-      }
-      await apiFetchTo(target, path, init);
+      const rowPath = path.match(/^\/api\/queue\/([^/?]+)(?:[/?]|$)/);
+      const jobId =
+        rowPath && !["pause", "resume"].includes(rowPath[1]!)
+          ? decodeURIComponent(rowPath[1]!)
+          : null;
+      const execute = async () => {
+        const hosts = useHostsStore();
+        const host = hosts.all.find((h) => h.id === hostId);
+        const target = host ? this.targetFor(host) : null;
+        if (!host || !target || host.status !== "ready") throw new Error("Host is not connected.");
+        const captured = {
+          baseUrl: host.baseUrl,
+          apiKey: host.apiKey,
+          instanceId: host.instanceId,
+        };
+        if (captured.instanceId) {
+          const status = await apiJsonTo<{ instance_id?: string }>(target, "/api/status");
+          const current = hosts.all.find((candidate) => candidate.id === hostId);
+          if (
+            status.instance_id !== captured.instanceId ||
+            current?.status !== "ready" ||
+            current.baseUrl !== captured.baseUrl ||
+            current.apiKey !== captured.apiKey ||
+            current.instanceId !== captured.instanceId
+          )
+            throw new Error("The original machine changed. Refresh its queue before acting.");
+        }
+        const init: RequestInit = { method };
+        if (body !== undefined) {
+          init.body = JSON.stringify(body);
+          init.headers = { "Content-Type": "application/json" };
+        }
+        await apiFetchTo(target, path, init);
+      };
+      if (jobId) await this.withJobMutation(hostId, jobId, execute);
+      else await execute();
     },
     startPolling() {
       this.pollConsumers += 1;

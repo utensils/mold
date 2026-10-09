@@ -38,9 +38,10 @@ struct QueueBatchRow: View {
                     QueueHoldRow(entry: entry, hold: hold, sourceHost: sourceHost,
                         pullThenRetry: { _ in downloads.recover(entry, on: sourceHost, queue: queue) },
                         tryAgain: { rowAct(.retry, entry) },
-                        moveToDestinations: transfers.transferDestinations(from: sourceHost.id),
+                        moveToDestinations: queue.canTransfer(entry, on: sourceHost.id) && transfers.transferring == nil ? transfers.transferDestinations(from: sourceHost.id) : [],
                         moveTo: { destination in Task { await transfers.transfer(entry, from: sourceHost.id, to: destination); await queue.poll(sourceHost.id) } },
-                        cancel: { rowAct(.cancel, entry) }, inspect: inspect.map { inspect in { inspect(entry) } })
+                        cancel: { rowAct(.cancel, entry) }, inspect: inspect.map { inspect in { inspect(entry) } },
+                        actions: queue.actions(for: entry, on: sourceHost.id))
                         .padding(.leading, 20).tag(entry.id)
                 } else {
                 QueueRow(entry: entry, actions: childActions(entry),

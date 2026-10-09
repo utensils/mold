@@ -47,9 +47,11 @@ struct QueueRowActions: Equatable {
     /// does not advertise cooperative cancellation -- there being nothing
     /// there to stop work at a safe point. See `canCancelRunningJob`.
     private static func cancels(_ entry: QueueEntry, on capabilities: Capabilities?) -> Bool {
-        guard entry.state.isLive else { return false }
-        guard entry.state == .running else { return true }
-        return capabilities?.canCancelRunningJob == true
+        switch entry.state {
+        case .queued, .paused, .held: return true
+        case .running: return capabilities?.canCancelRunningJob == true
+        default: return false
+        }
     }
 
     /// A whole batch's row: what it offers is what ANY of its children do.

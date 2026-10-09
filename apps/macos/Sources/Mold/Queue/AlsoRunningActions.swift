@@ -22,10 +22,10 @@ struct AlsoRunningActions {
     /// this right now, and a right-click that opened nothing said nothing.
     let stopNote: String?
 
-    init(_ row: AlsoRunningRow) {
-        canPause = row.canPause
-        canResume = row.canResume
-        canCancel = row.canCancel
+    init(_ row: AlsoRunningRow, mutationAllowed: (Kind) -> Bool = { _ in true }) {
+        canPause = row.canPause && mutationAllowed(.pause)
+        canResume = row.canResume && mutationAllowed(.resume)
+        canCancel = row.canCancel && mutationAllowed(.cancel)
         canForget = row.isSettled
         stopNote = row.stopNote
     }

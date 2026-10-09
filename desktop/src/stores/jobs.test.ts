@@ -566,3 +566,65 @@ describe("enrichQueueEntries", () => {
     expect(enriched[0]).toMatchObject({ mine: true, clientId: null });
   });
 });
+
+describe("queue mutation authority", () => {
+  it.each(["old-instance", "replacement-instance"])(
+    "fences Held cancellation on %s",
+    async (reportedInstance) => {
+      const hosts = seedHosts();
+      hosts.extras[0]!.instanceId = "old-instance";
+      apiJsonTo.mockImplementation((_target: unknown, path: string) =>
+        Promise.resolve(path === "/api/status" ? { instance_id: reportedInstance } : {}),
+      );
+      const jobs = useJobsStore();
+      jobs.queues["hal9000-7680"] = { entries: [{ id: "held-job", state: "held" }] } as never;
+      await jobs.cancelJob("hal9000-7680", "held-job", { onlyHeld: true }).catch(() => {});
+      if (reportedInstance === "old-instance")
+        expect(apiFetchTo).toHaveBeenCalledWith(
+          expect.anything(),
+          "/api/queue/held-job?only_held=true",
+          { method: "DELETE" },
+        );
+      else expect(apiFetchTo).not.toHaveBeenCalled();
+    },
+  );
+  it("reserves a job across surfaces until its mutation refresh finishes", async () => {
+    seedHosts();
+    const jobs = useJobsStore();
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    vi.mocked(apiFetchTo).mockImplementationOnce(async () => {
+      await pending;
+      return new Response(null, { status: 200 });
+    });
+    let finishRefresh!: () => void;
+    const refreshing = new Promise<void>((resolve) => {
+      finishRefresh = resolve;
+    });
+    const refresh = vi
+      .spyOn(jobs, "refreshHost")
+      .mockImplementationOnce(() => refreshing)
+      .mockResolvedValue(undefined);
+    const first = jobs.cancelJob("hal9000-7680", "job");
+    await Promise.resolve();
+    await expect(jobs.setJobPaused("hal9000-7680", "job", true)).rejects.toThrow(/already|busy/i);
+    expect(apiFetchTo).toHaveBeenCalledTimes(1);
+    finish();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(jobs.isJobBusy("hal9000-7680", "job")).toBe(true);
+    await expect(jobs.cancelJob("hal9000-7680", "job")).rejects.toThrow(/already|busy/i);
+    finishRefresh();
+    await first;
+    expect(refresh).toHaveBeenCalled();
+    expect(jobs.isJobBusy("hal9000-7680", "job")).toBe(false);
+  });
+  it("rejects disconnected mutation before touching the network", async () => {
+    const hosts = seedHosts();
+    hosts.extras[0]!.status = "error";
+    await expect(useJobsStore().cancelJob("hal9000-7680", "job")).rejects.toThrow();
+    expect(apiFetchTo).not.toHaveBeenCalled();
+  });
+});

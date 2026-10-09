@@ -15,6 +15,30 @@ import { isSeparator, useContextMenuStore } from "../../stores/contextMenu";
 import { useJobsStore } from "../../stores/jobs";
 import { __resetQueueCommandState } from "../../composables/useQueueCommands";
 
+vi.mock("@studio/api/client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@studio/api/client")>();
+  return {
+    ...actual,
+    apiJsonTo: vi.fn((target, path, init) =>
+      path === "/api/activity"
+        ? Promise.resolve({
+            instance_id: "local-instance",
+            items: [
+              { id: "foreign-running", kind: "generation", phase: "running", can_cancel: true },
+              {
+                id: "foreign-auto-chain",
+                kind: "generation",
+                execution: "chain",
+                phase: "running",
+                can_cancel: true,
+              },
+            ],
+          })
+        : actual.apiJsonTo(target, path, init),
+    ),
+  };
+});
+
 // The queue composable's in-flight guard and Stop-everything dialog live at
 // module scope (one app, one dialog), and pinia does not clear them.
 beforeEach(() => __resetQueueCommandState());
@@ -132,6 +156,7 @@ describe("Sidebar queue", () => {
     const connection = useConnectionStore();
     connection.info = { mode: "local", baseUrl, apiKey: "secret" };
     connection.status = "ready";
+    useJobsStore().queues.local = { entries: [], caps: { canCancelRunning: true } } as never;
     useHostsStore().telemetry.local = {
       queueDepth: 1,
       queueCapacity: 1,
@@ -213,7 +238,9 @@ describe("Sidebar queue", () => {
     await row.trigger("contextmenu");
     const menu = useContextMenuStore();
     expect(menu.entries[0]).toMatchObject({ label: "Remove from queue" });
-    menu.activate(menu.entries[0]!);
+    menu.activate(
+      menu.entries.find((entry) => "label" in entry && entry.label === "Remove from queue")!,
+    );
     await flushPromises();
 
     expect(generation.jobs).toEqual([]);
@@ -351,11 +378,15 @@ describe("Sidebar queue", () => {
     await wrapper.get("[data-test='queue-active']").trigger("contextmenu");
     const menu = useContextMenuStore();
     expect(menu.visible).toBe(true);
-    expect(menu.entries).toMatchObject([{ label: "Stop", danger: true, disabled: false }]);
+    expect(menu.entries.find((entry) => "label" in entry && entry.label === "Stop")).toMatchObject({
+      label: "Stop",
+      danger: true,
+      disabled: false,
+    });
 
-    menu.activate(menu.entries[0]!);
+    menu.activate(menu.entries.find((entry) => "label" in entry && entry.label === "Stop")!);
     await flushPromises();
-    expect(cancel).toHaveBeenCalledWith("local", "foreign-running");
+    expect(cancel).toHaveBeenCalledWith("local", "foreign-running", { onlyHeld: false });
   });
 
   it("stops an auto-chain generation through its durable chain authority", async () => {
@@ -395,7 +426,7 @@ describe("Sidebar queue", () => {
 
     await wrapper.get("[data-test='queue-active']").trigger("contextmenu");
     const menu = useContextMenuStore();
-    menu.activate(menu.entries[0]!);
+    menu.activate(menu.entries.find((entry) => "label" in entry && entry.label === "Stop")!);
     await flushPromises();
 
     expect(fetchMock).toHaveBeenCalledWith(
@@ -444,10 +475,13 @@ describe("Sidebar queue", () => {
     const row = wrapper.get("[data-test='queue-active']");
     await row.trigger("contextmenu");
     const menu = useContextMenuStore();
-    menu.activate(menu.entries[0]!);
+    menu.activate(menu.entries.find((entry) => "label" in entry && entry.label === "Stop")!);
     await row.trigger("contextmenu");
-    expect(menu.entries).toMatchObject([{ label: "Stop", disabled: true }]);
-    menu.activate(menu.entries[0]!);
+    expect(menu.entries.find((entry) => "label" in entry && entry.label === "Stop")).toMatchObject({
+      label: "Stop",
+      disabled: true,
+    });
+    menu.activate(menu.entries.find((entry) => "label" in entry && entry.label === "Stop")!);
     expect(cancel).toHaveBeenCalledTimes(1);
 
     finishCancel();
@@ -489,7 +523,7 @@ describe("Sidebar queue", () => {
     await wrapper.get("[data-test='queue-active']").trigger("contextmenu");
     useHostsStore().telemetry.local!.instanceId = "replacement-instance";
     const menu = useContextMenuStore();
-    menu.activate(menu.entries[0]!);
+    menu.activate(menu.entries.find((entry) => "label" in entry && entry.label === "Stop")!);
     await flushPromises();
 
     expect(cancel).not.toHaveBeenCalled();

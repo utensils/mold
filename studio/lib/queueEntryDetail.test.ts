@@ -435,3 +435,27 @@ it.each(["complete", "completed", "failed", "cancelled", "canceled", "done"])(
     expect(detail.cancel.available).toBe(false);
   },
 );
+
+it.each([
+  ["completed", "Completed"],
+  ["cancelled", "Cancelled"],
+  ["failed", "Failed"],
+])("labels terminal %s accurately", (state, label) => {
+  const model = queueEntryDetailModel({
+    entry: entry({ state }),
+    hostLabel: "HAL",
+    modelLabel: "Style",
+    nowMs: 10,
+  });
+  expect(model.stateLabel).toBe(label);
+});
+
+it.each([
+  ["cancelling", "Stopping"],
+  ["future-state", "Unknown"],
+])("keeps %s detail read only", (state, label) => {
+  const value = model({ entry: entry({ state }) });
+  expect(value.stateLabel).toBe(label);
+  expect(value.cancel).toMatchObject({ applicable: false, available: false });
+  expect(value.retry).toMatchObject({ applicable: false, available: false });
+});

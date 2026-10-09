@@ -884,3 +884,5 @@ Hide and Show apply to every known replica. Pending edits retry when the editing
 client reconnects; new collection replicas preserve the visibility setting.
 Copying media between hosts preserves its collection organization. Removing a
 copy from a machine leaves the copies on other machines intact.
+
+Queue menus and touch swipe controls follow the owning machine’s current state and capabilities. Held jobs offer supported Retry or Download and Retry, transfer and Cancel; they do not offer Pause. On current Mold servers, Held cancellation retains its held-only safeguard through interrupted requests and app restarts. Offline, stopping, settled or currently updating rows retain inspection without unsupported mutation actions. Job Details distinguishes Stopping, completed, failed, cancelled and unknown states instead of labeling them Queued.

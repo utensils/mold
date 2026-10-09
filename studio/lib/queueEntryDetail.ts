@@ -497,7 +497,11 @@ export function queueEntryDetailModel(
     "failed",
     "done",
   ].includes(entry.state);
-  const cancel: QueueDetailAction = terminal
+  const actionable = ["queued", "paused", "held", "running"].includes(
+    entry.state,
+  );
+  const cancelling = entry.state === "cancelling";
+  const cancel: QueueDetailAction = !actionable
     ? { applicable: false, available: false, blockedReason: null }
     : running
       ? {
@@ -508,7 +512,7 @@ export function queueEntryDetailModel(
         }
       : { applicable: true, available: true, blockedReason: null };
 
-  const retryApplicable = held && entry.retryable === true;
+  const retryApplicable = held && entry.retryable !== false;
   const retry: QueueDetailAction = {
     applicable: retryApplicable,
     available: retryApplicable && input.retryAuthority != null,
@@ -551,25 +555,47 @@ export function queueEntryDetailModel(
     modelId: entry.model,
     modelLabel,
     hostLabel,
-    stateLabel: running
-      ? "Running"
-      : held
-        ? "Held"
-        : paused
-          ? "Paused"
-          : "Queued",
-    stateCode: running
-      ? entry.gpu != null
-        ? `RUNNING · GPU ${entry.gpu}`
-        : "RUNNING"
-      : held
-        ? "HELD"
-        : queueWaitCode(wait),
-    waitLabel: running
-      ? "Running"
-      : held
-        ? (normalizeBlockedReason(entry.held_reason) ?? "Held")
-        : queueWaitLabel(wait),
+    stateLabel: cancelling
+      ? "Stopping"
+      : !terminal && !actionable
+        ? "Unknown"
+        : terminal
+          ? ["cancelled", "canceled"].includes(entry.state)
+            ? "Cancelled"
+            : entry.state === "failed"
+              ? "Failed"
+              : "Completed"
+          : running
+            ? "Running"
+            : held
+              ? "Held"
+              : paused
+                ? "Paused"
+                : "Queued",
+    stateCode: cancelling
+      ? "STOPPING"
+      : !terminal && !actionable
+        ? "UNKNOWN"
+        : terminal
+          ? entry.state.toUpperCase()
+          : running
+            ? entry.gpu != null
+              ? `RUNNING · GPU ${entry.gpu}`
+              : "RUNNING"
+            : held
+              ? "HELD"
+              : queueWaitCode(wait),
+    waitLabel: cancelling
+      ? "Stopping"
+      : !terminal && !actionable
+        ? "Waiting for this machine to report the job’s state."
+        : terminal
+          ? "This job has settled."
+          : running
+            ? "Running"
+            : held
+              ? (normalizeBlockedReason(entry.held_reason) ?? "Held")
+              : queueWaitLabel(wait),
     running,
     held,
     prompt: text(metadata?.prompt),

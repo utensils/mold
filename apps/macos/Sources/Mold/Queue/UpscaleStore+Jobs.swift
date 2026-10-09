@@ -93,11 +93,25 @@ extension UpscaleStore {
     /// what it did. Polling resumes only if the new state is still moving --
     /// a paused job moves when somebody resumes it, and that reply is the
     /// next answer.
-    func transition(_ key: Key, to transition: FramewiseTransition) async {
+    func canTransition(_ key: Key, to transition: FramewiseTransition) -> Bool {
+        guard !transitioning.contains(key), let host = hosts.host(key.host), hosts.isUp(host),
+              let job = jobs[key] else { return false }
+        switch transition {
+        case .pause: return UpscalePlan.shouldPoll(job)
+        case .resume: return job.state == .paused
+        case .cancel: return [.queued, .running, .finalizing, .paused].contains(job.state)
+        }
+    }
+
+    func transition(_ key: Key, to transition: FramewiseTransition, expectedJob: VideoUpscaleJob? = nil) async {
         // Nothing to act on. Every surface that can reach this draws its
         // rows from `jobs`, so a key with no job has no row to press.
-        guard let job = jobs[key] else { return }
-        guard let backend = hosts.backend(for: key.host) else { return }
+        guard canTransition(key, to: transition), let job = jobs[key],
+              expectedJob == nil || (expectedJob?.id == job.id && expectedJob?.state == job.state),
+              let host = hosts.host(key.host), let backend = hosts.backend(for: key.host) else { return }
+        let instance = hosts.instanceID(of: key.host)
+        transitioning.insert(key)
+        defer { transitioning.remove(key) }
         // The epoch is bumped here for the same reason `start` bumps it: an
         // `ask` already in flight is about the job BEFORE this transition,
         // and landing it afterwards rewrites a paused job as running with
@@ -109,7 +123,8 @@ extension UpscaleStore {
             let next = try await backend.transitionFramewiseUpscale(id: job.id, to: transition)
             // A newer job for the same print took the key while this was in
             // flight -- this answer is about a job nobody is following.
-            guard epochs[key] == epoch, jobs[key]?.id == job.id else { return }
+            guard epochs[key] == epoch, jobs[key]?.id == job.id, hosts.host(key.host) == host,
+                  hosts.instanceID(of: key.host) == instance else { return }
             jobs[key] = next
             if UpscalePlan.shouldPoll(next) { poll(key) }
         } catch {

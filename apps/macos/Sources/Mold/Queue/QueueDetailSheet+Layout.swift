@@ -102,7 +102,7 @@ extension QueueDetailSheet {
     var actions: some View {
         HStack {
             if let current {
-                let actions = QueueRowActions.resolve(current, on: hosts.capabilities[host.id])
+                let actions = queue.actions(for: current, on: host.id)
                 if actions.retry, case .missingModel = queue.hold(for: current, on: host.id) {
                     Button("Download and Retry") { downloads.recover(current, on: activeHost, queue: queue) }
                         .disabled(downloads.queueDownloads.state(host: host.id, job: entry.id)?.isBusy == true)

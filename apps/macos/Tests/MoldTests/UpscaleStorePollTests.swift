@@ -45,6 +45,52 @@ struct UpscaleStorePollTests {
         UpscaleStore.Key(host: host.id, filename: "clip.mp4")
     }
 
+    @Test func offlineAndInapplicableUpscaleActionsDoNotMutate() async {
+        let host = machine()
+        let backend = fake(for: host)
+        let (store, hosts) = await bench(backend, host: host)
+        let key = key(host)
+        store.jobs[key] = FakeFixtures.framewiseJob("vup-1", state: "running")
+        backend.extras.framewiseJobs = [store.jobs[key]!]
+        hosts.reachability[host.id] = .unknown
+        await store.transition(key, to: .cancel)
+        #expect(backend.callCount("transitionFramewiseUpscale") == 0)
+        hosts.reachability[host.id] = .up(FakeFixtures.serverStatus())
+        await store.transition(key, to: .resume)
+        #expect(backend.callCount("transitionFramewiseUpscale") == 0)
+        store.jobs[key] = FakeFixtures.framewiseJob("vup-1", state: "unknown")
+        await store.transition(key, to: .cancel)
+        #expect(backend.callCount("transitionFramewiseUpscale") == 0)
+    }
+
+    @Test func duplicateUpscaleTransitionsAreReservedByExactKey() async {
+        let host = machine()
+        let backend = fake(for: host)
+        let (store, _) = await bench(backend, host: host)
+        let key = key(host)
+        store.jobs[key] = FakeFixtures.framewiseJob("vup-1", state: "running")
+        backend.extras.framewiseJobs = [store.jobs[key]!]
+        backend.delays["transitionFramewiseUpscale"] = .milliseconds(100)
+        let first = Task { await store.transition(key, to: .pause) }
+        await backend.entered("transitionFramewiseUpscale")
+        await store.transition(key, to: .cancel)
+        await first.value
+        #expect(backend.callCount("transitionFramewiseUpscale") == 1)
+    }
+
+    @Test func staleRenderedUpscaleIdentityAndStateNeverMutate() async {
+        let host = machine()
+        let backend = fake(for: host)
+        let (store, _) = await bench(backend, host: host)
+        let key = key(host)
+        let offered = FakeFixtures.framewiseJob("vup-1", state: "running")
+        store.jobs[key] = FakeFixtures.framewiseJob("vup-1", state: "paused")
+        await store.transition(key, to: .cancel, expectedJob: offered)
+        store.jobs[key] = FakeFixtures.framewiseJob("vup-2", state: "running")
+        await store.transition(key, to: .cancel, expectedJob: offered)
+        #expect(backend.callCount("transitionFramewiseUpscale") == 0)
+    }
+
     /// The job finishing between two asks: the store takes the settled answer,
     /// stops asking, and re-reads that machine's gallery -- the bigger clip is
     /// a new row in it and nothing else is going to go and look.

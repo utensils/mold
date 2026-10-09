@@ -1488,9 +1488,18 @@ describe("MobileApp generation lifecycle", () => {
     await flushPromises();
 
     const row = wrapper.get("[data-test='mobile-fleet-job']");
-    const control = row.get("[data-test='swipe-action-fleet-pause']");
+    const control = row.get("[data-test='swipe-action-fleet-cancel']");
     expect(control.text()).toBe("Cancel");
     await control.trigger("click");
+    await flushPromises();
+    const confirm = wrapper.get("[data-test='mobile-queue-fallback-cancel']");
+    await confirm.trigger("click");
+    expect(apiFetchTo).not.toHaveBeenCalledWith(
+      target,
+      "/api/chain-jobs/running-auto-chain/cancel",
+      { method: "POST" },
+    );
+    await confirm.trigger("click");
     await flushPromises();
     expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/chain-jobs/running-auto-chain/cancel", {
       method: "POST",
@@ -2857,6 +2866,7 @@ describe("MobileApp generation queue", () => {
         return Promise.resolve({
           events: { available: true },
           ...durableQueueCapabilities,
+          queue: { ...durableQueueCapabilities.queue, can_pause_job: true },
         });
       }
       if (path === "/api/activity") {
@@ -2880,6 +2890,7 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
     await submitPrompt("retry held print");
 
+    expect(wrapper.find("[data-test='swipe-action-queue-pause']").exists()).toBe(false);
     const retry = wrapper.get("[data-test='swipe-action-retry']");
     expect(retry.text()).toBe("Retry");
     expect(retry.classes()).toContain("swipe-row__action");

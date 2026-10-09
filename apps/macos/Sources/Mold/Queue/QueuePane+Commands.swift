@@ -32,25 +32,21 @@ extension QueuePane {
             let entries = queue.entries(on: host.id)
             guard let entry = QueueGroup.selectedEntry(selection, in: queue.groups(on: host.id))
             else { continue }
-            let canReorder = hosts.capabilities[host.id]?.canReorderQueue == true
+            let canReorder = hosts.isUp(host) && !queue.isActing(entry, on: host.id) && hosts.capabilities[host.id]?.canReorderQueue == true
             // The same authority the row's own buttons and contextual menu
             // read, so this menu can never offer something they do not.
-            let actions = QueueRowActions.resolve(entry, on: hosts.capabilities[host.id])
+            let actions = queue.actions(for: entry, on: host.id)
             return QueueSelection.Job(
                 target: .init(host: host.id, entry: entry.id),
                 canPause: actions.pause,
                 canResume: actions.resume,
-                // Narrower than `actions.retry` on purpose: this menu knows
-                // the row's BATCH CHILD, which is the only place `error_code`
-                // and the host's own `retryable` live (`routes.rs:2951-2956`).
-                // A missing-model hold's own button is Pull-then-Retry
-                // (`QueueHoldRow.swift`), which needs the download store this
-                // menu item does not carry.
-                canRetry: plainlyRetryable(queue.hold(for: entry, on: host.id)),
+                // Missing-model recovery stays on the explicit Download and
+                // Retry row/menu control rather than dispatching a plain retry.
+                canRetry: actions.retry && !missingModel(queue.hold(for: entry, on: host.id)),
                 canMoveUp: canReorder && QueueRow.canMove(entry.id, .up, in: entries),
                 canMoveDown: canReorder && QueueRow.canMove(entry.id, .down, in: entries),
                 canCancel: actions.cancel,
-                moveToDestinations: entry.state == .held ? transfers.transferDestinations(from: host.id) : [],
+                moveToDestinations: queue.canTransfer(entry, on: host.id) && transfers.transferring == nil ? transfers.transferDestinations(from: host.id) : [],
                 pause: { act(.pause, on: entry, host: host) },
                 resume: { act(.resume, on: entry, host: host) },
                 retry: { act(.retry, on: entry, host: host) },
@@ -62,9 +58,9 @@ extension QueuePane {
         return nil
     }
 
-    /// Only `.prose(_, retryable: true)`.
-    private func plainlyRetryable(_ hold: QueueHold?) -> Bool {
-        if case let .prose(_, retryable) = hold { return retryable }
+    /// A plain retry cannot repair a missing installation.
+    private func missingModel(_ hold: QueueHold?) -> Bool {
+        if case .missingModel = hold { return true }
         return false
     }
 

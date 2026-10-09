@@ -39,26 +39,42 @@ extension QueuePane {
         if !rows.isEmpty {
             Section("Also Running on \(host.name)") {
                 ForEach(rows) { row in
-                    AlsoRunningRowView(row: row) { act($0, on: row) }
+                    AlsoRunningRowView(row: row, actions: AlsoRunningActions(row, mutationAllowed: { action in
+                        if case let .reported(reported) = row.work { return activity.canAct(action, on: reported) }
+                        if case let .upscale(filename, job) = row.work {
+                            let key = UpscaleStore.Key(host: row.host, filename: filename)
+                            guard upscales.jobs[key]?.id == job.id else { return false }
+                            switch action {
+                            case .pause: return upscales.canTransition(key, to: .pause)
+                            case .resume: return upscales.canTransition(key, to: .resume)
+                            case .cancel: return upscales.canTransition(key, to: .cancel)
+                            case .forget: return true
+                            }
+                        }
+                        return hosts.isUp(host)
+                    })) { act($0, on: row) }
                 }
             }
         }
     }
 
-    /// Cancel is offered only where the machine confirmed it for that exact
-    /// item, and reaching a reported row's cancel is not this app's to invent
-    /// -- the only work here it OWNS is the clip upscale it started.
+    /// Reported chains recheck the machine's authority before dispatch;
+    /// upscales preserve the exact rendered job identity and state.
     func act(_ action: AlsoRunningActions.Kind, on row: AlsoRunningRow) {
+        if case let .reported(reported) = row.work {
+            Task { await activity.act(action, on: reported) }
+            return
+        }
         if case let .still(filename, _) = row.work, action == .forget {
             upscales.forgetStill(UpscaleStore.Key(host: row.host, filename: filename))
             return
         }
-        guard case let .upscale(filename, _) = row.work else { return }
+        guard case let .upscale(filename, job) = row.work else { return }
         let key = UpscaleStore.Key(host: row.host, filename: filename)
         switch action {
-        case .pause: Task { await upscales.transition(key, to: .pause) }
-        case .resume: Task { await upscales.transition(key, to: .resume) }
-        case .cancel: Task { await upscales.transition(key, to: .cancel) }
+        case .pause: Task { await upscales.transition(key, to: .pause, expectedJob: job) }
+        case .resume: Task { await upscales.transition(key, to: .resume, expectedJob: job) }
+        case .cancel: Task { await upscales.transition(key, to: .cancel, expectedJob: job) }
         case .forget: upscales.forget(key)
         }
     }

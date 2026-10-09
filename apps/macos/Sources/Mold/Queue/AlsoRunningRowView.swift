@@ -4,9 +4,8 @@ import SwiftUI
 /// One line of work with no queue row of its own.
 struct AlsoRunningRowView: View {
     let row: AlsoRunningRow
+    let actions: AlsoRunningActions
     let act: (AlsoRunningActions.Kind) -> Void
-
-    private var actions: AlsoRunningActions { AlsoRunningActions(row) }
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {

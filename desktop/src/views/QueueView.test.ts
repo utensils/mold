@@ -16,6 +16,12 @@ import { useGenerationStore } from "../stores/generation";
 import { useHostsStore } from "../stores/hosts";
 import { useJobsStore, type HostQueueSnapshot } from "../stores/jobs";
 
+const downloadRecovery = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock("@studio/composables/useQueueDownloadRecovery", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  startQueueDownloadRecovery: downloadRecovery,
+}));
+
 const stub = { template: "<div />" };
 let router: Router;
 
@@ -100,7 +106,7 @@ describe("QueueView", () => {
     expect(router.currentRoute.value.path).toBe("/create");
   });
 
-  it("calls a held print Needs a download first and offers Retry now", async () => {
+  it("calls a held print Needs a download first and offers Download and Retry", async () => {
     const wrapper = await mountView();
     const generation = useGenerationStore();
     generation.jobs = [
@@ -117,6 +123,7 @@ describe("QueueView", () => {
         retrying: false,
       } as never,
     ];
+    useHostsStore().telemetry.local = { instanceId: "i-1" } as never;
     const retry = vi.spyOn(generation, "retryHeld").mockResolvedValue();
     await flushPromises();
 
@@ -125,14 +132,20 @@ describe("QueueView", () => {
     expect(row.text()).not.toContain("Failed");
 
     await row.get("[data-test='queue-row-menu']").trigger("click");
-    expect(menuLabels()).toContain("Retry now");
+    expect(menuLabels()).toContain("Download and Retry");
     const entry = useContextMenuStore().entries.find(
-      (e) => !isSeparator(e) && e.label === "Retry now",
+      (e) => !isSeparator(e) && e.label === "Download and Retry",
     );
     if (!entry || isSeparator(entry)) throw new Error("no retry entry");
     entry.action?.();
     await flushPromises();
-    expect(retry).toHaveBeenCalledWith(2);
+    expect(downloadRecovery).toHaveBeenCalledWith(
+      expect.anything(),
+      "i-1",
+      "srv-2",
+      expect.anything(),
+    );
+    expect(retry).not.toHaveBeenCalled();
   });
 
   // A long clip the host chains and stitches is ONE print row, never a row
@@ -143,6 +156,7 @@ describe("QueueView", () => {
     generation.jobs = [
       { clientId: 1, id: "job-1", model: "ltx-video", prompt: "a long clip", status: "denoising" },
     ] as never;
+    useJobsStore().queues.local = { entries: [], caps: { canCancelRunning: true } } as never;
     const cancel = vi.spyOn(generation, "cancel").mockResolvedValue(true);
     await flushPromises();
 

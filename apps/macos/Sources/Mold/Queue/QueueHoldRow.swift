@@ -19,6 +19,7 @@ struct QueueHoldRow: View {
     /// nowhere to send it, used to offer nothing at all.
     let cancel: () -> Void
     var inspect: (() -> Void)? = nil
+    let actions: QueueRowActions
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -40,16 +41,9 @@ struct QueueHoldRow: View {
                     if let fraction = recovery.fraction { ProgressView(value: fraction).accessibilityLabel("Model download") }
                     else if recovery.isBusy { ProgressView().controlSize(.small).accessibilityLabel(recovery.message) }
                 }
-                HStack(spacing: 8) {
-                    ForEach(Self.actions(for: hold), id: \.self) { action in
-                        button(for: action)
-                    }
-                    MoveToMenu(destinations: moveToDestinations, send: moveTo)
-                    if let inspect {
-                        Button("Failure Details", action: inspect)
-                            .help("Show the machine’s saved diagnostic for this job")
-                            .accessibilityIdentifier("queue-failure-details-" + entry.id)
-                    }
+                ViewThatFits(in: .horizontal) {
+                    recoveryControls(horizontal: true)
+                    recoveryControls(horizontal: false)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -57,9 +51,12 @@ struct QueueHoldRow: View {
             Spacer(minLength: 12)
             // The same glyph, in the same place, as every other row's --
             // so the eye finds Cancel at one edge whatever the row is.
-            Button(action: cancel) { Image(systemName: "xmark") }
-                .buttonStyle(.borderless)
-                .help("Cancel this job")
+            if actions.cancel {
+                Button(action: cancel) { Image(systemName: "xmark") }
+                    .buttonStyle(.borderless)
+                    .help("Cancel this job")
+                    .accessibilityLabel("Cancel Job")
+            }
         }
         .padding(.vertical, 4)
         // The row's own buttons a second way -- a contextual menu is where a
@@ -67,9 +64,25 @@ struct QueueHoldRow: View {
         // The SAME list, drawn by the app's one renderer: it was a
         // hand-written `@ViewBuilder` beside a `menuTitles` a test read, which
         // is two lists that agreed by hand.
-        .rowActionMenu(Self.offered(for: hold, destinations: moveToDestinations),
+        .rowActionMenu(Self.offered(for: hold, destinations: moveToDestinations, actions: actions),
                        perform: perform)
         .help("Show this job’s details and why it is waiting")
+    }
+
+    private func recoveryControls(horizontal: Bool) -> some View {
+        let layout = horizontal ? AnyLayout(HStackLayout(spacing: 8)) : AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+        return layout {
+            ForEach(actions.retry ? Self.actions(for: hold) : [], id: \.self) { action in
+                button(for: action)
+            }
+            MoveToMenu(destinations: moveToDestinations, send: moveTo)
+            if let inspect {
+                Button("Failure Details", action: inspect)
+                    .help("Show the machine’s saved diagnostic for this job")
+                    .accessibilityIdentifier("queue-failure-details-" + entry.id)
+            }
+        }
+        .fixedSize(horizontal: horizontal, vertical: true)
     }
 
     private var sentence: String {

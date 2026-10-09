@@ -20,12 +20,16 @@ extension QueueStore {
         // drew from: a batch with one waiting and one running child pauses
         // the waiting one and leaves the other alone, rather than sending a
         // call the machine refuses by name (`routes.rs:7706-7710`).
-        let capabilities = hosts.capabilities[host]
-        for entry in group.rows
-        where QueueRowActions.resolve(entry, on: capabilities).offers(action) {
+        let eligible = group.rows.filter { actions(for: $0, on: host).offers(action) }
+        guard !eligible.isEmpty else { return }
+        let reserved = Set(eligible.map(\.id))
+        acting[host, default: []].formUnion(reserved)
+        defer { acting[host]?.subtract(reserved) }
+        for entry in eligible {
             guard hosts.host(host) == machine, hosts.instanceID(of: host) == instance,
                   let current = entries(on: host).first(where: { $0.id == entry.id }),
-                  current.state == entry.state else { continue }
+                  current.state == entry.state, hosts.isUp(machine),
+                  QueueRowActions.resolve(current, on: hosts.capabilities[host]).offers(action) else { continue }
             do {
                 switch action {
                 case .cancel:

@@ -667,14 +667,16 @@ for classifier in rust gpu website web nix; do
   fi
 done
 workflow_filter="$(extract_filter "$ci" workflow_static)"
-for path in .github/actionlint.yaml .github/workflows/\*\* scripts/tests/ci-routing-contract.sh; do
+for path in .github/actionlint.yaml .github/workflows/\*\* scripts/tests/ci-routing-contract.sh scripts/ci/install-actionlint.sh scripts/tests/actionlint-native.sh scripts/tests/actionlint-installer.py; do
   grep -Fxq "              - '$path'" <<< "$workflow_filter" \
     || fail "workflow policy classifier omits $path"
 done
 require_text "$ci" 'name: Validate workflow syntax' \
   "workflow-only PRs have no lightweight static validation"
-require_text "$ci" 'uses: docker://rhysd/actionlint:1.7.12' \
-  "workflow-only PRs do not use the pinned lightweight actionlint image"
+require_text "$ci" 'bash scripts/ci/install-actionlint.sh' \
+  "workflow-only PRs do not install pinned native actionlint"
+require_text "$ci" 'bash scripts/tests/actionlint-native.sh' \
+  "workflow-only PRs do not verify both external analyzers"
 require_text "$ci" 'name: Validate CI routing policy' \
   "workflow-only PRs do not run the routing contract"
 

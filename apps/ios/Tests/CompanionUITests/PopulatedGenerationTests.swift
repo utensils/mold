@@ -15,7 +15,12 @@ final class PopulatedGenerationTests: XCTestCase {
         let app = XCUIApplication()
         defer { app.terminate(); machine.stop() }
         cleanUpFixture(machine, port: port, app: app)
+        let destination = try FixtureMachine(queueDestinationFixture: true)
+        let destinationPort = try await destination.start()
+        defer { destination.stop() }
+        cleanUpFixture(destination, port: destinationPort, app: app)
         app.launch()
+        addQueueDownloadMachine(app, port: destinationPort)
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
         app.buttons["Add a Machine"].firstMatch.tap()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
@@ -36,17 +41,14 @@ final class PopulatedGenerationTests: XCTestCase {
             let details = app.buttons["queue-failure-details-fixture-held"]
             let list = app.collectionViews["queue-list"]
             XCTAssertTrue(list.waitForExistence(timeout: 10))
-            for _ in 0..<8 where !cancel.exists || !cancel.isHittable { list.swipeUp() }
-            XCTAssertTrue(cancel.waitForExistence(timeout: 5))
-            XCTAssertTrue(cancel.isHittable)
-            attach(app)
-            let maximumHeight: CGFloat = enriched ? 180 : 120
-            XCTAssertLessThan(cancel.frame.height, maximumHeight, "Cancel must keep a readable button height, including large text")
-            XCTAssertGreaterThan(cancel.frame.width, 100, "Cancel must show its words rather than only an icon")
-            if enriched { XCTAssertGreaterThan(cancel.frame.width, list.frame.width * 0.7, "Large text needs a full-width label without truncation") }
-            guard cancel.frame.height < maximumHeight, cancel.frame.width > 100 else { return }
+            XCTAssertFalse(app.buttons["Pause"].exists, "Pause belongs in native swipe actions, not on the card")
+            XCTAssertFalse(app.buttons["Resume"].exists, "Resume belongs in native swipe actions, not on the card")
+            XCTAssertFalse(cancel.exists, "Cancel belongs in native swipe actions, not on the card")
+            XCTAssertFalse(app.buttons["Retry"].exists, "Retry belongs in native swipe actions, not on the card")
+            guard !cancel.exists, !app.buttons["Retry"].exists else { attach(app); return }
             for _ in 0..<6 where !details.exists || !details.isHittable { list.swipeUp() }
             guard details.exists, details.isHittable else { attach(app); XCTFail(app.debugDescription); return }
+            if enriched { XCTAssertTrue(app.buttons["queue-move-to-fixture-held"].exists, "Held cards retain Move to at accessibility sizes") }
             attach(app)
             details.tap()
             guard machine.queueActionRequests().isEmpty else {
@@ -65,7 +67,6 @@ final class PopulatedGenerationTests: XCTestCase {
             guard machine.queueActionRequests().isEmpty else { XCTFail("Copying details must not mutate the queue"); return }
             app.buttons["Done"].firstMatch.tap()
             guard machine.queueActionRequests().isEmpty else { XCTFail("Dismissing details must not mutate the queue"); return }
-            XCTAssertTrue(cancel.waitForExistence(timeout: 5))
             if !enriched {
                 app.buttons["queue-open-fixture-held"].tap()
                 let nestedDetails = app.buttons["Failure Details"].firstMatch
@@ -81,12 +82,26 @@ final class PopulatedGenerationTests: XCTestCase {
                 app.buttons["Done"].firstMatch.tap()
                 guard machine.queueActionRequests().isEmpty else { XCTFail("Closing Job Details must not mutate the queue"); return }
             }
+            guard details.exists, details.isHittable else { XCTFail("Held diagnostics must stay reachable"); return }
+            revealQueueSwipe(app, at: details, leading: false)
+            let swipeCancel = app.buttons["queue-swipe-cancel-fixture-held"]
+            guard swipeCancel.waitForExistence(timeout: 5), swipeCancel.isHittable else { attach(app); XCTFail("Held Cancel must be reachable by swiping"); return }
+            XCTAssertTrue(machine.queueActionRequests().isEmpty, "Revealing actions must not cancel a job")
+            attach(app)
+            if !enriched { list.swipeUp() }
         }
         XCTAssertTrue(machine.queueActionRequests().isEmpty)
-        app.buttons["queue-cancel-fixture-held"].tap()
+        app.buttons["queue-swipe-cancel-fixture-held"].tap()
         for _ in 0..<100 where machine.queueActionRequests().isEmpty { try await Task.sleep(for: .milliseconds(50)) }
         XCTAssertEqual(machine.queueActionRequests(), ["/api/queue/fixture-held?only_held=true"])
         XCTAssertTrue(machine.generationRequests.isEmpty)
+    }
+
+    @MainActor private func revealQueueSwipe(_ app: XCUIApplication, at element: XCUIElement, leading: Bool) {
+        let y = min(max(element.frame.midY, app.frame.minY + 150), app.frame.maxY - 150)
+        let start = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: app.frame.width * (leading ? 0.2 : 0.8), dy: y))
+        let end = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: app.frame.width * (leading ? 0.8 : 0.2), dy: y))
+        start.press(forDuration: 0.05, thenDragTo: end)
     }
 
     @MainActor func testMemoryErrorIsConciseAndFitsAtEveryTextSize() async throws {
@@ -637,6 +652,77 @@ final class PopulatedGenerationTests: XCTestCase {
 }
 
 extension PopulatedGenerationTests {
+    @MainActor func testHeldRetryIsANativeSwipeAction() async throws {
+        continueAfterFailure = false
+        let machine = try FixtureMachine(queueFixture: true, queueControls: true, queueSwipeFixture: true)
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        defer { app.terminate(); machine.stop() }
+        cleanUpFixture(machine, port: port, app: app)
+        let destination = try FixtureMachine(queueDestinationFixture: true)
+        let destinationPort = try await destination.start()
+        defer { destination.stop() }
+        cleanUpFixture(destination, port: destinationPort, app: app)
+        app.launch()
+        addQueueDownloadMachine(app, port: destinationPort)
+        addQueueDownloadMachine(app, port: port)
+        XCTAssertTrue(app.navigateToDestination("Queue", shortcut: "3"))
+        let card = app.buttons["queue-open-fixture-held"]
+        guard card.waitForExistence(timeout: 15) else { XCTFail("Held job must appear"); return }
+        XCTAssertFalse(app.buttons["Retry"].exists, "Cards keep recovery in swipe actions")
+        XCTAssertFalse(app.buttons["queue-cancel-fixture-held"].exists)
+        let move = app.buttons["queue-move-to-fixture-held"]
+        XCTAssertTrue(move.waitForExistence(timeout: 5), "Held cards retain Move to for another available machine")
+        XCTAssertFalse(app.buttons["Pause"].exists)
+        XCTAssertFalse(app.buttons["Resume"].exists)
+        attach(app)
+        let queued = app.buttons["queue-open-fixture-video"]
+        revealQueueSwipe(app, at: queued, leading: true)
+        let pause = app.buttons["queue-swipe-pause-fixture-video"]
+        guard pause.waitForExistence(timeout: 5), pause.isHittable else { XCTFail("Queued jobs must offer Pause by swiping"); return }
+        XCTAssertTrue(machine.queueActionRequests().isEmpty)
+        pause.tap()
+        try await Task.sleep(for: .milliseconds(500))
+        revealQueueSwipe(app, at: queued, leading: true)
+        guard pause.waitForExistence(timeout: 5), pause.label == "Resume" else { attach(app); XCTFail("Paused jobs must offer Resume by swiping"); return }
+        pause.tap()
+        try await Task.sleep(for: .milliseconds(500))
+        for id in ["fixture-running", "fixture-cancelling"] {
+            let read = app.buttons["queue-open-" + id]
+            for _ in 0..<6 where !read.exists || !read.isHittable { app.collectionViews["queue-list"].swipeUp() }
+            guard read.exists, read.isHittable else { XCTFail("Live job must be reachable"); return }
+            let prior = machine.queueActionRequests()
+            revealQueueSwipe(app, at: read, leading: true)
+            let inspect = app.buttons["queue-swipe-details-" + id]
+            guard inspect.waitForExistence(timeout: 5), inspect.isHittable else { XCTFail("Read-only states must offer Details by swiping"); return }
+            XCTAssertEqual(machine.queueActionRequests(), prior)
+            inspect.tap()
+            guard app.navigationBars["Job Details"].waitForExistence(timeout: 5) else { XCTFail("Details must open the job inspector"); return }
+            app.buttons["Done"].firstMatch.tap()
+            guard app.navigationBars["Job Details"].waitForNonExistence(timeout: 5) else { attach(app); XCTFail("Details must dismiss before swiping another row"); return }
+            XCTAssertEqual(machine.queueActionRequests(), prior)
+            if id == "fixture-running" {
+                revealQueueSwipe(app, at: read, leading: false)
+                let cancel = app.buttons["queue-swipe-cancel-" + id]
+                guard cancel.waitForExistence(timeout: 5), cancel.isHittable else { XCTFail("Running cancellation must follow the machine capability"); return }
+                XCTAssertEqual(machine.queueActionRequests(), prior)
+                cancel.tap()
+            } else {
+                XCTAssertFalse(app.buttons["queue-swipe-cancel-" + id].exists)
+            }
+        }
+        for _ in 0..<6 where !card.exists || !card.isHittable { app.collectionViews["queue-list"].swipeDown() }
+        revealQueueSwipe(app, at: card, leading: true)
+        let retry = app.buttons["queue-swipe-retry-fixture-held"]
+        guard retry.waitForExistence(timeout: 5), retry.isHittable else { attach(app); XCTFail("Retry must be reachable by swiping: \(app.debugDescription)"); return }
+        XCTAssertEqual(machine.queueActionRequests(), ["/api/queue/fixture-video/pause", "/api/queue/fixture-video/resume", "/api/queue/fixture-running"])
+        attach(app)
+        retry.tap()
+        for _ in 0..<100 where !machine.queueActionRequests().contains("/api/queue/fixture-held/retry") { try await Task.sleep(for: .milliseconds(50)) }
+        XCTAssertEqual(machine.queueActionRequests(), ["/api/queue/fixture-video/pause", "/api/queue/fixture-video/resume", "/api/queue/fixture-running", "/api/queue/fixture-held/retry"])
+        XCTAssertTrue(machine.generationRequests.isEmpty)
+    }
+
     @MainActor func testQueueDownloadFeedbackAndAutomaticRetry() async throws {
         continueAfterFailure = false
         let machine = try FixtureMachine(queueFixture: true, queueControls: true, queueDownloadFixture: true)
@@ -648,14 +734,21 @@ extension PopulatedGenerationTests {
         app.launch()
         addQueueDownloadMachine(app, port: port)
         XCTAssertTrue(app.navigateToDestination("Queue", shortcut: "3"))
-        let action = app.buttons["queue-download-fixture-held"]
-        XCTAssertTrue(action.waitForExistence(timeout: 15))
+        let card = app.buttons["queue-open-fixture-held"]
+        XCTAssertTrue(card.waitForExistence(timeout: 15))
+        XCTAssertFalse(app.buttons["queue-download-fixture-held"].exists)
+        revealQueueSwipe(app, at: card, leading: true)
+        let action = app.buttons["queue-swipe-download-fixture-held"]
+        XCTAssertTrue(action.waitForExistence(timeout: 5))
+        XCTAssertTrue(machine.queueActionRequests().isEmpty, "Revealing Download and Retry must not mutate the job")
         XCTAssertEqual(action.label, "Download and Retry")
         action.tap()
         let feedback = app.staticTexts["queue-download-status-fixture-held"]
         XCTAssertTrue(feedback.waitForExistence(timeout: 5))
-        XCTAssertFalse(action.isEnabled)
         XCTAssertTrue(waitForQueueDownloadText(feedback, containing: "35"))
+        revealQueueSwipe(app, at: card, leading: true)
+        XCTAssertFalse(action.exists, "Busy recovery must not offer a duplicate native download action")
+        app.collectionViews["queue-list"].swipeUp()
         XCTAssertEqual(machine.installedRequests.count, 1)
         XCTAssertFalse(machine.queueActionRequests().contains("/api/queue/fixture-held/retry"))
         let attachment = XCTAttachment(screenshot: app.screenshot()); attachment.name = "Queue download feedback"; attachment.lifetime = .keepAlways; add(attachment)

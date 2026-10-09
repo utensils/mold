@@ -198,6 +198,127 @@ struct QueueStoreTests {
         #expect(queue.groups(for: hosts.hosts[0].id).count == 4)
     }
 
+    @Test func pendingCancelPreventsContextAndDragReorder() async throws {
+        let (queue, hosts, fake) = try await Self.setUp()
+        let id = hosts.hosts[0].id
+        let row = try #require(queue.listings[id]?.first { $0.id == "q1" })
+        fake.stub("reorderJob(id:position:)") { _ in () }
+        fake.stub("cancelJob(id:)") { _ in
+            await queue.move(row, up: false, on: id)
+            await queue.moveGroup([row.id], after: "q2", on: id)
+            return ()
+        }
+        await queue.cancel(row, on: id)
+        #expect(fake.count("reorderJob(id:position:)") == 0)
+    }
+
+    @Test func reorderReservesEveryMovedRowThroughRefresh() async throws {
+        let (queue, hosts, fake) = try await Self.setUp()
+        let id = hosts.hosts[0].id
+        let rows = try #require(queue.listings[id]).filter { $0.state.isReorderable }
+        fake.stub("cancelJob(id:)") { _ in () }
+        fake.stub("reorderJob(id:position:)") { _ in
+            for row in rows {
+                await MainActor.run { #expect(queue.isActing(row, on: id)) }
+                await queue.cancel(row, on: id)
+            }
+            return ()
+        }
+        fake.stub("queue()") { _ in
+            await MainActor.run {
+                for row in rows { #expect(queue.isActing(row, on: id)) }
+            }
+            return try Self.decode(QueueListing.self, Self.listing)
+        }
+        await queue.moveGroup(rows.map(\.id), after: nil, on: id)
+        #expect(fake.count("cancelJob(id:)") == 0)
+        for row in rows { #expect(!queue.isActing(row, on: id)) }
+    }
+
+    @Test func emptyDoesNotRacePendingRowCancel() async throws {
+        let (queue, hosts, fake) = try await Self.setUp()
+        let id = hosts.hosts[0].id
+        let row = try #require(queue.listings[id]?.first { $0.id == "q1" })
+        fake.stub("cancelAllQueued()", returning: try Self.decode(QueueCancelResult.self, #"{"cancelled":2}"#))
+        fake.stub("cancelHeldJob(id:)") { _ in true }
+        fake.stub("cancelJob(id:)") { _ in
+            await queue.empty([id])
+            return ()
+        }
+        await queue.cancel(row, on: id)
+        #expect(fake.count("cancelAllQueued()") == 0)
+        #expect(fake.count("cancelHeldJob(id:)") == 0)
+    }
+
+    @Test func moveRequiresCurrentQueuedRowSupportedOnlineMachine() async throws {
+        let (queue, hosts, fake) = try await Self.setUp()
+        let id = hosts.hosts[0].id
+        let row = try #require(queue.listings[id]?.first { $0.id == "q1" })
+        #expect(queue.canMove(row, on: id))
+        fake.stub("queue()", returning: try Self.decode(QueueListing.self,
+            #"{"entries":[{"id":"q1","state":"paused"},{"id":"q2","state":"queued"}]}"#))
+        await queue.poll(id)
+        #expect(!queue.canMove(row, on: id))
+        await queue.move(row, up: false, on: id)
+        #expect(fake.count("reorderJob(id:position:)") == 0)
+        hosts.setReachability(.down("Offline"), for: id)
+        #expect(!queue.canMove(row, on: id))
+        await queue.empty([id])
+        #expect(fake.count("cancelAllQueued()") == 0)
+        let (unsupported, unsupportedHosts, _) = try await Self.setUp(capabilities: #"{"queue":{}}"#)
+        let unsupportedID = unsupportedHosts.hosts[0].id
+        let unsupportedRow = try #require(unsupported.listings[unsupportedID]?.first { $0.id == "q1" })
+        #expect(!unsupported.canMove(unsupportedRow, on: unsupportedID))
+    }
+
+    @Test func emptyReservesPausedAndHeldAndSkipsAChangedHold() async throws {
+        let (queue, hosts, fake) = try await Self.setUp()
+        let id = hosts.hosts[0].id
+        let listing = try Self.decode(QueueListing.self,
+            #"{"entries":[{"id":"p","state":"paused"},{"id":"h","state":"held"}]}"#)
+        fake.stub("queue()", returning: listing); await queue.poll(id)
+        fake.stub("cancelHeldJob(id:)") { _ in true }
+        fake.stub("cancelAllQueued()") { _ in
+            await MainActor.run {
+                for row in listing.entries { #expect(queue.isActing(row, on: id)) }
+            }
+            let changed = try Self.decode(QueueListing.self,
+                #"{"entries":[{"id":"h","state":"running"}]}"#)
+            fake.stub("queue()", returning: changed)
+            await queue.poll(id)
+            return try Self.decode(QueueCancelResult.self, #"{"cancelled":1}"#)
+        }
+        await queue.empty([id])
+        #expect(fake.count("cancelHeldJob(id:)") == 0)
+        for row in listing.entries { #expect(!queue.isActing(row, on: id)) }
+    }
+
+    @Test func groupReorderStopsIfTheHostRouteChanges() async throws {
+        let (queue, hosts, fake) = try await Self.setUp()
+        let id = hosts.hosts[0].id
+        let rows = try #require(queue.listings[id]).filter { $0.state.isReorderable }
+        fake.stub("reorderJob(id:position:)") { _ in
+            try await MainActor.run { try hosts.update(id, name: "workstation", address: "10.0.0.5", apiKey: nil) }
+            await hosts.refreshAll()
+            return ()
+        }
+        await queue.moveGroup(rows.map(\.id), after: nil, on: id)
+        #expect(fake.count("reorderJob(id:position:)") == 1)
+    }
+
+    @Test func emptyStopsHeldDeletesIfTheHostRouteChanges() async throws {
+        let (queue, hosts, fake) = try await Self.setUp()
+        let id = hosts.hosts[0].id
+        fake.stub("cancelHeldJob(id:)") { _ in true }
+        fake.stub("cancelAllQueued()") { _ in
+            try await MainActor.run { try hosts.update(id, name: "workstation", address: "10.0.0.5", apiKey: nil) }
+            await hosts.refreshAll()
+            return try Self.decode(QueueCancelResult.self, #"{"cancelled":2}"#)
+        }
+        await queue.empty([id])
+        #expect(fake.count("cancelHeldJob(id:)") == 0)
+    }
+
     @Test func movingDownNamesTheQueuedIndexNotTheScreenRow() async throws {
         let (queue, hosts, fake) = try await Self.setUp()
         fake.stub("reorderJob(id:position:)") { _ in () }

@@ -184,7 +184,7 @@ use `UserFacingError.describe` (through `Error.sentence` on MainActor); backgrou
 workers call it directly. It records original local diagnostics in OSLog with
 private details, then supplies device/app wording. Do not point a local file
 error at a remote machine’s logs. A held Queue row shows its full-width reason
-once, outside the thumbnail column; keep Retry/Move controls and Dynamic Type.
+once, outside the thumbnail column; keep Move to controls and Dynamic Type. Cancel, Pause/Resume, Retry and Download and Retry live in native swipe actions and Job Details, not as card pills.
 
 **Queue model recovery.** QueueDownloadRecovery in MoldClient owns the native
 Download and Retry lifecycle. Show synchronous starting feedback, exact-ticket
@@ -209,4 +209,6 @@ writes remain pending until a later listing confirms them. Never convert missing
 selected-trash deletion support into live deletion; preserve the server refusal
 in the operation result.
 
-Queue Cancel remains visibly available for every currently actionable row, independently of batch metadata, retryability and transfer destinations. Failure Details preserves optional `error_detail` separately from the plain-English row explanation, falling back to the older machine’s reason. Copy includes machine and job identity. Cancel rechecks current state; Held actions always use the held-only endpoint and must never widen their intent after a state change. Current servers enforce this guard atomically; older servers may ignore the query, so do not promise that safeguard on older hosts.
+Queue Cancel remains reachable through native swipe actions and Job Details for every currently actionable row, independently of batch metadata, retryability and transfer destinations. Retry and Download and Retry use leading swipes plus accessible context menus and detail controls; preserve recovery status/progress and on-card Move to. Disable full-swipe activation, suppress busy recovery actions and recheck recovery availability inside their closures. Offer a read-only Details swipe when no leading mutation is eligible; settled/unknown states stay excluded from the live queue. Failure Details preserves optional `error_detail` separately from the plain-English row explanation, falling back to the older machine’s reason. Copy includes machine and job identity. Cancel rechecks current state; Held actions always use the held-only endpoint and must never widen their intent after a state change. Current servers enforce this guard atomically; older servers may ignore the query, so do not promise that safeguard on older hosts.
+
+Queue context-menu and Edit-mode reordering use row-aware `canMove`. Reserve every planned mover atomically through refresh, just as row Cancel/Pause does. Empty Queue reserves the currently affected queued, paused and Held IDs, refusing overlapping actions; keep existing bulk endpoint semantics, recheck host route/instance and current Held identity after its await, and retain the Held-only endpoint.
