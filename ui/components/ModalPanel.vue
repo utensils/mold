@@ -149,6 +149,13 @@ onBeforeUnmount(() =>
 }
 
 .ms-modal__panel {
+  /* Capped to the frame (inside the scrim's padding) with the body as the
+     only scroller: a long body — the licence dialog listing a dozen
+     components — used to grow the panel past the window and clip both the
+     title and the Accept/Cancel footer off-screen. */
+  display: flex;
+  flex-direction: column;
+  max-height: 100%;
   max-width: 92%;
   box-sizing: border-box;
   /* The raised-surface role, so cards inside a dialog still read as cards.
@@ -162,6 +169,7 @@ onBeforeUnmount(() =>
 }
 
 .ms-modal__head {
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
   gap: 5px;
@@ -181,6 +189,7 @@ onBeforeUnmount(() =>
 }
 
 .ms-modal__steps {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 7px;
@@ -200,10 +209,14 @@ onBeforeUnmount(() =>
 }
 
 .ms-modal__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
   padding: 16px;
 }
 
 .ms-modal__footer {
+  flex-shrink: 0;
   border-top: var(--mold-bw) solid var(--mold-border);
   padding: 14px 16px;
   display: flex;

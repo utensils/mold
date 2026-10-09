@@ -278,4 +278,24 @@ describe("ModalPanel layering and ground", () => {
       /\.ms-modal__panel \{[^}]*background: var\(--mold-panel-raised, var\(--mold-bg\)\)/s,
     );
   });
+
+  /*
+   * A long body (the licence dialog listing a dozen Hunyuan3D components)
+   * grew the panel past the window and clipped both its title and the
+   * Accept/Cancel footer off-screen. The panel is capped to its frame and
+   * only the body scrolls, so the header and footer always stay reachable.
+   */
+  it("fits its frame: the panel is capped and only the body scrolls", () => {
+    expect(ModalPanelSource).toMatch(
+      /\.ms-modal__panel \{[^}]*display: flex;[^}]*flex-direction: column;[^}]*max-height: 100%;/s,
+    );
+    expect(ModalPanelSource).toMatch(
+      /\.ms-modal__body \{[^}]*min-height: 0;[^}]*overflow-y: auto;/s,
+    );
+    for (const fixed of ["steps", "head", "footer"]) {
+      expect(ModalPanelSource).toMatch(
+        new RegExp(`\\.ms-modal__${fixed} \\{[^}]*flex-shrink: 0;`, "s"),
+      );
+    }
+  });
 });
