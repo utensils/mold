@@ -237,6 +237,9 @@ jobs:
               - 'scripts/lib/cuda-release-archive.sh'
               - 'scripts/aur/test-in-docker.sh'
               - 'scripts/aur/update-pkgbuild.sh'
+              - 'scripts/install-linux-desktop-files.sh'
+              - 'scripts/package-desktop-linux-archive.sh'
+              - 'website/guide/desktop.md'
               - 'scripts/verify-h3-release-exclusion.sh'
               - 'scripts/capture-minimax-h3-qwen-layer50.py'
               - 'scripts/tests/minimax-h3-qwen-layer50-capture-contract.py'
@@ -260,6 +263,7 @@ jobs:
               - 'scripts/tests/install-cuda-arch.sh'
               - 'scripts/tests/install-cpu.sh'
               - 'scripts/tests/aur-smoke-script.sh'
+              - 'scripts/tests/aur-desktop-contract.sh'
               - 'scripts/tests/cuda-qualification-contract.sh'
               - 'scripts/tests/minimax-h3-attention-release-contract.sh'
               - 'scripts/bench-qwen.sh'
@@ -583,6 +587,7 @@ jobs:
 # #           bash scripts/tests/install-cuda-arch.sh
 # #           bash scripts/tests/install-cpu.sh
 # #           bash scripts/tests/aur-smoke-script.sh
+# #           bash scripts/tests/aur-desktop-contract.sh
 # #           bash scripts/tests/cuda-qualification-contract.sh
 # #           bash scripts/tests/minimax-h3-attention-release-contract.sh
 # #           bash scripts/tests/bench-qwen-parse.sh

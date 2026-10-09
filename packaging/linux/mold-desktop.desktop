@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Mold
+GenericName=AI Image Generator
+Comment=Local AI image and video generation
+Exec=mold-desktop %U
+Icon=com.utensils.mold
+Terminal=false
+Categories=Graphics;
+Keywords=AI;image;video;diffusion;flux;stable diffusion;
+StartupNotify=true
+StartupWMClass=mold-desktop

@@ -549,7 +549,10 @@ require_text "crates/mold-candle/src/minimax_h3/attention.rs" \
 # the flake take the same rule.
 require_text "Dockerfile" 'RUN gpu_feature="cuda,flash-attn"; \'
 require_text "Dockerfile" 'if [ "${CUDA_COMPUTE_CAP}" = "120" ]; then gpu_feature="cuda"; fi; \'
-for aur_source in packaging/aur/mold-ai/PKGBUILD packaging/aur/mold-ai-git/PKGBUILD; do
+for aur_source in \
+  packaging/aur/mold-ai/PKGBUILD \
+  packaging/aur/mold-ai-git/PKGBUILD \
+  packaging/aur/mold-ai-desktop/PKGBUILD; do
   require_text "$aur_source" 'local gpu_feature="cuda,flash-attn"'
   require_text "$aur_source" '[[ "${CUDA_COMPUTE_CAP}" == "89" ]] && gpu_feature="h3-cuda"'
   # sm120 falls back to math attention on every surface that composes its own

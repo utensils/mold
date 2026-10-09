@@ -41,4 +41,36 @@ for entry in .INSTALL usr/share/zsh/site-functions/_mold; do
     echo "generated checks accepted empty $entry" >&2; exit 1
   fi
 done
+
+# The desktop recipes share one generated layout check; both must parse, and
+# the check must refuse a package that lost any installed member.
+for desktop_pkg in mold-ai-desktop mold-ai-desktop-bin; do
+  PATH="$scratch/bin:$PATH" TEST_CAPTURE="$scratch/$desktop_pkg" \
+    bash "$repo_root/scripts/aur/test-in-docker.sh" --as-is "$desktop_pkg" >/dev/null
+  bash -n "$scratch/$desktop_pkg"
+  grep -Fq 'desktop-file-validate /usr/share/applications/mold-desktop.desktop' \
+    "$scratch/$desktop_pkg"
+done
+awk '/^for member in .*usr\/bin\/mold-desktop/ {emit=1} emit {print} emit && /^done$/ {exit}' \
+  "$scratch/mold-ai-desktop-bin" > "$scratch/desktop-checks"
+[[ -s "$scratch/desktop-checks" ]]
+cat > "$scratch/desktop-fixture" <<'STUB'
+set -euo pipefail
+pkgfile=fixture.pkg.tar.zst
+bsdtar() {
+  for entry in usr/bin/mold-desktop usr/share/applications/mold-desktop.desktop \
+    usr/share/metainfo/com.utensils.mold.metainfo.xml \
+    usr/share/icons/hicolor/128x128/apps/com.utensils.mold.png \
+    usr/share/icons/hicolor/512x512/apps/com.utensils.mold.png; do
+    [[ "$entry" == "${TEST_MISSING:-}" ]] || echo "$entry"
+  done
+}
+source "$1"
+STUB
+bash "$scratch/desktop-fixture" "$scratch/desktop-checks"
+for entry in usr/bin/mold-desktop usr/share/applications/mold-desktop.desktop; do
+  if TEST_MISSING="$entry" bash "$scratch/desktop-fixture" "$scratch/desktop-checks" > /dev/null 2>&1; then
+    echo "generated desktop checks accepted a missing $entry" >&2; exit 1
+  fi
+done
 echo 'generated Arch package smoke checks: ok'

@@ -195,12 +195,21 @@ curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | sh
 
 ## Arch Linux / AUR
 
-Three packages on the [AUR](https://aur.archlinux.org/):
+Three CLI packages on the [AUR](https://aur.archlinux.org/):
 
 ```bash
 paru -S mold-ai-bin     # Prebuilt GPU-free CLI for remote hosts; no CUDA required.
 paru -S mold-ai         # Builds from source; set CUDA_COMPUTE_CAP for other GPUs
 paru -S mold-ai-git     # Builds from main HEAD
+```
+
+And two for the desktop app, which install `/usr/bin/mold-desktop` with a
+launcher entry and icons beside any CLI package (they conflict only with each
+other):
+
+```bash
+paru -S mold-ai-desktop-bin   # Prebuilt GPU-free desktop app for remote hosts
+CUDA_COMPUTE_CAP=89 paru -S mold-ai-desktop   # Builds from source with CUDA (86, 89 or 120)
 ```
 
 Substitute `yay`, `pikaur`, or any other AUR helper as appropriate. With
@@ -212,7 +221,7 @@ cd mold-ai-bin
 makepkg -si
 ```
 
-**Conflict with `extra/mold`**: All three packages declare `conflicts=('mold')`
+**Conflict with `extra/mold`**: All three CLI packages declare `conflicts=('mold')`
 because they install `/usr/bin/mold`; the same path used by the
 [rui314 linker](https://archlinux.org/packages/extra/x86_64/mold/). You cannot
 have both installed simultaneously. If you need the linker for your build

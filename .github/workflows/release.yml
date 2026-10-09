@@ -220,6 +220,92 @@ jobs:
             mold-windows-self-signing.cert.cer
             mold-x86_64-pc-windows-msvc-cpu.zip
 
+  # GPU-free Linux desktop app (CPU / remote hosts), the Linux twin of the
+  # Windows installer above and the payload of the `mold-ai-desktop-bin` AUR
+  # package. A plain cargo build with no nvcc kernels and no linuxdeploy
+  # bundling, so it stays far below the paused CUDA AppImage's two hours.
+  build-linux-desktop-cpu:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: oven-sh/setup-bun@v2
+      - name: Install Tauri build dependencies
+        run: |
+          sudo apt-get update
+          # `protobuf-compiler` is for the `pulid` feature: `candle-onnx`'s
+          # build script drives `prost-build`, which shells out to `protoc`.
+          sudo apt-get install -y \
+            build-essential clang lld nasm pkg-config protobuf-compiler \
+            libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev \
+            desktop-file-utils appstream \
+            xvfb xdotool x11-utils openbox dbus-x11
+      - name: Build embedded web SPA and desktop frontend
+        run: |
+          ./scripts/ensure-web-dist.sh
+          TAURI_ENV_PLATFORM=linux bun run build:desktop
+      # `tauri/custom-protocol` is what `tauri build` adds: it serves the
+      # embedded desktop/dist instead of the devUrl.
+      - name: Build GPU-free desktop app
+        run: >-
+          cargo build --locked --release
+          --manifest-path desktop/src-tauri/Cargo.toml
+          --features tauri/custom-protocol,pulid,webp
+      - name: Verify the GPU-free desktop binary
+        run: |
+          set -euo pipefail
+          binary=desktop/src-tauri/target/release/mold-desktop
+          scripts/verify-h3-release-exclusion.sh "$binary"
+          if ldd "$binary" | grep -E 'libcuda|libcudart|libcublas|libcudnn|libnvrtc'; then
+            echo "::error::the GPU-free desktop binary links a CUDA library"
+            exit 1
+          fi
+          desktop-file-validate packaging/linux/mold-desktop.desktop
+          appstreamcli validate --no-net packaging/linux/com.utensils.mold.metainfo.xml
+      # Launchers match a window to its entry by the class GTK reports, which
+      # is the program name while Tauri's GTK app id is off; the entry is
+      # named and keyed (StartupWMClass) for it.
+      - name: Launch under Xvfb and check the window class
+        run: |
+          set -euo pipefail
+          xvfb-run -a dbus-run-session -- bash -s -- desktop/src-tauri/target/release/mold-desktop <<'EOF'
+          set -euo pipefail
+          openbox >/tmp/mold-openbox.log 2>&1 &
+          wm_pid=$!
+          sleep 1
+          MOLD_HOME="$(mktemp -d)" WEBKIT_DISABLE_COMPOSITING_MODE=1 "$1" &
+          pid=$!
+          trap 'kill "$pid" "$wm_pid" 2>/dev/null || true' EXIT
+          window=
+          for _ in $(seq 1 60); do
+            kill -0 "$pid"
+            window=$(xdotool search --onlyvisible --pid "$pid" 2>/dev/null | head -n 1 || true)
+            [[ -n "$window" ]] || window=$(xdotool search --onlyvisible --name '^Mold$' 2>/dev/null | head -n 1 || true)
+            [[ -n "$window" ]] && break
+            sleep 1
+          done
+          [[ -n "$window" ]] || { echo "::error::mold-desktop opened no window"; exit 1; }
+          wm_class=$(xprop -id "$window" WM_CLASS)
+          echo "$wm_class"
+          grep -Fq '"mold-desktop"' <<<"$wm_class" \
+            || { echo "::error::WM_CLASS no longer names mold-desktop; update packaging/linux/mold-desktop.desktop"; exit 1; }
+          EOF
+      - name: Package GPU-free desktop archive
+        run: >-
+          scripts/package-desktop-linux-archive.sh
+          desktop/src-tauri/target/release/mold-desktop
+          mold-desktop-x86_64-unknown-linux-gnu-cpu.tar.gz
+      - name: Build and install Arch package without CUDA
+        run: scripts/aur/test-in-docker.sh --archive "$PWD/mold-desktop-x86_64-unknown-linux-gnu-cpu.tar.gz" mold-ai-desktop-bin
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mold-desktop-x86_64-unknown-linux-gnu-cpu
+          path: mold-desktop-x86_64-unknown-linux-gnu-cpu.tar.gz
+
   # Ampere (RTX 3090/A40, sm_86)
   build-linux-sm86:
     if: github.event_name != 'schedule'
@@ -1248,6 +1334,7 @@ jobs:
             | macOS Apple Silicon | Metal | `mold-aarch64-apple-darwin.tar.gz` |
             | Windows x86_64 CLI | CPU / remote client | `mold-x86_64-pc-windows-msvc-cpu.zip` |
             | Windows x86_64 Desktop | CPU / remote hosts | `Mold-windows-x64-self-signed.exe` |
+            | Linux x86_64 Desktop | CPU / remote hosts | `mold-desktop-x86_64-unknown-linux-gnu-cpu.tar.gz` |
             | Linux x86_64 | GPU-free remote CLI | `mold-x86_64-unknown-linux-gnu-cpu.tar.gz` |
             | Linux x86_64 | CUDA — RTX 3090 / A40 (Ampere) | `mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz` |
             | Linux x86_64 | CUDA — RTX 40-series (Ada) | `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz` |
@@ -1262,6 +1349,8 @@ jobs:
             **Mac: use Mold Studio.** `Mold-Studio-macos-arm64.dmg` (also attached as `Mold-native-*.dmg`) — the native macOS app (Apple Silicon, macOS 26 or newer), signed, notarized and stapled. It updates itself through Sparkle; `mold-native-appcast.xml` beside it is that channel's feed. Stable link to the newest build: https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg
 
             `Mold-macos-arm64.dmg` (also attached with its versioned name) — the legacy Tauri desktop app for macOS, for Macs that cannot run macOS 26. Signed, notarized, and stapled. Stable link: https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg
+
+            `mold-desktop-x86_64-unknown-linux-gnu-cpu.tar.gz` — the Linux desktop app for remote GPU hosts (no CUDA), as a `usr/` tree with its .desktop entry and icons. Arch users install it as the `mold-ai-desktop-bin` AUR package; `mold-ai-desktop` builds the CUDA app from source.
 
             `Mold-windows-x64-self-signed.exe` — self-signed NSIS installer. Verify and explicitly trust the attached `mold-windows-self-signing.cert.cer` before installation. This certificate is not publicly trusted and does not suppress SmartScreen by itself.
 
@@ -1337,6 +1426,7 @@ jobs:
         release-version,
         build-windows,
         build-linux-cpu,
+        build-linux-desktop-cpu,
         build-linux-sm86,
         build-linux-sm89,
         build-linux-sm100,
@@ -1366,6 +1456,7 @@ jobs:
           )
           gh release upload "$GITHUB_REF_NAME" \
             artifacts/mold-x86_64-unknown-linux-gnu-cpu.tar.gz \
+            artifacts/mold-desktop-x86_64-unknown-linux-gnu-cpu.tar.gz \
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz \
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz \
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz \
@@ -1456,7 +1547,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pkgname: [mold-ai-bin, mold-ai]
+        pkgname: [mold-ai-bin, mold-ai, mold-ai-desktop-bin, mold-ai-desktop]
     steps:
       # Bail out cleanly when AUR_SSH_PRIVATE_KEY hasn't been set. The
       # one-time bootstrap (registering the AUR account's SSH key +
@@ -1508,3 +1599,8 @@ jobs:
           # both so we are resilient if either rotates.
           ssh_keyscan_types: "rsa,ed25519"
           allow_empty_commits: false
+          # A package's first publish clones an empty AUR repo, whose unborn
+          # branch takes the container's git default; the action pushes
+          # `master`, so name it explicitly. A no-op on an existing package —
+          # this is what creates new AUR packages with no manual seed push.
+          post_process: git symbolic-ref HEAD refs/heads/master

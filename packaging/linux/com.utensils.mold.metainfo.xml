@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.utensils.mold</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Mold</name>
+  <summary>Local AI image and video generation</summary>
+  <developer id="io.utensils">
+    <name>James Brink and Jeffrey Dilley</name>
+  </developer>
+  <description>
+    <p>
+      Mold generates images and video locally on your GPU — FLUX, SD, SDXL,
+      SD3.5, Z-Image, Qwen-Image, LTX video and more — with a gallery, model
+      manager, and live job queue.
+    </p>
+    <p>
+      It runs its engine in-process or connects to a remote mold server.
+    </p>
+  </description>
+  <launchable type="desktop-id">mold-desktop.desktop</launchable>
+  <url type="homepage">https://github.com/utensils/mold</url>
+  <url type="bugtracker">https://github.com/utensils/mold/issues</url>
+  <categories>
+    <category>Graphics</category>
+  </categories>
+  <provides>
+    <binary>mold-desktop</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+</component>
