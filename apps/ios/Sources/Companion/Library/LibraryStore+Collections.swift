@@ -2,25 +2,51 @@ import Foundation
 import MoldClient
 
 extension LibraryStore {
-    /// Host-local ids are the membership values in each print's metadata.
-    var hiddenCollectionIDs: [MoldHost.ID: Set<String>] {
-        var result: [MoldHost.ID: Set<String>] = [:]
-        for shelf in shelves where shelf.hidden {
-            for (host, id) in shelf.hosts { result[host, default: []].insert(id) }
-        }
-        return result
+    var machineIDs: Set<MoldHost.ID> { machineID.map { [$0] } ?? [] }
+    var scopedPool: [LibraryEntry] {
+        scopedPool(on: machineIDs)
+    }
+    func scopedPool(on ids: Set<MoldHost.ID>) -> [LibraryEntry] {
+        ids.isEmpty ? pool : pool.compactMap { $0.presented(onAnyOf: ids) }
+    }
+    var hiddenCollectionIDs: [MoldHost.ID: Set<String>] { CollectionShelf.hiddenIDs(in: shelves) }
+
+    func shelfPresence(_ shelf: CollectionShelf) -> CollectionShelf.Presence {
+        shelfPresence(shelf, on: machineIDs)
     }
 
-    /// Hiding a merged shelf changes every machine's copy of it.
+    func shelfPresence(_ shelf: CollectionShelf, on ids: Set<MoldHost.ID>) -> CollectionShelf.Presence {
+        shelf.presence(on: ids, available: collectionInventoryAvailable.intersection(Set(hosts.upHosts.map(\.id))))
+    }
+
+    /// Visibility is a shared shelf attribute, even while browsing one machine.
     func setShelfHidden(_ shelf: CollectionShelf, hidden: Bool) async {
-        for (id, collectionID) in shelf.hosts.sorted(by: { $0.key.uuidString < $1.key.uuidString }) {
-            guard let host = hosts.host(id), let backend = hosts.backend(for: id) else { continue }
+        collectionVisibility.set(shelf.slug, hidden: hidden, hosts: hosts.hosts)
+        collectionVisibility.persist(to: .standard, key: "library.collectionVisibility")
+        rebuildNow()
+        await reconcileCollectionVisibility()
+    }
+
+    func reconcileCollectionVisibility() async {
+        guard !reconcilingCollectionVisibility else { return }
+        reconcilingCollectionVisibility = true
+        defer {
+            reconcilingCollectionVisibility = false
+            collectionVisibility.persist(to: .standard, key: "library.collectionVisibility")
+            rebuildNow()
+        }
+        await collectionVisibility.reconcile(hosts: { self.hosts.hosts },
+            collections: { self.collectionInventory }, available: { self.collectionInventoryAvailable }) { host, collection, hidden in
+            guard let backend = self.hosts.backend(for: host.id) else { return false }
             do {
-                _ = try await backend.updateCollection(id: collectionID, change: CollectionChange(hidden: hidden))
+                let updated = try await backend.updateCollection(id: collection.id, change: CollectionChange(hidden: hidden))
+                guard self.hosts.host(host.id) == host else { return false }
+                self.acceptCollection(updated, on: host.id)
+                return true
             } catch {
-                hosts.report(host, doing: hidden ? String(localized: "hide the collection") : String(localized: "show the collection"), error)
+                self.hosts.report(host, doing: hidden ? String(localized: "hide the shared collection") : String(localized: "show the shared collection"), error)
+                return false
             }
-            await reload(id)
         }
     }
 }

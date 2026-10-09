@@ -31,9 +31,9 @@ extension LibraryViewer {
             Spacer()
             Button { actions.toggleFavorite([entry]) } label: {
                 Label("Favourite",
-                      systemImage: entry.print.isFavorite ? "star.fill" : "star")
+                      systemImage: entry.isFavorite ? "star.fill" : "star")
             }
-            .help(entry.print.isFavorite ? "Remove from Favourites" : "Add to Favourites")
+            .help(entry.isFavorite ? "Remove from Favourites" : "Add to Favourites")
             Button { actions.save([entry]) } label: {
                 Label("Save", systemImage: "square.and.arrow.down")
             }

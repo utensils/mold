@@ -195,3 +195,16 @@ on same-model historical success or after a failed/cancelled companion download.
 Use concise held captions and one reason paragraph; narrow/AX action rows stack.
 
 **Visible reuse media.** Restore supported legacy retained roles into ordinary authoring wells before allowing submission, including all endpoint/keyframe and reference-image inputs. Preserve list order, exact frame indices, manual canvas, continuation overlap and explicit reference strength. Retire each materialized or superseded legacy role, including the mask paired with a replaced source; removal must never revive an archived fallback. Fence every asynchronous operation by reuse identity, immutable origin route/instance, per-role monotonic attachment revisions and component lifetime. Scalar edits remain live. Keep restoration failures blocking until deliberate recovery/discard; descriptor-only typed references retain their exact-set authority.
+
+**Shared library machine scope and visibility.** Library's Machine picker projects
+copies before membership, counts and mutations. Shelf badges distinguish absent
+(successful collection inventory) from unavailable (failed/offline inventory).
+Hidden protection checks the full merged identity before machine projection; an
+explicit collection still requires membership on the selected host. Use
+`CollectionShelf.hiddenIDs` and `LibraryEntry.isFavorite`/`tags` for shared
+attribute projections. CollectionVisibilityLedger persists deliberate hide/show
+intent, fences superseded edits and replacement routes, and conservatively heals
+mixed hidden replicas during fresh native inventory reconciliation. Successful
+writes remain pending until a later listing confirms them. Never convert missing
+selected-trash deletion support into live deletion; preserve the server refusal
+in the operation result.

@@ -1025,3 +1025,13 @@ other jobs may need.
 ### Reuse input media
 
 Reuse settings restores retained opening and closing frames into editable wells, preserving keyframe indices and ordered image references. Audio, source/continuation video, identity photos and control images restore with their saved settings where the selected recipe supports them. Continuation overlap and authored reference strength (including zero) are preserved. Older prints without recorded reference strength keep the server default. The original machine must retain the inputs; missing, damaged or oversized inputs are disclosed before generation. A new attachment or explicit removal wins over a late download, and restored wells never have a hidden archive fallback that can revive removed media.
+
+Library machine filters now scope physical collection memberships, collection
+counts/covers, favorites and tag suggestions. Global collection names remain
+visible, with absent collections distinguished from unavailable inventory.
+Hidden logical media stays excluded from the default Library even when a copy
+on the selected machine has not yet received its collection membership.
+Collection Hide/Show remains shared across matching names, with ordered local
+retry intentions bound to each machine route and installation; pending changes
+retry while this client runs and refreshes. Removing or organizing a media copy
+under a machine filter affects that machine's copy.

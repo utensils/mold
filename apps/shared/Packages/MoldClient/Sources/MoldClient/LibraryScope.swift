@@ -71,3 +71,14 @@ public extension LibraryScope {
         return resolved
     }
 }
+
+public extension LibraryScope {
+    /// The denominator for a narrowed view is this shelf on these machines,
+    /// before text/kind/tag filters, with the same hidden protection as its grid.
+    func baselineCount(in entries: [LibraryEntry], machines: Set<MoldHost.ID>,
+                       shelves: [CollectionShelf], hiddenIDs: [MoldHost.ID: Set<String>]) -> Int {
+        var query = LibraryQuery()
+        query.tokens = machines.map { .machine(id: $0, name: "") }
+        return resolve(query, shelves: shelves, hiddenCollectionIDs: hiddenIDs).apply(to: entries).count
+    }
+}

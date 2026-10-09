@@ -632,3 +632,63 @@ describe("mutations fan out to every copy's host", () => {
     expect(api.deleteCollection).toHaveBeenCalledWith(platoTarget, "b");
   });
 });
+
+it("preserves private inventory after a failed refresh on the same installation", async () => {
+  const previous = snapshot("plato", {
+    collections: [collection("private", "Private", { hidden: true })],
+    collectionsListingOk: true,
+    routeUrl: PLATO.url,
+    instanceId: null,
+  });
+  const fetchers = {
+    capabilities: vi.fn(async () => {
+      throw new Error("offline");
+    }),
+    collections: vi.fn(async () => []),
+    tags: vi.fn(async () => []),
+    trash: vi.fn(async () => []),
+  };
+  const [next] = await fetchOrganization([PLATO], fetchers, undefined, [
+    previous,
+  ]);
+  expect(next!.collections).toEqual(previous.collections);
+  expect(next!.collectionsListingOk).toBe(false);
+  const [replacement] = await fetchOrganization(
+    [{ ...PLATO, instanceId: "replacement" }],
+    fetchers,
+    undefined,
+    [{ ...previous, instanceId: "old" }],
+  );
+  expect(replacement!.collections).toEqual([]);
+});
+it("protects an older deferred collection GET from reversing explicit Show", async () => {
+  const visibility = await import("@studio/lib/collectionVisibility");
+  visibility.resetCollectionVisibilityForTests();
+  let release!: (rows: Collection[]) => void;
+  const listing = new Promise<Collection[]>((resolve) => {
+    release = resolve;
+  });
+  const fetchers = {
+    capabilities: vi.fn(async () => ({
+      gallery: { can_delete: true, organize: true },
+    })),
+    collections: vi.fn(() => listing),
+    tags: vi.fn(async () => []),
+    trash: vi.fn(async () => []),
+  };
+  const task = fetchOrganization([PLATO], fetchers);
+  await vi.waitFor(() => expect(fetchers.collections).toHaveBeenCalled());
+  visibility.rememberCollectionVisibility("private", false, [
+    {
+      hostId: PLATO.id,
+      target: { baseUrl: PLATO.url, apiKey: PLATO.apiKey ?? null },
+      instanceId: null,
+      collections: [],
+      listingOk: false,
+    },
+  ]);
+  release([collection("private", "Private", { hidden: true })]);
+  const [snapshot] = await task;
+  expect(snapshot!.collections[0]!.hidden).toBe(false);
+  visibility.resetCollectionVisibilityForTests();
+});

@@ -6,19 +6,22 @@ import MoldClient
 extension LibraryStore {
 
     /// Every machine's collections, folded into the shelves a person sees.
-    var shelves: [CollectionShelf] { CollectionShelf.merge(collectionsPerHost) }
+    var shelves: [CollectionShelf] {
+        CollectionShelf.merge(collectionsPerHost).map {
+            $0.overriding(hidden: collectionVisibility.desiredHidden(slug: $0.slug, fallback: $0.hidden))
+        }
+    }
 
     /// Which collections each machine hides, as that machine's own ids -- the
     /// form a print's `collections` are in.
     var hiddenCollectionIDs: [MoldHost.ID: Set<String>] {
-        collectionsPerHost.mapValues { collections in
-            Set(collections.filter { $0.hidden == true }.map(\.id))
-        }
+        CollectionShelf.hiddenIDs(in: shelves)
     }
 
     func shelf(slug: String) -> CollectionShelf? { shelves.first { $0.slug == slug } }
 
     func refreshOrganization() async {
+        let visibilityGeneration = collectionVisibility.generation
         await withTaskGroup(of: (MoldHost, Result<[Collection], Error>, Result<[TagCount], Error>).self) { group in
             for host in hosts.hosts {
                 let client = hosts.backend(for: host)
@@ -40,7 +43,12 @@ extension LibraryStore {
             for await (host, collectionsResult, tagsResult) in group {
                 guard !Task.isCancelled, hosts.host(host.id) == host else { continue }
                 let id = host.id
-                if case let .success(collections) = collectionsResult { collectionsPerHost[id] = collections }
+                if case let .success(collections) = collectionsResult {
+                    if collectionVisibility.generation == visibilityGeneration {
+                        collectionsPerHost[id] = collections
+                        collectionInventoryAvailable.insert(id)
+                    }
+                } else { collectionInventoryAvailable.remove(id) }
                 if case let .success(counts) = tagsResult { tags.perHost[id] = counts }
                 switch (collectionsResult, tagsResult) {
                 case (.success, .success):
@@ -58,6 +66,7 @@ extension LibraryStore {
                 }
             }
         }
+        await reconcileCollectionVisibility()
     }
 
     // MARK: - Filing

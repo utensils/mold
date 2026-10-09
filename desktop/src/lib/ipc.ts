@@ -1,3 +1,7 @@
+import {
+  captureMirrorOrganization,
+  applyMirrorOrganization,
+} from "@studio/api/galleryMirrorOrganization";
 import type {
   RunPodCreateInput,
   RunPodNetworkVolume,
@@ -432,13 +436,20 @@ export const ipc = {
     timestamp?: number | null,
   ): Promise<string> {
     if (!inTauri()) throw new Error("Local saves require the desktop app.");
-    await ipc.ensureLocalServer();
-    return invoke<string>("mirror_gallery_print", {
+    const local = await ipc.ensureLocalServer();
+    const organization = await captureMirrorOrganization(source, filename);
+    const copied = await invoke<string>("mirror_gallery_print", {
       source,
       filename,
       metadata: metadata ?? null,
       timestamp: timestamp ?? null,
     });
+    await applyMirrorOrganization(
+      { baseUrl: local.baseUrl, apiKey: local.apiKey },
+      copied,
+      organization,
+    );
+    return copied;
   },
   /** Write encoded output bytes (base64) into this Mac's output dir. */
   saveOutputBytes(

@@ -18,7 +18,7 @@ extension LibraryPane {
         return LibrarySelection(
             targets: entries.map(\.id),
             count: entries.count,
-            allFavorite: !entries.isEmpty && entries.allSatisfy(\.print.isFavorite),
+            allFavorite: !entries.isEmpty && entries.allSatisfy(\.isFavorite),
             scope: navigation.scope,
             shelves: library.shelves,
             enclosingShelf: enclosingShelf,

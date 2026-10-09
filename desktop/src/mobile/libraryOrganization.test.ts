@@ -545,3 +545,29 @@ describe("scopedLibraryCopies", () => {
     expect(scopedLibraryCopies(copies, "removed")).toEqual([]);
   });
 });
+
+it("selected machine favorite reads the physical copy rather than the opposite host union", async () => {
+  const { scopedPrintOrganization } = await import("./libraryOrganization");
+  const copies = [
+    { hostId: "one", filename: "shared.png", favorite: false },
+    { hostId: "two", filename: "shared.png", favorite: true },
+  ];
+  const global = {
+    favorite: true,
+    title: null,
+    tags: [],
+    collections: [],
+    trashedAt: null,
+    purgeAt: null,
+    unresolvedCollectionIds: [],
+  };
+  expect(scopedPrintOrganization(copies[0]!, copies, () => null, "one", global)?.favorite).toBe(
+    false,
+  );
+  expect(scopedPrintOrganization(copies[1]!, copies, () => null, "two", global)?.favorite).toBe(
+    true,
+  );
+  expect(scopedPrintOrganization(copies[0]!, copies, () => null, null, global)?.favorite).toBe(
+    true,
+  );
+});

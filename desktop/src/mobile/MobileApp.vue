@@ -1,4 +1,12 @@
 <script setup lang="ts">
+import {
+  desiredCollectionHidden,
+  collectionVisibilityRevision,
+  protectCollectionVisibilityListing,
+  collectionAvailability,
+  rememberCollectionVisibility,
+  reconcileCollectionVisibility,
+} from "@studio/lib/collectionVisibility";
 import { restoreRetainedDraftMedia } from "@studio/lib/retainedDraftMedia";
 import {
   connectionHealth,
@@ -80,6 +88,7 @@ import { thumbnailRenditionQuery, thumbnailTier } from "@studio/lib/thumbnailPer
 import {
   collectionSlug,
   collectionSlugResolver,
+  unionOrganization,
   displayTitle,
   planOrganizationFanout,
   rememberSessionScroll,
@@ -101,7 +110,6 @@ import {
   listTrash as listHostTrash,
   mutateGalleryBulk,
   updateCollection as updateHostCollection,
-  updateCollectionHidden as updateHostCollectionHidden,
 } from "@studio/api/galleryOrganization";
 import {
   enqueueGalleryMutation,
@@ -406,6 +414,7 @@ import {
   mergeHostTags,
   mergeTrashSnapshot,
   mergedCollectionsFor,
+  scopedPrintOrganization,
   purgeChipLabel,
   requestTitle,
   runOrganizationFanout,
@@ -9138,9 +9147,54 @@ const libraryScopes = computed(() =>
 const hostNamesById = computed(() =>
   Object.fromEntries(connectedHosts.value.map((host) => [host.id, host.name])),
 );
-const libraryCollectionCards = computed<MobileCollectionCard[]>(() =>
-  collectionCards(mergedCollectionsFor(hostCollections, connectedHosts.value), hostNamesById.value),
-);
+const collectionListingOk = reactive<Record<string, boolean>>({});
+const collectionReadRevisions = reactive<Record<string, number>>({});
+const libraryCollectionCards = computed<MobileCollectionCard[]>(() => {
+  const copies = scopedLibraryCopies(galleryCopies, libraryFilters.hostId);
+  const organizations = galleryOrganization.value;
+  const resolver = collectionSlugResolver(
+    connectedHosts.value.map((h) => ({ hostId: h.id, collections: hostCollections[h.id] ?? [] })),
+  );
+  const counts = new Map<string, number>();
+  for (const group of groupLogicalGalleryPrints(copies)) {
+    const physical = unionOrganization(
+      group.copies.map((c) => ({ hostId: c.hostId, item: c })),
+      { resolveCollectionSlug: resolver },
+    );
+    const org = libraryFilters.hostId
+      ? physical
+      : (organizations.get(galleryPrintKey(group.representative)) ?? physical);
+    for (const slug of org.collections) counts.set(slug, (counts.get(slug) ?? 0) + 1);
+  }
+  return collectionCards(
+    mergedCollectionsFor(hostCollections, connectedHosts.value),
+    hostNamesById.value,
+  ).map((card) => ({
+    ...card,
+    count: counts.get(card.slug) ?? 0,
+    availability: libraryFilters.hostId
+      ? collectionAvailability(
+          card.hostIds.map((hostId) => ({ hostId })),
+          libraryFilters.hostId,
+          collectionListingOk[libraryFilters.hostId] === true,
+        )
+      : "present",
+    hidden: desiredCollectionHidden(card.slug, card.hidden),
+    cover:
+      libraryFilters.hostId && card.cover?.hostId !== libraryFilters.hostId ? null : card.cover,
+    hostsLabel: libraryFilters.hostId
+      ? collectionAvailability(
+          card.hostIds.map((hostId) => ({ hostId })),
+          libraryFilters.hostId,
+          collectionListingOk[libraryFilters.hostId] === true,
+        ) === "absent"
+        ? `Not on ${hostNamesById.value[libraryFilters.hostId]}`
+        : collectionListingOk[libraryFilters.hostId] !== true
+          ? `Unavailable on ${hostNamesById.value[libraryFilters.hostId]}`
+          : (hostNamesById.value[libraryFilters.hostId] ?? libraryFilters.hostId)
+      : card.hostsLabel,
+  }));
+});
 const hiddenCollectionSlugs = computed(
   () =>
     new Set(libraryCollectionCards.value.filter((card) => card.hidden).map((card) => card.slug)),
@@ -9174,7 +9228,9 @@ const libraryFilterTags = computed(() => {
       : [];
   return visibleTagCounts(
     mergedTags.value,
-    visible.map((print) => organizationOf(print) ?? { tags: [] }),
+    visible
+      .filter((p) => !libraryFilters.hostId || p.hostId === libraryFilters.hostId)
+      .map((print) => scopedOrganizationOf(print) ?? { tags: [] }),
     excluded.map((print) => organizationOf(print) ?? { tags: [] }),
   );
 });
@@ -9354,7 +9410,13 @@ const selectedGalleryKeysList = computed(() => [...gallerySelection.value]);
 /** Whether every selected print is already a favorite (♥ toggles off then). */
 const selectedAllFavorite = computed(() => {
   const keys = selectedGalleryKeysList.value;
-  return keys.length > 0 && keys.every((key) => galleryOrganization.value.get(key)?.favorite);
+  return (
+    keys.length > 0 &&
+    keys.every(
+      (key) =>
+        scopedOrganizationOf(scopeCopies().find((p) => galleryPrintKey(p) === key)!)?.favorite,
+    )
+  );
 });
 const selectedDeleteKind = computed<"trash" | "delete" | "delete-forever">(() => {
   if (libraryScope.value === "trash") return "delete-forever";
@@ -9376,13 +9438,27 @@ const printTitleError = computed(() => {
   return result.ok ? "" : result.reason;
 });
 const selectedPrintOrganization = computed(() =>
-  selectedPrint.value ? organizationOf(selectedPrint.value) : undefined,
+  selectedPrint.value ? scopedOrganizationOf(selectedPrint.value) : undefined,
 );
 const selectedPrintTrashed = computed(
   () =>
     libraryScope.value === "trash" || (selectedPrintOrganization.value?.trashedAt ?? null) !== null,
 );
 
+function scopedOrganizationOf(
+  print: Pick<GalleryPrint, "hostId" | "filename">,
+): OrganizationUnion | undefined {
+  if (!print) return undefined;
+  return scopedPrintOrganization(
+    print,
+    [...galleryCopies, ...trashCopies],
+    collectionSlugResolver(
+      connectedHosts.value.map((h) => ({ hostId: h.id, collections: hostCollections[h.id] ?? [] })),
+    ),
+    libraryFilters.hostId,
+    organizationOf(print),
+  );
+}
 function organizationOf(
   print: Pick<GalleryPrint, "hostId" | "filename">,
 ): OrganizationUnion | undefined {
@@ -9462,9 +9538,16 @@ function visibleRepresentatives(): PendingGalleryPrint[] {
         ? { ...EMPTY_LIBRARY_FILTERS, collectionSlug: libraryFilters.collectionSlug }
         : { ...EMPTY_LIBRARY_FILTERS };
   const filtered = filterLibraryPrints(
-    representatives,
+    libraryScope.value === "prints"
+      ? representatives.filter(
+          (p) =>
+            !(organizationOf(p)?.collections ?? []).some((slug) =>
+              hiddenCollectionSlugs.value.has(slug),
+            ),
+        )
+      : representatives,
     filters,
-    organizationOf,
+    scopedOrganizationOf,
     (print) => copiesByRepresentative.get(print) ?? [print],
     libraryScope.value === "prints" ? hiddenCollectionSlugs.value : new Set(),
   );
@@ -9497,11 +9580,23 @@ async function refreshHostOrganization(hostIds: readonly string[]): Promise<void
       const host = connectedHosts.value.find((candidate) => candidate.id === hostId);
       if (!host || !support.organizeHostIds.has(hostId)) return;
       const target = mobileHostTarget(host);
+      const readRevision = collectionVisibilityRevision();
+      const instanceId = host.instanceId;
       const [collections, tags] = await Promise.allSettled([
         listHostCollections(target),
         listHostTags(target),
       ]);
-      if (collections.status === "fulfilled") hostCollections[hostId] = collections.value;
+      collectionListingOk[hostId] = collections.status === "fulfilled";
+      if (
+        collections.status === "fulfilled" &&
+        connectedHosts.value.find((h) => h.id === hostId)?.instanceId === instanceId
+      ) {
+        hostCollections[hostId] = protectCollectionVisibilityListing(
+          collections.value,
+          readRevision,
+        );
+        collectionReadRevisions[hostId] = readRevision;
+      }
       if (tags.status === "fulfilled") {
         hostTags[hostId] = tags.value;
         const host = connectedHosts.value.find((candidate) => candidate.id === hostId);
@@ -9509,6 +9604,21 @@ async function refreshHostOrganization(hostIds: readonly string[]): Promise<void
       }
     }),
   );
+  const errors = await reconcileCollectionVisibility(
+    mobileVisibilityHosts(),
+    mobileVisibilityHosts,
+  );
+  if (errors.length) organizationError.value = errors.join("\n");
+}
+function mobileVisibilityHosts() {
+  return connectedHosts.value.map((host) => ({
+    hostId: host.id,
+    target: mobileHostTarget(host),
+    instanceId: host.instanceId ?? null,
+    collections: hostCollections[host.id] ?? [],
+    listingOk: collectionListingOk[host.id] === true && host.online,
+    readRevision: collectionReadRevisions[host.id] ?? 0,
+  }));
 }
 
 function setLibraryScope(scope: MobileLibraryScope): void {
@@ -9574,8 +9684,8 @@ function collectionCoverCandidates(card: MobileCollectionCard): PendingGalleryPr
   // A merged collection can name its explicit cover on a sleeping machine.
   // Every cached/live member is a valid visual fallback, matching the desktop
   // and web mosaics instead of blanking the whole card for one unavailable host.
-  for (const print of galleryCopies) {
-    if (organizationOf(print)?.collections.includes(card.slug)) {
+  for (const print of scopedLibraryCopies(galleryCopies, libraryFilters.hostId)) {
+    if (scopedOrganizationOf(print)?.collections.includes(card.slug)) {
       add({ hostId: print.hostId, filename: print.filename });
     }
   }
@@ -10345,27 +10455,12 @@ async function setCollectionHidden(card: MobileCollectionCard): Promise<void> {
       collectionOnHost(hostCollections, host.id, card.slug),
     );
     const hidden = !card.hidden;
-    const results = await Promise.allSettled(
-      hosts.map((host) =>
-        updateHostCollectionHidden(
-          mobileHostTarget(host),
-          collectionOnHost(hostCollections, host.id, card.slug)!.id,
-          hidden,
-        ),
-      ),
+    rememberCollectionVisibility(card.slug, hidden, mobileVisibilityHosts());
+    const failures = await reconcileCollectionVisibility(
+      mobileVisibilityHosts(),
+      mobileVisibilityHosts,
     );
-    const failures = results.flatMap((result, index) =>
-      result.status === "rejected"
-        ? [{ hostId: hosts[index]!.id, hostName: hosts[index]!.name, error: result.reason }]
-        : [],
-    );
-    if (failures.length > 0) {
-      organizationError.value = fanoutFailureMessage(
-        `${hidden ? "hide" : "show"} “${card.name}”`,
-        failures,
-        (error, name) => describeTransportError(error, name),
-      );
-    }
+    if (failures.length) organizationError.value = failures.join("\n");
     await refreshHostOrganization(hosts.map((host) => host.id));
     rebuildGalleryOrganization();
     await requeueGallery();
@@ -13114,7 +13209,9 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                     >Hidden</span
                   >
                   <span
-                    ><span class="mobile-collection-count">{{ card.count }}</span>
+                    ><span class="mobile-collection-count">{{
+                      card.availability === "unavailable" ? "Unavailable" : card.count
+                    }}</span>
                     <template v-if="card.hostsLabel"> · {{ card.hostsLabel }}</template></span
                   >
                 </span>
@@ -13373,7 +13470,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                     Upscaled
                   </span>
                   <span
-                    v-if="!gallerySelectMode && organizationOf(print)?.favorite"
+                    v-if="!gallerySelectMode && scopedOrganizationOf(print)?.favorite"
                     class="gallery-favorite-badge"
                     data-test="favorite-badge"
                     aria-label="Favorite"
@@ -13602,7 +13699,9 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                 <span class="mobile-collection-copy">
                   <strong>{{ card.name }}</strong>
                   <span
-                    ><span class="mobile-collection-count">{{ card.count }}</span>
+                    ><span class="mobile-collection-count">{{
+                      card.availability === "unavailable" ? "Unavailable" : card.count
+                    }}</span>
                     <template v-if="card.hostsLabel"> · {{ card.hostsLabel }}</template></span
                   >
                 </span>

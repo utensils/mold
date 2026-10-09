@@ -100,39 +100,7 @@ struct LibraryPane: View {
             })
             .destructionDialog($pendingDestruction)
             .deferredMenuSheet(isPresented: $library.localSaveAlertPresented) {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("Sync to This Mac").font(.title2.bold())
-                    Text(library.localSaveReport)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if !library.localSaveFailures.isEmpty {
-                        Text("Couldn’t save").font(.headline)
-                        ScrollView {
-                            LazyVStack(alignment: .leading, spacing: 8) {
-                                ForEach(library.localSaveFailures, id: \.self) { failure in
-                                    Text(failure).textSelection(.enabled)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                }
-                            }
-                        }
-                    }
-                    HStack {
-                        if !library.localSaveFailures.isEmpty {
-                            Button("Copy Error Details") {
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString(
-                                    ([library.localSaveReport] + library.localSaveFailures)
-                                        .joined(separator: "\n"), forType: .string)
-                            }
-                        }
-                        Spacer()
-                        Button("Done") { library.localSaveAlertPresented = false }
-                            .keyboardShortcut(.defaultAction)
-                    }
-                }
-                .padding(24)
-                .frame(width: 600)
-                .frame(height: library.localSaveFailures.isEmpty ? nil : 480)
-                .frame(minHeight: 180)
+                LibrarySyncReportSheet()
             }
             .sheet(isPresented: Binding(
                 get: { newCollectionTargets != nil },

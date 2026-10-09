@@ -53,9 +53,9 @@ struct TagEditor: View {
 
     private var shared: [String] {
         guard let first = entries.first else { return [] }
-        var common = Set(first.print.tagList)
+        var common = Set(first.tags)
         for entry in entries.dropFirst() {
-            common.formIntersection(entry.print.tagList)
+            common.formIntersection(entry.tags)
         }
         return common.sorted()
     }

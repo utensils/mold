@@ -1,3 +1,11 @@
+import {
+  desiredCollectionHidden,
+  collectionVisibilityRevision,
+  protectCollectionVisibilityListing,
+  rememberCollectionVisibility,
+  reconcileCollectionVisibility,
+  collectionAvailability,
+} from "@studio/lib/collectionVisibility";
 import { defineStore } from "pinia";
 import { markRaw, toRaw } from "vue";
 import { apiFetchTo, conditionalApiJsonTo, type ApiTarget } from "../lib/api/client";
@@ -82,6 +90,8 @@ export interface CollectionsBucket {
   loading: boolean;
   error: string | null;
   loaded: boolean;
+  instanceId?: string | null;
+  visibilityReadRevision?: number;
 }
 
 /** One host's tag counts. */
@@ -378,6 +388,7 @@ export const useGalleryStore = defineStore("gallery", {
     localOfflineTrashRetentionDays: null as number | null,
     /** Per-host collections listings, merged by slug in `mergedCollections`. */
     collectionsByHost: {} as Record<string, CollectionsBucket>,
+    collectionVisibilityErrors: [] as string[],
     /** Per-host tag counts, merged by case-insensitive name in `mergedTags`. */
     tagsByHost: {} as Record<string, TagsBucket>,
     /** Organization edits retained in IndexedDB for unreachable hosts. */
@@ -555,7 +566,7 @@ export const useGalleryStore = defineStore("gallery", {
             hostLabel: s.label,
             collections: this.collectionsByHost[s.key]!.items,
           })),
-      );
+      ).map((c) => ({ ...c, hidden: desiredCollectionHidden(c.slug, c.hidden === true) }));
     },
     /** `(hostKey, collectionId) → slug` over every loaded listing. */
     collectionResolver(): (hostKey: string, collectionId: string) => string | null | undefined {
@@ -593,6 +604,11 @@ export const useGalleryStore = defineStore("gallery", {
       const resolve = this.collectionResolver;
       const index = this.organizationIndex;
       return (entry) => {
+        if (this.filter !== "all")
+          return unionOrganization([{ hostId: entry.sourceKey, item: entry.item }], {
+            localHostId: "local",
+            resolveCollectionSlug: resolve,
+          });
         const indexed = index.get(entry.item.filename);
         if (indexed) return indexed;
         // Hand-built or mid-refetch entry that matches no merged print: read
@@ -630,12 +646,16 @@ export const useGalleryStore = defineStore("gallery", {
           .map((collection) => collection.slug),
       );
       const organizationOf = this.organizationOf;
-      return (entry) => !organizationOf(entry).collections.some((slug) => hiddenSlugs.has(slug));
+      const global = this.organizationIndex;
+      return (entry) =>
+        !(global.get(entry.item.filename) ?? organizationOf(entry)).collections.some((slug) =>
+          hiddenSlugs.has(slug),
+        );
     },
     /** The live grid minus hidden albums — the library's own size, whatever
      *  scope is open. The shell's picture count reads this. */
     defaultLibraryPrints(): MergedPrint[] {
-      return this.merged.filter(this.visibleInDefaultLibrary);
+      return this.hostFiltered.filter(this.visibleInDefaultLibrary);
     },
     /**
      * The set the filter chips describe: the SCOPE'S OWN prints (the Trash
@@ -661,12 +681,14 @@ export const useGalleryStore = defineStore("gallery", {
     /** Exact tag counts over the same logical prints the scope renders. */
     filterChipTags(): TagCount[] {
       const scoped = this.scope === "trash" ? this.trashMerged : this.merged;
-      const visible = this.basePrints;
+      const visible = this.basePrints.filter(
+        (e) => this.filter === "all" || e.sourceKey === this.filter,
+      );
       const excluded = this.hidesHiddenAlbums
         ? scoped.filter((entry) => !this.visibleInDefaultLibrary(entry))
         : [];
       return visibleTagCounts(
-        this.mergedTags,
+        this.filter === "all" ? this.mergedTags : (this.tagsByHost[this.filter]?.items ?? []),
         visible.map(this.organizationOf),
         excluded.map(this.organizationOf),
       );
@@ -675,7 +697,7 @@ export const useGalleryStore = defineStore("gallery", {
      *  count a shelf card shows (a mirrored print counts once). */
     collectionCounts(): (slug: string) => number {
       const bySlug = new Map<string, MergedPrint[]>();
-      for (const entry of this.merged) {
+      for (const entry of this.hostFiltered) {
         for (const slug of this.organizationOf(entry).collections) {
           const held = bySlug.get(slug);
           if (held) held.push(entry);
@@ -1436,24 +1458,74 @@ export const useGalleryStore = defineStore("gallery", {
       return this.trashBuckets[key]!;
     },
     /** Fetch one host's collections; non-capable hosts settle empty. */
+    visibilityHosts() {
+      return this.sources.flatMap((s) => {
+        const target = this.targetOf(s.key);
+        if (!target) return [];
+        const bucket = this.collectionsByHost[s.key];
+        return [
+          {
+            hostId: s.key,
+            target,
+            instanceId: useHostsStore().all.find((h) => h.id === s.key)?.instanceId ?? null,
+            collections: bucket?.items ?? [],
+            readRevision: bucket?.visibilityReadRevision ?? 0,
+            listingOk:
+              bucket?.loaded === true &&
+              !bucket.error &&
+              useHostsStore().all.find((h) => h.id === s.key)?.status === "ready",
+          },
+        ];
+      });
+    },
+    collectionAvailability(slug: string) {
+      if (this.filter === "all") return "present";
+      const bucket = this.collectionsByHost[this.filter];
+      return collectionAvailability(
+        this.mergedCollections.find((c) => c.slug === slug)?.hosts ?? [],
+        this.filter,
+        bucket?.loaded === true &&
+          !bucket.error &&
+          this.targetOf(this.filter) !== null &&
+          useHostsStore().all.find((h) => h.id === this.filter)?.status === "ready",
+      );
+    },
     async fetchCollections(hostKey?: string) {
       if (hostKey === undefined) {
         await Promise.all(this.sources.map((s) => this.fetchCollections(s.key)));
+        this.collectionVisibilityErrors = await reconcileCollectionVisibility(
+          this.visibilityHosts(),
+          () => this.visibilityHosts(),
+        );
         return;
       }
       const bucket = this.ensureCollectionsBucket(hostKey);
       if (bucket.loading) return;
       const target = this.targetOf(hostKey);
-      if (!target || !this.organizeCapable(hostKey)) {
+      const instanceId = useHostsStore().all.find((h) => h.id === hostKey)?.instanceId ?? null;
+      if (bucket.instanceId && instanceId && bucket.instanceId !== instanceId) {
         bucket.items = [];
-        bucket.error = null;
-        bucket.loaded = true;
+        bucket.loaded = false;
+      }
+      if (!target || !this.organizeCapable(hostKey)) {
+        bucket.error = "Collection inventory is unavailable until this machine reconnects.";
         return;
       }
+      const readRevision = collectionVisibilityRevision();
       bucket.loading = true;
       bucket.error = null;
       try {
-        bucket.items = await listCollections(target);
+        const rows = await listCollections(target);
+        const current = useHostsStore().all.find((h) => h.id === hostKey)?.instanceId ?? null;
+        if (instanceId && current && instanceId !== current) {
+          bucket.items = [];
+          bucket.loaded = false;
+          bucket.error = "Machine installation changed.";
+          return;
+        }
+        bucket.items = protectCollectionVisibilityListing(rows, readRevision);
+        bucket.instanceId = instanceId;
+        bucket.visibilityReadRevision = readRevision;
         bucket.loaded = true;
       } catch (err) {
         bucket.error = String(err);
@@ -1552,6 +1624,7 @@ export const useGalleryStore = defineStore("gallery", {
       const unique = new Map<string, OrganizationTarget>();
       for (const entry of entries) {
         for (const location of this.allLocationsOf(entry)) {
+          if (this.filter !== "all" && location.sourceKey !== this.filter) continue;
           if (!this.organizeCapable(location.sourceKey) || !this.targetOf(location.sourceKey)) {
             continue;
           }
@@ -1619,7 +1692,9 @@ export const useGalleryStore = defineStore("gallery", {
       if (!name) return null;
       const target = this.targetOf(hostKey);
       if (!target) throw new Error("Host is not connected.");
-      const created = await createCollectionOn(target, { name });
+      let created = await createCollectionOn(target, { name });
+      const template = this.mergedCollections.find((c) => c.slug === slug);
+      if (template?.hidden) created = await updateCollectionHidden(target, created.id, true);
       bucket.items.push(created);
       bucket.loaded = true;
       return created;
@@ -1923,19 +1998,18 @@ export const useGalleryStore = defineStore("gallery", {
       const merged = this.mergedCollections.find((collection) => collection.slug === slug);
       if (!merged)
         return { applied: 0, failed: 0, failedHosts: [], error: "Collection not found." };
+      rememberCollectionVisibility(slug, hidden, this.visibilityHosts());
       const keys = merged.hosts.map((host) => host.hostId);
-      const results = await Promise.allSettled(
-        merged.hosts.map(async (host) => {
-          const target = this.targetOf(host.hostId);
-          if (!target) throw new Error("Host is not connected.");
-          const updated = await updateCollectionHidden(target, host.id, hidden);
-          const bucket = this.ensureCollectionsBucket(host.hostId);
-          const at = bucket.items.findIndex((collection) => collection.id === host.id);
-          if (at === -1) bucket.items.push(updated);
-          else bucket.items.splice(at, 1, updated);
-        }),
+      const errors = await reconcileCollectionVisibility(this.visibilityHosts(), () =>
+        this.visibilityHosts(),
       );
-      return this.settleHosts(keys, results);
+      const failedHosts = keys.filter((key) => errors.some((error) => error.startsWith(`${key}:`)));
+      return {
+        applied: keys.length - failedHosts.length,
+        failed: failedHosts.length,
+        failedHosts,
+        error: errors[0] ?? null,
+      };
     },
     /** Delete the collection on every host (never its prints). */
     async deleteCollection(slug: string): Promise<FanoutResult> {

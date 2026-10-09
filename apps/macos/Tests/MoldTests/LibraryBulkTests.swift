@@ -173,4 +173,17 @@ struct LibraryBulkTests {
         #expect(store.items.count == 1)
     }
 
+    @Test func unsupportedSelectedTrashDeletionExplainsRefusalWithoutLiveFallback() async {
+        let (store, fake, host) = await bench(0)
+        fake.trashedRows = [FakeFixtures.trashState(FakeFixtures.print("old.png"), at: 1)]
+        await store.refreshTrash()
+        fake.plantedErrors["deleteTrashed"] = MoldClientError.http(status: 409,
+            code: "GALLERY_TRASH_DELETE_UNSUPPORTED", message: "Update this machine before permanently deleting selected trash.")
+        await store.deleteForever(store.trashed)
+        #expect(fake.callCount("deleteForever") == 0)
+        #expect(fake.trashedRows.count == 1)
+        #expect(store.bulkResult?.contains(host.name) == true)
+        #expect(store.bulkResult?.contains("Update this machine") == true)
+    }
+
 }

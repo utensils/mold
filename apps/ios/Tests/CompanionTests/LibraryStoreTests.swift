@@ -49,6 +49,23 @@ struct LibraryStoreTests {
         return (library, hosts, one, two)
     }
 
+    @Test func machineSelectionProjectsMembershipAndFavoriteMetadata() async throws {
+        let (library, hosts, _, _) = try await fleet(first: [try print("a.png")], second: [try print("a.png", favourite: true)])
+        let alpha = try #require(hosts.hosts.first { $0.name == "alpha" })
+        #expect(library.pool.first?.isFavorite == true)
+        library.machineID = alpha.id
+        #expect(library.scopedPool.count == 1)
+        #expect(library.scopedPool.first?.everyCopy.count == 1)
+        #expect(library.scopedPool.first?.isFavorite == false)
+        let missing = CollectionShelf.merge([hosts.hosts[1].id: [Collection(id: "b", name: "Other", slug: "other")]])[0]
+        #expect(library.shelfPresence(missing) == .absent)
+        let beta = try #require(hosts.hosts.first { $0.name == "beta" })
+        #expect(library.scopedPool(on: [beta.id]).first?.isFavorite == true, "Search machine tokens use their own scope rather than the picker")
+        #expect(library.shelfPresence(missing, on: [beta.id]) == .present)
+        library.collectionInventoryAvailable.remove(alpha.id)
+        #expect(library.shelfPresence(missing) == .unavailable)
+    }
+
     @Test func theSamePrintOnTwoMachinesIsOneEntry() async throws {
         let (library, _, _, _) = try await fleet(first: [try print("a.png")], second: [try print("a.png")])
         #expect(library.pool.count == 1)

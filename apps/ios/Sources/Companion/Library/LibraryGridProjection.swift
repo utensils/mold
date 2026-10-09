@@ -35,7 +35,7 @@ final class LibraryGridProjection {
     init(entries: [LibraryEntry]) {
         self.entries = entries
         showsHost = Set(entries.flatMap(\.hostNames)).count > 1
-        favorites = entries.filter(\.print.isFavorite)
+        favorites = entries.filter(\.isFavorite)
         positions = Dictionary(uniqueKeysWithValues: entries.enumerated().map { ($0.element.id, $0.offset) })
     }
 

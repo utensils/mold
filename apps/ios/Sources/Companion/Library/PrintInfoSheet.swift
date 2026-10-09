@@ -26,9 +26,9 @@ struct PrintInfoSheet: View {
                                 .font(.title3.weight(.semibold))
                                 .submitLabel(.done)
                                 .onSubmit(saveTitle)
-                            Button { library.apply(.favorite(!entry.print.isFavorite), to: [entry]) } label: {
-                                Label(entry.print.isFavorite ? "Unfavourite" : "Favourite",
-                                      systemImage: entry.print.isFavorite ? "star.fill" : "star")
+                            Button { library.apply(.favorite(!entry.isFavorite), to: [entry]) } label: {
+                                Label(entry.isFavorite ? "Unfavourite" : "Favourite",
+                                      systemImage: entry.isFavorite ? "star.fill" : "star")
                                     .labelStyle(.iconOnly)
                             }
                             .buttonStyle(.borderless)

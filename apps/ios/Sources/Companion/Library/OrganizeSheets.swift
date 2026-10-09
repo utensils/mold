@@ -21,7 +21,7 @@ struct TagsSheet: View {
                 Section {
                     ForEach(known, id: \.self) { tag in
                         let on = entries.allSatisfy { entry in
-                            entry.print.tagList.contains { $0.caseInsensitiveCompare(tag) == .orderedSame }
+                            entry.tags.contains { $0.caseInsensitiveCompare(tag) == .orderedSame }
                         }
                         Toggle(tag, isOn: Binding(get: { on }, set: { adding in
                             library.apply(.tag(tag, adding: adding), to: entries)

@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("@studio/api/galleryMirrorOrganization", () => ({
+  captureMirrorOrganization: vi.fn(async () => ({ item: {}, collections: [] })),
+  applyMirrorOrganization: vi.fn(async () => undefined),
+}));
 const { open, invoke } = vi.hoisted(() => ({ open: vi.fn(), invoke: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open }));
 

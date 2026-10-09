@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { scopedCollectionInventory } from "@studio/lib/collectionVisibility";
 import {
   computed,
   nextTick,
@@ -237,8 +238,9 @@ const trashBytes = computed(() =>
  *  beside Favourites must not change when the Trash is on screen. */
 const favoritesCount = computed(
   () =>
-    gallery.merged.filter((entry) => gallery.visibleInDefaultLibrary(entry) && isFavorite(entry))
-      .length,
+    gallery.hostFiltered.filter(
+      (entry) => gallery.visibleInDefaultLibrary(entry) && isFavorite(entry),
+    ).length,
 );
 const sourceLabel = (key: string) => gallery.sources.find((s) => s.key === key)?.label ?? key;
 /** "This Mac · plato" — every organize-capable host, for the fan-out notes. */
@@ -974,7 +976,7 @@ function changeRetention() {
 /** Collection slug → its logical prints, newest first (one pass). */
 const membersBySlug = computed(() => {
   const map = new Map<string, MergedPrint[]>();
-  for (const entry of gallery.merged) {
+  for (const entry of gallery.hostFiltered) {
     for (const slug of orgOf(entry).collections) {
       const list = map.get(slug) ?? [];
       list.push(entry);
@@ -1029,13 +1031,23 @@ function collectionUpdatedAt(collection: MergedCollection): number | null {
 
 const shelfCards = computed<ShelfCard[]>(() => {
   const q = gallery.query.trim().toLowerCase();
-  return gallery.mergedCollections
+  return scopedCollectionInventory(gallery.mergedCollections, gallery.filter)
     .filter((c) => !q || c.name.toLowerCase().includes(q))
     .map((c) => ({
       slug: c.slug,
       name: c.name,
       count: gallery.collectionCounts(c.slug),
-      hostLabels: c.hosts.map((h) => sourceLabel(h.hostId)),
+      availability: gallery.collectionAvailability(c.slug),
+      hostLabels:
+        gallery.filter === "all"
+          ? c.hosts.map((h) => sourceLabel(h.hostId))
+          : [
+              gallery.collectionAvailability(c.slug) === "absent"
+                ? `Not on ${sourceLabel(gallery.filter)}`
+                : gallery.collectionAvailability(c.slug) === "unavailable"
+                  ? `Unavailable on ${sourceLabel(gallery.filter)}`
+                  : sourceLabel(gallery.filter),
+            ],
       updatedAt: collectionUpdatedAt(c),
       covers: coversFor(c),
       hidden: c.hidden === true,
@@ -2640,6 +2652,13 @@ onUnmounted(() => {
       @empty-now="emptyTrashOpen = true"
     />
 
+    <p
+      v-if="gallery.collectionVisibilityErrors.length"
+      role="status"
+      class="px-3.5 py-2 text-xs text-fg-dim"
+    >
+      {{ gallery.collectionVisibilityErrors.join(" · ") }}
+    </p>
     <!-- Albums: a strip of cards ABOVE the grid, which stays mounted. -->
     <CollectionsShelf
       v-if="showShelf"

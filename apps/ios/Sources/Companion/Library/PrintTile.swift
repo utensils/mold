@@ -55,7 +55,7 @@ struct PrintTile: View {
         } else {
             VStack(alignment: .trailing, spacing: 0) {
                 if fresh { Badge(text: String(localized: "New"), accent: true) }
-                if entry.print.isFavorite { Badge(symbol: "star.fill") }
+                if entry.isFavorite { Badge(symbol: "star.fill") }
             }
         }
     }

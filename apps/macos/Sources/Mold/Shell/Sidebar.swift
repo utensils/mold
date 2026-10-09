@@ -125,9 +125,11 @@ struct Sidebar: View {
     /// one: the number is in the pane's subtitle, and repeating four figures in
     /// a sidebar row is noise.
     private func count(of scope: LibraryScope) -> Int? {
-        switch scope {
-        case .favorites: library.items.count { $0.everyCopy.contains(where: \.print.isFavorite) }
-        case .trash: library.trashed.isEmpty ? nil : library.trashed.count
+        return switch scope {
+        case .favorites:
+            LibraryScope.favorites.resolve(navigation.query, shelves: library.shelves,
+                hiddenCollectionIDs: library.hiddenCollectionIDs).apply(to: library.items).count
+        case .trash: navigation.query.apply(to: library.trashed).count
         case .all, .collection: nil
         }
     }

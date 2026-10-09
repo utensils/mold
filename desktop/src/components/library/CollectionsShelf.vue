@@ -23,6 +23,7 @@ export interface ShelfCard {
   updatedAt: number | null;
   covers: CoverTile[];
   hidden: boolean;
+  availability?: "present" | "absent" | "unavailable";
 }
 
 withDefaults(
@@ -87,6 +88,7 @@ defineExpose({ startCreate, isCreating: () => creating.value });
       :key="card.slug"
       :name="card.name"
       :count="card.count"
+      :availability="card.availability ?? 'present'"
       :host-labels="card.hostLabels"
       :updated-at="card.updatedAt"
       :covers="card.covers"

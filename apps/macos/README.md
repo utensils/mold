@@ -798,3 +798,36 @@ other jobs may need.
 ### Reuse input media
 
 Reuse settings restores retained opening and closing frames into editable wells, preserving keyframe indices and ordered image references. Audio, source/continuation video, identity photos and control images restore with their saved settings where the selected recipe supports them. Continuation overlap and authored reference strength (including zero) are preserved. Older prints without recorded reference strength keep the server default. The original machine must retain the inputs; missing, damaged or oversized inputs are disclosed before generation. A new attachment or explicit removal wins over a late download, and restored wells never have a hidden archive fallback that can revive removed media.
+
+Library machine filters apply to collection, favourite and Trash counts and to
+all media actions, including filing a dragged print. Collection badges distinguish
+an empty shelf from one absent on the selected machine and an unavailable
+inventory. Hide from All Prints is shared by collection slug across machines;
+its explicit pending changes survive relaunch and retry on refresh/reconnection.
+An unavailable copy of a hidden shelf cannot expose a merged copy in All Prints.
+Collection visibility and collection deletion operate across the shelf's machines;
+media deletion affects only the copies shown by the machine filter.
+
+### Shared Library machine scope and recurring Sync
+
+**All Machines** shows the merged library. Choosing a machine shows its actual
+media and collection membership; sidebar counts follow that choice. Collections
+that are absent are labeled separately from inventories that are unavailable.
+Collection visibility is shared by slug across machines, including existing
+replicas; pending hide/show edits retry when their original machines return.
+Media actions on a machine-filtered view affect only its displayed copies.
+
+**Sync All to This Mac** starts an immediate copy and repeats every five minutes
+for this app session. The Library status shows completion, issues and the next
+run. **Stop Sync** ends repeats and lets active transfers settle. Successful runs
+need no confirmation. **Details** keeps the full report available; its checkbox
+acknowledges unchanged per-media issues, while changed issues and connection or
+authentication failures still appear. **Reset Acknowledgments** restores those
+notifications. Sync continues retrying acknowledged media.
+
+Sync preserves hidden collection flags, including empty shelves. Copies already
+in This Mac’s Trash, or previously synced copies removed from its Library, stay
+removed; use an explicit Save to copy them again deliberately. This is a copy
+workflow: removing a source does not delete a destination copy. Permanent trash
+deletion reports the actual machine refusal; an older machine without the
+trash-only selected-delete endpoint must be updated before retrying.

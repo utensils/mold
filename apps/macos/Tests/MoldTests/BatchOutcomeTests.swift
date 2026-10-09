@@ -120,7 +120,7 @@ struct BatchOutcomeTests {
             return
         }
         #expect(outcome.results.count == 3)
-        #expect(outcome.failures == ["Ran out of memory."])
+        #expect(outcome.failures == ["The machine ran out of memory. Try a smaller model, output size or batch."])
     }
 
     @Test func aBatchWhereNothingFinishedIsAFailure() async {
@@ -145,7 +145,7 @@ struct BatchOutcomeTests {
             Issue.record("expected .failed, got \(controller.run)")
             return
         }
-        #expect(message == "Ran out of memory.")
+        #expect(message == "The machine ran out of memory. Try a smaller model, output size or batch.")
     }
 
     /// **Fails today**: `settle` forgets the batch the moment the FIRST

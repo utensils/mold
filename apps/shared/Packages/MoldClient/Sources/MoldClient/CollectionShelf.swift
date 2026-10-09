@@ -109,3 +109,29 @@ public extension CollectionShelf {
         return trimmed.isEmpty ? nil : trimmed
     }
 }
+
+public extension CollectionShelf {
+    enum Presence: Sendable { case present, absent, unavailable }
+
+    static func hiddenIDs(in shelves: [CollectionShelf]) -> [MoldHost.ID: Set<String>] {
+        var ids: [MoldHost.ID: Set<String>] = [:]
+        for shelf in shelves where shelf.hidden {
+            for (host, id) in shelf.hosts { ids[host, default: []].insert(id) }
+        }
+        return ids
+    }
+
+    func overriding(hidden: Bool) -> CollectionShelf {
+        CollectionShelf(slug: slug, name: name, count: count, hidden: hidden, hosts: hosts)
+    }
+
+    func count(in entries: [LibraryEntry], on machineIDs: Set<MoldHost.ID>) -> Int {
+        count(in: machineIDs.isEmpty ? entries : entries.compactMap { $0.presented(onAnyOf: machineIDs) })
+    }
+
+    func presence(on machineIDs: Set<MoldHost.ID>, available: Set<MoldHost.ID>) -> Presence {
+        guard !machineIDs.isEmpty else { return .present }
+        guard machineIDs.isSubset(of: available) else { return .unavailable }
+        return machineIDs.contains { hosts[$0] != nil } ? .present : .absent
+    }
+}

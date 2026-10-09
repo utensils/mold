@@ -864,3 +864,17 @@ Reuse settings restores retained opening and closing frames into editable wells,
 A Library machine filter scopes trash, restore, permanent deletion and Empty Trash to that machine. Copies on other machines stay in place. Choose All Machines to include every loaded copy. This applies to web, desktop and mobile Library views.
 
 Selected Trash deletion requires a host with the trash-only deletion API; older hosts show an update request. On Tauri desktop, deleting selected local trash or emptying local trash requires the local engine to be running. Offline operations refuse rather than risking a restored live file.
+
+## Shared Library collections
+
+All Machines keeps the merged library available. A machine filter shows that
+machine’s actual collection memberships, favorites, covers and counts. A
+collection absent from a successfully loaded inventory is labeled separately
+from an unavailable inventory. Collection hiding applies across matching slugs,
+including media whose copy on the selected machine has not been filed locally.
+Opening a hidden collection explicitly still shows its members.
+
+Hide and Show apply to every known replica. Pending edits retry when the editing
+client reconnects; new collection replicas preserve the visibility setting.
+Copying media between hosts preserves its collection organization. Removing a
+copy from a machine leaves the copies on other machines intact.

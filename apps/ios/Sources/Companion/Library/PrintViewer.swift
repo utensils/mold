@@ -123,9 +123,9 @@ struct PrintViewer: View {
         Button { actions.share([entry]) } label: { Label("Share", systemImage: "square.and.arrow.up") }
         Spacer()
         if !trashed {
-            Button { library.apply(.favorite(!entry.print.isFavorite), to: [entry]) } label: {
-                Label(entry.print.isFavorite ? "Unfavourite" : "Favourite",
-                      systemImage: entry.print.isFavorite ? "star.fill" : "star")
+            Button { library.apply(.favorite(!entry.isFavorite), to: [entry]) } label: {
+                Label(entry.isFavorite ? "Unfavourite" : "Favourite",
+                      systemImage: entry.isFavorite ? "star.fill" : "star")
             }
             .keyboardShortcut("f", modifiers: [.command, .option])
             Spacer()

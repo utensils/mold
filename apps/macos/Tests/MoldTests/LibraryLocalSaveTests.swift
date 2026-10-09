@@ -365,6 +365,7 @@ struct LibraryLocalSaveTests {
         remoteBackend.mediaAnswer = Data([1, 2, 3])
         remoteBackend.collectionRows = [Collection(id: "remote-id", name: "Night Sky",
                                                     slug: "night-sky")]
+        localBackend.collectionCreateResponses["Night Sky"] = Collection(id: "local-id", name: "Night Sky", slug: "night-sky")
         let hosts = HostStore(hosts: [local, remote]) { machine in
             machine.id == local.id ? localBackend : remoteBackend
         }
@@ -382,7 +383,7 @@ struct LibraryLocalSaveTests {
         #expect(localBackend.mutationRequests.first?.filenames == ["star.png"])
         #expect(localBackend.mutationRequests.first?.addToCollection?.name == "Night Sky")
         #expect(remoteBackend.callCount("mutate") == 0)
-        #expect(localBackend.callCount("createCollection") == 0)
+        #expect(localBackend.callCount("createCollection") == 1)
     }
 
     @Test func unavailableSourceCollectionsDoNotBlockPictureCopies() async {
@@ -502,9 +503,9 @@ struct LibraryLocalSaveTests {
 
     @Test func syncAllKeepsSameNamedPrintsFromDifferentHostsAndRerunsWithoutDuplicates() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
-        let first = MoldHost(id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+        let first = MoldHost(id: UUID(),
                              name: "first", baseURL: URL(string: "http://first")!)
-        let second = MoldHost(id: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
+        let second = MoldHost(id: UUID(),
                               name: "second", baseURL: URL(string: "http://second")!)
         let localBackend = FakeBackend(host: local, noRetainedMedia: true)
         let firstBackend = FakeBackend(host: first, noRetainedMedia: true)
@@ -724,4 +725,113 @@ struct LibraryLocalSaveTests {
         #expect(localBackend.callCount("trash") == 0)
         #expect(library.items.map(\.id) == [localRow.id])
     }
+    @Test func syncDoesNotRecreateDestinationTrash() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("trashed-sync-source")
+        let source = FakeBackend(host: remote, noRetainedMedia: true)
+        let destination = FakeBackend(host: local, noRetainedMedia: true)
+        let print = versionedPrint("intentionally-trashed.png", prompt: "fox")
+        source.prints = [print]
+        source.mediaAnswer = Data([1, 2, 3])
+        destination.trashedRows = [print]
+        let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? destination : source }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+        await library.syncAllLocally()
+        #expect(destination.importedNames.isEmpty)
+        #expect(source.callCount("mediaFile") == 0)
+        #expect(library.localSaveReport.contains("kept removed"))
+    }
+
+    @Test func syncDoesNotRecreateRecordedCopyRemovedFromDestination() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("removed-sync-source")
+        let source = FakeBackend(host: remote, noRetainedMedia: true)
+        let destination = FakeBackend(host: local, noRetainedMedia: true)
+        let print = versionedPrint("intentionally-deleted.png", prompt: "fox")
+        source.prints = [print]
+        destination.prints = [print]
+        source.mediaAnswer = Data([1, 2, 3])
+        destination.mediaAnswers[print.filename] = Data([1, 2, 3])
+        let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? destination : source }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+        await library.syncAllLocally()
+        destination.prints = []
+        await library.syncAllLocally()
+        #expect(destination.importedNames.isEmpty)
+        #expect(library.localSaveReport.contains("kept removed"))
+    }
+
+    @Test func replacedSourceRouteCannotPairOldListingWithNewBackend() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("original-source-route")
+        let source = FakeBackend(host: remote, noRetainedMedia: true)
+        let destination = FakeBackend(host: local, noRetainedMedia: true)
+        source.prints = [versionedPrint("old-route.png", prompt: "fox")]
+        source.delays["gallery"] = .milliseconds(100)
+        source.mediaAnswer = Data([1, 2, 3])
+        let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? destination : source }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+        let run = Task { await library.syncAllLocally() }
+        await settle { source.callCount("gallery") > 0 }
+        var replacement = remote
+        replacement.baseURL = URL(string: "http://replacement-source")!
+        hosts.hosts = [local, replacement]
+        await run.value
+        #expect(destination.importedNames.isEmpty)
+        #expect(source.callCount("mediaFile") == 0)
+    }
+
+    @Test func newerShowWinsDuringSyncCollectionCreation() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("visibility-race-source")
+        let source = FakeBackend(host: remote, noRetainedMedia: true)
+        let destination = FakeBackend(host: local, noRetainedMedia: true)
+        let slug = "sync-race-\(UUID().uuidString)"
+        source.collectionRows = [Collection(id: "remote-hidden", name: slug, slug: slug, hidden: true)]
+        destination.collectionCreateResponses[slug] = Collection(id: "local-hidden", name: slug, slug: slug, hidden: false)
+        destination.delays["createCollection"] = .milliseconds(100)
+        let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? destination : source }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+        await library.refreshOrganization()
+        let run = Task { await library.syncAllLocally() }
+        await settle { destination.callCount("createCollection") > 0 }
+        await library.setShelfHidden(library.shelf(slug: slug)!, hidden: false)
+        await run.value
+        #expect(source.collectionRows.first?.hidden == false)
+        #expect(destination.collectionRows.first?.hidden != true)
+    }
+
+    @Test func recurringSyncKeepsLocalCollectionRemovalButExplicitSaveCanRestoreIt() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("membership-removal-source")
+        let source = FakeBackend(host: remote, noRetainedMedia: true)
+        let destination = FakeBackend(host: local, noRetainedMedia: true)
+        let slug = "membership-\(UUID().uuidString)"
+        source.collectionRows = [Collection(id: "source-shelf", name: slug, slug: slug)]
+        destination.collectionRows = [Collection(id: "destination-shelf", name: slug, slug: slug)]
+        var mutable = GalleryPrint.Mutable(versionedPrint("membership.png", prompt: "fox"))
+        mutable.collections = ["source-shelf"]
+        source.prints = [mutable.build()]
+        source.mediaAnswer = Data([1, 2, 3])
+        var localPrint = GalleryPrint.Mutable(versionedPrint("membership.png", prompt: "fox"))
+        localPrint.collections = ["destination-shelf"]
+        destination.prints = [localPrint.build()]
+        destination.mediaAnswer = Data([1, 2, 3])
+        let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? destination : source }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+        await library.syncAllLocally()
+        localPrint.collections = []
+        destination.prints = [localPrint.build()]
+        destination.mutationRequests.removeAll()
+        await library.syncAllLocally()
+        #expect(destination.mutationRequests.allSatisfy { $0.addToCollection == nil })
+        await library.saveLocally([LibraryEntry(host: remote, print: source.prints[0])])
+        #expect(destination.mutationRequests.contains { $0.addToCollection?.name == slug })
+    }
+
 }

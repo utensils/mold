@@ -173,3 +173,14 @@ accepted binary role and destination reads after origin output/pin deletion.
 **Native Mac legacy copies:** output-copy completion and retained-input completeness are separate outcomes. An empty exact-output transfer offer with conditioning provenance is allowed only after an explicit `unavailable_legacy` inventory. Verify source listing/offer recipe, captured identity, and destination output digest, size and recipe before returning the legacy-input outcome. Never relax corrupt/auth/unknown failures or the source-bearing unsupported-transfer fallback. Cached repair must return the same outcome, count the output as already local, and disclose unavailable originals separately from save failures. Preserve any destination retained binding; do not replace it with an empty source set.
 
 GUI Trash selections permanently delete through `POST /api/gallery/trash/delete-selected`, never the live-or-trash `delete-forever` route. Validate trash membership under the gallery publication writer before touching bytes or retained pins. A restored row returns `GALLERY_NOT_TRASHED`; missing support on older hosts is a refusal, never a fallback to live deletion. Empty Trash keeps its existing dedicated trash-only operation.
+
+**Shared Library projection:** global logical visibility is evaluated before
+physical host projection. A hidden same-slug collection protects every copy of
+its logical media, even when a selected host lacks local membership. Explicit
+collection scopes use physical membership after machine projection. Counts,
+favorites, covers and media actions use the same physical scope. Failed
+inventory reads retain privacy evidence and are unavailable, not confirmed
+absence. Persist explicit collection visibility intent with route/installation
+identity, serialize mirror and reconciliation writers, and reject snapshots
+older than a visibility edit. A fresh listing confirms convergence; a PATCH
+response alone does not supersede a newer edit.

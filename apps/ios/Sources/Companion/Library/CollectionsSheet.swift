@@ -6,6 +6,7 @@ import SwiftUI
 struct CollectionsSheet: View {
     @Environment(LibraryStore.self) private var library
     @Environment(\.dismiss) private var dismiss
+    var machineIDs: Set<MoldHost.ID>? = nil
     let choose: (LibraryScope) -> Void
     @State private var updating: Set<String> = []
 
@@ -22,6 +23,8 @@ struct CollectionsSheet: View {
                                 Image(systemName: shelf.hidden ? "rectangle.stack.badge.minus" : "rectangle.stack")
                                     .accessibilityHidden(true)
                                 Text(shelf.name)
+                                Text(library.shelfPresence(shelf, on: machineIDs ?? library.machineIDs) == .unavailable ? "Unavailable" : library.shelfPresence(shelf, on: machineIDs ?? library.machineIDs) == .absent ? "Not on machine" : shelf.count(in: library.scopedPool(on: machineIDs ?? library.machineIDs)).formatted())
+                                    .foregroundStyle(.secondaryText)
                                     .font(.body)
                                     .fixedSize(horizontal: false, vertical: true)
                                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -43,6 +46,10 @@ struct CollectionsSheet: View {
                             .disabled(updating.contains(shelf.slug))
                     }
                 }
+            }
+            .safeAreaInset(edge: .bottom) {
+                Text("Hide from All Prints applies to this collection on every machine. Changes retry when machines reconnect.")
+                    .font(.footnote).foregroundStyle(.secondaryText).padding().background(.background)
             }
             .accessibilityIdentifier("collections-sheet")
             .navigationTitle("Collections")

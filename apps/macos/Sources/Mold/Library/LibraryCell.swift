@@ -58,9 +58,9 @@ struct LibraryCell: View {
     }
 
     @ViewBuilder private var badges: some View {
-        if entry.print.isFavorite || mediaSymbol != nil {
+        if entry.isFavorite || mediaSymbol != nil {
         HStack(spacing: 4) {
-            if entry.print.isFavorite {
+            if entry.isFavorite {
                 Image(systemName: "star.fill")
             }
             if let mediaSymbol { Image(systemName: mediaSymbol) }

@@ -18,6 +18,10 @@ public struct LibraryQuery: Hashable, Sendable {
 
     public init() {}
 
+    public var machineIDs: Set<MoldHost.ID> {
+        Set(tokens.compactMap { if case let .machine(id, _) = $0 { id } else { nil } })
+    }
+
     public var isNarrowed: Bool {
         !tokens.isEmpty || !text.trimmingCharacters(in: .whitespaces).isEmpty
     }
@@ -30,10 +34,11 @@ public struct LibraryQuery: Hashable, Sendable {
             if case let .machine(id, _) = token { return id }
             return nil
         })
+        let protected = showHidden ? entries : entries.filter { !isHidden($0) }
         let candidates = machineIDs.isEmpty
-            ? entries : entries.compactMap { $0.presented(onAnyOf: machineIDs) }
+            ? protected : protected.compactMap { $0.presented(onAnyOf: machineIDs) }
         var shown = candidates.filter { entry in
-            matchesEveryGroup(entry) && (showHidden || !isHidden(entry))
+            matchesEveryGroup(entry)
         }
         if !text.trimmingCharacters(in: .whitespaces).isEmpty {
             shown = shown.filter { entry in entry.everyCopy.contains { $0.matches(text) } }

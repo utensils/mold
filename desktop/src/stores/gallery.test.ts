@@ -1165,7 +1165,7 @@ describe("organization fetch", () => {
     expect(organization.listCollections).toHaveBeenCalledTimes(1);
     expect(organization.listCollections).toHaveBeenCalledWith(LOCAL_TARGET);
     expect(gallery.collectionsByHost["local"]!.items.map((c) => c.name)).toEqual(["Smurfs"]);
-    expect(gallery.collectionsByHost["hal9000-7680"]).toMatchObject({ items: [], loaded: true });
+    expect(gallery.collectionsByHost["hal9000-7680"]).toMatchObject({ items: [], loaded: false });
     expect(gallery.tagsByHost["local"]!.items).toEqual([{ name: "blue", count: 3 }]);
     expect(gallery.tagsByHost["hal9000-7680"]).toMatchObject({ items: [], loaded: true });
   });
@@ -1358,10 +1358,34 @@ describe("organization union + filters", () => {
       collections: ["smurfs"],
       trashedAt: null,
     });
-    // A host-chip entry still reads the whole print's union.
+    // A host-chip entry reads only physical organization on that machine.
     gallery.filter = "hal9000-7680";
     const halShared = gallery.filtered.find((e) => e.item.filename === "shared.png")!;
-    expect(gallery.organizationOf(halShared).title).toBe("Grain test");
+    expect(gallery.organizationOf(halShared).title).toBeNull();
+  });
+
+  it("scopes collection counts and memberships but keeps global hidden protection", () => {
+    const gallery = seed();
+    gallery.buckets["hal9000-7680"]!.items[0]!.collections = [];
+    gallery.filter = "hal9000-7680";
+    expect(gallery.collectionCounts("smurfs")).toBe(1);
+    gallery.scope = "collections";
+    gallery.collectionSlug = "smurfs";
+    expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["remote.png"]);
+    gallery.collectionsByHost["local"]!.items[0]!.hidden = true;
+    gallery.scope = "prints";
+    expect(gallery.filtered).toEqual([]);
+  });
+
+  it("retains hidden privacy inventory when its owner cannot be reached", async () => {
+    const gallery = seed();
+    gallery.collectionsByHost["local"]!.items[0]!.hidden = true;
+    gallery.buckets["hal9000-7680"]!.items[0]!.collections = [];
+    gallery.filter = "hal9000-7680";
+    useConnectionStore().status = "error";
+    await gallery.fetchCollections("local");
+    expect(gallery.collectionsByHost["local"]!.items[0]!.hidden).toBe(true);
+    expect(gallery.filtered).toEqual([]);
   });
 
   it("the Favourites scope and tag chips (AND over the union) narrow the grid", () => {

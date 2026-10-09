@@ -5,7 +5,15 @@ import SwiftUI
 struct ShelfMenu: View {
     @Environment(LibraryStore.self) private var library
     let scope: LibraryScope
+    var machineIDs: Set<MoldHost.ID>? = nil
     let choose: (LibraryScope) -> Void
+
+    private func shelfLabel(_ shelf: CollectionShelf) -> String {
+        let presence = library.shelfPresence(shelf, on: machineIDs ?? library.machineIDs)
+        if presence == .unavailable { return "\(shelf.name) · Unavailable" }
+        if presence == .absent { return "\(shelf.name) · Not on machine" }
+        return "\(shelf.name) · \(shelf.count(in: library.scopedPool(on: machineIDs ?? library.machineIDs)))"
+    }
 
     var body: some View {
         Picker("Shelf", selection: Binding(get: { scope }, set: choose)) {
@@ -15,7 +23,7 @@ struct ShelfMenu: View {
             if !library.shelves.isEmpty {
                 Section("Collections") {
                     ForEach(library.shelves) { shelf in
-                        Label(shelf.name, systemImage: shelf.hidden ? "rectangle.stack.badge.minus" : "rectangle.stack")
+                        Label(shelfLabel(shelf), systemImage: shelf.hidden ? "rectangle.stack.badge.minus" : "rectangle.stack")
                             .tag(LibraryScope.collection(slug: shelf.slug))
                     }
                 }
@@ -88,11 +96,11 @@ struct SelectionBar: View {
                 Task { await library.deleteImmediately(selected); cleared() }
             }
         } message: {
-            Text("They are removed from their machines for good. This can't be undone.")
+            Text("They are removed from \(LibraryEntry.soleMachineName(of: selected) ?? "all machines holding these copies") for good. This can't be undone.")
         }
     }
 
-    private var allFavourite: Bool { !selected.isEmpty && selected.allSatisfy(\.print.isFavorite) }
+    private var allFavourite: Bool { !selected.isEmpty && selected.allSatisfy(\.isFavorite) }
 }
 
 /// Empty Trash, after asking.
@@ -113,5 +121,20 @@ struct EmptyTrashButton: View {
             } message: {
                 Text("Every print in Trash on \(targetMachines) is removed for good. Other machines keep their copies.")
             }
+    }
+}
+
+struct LibraryMachinePicker: View {
+    @Environment(LibraryStore.self) private var library
+    @Environment(HostStore.self) private var hosts
+
+    var body: some View {
+        @Bindable var library = library
+        Picker("Machine", selection: $library.machineID) {
+            Text("All Machines").tag(nil as MoldHost.ID?)
+            ForEach(hosts.hosts) { host in
+                Text(host.name).tag(Optional(host.id))
+            }
+        }
     }
 }

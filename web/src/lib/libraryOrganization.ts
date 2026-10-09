@@ -1,3 +1,10 @@
+import {
+  desiredCollectionHidden,
+  collectionVisibilityRevision,
+  protectCollectionVisibilityListing,
+  rememberCollectionVisibility,
+  reconcileCollectionVisibility,
+} from "@studio/lib/collectionVisibility";
 /*
  * Web-side Library organization plumbing — titles, favorites, tags,
  * collections, and the trash across every host in the registry (D1/D2).
@@ -52,7 +59,11 @@ import {
   hostGallery,
   type HostCapabilities,
 } from "../components/machines/hostClient";
-import { ORIGIN_HOST_ID, type HostEntry } from "./hostRegistry";
+import {
+  ORIGIN_HOST_ID,
+  listHosts as registeredHosts,
+  type HostEntry,
+} from "./hostRegistry";
 import type { HostGalleryImage } from "./multiHostGallery";
 import { downloadFileName, fileUnderAvailable } from "@studio/lib/fileUnder";
 import type { Collection, GalleryImage, TagCount } from "../types";
@@ -79,6 +90,11 @@ export interface HostOrganizationSnapshot {
    * refresh. A failed listing degrades to `trashed: []`, and pending local
    * shadows must not be cleared on that non-evidence (codex review). */
   trashListingOk: boolean;
+  collectionsListingOk?: boolean;
+  routeUrl?: string;
+  instanceId?: string | null;
+  visibilityReadRevision?: number;
+  visibilityError?: string;
 }
 
 export interface OrganizationFetchers {
@@ -106,6 +122,8 @@ const defaultFetchers: OrganizationFetchers = {
 function emptySnapshot(host: HostEntry): HostOrganizationSnapshot {
   return {
     hostId: host.id,
+    routeUrl: host.url,
+    instanceId: host.instanceId ?? null,
     hostLabel: host.name,
     organize: null,
     bulkMutations: false,
@@ -123,6 +141,7 @@ async function fetchHostSnapshot(
   signal?: AbortSignal,
 ): Promise<HostOrganizationSnapshot> {
   const snapshot = emptySnapshot(host);
+  snapshot.visibilityReadRevision = collectionVisibilityRevision();
   const caps = await fetchers.capabilities(host, signal).catch(() => null);
   const gallery = caps?.gallery;
   // A failed probe is UNKNOWN (null), never "answered organize: false".
@@ -138,9 +157,16 @@ async function fetchHostSnapshot(
     : null;
   const target = hostApiTarget(host);
   let trashListingOk = false;
+  let collectionsListingOk = false;
   const [collections, tags, trashed] = await Promise.all([
     snapshot.organize === true
-      ? fetchers.collections(target, signal).catch(() => [] as Collection[])
+      ? fetchers
+          .collections(target, signal)
+          .then((rows) => {
+            collectionsListingOk = true;
+            return rows;
+          })
+          .catch(() => [] as Collection[])
       : Promise.resolve([] as Collection[]),
     snapshot.organize === true
       ? fetchers.tags(target, signal).catch(() => [] as TagCount[])
@@ -156,7 +182,11 @@ async function fetchHostSnapshot(
       : Promise.resolve([] as GalleryImage[]),
   ]);
   snapshot.trashListingOk = trashListingOk;
-  snapshot.collections = collections;
+  snapshot.collectionsListingOk = collectionsListingOk;
+  snapshot.collections = protectCollectionVisibilityListing(
+    collections,
+    snapshot.visibilityReadRevision,
+  );
   snapshot.tags = tags;
   snapshot.trashed = trashed.map((item) => ({
     ...item,
@@ -172,10 +202,63 @@ export function fetchOrganization(
   hosts: readonly HostEntry[],
   fetchers: OrganizationFetchers = defaultFetchers,
   signal?: AbortSignal,
+  previous: readonly HostOrganizationSnapshot[] = [],
 ): Promise<HostOrganizationSnapshot[]> {
   return Promise.all(
     hosts.map((host) => fetchHostSnapshot(host, fetchers, signal)),
-  );
+  ).then(async (snapshots) => {
+    for (const next of snapshots) {
+      const old = previous.find((s) => s.hostId === next.hostId);
+      if (
+        !next.collectionsListingOk &&
+        old &&
+        old.routeUrl === next.routeUrl &&
+        old.instanceId === next.instanceId
+      ) {
+        next.collections = protectCollectionVisibilityListing(
+          old.collections,
+          next.visibilityReadRevision!,
+        );
+        next.tags = old.tags;
+      }
+    }
+    const errors = await reconcileCollectionVisibility(
+      snapshots.map((s) => {
+        const host = hosts.find((h) => h.id === s.hostId)!;
+        return {
+          hostId: s.hostId,
+          target: hostApiTarget(host),
+          instanceId: host.instanceId ?? null,
+          collections: s.collections,
+          listingOk: s.collectionsListingOk === true,
+          readRevision: s.visibilityReadRevision ?? 0,
+        };
+      }),
+      fetchers === defaultFetchers
+        ? () =>
+            registeredHosts().flatMap((host) => {
+              const s = snapshots.find((s) => s.hostId === host.id);
+              return s
+                ? [
+                    {
+                      hostId: host.id,
+                      target: hostApiTarget(host),
+                      instanceId: host.instanceId ?? null,
+                      collections: s.collections,
+                      listingOk: s.collectionsListingOk === true,
+                      readRevision: s.visibilityReadRevision ?? 0,
+                    },
+                  ]
+                : [];
+            })
+        : undefined,
+    );
+    for (const snapshot of snapshots) {
+      const error = errors.find((e) => e.startsWith(`${snapshot.hostId}:`));
+      if (error) snapshot.visibilityError = error;
+    }
+    return snapshots;
+  });
 }
 
 // ── Merging ─────────────────────────────────────────────────────────────────
@@ -222,7 +305,10 @@ export function mergedCollections(
       hostLabel: s.hostLabel,
       collections: s.collections,
     })),
-  );
+  ).map((c) => ({
+    ...c,
+    hidden: desiredCollectionHidden(c.slug, c.hidden === true),
+  }));
 }
 
 export function collectionResolver(
@@ -340,6 +426,7 @@ export interface CollectionCard {
   name: string;
   /** Logical prints in the collection (counted from the merged grid). */
   count: number;
+  availability?: "present" | "absent" | "unavailable";
   hostLabels: string[];
   /** Latest `updated_at` across hosts (unix secs), `null` when unknown. */
   updatedAt: number | null;
@@ -570,6 +657,12 @@ export async function applyOrganizationMutation(
             name: op.ensureCollection.name,
           });
           id = created.id;
+          if (
+            mergedCollections(context.snapshots).find(
+              (c) => c.slug === op.ensureCollection.slug,
+            )?.hidden
+          )
+            await updateCollectionHidden(target, id, true);
         }
         await setCollectionItems(target, id, {
           add: op.filenames,
@@ -623,14 +716,70 @@ export function renameCollectionEverywhere(
 }
 
 /** Hide/show every host copy of a merged collection. */
-export function setCollectionHiddenEverywhere(
+export async function setCollectionHiddenEverywhere(
   collection: MergedCollection,
   hidden: boolean,
   hostById: HostLookup,
 ): Promise<FanoutResult> {
-  return fanout(collection.hosts, hostById, (host, _entry, target) =>
-    updateCollectionHidden(target, host.id, hidden).then(() => undefined),
+  const hosts = collection.hosts.flatMap((h) => {
+    const host = hostById(h.hostId);
+    return host
+      ? [
+          {
+            hostId: h.hostId,
+            target: hostApiTarget(host),
+            instanceId: host.instanceId ?? null,
+            collections: [
+              {
+                id: h.id,
+                slug: collection.slug,
+                name: collection.name,
+                hidden: !hidden,
+                count: h.count,
+                description: null,
+                cover_filename: null,
+                created_at: 0,
+                updated_at: 0,
+              },
+            ],
+            listingOk: true,
+          },
+        ]
+      : [];
+  });
+  rememberCollectionVisibility(collection.slug, hidden, hosts);
+  const errors = await reconcileCollectionVisibility(hosts, () =>
+    hosts.flatMap((h) => {
+      const live = hostById(h.hostId);
+      return live
+        ? [
+            {
+              ...h,
+              target: hostApiTarget(live),
+              instanceId: live.instanceId ?? null,
+            },
+          ]
+        : [];
+    }),
   );
+  const failed = collection.hosts
+    .filter(
+      (h) =>
+        !hosts.some((host) => host.hostId === h.hostId) ||
+        errors.some((error) => error.startsWith(`${h.hostId}:`)),
+    )
+    .map((h) => ({
+      hostId: h.hostId,
+      error:
+        errors.find((error) => error.startsWith(`${h.hostId}:`)) ??
+        "That machine is unavailable.",
+    }));
+  return {
+    ok: hosts
+      .map((h) => h.hostId)
+      .filter((id) => !failed.some((f) => f.hostId === id)),
+    failed,
+  };
 }
 
 /** Delete every host's copy of a merged collection — never its prints. */
