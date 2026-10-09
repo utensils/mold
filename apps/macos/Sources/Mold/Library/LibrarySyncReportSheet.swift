@@ -3,6 +3,7 @@ import SwiftUI
 
 struct LibrarySyncReportSheet: View {
     @Environment(LibraryStore.self) private var library
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         @Bindable var library = library
@@ -19,10 +20,11 @@ struct LibrarySyncReportSheet: View {
                         }
                     }
                 }
-                Toggle("Don’t show these unchanged media issues again", isOn: $library.syncIssueAcknowledgment)
-                    .disabled(library.localSaveIssueKeys.isEmpty)
-                Text("Sync keeps retrying. New or changed issues still appear; machine connection and authentication failures are always reported.")
-                    .font(.caption).foregroundStyle(.secondary)
+                if !library.localSaveIssueKeys.isEmpty {
+                    Toggle("Don’t show these unchanged media issues again", isOn: $library.syncIssueAcknowledgment)
+                    Text("Sync keeps retrying. New or changed issues still appear; machine connection and authentication failures are always reported.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
             HStack {
                 Button("Copy Details") {
@@ -30,11 +32,13 @@ struct LibrarySyncReportSheet: View {
                     NSPasteboard.general.setString(
                         ([library.localSaveReport] + library.localSaveFailures).joined(separator: "\n"), forType: .string)
                 }
-                Button("Reset Acknowledgments") {
-                    library.syncSession.resetAcknowledgments()
+                if !library.localSaveFailures.isEmpty {
+                    Button("Reset Acknowledgments") {
+                        library.syncSession.resetAcknowledgments()
+                    }
                 }
                 Spacer()
-                Button("Done") { library.localSaveAlertPresented = false }
+                Button("Done", action: dismissReport)
                     .keyboardShortcut(.defaultAction)
             }
         }
@@ -42,5 +46,11 @@ struct LibrarySyncReportSheet: View {
         .frame(width: 650)
         .frame(height: library.localSaveFailures.isEmpty ? nil : 500)
         .frame(minHeight: 180)
+        .onExitCommand(perform: dismissReport)
+    }
+
+    private func dismissReport() {
+        library.localSaveAlertPresented = false
+        dismiss()
     }
 }

@@ -178,7 +178,8 @@ retry when their original machines reconnect.
 
 **Sync All to This Mac** copies now and repeats every five minutes for this app
 session. Completion appears in the Library status; the countdown and **Stop Sync**
-make the next run explicit. **Details** shows issues and offers **Don’t show these
+make the next run explicit. **Done**, Return, and Escape close Sync Details;
+successful reports omit issue controls. **Details** shows issues and offers **Don’t show these
 unchanged media issues again**. Acknowledgment keeps retries running; new or
 changed errors and connection/authentication failures still appear. Removed local
 copies stay removed during Sync; use explicit Save to copy one again. An older

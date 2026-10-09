@@ -10,9 +10,12 @@ private struct DeferredMenuSheet<Sheet: View>: ViewModifier {
 
     func body(content: Content) -> some View {
         let _ = completionRevision
+        // Observe the request while evaluating the presenter, rather than
+        // relying on SwiftUI to observe a custom Binding's lazy getter.
+        let presented = tracking.shouldPresentSheet(requested)
         return content
             .sheet(isPresented: Binding(
-                get: { tracking.shouldPresentSheet(requested) },
+                get: { presented },
                 set: { requested = $0 }
             ), content: sheet)
             .onReceive(tracking.didFinishTracking) { completionRevision = $0 }

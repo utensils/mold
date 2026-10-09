@@ -139,6 +139,8 @@ silently stranded); what was missing is that nobody was told.
 Quitting gives the engine the **server's** budget — `MOLD_SHUTDOWN_ABORT_SECS`
 or 45 s, plus what sits outside it — behind a small panel with a Quit Now, and
 it waits for a startup or an in-flight drain as well as for a running engine.
+The panel fits its wrapped message and keeps clear margins around the native
+**Quit Now** button.
 The app used to allow 8 s and discard the answer. A drain that overruns even
 that says so rather than reporting the engine stopped: its thread is still
 writing, and this process can never start another.
@@ -820,7 +822,8 @@ Media actions on a machine-filtered view affect only its displayed copies.
 **Sync All to This Mac** starts an immediate copy and repeats every five minutes
 for this app session. The Library status shows completion, issues and the next
 run. **Stop Sync** ends repeats and lets active transfers settle. Successful runs
-need no confirmation. **Details** keeps the full report available; its checkbox
+need no confirmation. **Details** keeps the full report available. **Done**, Return, and Escape dismiss
+the report; a successful report shows only Copy Details and Done. Its checkbox
 acknowledges unchanged per-media issues, while changed issues and connection or
 authentication failures still appear. **Reset Acknowledgments** restores those
 notifications. The checkbox reflects saved choices when Details reopens, and new issues leave it unchecked. Sync continues retrying acknowledged media.
