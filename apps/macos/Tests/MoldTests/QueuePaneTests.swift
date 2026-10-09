@@ -158,9 +158,12 @@ struct QueuePaneTests {
     @Test func aBatchMoveIssuesAscendingPatchesThenOnePoll() async {
         let workstation = machine()
         let fake = FakeBackend(host: workstation)
-        fake.queueListing = FakeFixtures.queueListing(["job-1"])
+        fake.queueListing = FakeFixtures.queueListing(["c1", "c2"])
         let hosts = HostStore(hosts: [workstation]) { _ in fake }
+        hosts.reachability[workstation.id] = .up(FakeFixtures.serverStatus(instanceId: "run-1"))
+        hosts.capabilities[workstation.id] = FakeFixtures.capabilities(canReorder: true)
         let queue = QueueStore(hosts: hosts)
+        queue.byHost[workstation.id] = fake.queueListing!.merged
 
         await queue.reorder([("c1", 0), ("c2", 1)], on: workstation.id)
 

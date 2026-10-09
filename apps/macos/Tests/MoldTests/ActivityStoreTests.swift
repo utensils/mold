@@ -56,6 +56,80 @@ struct ActivityStoreTests {
         return (store, hosts, centre)
     }
 
+    private func chainSnapshot(_ phase: String = "running", canCancel: Bool = true) -> ActiveWorkSnapshot {
+        let data = try! JSONSerialization.data(withJSONObject: ["instance_id": "inst-1", "observed_at_unix_ms": 1, "items": [
+            ["id": "chain-1", "kind": "generation", "execution": "chain", "phase": phase, "can_cancel": canCancel, "created_at_unix_ms": 1, "updated_at_unix_ms": 1]
+        ], "unavailable_kinds": []])
+        return try! MoldJSON.decoder.decode(ActiveWorkSnapshot.self, from: data)
+    }
+
+    @Test func autoChainActionsUseFreshStateAndChainRoutes() async {
+        let host = machine()
+        let backend = fake(for: host)
+        backend.serverStatus = FakeFixtures.serverStatus(instanceId: "inst-1")
+        backend.extras.activitySnapshot = chainSnapshot("paused", canCancel: false)
+        let (store, _, _) = await bench(backend, host: host)
+        await store.refresh(on: host.id)
+        await store.act(.resume, on: store.rows[0])
+        #expect(backend.callCount("resumeChainJob") == 1)
+        backend.extras.activitySnapshot = chainSnapshot()
+        await store.refresh(on: host.id)
+        await store.act(.cancel, on: store.rows[0])
+        #expect(backend.callCount("cancelChainJob") == 1)
+        #expect(backend.callCount("cancelJob") == 0)
+    }
+
+    @Test func changedChainStateInstanceAndOfflineHostNeverMutate() async {
+        let host = machine()
+        let backend = fake(for: host)
+        backend.serverStatus = FakeFixtures.serverStatus(instanceId: "inst-1")
+        backend.extras.activitySnapshot = chainSnapshot("held")
+        let (store, hosts, _) = await bench(backend, host: host)
+        await store.refresh(on: host.id)
+        let original = store.rows[0]
+        backend.extras.activitySnapshot = chainSnapshot("running")
+        await store.act(.cancel, on: original)
+        #expect(backend.callCount("cancelChainJob") == 0)
+        backend.serverStatus = FakeFixtures.serverStatus(instanceId: "changed")
+        await store.act(.cancel, on: store.rows[0])
+        #expect(backend.callCount("cancelChainJob") == 0)
+        hosts.reachability[host.id] = .unknown
+        await store.act(.cancel, on: store.rows[0])
+        #expect(backend.callCount("cancelChainJob") == 0)
+    }
+
+    @Test func revokedChainCancellationRefreshesItsOfferBeforeUnlocking() async {
+        let host = machine()
+        let backend = fake(for: host)
+        backend.serverStatus = FakeFixtures.serverStatus(instanceId: "inst-1")
+        backend.extras.activitySnapshot = chainSnapshot()
+        let (store, _, _) = await bench(backend, host: host)
+        await store.refresh(on: host.id)
+        let original = store.rows[0]
+        backend.extras.activitySnapshot = chainSnapshot(canCancel: false)
+        await store.act(.cancel, on: original)
+        #expect(backend.callCount("cancelChainJob") == 0)
+        #expect(!store.canAct(.cancel, on: original))
+    }
+
+    @Test func chainMutationReservesTheRowThroughRefresh() async {
+        let host = machine()
+        let backend = fake(for: host)
+        backend.serverStatus = FakeFixtures.serverStatus(instanceId: "inst-1")
+        backend.extras.activitySnapshot = chainSnapshot()
+        let (store, _, _) = await bench(backend, host: host)
+        await store.refresh(on: host.id)
+        let original = store.rows[0]
+        backend.delays["activity"] = .milliseconds(100)
+        let first = Task { await store.act(.cancel, on: original) }
+        await backend.entered("activity", atLeast: 2)
+        #expect(!store.canAct(.cancel, on: original))
+        await store.act(.cancel, on: original)
+        await first.value
+        #expect(backend.callCount("cancelChainJob") == 1)
+        #expect(store.canAct(.cancel, on: original))
+    }
+
     @Test func oneReadFillsTheFleetsRows() async {
         let workstation = machine()
         let backend = fake(for: workstation)

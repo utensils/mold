@@ -1,7 +1,11 @@
+import {
+  missingQueueModel,
+  startQueueDownloadRecovery,
+} from "@studio/composables/useQueueDownloadRecovery";
 import { useHeldQueueTransfer } from "@studio/composables/useHeldQueueTransfer";
 import { computed, ref, type ComputedRef, type Ref } from "vue";
 import { useRouter } from "vue-router";
-import { apiFetchTo } from "@studio/api/client";
+import { apiFetchTo, apiJsonTo } from "@studio/api/client";
 import type { FleetActiveWork } from "@studio/api/activity";
 import { useOpenLiveWork } from "./useOpenLiveWork";
 import { useQueueActivity, type QueueRow } from "./useQueueActivity";
@@ -173,6 +177,7 @@ export function useQueueCommands(): QueueCommands {
     const host = hosts.all.find((candidate) => candidate.id === row.hostId);
     if (
       !snapshot ||
+      host?.status !== "ready" ||
       snapshot.stale ||
       snapshot.routeUrl !== row.routeUrl ||
       snapshot.instanceId !== row.instanceId ||
@@ -197,7 +202,10 @@ export function useQueueCommands(): QueueCommands {
    */
   function canResumeChain(row: QueueRow): boolean {
     return (
-      row.kind === "shared" && row.shared.execution === "chain" && row.shared.phase === "paused"
+      row.kind === "shared" &&
+      connectedRow(row) &&
+      row.shared.execution === "chain" &&
+      row.shared.phase === "paused"
     );
   }
 
@@ -209,16 +217,35 @@ export function useQueueCommands(): QueueCommands {
   async function resumeSharedChain(row: FleetActiveWork) {
     const target = sharedRowTarget(row);
     if (!target) return;
-    try {
-      await apiFetchTo(target, `/api/chain-jobs/${encodeURIComponent(row.id)}/resume`, {
-        method: "POST",
-      });
-      toasts.push("Resumed");
-    } catch (error) {
-      report(error);
-    } finally {
-      await liveActivity.refresh();
-    }
+    await reserveMutation(
+      { kind: "shared", key: row.key, createdAtMs: row.created_at_unix_ms, shared: row },
+      async () => {
+        try {
+          const fresh = await apiJsonTo<{
+            instance_id: string;
+            items: { id: string; kind: string; execution: string | null; phase: string }[];
+          }>(target, "/api/activity");
+          const current = fresh.items.find((item) => item.id === row.id && item.kind === row.kind);
+          if (
+            fresh.instance_id !== row.instanceId ||
+            current?.execution !== "chain" ||
+            current.phase !== "paused" ||
+            !sharedRowTarget(row)
+          )
+            throw new Error(
+              "This job or machine changed. Reopen its details before resuming work.",
+            );
+          await apiFetchTo(target, `/api/chain-jobs/${encodeURIComponent(row.id)}/resume`, {
+            method: "POST",
+          });
+          toasts.push("Resumed");
+        } catch (error) {
+          report(error);
+        } finally {
+          await liveActivity.refresh();
+        }
+      },
+    );
   }
 
   async function cancelShared(row: FleetActiveWork) {
@@ -227,31 +254,129 @@ export function useQueueCommands(): QueueCommands {
     if (!target) return;
     cancellingShared.value = [...cancellingShared.value, row.key];
     try {
+      const fresh = await apiJsonTo<{
+        instance_id: string;
+        items: { id: string; kind: string; phase: string; can_cancel: boolean }[];
+      }>(target, "/api/activity");
+      const current = fresh.items.find((item) => item.id === row.id && item.kind === row.kind);
+      if (
+        fresh.instance_id !== row.instanceId ||
+        !current?.can_cancel ||
+        !["queued", "paused", "held", "running", "preparing"].includes(current.phase) ||
+        (row.phase === "held" && current.phase !== "held")
+      )
+        throw new Error("This job or machine changed. Reopen its details before stopping work.");
+      if (
+        row.execution !== "chain" &&
+        ["running", "preparing"].includes(current.phase) &&
+        queueFor(row.hostId)?.caps?.canCancelRunning !== true
+      )
+        throw new Error("This machine cannot stop a running job.");
+      if (!sharedRowTarget(row)) return;
       if (row.execution === "chain") {
         await apiFetchTo(target, `/api/chain-jobs/${encodeURIComponent(row.id)}/cancel`, {
           method: "POST",
         });
       } else {
-        await jobs.cancelJob(row.hostId, row.id);
+        await jobs.cancelJob(row.hostId, row.id, { onlyHeld: row.phase === "held" });
       }
-      const current = liveActivity.hosts[row.hostId]?.items.find(
+      const cached = liveActivity.hosts[row.hostId]?.items.find(
         (item) => item.kind === row.kind && item.id === row.id,
       );
-      if (current) {
-        current.can_cancel = false;
-        current.phase = "cancelling";
+      if (cached) {
+        cached.can_cancel = false;
+        cached.phase = "cancelling";
       }
       toasts.push("Stopped");
     } catch (error) {
       report(error);
     } finally {
-      await liveActivity.refresh();
-      cancellingShared.value = cancellingShared.value.filter((key) => key !== row.key);
+      try {
+        await liveActivity.refresh();
+      } finally {
+        cancellingShared.value = cancellingShared.value.filter((key) => key !== row.key);
+      }
+    }
+  }
+
+  function reservationKey(row: QueueRow): string {
+    return row.kind === "shared" ? row.shared.key : row.key;
+  }
+  async function reserveMutation(row: QueueRow, action: () => Promise<unknown>): Promise<void> {
+    if (!connectedRow(row)) return;
+    const key = reservationKey(row);
+    cancellingShared.value = [...cancellingShared.value, key];
+    try {
+      await action();
+    } finally {
+      try {
+        await liveActivity.refresh();
+      } finally {
+        cancellingShared.value = cancellingShared.value.filter((value) => value !== key);
+      }
+    }
+  }
+
+  function connectedRow(row: QueueRow): boolean {
+    if (cancellingShared.value.includes(reservationKey(row))) return false;
+    const ref = serverRef(row);
+    if (ref && jobs.isJobBusy(ref.hostId, ref.id)) return false;
+    if (
+      row.kind === "shared"
+        ? cancellingShared.value.includes(row.shared.key)
+        : row.print.cancelling || row.print.retrying
+    )
+      return false;
+    const host = hosts.all.find((host) => host.id === hostIdFor(row));
+    if (!host || host.status !== "ready") return false;
+    if (row.kind === "print") return true;
+    const snapshot = liveActivity.hosts[row.shared.hostId];
+    return (
+      !row.shared.stale &&
+      !!row.shared.instanceId &&
+      snapshot?.stale === false &&
+      snapshot.instanceId === row.shared.instanceId &&
+      host.instanceId === row.shared.instanceId &&
+      snapshot.routeUrl === row.shared.routeUrl &&
+      host.baseUrl === row.shared.routeUrl
+    );
+  }
+
+  async function retryShared(row: FleetActiveWork) {
+    const key = row.key;
+    if (cancellingShared.value.includes(key)) return;
+    if (!sharedRowTarget(row)) return;
+    cancellingShared.value = [...cancellingShared.value, key];
+    try {
+      const entry = await jobs.queueJob(row.hostId, row.id);
+      if (!sharedRowTarget(row)) return;
+      const target = sharedRowTarget(row);
+      if (!target || !row.instanceId) return;
+      if (await missingQueueModel(target, row.instanceId, row.id))
+        await startQueueDownloadRecovery(target, row.instanceId, row.id, row.hostLabel);
+      else await jobs.retryJob(row.hostId, entry);
+    } catch (error) {
+      report(error);
+    } finally {
+      try {
+        await liveActivity.refresh();
+      } finally {
+        cancellingShared.value = cancellingShared.value.filter((value) => value !== key);
+      }
     }
   }
 
   function canCancel(row: QueueRow): boolean {
+    if (!connectedRow(row)) return false;
     if (row.kind === "print") {
+      const executing = ["loading", "denoising", "finishing"].includes(row.print.status);
+      if (
+        row.print.id &&
+        executing &&
+        !row.print.chainStageCount &&
+        queueFor(hostIdFor(row))?.caps?.canCancelRunning !== true
+      )
+        return false;
       return (
         row.print.status !== "complete" && row.print.status !== "error" && !row.print.cancelling
       );
@@ -260,6 +385,10 @@ export function useQueueCommands(): QueueCommands {
       return (
         row.shared.kind === "generation" &&
         row.shared.can_cancel &&
+        ["queued", "paused", "held", "running", "preparing"].includes(row.shared.phase) &&
+        (row.shared.execution === "chain" ||
+          !["running", "preparing"].includes(row.shared.phase) ||
+          queueFor(row.shared.hostId)?.caps?.canCancelRunning === true) &&
         !row.shared.stale &&
         !cancellingShared.value.includes(row.shared.key)
       );
@@ -268,8 +397,12 @@ export function useQueueCommands(): QueueCommands {
   }
 
   async function cancel(row: QueueRow) {
-    if (row.kind === "print") await cancelPrint(row.print);
-    else await cancelShared(row.shared);
+    if (!canCancel(row)) return;
+    if (row.kind === "print") {
+      const ref = serverRef(row);
+      if (ref) await jobs.withJobMutation(ref.hostId, ref.id, () => cancelPrint(row.print));
+      else await cancelPrint(row.print);
+    } else await cancelShared(row.shared);
   }
 
   /** The host a row's server queue lives on, and the row's server id. A long
@@ -281,7 +414,11 @@ export function useQueueCommands(): QueueCommands {
     if (row.kind === "print") {
       return row.print.id ? { hostId: row.print.hostId ?? "local", id: row.print.id } : null;
     }
-    if (row.kind === "shared" && row.shared.kind === "generation") {
+    if (
+      row.kind === "shared" &&
+      row.shared.kind === "generation" &&
+      row.shared.execution !== "chain"
+    ) {
       return { hostId: row.shared.hostId, id: row.shared.id };
     }
     return null;
@@ -311,7 +448,10 @@ export function useQueueCommands(): QueueCommands {
   function canReorder(row: QueueRow): boolean {
     const ref = serverRef(row);
     return (
-      ref !== null && jobs.queues[ref.hostId]?.caps?.canReorder === true && queuedIndexOf(row) >= 0
+      connectedRow(row) &&
+      ref !== null &&
+      jobs.queues[ref.hostId]?.caps?.canReorder === true &&
+      queuedIndexOf(row) >= 0
     );
   }
 
@@ -319,8 +459,8 @@ export function useQueueCommands(): QueueCommands {
    * server clamps and re-syncs, so an out-of-range index is harmless. */
   async function reorder(row: QueueRow, position: number) {
     const ref = serverRef(row);
-    if (!ref) return;
-    await jobs.reorderQueued(ref.hostId, ref.id, Math.max(0, position));
+    if (!ref || !canReorder(row)) return;
+    await reserveMutation(row, () => jobs.reorderQueued(ref.hostId, ref.id, Math.max(0, position)));
   }
 
   /**
@@ -351,14 +491,20 @@ export function useQueueCommands(): QueueCommands {
    */
   function pauseEntries(row: QueueRow): MenuEntry[] {
     const ref = serverRef(row);
-    if (!ref || jobs.queues[ref.hostId]?.caps?.canPauseJob !== true) return [];
+    if (!ref || !connectedRow(row) || jobs.queues[ref.hostId]?.caps?.canPauseJob !== true)
+      return [];
     const entry = queueEntryOf(row);
     if (!entry || (entry.state !== "queued" && entry.state !== "paused")) return [];
     const paused = entry.state === "paused";
     return [
       {
         label: paused ? "Resume" : "Pause",
-        action: () => void jobs.setJobPaused(ref.hostId, ref.id, !paused).catch(report),
+        action: () => {
+          if (connectedRow(row))
+            void reserveMutation(row, () => jobs.setJobPaused(ref.hostId, ref.id, !paused)).catch(
+              report,
+            );
+        },
       },
     ];
   }
@@ -379,6 +525,17 @@ export function useQueueCommands(): QueueCommands {
    * now) is retried on its own host through the store's fence. */
   function retry(job: Job) {
     if (!job.retryable || job.retrying) return;
+    if (["MODEL_NOT_FOUND", "UNKNOWN_MODEL"].includes(job.holdCode ?? "")) {
+      const host = hosts.all.find((host) => host.id === (job.hostId ?? "local"));
+      if (host?.status === "ready" && host.baseUrl && host.instanceId && job.id)
+        void startQueueDownloadRecovery(
+          { baseUrl: host.baseUrl, apiKey: host.apiKey },
+          host.instanceId,
+          job.id,
+          host.label,
+        );
+      return;
+    }
     void generation
       .retryHeld(job.clientId)
       .then(() => toasts.push(`Retry queued on ${job.hostLabel ?? "this machine"}.`))
@@ -474,7 +631,7 @@ export function useQueueCommands(): QueueCommands {
     const held =
       queueEntryOf(row)?.state === "held" || (row.kind === "print" && row.print.holdError !== null);
     const transferEntries: MenuEntry[] =
-      held && source && transfer?.canSend(source.hostId)
+      held && connectedRow(row) && source && transfer?.canSend(source.hostId)
         ? [
             {
               label: "Send to another machine…",
@@ -482,9 +639,25 @@ export function useQueueCommands(): QueueCommands {
             },
           ]
         : [];
+    const sharedEntry = row.kind === "shared" ? queueEntryOf(row) : null;
+    const sharedRetry =
+      sharedEntry?.state === "held" &&
+      sharedEntry.retryable !== false &&
+      !!sharedEntry.batch_id?.trim() &&
+      !!sharedEntry.client_batch_id?.trim();
     if (row.kind === "shared") {
       return [
+        { label: "Show details", action: () => open(row) },
         ...transferEntries,
+        ...(sharedRetry && sharedEntry
+          ? [
+              {
+                label: "Retry now",
+                disabled: !connectedRow(row) || cancellingShared.value.includes(row.shared.key),
+                action: () => void retryShared(row.shared),
+              },
+            ]
+          : []),
         ...reorderEntries(row),
         ...pauseEntries(row),
         ...(canResumeChain(row)
@@ -507,7 +680,17 @@ export function useQueueCommands(): QueueCommands {
             action: () => generation.removeSettled(job.clientId),
           },
       ...(job.retryable
-        ? [{ label: "Retry now", disabled: job.retrying, action: () => retry(job) }]
+        ? [
+            {
+              label: ["MODEL_NOT_FOUND", "UNKNOWN_MODEL"].includes(job.holdCode ?? "")
+                ? "Download and Retry"
+                : "Retry now",
+              disabled: !connectedRow(row),
+              action: () => {
+                if (connectedRow(row)) retry(job);
+              },
+            },
+          ]
         : []),
       { separator: true },
       {

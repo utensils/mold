@@ -261,6 +261,12 @@ final class QueueStore {
         return hosts.capabilities[id]?.canReorderQueue == true
     }
 
+    func canMove(_ entry: QueueEntry, on id: MoldHost.ID) -> Bool {
+        guard canReorder(on: id), entry.state.isReorderable,
+              let row = actionable(entry, on: id) else { return false }
+        return row.state.isReorderable
+    }
+
     // MARK: - Acting
 
     func cancel(_ entry: QueueEntry, on id: MoldHost.ID) async {
@@ -282,6 +288,7 @@ final class QueueStore {
 
     /// Up or down one place, where the machine will actually put it.
     func move(_ entry: QueueEntry, up: Bool, on id: MoldHost.ID) async {
+        guard canMove(entry, on: id) else { return }
         let waiting = (listings[id] ?? []).filter(\.state.isReorderable)
         guard let index = waiting.firstIndex(where: { $0.id == entry.id }),
               up ? index > 0 : index + 1 < waiting.count else { return }
@@ -302,9 +309,17 @@ final class QueueStore {
     /// the PATCHes `QueueOrder` plans, in order.
     func moveGroup(_ ids: [String], after neighbour: String?, on id: MoldHost.ID) async {
         let plan = QueueOrder.moves(ids, after: neighbour, in: listings[id] ?? [])
-        guard !plan.isEmpty else { return }
-        await act(id, String(localized: "move that job")) { client in
-            for step in plan { try await client.reorderJob(id: step.id, position: step.position) }
+        let rows = plan.compactMap { step in listings[id]?.first { $0.id == step.id } }
+        guard !plan.isEmpty, rows.count == plan.count,
+              rows.allSatisfy({ canMove($0, on: id) }), let sourceHost = hosts.host(id) else { return }
+        let instance = hosts.instanceID(of: id)
+        await actOnIDs(plan.map(\.id), on: id, String(localized: "move that job")) { client in
+            for step in plan {
+                guard self.hosts.instanceID(of: id) == instance,
+                      let host = self.hosts.host(id), host == sourceHost, self.hosts.isUp(host),
+                      self.listings[id]?.first(where: { $0.id == step.id })?.state.isReorderable == true else { return }
+                try await client.reorderJob(id: step.id, position: step.position)
+            }
         }
     }
 
@@ -329,9 +344,17 @@ final class QueueStore {
     /// them), as on the Mac.
     func empty(_ ids: [MoldHost.ID]) async {
         for id in ids {
-            await act(id, String(localized: "empty its queue")) { client in
-                if self.hosts.capabilities[id]?.canCancelAllQueued == true { _ = try await client.cancelAllQueued() }
-                for held in (self.listings[id] ?? []) where held.state == .held {
+            guard let host = hosts.host(id), hosts.isUp(host) else { continue }
+            let cancelQueued = hosts.capabilities[id]?.canCancelAllQueued == true
+            let affected = (listings[id] ?? []).filter { $0.state == .held || (cancelQueued && ($0.state == .queued || $0.state == .paused)) }
+            let instance = hosts.instanceID(of: id)
+            await actOnIDs(affected.map(\.id), on: id, String(localized: "empty its queue")) { client in
+                if cancelQueued { _ = try await client.cancelAllQueued() }
+                for held in affected where held.state == .held {
+                    guard self.hosts.instanceID(of: id) == instance,
+                          let currentHost = self.hosts.host(id), currentHost == host, self.hosts.isUp(currentHost) else { return }
+                    guard let row = self.current(held, on: id), row.state == .held,
+                          row.batchId == held.batchId, row.clientBatchId == held.clientBatchId else { continue }
                     _ = try await client.cancelHeldJob(id: held.id)
                 }
             }
@@ -340,9 +363,17 @@ final class QueueStore {
 
     private func actOn(_ entry: QueueEntry, on id: MoldHost.ID, _ verb: String,
                        _ body: (any MoldBackend) async throws -> Void) async {
-        let key = "\(id)|\(entry.id)"
-        guard acting.insert(key).inserted else { return }
-        defer { acting.remove(key) }
+        await actOnIDs([entry.id], on: id, verb, body)
+    }
+
+    /// Reserve the exact jobs a single or grouped request affects until its
+    /// refreshed listing arrives, so another menu or gesture cannot overlap it.
+    private func actOnIDs(_ jobIDs: [String], on id: MoldHost.ID, _ verb: String,
+                          _ body: (any MoldBackend) async throws -> Void) async {
+        let keys = Set(jobIDs.map { "\(id)|\($0)" })
+        guard acting.isDisjoint(with: keys) else { return }
+        acting.formUnion(keys)
+        defer { acting.subtract(keys) }
         await act(id, verb, body)
     }
 

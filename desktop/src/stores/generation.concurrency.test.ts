@@ -799,6 +799,77 @@ describe("submitBatch connection cap", () => {
     );
   });
 
+  it.each([409, 503])(
+    "keeps held cancellation fenced after a %s response and running refresh",
+    async (status) => {
+      const store = useGenerationStore();
+      const hosts = useHostsStore();
+      hosts.extras = [
+        {
+          id: "hal9000",
+          label: "hal9000",
+          url: "http://hal9000:7680",
+          apiKey: "fresh-key",
+          status: "ready",
+          error: null,
+          instanceId: "instance-1",
+        },
+      ];
+      durableApi.admit.mockImplementation(async (_target, body) => ({
+        id: "held-batch",
+        client_batch_id: (body as { client_batch_id: string }).client_batch_id,
+        instance_id: "instance-1",
+        durable: true,
+        children: [
+          {
+            index: 1,
+            job_id: "held/job",
+            state: "held",
+            error: "model preparation failed",
+            retryable: true,
+            created_at_ms: 1,
+            updated_at_ms: 2,
+          },
+        ],
+      }));
+
+      const submitted = store.submitBatch(req, 1, {
+        hostId: "hal9000",
+        label: "hal9000",
+        kind: "remote",
+        target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+        instanceId: "instance-1",
+        heterogeneousBatchMaxOutputs: 64,
+        durableMedia: {
+          protocol_version: 2,
+          encrypted_at_rest: true,
+          generate_request_media: true,
+          identity: true,
+          private_h3: true,
+        },
+      });
+      await flushPromises();
+
+      const job = submitted.jobs[0]!;
+      vi.mocked(apiFetchTo).mockRejectedValueOnce(new ApiError("cancel conflict", status));
+      await store.cancel(job.clientId).catch(() => false);
+      expect(apiFetchTo).toHaveBeenCalledWith(
+        expect.anything(),
+        "/api/queue/held%2Fjob?only_held=true",
+        { method: "DELETE" },
+      );
+      const record = JSON.parse(localStorage.getItem(DURABLE_GENERATION_STORAGE_KEY)!).records[0];
+      job.holdError = null;
+      job.holdCode = null;
+      job.status = "loading";
+      await store.fulfillDurableCancelIntent(record, 1).catch(() => false);
+      const calls = vi
+        .mocked(apiFetchTo)
+        .mock.calls.filter(([, path]) => path.startsWith("/api/queue/held%2Fjob"));
+      expect(calls.every(([, path]) => path.endsWith("?only_held=true"))).toBe(true);
+    },
+  );
+
   it("admits singleton and chunks Batch N without held generation streams", async () => {
     const store = useGenerationStore();
     const hosts = useHostsStore();

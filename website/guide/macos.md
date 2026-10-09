@@ -189,3 +189,7 @@ server that cannot delete selected trash items must be updated; deletion reports
 that refusal without falling back to deleting live media.
 
 Reopening Sync Details shows the saved acknowledgment choice. New media issues leave the checkbox unchecked; Reset Acknowledgments clears the saved choice immediately.
+
+Queue row buttons, contextual menus, the Queue menu and Job Details share the same action eligibility. Queued jobs offer Pause and paused jobs offer Resume when supported by the machine. Held jobs offer Retry or Download and Retry when recovery is supported. Move to remains available for eligible held jobs. Running cancellation requires machine support. Offline, stopping, settled and currently updating jobs retain inspection without mutation controls. Recovery controls stack in narrow windows so their labels stay readable.
+
+Also Running offers Cancel for reported long-clip chains when the machine permits it, and Resume for paused chains. Clip-upscale controls also check that the machine is connected and the displayed job is still current before acting. Durable authored sequences remain managed in the machine's web app.

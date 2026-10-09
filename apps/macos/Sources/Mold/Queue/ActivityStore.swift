@@ -19,6 +19,7 @@ import MoldClient
 @MainActor
 @Observable
 final class ActivityStore {
+    var acting: Set<String> = []
     let hosts: HostStore
 
     /// Desktop's own interval (`liveActivity.ts:11`). A constructor

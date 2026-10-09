@@ -7,6 +7,46 @@ import Testing
 
 @MainActor
 struct QueueSourceLayoutTests {
+    @Test(arguments: [400.0, 800.0])
+    func heldRecoveryControlsRenderAtNarrowAndWideWidths(width: Double) async throws {
+        let host = MoldHost(name: "fixture", baseURL: URL(string: "http://fixture")!)
+        let hosts = HostStore(hosts: [host])
+        let downloads = DownloadStore(hosts: hosts, licenses: LicenseStore(hosts: hosts))
+        let destination = TransferStore.TransferDestination(id: host.id, name: "Another machine", queueDepth: 3)
+        let row = QueueHoldRow(entry: FakeFixtures.queueEntry("held-layout", state: "held", model: "MiniMax H3 Turbo"),
+            hold: .missingModel("h3", sentence: "This model is not installed."),
+            pullThenRetry: { _ in }, tryAgain: {}, moveToDestinations: [destination], moveTo: { _ in },
+            cancel: {}, inspect: {}, actions: QueueRowActions(retry: true, cancel: true))
+            .environment(downloads).padding(12).frame(width: width)
+        let view = NSHostingView(rootView: row.background(Color(nsColor: .windowBackgroundColor)))
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: width, height: 200),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.appearance = NSAppearance(named: .aqua)
+        window.isReleasedWhenClosed = false
+        window.contentView = view
+        window.orderFront(nil)
+        defer { window.close() }
+        await settle { view.fittingSize.height >= 60 }
+        window.setContentSize(CGSize(width: width, height: view.fittingSize.height))
+        view.layoutSubtreeIfNeeded()
+        #expect(abs(view.bounds.width - width) < 0.01)
+        #expect(view.bounds.height >= 60)
+        if width == 400 {
+            let controls = NSHostingView(rootView: VStack(alignment: .leading, spacing: 8) {
+                Button("Download and Retry") {}
+                Menu("Move to") { Button("Another machine") {} }
+                Button("Failure Details") {}
+            }.buttonStyle(.bordered).controlSize(.small))
+            let title = NSHostingView(rootView: Text("MiniMax H3 Turbo"))
+            #expect(view.bounds.height >= controls.fittingSize.height + title.fittingSize.height + 24,
+                    "Three complete recovery controls and the title must fit inside the padded row")
+        }
+        let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        let bytes = try #require(bitmap.representation(using: .png, properties: [:]))
+        try bytes.write(to: URL(fileURLWithPath: "/tmp/mold-mac-held-controls-\(Int(width)).png"))
+    }
+
     @Test func delayedThumbnailCannotOutgrowInitialRowMeasurement() async throws {
         let host = MoldHost(name: "fixture", baseURL: URL(string: "http://fixture")!)
         let backend = FakeBackend(host: host)

@@ -5,6 +5,7 @@ import MoldClient
 @MainActor
 @Observable
 final class QueueStore {
+    var acting: [MoldHost.ID: Set<String>] = [:]
     let hosts: HostStore
     /// `internal(set)`: `QueueStore+Fixture.seed(from:)` writes it too, and
     /// `private(set)` does not cross a file boundary.
@@ -96,6 +97,6 @@ final class QueueStore {
 // The ACTIONS on a row -- cancel, pause, resume, retry -- are
 // `QueueStore+Actions.swift`, and a whole batch's are
 // `QueueStore+GroupAction.swift`; this file holds the state and the one
-// listing read. `NoInstanceKnown`, `NotADurableBatchChild` and the fixture's
-// own `FixtureRefusal` live in `QueueStore+Fixture.swift`, not `private`
-// here -- `private` does not cross a file boundary.
+// listing read. Fixture refusal and missing-machine identity errors live in
+// `QueueStore+Fixture.swift`, not `private` here -- `private` does not cross a
+// file boundary.

@@ -836,3 +836,16 @@ deletion reports the actual machine refusal; an older machine without the
 trash-only selected-delete endpoint must be updated before retrying.
 
 Actionable held queue jobs offer Cancel independently of Retry or Move availability. Failure Details shows the machine’s saved job diagnostic and supports copying it together with the machine, model and job identifiers; it does not imply access to the complete machine log. Queue explanations remain concise and use plain English. Current Mold servers enforce held-only cancellation, preventing stale Held actions from stopping a render. Update older machines for this safeguard.
+
+Queue controls agree across row buttons, contextual menus, the Queue menu and
+Job Details. Offline, terminal, cancelling and currently updating jobs keep their
+details available while mutation controls are unavailable. Held Retry works from
+the queue's durable identity before full settings load; a missing model uses
+Download and Retry. Actions recheck current state and server identity, and stay
+reserved until the refreshed queue confirms the result.
+
+The Also Running section can stop an ephemeral long-clip chain when its machine
+allows cancellation, and resume a paused chain. Its controls recheck the machine
+and activity before acting. Existing clip-upscale Pause, Resume and Cancel
+controls also reject disconnected machines, stale rows and duplicate requests.
+Durable authored sequence controls remain available in the machine's web app.

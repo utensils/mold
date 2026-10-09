@@ -89,7 +89,8 @@ extension DownloadStore {
     }
 
     func recover(_ entry: QueueEntry, on host: MoldHost, queue: QueueStore) {
-        guard let instance = hosts.instanceID(of: host.id), let authority = entry.authority(instanceId: instance) else { return }
+        guard queue.actions(for: entry, on: host.id).retry, let instance = hosts.instanceID(of: host.id),
+              let authority = entry.authority(instanceId: instance) else { return }
         queueDownloads.start(entry: entry, host: host.id, authority: authority, backend: hosts.backend(for: host), hostName: host.name,
             isCurrent: { [weak self] in
                 guard let self, self.hosts.host(host.id) == host, self.hosts.instanceID(of: host.id) == instance else { return false }

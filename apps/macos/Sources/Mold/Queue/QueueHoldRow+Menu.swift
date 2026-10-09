@@ -51,13 +51,13 @@ extension QueueHoldRow {
     /// submenu, and `RowAction.rendered` drops it where there is nowhere to
     /// send the job -- the gate `MoveToMenu` keeps for the inline control.
     static func offered(
-        for hold: QueueHold, destinations: [TransferStore.TransferDestination]
+        for hold: QueueHold, destinations: [TransferStore.TransferDestination], actions: QueueRowActions? = nil
     ) -> [RowAction<Item>] {
-        var items = actions(for: hold).map { RowAction(kind: Item.act($0), title: $0.title) }
+        var items = (actions?.retry == false ? [] : Self.actions(for: hold)).map { RowAction(kind: Item.act($0), title: $0.title) }
         items.append(RowAction(title: "Move to", children: destinations.map {
             RowAction(kind: Item.moveTo($0.id), title: $0.caption)
         }))
-        items.append(RowAction(kind: .cancel, title: "Cancel Job", isDestructive: true))
+        if actions?.cancel != false { items.append(RowAction(kind: .cancel, title: "Cancel Job", isDestructive: true)) }
         return RowAction.ordered(items)
     }
 

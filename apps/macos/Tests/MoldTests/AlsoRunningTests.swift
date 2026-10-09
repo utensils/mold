@@ -16,13 +16,13 @@ struct AlsoRunningTests {
 
     private func item(_ id: String, kind: String, phase: String = "running",
                       current: Int? = nil, total: Int? = nil,
-                      canCancel: Bool = true) -> ActiveWorkItem {
+                      canCancel: Bool = true, execution: String? = nil) -> ActiveWorkItem {
         let json = #"""
         {"id": "\#(id)", "kind": "\#(kind)", "phase": "\#(phase)",
          "created_at_unix_ms": 1, "updated_at_unix_ms": 1,
          "current": \#(current.map { "\($0)" } ?? "null"),
          "total": \#(total.map { "\($0)" } ?? "null"),
-         "can_cancel": \#(canCancel)}
+         "can_cancel": \#(canCancel), "execution": \#(execution.map { "\"\($0)\"" } ?? "null")}
         """#
         return try! MoldJSON.decoder.decode(ActiveWorkItem.self, from: Data(json.utf8))
     }
@@ -127,6 +127,24 @@ struct AlsoRunningTests {
             reported: reported([item("standalone-upscale-1", kind: "standalone_upscale")]),
             queuedIDs: [:], upscales: [(key: key, job: job)])
         #expect(drawn.contains { $0.host == workstation && $0.title == "Upscale" })
+    }
+
+    @Test func displayedAutoChainsUseTheirOwnCancellationAndResumeAuthority() {
+        for phase in ["queued", "held", "paused", "running", "preparing"] {
+            let chain = rows([item("c", kind: "generation", phase: phase, execution: "chain")])[0]
+            #expect(chain.canCancel)
+            #expect(chain.canResume == (phase == "paused"))
+        }
+        for phase in ["complete", "failed", "cancelled", "cancelling", "unknown"] {
+            let chain = rows([item("c", kind: "generation", phase: phase, execution: "chain")])[0]
+            #expect(!chain.canCancel)
+            #expect(!chain.canResume)
+        }
+        let parked = rows([item("c", kind: "generation", phase: "paused", canCancel: false, execution: "chain")])[0]
+        #expect(parked.canResume)
+        #expect(!parked.canCancel)
+        let stale = AlsoRunningRow(host: workstation, work: .reported(reported([item("c", kind: "generation", execution: "chain")], stale: true)[0]))
+        #expect(!stale.canCancel)
     }
 
     /// Cancel is offered only where this app can actually act. A reported row

@@ -74,20 +74,14 @@ struct AlsoRunningRow: Identifiable, Equatable {
     }
 
     /// Cancellable only where the machine confirmed it for this exact item
-    /// AND this app has a route to act through.
-    ///
-    /// Today that is the clip upscale it started and nothing else. Of the
-    /// kinds drawn here, the scheduler-owned ones report `can_cancel: false`
-    /// themselves (`routes_activity.rs:340`), and the one that reports
-    /// `true` is a durable `sequence`, whose cancel is
-    /// `/api/chain-jobs` -- an endpoint family this app does not speak, and
-    /// chain authoring is deliberately out of its scope. Offering a Cancel
-    /// that quietly does nothing would be worse than not offering one, so the
-    /// server's own answer is necessary here and not sufficient.
+    /// Ephemeral long-clip generations use their own chain lifecycle,
+    /// independently of singleton generation cancellation capabilities.
     var canCancel: Bool {
         switch work {
-        case .reported: false
-        case let .upscale(_, job): !job.state.isTerminal
+        case let .reported(row):
+            !row.stale && !row.unavailableKind && row.item.kind == "generation" && row.item.execution == "chain"
+                && row.item.canCancel && ["queued", "held", "paused", "running", "preparing"].contains(row.item.phase)
+        case let .upscale(_, job): [.queued, .running, .finalizing, .paused].contains(job.state)
         // The request IS the work and the machine is already doing it;
         // there is no route that would call it off.
         case .still: false
@@ -102,7 +96,7 @@ struct AlsoRunningRow: Identifiable, Equatable {
         guard !isSettled, !canCancel else { return nil }
         switch work {
         case let .reported(row) where row.item.canCancel:
-            return "Stop this from the machine\u{2019}s own web app; this app does not drive sequences."
+            return "Manage this work from the machine\u{2019}s web app; this app does not drive this activity type."
         case .reported:
             return "This machine doesn\u{2019}t offer a way to stop this."
         case .still:
@@ -119,8 +113,13 @@ struct AlsoRunningRow: Identifiable, Equatable {
     }
 
     var canResume: Bool {
-        guard case let .upscale(_, job) = work else { return false }
-        return job.state == .paused
+        switch work {
+        case let .reported(row):
+            !row.stale && !row.unavailableKind && row.item.kind == "generation"
+                && row.item.execution == "chain" && row.item.phase == "paused"
+        case let .upscale(_, job): job.state == .paused
+        case .still: false
+        }
     }
 
     /// This row is the last thing the machine said, not the current truth.

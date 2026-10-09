@@ -73,7 +73,7 @@ struct QueueView: View {
                     Section {
                         ForEach(groups) { group in
                             QueueGroupRows(group: group, host: host)
-                                .moveDisabled(!queue.canReorder(on: host.id) || !group.rows.allSatisfy(\.state.isReorderable))
+                                .moveDisabled(!group.rows.allSatisfy { queue.canMove($0, on: host.id) })
                         }
                         .onMove { from, to in move(groups, from: from, to: to, on: host.id) }
                     } header: {

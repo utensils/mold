@@ -43,6 +43,8 @@ final class FixtureMachine: @unchecked Sendable {
     private let enrichedQueue = Mutex(false)
     func enrichQueueFailure() { enrichedQueue.withLock { $0 = true } }
     private let queueControls: Bool
+    private let queueSwipeFixture: Bool
+    private let queueDestinationFixture: Bool
     private var jobStates = ["fixture-video": "queued", "fixture-held": "held"]
     private var clearedHistory = false
     private let collectionFixture: Bool
@@ -50,7 +52,7 @@ final class FixtureMachine: @unchecked Sendable {
     private let modelMemoryFixture: Bool
     private var residentModels: Set<String> = []
 
-    init(exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, retainedFrameFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil, queueDownloadFixture: Bool = false, requiresDownloadLicense: Bool = false, trashFixture: Bool = false, queueFailureFixture: Bool = false) throws {
+    init(exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, retainedFrameFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil, queueDownloadFixture: Bool = false, requiresDownloadLicense: Bool = false, trashFixture: Bool = false, queueFailureFixture: Bool = false, queueSwipeFixture: Bool = false, queueDestinationFixture: Bool = false) throws {
         self.exportFixture = exportFixture
         self.unsupportedExportFormats = unsupportedExportFormats
         self.aspectFixture = aspectFixture
@@ -63,6 +65,12 @@ final class FixtureMachine: @unchecked Sendable {
         self.queueDownloadFixture = queueDownloadFixture
         self.requiresDownloadLicense = requiresDownloadLicense
         self.queueControls = queueControls
+        self.queueSwipeFixture = queueSwipeFixture
+        self.queueDestinationFixture = queueDestinationFixture
+        if queueSwipeFixture {
+            jobStates["fixture-running"] = "running"
+            jobStates["fixture-cancelling"] = "cancelling"
+        }
         self.queueFailureFixture = queueFailureFixture
         self.memoryErrorFixture = memoryErrorFixture
         self.collectionFixture = collectionFixture
@@ -334,8 +342,11 @@ final class FixtureMachine: @unchecked Sendable {
                 row["is_loaded"] = residentModels.contains(row["name"] as! String)
                 return row
             })
-        case "/api/status": json = queueControls ? #"{"version":"0.32.0","busy":false,"uptime_secs":1,"instance_id":"queue-fixture"}"# : #"{"version":"0.32.0","busy":false,"uptime_secs":1}"#
+        case "/api/status":
+            if queueDestinationFixture { return Data(#"{"version":"0.32.0","busy":false,"uptime_secs":1,"instance_id":"queue-destination"}"#.utf8) }
+            json = queueControls ? #"{"version":"0.32.0","busy":false,"uptime_secs":1,"instance_id":"queue-fixture"}"# : #"{"version":"0.32.0","busy":false,"uptime_secs":1}"#
         case "/api/capabilities":
+            if queueDestinationFixture { return Data(#"{"max_batch_outputs":4,"queue":{"heterogeneous_batch_max_outputs":4}}"#.utf8) }
             if exportFixture { return Data(#"{"max_batch_outputs":4,"mesh":{"generation":true,"formats":["glb"],"export_formats":["glb","obj","zip","stl","ply","gif","apng"],"export_geometry":{"size_mm":{"min":1,"max":10000,"default":100},"up_axes":["y","z"],"origins":["center","floor"],"defaults":{"obj":{"up_axis":"y","origin":"floor"},"stl":{"size_mm":100,"up_axis":"z","origin":"floor"},"ply":{"size_mm":100,"up_axis":"z","origin":"floor"}}}}}"#.utf8) }
             if queueControls { return Data(#"{"max_batch_outputs":4,"queue":{"can_pause_job":true,"cooperative_cancellation":true}}"#.utf8) }
             if libraryMutations { return Data(#"{"max_batch_outputs":4,"gallery":{"organize":true,"bulk_mutations":true,"trash":{"enabled":true}}}"#.utf8) }
@@ -343,7 +354,10 @@ final class FixtureMachine: @unchecked Sendable {
             ? #"{"max_batch_outputs":4,"gallery":{"organize":true}}"#
             : #"{"max_batch_outputs":4}"#
         case "/api/queue":
-            if queueControls { return try! JSONSerialization.data(withJSONObject: ["entries": [queueRow("fixture-video"), queueRow("fixture-held")]]) }
+            if queueControls {
+                let ids = ["fixture-video", "fixture-held"] + (queueSwipeFixture ? ["fixture-running", "fixture-cancelling"] : [])
+                return try! JSONSerialization.data(withJSONObject: ["entries": ids.map(queueRow)])
+            }
             json = queueFixture
             ? #"{"entries":[{"id":"fixture-video","state":"queued","model":"ltx-2.5-22b-distilled:bf16","model_display_name":"LTX-2.5 Distilled BF16","position":0,"durable":true,"metadata":{"prompt":"A coastal path at sunrise","model":"ltx-2.5-22b-distilled:bf16"}}]}"#
             : #"{"entries":[]}"#

@@ -121,3 +121,11 @@ Queue details show a plain-language explanation and expandable, selectable
 Held work keeps **Cancel job** available even before settings finish loading.
 Cancellation rechecks the original server instance and current job state;
 completed work and an unreachable or replaced machine cannot be cancelled.
+
+Queue controls follow the job’s current state and owning machine. Waiting jobs
+offer Pause and paused jobs Resume when supported by the machine. Held jobs
+offer Retry or Download and Retry when the host supplies durable recovery authority. Running cancellation requires the
+host’s advertised support; completed, cancelled and failed jobs remain read-only.
+Busy, offline or changed-machine rows keep Details accessible. On current Mold
+servers, Held cancellation remains held-only even if another client starts the
+job before the request arrives.

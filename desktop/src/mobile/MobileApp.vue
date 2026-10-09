@@ -1,5 +1,10 @@
 <script setup lang="ts">
 import {
+  missingQueueModel,
+  startQueueDownloadRecovery,
+  queueDownloadState,
+} from "@studio/composables/useQueueDownloadRecovery";
+import {
   desiredCollectionHidden,
   collectionVisibilityRevision,
   protectCollectionVisibilityListing,
@@ -186,6 +191,7 @@ import {
 } from "@studio/api/activity";
 import {
   cancelQueueJob,
+  getQueueJob,
   findQueueEntryById,
   listQueue,
   mergeQueueEntries,
@@ -2935,6 +2941,9 @@ function canPauseActivityRow(row: ActivityRow): boolean {
   const hostId = activityRowHostId(row);
   return (
     activityRowJobId(row) !== null &&
+    !durableHold(row.print) &&
+    row.live?.phase !== "held" &&
+    row.queueState !== "held" &&
     (row.queueState === "queued" || row.queueState === "paused" || activityRowIsQueued(row)) &&
     serverCapabilities[hostId]?.queue?.can_pause_job === true &&
     activityRowQueueAuthority(row) !== null
@@ -2980,13 +2989,21 @@ function activityRowQueueAuthority(row: ActivityRow): MobileQueueControlAuthorit
 
 function fleetQueueAuthority(row: FleetActiveWork): MobileQueueControlAuthority | null {
   const host = connectedHosts.value.find((candidate) => candidate.id === row.hostId);
-  if (!host || row.stale || !row.instanceId || row.routeUrl !== host.baseUrl) return null;
+  if (
+    !host?.online ||
+    host.stale ||
+    row.stale ||
+    !row.instanceId ||
+    row.instanceId !== host.instanceId ||
+    row.routeUrl !== host.baseUrl
+  )
+    return null;
   return { host, target: mobileHostTarget(host), expectedInstanceId: row.instanceId };
 }
 
 function canPauseFleetActivity(row: FleetActiveWork): boolean {
   if (row.execution === "chain") {
-    return (row.phase === "paused" || row.can_cancel) && fleetQueueAuthority(row) !== null;
+    return row.phase === "paused" && fleetQueueAuthority(row) !== null;
   }
   return (
     row.kind === "generation" &&
@@ -3294,10 +3311,14 @@ watch(
 );
 function canCancelFleetActivity(row: FleetActiveWork): boolean {
   return (
+    !queueControlHostIds.value.has(row.hostId) &&
     row.kind === "generation" &&
     row.can_cancel &&
+    (row.execution === "chain" ||
+      !["running", "preparing"].includes(row.phase) ||
+      serverCapabilities[row.hostId]?.queue?.cooperative_cancellation === true) &&
     fleetQueueAuthority(row) !== null &&
-    !["complete", "completed", "failed", "cancelled", "canceled", "done"].includes(row.phase)
+    ["queued", "paused", "held", "running", "preparing"].includes(row.phase)
   );
 }
 const fallbackCancelArmed = ref(false);
@@ -3305,6 +3326,7 @@ async function cancelFleetActivity(row: FleetActiveWork): Promise<void> {
   const authority = fleetQueueAuthority(row);
   if (!authority || !canCancelFleetActivity(row) || queueDetailBusy.value) return;
   queueDetailBusy.value = true;
+  queueControlHostIds.value = new Set(queueControlHostIds.value).add(row.hostId);
   queueDetailError.value = "";
   try {
     const status = await apiJsonTo<ServerStatus>(authority.target, "/api/status");
@@ -3319,7 +3341,7 @@ async function cancelFleetActivity(row: FleetActiveWork): Promise<void> {
     const current = activity.items.find((item) => item.id === row.id && item.kind === row.kind);
     if (
       !current?.can_cancel ||
-      ["complete", "completed", "failed", "cancelled"].includes(current.phase)
+      !["queued", "paused", "held", "running", "preparing"].includes(current.phase)
     )
       throw new Error(
         "This job has already stopped or cannot be cancelled. Refresh its machine details.",
@@ -3329,7 +3351,7 @@ async function cancelFleetActivity(row: FleetActiveWork): Promise<void> {
         "This job is no longer held. Reopen its details before stopping running work.",
       );
     if (
-      current.phase === "running" &&
+      ["running", "preparing"].includes(current.phase) &&
       row.execution !== "chain" &&
       serverCapabilities[row.hostId]?.queue?.cooperative_cancellation !== true
     )
@@ -3351,6 +3373,9 @@ async function cancelFleetActivity(row: FleetActiveWork): Promise<void> {
     queueDetailError.value = describeTransportError(error, authority.host.name);
   } finally {
     queueDetailBusy.value = false;
+    const next = new Set(queueControlHostIds.value);
+    next.delete(row.hostId);
+    queueControlHostIds.value = next;
   }
 }
 async function cancelQueueDetail(): Promise<void> {
@@ -3378,8 +3403,12 @@ function cancelFallbackDetail(): void {
     void cancelFleetActivity(queueDetailEntry.value.shared);
 }
 function onSharedQueueRowAction(row: FleetActiveWork, action: string): void {
-  if (action === "fleet-cancel") {
+  if (action === "details" || action === "fleet-cancel") {
     inspectSharedQueueEntry(row);
+    return;
+  }
+  if (action === "fleet-retry") {
+    void retryFleetActivity(row);
     return;
   }
   void setFleetJobPaused(row, action === "fleet-pause");
@@ -3423,16 +3452,70 @@ function sharedQueuePosition(row: FleetActiveWork): string | null {
 }
 
 /** Pause, Resume, or a chain's Cancel — whatever this machine will accept. */
-function sharedQueueRowActions(row: FleetActiveWork): { id: string; label: string }[] {
-  const actions: { id: string; label: string }[] = [];
+function sharedRetryAuthority(row: FleetActiveWork) {
+  const entry = liveQueues.value[row.hostId]?.entries.find((entry) => entry.id === row.id);
+  return fleetQueueAuthority(row) &&
+    row.phase === "held" &&
+    entry?.state === "held" &&
+    entry.retryable !== false &&
+    entry.batch_id?.trim() &&
+    entry.client_batch_id?.trim()
+    ? entry
+    : null;
+}
+async function retryFleetActivity(row: FleetActiveWork): Promise<void> {
+  const authority = fleetQueueAuthority(row);
+  if (!authority || !sharedRetryAuthority(row) || queueControlHostIds.value.has(row.hostId)) return;
+  queueControlHostIds.value = new Set(queueControlHostIds.value).add(row.hostId);
+  try {
+    const status = await apiJsonTo<ServerStatus>(authority.target, "/api/status");
+    if (status.instance_id !== row.instanceId)
+      throw new Error("The original machine changed. Reopen the job.");
+    const fresh = (await getQueueJob(authority.target, row.id)).job;
+    if (
+      fresh.state !== "held" ||
+      fresh.retryable === false ||
+      !fresh.batch_id ||
+      !fresh.client_batch_id ||
+      !fleetQueueAuthority(row)
+    )
+      throw new Error("This job is no longer ready to retry.");
+    if (await missingQueueModel(authority.target, row.instanceId!, row.id))
+      await startQueueDownloadRecovery(authority.target, row.instanceId!, row.id, row.hostLabel);
+    else {
+      const result = await retryQueueJobRecoveringAmbiguity(authority.target, {
+        instanceId: row.instanceId!,
+        jobId: row.id,
+        batchId: fresh.batch_id,
+        clientBatchId: fresh.client_batch_id,
+      });
+      if (result.kind === "uncertain") throw new Error(result.error);
+    }
+    await refreshMobileActivity();
+  } catch (error) {
+    setGenerationStatus(describeTransportError(error, row.hostLabel), true);
+  } finally {
+    const next = new Set(queueControlHostIds.value);
+    next.delete(row.hostId);
+    queueControlHostIds.value = next;
+  }
+}
+
+function sharedQueueRowActions(row: FleetActiveWork): SwipeRowAction[] {
+  const actions: SwipeRowAction[] = [];
+  if (queueControlHostIds.value.has(row.hostId)) return [{ id: "details", label: "Details" }];
+  const source = fleetQueueAuthority(row);
+  if (source && queueDownloadState(source.target, row.instanceId, row.id)?.busy)
+    return [{ id: "details", label: "Details" }];
+  if (sharedRetryAuthority(row)) actions.push({ id: "fleet-retry", label: "Retry" });
   if (canPauseFleetActivity(row))
     actions.push({
       id: fleetQueueResumeNeeded(row) ? "fleet-resume" : "fleet-pause",
       label: fleetQueueControlLabel(row),
     });
-  if (canCancelFleetActivity(row) && row.execution !== "chain")
-    actions.push({ id: "fleet-cancel", label: "Cancel" });
-  return actions;
+  if (canCancelFleetActivity(row))
+    actions.push({ id: "fleet-cancel", label: "Cancel", tone: "danger" });
+  return actions.length ? actions : [{ id: "details", label: "Details" }];
 }
 
 function inspectSharedQueueEntry(row: FleetActiveWork): void {
@@ -12079,12 +12162,22 @@ type MobileActivityRow = (typeof activityRows.value)[number];
 
 /**
  * Trailing swipe actions for one Create queue row. Cancel is the only
- * destructive one and the only one a full swipe commits; the tray's reveal is
- * step one, so the row keeps its two deliberate moves without inline buttons.
+ * destructive one; swipes reveal the controls and only a deliberate tap acts.
  * Retry appears only for a durable hold the host itself fenced.
  */
 function mobileQueueRowActions(row: MobileActivityRow): SwipeRowAction[] {
   const actions: SwipeRowAction[] = [];
+  const authority = activityRowQueueAuthority(row);
+  const host = authority?.host;
+  if (
+    !host?.online ||
+    host.stale ||
+    host.instanceId !== authority?.expectedInstanceId ||
+    row.print.cancelling ||
+    durableHeldIsRetrying(row.print) ||
+    queueControlHostIds.value.has(host.id)
+  )
+    return [{ id: "details", label: "Details" }];
   if (canPauseActivityRow(row)) {
     actions.push({
       id: activityRowQueuePaused(row) ? "queue-resume" : "queue-pause",
@@ -12094,23 +12187,63 @@ function mobileQueueRowActions(row: MobileActivityRow): SwipeRowAction[] {
   if (durableHold(row.print) && row.print.hostId && queueTransfer.canSend(row.print.hostId)) {
     actions.push({ id: "transfer", label: "Send to…" });
   }
-  if (durableHold(row.print)?.retryable && !durableHeldIsRetrying(row.print)) {
-    actions.push({ id: "retry", label: "Retry" });
+  if (
+    durableHold(row.print)?.retryable &&
+    !durableHeldIsRetrying(row.print) &&
+    !queueDownloadState(
+      authority!.target,
+      authority!.expectedInstanceId,
+      activityRowJobId(row) ?? "",
+    )?.busy
+  ) {
+    actions.push({
+      id: "retry",
+      label: ["MODEL_NOT_FOUND", "UNKNOWN_MODEL"].includes(durableHold(row.print)?.code ?? "")
+        ? "Download and Retry"
+        : "Retry",
+    });
   }
-  if (!row.print.cancelling) {
-    actions.push({ id: "cancel", label: "Cancel", tone: "danger", commitOnFullSwipe: true });
+  const executing = ["loading", "denoising", "finishing"].includes(row.print.status);
+  if (
+    !row.print.cancelling &&
+    (!row.print.id ||
+      !executing ||
+      row.print.chainStageCount ||
+      serverCapabilities[host.id]?.queue?.cooperative_cancellation === true)
+  ) {
+    actions.push({ id: "cancel", label: "Cancel", tone: "danger", commitOnFullSwipe: false });
   }
-  return actions;
+  return actions.length ? actions : [{ id: "details", label: "Details" }];
 }
 
 function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
+  if (action === "details") {
+    inspectQueueEntry(`local:${row.key}`);
+    return;
+  }
+  if (!mobileQueueRowActions(row).some((candidate) => candidate.id === action)) return;
   if (action === "queue-pause" || action === "queue-resume") {
     void setActivityJobPaused(row, action === "queue-pause");
     return;
   }
   if (action === "transfer" && row.print.hostId && activityRowJobId(row))
     queueTransfer.open(row.print.hostId, activityRowJobId(row)!);
-  if (action === "retry") void retryHeldGeneration(row.print);
+  if (action === "retry") {
+    const authority = activityRowQueueAuthority(row);
+    const jobId = activityRowJobId(row);
+    if (
+      authority &&
+      jobId &&
+      ["MODEL_NOT_FOUND", "UNKNOWN_MODEL"].includes(durableHold(row.print)?.code ?? "")
+    )
+      void startQueueDownloadRecovery(
+        authority.target,
+        authority.expectedInstanceId,
+        jobId,
+        authority.host.name,
+      );
+    else void retryHeldGeneration(row.print);
+  }
   if (action === "cancel") void cancelGeneration(row.print);
 }
 </script>
@@ -14076,10 +14209,6 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                       queuePrintTitle(entry.local.print).trim() ||
                       `${modelLabel(entry.local.print.model)} · ${entry.local.print.hostLabel}`
                     "
-                    :disabled="
-                      entry.local.print.cancelling === true ||
-                      queueControlHostIds.has(activityRowHostId(entry.local))
-                    "
                     data-test="mobile-generation-job"
                     @act="onMobileQueueRowAction(entry.local, $event)"
                   >
@@ -14111,7 +14240,6 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                   <SwipeActionRow
                     :actions="sharedQueueRowActions(entry.shared)"
                     :label="sharedQueueTitle(entry.shared)"
-                    :disabled="queueControlHostIds.has(entry.shared.hostId)"
                     data-test="mobile-fleet-job"
                     @act="onSharedQueueRowAction(entry.shared, $event)"
                   >

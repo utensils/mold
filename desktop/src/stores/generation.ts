@@ -1012,10 +1012,23 @@ export const useGenerationStore = defineStore("generation", {
         try {
           await apiFetchTo(
             { baseUrl: host.baseUrl, apiKey: host.apiKey },
-            `/api/queue/${encodeURIComponent(job.id)}`,
+            `/api/queue/${encodeURIComponent(job.id)}${current.cancelOnlyHeldChildIndexes?.includes(childIndex) ? "?only_held=true" : ""}`,
             { method: "DELETE" },
           );
         } catch (error) {
+          if (
+            current.cancelOnlyHeldChildIndexes?.includes(childIndex) &&
+            (error as { status?: number }).status === 409
+          ) {
+            current.cancelRequestedChildIndexes = current.cancelRequestedChildIndexes.filter(
+              (index) => index !== childIndex,
+            );
+            current.cancelOnlyHeldChildIndexes = current.cancelOnlyHeldChildIndexes.filter(
+              (index) => index !== childIndex,
+            );
+            job.cancelling = false;
+            persistDurableRecords();
+          }
           await this.reconcileDurableHost(current.tracker.hostId);
           if (jobHasSettled(job)) return isCancelledError(job.error);
           throw error;
@@ -1665,6 +1678,14 @@ export const useGenerationStore = defineStore("generation", {
         }
         if (!durableRecord.cancelRequestedChildIndexes.includes(childIndex)) {
           durableRecord.cancelRequestedChildIndexes.push(childIndex);
+          if (
+            Object.values(durableRecord.tracker.jobs).some(
+              (child) => child.childIndex === childIndex && child.phase === "held",
+            )
+          ) {
+            durableRecord.cancelOnlyHeldChildIndexes ??= [];
+            durableRecord.cancelOnlyHeldChildIndexes.push(childIndex);
+          }
           // This write is the cancellation authority boundary: it precedes
           // the by-client reconciliation and any id-keyed DELETE.
           persistDurableRecords();

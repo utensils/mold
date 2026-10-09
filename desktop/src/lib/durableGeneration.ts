@@ -30,6 +30,8 @@ export interface DurableGenerationRecoveryRecord {
    * durable admission exposes the server-owned queue id. Persisted before
    * any lookup/DELETE so one tap survives a lost response or app restart. */
   cancelRequestedChildIndexes: number[];
+  /** State-specific cancellation intent frozen at the user action. */
+  cancelOnlyHeldChildIndexes?: number[];
   /** At-most-once receipts. They are persisted before performing effects. */
   effectReceipts: string[];
 }
@@ -104,7 +106,12 @@ export function loadDurableGenerationRecovery(
             (index) => Number.isSafeInteger(index) && index > 0,
           )
         : [];
-      return [{ ...record, cancelRequestedChildIndexes }];
+      const cancelOnlyHeldChildIndexes = Array.isArray(record.cancelOnlyHeldChildIndexes)
+        ? record.cancelOnlyHeldChildIndexes.filter((index) =>
+            cancelRequestedChildIndexes.includes(index),
+          )
+        : [];
+      return [{ ...record, cancelRequestedChildIndexes, cancelOnlyHeldChildIndexes }];
     });
   } catch {
     return [];

@@ -13,8 +13,19 @@ extension QueueStore {
     /// server's to state.
     func reorder(_ calls: [(id: String, position: Int)], on host: MoldHost.ID) async {
         guard !refuseIfFixture(host, doing: "reorder its queue") else { return }
-        guard let client = hosts.backend(for: host) else { return }
-        for call in calls {
+        guard let machine = hosts.host(host), hosts.isUp(machine),
+              hosts.capabilities[host]?.canReorderQueue == true,
+              let client = hosts.backend(for: host) else { return }
+        let instance = hosts.instanceID(of: host)
+        let eligible = calls.filter { call in
+            entries(on: host).contains { $0.id == call.id && $0.state.isReorderable && !isActing($0, on: host) }
+        }
+        let reserved = Set(eligible.map(\.id))
+        acting[host, default: []].formUnion(reserved)
+        defer { acting[host]?.subtract(reserved) }
+        for call in eligible {
+            guard hosts.host(host) == machine, hosts.instanceID(of: host) == instance, hosts.isUp(machine),
+                  entries(on: host).contains(where: { $0.id == call.id && $0.state.isReorderable }) else { continue }
             do {
                 try await client.reorderJob(id: call.id, position: call.position)
                 hosts.succeeded(on: host)

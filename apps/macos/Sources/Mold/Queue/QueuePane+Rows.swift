@@ -15,7 +15,7 @@ extension QueuePane {
     @ViewBuilder
     func rows(host: MoldHost, entries: [QueueEntry]) -> some View {
         let groups = queue.groups(on: host.id)
-        let canReorder = hosts.capabilities[host.id]?.canReorderQueue == true
+        let canReorder = hosts.isUp(host) && hosts.capabilities[host.id]?.canReorderQueue == true
         if canReorder {
             ForEach(groups) { row($0, host: host, entries: entries, groups: groups, canReorder: true) }
                 .onMove { source, destination in
@@ -35,8 +35,8 @@ extension QueuePane {
         if group.isExpandable {
             QueueBatchRow(
                 group: group, sourceHost: host,
-                actions: QueueRowActions.group(group.rows, on: hosts.capabilities[host.id]),
-                childActions: { QueueRowActions.resolve($0, on: hosts.capabilities[host.id]) },
+                actions: queue.actions(for: group.rows, on: host.id),
+                childActions: { queue.actions(for: $0, on: host.id) },
                 rowAct: { action, entry in act(action, on: entry, host: host) },
                 groupAct: { action in Task { await queue.act(action, onLiveChildrenOf: group, host: host.id) } },
                 canMoveUp: canReorder && QueueBatchRow.canMove(group, .up, in: groups),
@@ -51,15 +51,16 @@ extension QueuePane {
                     entry: entry, hold: hold, sourceHost: host,
                     pullThenRetry: { model in pullThenRetry(model, entry: entry, host: host) },
                     tryAgain: { act(.retry, on: entry, host: host) },
-                    moveToDestinations: transfers.transferDestinations(from: host.id),
+                    moveToDestinations: queue.canTransfer(entry, on: host.id) && transfers.transferring == nil ? transfers.transferDestinations(from: host.id) : [],
                     moveTo: { moveTo(entry, from: host, to: $0) },
                     cancel: { act(.cancel, on: entry, host: host) },
-                    inspect: { detailTarget = QueueDetailTarget(entry: entry, host: host) })
+                    inspect: { detailTarget = QueueDetailTarget(entry: entry, host: host) },
+                    actions: queue.actions(for: entry, on: host.id))
             } else {
                 let reorderable = canReorder && entry.state.isReorderable
                 QueueRow(
                     entry: entry,
-                    actions: QueueRowActions.resolve(entry, on: hosts.capabilities[host.id]),
+                    actions: queue.actions(for: entry, on: host.id),
                     sourceHost: host, isReorderable: reorderable,
                     canMoveUp: reorderable && QueueRow.canMove(entry.id, .up, in: entries),
                     canMoveDown: reorderable && QueueRow.canMove(entry.id, .down, in: entries),

@@ -531,3 +531,11 @@ replacement installation. Media organization and destructive actions follow the
 selected machine. Tauri local copies repair collection visibility/membership,
 tags, favorites and titles after their output and retained inputs are safely
 copied, including existing-copy repair; destination-only organization is kept.
+
+Queue controls follow the job’s current state and owning machine. Waiting jobs
+offer Pause and paused jobs Resume when supported by the machine. Held jobs
+offer Retry or Download and Retry when the host supplies durable recovery authority. Running cancellation requires the
+host’s advertised support; completed, cancelled and failed jobs remain read-only.
+Busy, offline or changed-machine rows keep Details accessible. On current Mold
+servers, Held cancellation remains held-only even if another client starts the
+job before the request arrives.

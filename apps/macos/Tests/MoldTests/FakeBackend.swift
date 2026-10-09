@@ -788,6 +788,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
 
     func queue() async throws -> QueueListing {
         try record("queue")
+        await pause("queue")
         if queueYields { await Task.yield() }
         guard let queueListing else { throw notPlanted() }
         return queueListing

@@ -340,3 +340,7 @@ machines. Pending visibility changes are saved locally and retried when this app
 refreshes or reconnects; a closed app cannot reconcile other machines.
 
 Actionable held queue jobs offer Cancel independently of Retry or Move availability. Failure Details shows the machine’s saved job diagnostic and supports copying it together with the machine, model and job identifiers; it does not imply access to the complete machine log. Queue explanations remain concise and use plain English. Current Mold servers enforce held-only cancellation, preventing stale Held actions from stopping a render. Update older machines for this safeguard.
+
+Queue cards keep Cancel, Retry and Pause/Resume in native swipe actions and Job Details. Swipe left to reveal Cancel; swipe right for Pause/Resume, Retry or Download and Retry when the machine permits the action. Otherwise swipe right for Details. Revealing a swipe never activates it. Busy model recovery hides duplicate download/retry actions. Held explanations, model download progress, Move to and Failure Details remain on the card.
+
+Reordering and Empty Queue reserve the jobs they affect until the machine listing refreshes. Pending row actions cannot overlap those operations; offline machines and changed job or machine identities refuse stale requests.

@@ -75,6 +75,24 @@ describe("SwipeActionRow", () => {
     ).toContain("translateX(-88px)");
   });
 
+  it("keeps repeated full swipes reveal-only when Cancel does not opt in", async () => {
+    const wrapper = mountRow({
+      actions: [{ id: "cancel", label: "Cancel", tone: "danger" }],
+    });
+    vi.spyOn(
+      wrapper.get('[data-test="swipe-action-row"]').element,
+      "getBoundingClientRect",
+    ).mockReturnValue({ width: 390 } as DOMRect);
+    for (let n = 0; n < 2; n++) {
+      await pointer(wrapper, "pointerdown", 380);
+      await pointer(wrapper, "pointermove", 80);
+      await pointer(wrapper, "pointerup", 80);
+    }
+    expect(wrapper.emitted("act")).toBeUndefined();
+    await wrapper.get('[data-test="swipe-action-cancel"]').trigger("click");
+    expect(wrapper.emitted("act")).toEqual([["cancel"]]);
+  });
+
   it("commits the opted-in action on a second full swipe from the revealed tray", async () => {
     const wrapper = mountRow();
     vi.spyOn(

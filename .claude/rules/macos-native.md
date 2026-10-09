@@ -84,3 +84,21 @@ and native button padding, sized to fit their wrapped message. Verify actual
 presented sheets and rendered quit-panel geometry, not only detached views.
 
 Queue Cancel remains visibly available for every currently actionable row, independently of batch metadata, retryability and transfer destinations. Failure Details preserves optional `error_detail` separately from the plain-English row explanation, falling back to the older machine’s reason. Copy includes machine and job identity. Cancel rechecks current state; Held actions always use the held-only endpoint and must never widen their intent after a state change. Current servers enforce this guard atomically; older servers may ignore the query, so do not promise that safeguard on older hosts.
+
+Queue action offers use QueueStore's current-host/current-row authority across
+rows, child rows, Job Details and focused menus. Offline, removed, cancelling,
+terminal and in-flight rows offer no mutations. Held Retry requires a durable
+batch identity and known server instance, independently of full metadata; missing
+models use Download and Retry. Preserve exact host/job reservations through the
+post-mutation refresh, and refuse stale state, retry identity or replaced host
+routes. Group dispatch reserves each eligible child separately and preserves
+Held-only intent. Reorder requires the advertised capability and current queued
+membership. Read-only Job Details and failure diagnostics remain accessible.
+
+Displayed ephemeral generation chains use the chain endpoints, their own
+`can_cancel` authority and paused Resume, independently of singleton cooperative
+cancellation. Re-read status and activity before dispatch and refresh refusals
+before releasing the exact host/kind/job reservation. Durable authored sequences
+remain unsupported here. Existing framewise upscale controls require a connected
+host, known applicable state and current rendered job identity; reserve the exact
+print/job key until the authoritative transition response reconciles its state.

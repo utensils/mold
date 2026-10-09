@@ -40,6 +40,7 @@ final class UpscaleStore {
     /// here so the row can say how it ended. `internal(set)` because
     /// `private(set)` does not cross a file boundary, even within one type.
     internal(set) var jobs: [Key: VideoUpscaleJob] = [:]
+    var transitioning: Set<Key> = []
 
     /// Prints whose upscale this app has asked for and not yet heard back
     /// about -- a still running inline, or a clip job with no id yet.

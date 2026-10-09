@@ -358,7 +358,7 @@ describe("HostQueuePanel", () => {
 
     await wrapper.get("[data-test='confirm-accept']").trigger("click");
     await flushPromises();
-    expect(cancel).toHaveBeenCalledWith("local", "srv-0");
+    expect(cancel).toHaveBeenCalledWith("local", "srv-0", { onlyHeld: false });
   });
 
   it("shows the configurable empty line for a host with nothing queued", async () => {
@@ -498,6 +498,16 @@ describe("held rows", () => {
       "local",
       expect.objectContaining({ id: "srv-held", client_batch_id: "client-1" }),
     );
+  });
+
+  it.each(["cancelling", "failed", "unknown"])("keeps %s panel menu read-only", async (state) => {
+    const { wrapper } = await mountPanel([], [{ ...queued("readonly", 0, 0), state } as never]);
+    await wrapper.get("[data-test='queue-row']").trigger("contextmenu", { clientX: 0, clientY: 0 });
+    const labels = useContextMenuStore()
+      .entries.filter((item) => "label" in item)
+      .map((item) => item.label);
+    expect(labels).toContain("Show details");
+    expect(labels).not.toContain("Cancel job");
   });
 
   it("opens a row context menu with queue controls and no disabled retry", async () => {

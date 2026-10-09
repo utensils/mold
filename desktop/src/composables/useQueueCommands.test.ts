@@ -8,7 +8,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent } from "vue";
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 
 const push = vi.hoisted(() => vi.fn());
@@ -28,6 +28,16 @@ vi.mock("../lib/ipc", () => ({ ipc: {}, inTauri: () => false }));
 vi.mock("@studio/api/client", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   apiFetchTo: vi.fn(() => Promise.resolve(new Response(null, { status: 200 }))),
+  apiJsonTo: vi.fn(),
+}));
+
+const recovery = vi.hoisted(() => ({
+  missing: vi.fn().mockResolvedValue(false),
+  start: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("@studio/composables/useQueueDownloadRecovery", () => ({
+  missingQueueModel: recovery.missing,
+  startQueueDownloadRecovery: recovery.start,
 }));
 
 import { __resetQueueCommandState, useQueueCommands, type QueueCommands } from "./useQueueCommands";
@@ -279,9 +289,25 @@ describe("useQueueCommands — the in-flight cancel guard is shared", () => {
   it("disarms the same row in every instance while one cancel is in flight", () => {
     const rail = commands();
     const rowMenu = commands();
+    useHostsStore().telemetry.local = { instanceId: "i-1" } as never;
+    useLiveActivityStore().hosts.local = {
+      stale: false,
+      instanceId: "i-1",
+      routeUrl: "http://127.0.0.1:7680",
+    } as never;
     const row = {
       kind: "shared",
-      shared: { kind: "generation", key: "local:generation:1", can_cancel: true, stale: false },
+      shared: {
+        kind: "generation",
+        key: "local:generation:1",
+        id: "1",
+        hostId: "local",
+        phase: "queued",
+        can_cancel: true,
+        stale: false,
+        instanceId: "i-1",
+        routeUrl: "http://127.0.0.1:7680",
+      },
     } as never;
 
     expect(rowMenu.canCancel(row)).toBe(true);
@@ -405,6 +431,133 @@ describe("useQueueCommands — resuming an auto-chain parked by a restart", () =
     } as never;
   }
 
+  it("offers Retry for a durable shared held row without metadata", () => {
+    liveHost();
+    useJobsStore().queues["local"] = {
+      ...(snapshot(false) as object),
+      entries: [
+        {
+          id: "held-1",
+          state: "held",
+          retryable: true,
+          batch_id: "batch-1",
+          client_batch_id: "client-1",
+        },
+      ],
+    } as never;
+    const api = commands();
+    const menu = useContextMenuStore();
+    api.contextMenu(
+      { clientX: 0, clientY: 0, preventDefault() {}, stopPropagation() {} } as never,
+      pausedChainRow({ execution: null, phase: "held", id: "held-1", can_cancel: true }),
+    );
+    expect(labels(menu.entries)).toContain("Retry now");
+  });
+
+  it("routes shared missing-model Retry through download recovery and reserves duplicates", async () => {
+    liveHost();
+    vi.spyOn(useLiveActivityStore(), "refresh").mockResolvedValue(undefined as never);
+    const jobs = useJobsStore();
+    const entry = {
+      id: "held-1",
+      state: "held",
+      retryable: true,
+      batch_id: "b",
+      client_batch_id: "c",
+    };
+    jobs.queues.local = { ...(snapshot(false) as object), entries: [entry] } as never;
+    vi.spyOn(jobs, "queueJob").mockResolvedValue(entry as never);
+    const retry = vi.spyOn(jobs, "retryJob").mockResolvedValue();
+    recovery.missing.mockResolvedValueOnce(true);
+    const api = commands();
+    api.contextMenu(
+      { clientX: 0, clientY: 0, preventDefault() {}, stopPropagation() {} } as never,
+      pausedChainRow({ execution: null, phase: "held", id: "held-1", can_cancel: true }),
+    );
+    const action = useContextMenuStore().entries.find(
+      (entry) => "label" in entry && entry.label === "Retry now",
+    ) as { action: () => void };
+    action.action();
+    action.action();
+    await flushPromises();
+    expect(recovery.start).toHaveBeenCalledTimes(1);
+    expect(retry).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["queued", undefined, true],
+    ["paused", false, true],
+    ["held", undefined, true],
+    ["running", undefined, false],
+    ["running", false, false],
+    ["running", true, true],
+    ["preparing", undefined, false],
+    ["cancelling", true, false],
+    ["unknown", true, false],
+    ["completed", true, false],
+    ["cancelled", true, false],
+    ["failed", true, false],
+  ])("offers Stop only for supported %s with cooperative %s", (phase, cooperative, expected) => {
+    liveHost();
+    useJobsStore().queues.local = {
+      ...(snapshot(false) as object),
+      caps: { canCancelRunning: cooperative },
+    } as never;
+    expect(commands().canCancel(pausedChainRow({ execution: null, phase, can_cancel: true }))).toBe(
+      expected,
+    );
+  });
+
+  it("suppresses Pause/Reorder during a held Retry reservation", () => {
+    liveHost();
+    useJobsStore().queues.local = {
+      ...(snapshot(false) as object),
+      entries: [{ id: "job", state: "queued" }],
+      caps: { canPauseJob: true, canReorder: true },
+    } as never;
+    const api = commands();
+    const row = pausedChainRow({ execution: null, id: "job", phase: "queued", can_cancel: true });
+    api.cancellingShared.value = ["local:generation:chain-7"];
+    expect(api.canReorder(row)).toBe(false);
+    api.contextMenu(
+      { clientX: 0, clientY: 0, preventDefault() {}, stopPropagation() {} } as never,
+      row,
+    );
+    expect(labels(useContextMenuStore().entries)).not.toContain("Pause");
+  });
+
+  it("reserves a paused row through request and refresh", async () => {
+    liveHost();
+    const jobs = useJobsStore();
+    jobs.queues.local = {
+      ...(snapshot(false) as object),
+      entries: [{ id: "job", state: "queued" }],
+      caps: { canPauseJob: true },
+    } as never;
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const pause = vi.spyOn(jobs, "setJobPaused").mockReturnValue(pending);
+    vi.spyOn(useLiveActivityStore(), "refresh").mockResolvedValue(undefined as never);
+    const api = commands();
+    const row = pausedChainRow({ execution: null, id: "job", phase: "queued", can_cancel: true });
+    api.contextMenu(
+      { clientX: 0, clientY: 0, preventDefault() {}, stopPropagation() {} } as never,
+      row,
+    );
+    const action = useContextMenuStore().entries.find(
+      (entry) => "label" in entry && entry.label === "Pause",
+    ) as { action: () => void };
+    action.action();
+    action.action();
+    expect(pause).toHaveBeenCalledTimes(1);
+    expect(api.canCancel(row)).toBe(false);
+    release();
+    await flushPromises();
+    expect(api.canCancel(row)).toBe(true);
+  });
+
   function labels(entries: readonly MenuEntry[]): string[] {
     return entries.map((entry) => ("label" in entry ? entry.label : "—"));
   }
@@ -417,13 +570,17 @@ describe("useQueueCommands — resuming an auto-chain parked by a restart", () =
     const menu = useContextMenuStore();
     const event = { clientX: 10, clientY: 10, preventDefault() {}, stopPropagation() {} } as never;
 
+    const { apiJsonTo } = await import("@studio/api/client");
+    vi.mocked(apiJsonTo).mockResolvedValue({
+      instance_id: "i-1",
+      items: [{ id: "chain-7", kind: "generation", execution: "chain", phase: "paused" }],
+    });
     api.contextMenu(event, pausedChainRow());
     expect(labels(menu.entries)).toContain("Resume");
 
     const resume = menu.entries.find((entry) => "label" in entry && entry.label === "Resume");
     (resume as { action: () => void }).action();
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushPromises();
 
     const { apiFetchTo } = await import("@studio/api/client");
     expect(apiFetchTo).toHaveBeenCalledWith(
@@ -431,6 +588,43 @@ describe("useQueueCommands — resuming an auto-chain parked by a restart", () =
       "/api/chain-jobs/chain-7/resume",
       { method: "POST" },
     );
+  });
+
+  it("refuses a captured chain Resume after the host reports it running", async () => {
+    liveHost();
+    vi.spyOn(useLiveActivityStore(), "refresh").mockResolvedValue(undefined as never);
+    const { apiJsonTo, apiFetchTo } = await import("@studio/api/client");
+    vi.mocked(apiFetchTo).mockClear();
+    vi.mocked(apiJsonTo).mockResolvedValue({
+      instance_id: "i-1",
+      items: [{ id: "chain-7", kind: "generation", execution: "chain", phase: "running" }],
+    });
+    commands().contextMenu(
+      { clientX: 0, clientY: 0, preventDefault() {}, stopPropagation() {} } as never,
+      pausedChainRow(),
+    );
+    const action = useContextMenuStore().entries.find(
+      (entry) => "label" in entry && entry.label === "Resume",
+    ) as { action: () => void };
+    action.action();
+    await flushPromises();
+    expect(apiFetchTo).not.toHaveBeenCalled();
+  });
+
+  it("keeps colliding chain IDs out of singleton queue controls", () => {
+    liveHost();
+    useJobsStore().queues["local"] = {
+      entries: [{ id: "chain-7", state: "queued" }],
+      caps: { canPauseJob: true, canReorder: true },
+    } as never;
+    const api = commands();
+    const row = pausedChainRow({ phase: "queued", can_cancel: true });
+    api.contextMenu(
+      { clientX: 0, clientY: 0, preventDefault() {}, stopPropagation() {} } as never,
+      row,
+    );
+    expect(labels(useContextMenuStore().entries)).not.toContain("Pause");
+    expect(api.canReorder(row)).toBe(false);
   });
 
   it("does not offer Resume on a running chain or an ordinary queue row", () => {

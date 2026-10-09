@@ -193,6 +193,27 @@ function onLaneDrop(laneKey: LaneKey) {
   }
 }
 
+function entryReady(entry: EnrichedQueueEntry): boolean {
+  const current = hosts.all.find((host) => host.id === props.host.id);
+  const owned =
+    entry.clientId === null ? null : generation.jobs.find((job) => job.clientId === entry.clientId);
+  return (
+    current?.status === "ready" &&
+    props.host.status === "ready" &&
+    current.baseUrl === props.host.baseUrl &&
+    current.instanceId === props.host.instanceId &&
+    !jobs.isJobBusy(props.host.id, entry.id) &&
+    !owned?.cancelling &&
+    !owned?.retrying
+  );
+}
+function entryCanCancel(entry: EnrichedQueueEntry): boolean {
+  return (
+    entryReady(entry) &&
+    (["queued", "paused", "held"].includes(entry.state) ||
+      (entry.state === "running" && caps.value?.canCancelRunning === true))
+  );
+}
 /** Queue actions live on every row. GPU reassignment is appended when the
  * selected queued row has real device lanes. */
 function openEntryMenu(entry: EnrichedQueueEntry, event: MouseEvent) {
@@ -202,30 +223,48 @@ function openEntryMenu(entry: EnrichedQueueEntry, event: MouseEvent) {
     { label: "Reuse settings", action: () => void reuseEntry(entry) },
     { separator: true },
   ];
-  if (caps.value?.canPauseJob && (entry.state === "queued" || entry.state === "paused")) {
+  if (
+    entryReady(entry) &&
+    caps.value?.canPauseJob &&
+    (entry.state === "queued" || entry.state === "paused")
+  ) {
     items.push({
       label: entry.state === "paused" ? "Resume job" : "Pause job",
+      disabled: jobs.isJobBusy(props.host.id, entry.id),
       action: () => void toggleEntryPause(entry),
     });
   }
-  if (entry.state === "held" && entry.retryable === true) {
-    items.push({ label: "Retry job", action: () => void retryFromMenu(entry) });
+  if (
+    entryReady(entry) &&
+    entry.state === "held" &&
+    entry.retryable !== false &&
+    entry.batch_id &&
+    entry.client_batch_id
+  ) {
+    items.push({
+      label: "Retry job",
+      disabled: jobs.isJobBusy(props.host.id, entry.id),
+      action: () => void retryFromMenu(entry),
+    });
   }
-  items.push({
-    label: entry.state === "running" ? "Stop job" : "Cancel job",
-    danger: true,
-    disabled: entry.state === "running" && caps.value?.canCancelRunning !== true,
-    action: () => {
-      confirmCancel.value = entry;
-    },
-  });
-  if (entry.state === "queued" && ordinals.length > 0) {
+  if (entryCanCancel(entry))
+    items.push({
+      label: entry.state === "running" ? "Stop job" : "Cancel job",
+      danger: true,
+      disabled:
+        jobs.isJobBusy(props.host.id, entry.id) ||
+        (entry.state === "running" && caps.value?.canCancelRunning !== true),
+      action: () => {
+        confirmCancel.value = entry;
+      },
+    });
+  if (entryReady(entry) && entry.state === "queued" && ordinals.length > 0) {
     const current = laneForEntry(entry);
     items.push(
       { separator: true },
       ...ordinals.map((ordinal) => ({
         label: `Move to GPU ${ordinal}`,
-        disabled: ordinal === current,
+        disabled: ordinal === current || jobs.isJobBusy(props.host.id, entry.id),
         action: () => void jobs.reassignGpu(props.host.id, entry.id, ordinal),
       })),
     );
@@ -244,13 +283,18 @@ function laneDroppable(laneKey: LaneKey): boolean {
 }
 
 async function cancelEntry(entry: EnrichedQueueEntry) {
-  if (cancellingIds.value.includes(entry.id)) return;
+  if (cancellingIds.value.includes(entry.id) || !entryCanCancel(entry)) return;
   cancellingIds.value = [...cancellingIds.value, entry.id];
   try {
-    const cancelled =
-      entry.clientId !== null
-        ? await generation.cancel(entry.clientId)
-        : await jobs.cancelJob(props.host.id, entry.id).then(() => true);
+    let cancelled = false;
+    if (entry.clientId !== null) {
+      await jobs.withJobMutation(props.host.id, entry.id, async () => {
+        cancelled = await generation.cancel(entry.clientId!);
+      });
+    } else
+      cancelled = await jobs
+        .cancelJob(props.host.id, entry.id, { onlyHeld: entry.state === "held" })
+        .then(() => true);
     if (cancelled) toasts.push("Cancelled");
   } catch (err) {
     toasts.push(String(err), "error");
@@ -719,7 +763,7 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
               v-if="caps?.canPauseJob && (entry.state === 'queued' || entry.state === 'paused')"
               type="button"
               data-test="pause-entry"
-              :disabled="pausingIds.includes(entry.id)"
+              :disabled="pausingIds.includes(entry.id) || !entryReady(entry)"
               class="h-7 shrink-0 rounded-control px-2.5 text-sm text-fg-dim hover:text-fg"
               @click.stop="toggleEntryPause(entry)"
             >
@@ -740,7 +784,7 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
               "
               type="button"
               data-test="cancel-entry"
-              :disabled="cancellingIds.includes(entry.id)"
+              :disabled="cancellingIds.includes(entry.id) || !entryCanCancel(entry)"
               class="h-7 shrink-0 rounded-control px-2.5 text-sm text-fg-dim hover:text-error"
               @click.stop="cancelEntry(entry)"
             >

@@ -50,10 +50,12 @@ private struct QueueBatchLabel: View {
 }
 
 /// A job: its model, where it stands in words, the preview while it runs,
-/// and -- when held -- the paragraph and the named buttons that answer it.
+/// and, when held, its explanation, transfer menu and diagnostics.
 struct QueueEntryRow: View {
     @Environment(HostStore.self) private var hosts
     @Environment(QueueStore.self) private var queue
+    @Environment(AppRouter.self) private var router
+    @Environment(ModelStore.self) private var models
     @Environment(\.dynamicTypeSize) private var size
     @ScaledMetric(relativeTo: .body) private var thumb = 52
     let entry: QueueEntry
@@ -113,23 +115,54 @@ struct QueueEntryRow: View {
         .task(id: "\(host.id)|\(hosts.instanceID(of: host.id) ?? "unknown")|\(hosts.isUp(host))|\(entry.id)") {
             await queue.loadSourceThumbnail(for: entry, on: host.id)
         }
-        .swipeActions(edge: .trailing) {
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             if queue.canCancel(entry, on: host.id) {
                 Button(role: .destructive) { Task { await queue.cancel(entry, on: host.id) } } label: {
                     Label("Cancel", systemImage: "xmark")
                 }
+                .accessibilityIdentifier("queue-swipe-cancel-" + entry.id)
             }
         }
-        .swipeActions(edge: .leading) {
+        .swipeActions(edge: .leading, allowsFullSwipe: false) {
+            retryAction
+            if !queue.canPause(entry, on: host.id), !retryAvailable {
+                Button("Details", systemImage: "info.circle") { inspecting = entry }
+                    .accessibilityIdentifier("queue-swipe-details-" + entry.id)
+            }
             if queue.canPause(entry, on: host.id) {
                 let paused = entry.state == .paused
                 Button { Task { await queue.setPaused(!paused, entry, on: host.id) } } label: {
                     Label(paused ? "Resume" : "Pause", systemImage: paused ? "play" : "pause")
                 }
                 .tint(.orange)
+                .accessibilityIdentifier("queue-swipe-pause-" + entry.id)
             }
         }
         .contextMenu { menu }
+    }
+
+    private var retryAvailable: Bool {
+        queue.canRetry(entry, on: host.id) && models.queueDownloads.state(host: host.id, job: entry.id)?.isBusy != true
+    }
+
+    @ViewBuilder private var retryAction: some View {
+        if retryAvailable {
+            if let hold = queue.hold(for: entry, on: host.id), case .missingModel = hold {
+                Button("Download and Retry", systemImage: "arrow.down.circle") {
+                    guard retryAvailable else { return }
+                    if let model = entry.model {
+                        models.pullThenRetry(model, entry: entry, on: host.id, presenter: router.presentationID)
+                    }
+                }
+                .accessibilityIdentifier("queue-swipe-download-" + entry.id)
+            } else {
+                Button("Retry", systemImage: "arrow.clockwise") {
+                    guard retryAvailable else { return }
+                    Task { await queue.retry(entry, on: host.id) }
+                }
+                .accessibilityIdentifier("queue-swipe-retry-" + entry.id)
+            }
+        }
     }
 
     private var caption: String {
@@ -160,7 +193,8 @@ struct QueueEntryRow: View {
 
     /// The Mac row menu's items, in its order; Cancel last, behind a divider.
     @ViewBuilder private var menu: some View {
-        if entry.state.isReorderable, queue.canReorder(on: host.id) {
+        retryAction
+        if queue.canMove(entry, on: host.id) {
             Button("Move Up", systemImage: "arrow.up") { Task { await queue.move(entry, up: true, on: host.id) } }
             Button("Move Down", systemImage: "arrow.down") { Task { await queue.move(entry, up: false, on: host.id) } }
         }
@@ -182,10 +216,9 @@ struct QueueEntryRow: View {
     }
 }
 
-/// A held row's paragraph and its named buttons: Pull (then Retry) for a
-/// missing model, Retry where the machine says it would help, Move to…
-/// another machine -- side by side, stacked full width at AX sizes.
-/// QueueItemActions draws Cancel independently of this recovery layout.
+/// A held row keeps its explanation, download progress and Move to menu.
+/// Job Details also offers explicit Retry and Download and Retry controls.
+/// Card recovery actions are native swipes; details keep explicit recovery controls.
 struct QueueHeldActions: View {
     @Environment(AppRouter.self) private var router
     @Environment(QueueStore.self) private var queue
@@ -224,7 +257,7 @@ struct QueueHeldActions: View {
     private func buttons(stacked: Bool) -> some View {
         let layout = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8)) : AnyLayout(HStackLayout(spacing: 8))
         return layout {
-            if case .missingModel = hold, queue.canRetry(entry, on: host.id) {
+            if detail, case .missingModel = hold, queue.canRetry(entry, on: host.id) {
                 Button(recovery?.isBusy == true ? "Downloading…" : "Download and Retry") {
                     if let model = entry.model { models.pullThenRetry(model, entry: entry, on: host.id, presenter: router.presentationID) }
                 }
@@ -232,17 +265,15 @@ struct QueueHeldActions: View {
                 .frame(maxWidth: stacked ? .infinity : nil)
                 .fixedSize(horizontal: !stacked, vertical: false)
                 .accessibilityIdentifier((detail ? "queue-detail-download-" : "queue-download-") + entry.id)
-            } else if queue.canRetry(entry, on: host.id) {
+            } else if detail, queue.canRetry(entry, on: host.id) {
                 Button("Retry") { Task { await queue.retry(entry, on: host.id) } }
                     .frame(maxWidth: stacked ? .infinity : nil)
             }
-            if entry.authority(instanceId: "") != nil, entry.state == .held {
+            if queue.canTransfer(entry, on: host.id) {
                 MoveToMenu(entry: entry, host: host)
             }
-
         }
     }
-
 }
 
 /// "Move to…": the other machines that are up and generate. Absent when
@@ -265,6 +296,7 @@ struct MoveToMenu: View {
             } label: {
                 Label("Move to…", systemImage: "arrow.right.circle")
             }
+            .accessibilityIdentifier("queue-move-to-" + entry.id)
             .disabled(transfers.transferring != nil)
         }
     }
