@@ -22,6 +22,15 @@ require('cargo fmt --all -- --check' in ci and 'actionlint' in ci, 'basic static
 require('docker://rhysd/actionlint' not in ci, 'static lint depends on rate-limited Docker Hub pulls')
 require('bash scripts/ci/install-actionlint.sh' in ci, 'pinned native actionlint installer missing')
 require('bash scripts/tests/actionlint-native.sh' in ci, 'external actionlint analyzers are not verified')
+desktop = active('desktop.yml')
+desktop_frontend = re.search(r'^            frontend:\n(.*?)(?=^            \w+:)', desktop, re.M | re.S)
+require(desktop_frontend is not None, 'desktop frontend classifier missing')
+for directory in ('composables', 'mobile'):
+    require(f"'desktop/src/{directory}/**'" in desktop_frontend.group(1),
+            f'desktop frontend classifier omits {directory}')
+desktop_push = desktop.split('  push:', 1)[1].split('  pull_request:', 1)[0]
+require('"desktop/src/composables/**"' in desktop_push, 'desktop main trigger omits composables')
+require('"desktop/src/mobile/**"' not in desktop_push, 'mobile-only changes trigger desktop artifact nightlies')
 for name in ('desktop.yml', 'ios.yml', 'macos-native.yml', 'ios-native.yml'):
     require('cargo clippy' not in active(name), f'{name} retains duplicate clippy builds')
 require('needs: [desktop-nightly]' in active('desktop.yml'), 'desktop publish waits for non-build gates')
