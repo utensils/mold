@@ -42,7 +42,12 @@ function closeMenu() {
   menuFor.value = null;
 }
 function metaLine(card: CollectionCard): string {
-  const count = `${card.count} ${card.count === 1 ? "print" : "prints"}`;
+  const count =
+    card.availability === "unavailable"
+      ? "Unavailable"
+      : card.availability === "absent"
+        ? "Not on this machine"
+        : `${card.count} ${card.count === 1 ? "print" : "prints"}`;
   return [count, ...card.hostLabels].join(" · ");
 }
 </script>

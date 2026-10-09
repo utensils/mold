@@ -6,6 +6,8 @@ private struct MirrorTarget: Sendable {
     let hostID: MoldHost.ID
     let print: GalleryPrint
     let source: any MoldBackend
+    let originContext: String
+    let isCurrent: @MainActor @Sendable () -> Bool
     let collections: [(slug: String, name: String)]
 }
 
@@ -14,6 +16,27 @@ private struct MirrorResult: Sendable {
     let alreadyLocal: Bool
     let error: String?
     var sourceMedia: RetainedSourceMedia.MirrorResult = .complete
+    var repeatAcknowledgable = false
+}
+
+
+private func targetVersioned(_ print: GalleryPrint) -> Bool {
+    print.mediaVersion != nil && print.canonicalMetadataJSON != nil
+}
+
+private func canAcknowledgeSyncError(_ error: Error) -> Bool {
+    if error is URLError || error is CancellationError { return false }
+    if let client = error as? MoldClientError {
+        switch client {
+        case .unreachable, .unauthorized, .licenseRequired, .malformedResponse: return false
+        case let .http(status, code, message):
+            if code == "RETAINED_MEDIA_COPY_INCOMPLETE", message?.contains("could not verify") == true { return false }
+            return status != 401 && status != 403 && status != 429 && status < 500
+        }
+    }
+    // Retained-source errors are stable per-output facts; acknowledgment
+    // suppresses repeated interruption, never retries or the full issue list.
+    return !(error is SyncDiskSpaceError)
 }
 
 private struct SyncDiskSpaceError: LocalizedError {
@@ -50,6 +73,7 @@ private struct LocalSyncRecord: Codable {
     let destinationTimestamp: UInt64
     let destinationSize: Int
     let destinationRecipe: String
+    let destinationInstance: String?
 
     private static let syncRecordStorageKey = "librarySyncCopiesV1"
 
@@ -105,7 +129,7 @@ private struct LocalSyncRecord: Codable {
         AppStorageSuite.defaults.set(data, forKey: syncRecordStorageKey)
     }
 
-    init?(source: GalleryPrint, local: GalleryPrint) {
+    init?(source: GalleryPrint, local: GalleryPrint, destinationInstance: String? = nil) {
         guard let sourceVersion = source.mediaVersion,
               let sourceSize = source.sizeBytes,
               let sourceRecipe = Self.recipe(source),
@@ -122,6 +146,7 @@ private struct LocalSyncRecord: Codable {
         destinationTimestamp = local.timestamp
         self.destinationSize = destinationSize
         self.destinationRecipe = destinationRecipe
+        self.destinationInstance = destinationInstance
     }
 }
 
@@ -203,11 +228,12 @@ private func collisionName(for target: MirrorTarget, file: URL) throws -> String
 private func repairCachedSources(_ target: MirrorTarget, to destination: any MoldBackend,
                                  as filename: String) async -> MirrorResult {
     do {
+        guard await target.isCurrent() else { throw MoldClientError.unreachable("The machine route changed. Refresh the Library before copying.") }
         let sourceMedia = try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
             from: target.source, to: destination, as: filename)
         return MirrorResult(filename: filename, alreadyLocal: true, error: nil, sourceMedia: sourceMedia)
     } catch {
-        return MirrorResult(filename: nil, alreadyLocal: false, error: error.sentence)
+        return MirrorResult(filename: nil, alreadyLocal: false, error: error.sentence, repeatAcknowledgable: canAcknowledgeSyncError(error))
     }
 }
 
@@ -216,9 +242,11 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
                     knownPrints: [String: GalleryPrint],
                     pending: PendingSyncOrganization?) async -> MirrorResult {
     do {
+        guard await target.isCurrent() else { throw MoldClientError.unreachable("The machine route changed. Refresh the Library before copying.") }
         try checkSyncStagingSpace(for: target.print)
         let sourceIdentity = try await RetainedSourceMedia.preflightMirror(
             for: target.print.filename, metadata: target.print.metadata, from: target.source, to: destination)
+        guard await target.isCurrent() else { throw MoldClientError.unreachable("The machine route changed. Refresh the Library before copying.") }
         let file = try await target.source.mediaFile(target.print.filename, trashed: false)
         defer { try? FileManager.default.removeItem(at: file) }
         if occupied {
@@ -248,6 +276,7 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
                 return MirrorResult(filename: filename, alreadyLocal: true, error: nil, sourceMedia: sourceMedia)
             }
         }
+        guard await target.isCurrent() else { throw MoldClientError.unreachable("The machine route changed. Refresh the Library before copying.") }
         let item = try GalleryImport(mirroring: target.print, fileAt: file)
         let sourceKey = LocalSyncRecord.key(hostID: target.hostID,
                                             filename: target.print.filename)
@@ -265,7 +294,7 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
         }
     } catch {
         return MirrorResult(filename: nil, alreadyLocal: false,
-                            error: error.sentence)
+                            error: error.sentence, repeatAcknowledgable: canAcknowledgeSyncError(error))
     }
 }
 
@@ -295,7 +324,12 @@ extension LibraryStore {
     }
 
     private func mirrorLocally(_ selection: [LibraryEntry], syncAll: Bool) async {
-        guard localSaveProgress == nil else { return }
+        guard !localSaveRunning else { return }
+        localSaveRunning = true
+        defer { localSaveRunning = false }
+        localSaveIssueKeys = [:]
+        localSaveAlertPresented = false
+        let visibilityGeneration = collectionVisibility.generation
         defer { localSaveTask = nil }
         var candidates = selection.filter(Self.canSaveLocally)
         guard syncAll || !candidates.isEmpty else { return }
@@ -314,6 +348,8 @@ extension LibraryStore {
 
         var failures: [String] = []
         var sourcePrints: [MoldHost.ID: [String: GalleryPrint]] = [:]
+        var sourceMachines: [MoldHost.ID: (MoldHost, any MoldBackend)] = [:]
+        var originContexts: [MoldHost.ID: String] = [:]
         var sourceCollections: [MoldHost.ID: [String: Collection]] = [:]
         var hostErrors: [MoldHost.ID: String] = [:]
         let sourceHostIDs = syncAll
@@ -321,21 +357,25 @@ extension LibraryStore {
             : Set(candidates.map(\.hostID))
         for hostID in sourceHostIDs.sorted() {
             if Task.isCancelled || localSaveStopRequested { break }
-            guard let source = hosts.backend(for: hostID) else {
+            guard let sourceHost = hosts.host(hostID), let source = hosts.backend(for: hostID) else {
                 hostErrors[hostID] = "its machine is no longer available"
                 if syncAll {
                     failures.append("\(hosts.name(of: hostID) ?? hostID.uuidString): its machine is no longer available")
                 }
                 continue
             }
+            sourceMachines[hostID] = (sourceHost, source)
+            originContexts[hostID] = [hostID.uuidString, hosts.host(hostID)?.baseURL.absoluteString ?? "",
+                                     hosts.instanceID(of: hostID) ?? ""].joined(separator: "\n")
             do {
                 guard case let .fresh(prints, _) = try await source.gallery(etag: nil) else {
                     throw MoldClientError.malformedResponse
                 }
+                guard hosts.host(hostID) == sourceHost else { throw MoldClientError.unreachable("The machine route changed while reading its Library.") }
                 sourcePrints[hostID] = Dictionary(prints.map { ($0.filename, $0) },
                                                   uniquingKeysWith: { first, _ in first })
-                if syncAll, let host = hosts.host(hostID) {
-                    candidates += prints.map { LibraryEntry(host: host, print: $0) }
+                if syncAll {
+                    candidates += prints.map { LibraryEntry(host: sourceHost, print: $0) }
                         .filter(Self.canSyncLocally)
                 }
                 let selectedNames = Set(candidates.filter { $0.hostID == hostID }
@@ -343,9 +383,9 @@ extension LibraryStore {
                 if syncAll || prints.contains(where: { selectedNames.contains($0.filename)
                     && !$0.collectionList.isEmpty }) {
                     do {
-                        sourceCollections[hostID] = Dictionary(
-                            try await source.collections().map { ($0.id, $0) },
-                            uniquingKeysWith: { first, _ in first })
+                        let collections = try await source.collections()
+                        guard hosts.host(hostID) == sourceHost else { throw MoldClientError.unreachable("The machine route changed while reading its collections.") }
+                        sourceCollections[hostID] = Dictionary(collections.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
                     } catch {
                         failures.append("Collections on \(hostID): \(error.sentence)")
                     }
@@ -374,7 +414,7 @@ extension LibraryStore {
                 continue
             }
             guard let print = sourcePrints[entry.hostID]?[entry.print.filename],
-                  let source = hosts.backend(for: entry.hostID) else {
+                  let (sourceHost, source) = sourceMachines[entry.hostID], hosts.host(entry.hostID) == sourceHost else {
                 failures.append("\(entry.print.filename): its recipe is no longer available")
                 continue
             }
@@ -389,7 +429,10 @@ extension LibraryStore {
                     hostID: entry.hostID, filename: print.filename))
             }
             targets.append(MirrorTarget(hostID: entry.hostID, print: print,
-                                        source: source, collections: names))
+                                        source: source, originContext: originContexts[entry.hostID] ?? "",
+                                        isCurrent: { [weak self] in
+                                            self?.hosts.host(sourceHost.id) == sourceHost && self?.hosts.host(local.id) == local
+                                        }, collections: names))
         }
 
         let destination = hosts.backend(for: local)
@@ -405,6 +448,20 @@ extension LibraryStore {
             localSaveAlertPresented = true
             return
         }
+        let localTrashNames: Set<String>
+        if syncAll {
+            do {
+                guard case let .fresh(prints, _) = try await destination.trashedPrints(etag: nil) else {
+                    throw MoldClientError.malformedResponse
+                }
+                localTrashNames = Set(prints.map(\.filename))
+            } catch {
+                localSaveReport = "Couldn’t read This Mac’s Trash safely: \(error.sentence)"
+                localSaveFailures = failures
+                localSaveAlertPresented = true
+                return
+            }
+        } else { localTrashNames = [] }
         let localByName = Dictionary(localPrints.map { ($0.filename, $0) },
                                      uniquingKeysWith: { first, _ in first })
         var syncedCopies = syncAll ? LocalSyncRecord.load() : [:]
@@ -416,32 +473,40 @@ extension LibraryStore {
             failures.append("This Mac’s collections: \(error.sentence)")
             localCollections = collectionsPerHost[local.id] ?? []
         }
+        var localCollectionBySlug = Dictionary(localCollections.map { ($0.slug, $0) }, uniquingKeysWith: { first, _ in first })
         var localNames = Dictionary(localCollections.map {
             ($0.slug, $0.name)
         }, uniquingKeysWith: { first, _ in first })
         var createdCollections = 0
         var failedCollectionSlugs: Set<String> = []
-        if syncAll {
-            collectionLoop: for hostID in sourceHostIDs.sorted() {
-                for collection in (sourceCollections[hostID] ?? [:]).values.sorted(by: { $0.slug < $1.slug }) {
-                    if Task.isCancelled || localSaveStopRequested { break collectionLoop }
-                    if let localName = localNames[collection.slug] {
-                        if localName != collection.name {
-                            failures.append("Collection “\(collection.slug)” is “\(localName)” on This Mac and “\(collection.name)” on \(hosts.name(of: hostID) ?? hostID.uuidString); keeping the local name.")
-                        }
-                        continue
-                    }
-                    do {
-                        let created = try await destination.createCollection(
-                            name: collection.name, description: collection.description)
-                        localNames[collection.slug] = created.name
-                        localNames[created.slug] = created.name
-                        createdCollections += 1
-                    } catch {
-                        failures.append("Collection “\(collection.name)”: \(error.sentence)")
-                        failedCollectionSlugs.insert(collection.slug)
-                    }
+        // Visibility is a shared shelf attribute. Include existing and empty
+        // shelves, not just memberships discovered while copying outputs.
+        var collectionInventories = collectionsPerHost
+        for (host, collections) in sourceCollections { collectionInventories[host] = Array(collections.values) }
+        collectionInventories[local.id] = localCollections
+        let desiredShelves = CollectionShelf.merge(collectionInventories)
+        for shelf in desiredShelves {
+            if Task.isCancelled || localSaveStopRequested { break }
+            guard syncAll || targets.contains(where: { $0.collections.contains { $0.slug == shelf.slug } }) else { continue }
+            do {
+                let existing: Collection
+                if let collection = localCollectionBySlug[shelf.slug] {
+                    existing = collection
+                } else {
+                    let description = collectionInventories.values.flatMap { $0 }
+                        .first { $0.slug == shelf.slug && $0.description != nil }?.description
+                    existing = try await destination.createCollection(name: shelf.name, description: description)
+                    guard existing.slug == shelf.slug else { throw MoldClientError.malformedResponse }
+                    localCollectionBySlug[shelf.slug] = existing
+                    localNames[shelf.slug] = existing.name
+                    createdCollections += 1
                 }
+                localCollectionBySlug[shelf.slug] = try await syncCollectionVisibility(
+                    existing, fallbackHidden: shelf.hidden, generation: visibilityGeneration,
+                    destination: local, backend: destination)
+            } catch {
+                failures.append("Collection “\(shelf.name)”: \(error.sentence)")
+                failedCollectionSlugs.insert(shelf.slug)
             }
         }
         var collectionNames: [String: String] = [:]
@@ -457,7 +522,10 @@ extension LibraryStore {
         var completed = 0
         func record(_ target: MirrorTarget, as filename: String, organize: Bool) {
             if syncAll { successfulCopies.append((target, filename)) }
-            for collection in target.collections {
+            let sourceKey = LocalSyncRecord.key(hostID: target.hostID, filename: target.print.filename)
+            let fileMembership = !syncAll || syncedCopies[sourceKey] == nil
+                || syncedCopies[sourceKey]?.destinationInstance != hosts.instanceID(of: local.id)
+            for collection in target.collections where fileMembership {
                 let name = localNames[collection.slug] ?? collection.name
                 if let previous = collectionNames[collection.slug], previous != name {
                     failures.append("Collection “\(collection.slug)” has different names on source machines; using “\(previous)”.")
@@ -478,10 +546,16 @@ extension LibraryStore {
 
         var work: [(Int, MirrorTarget, String, Bool, String?)] = []
         var claimedOriginals: Set<String> = []
+        var keptRemoved = 0
         for (index, target) in targets.enumerated() {
             if Task.isCancelled || localSaveStopRequested { break }
             let original = target.print.filename
             let sourceKey = LocalSyncRecord.key(hostID: target.hostID, filename: original)
+            if syncAll, localTrashNames.contains(original)
+                || (syncedCopies[sourceKey].map { $0.destinationInstance == hosts.instanceID(of: local.id) && localByName[$0.destinationFilename] == nil } ?? false) {
+                keptRemoved += 1
+                continue
+            }
             let canClaimOriginal = !syncAll || !claimedOriginals.contains(original)
             let requestedName: String
             if let pendingName = pendingOrganization?.destination(for: sourceKey) {
@@ -540,7 +614,20 @@ extension LibraryStore {
                     record(targets[index], as: name,
                            organize: !result.alreadyLocal || pendingMatch)
                 } else {
-                    failures.append("\(targets[index].print.filename): \(result.error ?? "save failed")")
+                    let failure = "\(targets[index].print.filename): \(result.error ?? "save failed")"
+                    failures.append(failure)
+                    if result.repeatAcknowledgable, targetVersioned(targets[index].print) {
+                        let target = targets[index]
+                        let context = [target.originContext,
+                                       target.print.mediaVersion ?? "",
+                                       LocalSyncRecord.recipe(target.print) ?? "",
+                                       local.baseURL.absoluteString,
+                                       hosts.instanceID(of: local.id) ?? "", failure].joined(separator: "\n")
+                        // Same text from two sources must acknowledge BOTH
+                        // current identities, not overwrite one with another.
+                        let key = SHA256.hash(data: Data(context.utf8)).map { String(format: "%02x", $0) }.joined()
+                        localSaveIssueKeys[failure] = Array(Set((localSaveIssueKeys[failure]?.split(separator: ":").map(String.init) ?? []) + [key])).sorted().joined(separator: ":")
+                    }
                 }
                 if completed % 10 == 0 || completed == targets.count {
                     localSaveProgress = "Saving \(completed.formatted()) of \(targets.count.formatted())…"
@@ -613,6 +700,7 @@ extension LibraryStore {
         // events apply normally.
         localSaveProgress = nil
         await refresh(on: local.id)
+        await reconcileCollectionVisibility()
         if syncAll {
             let refreshed = Dictionary((perHost[local.id] ?? []).map {
                 ($0.print.filename, $0.print)
@@ -626,7 +714,7 @@ extension LibraryStore {
                           failedCollectionSlugs.contains($0.slug)
                       }) else { continue }
                 guard let localPrint = refreshed[filename],
-                      let record = LocalSyncRecord(source: target.print, local: localPrint)
+                      let record = LocalSyncRecord(source: target.print, local: localPrint, destinationInstance: hosts.instanceID(of: local.id))
                 else { continue }
                 syncedCopies[sourceKey] = record
                 pendingOrganization?.clear(sourceKey)
@@ -646,13 +734,17 @@ extension LibraryStore {
         if createdCollections > 0 {
             summary += " Created \(createdCollections) \(createdCollections == 1 ? "collection" : "collections")."
         }
-        let unsaved = candidates.count - transferred - alreadyLocal
+        let unsaved = candidates.count - transferred - alreadyLocal - keptRemoved
+        if keptRemoved > 0 { summary += " \(keptRemoved) copies were kept removed from This Mac; use Save to copy them again deliberately." }
         if unsaved > 0 { summary += " \(unsaved) were not copied." }
         if skipped > 0 { summary += " Skipped \(skipped) local or unsupported prints." }
         if !failures.isEmpty { summary += " \(failures.count) issues need attention." }
         localSaveReport = summary
         localSaveFailures = failures
-        localSaveAlertPresented = true
+        localSaveAlertPresented = failures.contains { failure in
+            guard let key = localSaveIssueKeys[failure] else { return true }
+            return syncSession.hasNewIssues([key])
+        }
     }
 
 }

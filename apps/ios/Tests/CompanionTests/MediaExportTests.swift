@@ -49,7 +49,7 @@ import Testing
         let copy = LibraryEntry(host: second, print: print)
         merged.copies = [copy]
         #expect(LinkedPrint.presentedEntry(in: [merged], id: copy.id)?.hostID == second.id)
-        #expect(LinkedPrint.presentedEntry(in: [merged], id: copy.id)?.everyCopy.count == 2)
+        #expect(LinkedPrint.presentedEntry(in: [merged], id: copy.id)?.everyCopy.count == 1)
         #expect(ResultPager.presentedEntry(in: [merged], host: second.id, filename: print.filename)?.hostID == second.id)
     }
 

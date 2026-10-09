@@ -553,7 +553,8 @@ struct ReuseTests {
         let placed = await store.placePicture(in: draft, outgoing: request(), live: { draft })
 
         #expect(placed?.media.sourceImage == Data([3, 1, 4]).base64EncodedString())
-        #expect(placed?.media.sourceImageName == "a.png")
+        // Retained member displayName is the input name; the output filename is not.
+        #expect(placed?.media.sourceImageName == "source_image")
         // ...and by the well, not a banner, once it is there. The authority
         // belongs to ordinary editable media after restoration.
         #expect(store.pending(for: placed!) == nil)

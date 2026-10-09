@@ -1,3 +1,5 @@
+import { updateCollectionHidden } from "@studio/api/galleryOrganization";
+import { desiredCollectionHidden } from "@studio/lib/collectionVisibility";
 /**
  * iPhone-side Library organization state helpers — scopes, chip filters,
  * cross-host collection/tag merges, per-host capability gating, and the
@@ -390,6 +392,7 @@ export interface MobileCollectionCard {
   name: string;
   /** Sum of per-host counts (upper bound for mirrored prints). */
   count: number;
+  availability?: "present" | "absent" | "unavailable";
   hostIds: string[];
   /** "This Mac · plato" style label from the host names. */
   hostsLabel: string;
@@ -618,7 +621,16 @@ export async function runOrganizationFanout(
       try {
         if (op.kind === "deleteForever" && options.trashOnly) {
           await (api.deleteTrashed ?? deleteTrashed)(host.target, op.filenames);
-        } else await runHostOp(op, host, api, result, options.trashHostIds, options.bulkHostIds);
+        } else
+          await runHostOp(
+            op,
+            host,
+            api,
+            result,
+            options.trashHostIds,
+            options.bulkHostIds,
+            Object.values(hosts).flatMap((h) => h?.collections ?? []),
+          );
         result.succeededHostIds.push(host.id);
       } catch (error) {
         result.failures.push({ hostId: host.id, hostName: host.name, error });
@@ -635,6 +647,7 @@ async function runHostOp(
   result: FanoutResult,
   trashHostIds: ReadonlySet<string> | undefined,
   bulkHostIds: ReadonlySet<string> | undefined,
+  allCollections: readonly Collection[],
 ): Promise<void> {
   switch (op.kind) {
     case "setTitle":
@@ -657,6 +670,17 @@ async function runHostOp(
       );
       if (!collection) {
         collection = await api.createCollection(host.target, { name: op.ensureCollection.name });
+        if (
+          desiredCollectionHidden(
+            op.ensureCollection.slug,
+            allCollections.some(
+              (c) =>
+                (c.slug || collectionSlug(c.name)) === op.ensureCollection.slug &&
+                c.hidden === true,
+            ),
+          )
+        )
+          collection = await updateCollectionHidden(host.target, collection.id, true);
         result.createdCollections.push({ hostId: host.id, collection });
       }
       await api.setCollectionItems(host.target, collection.id, { add: op.filenames, remove: [] });
@@ -711,4 +735,20 @@ export function scopedLibraryCopies<T extends { hostId: string }>(
   hostId: string | null,
 ): T[] {
   return copies.filter((copy) => hostId === null || copy.hostId === hostId);
+}
+
+export function scopedPrintOrganization<
+  T extends GalleryOrganizationFields & { hostId: string; filename: string },
+>(
+  print: Pick<T, "hostId" | "filename">,
+  copies: readonly T[],
+  resolver: CollectionSlugResolver,
+  selectedHostId: string | null,
+  global: OrganizationUnion | undefined,
+): OrganizationUnion | undefined {
+  if (!selectedHostId) return global;
+  const copy = copies.find((c) => c.hostId === selectedHostId && c.filename === print.filename);
+  return copy
+    ? unionOrganization([{ hostId: copy.hostId, item: copy }], { resolveCollectionSlug: resolver })
+    : undefined;
 }

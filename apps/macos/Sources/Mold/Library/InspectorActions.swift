@@ -57,7 +57,7 @@ struct InspectorActions: View {
         }
     }
 
-    private var allFavorite: Bool { entries.allSatisfy(\.print.isFavorite) }
+    private var allFavorite: Bool { entries.allSatisfy(\.isFavorite) }
 }
 
 /// How long the machine will keep these, when they are in the trash.

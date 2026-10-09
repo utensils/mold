@@ -24,6 +24,27 @@ import { beforeEach, vi } from "vitest";
  * runner, which also collects `../studio/**` and `../ui/**`.
  */
 beforeEach(() => {
+  // Node 25 exposes an unavailable localStorage getter; tests use the DOM store.
+  const data = new Map<string, string>();
+  vi.stubGlobal(
+    "localStorage",
+    window.localStorage ?? {
+      get length() {
+        return data.size;
+      },
+      key: (index: number) => [...data.keys()][index] ?? null,
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        data.set(key, String(value));
+      },
+      removeItem: (key: string) => {
+        data.delete(key);
+      },
+      clear: () => {
+        data.clear();
+      },
+    },
+  );
   vi.stubGlobal(
     "fetch",
     vi.fn(() =>

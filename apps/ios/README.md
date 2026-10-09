@@ -329,3 +329,12 @@ other jobs may need.
 ### Reuse input media
 
 Reuse settings restores retained opening and closing frames into editable wells, preserving keyframe indices and ordered image references. Audio, source/continuation video, identity photos and control images restore with their saved settings where the selected recipe supports them. Continuation overlap and authored reference strength (including zero) are preserved. Older prints without recorded reference strength keep the server default. The original machine must retain the inputs; missing, damaged or oversized inputs are disclosed before generation. A new attachment or explicit removal wins over a late download, and restored wells never have a hidden archive fallback that can revive removed media.
+
+The Library's View Options includes a Machine picker. All Machines shows the
+shared library; choosing one machine shows and edits only its copies. Collection
+counts follow that scope. A collection confirmed absent on that machine is marked
+“Not on machine”; an unavailable inventory is marked “Unavailable”, rather than
+being presented as an empty collection. Hidden collections remain directly
+browsable, and Hide from All Prints applies to every same-slug collection across
+machines. Pending visibility changes are saved locally and retried when this app
+refreshes or reconnects; a closed app cannot reconcile other machines.

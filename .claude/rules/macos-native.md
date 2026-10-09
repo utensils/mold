@@ -58,3 +58,19 @@ Trash remains accessible when empty, ignores hidden collections, and resets
 prior browsing filters on entry while preserving the selected hosts. Put Back,
 Delete Immediately and Empty Trash act only on the displayed host scope; Empty
 Trash uses the trash-only endpoint and confirms its destination machines.
+
+Sidebar counts use the current machine scope, including collection drag filing.
+Collection inventory absence requires a successful read; failed/offline reads say
+unavailable. Shared CollectionVisibilityLedger retains hide/show intent through
+partial/offline writes, fences superseded edits and routes, and repairs mixed
+hidden replicas; protect logical hidden media before pruning copies for display.
+A fresh read must confirm a visibility write before retiring its pending intent.
+
+Library Sync is opt-in for the current app session: immediate run, five-minute
+non-overlapping repeats, visible next-run/completion status and Stop. Successful
+runs never require a completion sheet. Repeat issue acknowledgment is bound to
+origin route/instance, output version/recipe and exact error, never authentication
+or connectivity failures; preserve retries and inspectable details. Sync must not
+recreate destination trash or a recorded copy intentionally removed from the
+local listing. Explicit Save remains deliberate recovery. Copy hidden collection
+attributes for existing and empty replicas as well as newly filed outputs.

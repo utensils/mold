@@ -11,19 +11,24 @@ struct CollectionRow: View {
     @Binding var renaming: CollectionShelf?
 
     @Environment(LibraryStore.self) private var library
+    @Environment(LibraryNavigation.self) private var navigation
     @State private var isTargeted = false
     @State private var pending: LibraryActions.Destruction?
 
     /// What opening this row would show, which is not the host's own `count`
     /// -- see `CollectionShelf.count(in:)`.
-    private var shown: Int { shelf.count(in: library.items) }
+    private var machineIDs: Set<MoldHost.ID> { navigation.query.machineIDs }
+    private var shown: Int { shelf.count(in: library.items, on: machineIDs) }
+    private var presence: CollectionShelf.Presence {
+        shelf.presence(on: machineIDs, available: library.collectionInventoryAvailable.intersection(Set(library.hosts.hosts.filter(library.hosts.isUp).map(\.id))))
+    }
 
     var body: some View {
         Label {
             HStack {
                 Text(shelf.name).lineLimit(1)
                 Spacer(minLength: 6)
-                Text(shown.formatted())
+                Text(presence == .unavailable ? "Unavailable" : presence == .absent ? "Not on machine" : shown.formatted())
                     .font(.caption)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
@@ -61,10 +66,12 @@ struct CollectionRow: View {
     }
 
     private func file(_ ids: [PrintID]) {
-        // A drag from a machine-filtered grid carries THAT machine's copy;
-        // filing goes to the whole print either way.
+        // The drag's host identity and current machine scope both fence filing.
         var seen = Set<PrintID>()
-        let entries = ids.compactMap(library.tile(containing:)).filter { seen.insert($0.id).inserted }
+        let entries = ids.compactMap { id -> LibraryEntry? in
+            guard let tile = library.tile(containing: id) else { return nil }
+            return machineIDs.isEmpty ? tile : tile.presented(onAnyOf: machineIDs)
+        }.filter { seen.insert($0.id).inserted }
         guard !entries.isEmpty else { return }
         library.file(entries, into: shelf)
     }
@@ -73,7 +80,7 @@ struct CollectionRow: View {
         pending = LibraryActions.Destruction(
             title: "Delete “\(shelf.name)”?",
             // Worth saying plainly: people hesitate over this exact question.
-            message: "The \(shown.formatted()) prints in it are kept. Only the collection goes.",
+            message: "The \(shown.formatted()) prints in it are kept. Only the collection goes on every machine holding it.",
             verb: "Delete Collection"
         ) { Task { await library.deleteShelf(shelf) } }
     }
@@ -86,6 +93,7 @@ struct ShelfNameSheet: View {
 
     @Environment(HostStore.self) private var hosts
     @Environment(LibraryStore.self) private var library
+    @Environment(LibraryNavigation.self) private var navigation
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
 
@@ -116,7 +124,9 @@ struct ShelfNameSheet: View {
         Task {
             if let shelf {
                 await library.renameShelf(shelf, to: named)
-            } else if let machine = hosts.hosts.first(where: hosts.isUp) ?? hosts.hosts.first {
+            } else if let machine = hosts.hosts.first(where: {
+                navigation.query.machineIDs.contains($0.id)
+            }) ?? hosts.hosts.first(where: hosts.isUp) ?? hosts.hosts.first {
                 // Made on one machine; the others get their copy the first
                 // time something of theirs is filed into it. So it may as well
                 // be one that is ANSWERING: the first in the list being down

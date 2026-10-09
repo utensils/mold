@@ -16,9 +16,33 @@ struct LibraryActivityStatus: View {
         return VStack(spacing: 0) {
             if let progress = status.localSaveProgress {
                 bulkStatusRow(progress) {
-                    Button("Stop After Current Transfers") { library.localSaveStopRequested = true }
+                    Button("Stop Sync") {
+                        library.syncSession.stop(in: library)
+                        library.localSaveStopRequested = true
+                    }
                         .disabled(status.localSaveStopRequested)
                 }
+            }
+            if status.localSaveProgress == nil, !status.syncReport.isEmpty {
+                HStack {
+                    Image(systemName: status.syncHasIssues ? "exclamationmark.triangle" : "checkmark.circle")
+                        .accessibilityLabel(status.syncHasIssues ? "Sync has issues" : "Sync complete")
+                    Text(status.syncReport).lineLimit(3)
+                    Spacer()
+                    Button("Details") { library.localSaveAlertPresented = true }
+                }.padding(12).background(.bar)
+            }
+            if status.syncEnabled {
+                HStack {
+                    if let next = status.syncNextRun {
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            let minutes = max(0, Int(ceil(next.timeIntervalSince(context.date) / 60)))
+                            Text("Next sync in \(minutes) \(minutes == 1 ? "minute" : "minutes")")
+                        }
+                    } else { Text("Sync every 5 minutes during this session") }
+                    Spacer()
+                    Button("Stop Sync") { library.syncSession.stop(in: library) }
+                }.padding(12).background(.bar)
             }
             if let progress = status.bulkProgress {
                 bulkStatusRow(progress) {
@@ -64,6 +88,10 @@ extension LibraryActivityStatus {
 private struct LibraryActivitySnapshot {
     let localSaveProgress: String?
     let localSaveStopRequested: Bool
+    let syncReport: String
+    let syncHasIssues: Bool
+    let syncEnabled: Bool
+    let syncNextRun: Date?
     let bulkProgress: String?
     let bulkEmptying: Bool
     let bulkStopRequested: Bool
@@ -73,13 +101,17 @@ private struct LibraryActivitySnapshot {
     let bulkRunning: Bool
 
     var isEmpty: Bool {
-        localSaveProgress == nil && bulkProgress == nil && mutationProgress == nil
+        localSaveProgress == nil && syncReport.isEmpty && !syncEnabled && bulkProgress == nil && mutationProgress == nil
             && activities.isEmpty && (bulkResult == nil || bulkRunning)
     }
 
     init(_ library: LibraryStore) {
-        localSaveProgress = library.localSaveProgress
+        localSaveProgress = library.localSaveProgress ?? (library.localSaveRunning ? "Finishing sync…" : nil)
         localSaveStopRequested = library.localSaveStopRequested
+        syncReport = library.localSaveReport
+        syncHasIssues = !library.localSaveFailures.isEmpty
+        syncEnabled = library.syncSession.isEnabled
+        syncNextRun = library.syncSession.nextRun
         bulkProgress = library.bulkProgress
         bulkEmptying = library.bulkEmptying
         bulkStopRequested = library.bulkStopRequested

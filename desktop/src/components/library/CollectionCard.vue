@@ -28,6 +28,7 @@ const props = withDefaults(
     name: string;
     /** Logical prints in the collection. */
     count: number;
+    availability?: "present" | "absent" | "unavailable";
     /** Host labels holding the collection ("This Mac", "plato"). */
     hostLabels: readonly string[];
     /** Unix seconds of the latest change across hosts; null = unknown. */
@@ -43,7 +44,13 @@ const props = withDefaults(
 
 const emit = defineEmits<{ open: []; contextmenu: [event: MouseEvent] }>();
 
-const meta = computed(() => `${props.count} ${props.count === 1 ? "picture" : "pictures"}`);
+const meta = computed(() =>
+  props.availability === "unavailable"
+    ? "Unavailable"
+    : props.availability === "absent"
+      ? "Not on this machine"
+      : `${props.count} ${props.count === 1 ? "picture" : "pictures"}`,
+);
 
 /** Everything the card no longer shows, kept where a pointer can still ask. */
 const tooltip = computed(() => {

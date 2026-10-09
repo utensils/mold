@@ -61,13 +61,12 @@ extension LibraryPane {
         }
         ToolbarItem {
             Button {
-                guard library.localSaveTask == nil else { return }
-                library.localSaveTask = Task { await library.syncAllLocally() }
+                library.syncSession.start(in: library)
             } label: {
-                Label("Sync All to This Mac", systemImage: "arrow.down.to.line.compact")
+                Label(library.syncSession.isEnabled ? "Sync Enabled" : "Sync All to This Mac", systemImage: "arrow.down.to.line.compact")
             }
-            .help("Copy all remote Library prints and collections to This Mac, including clips and 3D prints")
-            .disabled(library.localSaveTask != nil
+            .help("Copy remote media and collections now and every five minutes during this app session. Removed local copies stay removed.")
+            .disabled(library.syncSession.isEnabled || library.localSaveRunning || library.localSaveTask != nil
                 || !hosts.hosts.contains { $0.id != MoldEngine.localHostID })
         }
         ToolbarItem {

@@ -294,6 +294,51 @@ describe("LibraryPage", () => {
     vi.mocked(requestConfirm).mockReset().mockResolvedValue(true);
   });
 
+  it("keeps hidden favorites out of default counts and reveals their tags in explicit collection browsing", async () => {
+    hostCapabilitiesMock.mockResolvedValue({
+      gallery: { can_delete: true, organize: true },
+    });
+    orgApi.listCollections.mockResolvedValue([
+      {
+        id: "private",
+        name: "Private",
+        slug: "private",
+        hidden: true,
+        count: 1,
+        description: null,
+        cover_filename: null,
+        created_at: 1,
+        updated_at: 1,
+      },
+    ] as never);
+    orgApi.listTags.mockResolvedValue([
+      { name: "Private tag", count: 1 },
+    ] as never);
+    listGalleryMock.mockResolvedValue([
+      {
+        ...cat,
+        favorite: true,
+        tags: ["Private tag"],
+        collections: ["private"],
+      },
+      dog,
+    ]);
+    const defaults = await mounted();
+    expect(defaults.get("[data-test=grid-count]").text()).toBe("1");
+    const chips = defaults.findComponent({ name: "LibraryChipRow" });
+    expect(chips.props("favoriteCount")).toBe(0);
+    expect(chips.props("tags")).toEqual([]);
+    defaults.unmount();
+    routeState.query = { scope: "collections", c: "private" };
+    const collection = await mounted();
+    expect(collection.get("[data-test=grid-count]").text()).toBe("1");
+    const inside = collection.findComponent({ name: "LibraryChipRow" });
+    expect(inside.props("favoriteCount")).toBe(1);
+    expect(inside.props("tags")).toEqual([{ name: "Private tag", count: 1 }]);
+    orgApi.listCollections.mockResolvedValue([]);
+    orgApi.listTags.mockResolvedValue([]);
+  });
+
   it("restores the window scroll position after leaving and returning", async () => {
     const scrollTo = vi
       .spyOn(window, "scrollTo")

@@ -68,6 +68,8 @@ enum PreferencesReset {
     /// would desynchronise its scheduler from what it believes it agreed with
     /// the user (review F5#6).
     static let kept: Set<String> = [
+        // Sync Details owns an explicit Reset Acknowledgments control.
+        "library.acknowledgedSyncIssues.v1",
         "appearance",
         "badgeLandedPrints",
         "notifyRenders",

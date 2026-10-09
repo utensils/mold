@@ -156,7 +156,7 @@ struct AlsoRunningTests {
         let failed = FakeFixtures.framewiseJob(
             "vup-1", state: "failed", error: "ffprobe is required for Framewise upscale")
         let drawn = rows([], upscales: [(key: key, job: failed)])
-        #expect(drawn[0].detail == "ffprobe is required for Framewise upscale")
+        #expect(drawn[0].detail == "Video processing tools are missing on the machine. Install ffmpeg and ffprobe, then try again.")
         #expect(drawn[0].isSettled)
         #expect(!drawn[0].canCancel)
         let offered = AlsoRunningActions(drawn[0]).offered().map(\.title)

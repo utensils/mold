@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { collectionAvailability } from "@studio/lib/collectionVisibility";
 import { libraryLink } from "../lib/libraryLinks";
 import { workspaceLabel } from "../lib/workspaces";
 /*
@@ -53,6 +54,7 @@ import {
   tagKey,
   trashRetentionSummary,
   visibleTagCounts,
+  unionOrganization,
   rememberSessionScroll,
   sessionScrollPosition,
   type MergedCollection,
@@ -183,6 +185,7 @@ function loadViewMode(): ViewMode {
 const entries = ref<HostGalleryImage[]>([]);
 /** Concrete device copies retained behind the deduplicated All view. */
 const rawEntries = ref<HostGalleryImage[]>([]);
+const privacyEvidence = ref<HostGalleryImage[]>([]);
 /** Per-host organization: capabilities, collections, tags, trash listing. */
 const snapshots = ref<HostOrganizationSnapshot[]>([]);
 const galleryImageUpscaleByHost = ref<Record<string, boolean>>({});
@@ -466,12 +469,25 @@ const hiddenCollectionSlugs = computed(
         .map((collection) => collection.slug),
     ),
 );
-const tags = computed(() => mergedTags(snapshots.value));
+const tags = computed(() =>
+  mergedTags(
+    snapshots.value.filter(
+      (s) => hostFilter.value === "all" || s.hostId === hostFilter.value,
+    ),
+  ),
+);
 const filterChipTags = computed(() => {
-  const visible = filterByOrganization(entries.value, {
-    excludeCollectionSlugs:
-      scope.value === "prints" ? hiddenCollectionSlugs.value : undefined,
-  });
+  const visible = filterByOrganization(
+    hostFiltered.value.filter((e) =>
+      scope.value === "prints" ? !globallyHiddenKeys.value.has(keyOf(e)) : true,
+    ),
+    {
+      collectionSlug:
+        scope.value === "collections" ? collectionSlug.value : null,
+      excludeCollectionSlugs:
+        scope.value === "prints" ? hiddenCollectionSlugs.value : undefined,
+    },
+  );
   const visibleKeys = new Set(visible.map((entry) => keyOf(entry)));
   const excluded =
     scope.value === "prints"
@@ -500,10 +516,30 @@ const trashEntries = computed(() =>
 const cards = computed(() =>
   collectionCards(
     collections.value,
-    entries.value,
+    hostFiltered.value,
     snapshots.value,
-    rawEntries.value,
-  ),
+    hostFilter.value === "all"
+      ? rawEntries.value
+      : rawEntries.value.filter((e) => e.hostId === hostFilter.value),
+  ).map((card) => ({
+    ...card,
+    availability:
+      hostFilter.value === "all"
+        ? ("present" as const)
+        : collectionAvailability(
+            card.merged.hosts,
+            hostFilter.value,
+            snapshots.value.find((s) => s.hostId === hostFilter.value)
+              ?.collectionsListingOk === true,
+          ),
+    hostLabels:
+      hostFilter.value === "all"
+        ? card.hostLabels
+        : [
+            hostOptions.value.find((h) => h.id === hostFilter.value)?.label ??
+              hostFilter.value,
+          ],
+  })),
 );
 const currentCollection = computed<MergedCollection | null>(() =>
   scope.value === "collections" && collectionSlug.value
@@ -518,10 +554,16 @@ const currentCard = computed(() =>
 );
 const favoriteCount = computed(
   () =>
-    filterByOrganization(entries.value, {
-      excludeCollectionSlugs:
-        scope.value === "prints" ? hiddenCollectionSlugs.value : undefined,
-    }).filter((entry) => entry.favorite).length,
+    filterByOrganization(
+      hostFiltered.value.filter(
+        (e) =>
+          scope.value !== "prints" || !globallyHiddenKeys.value.has(keyOf(e)),
+      ),
+      {
+        excludeCollectionSlugs:
+          scope.value === "prints" ? hiddenCollectionSlugs.value : undefined,
+      },
+    ).filter((entry) => entry.favorite).length,
 );
 const retentionSummary = computed(() =>
   trashRetentionSummary(retentionHosts(snapshots.value)),
@@ -1520,15 +1562,37 @@ const missingLinkedHost = computed(
     !getHost(hostFilter.value),
 );
 
+const globallyHiddenKeys = computed(() => {
+  const keys = new Set<string>();
+  for (const group of groupLogicalGalleryPrints([
+    ...rawEntries.value,
+    ...privacyEvidence.value,
+  ])) {
+    const org = unionOrganization(
+      group.copies.map((c) => ({ hostId: c.hostId, item: c })),
+      { resolveCollectionSlug: resolver.value },
+    );
+    if (org.collections.some((slug) => hiddenCollectionSlugs.value.has(slug)))
+      for (const copy of group.copies) keys.add(keyOf(copy));
+  }
+  return keys;
+});
 const organizationFiltered = computed(() => {
   if (scope.value === "trash") return kindFiltered.value;
-  return filterByOrganization(kindFiltered.value, {
-    favoritesOnly: favoritesOnly.value,
-    tags: tagFilter.value,
-    collectionSlug: scope.value === "collections" ? collectionSlug.value : null,
-    excludeCollectionSlugs:
-      scope.value === "prints" ? hiddenCollectionSlugs.value : undefined,
-  });
+  return filterByOrganization(
+    kindFiltered.value.filter(
+      (e) =>
+        scope.value !== "prints" || !globallyHiddenKeys.value.has(keyOf(e)),
+    ),
+    {
+      favoritesOnly: favoritesOnly.value,
+      tags: tagFilter.value,
+      collectionSlug:
+        scope.value === "collections" ? collectionSlug.value : null,
+      excludeCollectionSlugs:
+        scope.value === "prints" ? hiddenCollectionSlugs.value : undefined,
+    },
+  );
 });
 
 const filtered = computed(() => {
@@ -1539,9 +1603,12 @@ const filtered = computed(() => {
 
 const total = computed(
   () =>
-    filterByOrganization(entries.value, {
-      excludeCollectionSlugs: hiddenCollectionSlugs.value,
-    }).length,
+    filterByOrganization(
+      hostFiltered.value.filter((e) => !globallyHiddenKeys.value.has(keyOf(e))),
+      {
+        excludeCollectionSlugs: hiddenCollectionSlugs.value,
+      },
+    ).length,
 );
 const searchActive = computed(() => search.value.trim().length > 0);
 const organizationFilterActive = computed(
@@ -1583,7 +1650,9 @@ async function performRefresh() {
     const hosts = listHosts();
     const [merged, organization, upscaleCapabilities] = await Promise.all([
       fetchMergedGallery(hosts),
-      fetchOrganization(hosts).catch(() => null),
+      fetchOrganization(hosts, undefined, undefined, snapshots.value).catch(
+        () => null,
+      ),
       Promise.all(
         hosts.map(async (host) => {
           const capability = (await hostCapabilities(host)).video_upscale;
@@ -1602,7 +1671,27 @@ async function performRefresh() {
       upscaleCapabilities.map(([hostId, , video]) => [hostId, video]),
     );
     if (organization) {
+      const old = snapshots.value;
+      privacyEvidence.value = [
+        ...rawEntries.value,
+        ...privacyEvidence.value,
+      ].filter((copy) => {
+        if (!merged.unreachableHostIds.includes(copy.hostId)) return false;
+        const prior = old.find((s) => s.hostId === copy.hostId),
+          next = organization.find((s) => s.hostId === copy.hostId);
+        return (
+          prior &&
+          next &&
+          prior.routeUrl === next.routeUrl &&
+          prior.instanceId === next.instanceId
+        );
+      });
       snapshots.value = organization;
+      const visibilityErrors = organization.flatMap((s) =>
+        s.visibilityError ? [s.visibilityError] : [],
+      );
+      if (visibilityErrors.length)
+        errorMessage.value = visibilityErrors.join(" · ");
       // Drop a shadow copy only once its host's trash listing SUCCEEDED and
       // actually lists it — a failed listing degrades to an empty list and
       // is no evidence the trash move was lost (codex review). A generous
@@ -1658,7 +1747,11 @@ function refresh(): Promise<void> {
 // Honest count line: "all machines" only when remotes are actually connected,
 // otherwise "this server". Names the unreachable hosts rather than hiding them.
 const scopeLabel = computed(() =>
-  remoteHostCount.value > 0 ? "all machines" : "this server",
+  hostFilter.value !== "all"
+    ? mutationHostLabel.value
+    : remoteHostCount.value > 0
+      ? "all machines"
+      : "this server",
 );
 const unreachableLabel = computed(() => {
   const names = unreachableHostIds.value

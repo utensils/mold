@@ -15,6 +15,9 @@ struct QueueBatchLayoutTests {
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=")
         let hosts = HostStore(hosts: [host]) { _ in backend }
         hosts.reachability[host.id] = .up(FakeFixtures.serverStatus())
+        let queue = QueueStore(hosts: hosts)
+        let downloads = DownloadStore(hosts: hosts, licenses: LicenseStore(hosts: hosts))
+        let transfers = TransferStore(hosts: hosts, queue: queue)
         let entries = (0..<2).map { (index: Int) in
             FakeFixtures.queueEntry("child-\(index)", batchId: "batch", batchIndex: index, model: "MiniMax H3 FL2VA")
         }
@@ -29,7 +32,8 @@ struct QueueBatchLayoutTests {
                         .tag(group.id)
                 }.onMove { _, _ in }
             }
-        }.listStyle(.inset).environment(hosts).preferredColorScheme(.dark)
+        }.listStyle(.inset).environment(hosts).environment(queue)
+            .environment(downloads).environment(transfers).preferredColorScheme(.dark)
         let view = NSHostingView(rootView: content)
         let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 600, height: 450),
                               styleMask: [.borderless], backing: .buffered, defer: false)

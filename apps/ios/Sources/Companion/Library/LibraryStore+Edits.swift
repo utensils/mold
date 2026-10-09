@@ -73,13 +73,17 @@ extension LibraryStore {
         guard draining.insert(id).inserted else { return }
         Task {
             defer { draining.remove(id) }
+            var touchedCollections = false
             while true {
                 switch outbox.next(for: id) {
                 case .idle:
+                    if touchedCollections { await reload(id) }
                     return
                 case let .send(entry):
+                    if case .collection = entry.change { touchedCollections = true }
                     await send(entry, to: id)
                 case let .wait(delay, entry):
+                    if case .collection = entry.change { touchedCollections = true }
                     try? await Task.sleep(for: delay)
                     await send(entry, to: id)
                 case let .giveUp(entry, _):

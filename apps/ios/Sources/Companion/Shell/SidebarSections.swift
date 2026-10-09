@@ -19,7 +19,11 @@ extension RootView {
                     // Drop prints on a collection to file them there.
                     .dropDestination(for: PrintDrop.self) { drops in
                         let ids = Set(drops.map(\.id))
-                        let entries = library.pool.filter { entry in entry.everyCopy.contains { ids.contains($0.id) } }
+                        let entries = library.pool.compactMap { entry -> LibraryEntry? in
+                            let droppedHosts = Set(entry.everyCopy.filter { ids.contains($0.id) }.map(\.hostID))
+                            guard !droppedHosts.isEmpty else { return nil }
+                            return library.machineIDs.isEmpty ? entry : entry.presented(onAnyOf: library.machineIDs)
+                        }
                         library.apply(.collection(name: collection.name, slug: collection.slug, filing: true), to: entries)
                     }
             }
@@ -40,7 +44,22 @@ extension RootView {
         } label: {
             Label { Text(scope.title(in: library.shelves)) } icon: { Image(systemName: scope.symbol) }
         }
+        .badge(shelfBadge(scope, library))
         .defaultVisibility(.hidden, for: .tabBar)
+    }
+
+    private func shelfBadge(_ scope: LibraryScope, _ library: LibraryStore) -> Text? {
+        if let slug = scope.collectionSlug, let shelf = library.shelves.first(where: { $0.slug == slug }) {
+            switch library.shelfPresence(shelf) {
+            case .absent: return Text("Not on machine")
+            case .unavailable: return Text("Unavailable")
+            case .present: return Text(shelf.count(in: library.scopedPool).formatted())
+            }
+        }
+        var query = LibraryQuery()
+        if let id = library.machineID, let host = library.hosts.host(id) { query.tokens = [.machine(id: id, name: host.name)] }
+        let resolved = scope.resolve(query, shelves: library.shelves, hiddenCollectionIDs: library.hiddenCollectionIDs)
+        return Text(resolved.apply(to: scope.isTrash ? library.trashPool : library.pool).count.formatted())
     }
 
     @TabContentBuilder<TabSelection>

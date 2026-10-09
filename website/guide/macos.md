@@ -167,3 +167,20 @@ other jobs may need.
 Library machine filters also scope trash, restore and permanent deletion to the selected machines, preserving copies elsewhere. Choose All Machines to act on every copy. Native Trash remains browsable for hidden collection members and offers Put Back, Delete Immediately and Empty Trash for the selected machines. Opening Trash clears the previous shelf’s search and media filters while keeping the machine selection. Trashed photos and videos can be inspected before restoring or deleting them.
 
 Deleting selected Trash items requires an updated host with the trash-only deletion endpoint. If that host is older, Mold asks you to update it and preserves the files. Put Back and the dedicated Empty Trash operation remain available.
+
+## Shared Library and session sync
+
+The machine picker scopes collection counts, membership and media actions to the
+selected machine. An absent collection is different from an unavailable machine
+inventory. **All Machines** keeps the merged view available. Hidden collection
+visibility is shared across same-slug replicas, and pending hide/show changes
+retry when their original machines reconnect.
+
+**Sync All to This Mac** copies now and repeats every five minutes for this app
+session. Completion appears in the Library status; the countdown and **Stop Sync**
+make the next run explicit. **Details** shows issues and offers **Don’t show these
+unchanged media issues again**. Acknowledgment keeps retries running; new or
+changed errors and connection/authentication failures still appear. Removed local
+copies stay removed during Sync; use explicit Save to copy one again. An older
+server that cannot delete selected trash items must be updated; deletion reports
+that refusal without falling back to deleting live media.

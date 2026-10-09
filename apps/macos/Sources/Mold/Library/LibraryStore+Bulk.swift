@@ -38,6 +38,7 @@ extension LibraryStore {
         }
         let total = copies.count
         var reconciliationFailed = false
+        var failureDetails: [String] = []
         var completed = 0
         var failed = total - targets.reduce(0) { $0 + $1.2.count }
         bulkTargets = Set(copies.map(\.id))
@@ -87,6 +88,7 @@ extension LibraryStore {
                     guard hosts.host(host.id) == host else { break }
                     // No stale-snapshot rollback: earlier names in a failed
                     // request may already have moved on the host.
+                    failureDetails.append("\(host.name): \(UserFacingError.describe(error))")
                     hosts.report(error, on: host.id, doing: action.rawValue.lowercased())
                     break
                 }
@@ -101,6 +103,7 @@ extension LibraryStore {
             : failed > 0 ? "Some requests could not be confirmed; the Library was refreshed."
             : (completed < total ? "Stopped after the current batch." : "Finished.")
         bulkResult = "\(action.rawValue): \(completed.formatted()) of \(total.formatted()) copies confirmed. \(ending)"
+            + (failureDetails.isEmpty ? "" : " " + failureDetails.joined(separator: " · "))
     }
 
     /// Empty Trash must use the trash-only server operation. Enumerating
@@ -121,6 +124,7 @@ extension LibraryStore {
             .map { ($0, hosts.backend(for: $0)) }
         var completed = 0
         var failed = false
+        var failureDetails: [String] = []
         for (host, client) in destinations {
             guard !bulkStopRequested, !Task.isCancelled else { break }
             guard hosts.host(host.id) == host else { failed = true; continue }
@@ -132,7 +136,10 @@ extension LibraryStore {
                 hosts.succeeded(on: host.id)
             } catch {
                 failed = true
-                if hosts.host(host.id) == host { hosts.report(error, on: host.id, doing: "empty the trash") }
+                if hosts.host(host.id) == host {
+                    failureDetails.append("\(host.name): \(UserFacingError.describe(error))")
+                    hosts.report(error, on: host.id, doing: "empty the trash")
+                }
             }
             guard hosts.host(host.id) == host else { continue }
             etags[host.id] = nil
@@ -143,6 +150,7 @@ extension LibraryStore {
         let ending = failed ? "Some results could not be confirmed; check the machine."
             : completed < destinations.count ? "Stopped after the current machine." : "Finished."
         bulkResult = "Emptying Trash: \(completed) of \(destinations.count) machines confirmed. \(ending)"
+            + (failureDetails.isEmpty ? "" : " " + failureDetails.joined(separator: " · "))
     }
 
     private func reconcileBulk(host: MoldHost, client: any MoldBackend) async -> Bool {

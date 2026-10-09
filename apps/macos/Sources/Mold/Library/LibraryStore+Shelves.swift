@@ -45,10 +45,30 @@ extension LibraryStore {
     }
 
     func setShelfHidden(_ shelf: CollectionShelf, hidden: Bool) async {
-        let progress = hidden ? "Hiding collection" : "Showing collection"
-        let verb = hidden ? "hide the collection “\(shelf.name)”" : "show the collection “\(shelf.name)”"
-        await runShelfOperation(shelf, progress: progress, errorVerb: verb) { client, id in
-            _ = try await client.updateCollection(id: id, change: CollectionChange(hidden: hidden))
+        collectionVisibility.set(shelf.slug, hidden: hidden, hosts: hosts.hosts)
+        collectionVisibility.persist(to: AppStorageSuite.defaults, key: "library.collectionVisibility")
+        await reconcileCollectionVisibility()
+        await reloadCollections()
+    }
+
+    func reconcileCollectionVisibility() async {
+        guard !reconcilingCollectionVisibility else { return }
+        reconcilingCollectionVisibility = true
+        defer {
+            reconcilingCollectionVisibility = false
+            collectionVisibility.persist(to: AppStorageSuite.defaults, key: "library.collectionVisibility")
+        }
+        await collectionVisibility.reconcile(hosts: { self.hosts.hosts },
+            collections: { self.collectionsPerHost }, available: { self.collectionInventoryAvailable }) { host, collection, hidden in
+            do {
+                let updated = try await self.hosts.backend(for: host).updateCollection(id: collection.id, change: CollectionChange(hidden: hidden))
+                guard self.hosts.host(host.id) == host else { return false }
+                self.collectionsPerHost[host.id] = self.collectionsPerHost[host.id]?.map { $0.id == updated.id ? updated : $0 }
+                return true
+            } catch {
+                self.hosts.report(error, on: host.id, doing: hidden ? "hide the shared collection" : "show the shared collection")
+                return false
+            }
         }
     }
 

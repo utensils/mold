@@ -42,7 +42,7 @@ struct LibraryView: View {
     var body: some View {
         let showing = showing()
         let projection = gridCache.project(entries: showing.visible, revision: library.revision,
-                                           scope: scope, query: query)
+                                           scope: scope, query: showingQuery)
         Group {
             if hosts.hosts.isEmpty {
                 EmptyState(title: String(localized: "No prints yet"), symbol: Destination.library.symbol,
@@ -58,19 +58,19 @@ struct LibraryView: View {
                             selection: $selection, trashed: scope.isTrash, zoom: zoom, visible: showing.visible, newMediaVisit: router.libraryVisit)
                     // A different shelf or search is a new scroll context.
                     // Clearing the bound target alone leaves the old offset.
-                    .id(LibraryGridContext(scope: scope, query: query))
+                    .id(LibraryGridContext(scope: scope, query: showingQuery))
             }
         }
         .navigationTitle(libraryTitle)
         .navigationBarTitleDisplayMode(.inline)
         .modifier(ShelfTitleMenu(enabled: fixedScope == nil,
-                                 scope: scope, choose: setScope, query: $query))
+                                 scope: scope, choose: setScope, query: $query, machineIDs: showingQuery.machineIDs))
         .toolbar { toolbar(showing) }
         // A modal owns navigation while open; keep the presenting floating
         // tab chrome out of its layout and restore it on dismissal.
         .toolbarVisibility(managingCollections || showsOfflineDetails ? .hidden : .automatic, for: .tabBar)
         .sheet(isPresented: $managingCollections) {
-            CollectionsSheet { scope in
+            CollectionsSheet(machineIDs: showingQuery.machineIDs) { scope in
                 if fixedScope != nil { router.selection = .shelf(scope) } else { setScope(scope) }
             }
         }
@@ -111,6 +111,7 @@ struct LibraryView: View {
         }
         .onChange(of: sort) { query.sort = sort }
         .onChange(of: query) { scrollPosition.reset(); selection = [] }
+        .onChange(of: library.machineID) { scrollPosition.reset(); selection = [] }
         .onAppear {
             query.sort = sort
             if router.libraryVisit == nil { router.libraryVisit = library.newMedia.beginVisit() }
@@ -135,15 +136,28 @@ struct LibraryView: View {
     private var machines: [(id: MoldHost.ID, name: String)] { hosts.hosts.map { ($0.id, $0.name) } }
     private var tags: [String] { library.knownTags }
 
-    private func showing() -> LibraryShowing {
-        let narrowed = scope.resolve(query, shelves: library.shelves,
+    private var showingQuery: LibraryQuery {
+        var hostQuery = query
+        if let id = library.machineID, let host = hosts.host(id) {
+            hostQuery.tokens.removeAll { if case .machine = $0 { true } else { false } }
+            hostQuery.tokens.append(.machine(id: id, name: host.name))
+        }
+        return scope.resolve(hostQuery, shelves: library.shelves,
                                      hiddenCollectionIDs: library.hiddenCollectionIDs)
+    }
+
+    private func showing() -> LibraryShowing {
         return showingCache.showing(pool: scope.isTrash ? library.trashPool : library.pool,
-                                    revision: library.revision, query: narrowed, selection: selection)
+                                    revision: library.revision, query: showingQuery, selection: selection)
     }
 
     @ViewBuilder private var empty: some View {
-        if query.isNarrowed {
+        if let slug = scope.collectionSlug, let shelf = library.shelves.first(where: { $0.slug == slug }),
+           library.shelfPresence(shelf, on: showingQuery.machineIDs) != .present {
+            EmptyState(title: library.shelfPresence(shelf, on: showingQuery.machineIDs) == .absent ? String(localized: "Collection not on this machine") : String(localized: "Collection unavailable"),
+                       symbol: "rectangle.stack",
+                       message: library.shelfPresence(shelf, on: showingQuery.machineIDs) == .absent ? String(localized: "This collection exists on other machines. Add prints here to create its copy on this machine.") : String(localized: "Connect to this machine to confirm its collections. Saved prints remain available."))
+        } else if query.isNarrowed {
             EmptyState(title: String(localized: "No results"), symbol: "magnifyingglass",
                        message: String(localized: "Nothing here matches what you're looking for."))
         } else {
@@ -181,6 +195,8 @@ struct LibraryView: View {
                     Button("Manage Collections…", systemImage: "rectangle.stack") { managingCollections = true }
                     Divider()
                 }
+                LibraryMachinePicker()
+                Divider()
                 LibraryMediaPicker(query: $query)
                 Divider()
                 Picker("Sort By", selection: $sort) {
@@ -197,10 +213,7 @@ struct LibraryView: View {
                     .disabled(tile == .small)
                 if scope.isTrash, !library.trashPool.isEmpty {
                     Divider()
-                    EmptyTrashButton(machineIDs: Set(query.tokens.compactMap { token in
-                        if case let .machine(id, _) = token { return id }
-                        return nil
-                    }))
+                    EmptyTrashButton(machineIDs: showingQuery.machineIDs)
                 }
             } label: {
                 Label("View Options", systemImage: "ellipsis")
@@ -242,11 +255,12 @@ private struct ShelfTitleMenu: ViewModifier {
     let scope: LibraryScope
     let choose: (LibraryScope) -> Void
     @Binding var query: LibraryQuery
+    let machineIDs: Set<MoldHost.ID>
 
     func body(content: Content) -> some View {
         if enabled {
             content.toolbarTitleMenu {
-                ShelfMenu(scope: scope, choose: choose)
+                ShelfMenu(scope: scope, machineIDs: machineIDs, choose: choose)
                 Divider()
                 LibraryMediaPicker(query: $query)
             }

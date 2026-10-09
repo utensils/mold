@@ -63,7 +63,7 @@ struct HeldBatchTests {
             Issue.record("expected the hold to end the run, got \(controller.run)")
             return
         }
-        #expect(sentence.contains(reason))
+        #expect(sentence.contains("The render failed. Check the machine’s logs for details."))
         #expect(sentence.contains("Queue"))
     }
 

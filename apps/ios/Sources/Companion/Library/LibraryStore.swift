@@ -10,6 +10,11 @@ import MoldClient
 @Observable
 final class LibraryStore {
     var newMedia = LibraryNewMedia()
+    var machineID: MoldHost.ID?
+    var collectionInventoryAvailable: Set<MoldHost.ID> = []
+    let collectionVisibility = CollectionVisibilityLedger.load(from: .standard, key: "library.collectionVisibility")
+    var reconcilingCollectionVisibility = false
+    var collectionInventory: [MoldHost.ID: [Collection]] { collections }
 
     func markLibrarySeen() {
         guard !live.isEmpty else { return }
@@ -107,12 +112,14 @@ final class LibraryStore {
         let present = Set(hosts.hosts.map(\.id))
         for id in Set(live.keys).subtracting(present) { forget(id) }
         rebuild()
+        await reconcileCollectionVisibility()
     }
 
     func reload(_ id: MoldHost.ID) async {
         guard let host = hosts.host(id), hosts.isUp(host) else { return }
         await fetch(host)
         rebuild()
+        await reconcileCollectionVisibility()
     }
 
     /// Clear the device's saved listings, including their ETags. Prints from
@@ -171,19 +178,24 @@ final class LibraryStore {
                 }
             }
             if hosts.capabilities[host.id]?.canOrganize == true {
+                let visibilityGeneration = collectionVisibility.generation
                 let fresh = try await client.collections()
-                guard epoch == cacheEpoch else { return }
+                guard epoch == cacheEpoch, hosts.host(host.id) == host,
+                      collectionVisibility.generation == visibilityGeneration else { return }
+                collectionInventoryAvailable.insert(host.id)
                 if fresh != collections[host.id] { collections[host.id] = fresh; changed = true }
             }
         } catch is CancellationError {
             // Foreground navigation and coalesced gallery events can end a
             // refresh after prints loaded. Cancellation is not a host failure.
         } catch {
+            collectionInventoryAvailable.remove(host.id)
             hosts.report(host, doing: String(localized: "list its prints"), error)
         }
     }
 
     private func forget(_ id: MoldHost.ID) {
+        collectionInventoryAvailable.remove(id)
         live[id] = nil; trashed[id] = nil; collections[id] = nil
         etags[id] = nil; trashEtags[id] = nil
         snapshots.remove(id)
@@ -209,13 +221,20 @@ final class LibraryStore {
         if let prints = trashed[id] { trashed[id] = change(prints) }
     }
 
+    func acceptCollection(_ collection: Collection, on hostID: MoldHost.ID) {
+        collections[hostID] = collections[hostID]?.map { $0.id == collection.id ? collection : $0 }
+        rebuild()
+    }
+
     func rebuildNow() { rebuild() }
 
     private func rebuild() {
         pool = merged(live)
         trashPool = merged(trashed)
-        shelves = CollectionShelf.merge(collections)
-        knownTags = Array(Set(pool.flatMap(\.print.tagList)))
+        shelves = CollectionShelf.merge(collections).map {
+            $0.overriding(hidden: collectionVisibility.desiredHidden(slug: $0.slug, fallback: $0.hidden))
+        }
+        knownTags = Array(Set(pool.flatMap(\.tags)))
             .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
         revision += 1
     }

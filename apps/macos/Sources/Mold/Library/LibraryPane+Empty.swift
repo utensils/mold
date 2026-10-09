@@ -10,14 +10,13 @@ extension LibraryPane {
         // without invalidating the grid or its tracked context menu.
         if showing.selected.count > 1 { return "\(showing.selected.count.formatted()) selected" }
         let shown = showing.visible.count
-        // "1 prints" is the tell of a string built by concatenation. The noun
-        // agrees with the LAST number in the sentence, which is the pool's
-        // when the query has narrowed one count out of another; the trash
-        // reads "in the trash" either way, being a phrase and not a count.
-        let counted = navigation.query.isNarrowed ? showing.pool.count : shown
+        let baseline = navigation.scope.baselineCount(in: showing.pool,
+            machines: navigation.query.machineIDs, shelves: library.shelves,
+            hiddenIDs: library.hiddenCollectionIDs)
+        let counted = shown == baseline ? shown : baseline
         let noun = navigation.scope.isTrash ? "in the trash" : (counted == 1 ? "print" : "prints")
-        guard navigation.query.isNarrowed else { return "\(shown.formatted()) \(noun)" }
-        return "\(shown.formatted()) of \(showing.pool.count.formatted()) \(noun)"
+        guard shown != baseline else { return "\(shown.formatted()) \(noun)" }
+        return "\(shown.formatted()) of \(baseline.formatted()) \(noun)"
     }
 
     var pool: [LibraryEntry] {
@@ -27,6 +26,15 @@ extension LibraryPane {
     @ViewBuilder func empty(_ showing: LibraryShowing) -> some View {
         if library.isLoading, library.items.isEmpty {
             ProgressView("Loading prints…")
+        } else if let slug = navigation.scope.collectionSlug,
+                  let shelf = library.shelf(slug: slug),
+                  shelf.presence(on: navigation.query.machineIDs,
+                    available: library.collectionInventoryAvailable.intersection(Set(hosts.hosts.filter(hosts.isUp).map(\.id)))) != .present {
+            let unavailable = shelf.presence(on: navigation.query.machineIDs,
+                available: library.collectionInventoryAvailable.intersection(Set(hosts.hosts.filter(hosts.isUp).map(\.id)))) == .unavailable
+            ContentUnavailableView(unavailable ? "Collection Unavailable" : "Collection Not on This Machine",
+                systemImage: "rectangle.stack",
+                description: Text(unavailable ? "Connect to the selected machine to confirm its collections. Saved prints remain available." : "This collection exists on other machines. File prints here to create its copy on this machine."))
         } else if navigation.query.isNarrowed {
             // A narrowed library that shows nothing is a search result, not an
             // empty shelf -- and the way out is to widen, not to make a print.

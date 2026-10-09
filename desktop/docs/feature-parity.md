@@ -513,3 +513,21 @@ returned download ticket succeeds and the original held job and server identity
 are revalidated. Failed or cancelled downloads leave the job held. Global queue
 pause stays in effect. Cancelling a job does not cancel a model download that
 other jobs may need.
+
+### Shared Library machine scope
+
+The All machines view merges matching media and collection names. Selecting a
+machine reads that machine's physical collection memberships, favorites, tags,
+counts and covers. A globally known collection with a successful empty listing
+on the selected machine says **Not on this machine**; failed or offline inventory
+says **Unavailable**, rather than claiming an authoritative zero.
+
+Collection hiding applies to every matching collection name across machines.
+Hidden membership on any logical copy also protects its other copies in default
+Library/search views. Explicit collection browsing remains available. Hide/Show
+intentions persist without credentials and retry against the captured machine
+route and installation when the client refreshes; they do not replay against a
+replacement installation. Media organization and destructive actions follow the
+selected machine. Tauri local copies repair collection visibility/membership,
+tags, favorites and titles after their output and retained inputs are safely
+copied, including existing-copy repair; destination-only organization is kept.

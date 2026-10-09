@@ -29,6 +29,17 @@ final class HiddenCollectionTests: XCTestCase {
         let normalPrint = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Fixture 1,'")).firstMatch
         XCTAssertTrue(hiddenPrint.waitForExistence(timeout: 10))
         XCTAssertTrue(normalPrint.exists)
+        app.buttons["View Options"].firstMatch.tap()
+        let hostOption = app.buttons["127.0.0.1"].firstMatch
+        XCTAssertTrue(hostOption.waitForExistence(timeout: 5), "The fixture machine is offered directly in Library")
+        hostOption.tap()
+        XCTAssertTrue(hiddenPrint.waitForExistence(timeout: 5))
+        XCTAssertTrue(normalPrint.exists)
+        app.buttons["View Options"].firstMatch.tap()
+        let allMachines = app.buttons["All Machines"].firstMatch
+        XCTAssertTrue(allMachines.waitForExistence(timeout: 5))
+        allMachines.tap()
+        capture(app, "Library machine filter")
         try manage(app)
         let toggle = app.switches["Hide from All Prints"].firstMatch
         XCTAssertTrue(toggle.waitForExistence(timeout: 5))

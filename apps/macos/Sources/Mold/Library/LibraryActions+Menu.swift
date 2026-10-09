@@ -39,7 +39,7 @@ extension LibraryActions {
         case .save:
             save(targets)
         case .saveLocally:
-            guard library.localSaveTask == nil else { break }
+            guard !library.localSaveRunning, library.localSaveTask == nil else { break }
             library.localSaveTask = Task { await library.saveLocally(targets) }
         case let .export(format):
             if let entry = targets.first { requestExport(entry, as: format) }

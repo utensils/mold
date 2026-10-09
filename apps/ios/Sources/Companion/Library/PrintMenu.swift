@@ -106,7 +106,7 @@ struct PrintMenu: View {
     }
 
     private var single: Bool { entries.count == 1 }
-    private var allFavourite: Bool { !entries.isEmpty && entries.allSatisfy(\.print.isFavorite) }
+    private var allFavourite: Bool { !entries.isEmpty && entries.allSatisfy(\.isFavorite) }
     private var canOrganize: Bool {
         entries.flatMap(\.everyCopy).allSatisfy { hosts.capabilities[$0.hostID]?.canOrganize == true }
     }

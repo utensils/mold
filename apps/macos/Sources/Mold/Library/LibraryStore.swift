@@ -41,6 +41,9 @@ final class LibraryStore {
     /// machine's, so these are never merged in storage -- only when they are
     /// read, by `CollectionShelf.merge`.
     var collectionsPerHost: [MoldHost.ID: [Collection]] = [:]
+    var collectionInventoryAvailable: Set<MoldHost.ID> = []
+    let collectionVisibility = CollectionVisibilityLedger.load(from: AppStorageSuite.defaults, key: "library.collectionVisibility")
+    var reconcilingCollectionVisibility = false
 
     /// The tag index, and renaming or deleting a tag everywhere. See
     /// `LibraryTags`.
@@ -67,18 +70,22 @@ final class LibraryStore {
     var bulkStopRequested = false
     var bulkTargets: Set<PrintID> = []
 
+    var localSaveRunning = false
     var localSaveProgress: String?
     var localSaveTask: Task<Void, Never>?
     var localSaveStopRequested = false
     var localSaveReport = ""
     var localSaveFailures: [String] = []
     var localSaveAlertPresented = false
+    let syncSession: LibrarySyncSession
+    var localSaveIssueKeys: [String: String] = [:]
 
     /// How many times the rows have changed. See `LibraryRevision`.
     let rows = LibraryRevision()
 
-    init(hosts: HostStore) {
+    init(hosts: HostStore, syncSession: LibrarySyncSession = LibrarySyncSession()) {
         self.hosts = hosts
+        self.syncSession = syncSession
         // Listening starts with the store, not with a pane. The Library used
         // to register on appearing, so a print made while Generate was showing
         // reached nobody and the timeline only caught up on the next ⌘R.

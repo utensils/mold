@@ -55,7 +55,7 @@ struct LibraryActions {
     func toggleFavorite(_ entries: [LibraryEntry]) {
         // If any is not a favourite, the action makes them all favourites --
         // the same rule the Finder uses for mixed selections.
-        let makeFavorite = entries.contains { !$0.print.isFavorite }
+        let makeFavorite = entries.contains { !$0.isFavorite }
         library.setFavorite(makeFavorite, on: entries)
     }
 

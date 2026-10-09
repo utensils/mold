@@ -38,6 +38,9 @@ public struct LibraryEntry: Identifiable, Hashable, Sendable {
     /// Every machine holding it, lead first -- what the tile's badge names.
     public var hostNames: [String] { everyCopy.map(\.hostName) }
 
+    public var isFavorite: Bool { everyCopy.contains { $0.print.isFavorite } }
+    public var tags: [String] { Array(Set(everyCopy.flatMap { $0.print.tagList })).sorted() }
+
     /// The one machine every copy of `entries` is on, or `nil` when they span
     /// several -- a menu says "Move to Trash on <machine>" only when that is
     /// the whole of what it does, and an unfiltered merged print is trashed everywhere.

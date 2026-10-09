@@ -38,7 +38,7 @@ struct LibraryMenu {
         LibraryMenuPlan(
             scope: scope.menuKind,
             count: targets.count,
-            allFavorite: !targets.isEmpty && targets.allSatisfy(\.print.isFavorite),
+            allFavorite: !targets.isEmpty && targets.allSatisfy(\.isFavorite),
             name: targets.count == 1 ? targets[0].print.displayName : nil,
             shelves: shelves,
             enclosingShelf: enclosingShelf,

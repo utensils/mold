@@ -66,16 +66,21 @@ extension LibraryStore {
         for (host, client) in destinations {
             guard hosts.host(host.id) == host else { continue }
             do {
+                let visibilityGeneration = collectionVisibility.generation
                 let collections = try await client.collections()
                 guard hosts.host(host.id) == host else { continue }
+                guard collectionVisibility.generation == visibilityGeneration else { continue }
                 collectionsPerHost[host.id] = collections
+                collectionInventoryAvailable.insert(host.id)
                 // Scoped: a passive refresh after every shelf edit must not
                 // clear a failure that edit itself just reported.
                 hosts.succeeded(on: host.id, doing: "read its collections")
             } catch {
                 guard hosts.host(host.id) == host else { continue }
+                collectionInventoryAvailable.remove(host.id)
                 hosts.report(error, on: host.id, doing: "read its collections")
             }
         }
+        await reconcileCollectionVisibility()
     }
 }

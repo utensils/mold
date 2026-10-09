@@ -48,8 +48,8 @@ struct QueueDownloadRecoveryTests {
     }
 
     @Test func knownMissingModelUsesReadableCopyAndOtherErrorsStayIntact() {
-        #expect(QueueHold.missingModel("wan", sentence: "Run: mold pull wan").summary(modelName: "Wan", hostName: "Plato") == "Wan isn’t installed on Plato.")
-        #expect(QueueHold.prose("Disk full", retryable: false).summary(modelName: "Wan", hostName: "Plato") == "Disk full")
+        #expect(QueueHold.missingModel("wan", sentence: "Run: mold pull wan").summary(modelName: "Wan", hostName: "Workstation") == "Wan isn’t installed on Workstation.")
+        #expect(QueueHold.prose("Disk full", retryable: false).summary(modelName: "Wan", hostName: "Workstation") == "Disk full")
     }
 }
 

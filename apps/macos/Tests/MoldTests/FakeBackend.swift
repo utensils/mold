@@ -1055,12 +1055,21 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     }
     func createCollection(name: String, description: String?) async throws -> Collection {
         try record("createCollection")
+        await pause("createCollection")
         guard let created = collectionCreateResponses[name] else { throw notPlanted() }
         collectionRows.append(created)
         return created
     }
     func updateCollection(id: String, change: CollectionChange) async throws -> Collection {
-        try record("updateCollection"); throw notPlanted()
+        try record("updateCollection")
+        await pause("updateCollection")
+        guard let index = collectionRows.firstIndex(where: { $0.id == id }) else { throw notPlanted() }
+        let old = collectionRows[index]
+        let updated = Collection(id: old.id, name: change.name ?? old.name, slug: old.slug,
+            description: old.description, coverFilename: old.coverFilename,
+            count: old.count, hidden: change.hidden ?? old.hidden)
+        collectionRows[index] = updated
+        return updated
     }
     func deleteCollection(id: String) async throws {
         try record("deleteCollection")
