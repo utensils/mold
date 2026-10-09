@@ -160,3 +160,7 @@ server instance and held-job batch identity before retrying. Download failure or
 cancellation never retries a generation. Cancelling a generation leaves shared
 model downloads server-owned. CLI `mold queue retry` remains an explicit retry;
 install a missing model on that same host first with `mold pull`.
+
+GUI library lifecycle actions follow the explicit machine filter: trash, restore and permanent delete affect only selected hosts; All Machines includes every known copy. Empty Trash follows the same host scope. Native Trash ignores collection hiding so deleted prints remain recoverable. CLI and API lifecycle operations continue to target the requested server only.
+
+Trash selections use `POST /api/gallery/trash/delete-selected` with a filenames array. The endpoint checks current trash membership under the publication writer; a restored live print is preserved with `409 GALLERY_NOT_TRASHED`. An older host returning 404 needs an update; never retry through the live-or-trash `delete-forever` endpoint.

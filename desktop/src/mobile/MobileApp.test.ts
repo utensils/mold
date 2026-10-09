@@ -4106,7 +4106,7 @@ describe("MobileApp generation queue", () => {
       .join(" ");
     expect(announced).toContain("Variation 2, “middle thunderstorm”");
     expect(announced).toContain(
-      "Studio ran out of memory. Try a smaller model, image size, or batch.",
+      "Studio ran out of memory. Try a smaller model, output size or batch.",
     );
     await vi.waitFor(() => expect(wrapper!.find("img.result-media").exists()).toBe(true));
   });
@@ -4155,7 +4155,7 @@ describe("MobileApp generation queue", () => {
       .join(" ");
     expect(announced).toContain("Variation 2, “failed middle storm”");
     expect(announced).toContain(
-      "Studio ran out of memory. Try a smaller model, image size, or batch.",
+      "Studio ran out of memory. Try a smaller model, output size or batch.",
     );
     await vi.waitFor(() => expect(wrapper!.find("img.result-media").exists()).toBe(true));
   });
@@ -5396,10 +5396,10 @@ describe("MobileApp generation queue", () => {
     expect(wrapper.find("[data-test='mobile-generation-queue']").exists()).toBe(false);
     expect(wrapper.find("img.result-media").exists()).toBe(true);
     expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toContain(
-      "Studio ran out of memory. Try a smaller model, image size, or batch.",
+      "Studio ran out of memory. Try a smaller model, output size or batch.",
     );
     expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toContain(
-      "Studio ran out of memory. Try a smaller model, image size, or batch.",
+      "Studio ran out of memory. Try a smaller model, output size or batch.",
     );
   });
 
@@ -6047,7 +6047,7 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
 
     expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toContain(
-      "Studio ran out of memory. Try a smaller model, image size, or batch.",
+      "Studio ran out of memory. Try a smaller model, output size or batch.",
     );
   });
 
@@ -10220,14 +10220,13 @@ describe("MobileApp gallery", () => {
       return baseJson(callTarget, path, init);
     });
     const baseFetch = apiFetchTo.getMockImplementation()!;
-    // The host reports a payload past this phone's media budget, so the
-    // attach is refused rather than expanded into the request.
+    // A read failure remains visible after shared input normalization.
     apiFetchTo.mockImplementation(
       async (requestTarget: unknown, path: string, init?: RequestInit) =>
         String(path).includes("/api/gallery/image/refuse-this-result.png")
           ? ({
-              headers: new Headers({ "content-length": String(46 * 1024 * 1024) }),
-              blob: () => Promise.resolve(new Blob(["oversized"])),
+              headers: new Headers(),
+              blob: () => Promise.reject(new Error("Fixture source read failed")),
             } as unknown as Response)
           : baseFetch(requestTarget, path, init),
     );
@@ -10249,7 +10248,7 @@ describe("MobileApp gallery", () => {
     await flushPromises();
 
     expect(wrapper.get(".gallery-viewer-reuse-error").text()).toContain(
-      "Combined generation media must be 45 MiB or smaller on this phone",
+      "Fixture source read failed",
     );
     // The viewer stays open on the print that was refused.
     expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(true);
@@ -10387,7 +10386,7 @@ describe("MobileApp gallery", () => {
     expect(wrapper.get("[data-test='h3-reference-0']").text()).toContain("ordered subject.png");
   });
 
-  it("rejects an oversized gallery source before reading or base64 expansion", async () => {
+  it("rejects oversized unnormalizable source bytes after inspecting the input", async () => {
     const still = { ...print, filename: "huge source.png", format: "png" as const };
     apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
@@ -10395,7 +10394,7 @@ describe("MobileApp gallery", () => {
       if (path === "/api/gallery") return Promise.resolve([still]);
       return durableApiFallback(path, init, callTarget);
     });
-    const readBlob = vi.fn(() => Promise.resolve(new Blob(["should not be read"])));
+    const readBlob = vi.fn(() => Promise.resolve(new Blob([new Uint8Array(46 * 1024 * 1024)])));
     apiFetchTo.mockImplementation((_target: unknown, path: string) =>
       Promise.resolve(
         path.includes("/api/gallery/image/")
@@ -10416,7 +10415,7 @@ describe("MobileApp gallery", () => {
     await wrapper.get("[data-test='gallery-viewer-use-source']").trigger("click");
     await flushPromises();
 
-    expect(readBlob).not.toHaveBeenCalled();
+    expect(readBlob).toHaveBeenCalledTimes(1);
     expect(wrapper.get(".gallery-viewer-reuse-error").text()).toContain(
       "Combined generation media must be 45 MiB or smaller on this phone",
     );
@@ -12991,6 +12990,60 @@ describe("MobileApp Library organization", () => {
     expect(chips).not.toContain("Haunt");
   });
 
+  it("keeps host chips visible in Trash and restores only the selected host copy", async () => {
+    const platoTarget = { baseUrl: "http://plato.tailnet.ts.net:7680", apiKey: "secret" };
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "studio-id",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          hostname: "studio",
+          version: "0.18.0",
+          online: false,
+        },
+        {
+          id: "plato-id",
+          name: "Plato",
+          baseUrl: platoTarget.baseUrl,
+          hostname: "plato",
+          version: "0.18.0",
+          online: false,
+        },
+      ]),
+    );
+    installLibraryApi();
+    const base = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((requestTarget, path, init) => {
+      if (path === "/api/status" && requestTarget.baseUrl === platoTarget.baseUrl)
+        return Promise.resolve({ ...status, hostname: "plato", instance_id: "plato-id" });
+      return base(requestTarget, path, init);
+    });
+    await openLibrary();
+    const platoChip = () =>
+      wrapper!
+        .findAll("[data-test='mobile-library-chip-host']")
+        .find((chip) => chip.text().includes("Plato"))!;
+    await vi.waitFor(() => expect(platoChip()).toBeDefined());
+    await platoChip().trigger("click");
+    await openTrashScope();
+    expect(platoChip().attributes("aria-pressed")).toBe("true");
+    expect(platoChip().get(".mobile-library-chip-count").text()).toBe("1");
+    await wrapper!.get("[data-test='mobile-gallery-select']").trigger("click");
+    await wrapper!.get("[data-test='gallery-item']").trigger("click");
+    await wrapper!.get("[data-test='mobile-gallery-restore']").trigger("click");
+    await flushPromises();
+    const restores = organizeCalls("/api/gallery/trash/restore");
+    expect(restores).toHaveLength(1);
+    expect(restores[0]?.[0]).toMatchObject({ baseUrl: platoTarget.baseUrl });
+    expect(wrapper!.find("[data-test='mobile-library-empty']").exists()).toBe(true);
+    expect(platoChip().get(".mobile-library-chip-count").text()).toBe("0");
+    await platoChip().trigger("click");
+    await flushPromises();
+    expect(wrapper!.findAll("[data-test='gallery-item']")).toHaveLength(1);
+  });
+
   it("moves a selection to the trash behind the two-tap confirm", async () => {
     installLibraryApi();
     await openLibrary();
@@ -13059,12 +13112,13 @@ describe("MobileApp Library organization", () => {
     expect(wrapper?.get("[data-test='mobile-gallery-actions']").text()).toContain(
       "Delete 1 forever?",
     );
-    expect(organizeCalls("/api/gallery/image/gone.png?permanent=true")).toHaveLength(0);
+    expect(organizeCalls("/api/gallery/trash/delete-selected")).toHaveLength(0);
     await deleteButton.trigger("click");
     await flushPromises();
-    const forever = organizeCalls("/api/gallery/image/gone.png?permanent=true");
+    const forever = organizeCalls("/api/gallery/trash/delete-selected");
     expect(forever).toHaveLength(1);
-    expect(forever[0]?.[2]?.method).toBe("DELETE");
+    expect(forever[0]?.[2]?.method).toBe("POST");
+    expect(JSON.parse(String(forever[0]?.[2]?.body))).toEqual({ filenames: ["gone.png"] });
   });
 
   it("empties the trash from the header behind a two-step confirm", async () => {
@@ -13082,7 +13136,7 @@ describe("MobileApp Library organization", () => {
     await button.trigger("click");
     expect(emptyCalls()).toHaveLength(0);
     expect(wrapper?.get("[data-test='mobile-library-empty-prompt']").text()).toContain(
-      "Delete everything in the trash forever?",
+      "Delete everything in the trash on all connected machines forever?",
     );
 
     await button.trigger("click");
@@ -14006,7 +14060,7 @@ describe("MobileApp identity photo", () => {
     historyBack.mockRestore();
   });
 
-  it("keeps an oversized Android pick inline and never stages its bytes", async () => {
+  it("uses normalized Android image bytes rather than the original reported size", async () => {
     isNativeAndroidRuntime.mockReturnValue(true);
     serveIdentity([identityModel]);
     invoke.mockImplementation((command: string) => {
@@ -14029,8 +14083,9 @@ describe("MobileApp identity photo", () => {
     await wrapper.get("[data-test='mobile-identity-pick-camera']").trigger("click");
     await flushPromises();
 
-    expect(wrapper.get("[data-test='identity-conditioning-error']").text()).toContain("16 MiB");
-    expect(well().props("image")).toBeNull();
+    expect(wrapper.find("[data-test='identity-conditioning-error']").exists()).toBe(false);
+    expect(well().props("image")).toBe(PNG_1X1);
+    expect(well().props("filename")).toBe("huge.png");
   });
 
   it("mounts the well and the two knobs only for a checkpoint that advertises support", async () => {
@@ -14440,7 +14495,7 @@ describe("MobileApp identity photo", () => {
     expect(admittedRequests()[0]?.id_image).toBe(PNG_1X1);
   });
 
-  it("refuses an oversized photo without ever reading it", async () => {
+  it("rejects invalid photo bytes after inspecting the reported oversized input", async () => {
     serveIdentity([identityModel]);
     wrapper = mountMobileApp();
     await flushPromises();
@@ -14455,9 +14510,9 @@ describe("MobileApp identity photo", () => {
     well().vm.$emit("file", huge);
     await flushPromises();
 
-    expect(arrayBuffer).not.toHaveBeenCalled();
+    expect(arrayBuffer).toHaveBeenCalledTimes(1);
     expect(wrapper.get("[data-test='identity-conditioning-error']").text()).toContain(
-      "16 MiB or smaller",
+      "must not be empty",
     );
     expect(well().props("image")).toBeNull();
   });

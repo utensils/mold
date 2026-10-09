@@ -28,6 +28,7 @@ const { apiFetchTo, apiJsonTo, localGalleryList, localGalleryTrashList, org } = 
     deleteTag: vi.fn(),
     trashGalleryImage: vi.fn(),
     deleteGalleryImageForever: vi.fn(),
+    deleteTrashed: vi.fn().mockResolvedValue(undefined),
     trashMany: vi.fn(),
     restoreTrashed: vi.fn().mockResolvedValue({ restored: 1 }),
     emptyTrash: vi.fn().mockResolvedValue({ purged: 1 }),
@@ -970,11 +971,7 @@ describe("Trash scope", () => {
     expect(dialog.text()).toContain("Delete “Grain test 01” forever?");
     await dialog.get("[data-test='confirm-accept']").trigger("click");
     await flushPromises();
-    expect(apiFetchTo).toHaveBeenCalledWith(
-      PLATO,
-      `/api/gallery/image/${trashed.filename}?permanent=true`,
-      { method: "DELETE" },
-    );
+    expect(org.deleteTrashed).toHaveBeenCalledWith(PLATO, [trashed.filename]);
 
     await wrapper.get("[data-test='trash-banner-link']").trigger("click");
     await flushPromises();

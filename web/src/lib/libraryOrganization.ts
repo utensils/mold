@@ -18,6 +18,7 @@ import {
   deleteCollection,
   deleteGalleryImageForever,
   deleteManyForever,
+  deleteTrashed,
   emptyTrash,
   listCollections,
   listTags,
@@ -470,6 +471,7 @@ async function fanout<T extends { hostId: string }>(
 export interface MutationContext {
   hostById: HostLookup;
   snapshots: readonly HostOrganizationSnapshot[];
+  trashOnly?: boolean;
 }
 
 /** Resolve a host's collection id for a slug from the current snapshots. */
@@ -514,6 +516,10 @@ export async function applyOrganizationMutation(
     mutation,
   );
   return fanout(ops, context.hostById, async (op, _host, target) => {
+    if (op.kind === "deleteForever" && context.trashOnly) {
+      await deleteTrashed(target, op.filenames);
+      return;
+    }
     const bulk =
       snapshotFor(context.snapshots, op.hostId)?.bulkMutations === true;
     if (bulk) {

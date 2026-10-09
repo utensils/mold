@@ -31,6 +31,14 @@ public extension HTTPBackend {
                               body: TrashRequest(filenames: filenames), timeout: 300)
     }
 
+    func deleteTrashed(_ filenames: [String]) async throws {
+        do {
+            _ = try await postRaw("/api/gallery/trash/delete-selected", body: TrashRequest(filenames: filenames), timeout: 300)
+        } catch let MoldClientError.http(status, _, _) where status == 404 {
+            throw MoldClientError.http(status: 409, code: "GALLERY_TRASH_DELETE_UNSUPPORTED", message: "Update this machine before permanently deleting selected trash.")
+        }
+    }
+
     func trashedPrints(etag: String?) async throws -> Fetched<[GalleryPrint]> {
         try await galleryListing(view: "trash", etag: etag)
     }

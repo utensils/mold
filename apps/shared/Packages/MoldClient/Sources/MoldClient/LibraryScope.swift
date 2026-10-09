@@ -21,7 +21,7 @@ public enum LibraryScope: Hashable, Identifiable, Codable, Sendable {
         switch self {
         case .all: "All Prints"
         case .favorites: "Favourites"
-        case .trash: "Recently Deleted"
+        case .trash: "Trash"
         case let .collection(slug):
             shelves.first { $0.slug == slug }?.name ?? "Collection"
         }

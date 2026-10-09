@@ -58,8 +58,12 @@ struct Sidebar: View {
                                               title: "Empty Trash…", isDestructive: true,
                                               isDisabled: library.trashed.isEmpty)]) { _ in
                         LibraryActions(hosts: hosts, library: library,
+                                       lifecycleHostIDs: trashHostIDs,
                                        confirmDestruction: confirmDestruction).emptyTrash()
                     }
+                    // List reads selection traits from the outer row. The
+                    // AppKit context-menu owner otherwise swallows the tag.
+                    .tag(SidebarRow.shelf(.trash))
             }
 
             Section("Machines") {
@@ -106,6 +110,14 @@ struct Sidebar: View {
             Image(systemName: scope.symbol)
         }
         .tag(SidebarRow.shelf(scope))
+    }
+
+    private var trashHostIDs: Set<MoldHost.ID>? {
+        let ids = Set(navigation.query.tokens.compactMap { token -> MoldHost.ID? in
+            if case let .machine(id, _) = token { return id }
+            return nil
+        })
+        return ids.isEmpty ? nil : ids
     }
 
     /// Every badge is a promise about what opening the row shows, so each one

@@ -16,7 +16,7 @@ beside the Tauri iPhone app (`apps/mobile`), not instead of it.
 | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Machines          | Fleet cards, Nearby (Bonjour), add by pairing QR, pasted link or address; keys in the Keychain                                                                                                                                          |
 | Generate          | Stills, clips and 3-D objects with each model's own controls; picture wells from Photos, Camera, Files, Library or Share                                                                                                                |
-| Library           | Every machine's prints as one grid, browsable offline (saved listings, thumbnails and opened prints, within Settings' storage limit); five pinchable tile sizes; favourites, tags, collections, Recently Deleted; video and 3-D viewers |
+| Library           | Every machine's prints as one grid, browsable offline (saved listings, thumbnails and opened prints, within Settings' storage limit); five pinchable tile sizes; favourites, tags, collections, Trash; video and 3-D viewers |
 | Queue             | Every machine's work; held jobs in words with Download and Retry, Retry and Move to…; reorder, pause, empty                                                                                                                             |
 | Models            | Installed per machine, Discover, downloads, licences                                                                                                                                                                                    |
 | Away from the app | Completion/failure notifications, background refresh, widgets, Share extension                                                                                                                                                          |
@@ -44,7 +44,11 @@ explains when an offline machine's inventory could not be read. Removing a
 machine returns to the list. See the [iPhone UAT record](docs/IPHONE-UAT.md).
 
 The iPhone Library uses one navigation title menu for All Prints, Favourites,
-collections and Recently Deleted. Media Type filters All Media, Photos, Videos
+collections and Trash. A machine search chip scopes Delete, Put Back,
+Delete Immediately and Empty Trash to that machine; copies on other
+machines stay intact. Without machine chips, these actions apply to all shown
+copies. Permanent deletion asks for confirmation, including the print menu.
+Media Type filters All Media, Photos, Videos
 and 3D within the current shelf. In Select mode, tap tiles or start a sideways
 finger sweep to select a range; start on a selected tile to deselect a range.
 Reverse the sweep to shorten it, or hold near a grid edge to scroll further.

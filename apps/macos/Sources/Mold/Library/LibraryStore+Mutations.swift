@@ -90,7 +90,7 @@ extension LibraryStore {
         await runBulk(.delete, entries: entries)
     }
 
-    func emptyTrash() async {
-        await runEmptyTrash()
+    func emptyTrash(on hostIDs: Set<MoldHost.ID>? = nil) async {
+        await runEmptyTrash(on: hostIDs)
     }
 }

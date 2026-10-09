@@ -121,6 +121,7 @@ struct ClipPlayer: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var player: AVPlayer?
     @State private var problem: String?
+    @State private var playbackFile: URL?
 
     var body: some View {
         ZStack {
@@ -138,7 +139,11 @@ struct ClipPlayer: View {
             if isSelected { await load() }
             else { ClipPlayback.sync(player, isSelected: false) }
         }
-        .onDisappear { ClipPlayback.sync(player, isSelected: false) }
+        .onDisappear {
+            ClipPlayback.sync(player, isSelected: false)
+            player?.replaceCurrentItem(with: nil)
+            releasePlaybackFile()
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { player?.pause() }
         }
@@ -153,9 +158,15 @@ struct ClipPlayer: View {
         }
     }
 
+    private func releasePlaybackFile() {
+        if let playbackFile { try? FileManager.default.removeItem(at: playbackFile) }
+        playbackFile = nil
+    }
+
     private func load() async {
         player?.pause()
         player = nil
+        releasePlaybackFile()
         problem = nil
         await play(from: nil, reminted: false)
     }
@@ -168,9 +179,14 @@ struct ClipPlayer: View {
         let item: AVPlayerItem
         do {
             try PlaybackAudio.configure()
-            let url = try await hosts.backend(for: host).playableURL(for: entry.print.filename)
-            try Task.checkCancellation()
+            let url = try await hosts.backend(for: host).playableURL(for: entry.print.filename, trashed: entry.print.trashedAt != nil)
+            if Task.isCancelled {
+                if url.isFileURL { try? FileManager.default.removeItem(at: url) }
+                return
+            }
             item = AVPlayerItem(url: url)
+            releasePlaybackFile()
+            playbackFile = url.isFileURL ? url : nil
         } catch is CancellationError {
             return
         } catch {

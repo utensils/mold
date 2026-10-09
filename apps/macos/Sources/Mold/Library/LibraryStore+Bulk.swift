@@ -59,7 +59,13 @@ extension LibraryStore {
                     switch action {
                     case .trash: try await client.trash(names)
                     case .restore: try await client.restoreFromTrash(names)
-                    case .delete: try await client.deleteForever(names)
+                    case .delete:
+                        let trashed = batch.filter { $0.print.trashedAt != nil }.map(\.print.filename)
+                        let live = batch.filter { $0.print.trashedAt == nil }.map(\.print.filename)
+                        // Trash deletion must not destroy a concurrently restored
+                        // live print on the same host.
+                        if !trashed.isEmpty { try await client.deleteTrashed(trashed) }
+                        if !live.isEmpty { try await client.deleteForever(live) }
                     }
                     guard hosts.host(host.id) == host else {
                         failed += rows.count - start
@@ -100,7 +106,7 @@ extension LibraryStore {
     /// Empty Trash must use the trash-only server operation. Enumerating
     /// names then calling deleteForever could destroy a concurrently restored
     /// live print; that endpoint deliberately supports live deletion too.
-    func runEmptyTrash() async {
+    func runEmptyTrash(on hostIDs: Set<MoldHost.ID>? = nil) async {
         guard !isBulkBusy else { return }
         bulkRunning = true
         bulkEmptying = true
@@ -111,7 +117,8 @@ extension LibraryStore {
             bulkEmptying = false
             bulkProgress = nil
         }
-        let destinations = hosts.hosts.map { ($0, hosts.backend(for: $0)) }
+        let destinations = hosts.hosts.filter { hostIDs?.contains($0.id) ?? true }
+            .map { ($0, hosts.backend(for: $0)) }
         var completed = 0
         var failed = false
         for (host, client) in destinations {

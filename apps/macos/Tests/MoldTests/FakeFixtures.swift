@@ -13,6 +13,13 @@ enum FakeFixtures {
         return try! MoldJSON.decoder.decode(GalleryPrint.self, from: Data(json.utf8))
     }
 
+    nonisolated static func trashState(_ print: GalleryPrint, at timestamp: UInt64?) -> GalleryPrint {
+        var row = try! JSONSerialization.jsonObject(with: MoldJSON.encoder.encode(print)) as! [String: Any]
+        row["trashed_at"] = timestamp
+        if timestamp == nil { row.removeValue(forKey: "purge_at") }
+        return try! MoldJSON.decoder.decode(GalleryPrint.self, from: JSONSerialization.data(withJSONObject: row))
+    }
+
     /// `state` defaults to `"queued"` -- the ordinary waiting row. This used
     /// to default to `"accepted"`, a string `/api/queue` never actually sends
     /// (design M6 fact 1): every test that didn't override `state` was

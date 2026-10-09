@@ -33,6 +33,7 @@ vi.mock("@studio/api/galleryOrganization", () => ({
   deleteTag: vi.fn(),
   trashGalleryImage: vi.fn(),
   deleteGalleryImageForever: vi.fn(),
+  deleteTrashed: vi.fn(async () => undefined),
   trashMany: vi.fn(),
   restoreTrashed: vi.fn(),
   emptyTrash: vi.fn(),
@@ -1758,6 +1759,62 @@ describe("organization fan-out", () => {
 });
 
 describe("trash", () => {
+  it("refuses offline empty-trash without risking a restored live print", async () => {
+    const gallery = useGalleryStore();
+    gallery.trashBuckets.local = loadedBucket([organized("restored.png", 10, { trashed_at: 1 })]);
+    const result = await gallery.emptyTrash(["local"]);
+    expect(result.failedHosts).toEqual(["local"]);
+    expect(result.error).toContain("Start this device's engine");
+    expect(ipc.localGalleryDeleteForever).not.toHaveBeenCalled();
+  });
+
+  it("permanent deletion in Trash preserves an active copy on another machine", async () => {
+    connectLocalPlusHal();
+    advertise("local");
+    advertise("hal9000-7680");
+    const gallery = useGalleryStore();
+    gallery.scope = "trash";
+    gallery.buckets.local = loadedBucket([img("a.png", 10)]);
+    gallery.trashBuckets["hal9000-7680"] = loadedBucket([
+      organized("a.png", 10, { trashed_at: 1 }),
+    ]);
+    vi.mocked(apiFetchTo).mockResolvedValue(new Response(null, { status: 204 }) as never);
+    await gallery.deleteForever(gallery.trashFiltered);
+    expect(gallery.buckets.local!.items).toHaveLength(1);
+    expect(apiFetchTo).not.toHaveBeenCalled();
+    expect(organization.deleteTrashed).toHaveBeenCalledWith(HAL_TARGET, ["a.png"]);
+  });
+
+  it("limits delete, restore, permanent delete and empty trash to the selected machine", async () => {
+    connectLocalPlusHal();
+    advertise("local");
+    advertise("hal9000-7680");
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([img("a.png", 10)]);
+    gallery.buckets["hal9000-7680"] = loadedBucket([img("a.png", 10)]);
+    gallery.filter = "hal9000-7680";
+    const entry = gallery.filtered[0]!;
+    const held = gallery.beginDeleteEverywhere(entry);
+    expect(held.map((copy) => copy.sourceKey)).toEqual(["hal9000-7680"]);
+    expect(gallery.pendingDeletions.has("local::a.png")).toBe(false);
+    gallery.cancelDeleteEverywhere(held);
+    gallery.trashBuckets.local = loadedBucket([organized("a.png", 10, { trashed_at: 1 })]);
+    gallery.trashBuckets["hal9000-7680"] = loadedBucket([
+      organized("a.png", 10, { trashed_at: 1 }),
+    ]);
+    await gallery.restore(gallery.trashFiltered);
+    expect(organization.restoreTrashed).toHaveBeenCalledTimes(1);
+    expect(organization.restoreTrashed).toHaveBeenCalledWith(HAL_TARGET, ["a.png"]);
+    vi.mocked(apiFetchTo).mockResolvedValue(new Response(null, { status: 204 }) as never);
+    await gallery.deleteForever([entry]);
+    expect(gallery.buckets.local!.items).toHaveLength(1);
+    vi.mocked(organization.emptyTrash).mockResolvedValue({ purged: 1 } as never);
+    await gallery.emptyTrash();
+    expect(organization.emptyTrash).toHaveBeenCalledTimes(1);
+    expect(organization.emptyTrash).toHaveBeenCalledWith(HAL_TARGET);
+    expect(gallery.trashBuckets.local!.items).toHaveLength(1);
+  });
+
   it("a plain delete moves the row into the trash on a trash-capable host (media kept), hard-deletes elsewhere", async () => {
     connectLocalPlusHal();
     advertise("local", { retentionDays: 30 });

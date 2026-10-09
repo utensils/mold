@@ -6,6 +6,7 @@ import {
   deleteCollection,
   deleteGalleryImageForever,
   deleteManyForever,
+  deleteTrashed,
   deleteTag,
   emptyTrash,
   listCollections,
@@ -59,6 +60,23 @@ function stub(
 afterEach(() => vi.unstubAllGlobals());
 
 describe("gallery organization API", () => {
+  it("permanently deletes only selected trash members through the dedicated route", async () => {
+    const captured = stub();
+    await deleteTrashed(target, ["restored.png"]);
+    expect(captured()).toMatchObject({
+      url: "http://plato:7680/api/gallery/trash/delete-selected",
+      method: "POST",
+      body: { filenames: ["restored.png"] },
+    });
+  });
+  it("refuses an older trash-delete route without a live-delete fallback", async () => {
+    stub(() => new Response(null, { status: 404 }));
+    await expect(deleteTrashed(target, ["a.png"])).rejects.toThrow(
+      "Update this machine",
+    );
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("PATCHes one print through the explicit target with the API key header", async () => {
     const captured = stub(() =>
       Response.json({ filename: "a b.png", title: "New", favorite: true }),

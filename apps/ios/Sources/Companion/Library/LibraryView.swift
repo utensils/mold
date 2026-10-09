@@ -197,7 +197,10 @@ struct LibraryView: View {
                     .disabled(tile == .small)
                 if scope.isTrash, !library.trashPool.isEmpty {
                     Divider()
-                    EmptyTrashButton()
+                    EmptyTrashButton(machineIDs: Set(query.tokens.compactMap { token in
+                        if case let .machine(id, _) = token { return id }
+                        return nil
+                    }))
                 }
             } label: {
                 Label("View Options", systemImage: "ellipsis")

@@ -371,6 +371,7 @@ use crate::queue::clean_error_message;
         crate::gallery_trash::trash_gallery_files,
         crate::gallery_trash::restore_gallery_files,
         crate::gallery_trash::delete_gallery_files_forever,
+        crate::gallery_trash::delete_selected_gallery_trash,
         crate::gallery_trash::empty_gallery_trash,
         crate::gallery_trash::sweep_gallery_trash,
         crate::gallery_source_media::inventory,
@@ -841,6 +842,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/gallery/trash/restore",
             post(crate::gallery_trash::restore_gallery_files),
+        )
+        .route(
+            "/api/gallery/trash/delete-selected",
+            post(crate::gallery_trash::delete_selected_gallery_trash),
         )
         .route(
             "/api/gallery/trash/delete-forever",

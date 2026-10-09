@@ -976,6 +976,7 @@ describe("LibraryView Use these settings retained source media", () => {
 
     expect(useComposerStore().retainedSource).toEqual({
       filename: "remote-v2v.mp4",
+      metadata: v2v.metadata,
       origin: plato,
       inventory,
     });
@@ -1003,6 +1004,7 @@ describe("LibraryView Use these settings retained source media", () => {
     expect(retainedInventoryMock).toHaveBeenCalledWith("remote-img2img.png", plato);
     expect(useComposerStore().retainedSource).toEqual({
       filename: "remote-img2img.png",
+      metadata: img2img.metadata,
       origin: plato,
       inventory,
     });
@@ -1053,6 +1055,7 @@ describe("LibraryView Use these settings retained source media", () => {
       expect(retainedInventoryMock).toHaveBeenCalledWith(video.filename, plato);
       expect(useComposerStore().retainedSource).toEqual({
         filename: video.filename,
+        metadata: video.metadata,
         origin: plato,
         inventory,
       });

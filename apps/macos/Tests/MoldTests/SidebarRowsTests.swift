@@ -1,4 +1,6 @@
+import AppKit
 import Foundation
+import SwiftUI
 import MoldClient
 import Testing
 
@@ -144,4 +146,49 @@ struct SidebarRowsTests {
         defaults.set(Destination.models.rawValue, forKey: "destination")
         #expect(Destination.launch(environment: [:], defaults: defaults) == .models)
     }
+    @Test func openingTrashClearsBrowsingFiltersButKeepsMachineScope() {
+        let navigation = LibraryNavigation(defaults: scratch())
+        let machine = machineID()
+        navigation.query.text = "old search"
+        navigation.query.tokens = [.machine(id: machine, name: "remote"), .tag("NSFW"), .favorite]
+        navigation.scope = .trash
+        #expect(navigation.query.text.isEmpty)
+        #expect(navigation.query.tokens == [.machine(id: machine, name: "remote")])
+    }
+
+    @Test func renderedTrashSidebarRowCanBeSelected() async throws {
+        let hosts = HostStore(hosts: []) { FakeBackend(host: $0) }
+        let library = LibraryStore(hosts: hosts)
+        let navigation = LibraryNavigation(defaults: scratch())
+        let engine = MoldEngine()
+        var destination = Destination.generate
+        let view = NSHostingView(rootView: Sidebar(destination: Binding(
+            get: { destination }, set: { destination = $0 }))
+            .environment(hosts).environment(library).environment(navigation).environment(engine))
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 300, height: 700),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = view
+        window.orderFront(nil)
+        defer { window.close() }
+        await settle { self.table(in: view)?.numberOfRows ?? 0 > 0 }
+        let table = try #require(self.table(in: view))
+        var selectedTrash = false
+        // Ask each rendered row, rather than assuming section/header indexes.
+        // An inner tag swallowed by the contextual menu wrapper makes Trash
+        // impossible to reach even though its label is visible.
+        for row in 0..<table.numberOfRows {
+            table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            try await Task.sleep(for: .milliseconds(30))
+            if navigation.scope == .trash, destination == .library { selectedTrash = true; break }
+        }
+        #expect(selectedTrash, "The rendered Trash row must participate in native List selection")
+    }
+
+    private func table(in view: NSView) -> NSTableView? {
+        if let table = view as? NSTableView { return table }
+        for child in view.subviews { if let table = self.table(in: child) { return table } }
+        return nil
+    }
+
 }

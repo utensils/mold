@@ -80,4 +80,28 @@ struct LibraryMergeStoreTests {
         #expect(library.entry(id)?.hostName == "workstation")
         #expect(library.tile(containing: id)?.hostID == MoldEngine.localHostID)
     }
+    @Test func machineFilteredTrashRestoreAndPurgePreserveLocalCopy() async throws {
+        let (library, here, there) = await bench()
+        let remote = there.host
+        var query = LibraryQuery()
+        query.tokens = [.machine(id: remote.id, name: remote.name)]
+        let cat = try #require(query.apply(to: library.items).first { $0.print.filename == "cat.png" })
+        await library.moveToTrash([cat])
+        #expect(here.callCount("trash") == 0)
+        #expect(here.prints.map(\.filename) == ["cat.png"])
+        #expect(there.prints.map(\.filename) == ["dog.png"])
+
+        let trashed = try #require(query.apply(to: library.trashed).first)
+        await library.restore([trashed])
+        #expect(here.callCount("restoreFromTrash") == 0)
+        #expect(there.prints.contains { $0.filename == "cat.png" })
+
+        let restored = try #require(query.apply(to: library.items).first { $0.print.filename == "cat.png" })
+        await library.moveToTrash([restored])
+        await library.deleteForever(query.apply(to: library.trashed))
+        #expect(here.callCount("deleteForever") == 0)
+        #expect(here.prints.map(\.filename) == ["cat.png"])
+        #expect(there.trashedRows.isEmpty)
+    }
+
 }

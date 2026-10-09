@@ -784,25 +784,23 @@ describe("MobileSourceControls on a canvasless recipe", () => {
 });
 
 describe("MobileSourceControls — H3 boundary media budget", () => {
-  it("refuses a direct file past the 45 MiB request budget before reading it", async () => {
+  it("refuses a normalized PNG when combined media exceeds the 45 MiB request budget", async () => {
     const form = formFor("minimax-h3");
     form.model = "minimax-h3-fl2va:comfy-pruned-int8";
     const model = { name: form.model, family: "minimax-h3" } as ModelEntry;
     const wrapper = mount(MobileSourceControls, { props: { form, model } });
 
-    const oversized = new File([new Uint8Array(8)], "huge.png", {
-      type: "image/png",
-    });
-    Object.defineProperty(oversized, "size", {
-      value: MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES + 1,
-    });
+    form.sourceImage = "A".repeat(Math.ceil(MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES / 3) * 4);
+    const png = "iVBORw0KGgoAAAANSUhEUgAAAAcAAAAECAIAAAAmkwkpAAAAAElFTkSuQmCC";
+    const bytes = Uint8Array.from(atob(png), (c) => c.charCodeAt(0));
+    const oversized = new File([bytes], "opening.png", { type: "image/png" });
     await wrapper
       .get("[data-test='source-well']")
       .trigger("drop", { dataTransfer: { files: [oversized] } });
     await flushPromises();
 
     expect(form.h3Authoring?.firstFrame ?? null).toBeNull();
-    expect(wrapper.text()).toContain("45 MiB");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("45 MiB"));
   });
 });
 

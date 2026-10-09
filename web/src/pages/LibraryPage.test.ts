@@ -50,6 +50,7 @@ const orgApi = vi.hoisted(() => ({
   trashMany: vi.fn(async () => undefined),
   restoreTrashed: vi.fn(async () => undefined),
   deleteGalleryImageForever: vi.fn(async () => undefined),
+  deleteTrashed: vi.fn(async () => undefined),
   emptyTrash: vi.fn(async () => ({ purged: 1 })),
   listCollections: vi.fn(async () => []),
   listTags: vi.fn(async () => []),
@@ -794,6 +795,10 @@ describe("LibraryPage", () => {
       },
     };
     listGalleryMock.mockResolvedValue([sourcePrint]);
+    retainedInventoryMock.mockResolvedValue({
+      availability: "unavailable_legacy",
+      members: [],
+    });
     restoreSourceMock.mockResolvedValue({
       base64: "ORIGINAL",
       filename: "portrait.jpg",
@@ -929,6 +934,7 @@ describe("LibraryPage multi-host identity", () => {
     resetNotifications();
     formTesting.resetForTest();
     listGalleryMock.mockReset().mockResolvedValue([theirs, mine]);
+    fetchModelsMock.mockReset().mockResolvedValue([]);
     deleteMock.mockReset().mockResolvedValue(undefined);
     hostDeleteMock.mockReset().mockResolvedValue(undefined);
     hostCapabilitiesMock.mockReset().mockResolvedValue({
@@ -995,14 +1001,14 @@ describe("LibraryPage multi-host identity", () => {
 
     vi.advanceTimersByTime(6000);
     await flushPromises();
-    expect(deleteMock).toHaveBeenCalledWith("twin.png");
+    expect(deleteMock).not.toHaveBeenCalled();
     expect(hostDeleteMock).toHaveBeenCalledWith(
       expect.objectContaining({ id: "studio-7680" }),
       "twin.png",
     );
   });
 
-  it("deletes everywhere from a non-representative host-filter copy", async () => {
+  it("preserves remote twins when deleting through this server filter", async () => {
     vi.useFakeTimers();
     const wrapper = mountPage();
     await flushPromises();
@@ -1018,10 +1024,7 @@ describe("LibraryPage multi-host identity", () => {
     vi.advanceTimersByTime(6000);
     await flushPromises();
     expect(deleteMock).toHaveBeenCalledWith("twin.png");
-    expect(hostDeleteMock).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "studio-7680" }),
-      "twin.png",
-    );
+    expect(hostDeleteMock).not.toHaveBeenCalled();
   });
 
   it("uses representative groups when deleting a chained host-filter copy", async () => {
@@ -1065,7 +1068,7 @@ describe("LibraryPage multi-host identity", () => {
     vi.advanceTimersByTime(6_000);
     await flushPromises();
 
-    expect(deleteMock).toHaveBeenCalledWith("newest.png");
+    expect(deleteMock).not.toHaveBeenCalled();
     expect(hostDeleteMock).toHaveBeenCalledWith(
       expect.objectContaining({ id: "studio-7680" }),
       "middle.png",
@@ -1083,7 +1086,7 @@ describe("LibraryPage multi-host identity", () => {
     await allHosts!.trigger("click");
     await flushPromises();
     expect(wrapper.find("[data-test='grid-keys']").text()).toBe(
-      "archive-7680|oldest.png",
+      "origin|newest.png,archive-7680|oldest.png",
     );
   });
 

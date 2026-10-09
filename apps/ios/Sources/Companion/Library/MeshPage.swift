@@ -51,7 +51,7 @@ struct MeshPage: View {
         let requestIdentity = identity
         var downloaded = false
         do {
-            let file = try await hosts.backend(for: host).mediaFile(entry.print.filename, trashed: false)
+            let file = try await hosts.backend(for: host).mediaFile(entry.print.filename, trashed: entry.print.trashedAt != nil)
             defer { try? FileManager.default.removeItem(at: file) }
             try Task.checkCancellation()
             downloaded = true

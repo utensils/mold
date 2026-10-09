@@ -12,6 +12,8 @@ public protocol MoldGalleryBackend: Sendable {
     func restoreFromTrash(_ filenames: [String]) async throws
     /// Permanent. There is no undo on the host side.
     func deleteForever(_ filenames: [String]) async throws
+    /// Trash-only deletion refuses an active copy restored since listing.
+    func deleteTrashed(_ filenames: [String]) async throws
     @discardableResult
     func importPrint(_ item: GalleryImport, as filename: String) async throws -> String
     /// The stored bytes. A trashed print lives behind the trash view, exactly
@@ -34,4 +36,24 @@ public protocol MoldGalleryBackend: Sendable {
     /// Throws rather than falling back to an unticketed URL: on a keyed host
     /// a failed ticket means the player would 401, not play silently wrong.
     func playableURL(for filename: String) async throws -> URL
+    func playableURL(for filename: String, trashed: Bool) async throws -> URL
+}
+
+public extension MoldGalleryBackend {
+    func deleteTrashed(_ filenames: [String]) async throws {
+        throw MoldClientError.http(status: 409, code: "GALLERY_TRASH_DELETE_UNSUPPORTED", message: "Update this machine before permanently deleting selected trash.")
+    }
+
+    /// Existing backends retain their ticket policy; trash uses the same route
+    /// with an explicit trash view, just like thumbnail and media downloads.
+    func playableURL(for filename: String, trashed: Bool) async throws -> URL {
+        let url = try await playableURL(for: filename)
+        guard trashed, var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+        var query = components.queryItems ?? []
+        query.removeAll { $0.name == "view" }
+        query.append(URLQueryItem(name: "view", value: "trash"))
+        components.queryItems = query
+        guard let result = components.url else { throw MoldClientError.malformedResponse }
+        return result
+    }
 }

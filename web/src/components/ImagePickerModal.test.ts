@@ -19,12 +19,6 @@ vi.mock("../composables/useThumbnailSources", () => ({
   }),
 }));
 
-vi.mock("../lib/base64", () => ({
-  blobToBase64: vi.fn(async (blob: Blob & { name?: string }) =>
-    blob.name ? `b64:${blob.name}` : "b64:blob",
-  ),
-}));
-
 /**
  * Pictographs, dingbats, arrows and the variation selector. The Mold Studio
  * voice is icons-only, so any hit in rendered chrome is a regression.
@@ -72,8 +66,8 @@ describe("ImagePickerModal", () => {
 
     const pick = w.emitted("pick")?.[0]?.[0];
     expect(pick).toEqual([
-      { kind: "upload", filename: "target.png", base64: "b64:target.png" },
-      { kind: "upload", filename: "ref.png", base64: "b64:ref.png" },
+      { kind: "upload", filename: "target.png", base64: "YQ==" },
+      { kind: "upload", filename: "ref.png", base64: "Yg==" },
     ]);
     expect(w.emitted("close")).toHaveLength(1);
   });
@@ -101,7 +95,7 @@ describe("ImagePickerModal", () => {
       {
         kind: "upload",
         filename: "mask-base.png",
-        base64: "b64:mask-base.png",
+        base64: "YQ==",
       },
     ]);
   });
@@ -220,9 +214,9 @@ describe("ImagePickerModal", () => {
     });
     input.dispatchEvent(new Event("change", { bubbles: true }));
     await flushPromises();
-    // The bytes go out as picked: no re-encode, no flattening.
+    // Small fixture bytes pass through the shared input encoder unchanged.
     expect(w.emitted("pick")?.[0]?.[0]).toEqual([
-      { kind: "upload", filename: "layer.webp", base64: "b64:layer.webp" },
+      { kind: "upload", filename: "layer.webp", base64: "eA==" },
     ]);
 
     await w.setProps({ open: false });

@@ -40,7 +40,7 @@ public struct LibraryEntry: Identifiable, Hashable, Sendable {
 
     /// The one machine every copy of `entries` is on, or `nil` when they span
     /// several -- a menu says "Move to Trash on <machine>" only when that is
-    /// the whole of what it does, and a merged print is trashed everywhere.
+    /// the whole of what it does, and an unfiltered merged print is trashed everywhere.
     public static func soleMachineName(of entries: [LibraryEntry]) -> String? {
         let copies = entries.flatMap(\.everyCopy)
         return Set(copies.map(\.hostID)).count == 1 ? copies.first?.hostName : nil
@@ -53,16 +53,17 @@ public struct LibraryEntry: Identifiable, Hashable, Sendable {
         return compact ? "\(hostName) +\(copies.count)" : hostNames.joined(separator: " · ")
     }
 
-    /// The copy held by one of `hosts`, presented as the lead and carrying
-    /// the others -- how a machine filter shows THAT machine's copy of a
-    /// print whose lead is elsewhere. `nil` when none of them holds it.
+    /// Present only copies held by the selected machines. The filtered row is
+    /// also the action target: reading or editing it must not reach a copy
+    /// hidden by the machine filter. Clear nested groups when changing leads.
     public func presented(onAnyOf hosts: Set<MoldHost.ID>) -> LibraryEntry? {
-        if hosts.contains(hostID) { return self }
-        guard let index = copies.firstIndex(where: { hosts.contains($0.hostID) }) else { return nil }
-        var lead = copies[index]
-        var others = everyCopy
-        others.removeAll { $0.id == lead.id }
-        lead.copies = others
+        let selected = everyCopy.filter { hosts.contains($0.hostID) }.map { entry in
+            var copy = entry
+            copy.copies = []
+            return copy
+        }
+        guard var lead = selected.first else { return nil }
+        lead.copies = Array(selected.dropFirst())
         return lead
     }
 

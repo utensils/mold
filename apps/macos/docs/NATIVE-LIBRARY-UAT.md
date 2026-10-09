@@ -42,3 +42,27 @@ read-only loopback fixture containing 120 mixed prints (45 favourites).
 - Native build and architecture lint pass. The independent reviewer approved
   the final one-shot viewer restore and scope/query reset. Shared MoldClient
   tests pass (1,095 tests). No generation or production data mutation occurred.
+
+## Host-scoped Trash — 2026-10-08
+
+Native Debug build, disposable preferences/home and two loopback fixture hosts.
+No generation or production media was used for mutation testing.
+
+- A shared hidden-collection print merges into one tile. Filtering to Origin
+  Fixture and moving it to Trash sends one request to that fixture; Other Copy
+  remains live. The fixture action log records no request to Other Copy.
+- The Trash sidebar selection originally failed on click and native table-row
+  selection. Applying the list tag outside its context-menu owner fixes it;
+  the rendered native regression passes and clicking Trash opens the grid.
+- Trash retains the Origin Fixture filter and shows the deleted hidden member.
+  Its toolbar offers Put Back, Delete Immediately and Empty Trash. Selecting
+  Delete Immediately names only Origin Fixture; Cancel keeps the print.
+- Put Back sends one restore request to Origin Fixture. Both fixtures end with
+  one live print and no trash entries. Source/query and lifecycle regressions
+  pass in 32 native tests across five affected suites; native lint passes.
+- Shared HTTP tests cover trash video URLs, keyed tickets and relay fallback
+  to authenticated temporary trash media, including cleanup at the caller.
+
+The full native suite also exposes pre-existing error-message and reuse-name
+expectation mismatches and a queue-layout harness missing its QueueStore. Those
+unrelated failures are separate from the passing affected suites.

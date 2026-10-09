@@ -52,7 +52,7 @@ for Macs that cannot run macOS 26, and remains the default desktop app on
   restore a print's full recipe. Select prints and choose **Move to Collection →
   New Collection…** to create a collection from the selection. Hidden collection
   members stay out of general browsing even when a local copy leads; the
-  collection itself and Recently Deleted remain accessible. Context menus keep
+  collection itself and Trash remain accessible. Context menus keep
   their rows stable while background transfer status changes.
 - **Queue** — every machine's work live from its event stream: reorder,
   pause, resume, cancel, and move held jobs between machines. Source thumbnails
@@ -161,3 +161,9 @@ returned download ticket succeeds and the original held job and server identity
 are revalidated. Failed or cancelled downloads leave the job held. Global queue
 pause stays in effect. Cancelling a job does not cancel a model download that
 other jobs may need.
+
+## Control copies on each machine
+
+Library machine filters also scope trash, restore and permanent deletion to the selected machines, preserving copies elsewhere. Choose All Machines to act on every copy. Native Trash remains browsable for hidden collection members and offers Put Back, Delete Immediately and Empty Trash for the selected machines. Opening Trash clears the previous shelf’s search and media filters while keeping the machine selection. Trashed photos and videos can be inspected before restoring or deleting them.
+
+Deleting selected Trash items requires an updated host with the trash-only deletion endpoint. If that host is older, Mold asks you to update it and preserves the files. Put Back and the dedicated Empty Trash operation remain available.

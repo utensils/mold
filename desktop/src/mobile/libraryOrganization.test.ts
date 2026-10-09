@@ -21,6 +21,7 @@ import {
   reusedPrintTitle,
   runOrganizationFanout,
   selectionDeleteKind,
+  scopedLibraryCopies,
   tagChipPlan,
   trashRetentionHosts,
   validateCollectionName,
@@ -342,6 +343,7 @@ describe("runOrganizationFanout", () => {
       restoreTrashed: vi.fn().mockResolvedValue(undefined),
       deleteGalleryImageForever: vi.fn().mockResolvedValue(undefined),
       deleteManyForever: vi.fn().mockResolvedValue(undefined),
+      deleteTrashed: vi.fn().mockResolvedValue(undefined),
       deleteGalleryImage: vi.fn().mockResolvedValue(undefined),
     };
   }
@@ -364,6 +366,19 @@ describe("runOrganizationFanout", () => {
     { hostId: "plato", filename: "a.png" },
     { hostId: "plato", filename: "b.png" },
   ];
+
+  it("uses trash-only deletion without falling back to live files", async () => {
+    const api = fakeApi();
+    await runOrganizationFanout(
+      [{ hostId: "plato", kind: "deleteForever", filenames: ["a.png"] }],
+      fanoutHosts,
+      api,
+      { trashOnly: true },
+    );
+    expect(api.deleteTrashed).toHaveBeenCalledWith(fanoutHosts.plato.target, ["a.png"]);
+    expect(api.deleteManyForever).not.toHaveBeenCalled();
+    expect(api.deleteGalleryImageForever).not.toHaveBeenCalled();
+  });
 
   it("creates the collection on hosts lacking it, then adds every copy", async () => {
     const api = fakeApi();
@@ -516,5 +531,17 @@ describe("mobile library search", () => {
         { name: "Unrelated", slug: "other" },
       ]),
     ).toBe(false);
+  });
+});
+
+describe("scopedLibraryCopies", () => {
+  it("preserves other machine copies for host-scoped mutations", () => {
+    const copies = [
+      { hostId: "local", filename: "a.png" },
+      { hostId: "plato", filename: "a.png" },
+    ];
+    expect(scopedLibraryCopies(copies, "plato")).toEqual([copies[1]]);
+    expect(scopedLibraryCopies(copies, null)).toEqual(copies);
+    expect(scopedLibraryCopies(copies, "removed")).toEqual([]);
   });
 });

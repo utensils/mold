@@ -214,7 +214,7 @@ const canOrganizeEntry = (entry: MergedPrint) =>
   gallery.allLocationsOf(entry).some((l) => gallery.organizeCapable(l.sourceKey));
 /** Every copy of this print deletes into a trash (else the old hard delete). */
 const entryTrashCapable = (entry: MergedPrint) => {
-  const locations = gallery.locationsOf(entry);
+  const locations = gallery.mutationLocationsOf(entry);
   if (locations.length === 0) return gallery.trashCapable(entry.sourceKey);
   return locations.every(
     (l) =>
@@ -916,8 +916,11 @@ async function confirmDeleteForever() {
 }
 
 const trashHostLabels = computed(() => {
-  const labels = gallery.retentionByHost.map((h) => h.label);
-  if (labels.length === 0 && offlineLocalTrash.value) labels.push(sourceLabel("local"));
+  const labels = gallery.retentionByHost
+    .filter((h) => gallery.filter === "all" || h.key === gallery.filter)
+    .map((h) => h.label);
+  if (labels.length === 0 && offlineLocalTrash.value && ["all", "local"].includes(gallery.filter))
+    labels.push(sourceLabel("local"));
   return labels;
 });
 function joinNames(names: string[]): string {
@@ -925,7 +928,10 @@ function joinNames(names: string[]): string {
   return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 }
 const emptyTrashMessage = computed(() => {
-  const n = gallery.trashCount;
+  const n =
+    gallery.filter === "all"
+      ? gallery.trashMerged.length
+      : (gallery.trashBuckets[gallery.filter]?.items.length ?? 0);
   const where = joinNames(trashHostLabels.value);
   return `Delete ${n} ${n === 1 ? "picture" : "pictures"} in the trash${where ? ` on ${where}` : ""} forever? This can't be undone.`;
 });
@@ -2258,7 +2264,9 @@ function deletePrint(entry: MergedPrint) {
   scheduleDelete(
     key,
     locations,
-    trashable ? `Moved “${title}” to trash` : `Deleted ${filename} everywhere`,
+    trashable
+      ? `Moved “${title}” to trash`
+      : `Deleted ${filename} from ${gallery.filter === "all" ? "all connected machines" : sourceLabel(gallery.filter)}`,
   );
 }
 
@@ -2992,7 +3000,7 @@ onUnmounted(() => {
     <ConfirmDialog
       :open="deleteForeverTargets !== null"
       :title="deleteForeverTitle"
-      message="This can't be undone."
+      :message="`Copies on ${gallery.filter === 'all' ? 'all connected machines' : sourceLabel(gallery.filter)} will be deleted forever. This can't be undone.`"
       confirm-label="Delete forever"
       danger
       :busy="organizeBusy"

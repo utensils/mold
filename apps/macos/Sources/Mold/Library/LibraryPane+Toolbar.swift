@@ -76,8 +76,31 @@ extension LibraryPane {
                 .help("Make the Library thumbnails larger or smaller")
                 .onChange(of: navigation.edge) { _, _ in navigation.rememberEdge() }
         }
+        if navigation.scope.isTrash {
+            ToolbarItemGroup {
+                Button("Put Back", systemImage: "arrow.uturn.backward") {
+                    actions.restore(trashToolbarTargets)
+                }
+                .disabled(trashToolbarTargets.isEmpty || library.isBulkBusy)
+                .help("Restore the selected copies on the displayed machines")
+                Button("Delete Immediately…", systemImage: "trash.slash") {
+                    actions.deleteForever(trashToolbarTargets)
+                }
+                .disabled(trashToolbarTargets.isEmpty || library.isBulkBusy)
+                .help("Permanently delete the selected copies on the displayed machines")
+                Button("Empty Trash…", systemImage: "trash") { actions.emptyTrash() }
+                    .disabled(actions.trashEntries.isEmpty || library.isBulkBusy)
+                    .help("Empty Trash on \(machineFilterTitle)")
+            }
+        }
         // No inspector switch here: it belongs over the column it opens,
         // and `trailingColumn` is what knows where that is.
+    }
+
+    var trashToolbarTargets: [LibraryEntry] {
+        let visible = resolved.apply(to: pool)
+        if let viewing, let entry = entry(viewing, in: visible) { return [entry] }
+        return visible.filter { selection.items.contains($0.id) }
     }
 
     /// Chips offered under the search field as you type -- and the one a

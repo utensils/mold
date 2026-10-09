@@ -9,6 +9,8 @@ import UniformTypeIdentifiers
 struct LibraryActions {
     let hosts: HostStore
     let library: LibraryStore
+    /// Empty Trash follows the pane's machine filter; nil means the whole fleet.
+    var lifecycleHostIDs: Set<MoldHost.ID>? = nil
     /// Set by the pane so a print can seed a new render. Absent in contexts
     /// that have no Generate pane to send it to.
     var reuse: ((LibraryEntry) -> Void)?
@@ -110,7 +112,8 @@ struct LibraryActions {
     func playableURL(for entry: LibraryEntry) async -> URL? {
         guard let backend = hosts.backend(for: entry.hostID) else { return nil }
         do {
-            return try await backend.playableURL(for: entry.print.filename)
+            return try await backend.playableURL(for: entry.print.filename,
+                                                 trashed: entry.print.trashedAt != nil)
         } catch {
             hosts.report(error, on: entry.hostID, doing: "play that clip")
             return nil

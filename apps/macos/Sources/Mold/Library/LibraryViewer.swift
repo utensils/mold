@@ -25,6 +25,7 @@ struct LibraryViewer: View {
     /// Not `private`: the mesh arm lives in `+Mesh` for size.
     @State var placeholder: NSImage?
     @State private var player: AVPlayer?
+    @State private var playbackFile: URL?
     /// Anything being typed into keeps the keyboard for its caret. A key
     /// equivalent is checked BEFORE the focused field sees the key, so every
     /// shortcut this viewer binds stands down while text is being edited --
@@ -70,6 +71,7 @@ struct LibraryViewer: View {
                                  shelves: shelves, enclosingShelf: enclosingShelf,
                                  trashCount: trashCount, open: nil))
         .task(id: entry.id) { await load() }
+        .onDisappear { clearPlayback() }
         .onReceive(NotificationCenter.default.publisher(for: MeshMetalView.claimChanged)) { _ in
             readArrowClaim()
         }
@@ -118,13 +120,17 @@ struct LibraryViewer: View {
 
     private func load() async {
         full = nil
-        player?.pause()
-        player = nil
+        clearPlayback()
 
         if entry.print.isVideo {
             // Streamed, not downloaded: a clip can be hundreds of megabytes
             // and waiting for all of it before the first frame is not playback.
             guard let url = await actions.playableURL(for: entry) else { return }
+            guard !Task.isCancelled else {
+                if url.isFileURL { try? FileManager.default.removeItem(at: url) }
+                return
+            }
+            if url.isFileURL { playbackFile = url }
             let player = AVPlayer(url: url)
             self.player = player
             return
@@ -139,4 +145,11 @@ struct LibraryViewer: View {
         guard !entry.print.isMesh, let data = await actions.data(for: entry) else { return }
         full = NSImage(data: data)
     }
+    private func clearPlayback() {
+        player?.pause()
+        player = nil
+        if let playbackFile { try? FileManager.default.removeItem(at: playbackFile) }
+        playbackFile = nil
+    }
+
 }

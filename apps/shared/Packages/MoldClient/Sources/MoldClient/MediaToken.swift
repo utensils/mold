@@ -44,8 +44,12 @@ public extension HTTPBackend {
     /// keyless answer is the HOST's (`auth_required`), never this Mac's own
     /// configuration.
     func playableURL(for filename: String) async throws -> URL {
+        try await playableURL(for: filename, trashed: false)
+    }
+
+    func playableURL(for filename: String, trashed: Bool) async throws -> URL {
         let urls = MediaURL(baseURL: host.baseURL)
-        let plain = urls.media(filename)
+        let plain = urls.media(filename, trashed: trashed)
         guard host.apiKey?.isEmpty == false else { return plain }
 
         // Signed over the same encoded path `plain` carries, not a hand-built
@@ -53,6 +57,13 @@ public extension HTTPBackend {
         // the server compares against the request's (encoded) path, so the
         // ticket never matched.
         let ticket = try await mediaToken(forPath: urls.mediaPath(filename))
+        // Older relay ticket APIs stage the live route by path alone. Never
+        // play that object for a Trash entry: download the authenticated trash
+        // route, whose request target preserves its view through relay staging.
+        // This file URL is caller-owned and must be removed after playback.
+        if trashed, ticket.url != nil || ticket.relay != nil {
+            return try await mediaFile(filename, trashed: true)
+        }
         if let resolved = try await relayMediaURL(ticket) { return resolved }
         // A host that answers `auth_required: false` is keyless and the
         // direct URL IS the right request there. That is the case this Mac

@@ -51,3 +51,10 @@ baseline; viewer navigation preserves the visit. Badge rows must fit machine
 labels beside playback without overlap, including narrow tiles.
 
 **Visible reuse media.** Restore supported legacy retained roles into ordinary authoring wells before allowing submission, including all endpoint/keyframe and reference-image inputs. Preserve list order, exact frame indices, manual canvas, continuation overlap and explicit reference strength. Retire each materialized or superseded legacy role, including the mask paired with a replaced source; removal must never revive an archived fallback. Fence every asynchronous operation by reuse identity, immutable origin route/instance, per-role monotonic attachment revisions and component lifetime. Scalar edits remain live. Keep restoration failures blocking until deliberate recovery/discard; descriptor-only typed references retain their exact-set authority.
+
+Library machine filters project merged tiles to only the selected hosts before
+presenting or acting on them. Never expand those rows back to fleet copies.
+Trash remains accessible when empty, ignores hidden collections, and resets
+prior browsing filters on entry while preserving the selected hosts. Put Back,
+Delete Immediately and Empty Trash act only on the displayed host scope; Empty
+Trash uses the trash-only endpoint and confirms its destination machines.
