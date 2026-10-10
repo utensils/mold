@@ -14,10 +14,14 @@ public enum SourceFitOptions {
     }
 
     public static func resolve(recipe: GenerationRecipe?, media: DraftMedia) -> [SourceFitMode] {
-        guard let recipe, media.requestConditioning.carriesSource, media.extendVideo == nil,
+        guard let recipe, media.extendVideo == nil,
               recipe.resolution.domain != .sourceDriven, recipe.resolution.hasCanvas else { return [] }
+        let boundary = BoundaryFramePolicy.resolve(capabilities: recipe.capabilities)
+        let carriesBoundary = boundary != nil && (!media.keyframes.isEmpty
+            || (boundary == "h3-endpoints" && media.sourceImage != nil))
+        guard carriesBoundary || media.requestConditioning.carriesSource else { return [] }
         let modes: [SourceFitMode] = [.cropFill, .padFit, .lanczosResize]
-        return recipe.capabilities.acceptsMask && recipe.capabilities.readsSourceImage
+        return !carriesBoundary && recipe.capabilities.acceptsMask && recipe.capabilities.readsSourceImage
             ? [.padRepaint] + modes : modes
     }
 }

@@ -157,6 +157,70 @@ final class GenerationInteractionTests: XCTestCase {
         capture(app)
     }
 
+    @MainActor func testAppearanceChangesLiveAndPersistsAcrossLaunch() throws {
+        let app = launch()
+        defer { app.terminate() }
+        app.buttons["Settings"].firstMatch.tap()
+        let picker = app.descendants(matching: .any)["appearance-picker"].firstMatch
+        XCTAssertTrue(picker.waitForExistence(timeout: 5))
+        @discardableResult func choose(_ title: String, dark: Bool?) throws -> Double {
+            picker.tap()
+            let choice = app.buttons.matching(NSPredicate(format: "label == %@", title)).firstMatch
+            XCTAssertTrue(choice.waitForExistence(timeout: 5), app.debugDescription)
+            choice.tap()
+            XCTAssertTrue(picker.label.contains(title) || (picker.value as? String)?.contains(title) == true,
+                          "Appearance choice must be visible: \(picker.label), \(picker.value ?? "")")
+            let brightness = try assertAppearancePixels(app, scope: picker.frame, dark: dark)
+            let shot = XCTAttachment(screenshot: app.screenshot())
+            shot.name = "Settings appearance \(title)"; shot.lifetime = .keepAlways; add(shot)
+            return brightness
+        }
+        // Record the actual system palette; this test runs in both appearances.
+        let systemBrightness = try choose("System", dark: nil)
+        try choose("Dark", dark: true)
+        app.buttons["Done"].firstMatch.tap()
+        try assertAppearancePixels(app, scope: app.navigationBars.firstMatch.frame, dark: true, fraction: 0.25)
+        app.terminate(); app.launch()
+        XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
+        app.buttons["Settings"].firstMatch.tap()
+        XCTAssertTrue(picker.waitForExistence(timeout: 5))
+        XCTAssertTrue(picker.label.contains("Dark") || (picker.value as? String)?.contains("Dark") == true)
+        try assertAppearancePixels(app, scope: picker.frame, dark: true)
+        try choose("Light", dark: false)
+        app.buttons["Done"].firstMatch.tap()
+        try assertAppearancePixels(app, scope: app.navigationBars.firstMatch.frame, dark: false, fraction: 0.25)
+        app.buttons["Settings"].firstMatch.tap()
+        XCTAssertTrue(picker.waitForExistence(timeout: 5))
+        let resetBrightness = try choose("System", dark: nil)
+        XCTAssertEqual(resetBrightness, systemBrightness, accuracy: 0.1,
+                       "System must restore the device palette")
+        app.buttons["Done"].firstMatch.tap()
+    }
+
+    @MainActor @discardableResult private func assertAppearancePixels(
+        _ app: XCUIApplication, scope: CGRect, dark: Bool?, fraction: CGFloat = 0.5
+    ) throws -> Double {
+        // Sample the blank center between a Form row's label/value, or the
+        // navigation bar's left padding. Canonical RGBA avoids PNG byte-order assumptions.
+        let image = try XCTUnwrap(app.screenshot().image.cgImage)
+        let scale = CGFloat(image.width) / app.frame.width
+        let context = try XCTUnwrap(CGContext(data: nil, width: image.width, height: image.height,
+            bitsPerComponent: 8, bytesPerRow: image.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        let rgba = try XCTUnwrap(context.data).assumingMemoryBound(to: UInt8.self)
+        let point = CGPoint(x: scope.minX + scope.width * fraction, y: scope.midY)
+        let x = min(image.width - 1, max(0, Int(point.x * scale)))
+        let y = min(image.height - 1, max(0, Int(point.y * scale)))
+        let offset = (y * image.width + x) * 4
+        let brightness = (Double(rgba[offset]) + Double(rgba[offset + 1]) + Double(rgba[offset + 2])) / 765
+        if let dark {
+            if dark { XCTAssertLessThan(brightness, 0.4, "Dark surface must paint dark pixels") }
+            else { XCTAssertGreaterThan(brightness, 0.7, "Light surface must paint light pixels") }
+        }
+        return brightness
+    }
+
     @MainActor func testSettingsPresentationAndAddMachineRoute() throws {
         let app = launch()
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))

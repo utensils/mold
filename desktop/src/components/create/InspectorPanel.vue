@@ -428,6 +428,8 @@ const {
   // whose request cannot carry that image. Switching back recomputes these
   // controls from the retained dimensions without destructive cleanup.
   supportsSourceImage: () => caps.value.supportsSourceImage,
+  sourceImageMode: () => caps.value.sourceImageMode,
+  supportsEndFrame: () => caps.value.supportsEndFrame,
   onCanvasIntent: (intent) => emit("canvas-intent", intent),
 });
 const resolutionWarning = computed(() =>

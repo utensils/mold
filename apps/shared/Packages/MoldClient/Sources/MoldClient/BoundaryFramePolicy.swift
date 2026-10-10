@@ -58,11 +58,9 @@ public enum BoundaryFramePolicy {
         capabilities: RecipeCapabilities, recipe: GenerationRecipe? = nil
     ) {
         guard let wire = resolve(capabilities: capabilities) else { return }
-        let previousFirst = image(first: true, draft: draft, capabilities: capabilities)
-        if first, let picture, let pixels = ReferenceCanvas.uprightPixels(ofBase64: picture.encoded) {
-            draft.attachSourceShape((pixels.width, pixels.height), recipe: recipe,
-                                    replaced: previousFirst != picture.encoded)
-        }
+        let attachedEndpoint = image(first: first, draft: draft, capabilities: capabilities)
+        let previousEndpoint = first && wire == "h3-endpoints" && attachedEndpoint != nil
+            ? draft.media.sourceImageOriginal ?? attachedEndpoint : attachedEndpoint
         if first && wire == "h3-endpoints" {
             draft.media.sourceImage = picture?.encoded
             draft.media.sourceImageName = picture?.name
@@ -81,6 +79,27 @@ public enum BoundaryFramePolicy {
             }
         }
         apply(to: &draft, capabilities: capabilities)
+        if let driver = canvasImage(draft: draft, capabilities: capabilities),
+           let pixels = ReferenceCanvas.uprightPixels(ofBase64: driver) {
+            // Removing an endpoint transfers an automatic canvas to the remaining
+            // endpoint, but preserves a manually authored canvas. A new driver
+            // attachment re-arms sizing just like a new ordinary source picture.
+            let drivesCanvas = first || image(first: true, draft: draft, capabilities: capabilities) == nil
+            draft.attachSourceShape((pixels.width, pixels.height), recipe: recipe,
+                                    replaced: drivesCanvas && picture?.encoded == driver && previousEndpoint != driver)
+        }
+    }
+
+    /// First has priority; a closing frame supplies the shape when first is absent.
+    public static func canvasImage(draft: RenderDraft, capabilities: RecipeCapabilities) -> String? {
+        guard resolve(capabilities: capabilities) != nil else { return nil }
+        if let first = image(first: true, draft: draft, capabilities: capabilities) {
+            // The ordinary source may already be crop-fitted for submission.
+            // Its original shape remains the canvas authority across recipes.
+            return resolve(capabilities: capabilities) == "h3-endpoints"
+                ? draft.media.sourceImageOriginal ?? first : first
+        }
+        return image(first: false, draft: draft, capabilities: capabilities)
     }
 
     public static func refusal(draft: RenderDraft, capabilities: RecipeCapabilities) -> String? {

@@ -101,7 +101,11 @@ public extension RenderDraft {
         // defaults above, which is exactly the write studio's watcher
         // re-resolves after (`sourceResolution.ts:50-59`) -- without this the
         // canvas went square on the first model switch and stayed there.
-        if draft.canvasIntent.followsSource, let pixels = draft.media.sourceImagePixels {
+        let sourcePixels = BoundaryFramePolicy.resolve(capabilities: capabilities) != nil
+            ? BoundaryFramePolicy.canvasImage(draft: draft, capabilities: capabilities)
+                .flatMap { ReferenceCanvas.uprightPixels(ofBase64: $0) }
+            : draft.media.sourceImagePixels
+        if draft.canvasIntent.followsSource, let pixels = sourcePixels {
             draft.attachSourceShape((pixels.width, pixels.height),
                                     recipe: recipe, replaced: false)
         }

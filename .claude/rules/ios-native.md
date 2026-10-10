@@ -6,6 +6,14 @@ paths:
 
 # Mold Studio Companion (apps/ios) and the shared Swift packages (apps/shared)
 
+**Appearance.** Settings offers System, Light and Dark through the local
+`appearance` AppStorage preference. The app root's AppearanceWindow probe applies
+UIKit's window override to root content and every presented sheet. System explicitly
+clears it to `.unspecified`, so iOS owns the palette again; never sample the overridden
+window's traits to infer the device setting. SwiftUI `preferredColorScheme(nil)` can
+leave a presented sheet holding its old explicit palette. Keep selection persistence,
+live sheet/root changes and returning to System on both device palettes covered by native tests.
+
 **Temporary build-first delivery (2026-10-06, owner request).** Hosted native
 accessibility CI is physically commented out in `ios-native.yml`; its matrix and
 local audits remain available unchanged. The CI lane compiles the native app
@@ -57,7 +65,7 @@ exact frame equality and all containment checks.
 
 **Notification presentation and refresh cancellation.** Use the system notification banner (the app bundle supplies AppIcon), concise completion copy, and no prompt or media attachment. Preserve print/queue links and per-batch deduplication. Notification delegates implement the explicit completion-handler API: extract payload strings off-actor, then route and invoke completion on MainActor. The nonisolated async delegate bridge completes on a cooperative thread and crashes UIKit notification activation/state restoration ("Call must be made on main thread"). Test the Objective-C callback from a background queue, including its completion thread, and actual Notification Center taps after backgrounding and cold launch; an onOpenURL-only test misses this boundary. Dismissed and unknown actions complete without navigation. A cancelled Library listing is routine lifecycle/event coalescing, not a host failure; keep loaded prints and never report it in FailureBanner. Genuine listing failures remain visible.
 
-**Generation option parity.** BoundaryFramePolicy receives the recipe when attaching an endpoint: only the first frame re-arms source-driven closest-aspect sizing; the closing frame never changes the canvas. Test the real attachment path for Wan and H3, plus the iOS top-level aspect menu selection. Aspect menu icons draw the ratio of the offered dimensions rather than a generic rectangle. SourceFitOptions and SourceFitRender in MoldClient are shared native authorities. iOS fits a submission snapshot from original source bytes before admission; its painted mask is in source space and must follow the same transform (macOS masks remain canvas-space). Source-driven, parked reference-only and continuation inputs bypass fitting. Random seeds are the untouched default; Fixed is explicit and Reset restores Random plus centered crop-fill.
+**Generation option parity.** BoundaryFramePolicy receives the recipe when attaching an endpoint: the first frame owns source-driven closest-aspect sizing while present; otherwise the closing frame owns it. New driving endpoint attachments re-arm sizing; removing the first transfers automatic sizing to the last, while manual/reuse canvas choices survive removal and recipe adoption. Neither endpoint means no invented dimensions. Test the real attachment path for Wan and H3, plus the iOS top-level aspect menu selection. Aspect menu icons draw the ratio of the offered dimensions rather than a generic rectangle. SourceFitOptions and SourceFitRender in MoldClient are shared native authorities. iOS fits a submission snapshot from original source bytes before admission; its painted mask is in source space and must follow the same transform (macOS masks remain canvas-space). Source-driven, parked reference-only and continuation inputs bypass fitting. Random seeds are the untouched default; Fixed is explicit and Reset restores Random plus centered crop-fill.
 
 **Hidden collections.** Library queries include host-local hidden membership ids and check every merged copy, so a local lead cannot expose a hidden remote member. Hidden shelves remain directly browsable. Library View Options offers Manage Collections on phone and iPad; its Hide from All Prints toggle updates every machine holding that shelf and surfaces failures through HostStore.
 

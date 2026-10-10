@@ -156,6 +156,79 @@ describe("GenerateView source-fit submit path", () => {
     document.body.innerHTML = "";
   });
 
+  it("follows the last H3 boundary after removing first and replacing last", async () => {
+    const h3 = {
+      ...model,
+      name: "minimax-h3-fl2va:comfy-pruned-int8",
+      family: "minimax-h3",
+      recommended_dimensions: [
+        { width: 1344, height: 768 },
+        { width: 768, height: 1344 },
+        { width: 1024, height: 1024 },
+      ],
+    } as ModelEntry;
+    apiJsonTo.mockResolvedValue([h3]);
+    useModelStore().all = [h3];
+    const form = useGenerateFormStore().form;
+    form.model = h3.name;
+    form.family = h3.family;
+    form.width = 1344;
+    form.height = 768;
+    const wrapper = mount(GenerateView, { shallow: true, attachTo: document.body });
+    await flushPromises();
+    const boundary = (data: string, width: number, height: number) => ({
+      data,
+      width,
+      height,
+      filename: "frame.png",
+      mimeType: "image/png",
+    });
+    form.h3Authoring = {
+      firstFrame: boundary("FIRST", 1920, 1080),
+      lastFrame: boundary("LAST", 1080, 1920),
+      references: [],
+    };
+    await flushPromises();
+    expect([form.width, form.height]).toEqual([1344, 768]);
+    form.h3Authoring.firstFrame = null;
+    await flushPromises();
+    expect([form.width, form.height]).toEqual([768, 1344]);
+    form.h3Authoring.lastFrame = boundary("REPLACED", 1000, 1000);
+    await flushPromises();
+    expect([form.width, form.height]).toEqual([1024, 1024]);
+    form.h3Authoring.firstFrame = boundary("FIRST_AGAIN", 1920, 1080);
+    await flushPromises();
+    wrapper.findComponent({ name: "InspectorPanel" }).vm.$emit("canvas-intent", "manual");
+    form.width = 900;
+    form.height = 600;
+    form.h3Authoring.lastFrame = boundary("PARKED_CHANGE", 1080, 1920);
+    await flushPromises();
+    expect([form.width, form.height]).toEqual([900, 600]);
+    form.h3Authoring.firstFrame = null;
+    await flushPromises();
+    expect([form.width, form.height]).toEqual([900, 600]);
+    form.model = model.name;
+    form.family = model.family;
+    await flushPromises();
+    expect([form.width, form.height]).toEqual([900, 600]);
+    form.model = h3.name;
+    form.family = h3.family;
+    await flushPromises();
+    expect([form.width, form.height]).toEqual([900, 600]);
+    form.h3Authoring.lastFrame = boundary("EXPLICIT", 1000, 1000);
+    await flushPromises();
+    expect([form.width, form.height]).toEqual([1024, 1024]);
+    form.h3Authoring.lastFrame = null;
+    await flushPromises();
+    expect([form.width, form.height]).toEqual([1024, 1024]);
+    wrapper.findComponent({ name: "InspectorPanel" }).vm.$emit("canvas-intent", "manual");
+    form.width = 900;
+    form.height = 600;
+    form.h3Authoring.lastFrame = boundary("FRESH", 1080, 1920);
+    await flushPromises();
+    expect([form.width, form.height]).toEqual([768, 1344]);
+  });
+
   it("preserves an attached source and its fit policy when Create remounts", async () => {
     const form = primeForm();
     form.sourceImageName = "camera.png";

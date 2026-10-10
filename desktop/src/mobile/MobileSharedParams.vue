@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { canvasSource, canvasSourceDimensions } from "@studio/lib/canvasSource";
 /*
  * The generation params the Create stack reads: size, steps, guidance, and
  * seed. Extracted so the primary form and the Advanced sheet render the
@@ -204,11 +205,20 @@ const targetFacesError = computed(() =>
 );
 
 const sourceDimensions = computed(() =>
-  props.form.sourceImageWidth && props.form.sourceImageHeight
-    ? {
-        width: props.form.sourceImageWidth,
-        height: props.form.sourceImageHeight,
-      }
+  guidanceCaps.value.supportsSourceImage
+    ? canvasSourceDimensions(
+        canvasSource({
+          mode: guidanceCaps.value.sourceImageMode,
+          supportsEndFrame: guidanceCaps.value.supportsEndFrame,
+          source: {
+            base64: props.form.sourceImage ?? "",
+            width: props.form.sourceImageWidth,
+            height: props.form.sourceImageHeight,
+          },
+          end: props.form.endFrame,
+          h3: props.form.h3Authoring,
+        }),
+      )
     : null,
 );
 const quality = computed(() => qualityPresets(stepsControl.value));

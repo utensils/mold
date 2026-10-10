@@ -34,6 +34,7 @@ struct MoreOptionsSheet: View {
                     Text("Choose a model first.").foregroundStyle(.secondaryText)
                 }
             }
+            .accessibilityIdentifier("generation-options-form")
             .navigationTitle("More Options")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

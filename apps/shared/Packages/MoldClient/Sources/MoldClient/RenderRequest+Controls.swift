@@ -54,10 +54,13 @@ extension RenderRequest {
     static func applySourceFit(
         _ draft: RenderDraft, to request: inout GenerateRequest, carriesSource: Bool
     ) {
-        guard carriesSource else { request.sourceFit = nil; return }
+        let carriesBoundary = draft.media.adoptedReferenceCapabilities
+            .flatMap { BoundaryFramePolicy.resolve(capabilities: $0) } != nil
+            && !draft.media.keyframes.isEmpty
+        guard carriesSource || carriesBoundary else { request.sourceFit = nil; return }
         // The defensive half. The adopt above has already coerced it, so
         // this can only ever agree -- which is the point of a belt.
-        request.sourceFit = draft.media.acceptsMask
+        request.sourceFit = !carriesBoundary && draft.media.acceptsMask
             ? draft.media.sourceFit : draft.media.sourceFit.coercedForMaskless()
     }
 

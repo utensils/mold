@@ -769,7 +769,13 @@ function setSourceFitMode(e: Event) {
          canvasless recipe (a 3-D mesh) has no canvas to fit onto. On an
          exclusive recipe these belong to the Source well, so they render
          only while it is the active one. -->
-    <template v-if="sourceRefinements && form.sourceImage && !caps.canvasless">
+    <template
+      v-if="
+        sourceRefinements &&
+        (form.sourceImage || (caps.supportsEndFrame && form.endFrame)) &&
+        !caps.canvasless
+      "
+    >
       <label class="mt-3 block text-micro text-fg-2" for="source-fit-policy">Source fit</label>
       <select
         id="source-fit-policy"

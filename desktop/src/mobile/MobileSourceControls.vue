@@ -903,9 +903,11 @@ function applyMask(mask: string): void {
         @gallery="openSingleSourcePicker"
         @clear="clearSingleSource"
       />
-      <template v-if="sourceRefinements && form.sourceImage">
+      <template
+        v-if="sourceRefinements && (form.sourceImage || (caps.supportsEndFrame && form.endFrame))"
+      >
         <!-- Wan pins the first frame exactly and never reads strength. -->
-        <label v-if="caps.supportsStrength" class="mobile-range-field">
+        <label v-if="caps.supportsStrength && form.sourceImage" class="mobile-range-field">
           <span
             >{{ strength.label }} <output>{{ form.strength.toFixed(2) }}</output></span
           >
@@ -921,7 +923,11 @@ function applyMask(mask: string): void {
         </label>
         <!-- The direction is the whole point of the hint, and a `title` is
              invisible on a phone: there is no pointer to hover with. -->
-        <p v-if="!canvasless" class="mobile-source-note" data-test="mobile-source-strength-hint">
+        <p
+          v-if="!canvasless && form.sourceImage"
+          class="mobile-source-note"
+          data-test="mobile-source-strength-hint"
+        >
           {{ strength.hint }}
         </p>
 

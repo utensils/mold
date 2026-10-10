@@ -669,7 +669,12 @@ function clearControl() {
         </template>
       </div>
 
-      <template v-if="sourceRefinements && hasSource">
+      <template
+        v-if="
+          sourceRefinements &&
+          (hasSource || (caps.supportsEndFrame && modelValue.endFrame))
+        "
+      >
         <!-- A canvasless recipe (a 3-D mesh) has no canvas to fit onto, and
              `toRequest` sends no `source_fit` for one. -->
         <div v-if="!caps.canvasless" class="smp__field">
@@ -682,7 +687,7 @@ function clearControl() {
           />
         </div>
         <SliderRow
-          v-if="caps.supportsStrength"
+          v-if="caps.supportsStrength && hasSource"
           :label="strength.label"
           :model-value="modelValue.strength"
           :min="0"
@@ -691,11 +696,11 @@ function clearControl() {
           :value-label="modelValue.strength.toFixed(2)"
           @update:model-value="patch({ strength: $event })"
         />
-        <p v-if="caps.supportsStrength" class="smp__hint">
+        <p v-if="caps.supportsStrength && hasSource" class="smp__hint">
           {{ strength.hint }}
         </p>
         <button
-          v-if="caps.supportsMask"
+          v-if="caps.supportsMask && hasSource"
           type="button"
           class="smp__mask"
           data-test="source-mask"

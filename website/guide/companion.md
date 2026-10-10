@@ -134,6 +134,10 @@ Share** card in Generate finishes the job.
 
 ## Text size and accessibility
 
+In native iOS Settings, **Display → Appearance** offers **System**, **Light** and
+**Dark**. System follows iOS and is the default. Your choice applies immediately
+and is remembered when you reopen the app.
+
 Every screen is audited from the smallest text size to the largest
 accessibility size, in light and dark, on iPhone and iPad. Rows that put a
 label beside a value stack at accessibility sizes instead of truncating, and

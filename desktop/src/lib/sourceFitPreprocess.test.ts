@@ -3,6 +3,7 @@ import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import type { Rect, SourceFitPolicy, SourceFitTransform } from "@studio/lib/sourceFit";
 import {
   applyH3BoundaryFit,
+  applyEndpointFrameFit,
   applySourceFitPreprocess,
   drawableFitPolicy,
   type SourceFitCanvasOps,
@@ -359,6 +360,26 @@ describe("applyH3BoundaryFit", () => {
     expect(ops.maskCalls).toHaveLength(0);
   });
 
+  it("fits a last-only boundary without mutating the staged image", async () => {
+    const ops = fakeOps({ width: 720, height: 1280 });
+    const state = { firstFrame: null, lastFrame: boundary("last.jpg", "LAST"), references: [] };
+    const next = await applyH3BoundaryFit(state, { mode: "crop-fill" }, TARGET, { ops });
+    expect(next?.firstFrame).toBeNull();
+    expect(next?.lastFrame).toMatchObject({
+      data: "fit(LAST)",
+      width: TARGET.width,
+      height: TARGET.height,
+      sha256: null,
+    });
+    expect(state.lastFrame).toMatchObject({
+      data: "LAST",
+      width: 720,
+      height: 1280,
+      sha256: "a".repeat(64),
+    });
+    expect(ops.maskCalls).toHaveLength(0);
+  });
+
   it("leaves an already-sized boundary and its provenance untouched", async () => {
     const ops = fakeOps(TARGET);
     const state = {
@@ -382,5 +403,21 @@ describe("applyH3BoundaryFit", () => {
     expect(await applyH3BoundaryFit(stripped, { mode: "crop-fill" }, TARGET, { ops })).toBe(
       stripped,
     );
+  });
+});
+
+describe("applyEndpointFrameFit", () => {
+  it("fits both ordinary endpoints maskless without changing staged bytes", async () => {
+    const ops = fakeOps({ width: 720, height: 1280 });
+    const end = { filename: "last.jpg", base64: "LAST" };
+    const next = await applyEndpointFrameFit("FIRST", end, { mode: "pad-repaint" }, TARGET, {
+      ops,
+    });
+    expect(next).toEqual({
+      source: "fit(FIRST)",
+      end: { filename: "last.jpg", base64: "fit(LAST)" },
+    });
+    expect(end.base64).toBe("LAST");
+    expect(ops.maskCalls).toHaveLength(0);
   });
 });

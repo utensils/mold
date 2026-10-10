@@ -446,7 +446,8 @@ button.
 - **About:** version, acknowledgements, and a privacy policy link that opens
   `https://utensils.io/mold/privacy` in the browser.
 
-There is no Appearance setting; the system decides. Advanced config editing
+Appearance offers System (default), Light and Dark. The local choice persists and
+applies to every app window and presented sheet; System follows iOS. Advanced config editing
 stays on the Mac.
 
 ### 5.7 Live Activity and Dynamic Island

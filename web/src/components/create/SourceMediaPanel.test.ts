@@ -104,6 +104,14 @@ describe("SourceMediaPanel — per-model source-image contract (#772)", () => {
     );
   }
 
+  it("keeps Fit to canvas visible with only an ordinary closing frame", () => {
+    const wrapper = wan("optional", {
+      endFrame: { kind: "upload", filename: "last.png", base64: "LAST" },
+    });
+    expect(wrapper.text()).toContain("Fit to canvas");
+    expect(wrapper.text()).toContain("Crop to fill");
+  });
+
   it("keeps today's source well when the server advertises nothing", () => {
     const wrapper = wan(undefined);
     expect(wrapper.find("[data-test='source-media-panel']").exists()).toBe(
@@ -365,6 +373,31 @@ describe("SourceMediaPanel — MiniMax H3 FL2VA boundaries", () => {
 
     await wrapper.get("[data-test='source-gallery']").trigger("click");
     expect(wrapper.emitted("open-h3-first-frame-picker")).toHaveLength(1);
+  });
+
+  it("shows Crop fill for a last-only H3 boundary", () => {
+    const open = { ...fl2va, source_image: "optional" } as ModelInfoExtended;
+    const wrapper = factory(
+      "minimax-h3",
+      {
+        model: open.name,
+        modelFamily: open.family,
+        h3Authoring: {
+          firstFrame: null,
+          lastFrame: {
+            data: "LAST",
+            filename: "last.png",
+            mimeType: "image/png",
+            width: 720,
+            height: 1280,
+          },
+          references: [],
+        },
+      },
+      { models: [open] },
+    );
+    expect(wrapper.text()).toContain("Fit to canvas");
+    expect(wrapper.text()).toContain("Crop to fill");
   });
 
   it("offers both boundary wells when no endpoint is required", async () => {

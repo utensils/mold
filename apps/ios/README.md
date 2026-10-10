@@ -268,11 +268,15 @@ machine's entire history, including prompts hidden by search.
 
 ### References and boundary frames
 
+The **Boundary frames** fit controls remain available with only the last frame
+attached. **Crop to fill** is the default; crop, pad and resize apply to the
+submitted endpoints while preserving the original attachments for later edits.
+
 Both native apps expose the server's reference contracts. MiniMax H3 **Ref2VA** takes an ordered mixture of images, H.264 MP4 clips and mono/stereo PCM WAV audio; image references can come from Photos/Camera/Library/Share on iOS or Finder/Library/Paste on macOS, and movie/audio files use Files/Finder. Replace, remove and reorder attachments before generating. Use `image 1`, `video 1` and `audio 1` in the prompt (numbered within each media kind). Audio references need at least one visual reference. The limits are nine images, three videos, three audio files and twelve files total; each clip is 2–15 seconds, with at most 15 seconds of video and 15 seconds of audio including video soundtracks. Authenticated hosts use request-bound upload sessions; keyless hosts accept at most 32 MiB of inline reference media per render. Video clips with sound require authenticated uploads so the server can supply exact decoded soundtrack counts; on keyless hosts use a silent MP4 plus separate PCM WAV audio. Unsupported or oversized files report an error instead of silently disappearing.
 
 Hunyuan3D multiview models offer named Front/Left/Back/Right wells from their recipe. Wan offers a first/last pair rather than arbitrary middle frames; MiniMax **FL2VA** offers separate optional first/last frames. Changing clip length updates the closing frame. Existing Qwen Edit, Qwen Image 2.1 and Flux.2 reference strips honor their source-image relation and count limits; processing pixel budgets automatically resize references in the engine and never require a manual resize. The last Qwen Image 2.1 reference updates the default canvas until you choose a size. SD1.5/SDXL reference weight comes from the model's own control. Model changes park unsupported attachments so they can return. Reuse restores retained typed references with fresh media authority while their original set and order stay unchanged. Changing retained slots requires reattaching the remaining originals; archived bytes never overwrite new attachments. Imported mesh texture/roundtrip workflows remain API/CLI-only.
 
-Attaching a first/start frame selects the closest supported aspect ratio from that image; adding a closing frame preserves it. Crop to fill is the default. The iOS aspect menu marks its current selection with a checkmark.
+Boundary frames select the closest supported aspect ratio from the first frame while it is present, or from the last frame when the first is empty. Removing the first transfers automatic sizing to the last; replacing the driving endpoint updates it again. Manual and reused canvas sizes survive removal. Crop to fill is the default. The iOS aspect menu marks its current selection with a checkmark.
 
 ## Access and saving to Photos
 
@@ -309,6 +313,12 @@ Queue rows show the owning machine’s sealed conditioning images across models.
 Library New badges and unread counts are saved on each client independently. Newly discovered media stays new until that client displays it in the viewer; opening Library, changing filters, refreshing, and preparing neighboring pages do not clear it. Counts and badges deduplicate merged copies and exclude hidden collections and Trash. Existing read status is preserved during upgrade, and a newly connected machine establishes a historical baseline; subsequent arrivals require individual viewing. Native iOS also badges its Images navigation. Native app-icon counts follow the same local history, subject to the existing badge preference or permission. iOS refreshes while active and opportunistically in the background; the server has no push.
 
 On iOS, Use These Settings replaces all active and parked attachments with the selected print’s media. Retained archives restore from the owning machine or another available copy; unavailable conditioning blocks Generate until restored, reattached or explicitly removed. Retry retained media after reconnecting. Late replies cannot replace a newer reuse or revive a source added and removed during restoration.
+
+## Appearance
+
+Settings → Display → Appearance offers **System**, **Light** and **Dark**. System
+is the default and follows iOS. The choice applies immediately to the app and
+presented sheets, persists across launches, and is local to this device.
 
 ## Error messages
 

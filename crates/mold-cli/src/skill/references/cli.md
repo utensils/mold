@@ -759,6 +759,10 @@ model settings or source attachments.
 
 Native iOS and macOS authoring reads the same reference authority: `generation_references` describes H3 Ref2VA typed media, `boundary_frames` describes H3 FL2VA/Wan endpoint wire shapes, and `mesh.named_views` describes semantic camera roles. `reference_images` still describes only `edit_images`. Do not send MiniMax typed inputs through `edit_images`. Native upload leases are ephemeral and per request; keyless inline references remain limited to 32 MiB. Native texture/roundtrip mesh workflow authoring remains intentionally API/CLI-only.
 
+In graphical first/last-frame authoring, automatic canvas sizing follows the first frame when present and the last frame otherwise. Removing the first frame or replacing a last-only frame selects the remaining image's closest supported aspect. This does not relax the recipe's required-frame rules or change explicit CLI dimensions.
+
+Graphical endpoint fitting defaults to Crop to Fill and remains available for last-only inputs. Fit the outgoing endpoint snapshot, preserving frame roles and original editor attachments; boundary endpoints never acquire repaint masks.
+
 Native Mac shipping builds include the reviewed Metal H3 runtime. Remote rendering reads the selected machine’s capabilities. Retained native Mac recipes preserve unchanged typed references across ordinary edits and repeated renders and verify byte-free origin identities on relaunch. The authenticated `GET /api/gallery/source-media/:filename/:member_id/thumbnail` returns a bounded private image preview; preview bytes never grant generation authority.
 
 Gallery host copies include retained conditioning independently of model family,

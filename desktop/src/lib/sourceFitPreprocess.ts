@@ -150,3 +150,24 @@ export async function applyH3BoundaryFit(
   }
   return next;
 }
+
+/** Fit ordinary first/last endpoints on the immutable submission draft. */
+export async function applyEndpointFrameFit<T extends { base64: string }>(
+  source: string | null,
+  end: T | null,
+  policy: SourceFitPolicy,
+  target: { width: number; height: number },
+  deps: Parameters<typeof applySourceFitPreprocess>[1],
+): Promise<{ source: string | null; end: T | null }> {
+  const fit = async (base64: string) => {
+    const result = await applySourceFitPreprocess(
+      { source: base64, mask: null, policy: coerceSourceFitForMaskless(policy), target },
+      deps,
+    );
+    return result.source ?? base64;
+  };
+  return {
+    source: source ? await fit(source) : null,
+    end: end ? { ...end, base64: await fit(end.base64) } : null,
+  };
+}

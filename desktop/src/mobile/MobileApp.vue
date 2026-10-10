@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { canvasSource } from "@studio/lib/canvasSource";
 import { PromptClearRecovery } from "@studio/lib/promptClearRecovery";
 import {
   missingQueueModel,
@@ -2259,6 +2260,49 @@ function preserveRestoredSourceCanvas(base64: string) {
   canvasIntent.value = "manual";
 }
 
+const activeCanvasSource = computed(() =>
+  canvasSource({
+    mode: caps.value.sourceImageMode,
+    supportsEndFrame: caps.value.supportsEndFrame,
+    source:
+      requestConditioning.value === "references"
+        ? { base64: form.imageAttachments[0] ?? "" }
+        : {
+            base64: form.sourceImage ?? "",
+            width: form.sourceImageWidth,
+            height: form.sourceImageHeight,
+          },
+    end: form.endFrame,
+    h3: form.h3Authoring,
+  }),
+);
+let previousClosingCanvasSource = "";
+let canvasSourceInitialized = false;
+let previousCanvasRecipe = "";
+function preserveBoundaryRemovalCanvas() {
+  const closing =
+    caps.value.sourceImageMode === "h3-boundaries"
+      ? (form.h3Authoring?.lastFrame?.data ?? "")
+      : caps.value.supportsEndFrame
+        ? (form.endFrame?.base64 ?? "")
+        : "";
+  const selected = activeCanvasSource.value?.base64 ?? "";
+  const recipe = `${form.model}:${form.pipeline ?? ""}`;
+  // Removal preserves a manual canvas; deliberate replacement rearms it.
+  if (
+    canvasIntent.value === "manual" &&
+    selected &&
+    (!canvasSourceInitialized ||
+      recipe !== previousCanvasRecipe ||
+      (selected === closing && previousStillSource && closing === previousClosingCanvasSource))
+  ) {
+    preservedSourceReplacement = selected;
+  }
+  previousClosingCanvasSource = closing;
+  canvasSourceInitialized = true;
+  previousCanvasRecipe = recipe;
+}
+
 function applyMobileSourceResolution(
   base64: string | null,
   previous: {
@@ -2282,7 +2326,9 @@ function applyMobileSourceResolution(
   const dimensions =
     base64 === previous.base64 && previous.resolution
       ? previous.resolution.source
-      : imageDimensionsFromBase64(base64);
+      : activeCanvasSource.value?.width && activeCanvasSource.value.height
+        ? { width: activeCanvasSource.value.width, height: activeCanvasSource.value.height }
+        : imageDimensionsFromBase64(base64);
   if (!dimensions) {
     setDimensions(null, null);
     return { base64, resolution: null, automaticResolution: null };
@@ -2352,10 +2398,9 @@ function restoreReusedPrintCanvas(metadata: OutputMetadata): void {
 
 watch(
   [
-    () =>
-      requestConditioning.value === "references"
-        ? (form.imageAttachments[0] ?? null)
-        : form.sourceImage,
+    () => activeCanvasSource.value?.base64 ?? null,
+    () => `${activeCanvasSource.value?.width ?? ""}x${activeCanvasSource.value?.height ?? ""}`,
+    () => form.h3Authoring?.lastFrame?.data ?? form.endFrame?.base64 ?? "",
     () => selectedGenerationModel.value?.name ?? form.model,
     () => form.pipeline ?? null,
     () => selectedGenerationModel.value?.generation_profile?.profile_hash ?? null,
@@ -2368,6 +2413,7 @@ watch(
         .join("|") ?? "",
   ],
   ([base64]) => {
+    preserveBoundaryRemovalCanvas();
     const replaced = Boolean(base64 && base64 !== previousStillSource);
     const next = applyMobileSourceResolution(
       base64,
@@ -2377,8 +2423,10 @@ watch(
         automaticResolution: previousStillAutomaticResolution,
       },
       (width, height) => {
-        form.sourceImageWidth = width;
-        form.sourceImageHeight = height;
+        if (activeCanvasSource.value?.base64 === form.sourceImage) {
+          form.sourceImageWidth = width;
+          form.sourceImageHeight = height;
+        }
       },
     );
     previousStillSource = next.base64;
@@ -8897,6 +8945,8 @@ async function restoreOrdinaryReusedSource(
       if (result) {
         authoritativeReuseApply = true;
         Object.assign(form, result.patch);
+        const restored = activeCanvasSource.value;
+        if (restored) preserveRestoredSourceCanvas(restored.base64);
         retainedSourceAuthority.setIfCurrent(retainedVersion, {
           filename: print.filename,
           origin: print.target,

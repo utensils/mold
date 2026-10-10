@@ -108,3 +108,17 @@ inject thumbnail loaders. Native iOS omits the visual host-name thumbnail badge;
 Info and host sorting/filtering retain their authority. Unseen semantics are unchanged.
 
 PromptEditor is a live editor of the existing composer prompt, never a second persisted draft. Route typed/recalled/clear/undo-clear through the owning authoring handler. Immediate Clear recovery is per composer and preserves rewrite state while clearing wire originalPrompt; later edits/history retire recovery. Large-editor arrows remain ordinary text navigation and generation shortcuts must not escape to the shell, including native menu intents. Full-viewport editor is explicitly teleported outside positioned composers; it sits below nested rewrite modals and uses overlay-stack transitions for focus return. Keep phone editable text at least 16px, 44px action targets, visualViewport height/offset, scroll locking and opener restoration. Capability-ignored prompts have no editing door.
+
+Boundary-frame canvas authority is shared by `studio/lib/canvasSource.ts`.
+For a recipe exposing first/last frames, first drives automatic canvas aspect;
+last drives it when first is absent. Dedicated H3 endpoint state follows the
+same rule. Removing all endpoints retains the current canvas. Removing first
+preserves a manual canvas, while explicitly attaching/replacing an endpoint
+rearms automatic selection; reuse and restored drafts retain their authored
+canvas. Shape controls and Match source read the same effective endpoint.
+
+Boundary fit controls stay visible with either endpoint attached. Fit both
+first/last endpoints on the frozen request before serialization; coerce repaint
+policies maskless, preserve endpoint indices/names, and retain original staged
+image bytes. H3 dedicated boundaries and ordinary capability-qualified endpoints
+use the same canvas fit contract.

@@ -71,6 +71,37 @@ describe("MobileSourceControls", () => {
     document.body.innerHTML = "";
   });
 
+  it("shows Crop fill for a last-only H3 boundary", () => {
+    const form = formFor("minimax-h3");
+    form.model = "minimax-h3-fl2va:official-bf16";
+    form.h3Authoring = {
+      firstFrame: null,
+      lastFrame: {
+        data: "LAST",
+        filename: "last.png",
+        mimeType: "image/png",
+        width: 720,
+        height: 1280,
+      },
+      references: [],
+    };
+    const wrapper = mount(MobileSourceControls, { props: { form } });
+    const select = wrapper.get("[data-test='mobile-h3-source-fit']").element as HTMLSelectElement;
+    expect(select.value).toBe("crop-fill");
+    expect(Array.from(select.options).map((option) => option.value)).toContain("crop-fill");
+  });
+
+  it("keeps the fit selector visible with only an ordinary closing frame", () => {
+    const form = formFor("wan");
+    form.model = "wan22-ti2v-5b:fp16";
+    form.sourceImageCapability = "optional";
+    form.endFrame = { filename: "last.png", base64: "LAST" };
+    const wrapper = mount(MobileSourceControls, { props: { form } });
+    expect(
+      (wrapper.get("[data-test='mobile-source-fit']").element as HTMLSelectElement).value,
+    ).toBe("crop-fill");
+  });
+
   it("does not render for a family without image conditioning", () => {
     const wrapper = mount(MobileSourceControls, { props: { form: formFor("ltx-video") } });
     expect(wrapper.find("[data-test='mobile-source-controls']").exists()).toBe(false);

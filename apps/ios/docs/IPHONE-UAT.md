@@ -465,3 +465,38 @@ that remains held. The result bundle is `/tmp/mold-queue-ios-confirmed.xcresult`
 its retained “Queue download feedback” attachment records the rendered row.
 Fixtures perform no real model download or inference. This is Simulator evidence;
 physical-device and multiwindow visual UAT are not claimed.
+
+## Boundary canvas, fitting and Appearance (2026-10-10)
+
+On the iOS 26.5 iPhone Simulator (`23AA9737-FFBF-4753-AD8E-B4E3C1C20795`),
+`ReferenceParityTests.testLastFrameAspectAfterRemovingAndReplacingFirst` uses the
+loopback fixture's actual H3 FL2VA profile and imported PNGs. A last-only portrait
+selects 4:7 (768×1344); adding a landscape first frame selects 16:9 (1024×576).
+Removing the first restores portrait sizing, and replacing the last with landscape
+then portrait updates the canvas each time. More Options exposes the complete
+Crop to fill control, defaulting to centered horizontal/vertical position, after
+scrolling inside its own Form. The fixture recorded zero generation submissions.
+
+Shared package regressions cover both advertised endpoint protocols and every
+shipped boundary recipe, first priority, manual preservation on removal, matching
+bytes in different endpoint roles, recipe adoption, original-first shape after
+fitting, and request dimensions. Submission-copy fitting covers both endpoints,
+maskless coercion, original authoring bytes/frame indices, source-driven/parked
+exclusions and cancellation. The final MoldClient run passed 1,287 tests.
+
+`GenerationInteractionTests.testAppearanceChangesLiveAndPersistsAcrossLaunch`
+checks real Settings and root pixels, Dark persistence across relaunch, explicit
+Light, and returning to the device's System palette. It passed with both dark and
+light device appearance. These tests first exposed a stale Settings sheet after
+Light selection and a failed System reset on a dark device; the window override
+now applies the preference to all presentations and explicitly clears to
+`.unspecified` for System. Three native unit tests also passed, including the
+window's Dark→Light→System override transition and unknown-preference fallback.
+
+The final combined dark-device result is
+`/tmp/mold-window-appearance-boundary-dark.xcresult` (5 passed), with named canvas,
+fully visible Crop to fill, and appearance screenshots. The same compiled
+products passed the focused light-device appearance run at
+`/tmp/mold-window-appearance-light-final.xcresult` (1 passed). iOS lint passed.
+These are Simulator and fixture results; no physical-device render or full
+accessibility audit is claimed.

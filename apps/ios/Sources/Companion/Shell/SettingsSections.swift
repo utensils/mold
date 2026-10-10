@@ -4,6 +4,7 @@ import SwiftUI
 /// Library, Notifications and Live Activities (DESIGN.md §5.6), between
 /// Machines and About.
 struct SettingsSections: View {
+    @AppStorage(Preference.appearance) private var appearance = AppAppearance.system
     @AppStorage(Preference.autoSaveToPhotos) private var autoSave = false
     @AppStorage(Preference.notifyFinished) private var finished = true
     @AppStorage(Preference.notifyFailed) private var failed = true
@@ -14,6 +15,14 @@ struct SettingsSections: View {
     @Bindable var access: SettingsAccess
 
     var body: some View {
+        Section {
+            Picker("Appearance", selection: $appearance) {
+                ForEach(AppAppearance.allCases) { choice in
+                    Text(choice.title).tag(choice)
+                }
+            }
+            .accessibilityIdentifier("appearance-picker")
+        } header: { SectionHeader(String(localized: "Display")) }
         OfflineLibrarySection(autoSave: Binding(get: { autoSave }, set: { enabled in
             if !enabled { autoSave = false; return }
             requestPhotos()
