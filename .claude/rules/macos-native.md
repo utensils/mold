@@ -5,6 +5,9 @@ paths:
 
 # Native Mac interaction contracts
 
+Active Library sync progress replaces the recurring-session countdown banner.
+Expose one Stop Sync control during transfers, including their finishing phase.
+
 Boundary-frame fit controls remain available for last-only inputs. Fit active
 endpoints once on the captured submission snapshot before admission, preserving
 original authoring bytes, roles, batch IDs, seeds and synchronous queue reservation.

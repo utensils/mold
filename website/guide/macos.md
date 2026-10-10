@@ -188,7 +188,8 @@ retry when their original machines reconnect.
 
 **Sync All to This Mac** copies now and repeats at the interval selected in Settings (five minutes by default) for this app
 session. Completion appears in the Library status; the countdown and **Stop Sync**
-make the next run explicit. **Done**, Return, and Escape close Sync Details;
+make the next run explicit. During transfers, a single progress banner and
+**Stop Sync** button replace the countdown. **Done**, Return, and Escape close Sync Details;
 successful reports omit issue controls. **Details** shows issues and offers **Don’t show these
 unchanged media issues again**. Acknowledgment keeps retries running; new or
 changed errors and connection/authentication failures still appear. Removed local

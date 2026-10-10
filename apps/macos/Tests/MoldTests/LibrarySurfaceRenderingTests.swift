@@ -7,6 +7,30 @@ import Testing
 /// Isolated native windows backed only by fakes. Screenshots are inspectable
 /// UAT evidence; this never launches or operates the installed app.
 @MainActor struct LibrarySurfaceRenderingTests {
+    @Test(arguments: ["Preparing 2,348 prints…", nil] as [String?])
+    func activeSyncUsesOneStatusRow(progress: String?) throws {
+        let session = LibrarySyncSession(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        let library = LibraryStore(hosts: HostStore(hosts: []), syncSession: session)
+        session.start(in: library)
+        defer { session.stop(in: library) }
+        library.localSaveRunning = true
+        library.localSaveProgress = progress
+        let active = ImageRenderer(content: LibraryActivityStatus().environment(library))
+        active.proposedSize = .init(width: 700, height: nil)
+        let activeImage = try #require(active.cgImage)
+
+        let single = LibraryStore(hosts: HostStore(hosts: []))
+        single.localSaveRunning = true
+        single.localSaveProgress = library.localSaveProgress
+        let baseline = ImageRenderer(content: LibraryActivityStatus().environment(single))
+        baseline.proposedSize = active.proposedSize
+        #expect(activeImage.height == (try #require(baseline.cgImage)).height,
+                "Recurring sync must not add a second banner during a transfer")
+        let bitmap = NSBitmapImageRep(cgImage: activeImage)
+        try #require(bitmap.representation(using: .png, properties: [:]))
+            .write(to: URL(fileURLWithPath: "/tmp/mac-library-sync-active.png"))
+    }
+
     @Test func scopedCollectionsAndSyncControlsRender() async throws {
         let local = MoldHost(name: "This Mac", baseURL: URL(string: "http://fixture-local")!)
         let remote = MoldHost(name: "Workstation", baseURL: URL(string: "http://fixture-remote")!)

@@ -32,7 +32,7 @@ struct LibraryActivityStatus: View {
                     Button("Details") { library.localSaveAlertPresented = true }
                 }.padding(12).background(.bar)
             }
-            if status.syncEnabled {
+            if status.syncEnabled, status.localSaveProgress == nil {
                 HStack {
                     if let next = status.syncNextRun {
                         TimelineView(.periodic(from: .now, by: 1)) { context in
