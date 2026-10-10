@@ -375,3 +375,5 @@ live draft, supports multiline text, Recent prompts, Clear/Undo clear and the
 existing Expand menu; Done or dismissal retains edits. Settings ▸ Library has a
 persisted **Show date separators** preference, on by default, for Library, Search
 and collection shelves.
+
+Deleting the media currently open in a Library viewer keeps the viewer open on the next surviving item in the current filtered order, or the previous item at the end. It returns to the grid only when no items remain. A surviving machine copy stays visible after a partial deletion failure. Native macOS successful moves to Trash finish without a persistent completion notice; progress, interrupted work and failures remain visible.

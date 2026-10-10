@@ -39,6 +39,8 @@ final class LibraryGridProjection {
         positions = Dictionary(uniqueKeysWithValues: entries.enumerated().map { ($0.element.id, $0.offset) })
     }
 
+    var viewerEntries: [LibraryEntry] { entries }
+
     func entry(_ id: PrintID) -> LibraryEntry? {
         positions[id].map { entries[$0] }
     }

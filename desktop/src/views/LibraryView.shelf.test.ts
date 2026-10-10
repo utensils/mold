@@ -945,6 +945,26 @@ describe("Trash scope", () => {
     wrapper.unmount();
   });
 
+  it("keeps the next trash print in the viewer after permanent deletion", async () => {
+    const { wrapper } = await mountView("/library?scope=trash");
+    const gallery = useGalleryStore();
+    const second = {
+      ...trashed,
+      filename: "second-trash.png",
+      timestamp: trashed.timestamp - 1,
+      metadata: { ...trashed.metadata, seed: 100 },
+    };
+    gallery.trashBuckets["plato-7680"]!.items.push(second);
+    await wrapper.vm.$nextTick();
+    await tileFor(wrapper, trashed.filename).trigger("dblclick");
+    wrapper.getComponent({ name: "Lightbox" }).vm.$emit("deleteForever");
+    await wrapper.vm.$nextTick();
+    await wrapper.get("[data-test='confirm-accept']").trigger("click");
+    await flushPromises();
+    expect(wrapper.getComponent({ name: "Lightbox" }).props("item").filename).toBe(second.filename);
+    wrapper.unmount();
+  });
+
   it("Empty trash confirms with the plain dialog naming the hosts, then purges", async () => {
     const { wrapper } = await mountView("/library?scope=trash");
     await wrapper.get("[data-test='empty-trash']").trigger("click");

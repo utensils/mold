@@ -13,6 +13,7 @@ struct PrintViewer: View {
     let start: PrintID
     let projection: LibraryGridProjection
     let trashed: Bool
+    @State private var previousEntries: [LibraryEntry]
     @State private var current: PrintID?
     @State private var pageAnchor: PrintID?
     @State private var chrome = true
@@ -24,6 +25,7 @@ struct PrintViewer: View {
         self.start = start
         self.projection = projection ?? LibraryGridProjection(entries: entries)
         self.trashed = trashed
+        self._previousEntries = State(initialValue: self.projection.viewerEntries)
     }
 
     var body: some View {
@@ -109,10 +111,12 @@ struct PrintViewer: View {
             }
         }
         .onChange(of: ObjectIdentifier(projection)) { _, _ in
-            // The print on screen went away (deleted, moved): back to the grid.
-            let now = current ?? start
-            guard projection.entry(now) != nil else { dismiss(); return }
-            pageAnchor = projection.anchor(for: now, preferred: pageAnchor ?? start)
+            let previous = previousEntries
+            previousEntries = projection.viewerEntries
+            guard let next = LibraryViewerCursor.afterRemoval(current ?? start, previous: previous, remaining: projection.viewerEntries)
+            else { dismiss(); return }
+            select(next)
+            pageAnchor = projection.anchor(for: next, preferred: pageAnchor ?? start)
         }
         .keyboardShortcut(for: projection, current: Binding(get: { current }, set: { if let id = $0 { select(id) } }), start: start, close: { dismiss() })
         // Handoff: the same print, continued in Mold Studio on the Mac.

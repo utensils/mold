@@ -254,3 +254,5 @@ reopen and fence it against a different authored prompt.
 per client, and appears only in Settings Library. Pass it to LibraryShowingCache
 for Library, Search and shelves; continuous sections retain sort, identities,
 selection and the print anchor during reflow.
+
+Library viewer removal preserves the previous filtered order and copy identities: keep any surviving copy of the current print, otherwise advance to the next survivor, then the previous survivor at the end. Close only when the list is empty. Web updates the print URL when advancing; explicit scope/filter changes retain their existing navigation behavior. Native Mac successful trash moves do not leave a completion notice; preserve progress and uncertain/interrupted outcomes.

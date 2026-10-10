@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { viewerAfterRemoval } from "@studio/lib/viewerRemoval";
 import { scopedCollectionInventory } from "@studio/lib/collectionVisibility";
 import {
   computed,
@@ -1655,15 +1656,41 @@ function clearBulkSelection() {
 }
 
 /** Drop selection / lightbox state for prints that left the grid. */
-function pruneSelection() {
+function pruneSelection(previous: MergedPrint[] = entries.value) {
   const remaining = new Set(entries.value.map((e) => e.item.filename));
   bulkSelection.value = new Set([...bulkSelection.value].filter((f) => remaining.has(f)));
   if (bulkAnchor.value && !remaining.has(bulkAnchor.value)) bulkAnchor.value = null;
-  if (selected.value && !remaining.has(selected.value.filename)) {
-    selected.value = null;
-    lightboxOpen.value = false;
+  if (selected.value) {
+    const current = previous.find(
+      (entry) =>
+        entry.sourceKey === selected.value!.sourceKey &&
+        entry.item.filename === selected.value!.filename,
+    );
+    const same = (a: MergedPrint, b: MergedPrint) => {
+      const copies = (entry: MergedPrint) =>
+        entry.copies?.length ? entry.copies : [{ sourceKey: entry.sourceKey, item: entry.item }];
+      return copies(a).some((left) =>
+        copies(b).some(
+          (right) =>
+            left.sourceKey === right.sourceKey && left.item.filename === right.item.filename,
+        ),
+      );
+    };
+    const next = current
+      ? viewerAfterRemoval(current, previous, entries.value, same)
+      : entries.value.find(
+          (entry) =>
+            entry.sourceKey === selected.value!.sourceKey &&
+            entry.item.filename === selected.value!.filename,
+        );
+    if (next) select(next);
+    else {
+      selected.value = null;
+      lightboxOpen.value = false;
+    }
   }
 }
+watch(entries, (_remaining, previous) => pruneSelection(previous));
 
 /**
  * Bulk delete. On trash-capable hosts: optimistic, one 6 s undo toast for
@@ -2298,6 +2325,7 @@ function deletePrint(entry: MergedPrint) {
 
 /** Bulk move to trash: every selected print into limbo behind ONE undo toast. */
 function trashPrints(targets: MergedPrint[]) {
+  const previous = entries.value;
   const fresh = targets.filter((e) => !pendingDeletes.has(deleteKey(e.sourceKey, e.item.filename)));
   if (fresh.length === 0) return;
   const locations: GalleryLocation[] = [];
@@ -2308,7 +2336,7 @@ function trashPrints(targets: MergedPrint[]) {
     locations,
     `Moved ${n} ${n === 1 ? "picture" : "pictures"} to trash`,
   );
-  pruneSelection();
+  pruneSelection(previous);
 }
 
 function removeSelected() {

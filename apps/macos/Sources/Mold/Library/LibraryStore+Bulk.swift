@@ -102,6 +102,11 @@ extension LibraryStore {
         let ending = reconciliationFailed ? "Some listings could not be refreshed; check the machine and refresh again."
             : failed > 0 ? "Some requests could not be confirmed; the Library was refreshed."
             : (completed < total ? "Stopped after the current batch." : "Finished.")
+        // Routine trash succeeds silently; interrupted or uncertain work remains visible.
+        if action == .trash, !reconciliationFailed, failed == 0, completed == total {
+            bulkResult = nil
+            return
+        }
         bulkResult = "\(action.rawValue): \(completed.formatted()) of \(total.formatted()) copies confirmed. \(ending)"
             + (failureDetails.isEmpty ? "" : " " + failureDetails.joined(separator: " · "))
     }
