@@ -77,6 +77,11 @@ struct LibraryView: View {
         .modifier(ShelfTitleMenu(enabled: fixedScope == nil,
                                  scope: scope, choose: setScope, query: $query, machineIDs: showingQuery.machineIDs))
         .toolbar { toolbar(showing) }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                NavigationLink { SourceMediaBrowser() } label: { Label("Source Media", systemImage: "photo.stack") }
+            }
+        }
         // A modal owns navigation while open; keep the presenting floating
         // tab chrome out of its layout and restore it on dismissal.
         .toolbarVisibility(managingCollections || showsOfflineDetails ? .hidden : .automatic, for: .tabBar)
@@ -114,11 +119,8 @@ struct LibraryView: View {
             }
             return true
         }
-        .safeAreaInset(edge: .top, spacing: 0) {
-            VStack(spacing: 4) {
-                FailureBanner()
-                OfflineNote(showsDetails: $showsOfflineDetails)
-            }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) { OfflineNote(showsDetails: $showsOfflineDetails) }
         }
         .onChange(of: sort) { query.sort = sort }
         .onChange(of: query) { scrollPosition.reset(); selection = [] }

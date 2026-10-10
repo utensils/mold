@@ -1,4 +1,13 @@
 <script setup lang="ts">
+import SourceMediaBrowser from "@studio/components/SourceMediaBrowser.vue";
+import {
+  sourceMemberKind,
+  type SourceMediaOwner,
+  type SourceMediaSelection,
+} from "@studio/lib/sourceMediaBrowser";
+import { retainedSourceMediaContent } from "@studio/api/sourceMediaBrowser";
+import { attachRetainedSource } from "../lib/retainedSourceAttachment";
+
 import { viewerAfterRemoval } from "@studio/lib/viewerRemoval";
 import { scopedCollectionInventory } from "@studio/lib/collectionVisibility";
 import {
@@ -92,6 +101,7 @@ import {
   upscaleLibraryImage,
   type VideoUpscaleJob,
 } from "@studio/api/videoUpscale";
+import { useAppPrefsStore } from "../stores/appPrefs";
 import { useHostsStore } from "../stores/hosts";
 import {
   defaultUpscaler,
@@ -117,6 +127,7 @@ const router = useRouter();
 const route = useRoute();
 const gallery = useGalleryStore();
 const hosts = useHostsStore();
+const appPrefs = useAppPrefsStore();
 const models = useModelStore();
 const generateForm = useGenerateFormStore();
 const contextMenu = useContextMenuStore();
@@ -163,6 +174,7 @@ const scopes = computed<LibraryScope[]>(() => [
   "prints",
   ...(organizeAvailable.value ? (["favorites", "collections"] as const) : []),
   ...(trashAvailable.value ? (["trash"] as const) : []),
+  "sources",
 ]);
 const scope = computed<LibraryScope>(() =>
   scopes.value.includes(gallery.scope) ? gallery.scope : "prints",
@@ -199,6 +211,94 @@ const entries = computed<MergedPrint[]>(() =>
   inTrash.value ? gallery.trashFiltered : gallery.filtered,
 );
 
+// Physical owners come from the already visibility-filtered projection.
+const sourceOwners = computed<SourceMediaOwner[]>(() =>
+  gallery.hostFiltered
+    .filter((entry) => gallery.visibleInDefaultLibrary(entry))
+    .flatMap((entry) =>
+      (entry.copies?.length
+        ? entry.copies
+        : [{ sourceKey: entry.sourceKey, item: entry.item }]
+      ).flatMap((copy) => {
+        const target = gallery.targetOf(copy.sourceKey);
+        if (!target) return [];
+        const instanceId = gallery.hostFor(copy.sourceKey)?.instanceId ?? undefined;
+        return [
+          {
+            key: JSON.stringify([copy.sourceKey, target.baseUrl, instanceId, copy.item.filename]),
+            filename: copy.item.filename,
+            title: copy.item.title ?? copy.item.filename,
+            hostLabel:
+              gallery.sources.find((source) => source.key === copy.sourceKey)?.label ??
+              entry.hostLabel,
+            target: { ...target },
+            instanceId: instanceId ?? "",
+            revision: copy.item.media_version ?? "",
+          },
+        ];
+      }),
+    ),
+);
+let retainedAttachEpoch = 0;
+
+onBeforeUnmount(() => {
+  retainedAttachEpoch++;
+});
+async function useRetainedSource(selection: SourceMediaSelection) {
+  const epoch = ++retainedAttachEpoch;
+  const owner = selection.owner;
+  const sourceKey = gallery.sources.find((source) => {
+    const target = gallery.targetOf(source.key);
+    return target?.baseUrl === owner.target.baseUrl && target?.apiKey === owner.target.apiKey;
+  })?.key;
+  const origin = () => (sourceKey ? gallery.targetOf(sourceKey) : null);
+  const originalInstance = sourceKey ? gallery.hostFor(sourceKey)?.instanceId : undefined;
+  const destination = JSON.stringify([
+    appPrefs.settings?.generateTargetHost,
+    hosts.all.map((h) => [h.id, h.instanceId, h.baseUrl, h.apiKey]),
+  ]);
+  const outcome = await attachRetainedSource(
+    generateForm.form,
+    selection.member.display_name,
+    sourceMemberKind(selection.member),
+    () => retainedSourceMediaContent(owner.filename, selection.member, owner.target),
+    () =>
+      epoch === retainedAttachEpoch &&
+      (!owner.instanceId || owner.instanceId === originalInstance) &&
+      destination ===
+        JSON.stringify([
+          appPrefs.settings?.generateTargetHost,
+          hosts.all.map((h) => [h.id, h.instanceId, h.baseUrl, h.apiKey]),
+        ]) &&
+      origin()?.baseUrl === owner.target.baseUrl &&
+      origin()?.apiKey === owner.target.apiKey &&
+      (!sourceKey || gallery.hostFor(sourceKey)?.instanceId === originalInstance),
+  );
+  if (!outcome.ok) {
+    toasts.push(outcome.error, "error");
+    return;
+  }
+  lightboxOpen.value = false;
+  toasts.push(outcome.message);
+  void router.push("/create");
+}
+function openSourceOwner(owner: SourceMediaOwner) {
+  void router.push({
+    path: "/library",
+    query: {
+      print: owner.filename,
+      host: gallery.sources.find((source) => {
+        const target = gallery.targetOf(source.key);
+        return (
+          target?.baseUrl === owner.target.baseUrl &&
+          target?.apiKey === owner.target.apiKey &&
+          (!owner.instanceId || gallery.hostFor(source.key)?.instanceId === owner.instanceId)
+        );
+      })?.key,
+    },
+  });
+}
+
 const orgOf = (entry: MergedPrint) => gallery.organizationOf(entry);
 const isFavorite = (entry: MergedPrint) => orgOf(entry).favorite;
 const tileTitle = (entry: MergedPrint) =>
@@ -220,6 +320,7 @@ const entryTrashCapable = (entry: MergedPrint) => {
 // ── Header labels ────────────────────────────────────────────────────────────
 const scopeCounts = computed(() => ({
   // Share the store's count with the shell subtitle and the grid.
+  sources: sourceOwners.value.length,
   prints: gallery.basePrintCount,
   favorites: favoritesCount.value,
   collections: gallery.mergedCollections.length,
@@ -1070,6 +1171,48 @@ function exitCollection() {
   lightboxOpen.value = false;
 }
 
+watch(
+  () => route.query.action,
+  (action) => {
+    if (route.path !== "/library" || typeof action !== "string") return;
+    const slug = typeof route.query.c === "string" ? route.query.c : null;
+    if (action === "new") openNewCollection();
+    else if (slug && action === "rename") collectionRenameSlug.value = slug;
+    else if (slug && action === "delete") collectionDeleteSlug.value = slug;
+    else if (slug && action === "visibility")
+      void setCollectionHidden(
+        slug,
+        !gallery.mergedCollections.find((c) => c.slug === slug)?.hidden,
+      );
+    const query = { ...route.query };
+    delete query.action;
+    void router.replace({ query });
+  },
+  { immediate: true },
+);
+function beginCollectionDrag(event: DragEvent, entry: MergedPrint) {
+  const targets = selectedEntries.value.includes(entry) ? selectedEntries.value : [entry];
+  event.dataTransfer?.setData(
+    "application/x-mold-library-prints",
+    JSON.stringify(targets.map((e) => [e.sourceKey, e.item.filename])),
+  );
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = "copy";
+}
+function fileDraggedPrints(event: Event) {
+  try {
+    const { slug, keys } = (event as CustomEvent).detail;
+    const wanted = new Set((JSON.parse(keys) as string[][]).map((key) => JSON.stringify(key)));
+    const targets = entries.value.filter((entry) =>
+      wanted.has(JSON.stringify([entry.sourceKey, entry.item.filename])),
+    );
+    if (typeof slug === "string") void toggleCollection(targets, { slug, checked: true });
+  } catch {
+    /* Ignore foreign or expired drag payloads. */
+  }
+}
+onMounted(() => window.addEventListener("mold-file-library-prints", fileDraggedPrints));
+onBeforeUnmount(() => window.removeEventListener("mold-file-library-prints", fileDraggedPrints));
+
 function collectionMenu(slug: string): MenuEntry[] {
   const hidden =
     gallery.mergedCollections.find((collection) => collection.slug === slug)?.hidden === true;
@@ -1583,6 +1726,7 @@ function runDragFrame(): void {
 function beginSelectionDrag(event: PointerEvent, entry: MergedPrint): void {
   if (
     !selectMode.value ||
+    event.altKey ||
     event.isPrimary === false ||
     event.shiftKey ||
     // macOS synthesizes a context menu from Control-click. Let the click /
@@ -2074,6 +2218,18 @@ const selectedIndex = computed(() => entries.value.findIndex((e) => isSelected(e
 const selectedEntry = computed<MergedPrint | null>(
   () => entries.value[selectedIndex.value] ?? null,
 );
+watch(
+  () => [
+    selectedEntry.value?.item.filename,
+    route.fullPath,
+    appPrefs.settings?.generateTargetHost,
+    JSON.stringify(hosts.all.map((h) => [h.id, h.instanceId, h.baseUrl, h.apiKey])),
+  ],
+  () => {
+    retainedAttachEpoch++;
+  },
+  { flush: "sync" },
+);
 
 /**
  * What the host that HOLDS the open print can transcode a stored GLB into.
@@ -2373,7 +2529,13 @@ async function useSelectedAsSource() {
 // Plain /library keeps the session state, like ?host always has.
 // Favourites is a scope now, so the retired `?fav=1` reads as one and is
 // dropped from the address on the way back out.
-const VALID_SCOPES: readonly LibraryScope[] = ["prints", "favorites", "collections", "trash"];
+const VALID_SCOPES: readonly LibraryScope[] = [
+  "prints",
+  "favorites",
+  "collections",
+  "sources",
+  "trash",
+];
 const asString = (value: unknown): string | null =>
   typeof value === "string" && value.length > 0 ? value : null;
 
@@ -2636,9 +2798,9 @@ onUnmounted(() => {
     <LibraryChipRow
       v-if="showChipRow"
       ref="chipRow"
-      :organize="organizeAvailable"
+      :organize="organizeAvailable && gallery.scope !== 'sources'"
       :tags="gallery.filterChipTags"
-      :active-tags="gallery.tagFilter"
+      :active-tags="gallery.scope === 'sources' ? [] : gallery.tagFilter"
       :host-chips="gallery.chipCounts"
       :host-filter="gallery.filter"
       :collection-name="drillInName"
@@ -2713,7 +2875,13 @@ onUnmounted(() => {
       @contextmenu="(slug, event) => contextMenu.open(event, collectionMenu(slug))"
     />
 
-    <div class="flex min-h-0 flex-1">
+    <SourceMediaBrowser
+      v-if="scope === 'sources'"
+      :owners="sourceOwners"
+      @use="useRetainedSource"
+      @open-owner="openSourceOwner"
+    />
+    <div v-else class="flex min-h-0 flex-1">
       <div
         ref="scrollEl"
         data-test="library-scroll"
@@ -2788,6 +2956,8 @@ onUnmounted(() => {
               '--tile-y': `${tile.y}px`,
             }"
             :data-filename="tile.model.item.filename"
+            :draggable="!selectMode || bulkSelection.has(tile.model.item.filename)"
+            @dragstart="beginCollectionDrag($event, tile.model.entry)"
             @pointerdown="beginSelectionDrag($event, tile.model.entry)"
             @click="onTileClick(tile.model.entry, $event)"
             @contextmenu="onTileContextMenu(tile.model.entry, $event)"
@@ -2912,7 +3082,7 @@ onUnmounted(() => {
       :selected-count="bulkSelection.size"
       :total="entries.length"
       :scope="scope"
-      :organize="organizeAvailable"
+      :organize="organizeAvailable && gallery.scope !== 'sources'"
       :organize-blocked-reason="selectionOrganizeBlockedReason"
       :trash="selectionTrashCapable"
       :confirming="confirmingBulkDelete"
@@ -2970,6 +3140,7 @@ onUnmounted(() => {
       :trashed="inTrash"
       :upscale-enabled="canUpscaleEntry(selectedEntry)"
       :collections="gallery.mergedCollections"
+      :instance-id="gallery.hostFor(selectedEntry!.sourceKey)?.instanceId ?? ''"
       :collection-counts="gallery.collectionCounts"
       :tag-suggestions="gallery.mergedTags"
       @viewed="selectedEntry && scope !== 'trash' && gallery.markViewed(selectedEntry)"
@@ -2978,6 +3149,7 @@ onUnmounted(() => {
       @next="moveSelection(1)"
       @delete="removeSelected"
       @use-source="useSelectedAsSource"
+      @use-retained-source="useRetainedSource"
       @reuse="reuseSettings(selectedEntry!)"
       @rename="(title) => renamePrint(selectedEntry!, title)"
       @favorite="(value) => setFavorite([selectedEntry!], value)"

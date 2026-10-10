@@ -1452,6 +1452,11 @@ mod tests {
             role: role.to_string(),
             display_name: name.to_string(),
             size_bytes: size,
+            label: None,
+            media_kind: None,
+            position: None,
+            frame_index: None,
+            image_role: None,
         }
     }
 

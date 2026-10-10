@@ -134,3 +134,13 @@ The compact Generate prompt stays bounded; Edit prompt opens a spacious native s
 Show date separators is a persisted Mac-local Library Settings preference, default on and included in preferences reset. Off projects one continuous section without changing visible sort/filter order, selection or unread identity. Include it in section cache invalidation and retain a visible print anchor through regrouping.
 
 Library viewer removal preserves the previous filtered order and copy identities: keep any surviving copy of the current print, otherwise advance to the next survivor, then the previous survivor at the end. Close only when the list is empty. Web updates the print URL when advancing; explicit scope/filter changes retain their existing navigation behavior. Native Mac successful trash moves do not leave a completion notice; preserve progress and uncertain/interrupted outcomes.
+
+**Source Media.** The sidebar destination and Details cards use the shared
+`SourceMediaCatalog` and `SourceMediaAttachment` contracts. Apply Library logical
+visibility before machine projection and enumerate physical owners independently;
+never use a different copy's member ID. A Source Media row creates no pin.
+Authenticated thumbnails are separate from original attachment bytes. Fence
+imports by current model/recipe/media revisions, origin route/key/instance and
+view lifetime; preserve authored scalar edits while a download completes.
+
+**Stable library status and clip duration.** Library connection/failure/cache status lives in an always-present toolbar slot, never an inserted grid row. Both native apps read model `supports_duration_prediction` and `runtime_ready` for automatic clip length: omit frames only for the active supported automatic preference, persist/restore that preference independently of the explicit frame count, and preserve it through unsupported models.

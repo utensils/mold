@@ -12708,7 +12708,8 @@ describe("MobileApp Library organization", () => {
   it("hides every organization affordance when no host advertises it", async () => {
     await openLibrary();
 
-    expect(wrapper?.find("[data-test='mobile-library-scope']").exists()).toBe(false);
+    expect(wrapper?.get("[data-test='mobile-library-scope']").text()).toContain("Source Media");
+    expect(wrapper?.get("[data-test='mobile-library-scope']").text()).not.toContain("Collections");
     expect(wrapper?.find("[data-test='mobile-library-chips']").exists()).toBe(false);
 
     await wrapper?.get("[data-test='mobile-gallery-select']").trigger("click");
@@ -12733,7 +12734,7 @@ describe("MobileApp Library organization", () => {
     // rather than the radio grid that wrapped onto two lines.
     expect(scope.classes()).toEqual(expect.arrayContaining(["ms-seg", "ms-seg--inline"]));
     expect(scope.attributes("role")).toBe("radiogroup");
-    expect(scope.findAll("button")).toHaveLength(3);
+    expect(scope.findAll("button")).toHaveLength(4);
     expect(libraryScopeSegment("prints").attributes("aria-checked")).toBe("true");
     expect(libraryScopeSegment("prints").text()).toContain("Prints");
     expect(libraryScopeSegment("prints").text()).toContain("2");

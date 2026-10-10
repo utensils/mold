@@ -107,7 +107,6 @@ describe("Sidebar a11y", () => {
     // The old lexicon and the folded destinations are gone from the rail.
     for (const label of [
       "Create",
-      "Library",
       "Models",
       "Generate",
       "Gallery",
@@ -1065,5 +1064,26 @@ describe("Sidebar nav groups", () => {
       expect(group, `${label} group`).toBeTruthy();
       expect(group!.classList.contains("shrink-0"), `${label} group`).toBe(true);
     }
+  });
+});
+
+describe("Library navigation", () => {
+  it("opens Source Media while clearing stale selected-print routes", async () => {
+    const wrapper = await mountAt("/library?print=old.png&panel=history&host=remote");
+    await navButton(wrapper, "Source Media")!.trigger("click");
+    await flushPromises();
+    expect(router.currentRoute.value.query).toEqual({ host: "remote", scope: "sources" });
+    wrapper.unmount();
+  });
+  it("persists expansion independently of the sidebar's collapsed width", async () => {
+    const wrapper = await mountAt("/library");
+    const toggle = wrapper.get('button[aria-label="Collapse library"]');
+    await toggle.trigger("click");
+    expect(navButton(wrapper, "Source Media")).toBeUndefined();
+    wrapper.unmount();
+    const next = await mountAt("/library");
+    expect(navButton(next, "Source Media")).toBeUndefined();
+    expect(next.find('button[aria-label="Expand library"]').exists()).toBe(true);
+    next.unmount();
   });
 });

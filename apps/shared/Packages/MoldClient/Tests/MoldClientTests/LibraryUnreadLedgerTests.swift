@@ -59,6 +59,24 @@ struct LibraryUnreadLedgerTests {
         #expect(ledger.count == 1)
     }
 
+    @Test func viewingKnownPhysicalCopyClearsItsLogicalGroupWithoutAListing() throws {
+        var ledger = LibraryUnreadLedger()
+        observe([], ledger: &ledger)
+        let original = try entry("source.png", host: one)
+        let mirror = try entry("renamed-copy.png", host: two)
+        let unrelated = try entry("unrelated.png", host: one, size: 2000)
+        observe([original, mirror, unrelated], ledger: &ledger)
+        #expect(ledger.count == 2)
+        // The viewer can finish a pending load after its in-memory inventory
+        // was cleared. Its physical ID still has persisted logical identity.
+        ledger.observe(entries: [], visible: [], loadedHosts: [], presentHosts: [one, two])
+        ledger.view(mirror.id)
+        #expect(ledger.count == 1)
+        #expect(!ledger.isUnread(original))
+        #expect(!ledger.isUnread(mirror))
+        #expect(ledger.isUnread(unrelated))
+    }
+
     @Test func renamedCopyOfReadPrintDoesNotBecomeNew() throws {
         var ledger = LibraryUnreadLedger()
         observe([], ledger: &ledger)

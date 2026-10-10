@@ -387,6 +387,11 @@ export function entryMatchesOrganization(
       return false;
   }
   if (
+    filter.excludeCollectionSlugs &&
+    entry.organization?.unresolvedCollectionIds.length
+  )
+    return false;
+  if (
     filter.excludeCollectionSlugs?.size &&
     entryCollectionSlugs(entry).some((slug) =>
       filter.excludeCollectionSlugs!.has(slug),

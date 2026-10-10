@@ -49,6 +49,7 @@ enum Destination: String, CaseIterable, Identifiable, Hashable {
 enum TabSelection: Hashable {
     case go(Destination)
     case search
+    case sourceMedia
     /// iPad sidebar only: one Library shelf, or one machine.
     case shelf(LibraryScope)
     case machine(UUID)

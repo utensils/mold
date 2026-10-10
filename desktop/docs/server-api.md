@@ -401,3 +401,5 @@ Servers advertising `queue.pre_render_transfer` allow queued, paused, and held s
 - `POST /api/queue/:id/transfer/release` restores the source only before sealing, or with a matching destination abort receipt after sealing.
 
 Reservations and abort tombstones survive restarts. An ambiguous response never permits blindly resuming the source. Reserved originals reject conflicting Resume, Retry, Cancel, and bulk queue mutations. Receipt forwarding uses the authenticated client's existing authority; it is not independent server-to-server proof. No inference or generation is needed to test the protocol.
+
+Retained source browsing uses authenticated `POST /api/gallery/source-media/inventory` batches of at most 100 exact visible owner filenames. A 404/405 falls back to individual inventory reads. Individual attachment reads `/api/gallery/source-media/{filename}/{member_id}/content`; this extracts original image bytes from keyframe envelopes. Inventory/thumbnail/content failures remain explicit, and attachment commits only if the origin machine and destination draft still match the captured state.

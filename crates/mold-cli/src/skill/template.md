@@ -176,4 +176,11 @@ GUI Library thumbnails preserve media aspect ratios in continuous justified rows
 
 GUI **Edit prompt** opens a spacious live draft editor with recent-prompt search, Clear and Undo clear. Dismissal keeps edits; history recall changes prompt text rather than the model, source media or other settings. Native iOS and macOS Library Settings persist **Show date separators**; turning it off removes daily row breaks while preserving sort order. These are client preferences and do not change CLI/API generation contracts.
 
+GUI print details and **Source Media** expose publication-owned retained inputs with role labels and authenticated thumbnails. Individual reuse attaches original content to a new draft; it is separate from restoring a print's complete settings. Browse only owners allowed by the current library visibility and machine scope. Source browsing never creates independent pins or changes Trash/permanent-delete retention. Batch inventory accepts at most 100 exact owner filenames at `POST /api/gallery/source-media/inventory`; `GET /api/gallery/source-media/:filename/:member_id/content` extracts independently reusable content (keyframe image bytes), while the existing raw member download preserves its serialized replay format.
+
 Deleting the media currently open in a Library viewer keeps the viewer open on the next surviving item in the current filtered order, or the previous item at the end. It returns to the grid only when no items remain. A surviving machine copy stays visible after a partial deletion failure. Native macOS successful moves to Trash finish without a persistent completion notice; progress, interrupted work and failures remain visible. These GUI behaviors do not alter CLI/API lifecycle contracts.
+
+All GUI surfaces expose duration prediction only when the selected model advertises
+`supports_duration_prediction` and is not runtime-disabled. Automatic mode omits
+`frames`; explicit duration sends its frame count. Native persisted auto preference
+parks on unsupported models without suppressing their explicit frames.

@@ -4487,6 +4487,11 @@ mod tests {
                     role: "source_image".into(),
                     display_name: "armchair.png".into(),
                     size_bytes: 5,
+                    label: None,
+                    media_kind: None,
+                    position: None,
+                    frame_index: None,
+                    image_role: None,
                 }],
             }
         );

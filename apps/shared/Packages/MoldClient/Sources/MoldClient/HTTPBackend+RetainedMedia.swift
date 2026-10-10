@@ -3,6 +3,42 @@ import Foundation
 // Reading a print's retained private conditioning media, and minting the
 // one-use handle that lets the host hydrate a request from it.
 public extension HTTPBackend {
+    func retainedSourceMediaInventories(filenames: [String]) async throws -> RetainedSourceMedia.Inventories {
+        guard filenames.count <= 100 else { throw MoldClientError.malformedResponse }
+        struct Body: Encodable { let filenames: [String] }
+        do {
+            return try await post("/api/gallery/source-media/inventory", body: Body(filenames: filenames))
+        } catch MoldClientError.http(let status, _, _) where status == 404 || status == 405 {
+            var inventories: [String: RetainedSourceMedia.Inventory] = [:]
+            for filename in filenames {
+                try Task.checkCancellation()
+                inventories[filename] = try await retainedSourceMedia(for: filename)
+            }
+            return .init(instanceId: nil, inventories: inventories)
+        }
+    }
+
+    func retainedSourceMediaContent(for filename: String, member: RetainedSourceMedia.Member) async throws -> Data {
+        let route = retainedSourceMediaPath(filename) + "/\(escaped(member.memberId))/content"
+        do { return try await retainedContentBytes(at: route) }
+        catch MoldClientError.http(let status, _, _) where status == 404 || status == 405 {
+            guard member.role != "keyframes" else {
+                throw MoldClientError.http(status: 404, code: nil, message: "Update this machine to reuse individual keyframes.")
+            }
+            return try await retainedSourceMediaBytes(for: filename, member: member.memberId)
+        }
+    }
+
+    private func retainedContentBytes(at route: String) async throws -> Data {
+        let (stream, http) = try await relayBytes(request(route))
+        guard (200 ..< 300).contains(http.statusCode) else {
+            if http.statusCode == 401 { throw MoldClientError.unauthorized }
+            throw MoldClientError.http(status: http.statusCode, code: nil, message: nil)
+        }
+        guard http.expectedContentLength <= Int64(ResponseCeiling.media) else { throw MoldClientError.malformedResponse }
+        return try await stream.collected(upTo: ResponseCeiling.media)
+    }
+
     func retainedSourceMediaThumbnail(for filename: String, member memberId: String) async throws -> Data {
         let route = retainedSourceMediaPath(filename) + "/\(escaped(memberId))/thumbnail"
         return try await retainedPreviewBytes(at: route)

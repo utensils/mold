@@ -11,6 +11,11 @@ export interface RetainedSourceMediaMember {
   role: string;
   display_name: string;
   size_bytes: number;
+  label?: string;
+  media_kind?: string;
+  position?: number;
+  frame_index?: number;
+  image_role?: string;
 }
 
 export interface RetainedSourceMediaInventory {

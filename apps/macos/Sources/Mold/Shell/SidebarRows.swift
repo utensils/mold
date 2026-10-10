@@ -30,7 +30,7 @@ struct SidebarPick: Equatable {
 /// than by two bindings agreeing.
 enum SidebarRows {
     /// The destinations that are rows of their own, in menu order.
-    static let destinations: [Destination] = Destination.allCases.filter { $0 != .library }
+    static let destinations: [Destination] = Destination.allCases.filter { $0 != .library && $0 != .sourceMedia }
 
     /// The highlighted row, from where the window is. On the library that is
     /// the shelf showing; on Machines it is the machine picked, falling back

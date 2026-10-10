@@ -28,6 +28,9 @@ import { useOverlayStack } from "@ui/lib/overlayStack";
 import { useRootFocusOnOpen } from "@ui/lib/useRootFocusOnOpen";
 import MeshExportDialog from "@ui/components/MeshExportDialog.vue";
 import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
+import SourceMediaPanel from "@studio/components/SourceMediaPanel.vue";
+import { useSourceMedia, webSourceOwner } from "../../lib/useSourceMedia";
+import type { SourceMediaSelection } from "@studio/lib/sourceMediaBrowser";
 import PrintOrganizer from "../library/PrintOrganizer.vue";
 import type { CollectionPickerRow } from "../library/CollectionPicker.vue";
 import { purgeCountdownFromPurgeAt } from "@studio/lib/libraryOrganization";
@@ -135,6 +138,14 @@ const emit = defineEmits<{
 }>();
 
 const organizer = ref<InstanceType<typeof PrintOrganizer> | null>(null);
+const sourceOwner = computed(() =>
+  props.item ? webSourceOwner(props.item) : null,
+);
+const sourceReuse = useSourceMedia(() => props.models ?? []);
+async function useRetainedSource(selection: SourceMediaSelection) {
+  if (await sourceReuse.use(selection, () => sourceOwner.value)) emit("close");
+}
+
 const purgeLabel = computed(() =>
   props.item?.trashed_at != null
     ? purgeCountdownFromPurgeAt(props.item.purge_at, Date.now()).label
@@ -916,6 +927,17 @@ async function performVideoExport(options: VideoExportOptions) {
                   @click="menuOpen = false"
                 ></button>
                 <div class="lb__menu" role="menu">
+                  <SourceMediaPanel
+                    v-if="sourceOwner"
+                    :owner="sourceOwner"
+                    @use="useRetainedSource"
+                  />
+                  <p v-if="sourceReuse.busy.value" role="status">
+                    Loading original source…
+                  </p>
+                  <p v-if="sourceReuse.error.value" role="alert">
+                    {{ sourceReuse.error.value }}
+                  </p>
                   <template v-if="inTrash">
                     <button role="menuitem" @click="onRestore">Restore</button>
                     <button
@@ -1082,6 +1104,17 @@ async function performVideoExport(options: VideoExportOptions) {
 
           <span class="lb__flex"></span>
 
+          <SourceMediaPanel
+            v-if="sourceOwner"
+            :owner="sourceOwner"
+            @use="useRetainedSource"
+          />
+          <p v-if="sourceReuse.busy.value" role="status">
+            Loading original source…
+          </p>
+          <p v-if="sourceReuse.error.value" role="alert">
+            {{ sourceReuse.error.value }}
+          </p>
           <template v-if="inTrash">
             <button
               class="lb__reuse"
@@ -1261,6 +1294,17 @@ async function performVideoExport(options: VideoExportOptions) {
                 @click="menuOpen = false"
               ></button>
               <div class="lb__menu lb__menu--right" role="menu">
+                <SourceMediaPanel
+                  v-if="sourceOwner"
+                  :owner="sourceOwner"
+                  @use="useRetainedSource"
+                />
+                <p v-if="sourceReuse.busy.value" role="status">
+                  Loading original source…
+                </p>
+                <p v-if="sourceReuse.error.value" role="alert">
+                  {{ sourceReuse.error.value }}
+                </p>
                 <template v-if="inTrash">
                   <button role="menuitem" @click="onRestore">Restore</button>
                   <button
@@ -1461,6 +1505,17 @@ async function performVideoExport(options: VideoExportOptions) {
             data-test="lightbox-identity"
           >
             <b>Identity:</b> {{ identityLabel }}
+          </p>
+          <SourceMediaPanel
+            v-if="sourceOwner"
+            :owner="sourceOwner"
+            @use="useRetainedSource"
+          />
+          <p v-if="sourceReuse.busy.value" role="status">
+            Loading original source…
+          </p>
+          <p v-if="sourceReuse.error.value" role="alert">
+            {{ sourceReuse.error.value }}
           </p>
           <template v-if="inTrash">
             <button class="lb__reuse" @click="onRestore">Restore</button>

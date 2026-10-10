@@ -27,9 +27,9 @@ settings:
     # Tailscale, and holds a models directory the user points at.
     ENABLE_APP_SANDBOX: "NO"
     # Ad-hoc, so `make build` works on a machine with no signing identity.
-    # `make release` re-signs properly. The Makefile overrides this with
-    # MOLD_DEV_SIGN_IDENTITY when this Mac has a real identity, so a dev
-    # build keeps one identity across rebuilds and TCC grants persist.
+    # `make release` re-signs properly. Only the app target consumes the
+    # Makefile-selected identity; SwiftPM resource bundles keep their defaults.
+    MOLD_APP_SIGN_IDENTITY: "-"
     CODE_SIGN_IDENTITY: "-"
     CODE_SIGNING_REQUIRED: "NO"
     CODE_SIGN_STYLE: Manual
@@ -98,6 +98,7 @@ targets:
         # not land on top of it in /Applications. The executable keeps the
         # short name -- it is a path the Makefile, the scripts and the test
         # host all spell, and nothing a user sees.
+        CODE_SIGN_IDENTITY: "$(MOLD_APP_SIGN_IDENTITY)"
         PRODUCT_NAME: Mold Studio
         EXECUTABLE_NAME: Mold
         # And the Swift module: derived from PRODUCT_NAME it would become

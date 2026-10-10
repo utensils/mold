@@ -25,6 +25,9 @@ public struct Model: Codable, Hashable, Sendable, Identifiable {
     /// lacks the audio assets even when its family recipe supports sound;
     /// absent on older hosts and models that inherit the recipe answer.
     public let supportsAudio: Bool?
+    public var supportsDurationPrediction: Bool? = nil
+    public var runtimeReady: Bool? = nil
+    public var offersDurationPrediction: Bool { supportsDurationPrediction == true && runtimeReady != false }
     /// Bytes this model occupies on the machine, present only when
     /// `downloaded` (`catalog.rs:220-225`). NEVER SUM THIS COLUMN: a shared
     /// VAE or encoder is counted once per model that references it -- the

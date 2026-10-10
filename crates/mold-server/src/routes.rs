@@ -375,6 +375,8 @@ use crate::queue::clean_error_message;
         crate::gallery_trash::empty_gallery_trash,
         crate::gallery_trash::sweep_gallery_trash,
         crate::gallery_source_media::inventory,
+        crate::gallery_source_media::batch_inventory,
+        crate::gallery_source_media::content,
         crate::gallery_source_media::download,
         crate::gallery_media_transfer::offer,
         crate::gallery_media_transfer::receive,
@@ -784,6 +786,14 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/gallery/sync-checkpoint",
             get(crate::gallery_sync::checkpoint),
+        )
+        .route(
+            "/api/gallery/source-media/inventory",
+            post(crate::gallery_source_media::batch_inventory),
+        )
+        .route(
+            "/api/gallery/source-media/:filename/:member_id/content",
+            get(crate::gallery_source_media::content),
         )
         .route(
             "/api/gallery/source-media/:filename",

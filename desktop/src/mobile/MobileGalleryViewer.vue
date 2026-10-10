@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import SourceMediaPanel from "@studio/components/SourceMediaPanel.vue";
+import type { SourceMediaOwner, SourceMediaSelection } from "@studio/lib/sourceMediaBrowser";
+
 import { relayFetch as fetch } from "@studio/api/relayTransport";
 import { showsAlphaBed } from "@studio/lib/alphaMedia";
 import { useMobileBack } from "./useMobileBack";
@@ -86,6 +89,7 @@ const props = withDefaults(
   defineProps<{
     item: GalleryImage;
     target: ApiTarget;
+    instanceId?: string;
     cacheKey: string;
     hostName: string;
     thumbnailUrl: string;
@@ -159,6 +163,7 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   viewed: [];
+  useRetainedSource: [selection: SourceMediaSelection];
   close: [];
   reuse: [];
   previous: [];
@@ -502,6 +507,15 @@ function guardSheetClick(event: MouseEvent): void {
 }
 
 // ── Print info sheet (title / favorite / tags / collections / trash) ────────
+const retainedOwner = computed<SourceMediaOwner>(() => ({
+  key: JSON.stringify([props.cacheKey, props.target.baseUrl, props.item.filename]),
+  filename: props.item.filename,
+  title: props.item.filename,
+  hostLabel: props.hostName,
+  instanceId: props.instanceId ?? "",
+  target: { ...props.target },
+  revision: props.item.media_version ?? "",
+}));
 const infoOpen = ref(false);
 const titleDraft = ref("");
 const titleError = ref("");
@@ -2104,6 +2118,11 @@ onBeforeUnmount(() => {
             <dd>{{ hostName }}</dd>
           </div>
         </dl>
+        <SourceMediaPanel
+          v-if="infoOpen"
+          :owner="retainedOwner"
+          @use="emit('useRetainedSource', $event)"
+        />
         <p v-if="item.metadata.version" class="gallery-viewer-info-version">
           mold {{ item.metadata.version }}
         </p>

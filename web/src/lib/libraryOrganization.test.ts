@@ -692,3 +692,39 @@ it("protects an older deferred collection GET from reversing explicit Show", asy
   expect(snapshot!.collections[0]!.hidden).toBe(false);
   visibility.resetCollectionVisibilityForTests();
 });
+
+it("updates cached web collection visibility immediately for pending hide and show", async () => {
+  const { computed } = await import("vue");
+  const { rememberCollectionVisibility, resetCollectionVisibilityForTests } =
+    await import("@studio/lib/collectionVisibility");
+  resetCollectionVisibilityForTests();
+  const rows = [
+    snapshot("origin", { collections: [collection("a", "Private")] }),
+  ];
+  const merged = computed(() => mergedCollections(rows));
+  expect(merged.value[0]?.hidden).toBe(false);
+  rememberCollectionVisibility("private", true, []);
+  expect(merged.value[0]?.hidden).toBe(true);
+  rememberCollectionVisibility("private", false, []);
+  expect(merged.value[0]?.hidden).toBe(false);
+  resetCollectionVisibilityForTests();
+});
+
+it("withholds unresolved collection membership from default-print filtering", () => {
+  const print: HostGalleryImage = {
+    ...entry("origin", "private.png"),
+    collections: ["unknown"],
+    organization: {
+      title: null,
+      favorite: false,
+      tags: [],
+      collections: [],
+      trashedAt: null,
+      purgeAt: null,
+      unresolvedCollectionIds: [{ hostId: "origin", id: "unknown" }],
+    },
+  };
+  expect(
+    filterByOrganization([print], { excludeCollectionSlugs: new Set() }),
+  ).toEqual([]);
+});

@@ -582,6 +582,24 @@ describe("CreatePage layout and behavior", () => {
    * that object's own badge and the pixels the form holds — it never computes
    * a size, and it is absent on a recipe that renders on no canvas at all.
    */
+  it("opens the composer with an already staged source image", async () => {
+    const form = useGenerateForm();
+    form.state.value.imageAttachments = [
+      {
+        kind: "upload",
+        filename: "retained.png",
+        base64: "AAAA",
+        width: 640,
+        height: 480,
+      },
+    ];
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    expect(wrapper.findComponent({ name: "ComposerCard" }).exists()).toBe(true);
+    expect(form.state.value.imageAttachments[0]?.filename).toBe("retained.png");
+    wrapper.unmount();
+  });
+
   it("sizes a Qwen Image 2.1 canvas from the last reference until the user picks one", async () => {
     const model = {
       ...installedModelRow("qwen-image-2.1:bf16", "qwen-image21"),

@@ -377,3 +377,22 @@ persisted **Show date separators** preference, on by default, for Library, Searc
 and collection shelves.
 
 Deleting the media currently open in a Library viewer keeps the viewer open on the next surviving item in the current filtered order, or the previous item at the end. It returns to the grid only when no items remain. A surviving machine copy stays visible after a partial deletion failure. Native macOS successful moves to Trash finish without a persistent completion notice; progress, interrupted work and failures remain visible.
+
+### Source Media
+
+Open Source Media from Library (or the iPad Shelves sidebar) to browse original
+inputs retained by visible library prints. Each print's Info also lists its
+retained inputs, including ordered references and boundary frames. Image previews
+are authenticated thumbnails; Use source imports the original into a compatible
+input of the current Generate model. Audio and video show their media icons and
+can be attached when the selected recipe accepts them. Unknown types remain
+listed with an explanation. Choose the owning print to return to its viewer.
+
+Source Media creates no independent pins. Sources in Trash remain accessible in
+that print's Info, and permanent deletion releases its ownership. Hidden
+collections remain excluded from general source browsing. Older servers retain
+per-print browsing; individual keyframe reuse requires the content endpoint.
+
+Library connection status is always available in the toolbar. Offline and reconnecting updates change its icon and details without moving the gallery. Qualified models advertising duration prediction offer Automatic from prompt or an explicit clip length; the authored choice survives draft restoration and settings reuse, and parks on unsupported destinations.
+
+The Queue navigation badge counts individual jobs waiting to run across machines: queued, paused and held jobs. Running, cancelling and finished jobs are excluded; a batch contributes its waiting children.

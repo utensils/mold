@@ -28,6 +28,29 @@ to a remote `mold serve` machine.
 _Mold Studio's New image workspace keeps the canvas, prompt, model-aware controls,
 machine status, and live generation progress in one native window._
 
+## Original source media
+
+Open a print's details to see the original inputs retained by its machine. Image
+inputs have thumbnails and role labels; audio, video and other files have named
+tiles. **Use as source** attaches an individual input to a new creation using the
+selected model's supported input flow. **Reuse settings** still restores the
+complete original recipe.
+
+Open **Library → Source Media** to browse sources independently of their original
+print. Each group links to its owner and identifies the machine holding it.
+Machine filters and hidden collections keep the same library visibility. The
+browser checks owners in batches; search covers the loaded sources and **Check
+more library items** continues through the library.
+
+Sources have no separate upload, pin or delete action. They remain retained while
+an owning print exists, including in Trash, and permanent deletion releases only
+that owner's retention. New creations using a source establish their normal
+retention when published.
+
+The desktop sidebar also expands Library and Collections, with named collection
+rows, counts and availability, creation and management actions, and drag-to-file.
+The existing collection shelf and filters remain available.
+
 ## Download
 
 <div class="platform-downloads">
@@ -902,3 +925,10 @@ If a connection is interrupted during a move, retry the same destination so Mold
 The compact prompt stays bounded while you type. **Edit prompt** opens a spacious live editor; **Done**, Escape and backdrop dismissal retain edits and return focus to the opener. Enter inserts a newline, and arrow keys move through text. **Recent prompts** searches full prompt text and replaces only the prompt, preserving model and other settings. **Clear** offers immediate **Undo clear**; a later edit or history choice ends that recovery. Expand and Remix use the existing rewrite flow and return to the editor. The editor never submits a generation shortcut. Phone presentation fills the visible viewport, with controls retained when the keyboard reduces the available space.
 
 Deleting the media currently open in a Library viewer keeps the viewer open on the next surviving item in the current filtered order, or the previous item at the end. It returns to the grid only when no items remain. A surviving machine copy stays visible after a partial deletion failure. Native macOS successful moves to Trash finish without a persistent completion notice; progress, interrupted work and failures remain visible.
+
+### Automatic clip length
+
+When the selected model advertises duration prediction, **Predict duration** lets
+the server choose a 1–20 second LTX 2.5 clip from the prompt. Turn it off to choose
+an explicit length. Native iOS and macOS expose the same choice as web and Tauri;
+unsupported or unavailable models keep explicit duration controls.

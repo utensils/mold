@@ -15,31 +15,24 @@ enum OfflineLibraryNotice {
 /// Said at the top of the Library when it shows this device's saved copy.
 struct OfflineNote: View {
     @Environment(LibraryStore.self) private var library
+    @Environment(HostStore.self) private var hosts
     @Binding var showsDetails: Bool
 
     var body: some View {
-        if let summary = OfflineLibraryNotice.summary(hosts: library.offlineHosts) {
+        let summary = OfflineLibraryNotice.summary(hosts: library.offlineHosts) ?? "All machines connected"
+        return Group {
             Button { showsDetails = true } label: {
-                Label {
-                    Text(summary).fixedSize(horizontal: false, vertical: true)
-                } icon: {
-                    Image(systemName: "icloud.slash").font(.caption).accessibilityHidden(true)
-                }
-                .font(.footnote)
-                .foregroundStyle(.primary)
+                Label(summary, systemImage: hosts.failures.isEmpty && library.offlineHosts.isEmpty ? "checkmark.icloud" : "icloud.slash")
+                    .labelStyle(.iconOnly)
+                    .frame(width: 44, height: 44)
             }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-            .background(Color(uiColor: .secondarySystemBackground), in: .rect(cornerRadius: 10))
-            .contentShape(.rect)
             .accessibilityIdentifier("offline-library-status")
-            .accessibilityHint("Shows the full list of unavailable machines.")
-            .padding(.horizontal, 12)
-            .padding(.top, 4)
+            .accessibilityHint("Shows connection status and unavailable machines.")
             .sheet(isPresented: $showsDetails) {
                 NavigationStack {
                     List {
+                        Section { Text(summary) }
+                        if !hosts.failures.isEmpty { Section("Messages") { FailureBanner() } }
                         Section {
                             Text("This device's saved prints remain available.")
                                 .fixedSize(horizontal: false, vertical: true)

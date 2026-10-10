@@ -168,6 +168,13 @@ import {
   setMinimaxH3GalleryImageFirstFrame,
 } from "@studio/lib/minimaxH3Authoring";
 
+import SourceMediaBrowser from "@studio/components/SourceMediaBrowser.vue";
+import { useSourceMedia, webSourceOwner } from "../lib/useSourceMedia";
+import type {
+  SourceMediaOwner,
+  SourceMediaSelection,
+} from "@studio/lib/sourceMediaBrowser";
+
 const WEB_LIBRARY_SCROLL_KEY = "web:library";
 
 type FilterKind = "all" | "images" | "video" | "audio" | "mesh";
@@ -235,6 +242,48 @@ const tagFilter = ref<string[]>([]);
 const form = useGenerateForm();
 const route = useRoute();
 const router = useRouter();
+const sourceView = computed(() => route.query.section === "sources");
+const sourceReuse = useSourceMedia(() => models.value);
+const sourceEntries = computed(() =>
+  rawEntries.value.filter(
+    (entry) =>
+      !globallyHiddenKeys.value.has(keyOf(entry)) &&
+      (hostFilter.value === "all" ||
+        (entry.hostId ?? ORIGIN_HOST_ID) === hostFilter.value),
+  ),
+);
+const sourceOwners = computed(() =>
+  sourceEntries.value
+    .map(webSourceOwner)
+    .filter((owner): owner is SourceMediaOwner => owner !== null),
+);
+
+function toggleSourceView() {
+  clearSelection();
+  closeLightbox(false);
+  const query = { ...route.query };
+  if (sourceView.value) delete query.section;
+  else {
+    query.section = "sources";
+    delete query.scope;
+    delete query.c;
+  }
+  void router.push({ query });
+}
+async function useSourceMember(selection: SourceMediaSelection) {
+  await sourceReuse.use(
+    selection,
+    () =>
+      sourceOwners.value.find((owner) => owner.key === selection.owner.key) ??
+      null,
+  );
+}
+function openSourceOwner(owner: SourceMediaOwner) {
+  const item = rawEntries.value.find(
+    (entry) => webSourceOwner(entry)?.key === owner.key,
+  );
+  if (item) openItem(item);
+}
 
 const filterOptions: SegmentOption<FilterKind>[] = [
   { value: "all", label: "All" },
@@ -271,8 +320,12 @@ watch(
 // Scope, drill-in, tag, and favorite filters live in the URL too so the
 // palette and History can deep-link straight into a collection or the trash.
 watch(
-  () => route.query.scope,
-  (value) => {
+  () => [route.query.scope, sourceView.value] as const,
+  ([value, sources]) => {
+    if (sources) {
+      scope.value = "prints";
+      return;
+    }
     if (value === "prints" || value === "collections" || value === "trash") {
       if (scope.value !== value) scope.value = value;
     } else if (value === undefined && scope.value !== "prints") {
@@ -332,6 +385,12 @@ function syncOrganizationToUrl() {
 }
 
 function setScope(next: Scope) {
+  if (sourceView.value) {
+    const query = { ...route.query };
+    delete query.section;
+    query.scope = next;
+    void router.push({ query });
+  }
   if (scope.value === next) return;
   scope.value = next;
   if (next !== "collections") collectionSlug.value = null;
@@ -1567,7 +1626,10 @@ const globallyHiddenKeys = computed(() => {
       group.copies.map((c) => ({ hostId: c.hostId, item: c })),
       { resolveCollectionSlug: resolver.value },
     );
-    if (org.collections.some((slug) => hiddenCollectionSlugs.value.has(slug)))
+    if (
+      org.unresolvedCollectionIds.length > 0 ||
+      org.collections.some((slug) => hiddenCollectionSlugs.value.has(slug))
+    )
       for (const copy of group.copies) keys.add(keyOf(copy));
   }
   return keys;
@@ -1595,6 +1657,12 @@ const filtered = computed(() => {
   if (!q) return organizationFiltered.value;
   return organizationFiltered.value.filter((e) => entryMatchesSearch(e, q));
 });
+
+// Source owners remain independently accessible even when the ordinary output
+// grid has a search, media filter, or a preferred logical copy elsewhere.
+const viewerEntries = computed(() =>
+  sourceView.value ? sourceEntries.value : filtered.value,
+);
 
 const total = computed(
   () =>
@@ -1755,6 +1823,8 @@ const unreachableLabel = computed(() => {
   return names.length ? `${names.join(", ")} unreachable` : "";
 });
 const countLabel = computed(() => {
+  if (sourceView.value)
+    return `${sourceOwners.value.length} library items · ${scopeLabel.value}`;
   if (scope.value === "collections")
     return `${collections.value.length} ${collections.value.length === 1 ? "collection" : "collections"} · ${total.value} prints`;
   if (scope.value === "trash")
@@ -1821,7 +1891,7 @@ function printQuery(item: GalleryImage) {
 }
 function openItem(item: GalleryImage) {
   const key = keyOf(item);
-  selectedIndex.value = filtered.value.findIndex((e) => keyOf(e) === key);
+  selectedIndex.value = viewerEntries.value.findIndex((e) => keyOf(e) === key);
   selected.value = item;
   void router.push({ query: printQuery(item) });
 }
@@ -1837,7 +1907,7 @@ function closeLightbox(syncUrl = true) {
 }
 function stepLightbox(delta: number) {
   if (selectedIndex.value < 0) return;
-  const list = filtered.value;
+  const list = viewerEntries.value;
   const next = selectedIndex.value + delta;
   if (next < 0 || next >= list.length) return;
   selectedIndex.value = next;
@@ -1854,14 +1924,17 @@ function hydrateLinkedPrint() {
   const hostId = typeof host === "string" && host ? host : ORIGIN_HOST_ID;
   const matches = (item: HostGalleryImage) =>
     item.filename === filename && (item.hostId ?? ORIGIN_HOST_ID) === hostId;
-  const physical = scopeRaw.value.find(matches);
-  const index = filtered.value.findIndex(
+  const physical = (
+    sourceView.value ? sourceEntries.value : scopeRaw.value
+  ).find(matches);
+  const index = viewerEntries.value.findIndex(
     (item) =>
       matches(item) ||
       (hostFilter.value === "all" && copiesOf(item).some(matches)),
   );
   selectedIndex.value = index;
-  selected.value = index >= 0 ? (physical ?? filtered.value[index]!) : null;
+  selected.value =
+    index >= 0 ? (physical ?? viewerEntries.value[index]!) : null;
 }
 watch(
   [() => route.query.print, () => route.query.printHost],
@@ -1874,7 +1947,7 @@ watch(
 // Reconcile against complete listing updates, retaining local selections while
 // their router.push is pending and advancing only when their media leaves.
 watch(
-  filtered,
+  viewerEntries,
   (remaining, previous) => {
     if (!selected.value) {
       hydrateLinkedPrint();
@@ -1891,9 +1964,9 @@ watch(
       return;
     }
     // An explicit printHost link keeps its physical copy while it survives.
-    const physical = scopeRaw.value.find(
-      (item) => keyOf(item) === keyOf(selected.value!),
-    );
+    const physical = (
+      sourceView.value ? sourceEntries.value : scopeRaw.value
+    ).find((item) => keyOf(item) === keyOf(selected.value!));
     const target =
       keyOf(next) !== keyOf(selected.value) &&
       physical &&
@@ -2615,7 +2688,18 @@ onBeforeUnmount(() => {
 <template>
   <div class="gal" :data-scope="scope">
     <header class="gal__head">
-      <h1 class="gal__title">{{ workspaceLabel("library") }}</h1>
+      <h1 class="gal__title">
+        {{ sourceView ? "Source Media" : workspaceLabel("library") }}
+      </h1>
+      <button
+        type="button"
+        class="gal__select"
+        :aria-pressed="sourceView"
+        data-test="source-media-nav"
+        @click="toggleSourceView"
+      >
+        {{ sourceView ? "Back to prints" : "Source Media" }}
+      </button>
       <span class="gal__count" data-test="gallery-count"
         >{{ countLabel
         }}<span v-if="unreachableLabel" class="gal__unreachable">
@@ -2624,7 +2708,7 @@ onBeforeUnmount(() => {
       >
 
       <SegmentedControl
-        v-if="showScopes"
+        v-if="showScopes && !sourceView"
         class="gal__scope"
         data-test="library-scope"
         :model-value="scope"
@@ -2644,7 +2728,7 @@ onBeforeUnmount(() => {
         Copy view link
       </button>
 
-      <template v-if="scope === 'collections'">
+      <template v-if="!sourceView && scope === 'collections'">
         <label class="gal__search">
           <Icon name="search" :size="15" />
           <input
@@ -2693,7 +2777,7 @@ onBeforeUnmount(() => {
         </button>
       </template>
 
-      <template v-else>
+      <template v-else-if="!sourceView">
         <ThumbnailSizeSlider
           v-if="view === 'grid' || scope === 'trash'"
           class="gal__thumbnail-size"
@@ -2849,10 +2933,10 @@ onBeforeUnmount(() => {
       v-if="
         scope === 'prints' || (scope === 'collections' && currentCollection)
       "
-      :organize="canOrganize"
+      :organize="canOrganize && !sourceView"
       :favorites-only="favoritesOnly"
       :favorite-count="favoriteCount"
-      :tags="filterChipTags"
+      :tags="sourceView ? [] : filterChipTags"
       :active-tags="tagFilter"
       :host-options="hostOptions"
       :host-filter="hostFilter"
@@ -2985,7 +3069,18 @@ onBeforeUnmount(() => {
       </Popover>
     </div>
 
-    <main class="gal__main">
+    <p v-if="sourceReuse.busy.value" role="status">Loading original source…</p>
+    <p v-if="sourceReuse.error.value" role="alert">
+      {{ sourceReuse.error.value }}
+    </p>
+    <SourceMediaBrowser
+      v-if="sourceView"
+      :owners="sourceOwners"
+      :show-title="false"
+      @use="useSourceMember"
+      @open-owner="openSourceOwner"
+    />
+    <main v-else class="gal__main">
       <div
         v-if="errorMessage || unread.persistenceError"
         class="gal__error"
@@ -3463,9 +3558,9 @@ onBeforeUnmount(() => {
       :item="selected"
       :models="models"
       :index="selectedIndex"
-      :total="filtered.length"
+      :total="viewerEntries.length"
       :has-prev="selectedIndex > 0"
-      :has-next="selectedIndex >= 0 && selectedIndex < filtered.length - 1"
+      :has-next="selectedIndex >= 0 && selectedIndex < viewerEntries.length - 1"
       :muted="muted"
       :upscale-enabled="canUpscaleItem(selected)"
       :can-organize="canOrganizeEntry(selected)"

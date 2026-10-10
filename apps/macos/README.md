@@ -881,3 +881,25 @@ Generate keeps a compact prompt field for quick edits. **Edit prompt** opens a s
 Settings → Library → **Show date separators** is a preference on this Mac, enabled by default. Turn it off for a continuous grid in the current sort order. Filters, selection, unread media and viewer return remain intact; the visible print anchors regrouping.
 
 Deleting the media currently open in a Library viewer keeps the viewer open on the next surviving item in the current filtered order, or the previous item at the end. It returns to the grid only when no items remain. A surviving machine copy stays visible after a partial deletion failure. Native macOS successful moves to Trash finish without a persistent completion notice; progress, interrupted work and failures remain visible.
+
+### Source Media
+
+The Library sidebar's Source Media destination browses original inputs retained
+by visible prints on the selected machines. Details lists the same members for
+each selected print, including references, boundary frames, masks, audio and
+video. Use source stages original bytes into a compatible input of the current
+Generate recipe; processed inputs are explicitly identified as new authored
+inputs. Source thumbnails are authenticated and separate from original bytes.
+Owner links return to the original print. Search scans all eligible owners in
+bounded batches and reports unavailable inventories with a retry action.
+
+This browser owns no extra pins: Trash preserves retained inputs and permanent
+print deletion releases only that print's ownership. Hidden collections protect
+their source media from general browsing. Older machines use individual
+inventories; individual keyframe reuse requires the newer content endpoint.
+
+Library connection status is always available in the toolbar. Offline and reconnecting updates change its icon and details without moving the gallery. Qualified models advertising duration prediction offer Automatic from prompt or an explicit clip length; the authored choice survives draft restoration and settings reuse, and parks on unsupported destinations.
+
+The Queue navigation badge counts individual jobs waiting to run across machines: queued, paused and held jobs. Running, cancelling and finished jobs are excluded; a batch contributes its waiting children.
+
+Developer builds retain a stable signing identity when one is available. The Makefile passes it through `MOLD_APP_SIGN_IDENTITY`, consumed only by the app target, so SwiftPM resource bundles do not inherit a Developer ID requirement. Release builds remain ad hoc until the release signing step. `MOLD_DEV_SIGN_IDENTITY=-` explicitly selects ad hoc development signing.

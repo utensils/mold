@@ -8,6 +8,7 @@ import SwiftUI
 /// that is what a collection is on a Mac -- the same idiom Photos, Music and
 /// Mail use for the same thing. Filing is a drag onto a row.
 struct Sidebar: View {
+    @Environment(QueueStore.self) private var queue
     @Environment(HostStore.self) private var hosts
     @Environment(LibraryStore.self) private var library
     @Environment(LibraryNavigation.self) private var navigation
@@ -33,6 +34,7 @@ struct Sidebar: View {
             Section {
                 ForEach(SidebarRows.destinations) { item in
                     Label(item.title, systemImage: item.symbol).tag(SidebarRow.destination(item))
+                        .badge(item == .queue ? queue.badge : 0)
                 }
             }
 
@@ -41,6 +43,7 @@ struct Sidebar: View {
             Section("Library") {
                 shelfRow(.all)
                 shelfRow(.favorites)
+                Label("Source Media", systemImage: "photo.stack").tag(SidebarRow.destination(.sourceMedia))
                 DisclosureGroup("Collections", isExpanded: $collectionsExpanded) {
                     ForEach(library.shelves) { shelf in
                         CollectionRow(shelf: shelf, renaming: $renaming)

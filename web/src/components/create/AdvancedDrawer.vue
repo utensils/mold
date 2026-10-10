@@ -872,7 +872,7 @@ function resetAdvanced() {
         v-if="caps.supportsVideo"
         icon="video"
         title="Video"
-        :summary="`${modelValue.frames ?? 25} frames · ${modelValue.fps ?? 24} fps`"
+        :summary="`${predictDuration && canPredictDuration ? 'Automatic length' : `${modelValue.frames ?? 25} frames`} · ${modelValue.fps ?? 24} fps`"
         :open="true"
         :header-interactive="false"
         data-test="section-video"
@@ -907,7 +907,7 @@ function resetAdvanced() {
         <p v-else class="adv__hint" data-test="predicted-duration-hint">
           The host will choose 1–20 seconds from the prompt.
         </p>
-        <div class="adv__field">
+        <div v-if="!predictDuration || !canPredictDuration" class="adv__field">
           <label class="adv__label">Frames ({{ frameGridLabel }})</label>
           <input
             class="adv__input"

@@ -14,17 +14,22 @@ struct ViewerReadBoundaryTests {
         #expect(!ViewerReadBoundary.allows(displayed: one, current: one, selected: true, trashed: true))
         #expect(!ViewerReadBoundary.allows(displayed: one, current: one, selected: true, trashed: false, cancelled: true))
     }
-    @MainActor @Test func selectedPreviewIsReadBeforeOriginalLoadBegins() async {
+    @Test func preloadedNeighborBecomingVisibleRechecksWhenItsImageArrives() {
+        let id = PrintID(host: UUID(), filename: "neighbor.png")
+        let preloading = ViewerReadBoundary(displayed: nil, current: id, selected: false, trashed: false)
+        let selectedBeforeLoad = ViewerReadBoundary(displayed: nil, current: id, selected: true, trashed: false)
+        let displayedAfterSelection = ViewerReadBoundary(displayed: id, current: id, selected: true, trashed: false)
+        #expect(!preloading.shouldMarkViewed)
+        #expect(!selectedBeforeLoad.shouldMarkViewed)
+        #expect(displayedAfterSelection != selectedBeforeLoad)
+        #expect(displayedAfterSelection.shouldMarkViewed)
+        let swipedAwayBeforeLoad = ViewerReadBoundary(displayed: id, current: id, selected: false, trashed: false)
+        #expect(!swipedAwayBeforeLoad.shouldMarkViewed)
+    }
+
+    @Test func selectedPreviewIsReadWhileOriginalLoadIsPending() {
         let id = PrintID(host: UUID(), filename: "preview.png")
-        var viewed = false
-        let original: String? = await ViewerReadBoundary.originalAfterPreview(
-            displayed: id, current: id, selected: true, trashed: false,
-            markViewed: { viewed = true }, load: {
-                #expect(viewed, "A displayed preview must be read while original loading is pending")
-                await Task.yield()
-                return nil
-            })
-        #expect(original == nil)
-        #expect(viewed)
+        let preview = ViewerReadBoundary(displayed: id, current: id, selected: true, trashed: false)
+        #expect(preview.shouldMarkViewed, "A displayed preview does not wait for the original download")
     }
 }

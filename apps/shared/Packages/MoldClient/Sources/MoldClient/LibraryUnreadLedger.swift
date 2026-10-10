@@ -44,7 +44,13 @@ public struct LibraryUnreadLedger: Codable, Equatable, Sendable {
 
     /// A successfully displayed generation can precede its gallery listing.
     public mutating func view(_ id: PrintID) {
-        if known[id.host]?.contains(id) == true { unread.remove(id) }
+        if known[id.host]?.contains(id) == true {
+            // The viewer can outlive a temporarily unavailable listing. Preserve
+            // the last authoritative copy identity instead of leaving a mirror
+            // unread when only its physical ID is available to the caller.
+            let copies = visibleGroups.first { $0.contains(id) } ?? [id]
+            unread.subtract(copies)
+        }
         else {
             if pendingViewed == nil { pendingViewed = [] }
             pendingViewed?.insert(id)

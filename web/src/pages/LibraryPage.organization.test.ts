@@ -1,3 +1,7 @@
+// Retained source transport is verified by its shared component/API suites.
+vi.mock("@studio/components/SourceMediaPanel.vue", () => ({
+  default: { template: "<section />" },
+}));
 /**
  * Library organization (V3 "Shelf"): the Prints | Collections | Trash scope
  * control and its URL sync, the filter-chip row, the collections shelf and
@@ -269,6 +273,11 @@ function mountPage() {
         GalleryGrid: GalleryGridStub,
         GalleryFeed: { template: "<div data-test='feed' />" },
         Lightbox: LightboxStub,
+        SourceMediaBrowser: {
+          props: ["owners"],
+          emits: ["openOwner"],
+          template: `<button data-test="source-owner" @click="$emit('openOwner', owners[0])">Open owner</button>`,
+        },
         Transition: false,
         RouterLink: { template: "<a><slot /></a>" },
       },
@@ -328,6 +337,29 @@ afterEach(() => {
 });
 
 describe("Library scopes", () => {
+  it("never applies Trash actions to a live source-owner deep link", async () => {
+    routeQuery.value = {
+      section: "sources",
+      scope: "trash",
+      print: "smurf.png",
+      printHost: "origin",
+    };
+    const wrapper = await mounted();
+    expect(
+      wrapper.get("[data-test=lightbox]").attributes("data-in-trash"),
+    ).toBe("false");
+  });
+  it("opens an exact source owner even when output filters exclude it", async () => {
+    routeQuery.value = {
+      section: "sources",
+      q: "no matching outputs",
+      print: "smurf.png",
+      printHost: "origin",
+    };
+    const wrapper = await mounted();
+    expect(wrapper.get("[data-test=lb-filename]").text()).toBe("smurf.png");
+  });
+
   it("renders Prints | Collections | Trash with counts and syncs the scope to the URL", async () => {
     const wrapper = await mounted();
     const scope = wrapper.get("[data-test='library-scope']");
@@ -935,7 +967,7 @@ describe("Mixed-capability delete wording", () => {
     );
     listGalleryMock.mockResolvedValue([
       smurf,
-      { ...smurf, hostId: "plato", hostLabel: "plato" },
+      { ...smurf, hostId: "plato", hostLabel: "plato", collections: [] },
     ]);
     const wrapper = await mounted();
     await wrapper.get("[data-test='gallery-select']").trigger("click");
@@ -975,6 +1007,12 @@ describe("Capability-scoped scope options", () => {
   });
 
   it("offers Collections only when a host can organize", async () => {
+    // An older host has no organization memberships to resolve.
+    listGalleryMock.mockResolvedValue([
+      { ...smurf, collections: [] },
+      frog,
+      plain,
+    ]);
     hostCapabilitiesMock.mockResolvedValue({
       gallery: {
         can_delete: true,

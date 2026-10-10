@@ -47,7 +47,10 @@ pub(crate) async fn get(
         let bytes = lifecycle
             .gallery_member_bytes(member.media_set, member.pin_id, member.index)
             .map_err(|_| ApiError::not_found("retained media unavailable"))?;
-        let bytes = zeroize::Zeroizing::new(bytes);
+        let bytes = zeroize::Zeroizing::new(crate::gallery_source_media::media_content(
+            &member.member.role,
+            bytes,
+        )?);
         crate::queue_input_thumbnail::render(&bytes)
             .map_err(|_| ApiError::not_found("retained member has no image preview"))
     })

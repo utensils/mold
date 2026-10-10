@@ -11073,6 +11073,16 @@ pub struct RetainedSourceMediaMember {
     pub role: String,
     pub display_name: String,
     pub size_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_index: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_role: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]

@@ -56,6 +56,9 @@ vi.mock("../lib/api/history", () => ({ fetchHistory: vi.fn(() => Promise.resolve
 // jsdom has no canvas; source fitting is not what these tests are about, so
 // the preprocessor passes the attached bytes straight through.
 vi.mock("../lib/sourceFitPreprocess", () => ({
+  applyEndpointFrameFit: vi.fn((source: string, end: { base64: string }) =>
+    Promise.resolve({ source, end }),
+  ),
   applySourceFitPreprocess: vi.fn((input: { source: string; mask: string | null }) =>
     Promise.resolve({ source: input.source, mask: input.mask, changed: false }),
   ),

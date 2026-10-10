@@ -64,6 +64,15 @@ public enum QueueState: String, OpenWireEnum {
         }
     }
 
+    /// Work still waiting to run, including deliberately paused or held jobs.
+    /// Running and cancelling work is activity, not backlog.
+    public var isWaiting: Bool {
+        switch self {
+        case .queued, .paused, .held: true
+        case .running, .cancelling, .complete, .failed, .cancelled, .unknown: false
+        }
+    }
+
     /// Whether a machine could still reorder this row.
     /// `PATCH /api/queue/:id` refuses anything else (`routes.rs:7322-7326`),
     /// and the reorder candidate set is `state = 'queued'` alone

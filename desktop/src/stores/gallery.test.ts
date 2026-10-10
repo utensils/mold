@@ -1352,6 +1352,90 @@ describe("organization union + filters", () => {
     return gallery;
   }
 
+  it("hydrates collection membership and hidden visibility on the first shell gallery load", async () => {
+    connectLocal();
+    advertise("local");
+    vi.mocked(ipc.localGalleryList).mockResolvedValue({
+      images: [organized("private.png", 100, { collections: ["private-id"] })],
+      target: { baseUrl: "http://127.0.0.1:49152", apiKey: "desktop-key" },
+    });
+    vi.mocked(organization.listCollections).mockResolvedValue([
+      { ...collection("private-id", "Private", 1), hidden: true },
+    ]);
+    const gallery = useGalleryStore();
+    await gallery.fetchAll();
+    expect(gallery.collectionCounts("private")).toBe(1);
+    expect(gallery.basePrintCount).toBe(0);
+    expect(gallery.filtered).toEqual([]);
+  });
+
+  it("keeps offline remote hidden membership protecting its visible local mirror", () => {
+    const gallery = seed();
+    gallery.buckets.local!.items[0]!.collections = [];
+    gallery.collectionsByHost["hal9000-7680"]!.items[0]!.hidden = true;
+    expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["solo.png"]);
+    useHostsStore().extras[0]!.status = "error";
+    gallery.syncBuckets();
+    expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["solo.png"]);
+    expect(gallery.mergedCollections.find((c) => c.slug === "smurfs")?.hidden).toBe(true);
+    expect(gallery.collectionAvailability("river-studies")).toBe("unavailable");
+  });
+
+  it("discards retained collection authority when a configured route is replaced", () => {
+    const gallery = seed();
+    gallery.collectionsByHost["hal9000-7680"]!.authorityTarget = {
+      baseUrl: "http://hal9000:7680",
+      apiKey: "hk",
+    };
+    useHostsStore().extras[0]!.url = "http://replacement:7680";
+    expect(gallery.mergedCollections.find((c) => c.slug === "river-studies")).toBeUndefined();
+  });
+
+  it("rejects a collection response after its machine route changes", async () => {
+    const gallery = seed();
+    let finish!: (rows: Collection[]) => void;
+    vi.mocked(organization.listCollections).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const pending = gallery.fetchCollections("hal9000-7680");
+    useHostsStore().extras[0]!.url = "http://replacement:7680";
+    finish([collection("old-route", "Stale private", 8)]);
+    await pending;
+    expect(gallery.collectionsByHost["hal9000-7680"]!.loaded).toBe(false);
+    expect(gallery.collectionsByHost["hal9000-7680"]!.items).toEqual([]);
+  });
+
+  it("withholds filed prints until their collection visibility can be resolved", () => {
+    const gallery = seed();
+    gallery.collectionsByHost = {};
+    expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["solo.png"]);
+  });
+
+  it("reloads collection metadata when IPC proves a new local authority", async () => {
+    const gallery = seed();
+    gallery.collectionsByHost.local!.authorityTarget = {
+      baseUrl: "http://old:7680",
+      apiKey: "old",
+    };
+    vi.mocked(ipc.localGalleryList).mockResolvedValue({
+      images: [organized("private.png", 100, { collections: ["new-id"] })],
+      target: { baseUrl: "http://127.0.0.1:49999", apiKey: "new" },
+    });
+    vi.mocked(organization.listCollections).mockResolvedValue([
+      { ...collection("new-id", "New private", 1), hidden: true },
+    ]);
+    await gallery.fetchBucket("local");
+    expect(organization.listCollections).toHaveBeenCalledWith({
+      baseUrl: "http://127.0.0.1:49999",
+      apiKey: "new",
+    });
+    expect(gallery.filtered.some((e) => e.item.filename === "private.png")).toBe(false);
+    expect(gallery.collectionsByHost.local!.items[0]!.id).toBe("new-id");
+  });
+
   it("organizationOf unions favorite/tags/collections over every copy, local title first", () => {
     const gallery = seed();
     const shared = gallery.merged.find((e) => e.item.filename === "shared.png")!;

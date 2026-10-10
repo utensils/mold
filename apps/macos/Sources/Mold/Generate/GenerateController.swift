@@ -36,6 +36,7 @@ final class GenerateController {
     /// Checkpoint-level audio asset veto retained across recipe switches on
     /// the same model.
     var modelSupportsAudio: Bool?
+    var modelSupportsDurationPrediction = false
     /// Where the next render goes; `nil` is Auto. STORED, and mirrored to the
     /// suite on write -- see `MachineChoiceStore` for why a computed property
     /// reading `UserDefaults` was invisible to `@Observable`.
@@ -97,6 +98,7 @@ final class GenerateController {
         modelName = model.name
         modelFamily = model.family
         modelSupportsAudio = model.supportsAudio
+        modelSupportsDurationPrediction = model.offersDurationPrediction
         hostID = host
         recipeID = nil
         machineChoice = host
@@ -119,6 +121,7 @@ final class GenerateController {
         modelName = model.name
         modelFamily = model.family
         modelSupportsAudio = model.supportsAudio
+        modelSupportsDurationPrediction = model.offersDurationPrediction
         hostID = host
         if isNewModel { recipeID = nil }
         guard let recipe = model.defaultRecipe else {
@@ -137,12 +140,15 @@ final class GenerateController {
         recipeID = recipe.id
         draft = draft.adopting(recipe, isNewModel: false, family: modelFamily,
                                model: modelName, profile: profile,
-                               modelSupportsAudio: modelSupportsAudio)
+                               modelSupportsAudio: modelSupportsAudio,
+                               modelSupportsDurationPrediction: modelSupportsDurationPrediction)
     }
 
     /// Keep authored preferences parked on a profile-less model, but clear
     /// every effective capability consumed by the request builder.
     private func clearRecipeCapabilities() {
+        draft.supportsDurationPrediction = false
+        modelSupportsDurationPrediction = false
         draft.supportsAudio = false
         draft.requiresAudio = false
         draft.offersAudioControl = false

@@ -39,6 +39,7 @@ final class LibraryCollectionPickerTests: XCTestCase {
         XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
         let print = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Fixture 0,'")).firstMatch
         XCTAssertTrue(print.waitForExistence(timeout: 10))
+        let onlineGridOrigin = print.frame.minY
         // Reopen the saved gallery with its fixture offline, so the status
         // notice is audited even on a fresh simulator with no saved machines.
         machine.stop()
@@ -48,6 +49,9 @@ final class LibraryCollectionPickerTests: XCTestCase {
         let offlineNote = app.buttons["offline-library-status"]
         XCTAssertTrue(offlineNote.waitForExistence(timeout: 10))
         XCTAssertTrue(offlineNote.label.localizedCaseInsensitiveContains("saved prints"))
+        XCTAssertTrue(print.waitForExistence(timeout: 10))
+        XCTAssertEqual(print.frame.minY, onlineGridOrigin, accuracy: 1,
+                       "Connection status must never shift the gallery content origin")
         let picker = app.navigationBars.buttons["All Prints"].firstMatch
         XCTAssertTrue(picker.waitForExistence(timeout: 5))
         XCTAssertTrue(picker.isHittable, "The navigation title shelf picker must be visible at \(size)")

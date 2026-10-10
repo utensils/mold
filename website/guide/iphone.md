@@ -514,3 +514,16 @@ further visual refinements and physical-device acceptance remain tracked in
 intentionally absent.
 
 Queue rows show the owning machine’s sealed conditioning images across models. Job Details shows every ordered reference separately with its role, including identity photos, named views, masks, control images and boundary frames. Audio/video references are listed by kind; unavailable previews are disclosed. Inputs remain separate from live denoise previews and are fetched through authenticated routes, including work submitted from another device. Older servers retain their singular source preview.
+
+## Reuse original inputs
+
+The Images library offers **Source Media**, and each print’s Info sheet lists its retained inputs with role labels and image thumbnails. Choose **Use as source** to attach an original input to a new creation. The browser shows its owning print and machine, respects hidden collections and machine filters, and checks more library items on demand. Search applies to loaded sources. Audio, video and unknown files remain listed; unsupported attachment actions explain which input is needed.
+
+Source browsing does not create separate uploads, pins or deletion rules. Sources remain retained while an owning library print exists, including in Trash. Permanent deletion releases only that owner’s retention. Individual keyframe reuse requires a machine with the new content endpoint; older machines show an update message.
+
+### Automatic clip length
+
+When the selected model advertises duration prediction, **Predict duration** lets
+the server choose a 1–20 second LTX 2.5 clip from the prompt. Turn it off to choose
+an explicit length. Native iOS and macOS expose the same choice as web and Tauri;
+unsupported or unavailable models keep explicit duration controls.
