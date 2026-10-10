@@ -559,3 +559,7 @@ The compact prompt stays bounded while you type. **Edit prompt** opens a spaciou
 Desktop and the Tauri mobile client show retained input thumbnails and role labels in each print's details. Source Media in the library browses the same visible owners across selected machines, with original-byte attachment to the current draft and navigation to the owning output. Hidden collections stay excluded from the general source browser. Sources have no independent upload, pin, or delete action: the owning output continues to control retention, including Trash.
 
 The desktop sidebar also expands Library and Collections, remembers expansion, shows collection counts and machine availability, and opens the existing collection creation, rename, visibility, and deletion controls. Drag a print onto a collection to file it; in selection mode hold Option/Alt while dragging to file the selected prints (ordinary drag retains sweep selection).
+
+Library sidebar disclosures use the shared 18px chevron icons and independent, nonshrinking 32px collection toggle targets. Their accessible labels name the current expand/collapse action; toggling does not change the selected library shelf.
+
+Collection counts and hidden membership load with the initial library snapshot, before opening Collections. Hide/show updates immediately, including pending writes; a configured offline machine retains privacy evidence so its local mirrors remain hidden until explicitly opened.

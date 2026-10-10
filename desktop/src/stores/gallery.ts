@@ -93,6 +93,7 @@ export interface CollectionsBucket {
   loaded: boolean;
   instanceId?: string | null;
   visibilityReadRevision?: number;
+  authorityTarget?: ApiTarget;
 }
 
 /** One host's tag counts. */
@@ -136,6 +137,7 @@ export interface GalleryBucket {
    *  proved the server was Off and native filesystem access was used. */
   authorityTarget?: ApiTarget | null;
   authorityResolved?: boolean;
+  instanceId?: string | null;
 }
 
 /** A bucket that should exist right now. */
@@ -424,6 +426,35 @@ export const useGalleryStore = defineStore("gallery", {
       }
       return refs;
     },
+    /** Retained inventory from configured machines remains privacy evidence
+     * while offline. It is never used to display their unavailable media. */
+    privacySources(): GallerySourceRef[] {
+      const known = useHostsStore().all;
+      return [
+        {
+          key: "local",
+          label: known.find((h) => h.id === "local")?.label ?? PLATFORM_UI.deviceLabel,
+        },
+        ...known
+          .filter((h) => {
+            if (h.id === "local") return false;
+            const collection = this.collectionsByHost[h.id];
+            const gallery = this.buckets[h.id];
+            const authorities = [collection?.authorityTarget, gallery?.authorityTarget].filter(
+              Boolean,
+            );
+            return (
+              authorities.every(
+                (target) => target!.baseUrl === h.baseUrl && target!.apiKey === h.apiKey,
+              ) &&
+              [collection?.instanceId, gallery?.instanceId].every(
+                (instance) => !instance || !h.instanceId || instance === h.instanceId,
+              )
+            );
+          })
+          .map((h) => ({ key: h.id, label: h.label })),
+      ];
+    },
     /**
      * Every loaded print across buckets, newest first. Matching filenames are
      * one logical print in the All view: saved remote results retain their
@@ -485,8 +516,8 @@ export const useGalleryStore = defineStore("gallery", {
           }
         }
       };
-      add(this.merged);
-      add(this.trashMerged);
+      add(mergeBuckets(this.privacySources, this.buckets, this.pendingDeletions));
+      add(mergeBuckets(this.privacySources, this.trashBuckets, this.pendingDeletions));
       return index;
     },
     /** Logical prints in the trash across every host. */
@@ -561,7 +592,7 @@ export const useGalleryStore = defineStore("gallery", {
     /** Collections across every loaded host, merged by slug (name-sorted). */
     mergedCollections(): MergedCollection[] {
       return mergeCollectionsAcrossHosts(
-        this.sources
+        this.privacySources
           .filter((s) => this.collectionsByHost[s.key]?.loaded)
           .map((s) => ({
             hostId: s.key,
@@ -649,10 +680,13 @@ export const useGalleryStore = defineStore("gallery", {
       );
       const organizationOf = this.organizationOf;
       const global = this.organizationIndex;
-      return (entry) =>
-        !(global.get(entry.item.filename) ?? organizationOf(entry)).collections.some((slug) =>
-          hiddenSlugs.has(slug),
+      return (entry) => {
+        const organization = global.get(entry.item.filename) ?? organizationOf(entry);
+        return (
+          organization.unresolvedCollectionIds.length === 0 &&
+          !organization.collections.some((slug) => hiddenSlugs.has(slug))
         );
+      };
     },
     /** The live grid minus hidden albums — the library's own size, whatever
      *  scope is open. The shell's picture count reads this. */
@@ -974,7 +1008,7 @@ export const useGalleryStore = defineStore("gallery", {
 
     /** Drop buckets whose source disappeared; their cached media goes too. */
     syncBuckets() {
-      const keys = new Set(this.sources.map((s) => s.key));
+      const keys = new Set(this.privacySources.map((s) => s.key));
       for (const key of Object.keys(this.buckets)) {
         if (keys.has(key)) continue;
         delete this.buckets[key];
@@ -998,6 +1032,7 @@ export const useGalleryStore = defineStore("gallery", {
       bucket.loading = true;
       bucket.error = null;
       const previousSource = this.mediaSourceOf(key);
+      const capturedInstance = this.hostFor(key)?.instanceId ?? null;
       try {
         // Resolve the origin at call time: a key backed by a live host reads
         // that host's /api/gallery; the bare "local" key is this Mac via IPC.
@@ -1012,7 +1047,30 @@ export const useGalleryStore = defineStore("gallery", {
           if (!target) throw new Error("Host is not connected.");
           items = await conditionalApiJsonTo<GalleryImage[]>(target, "/api/gallery");
           authorityTarget = target;
+          const current = this.targetOfOrNull(key);
+          if (
+            current?.baseUrl !== target.baseUrl ||
+            current?.apiKey !== target.apiKey ||
+            (this.hostFor(key)?.instanceId !== capturedInstance && capturedInstance !== null)
+          )
+            throw new Error("Machine authority changed while loading its gallery.");
         }
+        const localCollections = key === "local" ? this.collectionsByHost.local : undefined;
+        const resetLocalCollections =
+          !!localCollections &&
+          ((!!localCollections.authorityTarget &&
+            (localCollections.authorityTarget.baseUrl !== authorityTarget?.baseUrl ||
+              localCollections.authorityTarget.apiKey !== authorityTarget?.apiKey)) ||
+            (!!localCollections.instanceId &&
+              !!capturedInstance &&
+              localCollections.instanceId !== capturedInstance));
+        if (resetLocalCollections) {
+          // IPC is authoritative about a restarted engine's route, including Off.
+          // Withhold filed rows until the new authority resolves their privacy.
+          localCollections.items = [];
+          localCollections.loaded = false;
+        }
+        bucket.instanceId = capturedInstance;
         const authorityChanged =
           bucket.authorityResolved &&
           (bucket.authorityTarget?.baseUrl !== authorityTarget?.baseUrl ||
@@ -1037,6 +1095,7 @@ export const useGalleryStore = defineStore("gallery", {
         // Newest first, like a print drawer.
         bucket.items = rawRows(items.sort((a, b) => b.timestamp - a.timestamp));
         bucket.loaded = true;
+        if (resetLocalCollections && authorityTarget) await this.fetchCollections("local");
       } catch (err) {
         bucket.error = String(err);
       } finally {
@@ -1046,6 +1105,8 @@ export const useGalleryStore = defineStore("gallery", {
     /** (Re)fetch every current source. */
     async fetchAll() {
       this.syncBuckets();
+      // Resolve hidden membership before publishing fresh rows to the shell.
+      await this.fetchCollections();
       await Promise.all(this.sources.map((s) => this.fetchBucket(s.key)));
     },
     /**
@@ -1496,7 +1557,19 @@ export const useGalleryStore = defineStore("gallery", {
       });
     },
     collectionAvailability(slug: string) {
-      if (this.filter === "all") return "present";
+      if (this.filter === "all") {
+        const collection = this.mergedCollections.find((c) => c.slug === slug);
+        return collection?.hosts.some((owner) => {
+          const bucket = this.collectionsByHost[owner.hostId];
+          return (
+            bucket?.loaded &&
+            !bucket.error &&
+            useHostsStore().all.some((host) => host.id === owner.hostId && host.status === "ready")
+          );
+        })
+          ? "present"
+          : "unavailable";
+      }
       const bucket = this.collectionsByHost[this.filter];
       return collectionAvailability(
         this.mergedCollections.find((c) => c.slug === slug)?.hosts ?? [],
@@ -1520,7 +1593,12 @@ export const useGalleryStore = defineStore("gallery", {
       if (bucket.loading) return;
       const target = this.targetOf(hostKey);
       const instanceId = useHostsStore().all.find((h) => h.id === hostKey)?.instanceId ?? null;
-      if (bucket.instanceId && instanceId && bucket.instanceId !== instanceId) {
+      if (
+        (bucket.instanceId && instanceId && bucket.instanceId !== instanceId) ||
+        (bucket.authorityTarget &&
+          (bucket.authorityTarget.baseUrl !== target?.baseUrl ||
+            bucket.authorityTarget.apiKey !== target?.apiKey))
+      ) {
         bucket.items = [];
         bucket.loaded = false;
       }
@@ -1534,7 +1612,12 @@ export const useGalleryStore = defineStore("gallery", {
       try {
         const rows = await listCollections(target);
         const current = useHostsStore().all.find((h) => h.id === hostKey)?.instanceId ?? null;
-        if (instanceId && current && instanceId !== current) {
+        const currentTarget = this.targetOfOrNull(hostKey);
+        if (
+          (instanceId && current && instanceId !== current) ||
+          currentTarget?.baseUrl !== target.baseUrl ||
+          currentTarget?.apiKey !== target.apiKey
+        ) {
           bucket.items = [];
           bucket.loaded = false;
           bucket.error = "Machine installation changed.";
@@ -1542,6 +1625,7 @@ export const useGalleryStore = defineStore("gallery", {
         }
         bucket.items = protectCollectionVisibilityListing(rows, readRevision);
         bucket.instanceId = instanceId;
+        bucket.authorityTarget = { ...target };
         bucket.visibilityReadRevision = readRevision;
         bucket.loaded = true;
       } catch (err) {

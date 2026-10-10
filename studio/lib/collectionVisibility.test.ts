@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const api = vi.hoisted(() => ({ updateCollectionHidden: vi.fn() }));
 vi.mock("../api/galleryOrganization", () => api);
 import {
+  desiredCollectionHidden,
   collectionAvailability,
   scopedCollectionInventory,
   rememberCollectionVisibility,
@@ -182,4 +183,16 @@ it("checks the live registry before reaching the second host after a suspended w
   const errors = await task;
   expect(api.updateCollectionHidden).toHaveBeenCalledTimes(1);
   expect(errors.join(" ")).toContain("installation changed");
+});
+
+it("invalidates cached visibility when pending intent is added and acknowledged", async () => {
+  const { computed } = await import("vue");
+  const visible = computed(() => desiredCollectionHidden("private", false));
+  expect(visible.value).toBe(false);
+  rememberCollectionVisibility("private", true, [host]);
+  expect(visible.value).toBe(true);
+  await reconcileCollectionVisibility([
+    { ...host, readRevision: Number.MAX_SAFE_INTEGER },
+  ]);
+  expect(visible.value).toBe(false);
 });

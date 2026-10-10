@@ -967,7 +967,7 @@ describe("Mixed-capability delete wording", () => {
     );
     listGalleryMock.mockResolvedValue([
       smurf,
-      { ...smurf, hostId: "plato", hostLabel: "plato" },
+      { ...smurf, hostId: "plato", hostLabel: "plato", collections: [] },
     ]);
     const wrapper = await mounted();
     await wrapper.get("[data-test='gallery-select']").trigger("click");
@@ -1007,6 +1007,12 @@ describe("Capability-scoped scope options", () => {
   });
 
   it("offers Collections only when a host can organize", async () => {
+    // An older host has no organization memberships to resolve.
+    listGalleryMock.mockResolvedValue([
+      { ...smurf, collections: [] },
+      frog,
+      plain,
+    ]);
     hostCapabilitiesMock.mockResolvedValue({
       gallery: {
         can_delete: true,

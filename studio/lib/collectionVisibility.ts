@@ -1,4 +1,5 @@
 /** Shared privacy intentions. Persist routes and installation identities, never credentials. */
+import { shallowRef } from "vue";
 import type { ApiTarget } from "../api/client";
 import { updateCollectionHidden } from "../api/galleryOrganization";
 import type { Collection } from "./api/galleryOrganization";
@@ -42,6 +43,7 @@ interface Intent {
 }
 const KEY = "mold-collection-visibility-v1";
 let intents: Record<string, Intent> | null = null;
+const visibilityVersion = shallowRef(0);
 let revision = Date.now();
 const latestEdits = new Map<string, { hidden: boolean; revision: number }>();
 let running: Promise<string[]> | null = null;
@@ -109,6 +111,7 @@ export function rememberCollectionVisibility(
     ),
   };
   latestEdits.set(slug, { hidden, revision });
+  visibilityVersion.value++;
   save();
 }
 export function collectionVisibilityRevision(): number {
@@ -130,12 +133,14 @@ export function desiredCollectionHidden(
   slug: string,
   fallback: boolean,
 ): boolean {
+  void visibilityVersion.value;
   return read()[slug]?.hidden ?? fallback;
 }
 export function resetCollectionVisibilityForTests() {
   intents = null;
   running = null;
   latestEdits.clear();
+  visibilityVersion.value++;
 }
 /** Serialized replay reads latest intent before every write. A later explicit edit wins. */
 export async function reconcileCollectionVisibility(
@@ -241,6 +246,7 @@ export async function reconcileCollectionVisibility(
         })
       ) {
         delete read()[slug];
+        visibilityVersion.value++;
         save();
       }
     }

@@ -1626,7 +1626,10 @@ const globallyHiddenKeys = computed(() => {
       group.copies.map((c) => ({ hostId: c.hostId, item: c })),
       { resolveCollectionSlug: resolver.value },
     );
-    if (org.collections.some((slug) => hiddenCollectionSlugs.value.has(slug)))
+    if (
+      org.unresolvedCollectionIds.length > 0 ||
+      org.collections.some((slug) => hiddenCollectionSlugs.value.has(slug))
+    )
       for (const copy of group.copies) keys.add(keyOf(copy));
   }
   return keys;
