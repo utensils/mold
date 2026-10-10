@@ -53,7 +53,11 @@ unopened badges within the visit and the previous next-visit clearing behavior.
 merged visible active inventory, excluding hidden collections and Trash; retain
 offline read state. Opening Library uses its existing whole-pool seen behavior
 to clear the icon count. iOS serializes badge writes and flushes background
-refresh; macOS updates the Dock. Badge rows must fit machine
+refresh; macOS updates the Dock through one preference-aware controller. The
+existing Dock badge toggle suppresses presentation and immediately clears it;
+re-enabling restores the current ledger count. Never also follow LandedPrints
+for the Dock, since app activation would overwrite the persisted count.
+Badge rows must fit machine
 labels beside playback without overlap, including narrow tiles.
 
 **Visible reuse media.** Restore supported legacy retained roles into ordinary authoring wells before allowing submission, including all endpoint/keyframe and reference-image inputs. Preserve list order, exact frame indices, manual canvas, continuation overlap and explicit reference strength. Retire each materialized or superseded legacy role, including the mask paired with a replaced source; removal must never revive an archived fallback. Fence every asynchronous operation by reuse identity, immutable origin route/instance, per-role monotonic attachment revisions and component lifetime. Scalar edits remain live. Keep restoration failures blocking until deliberate recovery/discard; descriptor-only typed references retain their exact-set authority.

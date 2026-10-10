@@ -19,9 +19,6 @@ final class MoldAppDelegate: NSObject, NSApplicationDelegate {
     /// the app being active is an APPLICATION fact, and a window closing must
     /// not take the fleet's only unprompted reconciliation with it.
     var heartbeat: HostHeartbeat?
-    /// The Dock is an APPLICATION surface, so its observer lives here and
-    /// not on a view -- see `DockBadge`.
-    let dockBadge = DockBadge()
     /// The "Finishing…" panel and the one-time reply to macOS.
     let quit = EngineQuit()
     /// Retains cold-launch clicks until the SwiftUI scene can apply them.

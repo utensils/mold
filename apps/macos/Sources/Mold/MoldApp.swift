@@ -62,7 +62,8 @@ struct MoldApp: App {
         delegate.materializer = stores.materializer
         delegate.thumbnails = stores.thumbnails
         delegate.landedPrints = stores.landedPrints
-        delegate.dockBadge.follow(stores.landedPrints)
+        // Library's persisted unread ledger owns the Dock count. LandedPrints
+        // still delivers notifications, but must not overwrite that count.
         // `applicationDidBecomeActive` has already fired by the time this
         // scene's task runs, so the launch start is here rather than there;
         // `start()` is idempotent, so the next activation costs nothing.

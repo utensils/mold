@@ -172,6 +172,26 @@ struct LandedPrintsTests {
 
     // MARK: - The badge itself
 
+    @Test func persistedGalleryBadgeRespectsPreferenceChanges() async {
+        let defaults = scratchDefaults()
+        var painted: [String] = []
+        let badge = DockBadge(defaults: defaults) { painted.append($0 ?? "none") }
+        badge.updateUnreadCount(2)
+        #expect(painted.last == "2")
+        defaults.set(false, forKey: "badgeLandedPrints")
+        NotificationCenter.default.post(name: UserDefaults.didChangeNotification, object: defaults)
+        await settle { painted.last == "none" }
+        #expect(painted.last == "none")
+        badge.updateUnreadCount(3)
+        #expect(painted.last == "none")
+        defaults.set(true, forKey: "badgeLandedPrints")
+        NotificationCenter.default.post(name: UserDefaults.didChangeNotification, object: defaults)
+        await settle { painted.last == "3" }
+        #expect(painted.last == "3")
+        badge.updateUnreadCount(0)
+        #expect(painted.last == "none")
+    }
+
     /// Zero is NO badge, not a badge reading "0".
     @Test func anEmptyCountPaintsNoBadgeAtAll() {
         #expect(DockBadge.label(for: 0) == nil)

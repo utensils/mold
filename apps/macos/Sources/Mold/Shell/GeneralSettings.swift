@@ -44,11 +44,11 @@ struct GeneralSettings: View {
                     .foregroundStyle(.secondary)
             }
             Section {
-                Toggle("Badge the Dock icon with prints that arrive while Mold is in the background",
+                Toggle("Badge the Dock icon with new Library media",
                        isOn: $badgeLandedPrints)
                 Toggle("Notify when a render finishes or a job fails", isOn: $notifyRenders)
             } footer: {
-                Text("Only while Mold is in the background. Coming back to the app clears the badge.")
+                Text("Counts new media across your machines. Opening Library clears the badge.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
