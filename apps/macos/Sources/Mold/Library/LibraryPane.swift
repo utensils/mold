@@ -29,6 +29,7 @@ struct LibraryPane: View {
     @Binding var destination: Destination
 
     @State var selection = LibraryCursor.Selection.empty
+    @State var viewerOrder: [LibraryEntry] = []
     @State var viewing: PrintID?
     @State var gridViewport = LibraryViewport()
     @State var gridReturn: (id: PrintID, scope: LibraryScope, query: LibraryQuery)?

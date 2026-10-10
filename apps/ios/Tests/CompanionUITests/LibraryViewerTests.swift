@@ -173,8 +173,16 @@ final class LibraryViewerTests: XCTestCase {
         // survives. Its page must remain visible, not become a blank window.
         XCTAssertTrue(app.descendants(matching: .any)["viewer-print-fixture-51.png"].firstMatch.isHittable)
         app.buttons["Delete"].firstMatch.tap()
-        XCTAssertTrue(app.navigationBars["All Prints"].waitForExistence(timeout: 5),
-                      "removing the current print must dismiss its viewer")
+        let nextPrint = app.descendants(matching: .any)["viewer-print-fixture-52.png"].firstMatch
+        XCTAssertTrue(nextPrint.waitForExistence(timeout: 5))
+        XCTAssertTrue(nextPrint.isHittable, "deleting the current print keeps the viewer on its next media")
+        XCTAssertTrue(app.buttons["Info"].firstMatch.isHittable)
+        let advanced = XCTAttachment(screenshot: app.screenshot())
+        advanced.name = "Library viewer advances after deletion"
+        advanced.lifetime = .keepAlways
+        add(advanced)
+        app.navigationBars.buttons["BackButton"].tap()
+        XCTAssertTrue(app.navigationBars["All Prints"].waitForExistence(timeout: 5))
         XCTAssertFalse(print.exists)
         XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Fixture 51,'")).firstMatch.exists)
         XCTAssertTrue(machine.requestLog().contains("POST /api/gallery/mutations"))

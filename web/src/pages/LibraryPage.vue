@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { viewerAfterRemoval } from "@studio/lib/viewerRemoval";
 import { useLibraryUnread } from "../stores/libraryUnread";
 import { collectionAvailability } from "@studio/lib/collectionVisibility";
 import { libraryLink } from "../lib/libraryLinks";
@@ -143,7 +144,10 @@ import CollectionPicker, {
 } from "../components/library/CollectionPicker.vue";
 import TagEditor from "../components/library/TagEditor.vue";
 import Lightbox from "../components/gallery/Lightbox.vue";
-import { groupLogicalGalleryPrints } from "@studio/lib/galleryPrintIdentity";
+import {
+  groupLogicalGalleryPrints,
+  sameLogicalGalleryPrint,
+} from "@studio/lib/galleryPrintIdentity";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import { restoreGenerationSourceMedia } from "@studio/lib/generationSourceMedia";
 import {
@@ -1400,7 +1404,6 @@ async function restoreCopies(copies: readonly HostGalleryImage[]) {
         : `Restored ${copies.length} prints`,
     );
   }
-  closeLightbox();
   clearSelection();
   await refresh();
 }
@@ -1445,7 +1448,6 @@ async function deleteForeverCopies(
   }));
   rawEntries.value = rawEntries.value.filter((e) => !keys.has(keyOf(e)));
   syncLogicalEntries();
-  closeLightbox();
   clearSelection();
 }
 function deleteForeverOne(item: GalleryImage) {
@@ -1487,7 +1489,6 @@ async function emptyTrash() {
   snapshots.value = snapshots.value.map((s) =>
     okHosts.has(s.hostId) ? { ...s, trashed: [] } : s,
   );
-  closeLightbox();
   clearSelection();
   void refresh();
 }
@@ -1870,9 +1871,44 @@ watch(
   },
   { immediate: true },
 );
-// Listing/organization refresh must not dismiss a just-opened local selection
-// while its router.push is still pending. Only a URL change closes the viewer.
-watch(filtered, hydrateLinkedPrint);
+// Reconcile against complete listing updates, retaining local selections while
+// their router.push is pending and advancing only when their media leaves.
+watch(
+  filtered,
+  (remaining, previous) => {
+    if (!selected.value) {
+      hydrateLinkedPrint();
+      return;
+    }
+    const next = viewerAfterRemoval(
+      selected.value,
+      previous,
+      remaining,
+      sameLogicalGalleryPrint,
+    );
+    if (!next) {
+      closeLightbox();
+      return;
+    }
+    // An explicit printHost link keeps its physical copy while it survives.
+    const physical = scopeRaw.value.find(
+      (item) => keyOf(item) === keyOf(selected.value!),
+    );
+    const target =
+      keyOf(next) !== keyOf(selected.value) &&
+      physical &&
+      sameLogicalGalleryPrint(physical, next)
+        ? physical
+        : next;
+    const changed = keyOf(target) !== keyOf(selected.value);
+    selected.value = target;
+    selectedIndex.value = remaining.findIndex(
+      (item) => keyOf(item) === keyOf(next),
+    );
+    if (changed) void router.replace({ query: printQuery(target) });
+  },
+  // Batch in-place sorting and organization updates before resolving media.
+);
 const missingLinkedPrint = computed(
   () =>
     typeof route.query.print === "string" && !loading.value && !selected.value,
@@ -2313,16 +2349,6 @@ async function onLightboxDelete(item: GalleryImage) {
   addPendingRemovals(removedKeys);
   rawEntries.value = rawEntries.value.filter((e) => !removedKeys.has(keyOf(e)));
   syncLogicalEntries();
-  if (filtered.value.length === 0) {
-    closeLightbox();
-  } else {
-    selectedIndex.value = Math.min(
-      selectedIndex.value,
-      filtered.value.length - 1,
-    );
-    selected.value = filtered.value[selectedIndex.value] ?? null;
-    if (!selected.value) closeLightbox();
-  }
 
   undoableAction({
     text: reversible

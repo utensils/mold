@@ -522,6 +522,24 @@ describe("LibraryPage", () => {
     wrapper.unmount();
   });
 
+  it("preserves a linked physical machine copy through a gallery refresh", async () => {
+    const remote = { ...cat, hostId: "studio", hostLabel: "Studio" };
+    listGalleryMock.mockResolvedValue([cat, remote, dog]);
+    routeState.query = { print: cat.filename, printHost: "studio" };
+    const wrapper = await mounted();
+    expect(wrapper.get('[data-test="lb-key"]').text()).toBe("studio|cat.png");
+    replaceMock.mockClear();
+    window.dispatchEvent(new Event("online"));
+    await flushPromises();
+    expect(wrapper.get('[data-test="lb-key"]').text()).toBe("studio|cat.png");
+    expect(replaceMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: expect.objectContaining({ printHost: "origin" }),
+      }),
+    );
+    wrapper.unmount();
+  });
+
   it("refreshes on visible return and reconnect without losing linked selection or overlapping reads", async () => {
     routeState.query = { print: "cat.png", printHost: "origin", q: "cat" };
     const wrapper = await mounted();

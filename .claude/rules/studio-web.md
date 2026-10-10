@@ -122,3 +122,5 @@ first/last endpoints on the frozen request before serialization; coerce repaint
 policies maskless, preserve endpoint indices/names, and retain original staged
 image bytes. H3 dedicated boundaries and ordinary capability-qualified endpoints
 use the same canvas fit contract.
+
+Library viewer removal preserves the previous filtered order and copy identities: keep any surviving copy of the current print, otherwise advance to the next survivor, then the previous survivor at the end. Close only when the list is empty. Web updates the print URL when advancing; explicit scope/filter changes retain their existing navigation behavior. Native Mac successful trash moves do not leave a completion notice; preserve progress and uncertain/interrupted outcomes.

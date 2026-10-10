@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { viewerAfterRemoval } from "@studio/lib/viewerRemoval";
 import { canvasSource } from "@studio/lib/canvasSource";
 import { PromptClearRecovery } from "@studio/lib/promptClearRecovery";
 import {
@@ -92,7 +93,10 @@ import {
 import { restoredCanvasIntent, type CanvasIntent } from "@studio/lib/outputShape";
 import { loadLibraryUnreadLedger, saveLibraryUnreadLedger } from "@studio/lib/libraryUnreadLedger";
 import { observeTimestampViewingHistory } from "@studio/lib/libraryUnreadMigration";
-import { groupLogicalGalleryPrints } from "@studio/lib/galleryPrintIdentity";
+import {
+  groupLogicalGalleryPrints,
+  sameLogicalGalleryPrint,
+} from "@studio/lib/galleryPrintIdentity";
 import { virtualGridWindow } from "@studio/lib/virtualGrid";
 import { galleryThumbnailScheduler, type ThumbnailHandle } from "@studio/lib/thumbnailScheduler";
 import { thumbnailRenditionQuery, thumbnailTier } from "@studio/lib/thumbnailPersistentCache";
@@ -8580,6 +8584,7 @@ async function performGalleryRefresh(): Promise<void> {
 }
 
 async function loadMoreGalleryPage(): Promise<void> {
+  const previous = [...gallery.value];
   const desired = pendingGallery.splice(0);
   const priorByPhysicalKey = new Map(
     gallery.value.map((print) => [
@@ -8609,6 +8614,16 @@ async function loadMoreGalleryPage(): Promise<void> {
   }
   for (const { print } of priorByPhysicalKey.values()) revokeObjectUrl(print.thumbnailUrl);
   gallery.value.splice(0, gallery.value.length, ...next);
+  if (selectedPrint.value) {
+    const next = viewerAfterRemoval(
+      selectedPrint.value,
+      previous,
+      gallery.value,
+      sameLogicalGalleryPrint,
+    );
+    if (next) selectedPrint.value = next;
+    else closePrint();
+  }
   // Store Vue proxies, not the raw objects passed to splice: thumbnail
   // completions arrive from async closures and raw mutation bypasses proxy
   // traps, leaving the DOM stuck on its placeholder.
@@ -11130,7 +11145,6 @@ async function restoreSelectedPrint(): Promise<void> {
     ...restored.map(({ trashed_at: _trashedAt, purge_at: _purgeAt, ...copy }) => copy),
   ].sort((a, b) => b.timestamp - a.timestamp);
   trashCopies = trashCopies.filter((copy) => !keys.has(galleryPrintKey(copy)));
-  dismissSelectedPrint();
   galleryRefreshDeferred = false;
   rebuildGalleryOrganization();
   await requeueGallery();
@@ -11147,7 +11161,6 @@ async function deleteSelectedPrintForever(): Promise<void> {
     copies.filter((copy) => !outcome.failedHostIds.has(copy.hostId)).map(galleryPrintKey),
   );
   if (keys.size === 0) return;
-  dismissSelectedPrint();
   galleryRefreshDeferred = false;
   await enqueueGalleryOperation(() => dropCopiesFromLibrary(keys, { purgeThumbnails: true }));
 }
@@ -11516,7 +11529,6 @@ async function deleteSelectedGalleryPrints(): Promise<void> {
   await evictCachedGalleryMedia(
     hardDeletedCopies.map((copy) => ({ hostId: copy.cacheKey, filename: copy.filename })),
   );
-  for (const print of gallery.value) revokeObjectUrl(print.thumbnailUrl);
   galleryCopies = galleryCopies.filter((print) => !removedKeys.has(galleryPrintKey(print)));
   trashCopies = trashCopies.filter((print) => !removedKeys.has(galleryPrintKey(print)));
   rebuildGalleryOrganization();
@@ -11526,7 +11538,6 @@ async function deleteSelectedGalleryPrints(): Promise<void> {
     trashLoaded.value = false;
     trashCount.value += groupLogicalGalleryPrints(trashedCopies).length;
   }
-  gallery.value = [];
   galleryByThumbnailKey.clear();
   pendingGallery = visibleRepresentatives();
   await loadMoreGalleryPage();

@@ -247,7 +247,7 @@ const LightboxStub = defineComponent({
     "delete-forever",
   ],
   template: `<div v-if="item" data-test="lightbox" :data-can-organize="canOrganize" :data-can-trash="canTrash" :data-in-trash="inTrash">
-    <span data-test="lb-title">{{ item.title ?? '' }}</span>
+    <span data-test="lb-filename">{{ item.filename }}</span><span data-test="lb-title">{{ item.title ?? '' }}</span>
     <span data-test="lb-fav">{{ item.favorite ? 'fav' : 'plain' }}</span>
     <span data-test="lb-tags">{{ (item.tags ?? []).join(',') }}</span>
     <span data-test="lb-collections">{{ collections.map((c) => c.slug + ':' + (c.checked ? 'on' : 'off')).join(',') }}</span>
@@ -646,6 +646,22 @@ describe("Trash scope", () => {
     expect(wrapper.text()).toContain("No prints in the trash");
   });
 
+  it("permanent deletion keeps the next trash item open, then closes an empty viewer", async () => {
+    const second = { ...trashedOld, filename: "second.png", timestamp: 3 };
+    hostGalleryMock.mockResolvedValue([trashedOld, second]);
+    const wrapper = await inTrash();
+    await wrapper.get("[data-test='grid-open']").trigger("click");
+    await wrapper.get("[data-test='lb-delete-forever']").trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[data-test='lb-filename']").text()).toBe("second.png");
+    expect(replaceMock).toHaveBeenLastCalledWith({
+      query: { print: "second.png", printHost: "origin" },
+    });
+    await wrapper.get("[data-test='lb-delete-forever']").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-test='lightbox']").exists()).toBe(false);
+  });
+
   it("empties the trash with a plain confirm naming the count and hosts", async () => {
     const wrapper = await inTrash();
     await wrapper.get("[data-test='empty-trash']").trigger("click");
@@ -681,6 +697,10 @@ describe("Trash-aware deletes in Prints", () => {
     await flushPromises();
     expect(requestConfirm).not.toHaveBeenCalled();
     expect(wrapper.get("[data-test='grid-count']").text()).toBe("2");
+    expect(wrapper.get("[data-test='lb-filename']").text()).toBe("frog.png");
+    expect(replaceMock).toHaveBeenLastCalledWith({
+      query: { print: "frog.png", printHost: "origin" },
+    });
     expect(useNotifications().toasts[0]!.text).toBe("Moved to trash");
     expect(deleteMock).not.toHaveBeenCalled();
 

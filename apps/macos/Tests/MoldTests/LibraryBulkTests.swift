@@ -22,7 +22,7 @@ struct LibraryBulkTests {
         #expect(store.items.isEmpty)
         #expect(store.trashed.count == 35)
         #expect(store.bulkProgress == nil)
-        #expect(store.bulkResult?.contains("35 of 35") == true)
+        #expect(store.bulkResult == nil)
     }
 
     @Test func statusIsVisibleWhileAwaitingAndStopFinishesCurrentBatch() async {

@@ -42,6 +42,7 @@ extension LibraryStore {
         trashed = LibraryMerge.merge(inMachineOrder(trashPerHost), localHost: MoldEngine.localHostID,
                                      links: syncLinks())
             .sorted { ($0.print.trashedAt ?? 0) > ($1.print.trashedAt ?? 0) }
+        rows.bump()
     }
 
     /// Any print by its own machine's id -- a lead OR a copy merged under

@@ -17,15 +17,25 @@ extension LibraryPane {
             // The clip upscales already running on each machine. One listing
             // per machine, so a job survives a restart and a second Mac.
             .task { await upscales.recover() }
-            .onAppear { library.undo.manager = undoManager }
+            .onAppear { library.undo.manager = undoManager; viewerOrder = showing.visible }
             .onAppear {
                 revealIfNeeded()
             }
             .onChange(of: undoManager) { _, manager in library.undo.manager = manager }
-            .onChange(of: navigation.scope) { _, _ in clearSelection() }
-            .onChange(of: navigation.query) { _, _ in clearSelection() }
+            .onChange(of: navigation.scope) { _, _ in clearSelection(); viewerOrder = showing.visible }
+            .onChange(of: navigation.query) { _, _ in clearSelection(); viewerOrder = showing.visible }
             .onChange(of: library.shelves) { _, shelves in navigation.reconcile(with: shelves) }
             .onChange(of: library.rows.value) { _, _ in
+                let previous = viewerOrder
+                viewerOrder = showing.visible
+                if let viewing {
+                    self.viewing = LibraryViewerCursor.afterRemoval(viewing, previous: previous, remaining: showing.visible)
+                }
+                if selection.items.count <= 1, let lead = selection.lead, entry(lead, in: showing.visible) == nil {
+                    if let next = LibraryViewerCursor.afterRemoval(lead, previous: previous, remaining: showing.visible) {
+                        selection = LibraryCursor.Selection(items: [next], anchor: next, lead: next)
+                    } else { selection = .empty }
+                }
                 followMergedTiles()
             }
             // A click on an already-open Library: `.onAppear` above only
@@ -79,7 +89,7 @@ extension LibraryPane {
                 returnToPrint: gridReturn?.scope == navigation.scope && gridReturn?.query == navigation.query
                     ? gridReturn?.id : nil,
                 onReturnRestored: { gridReturn = nil },
-                onOpen: { gridViewport.cover(); gridReturn = nil; viewing = $0 }
+                onOpen: { gridViewport.cover(); gridReturn = nil; viewerOrder = showing.visible; viewing = $0 }
             )
             .id(LibraryGridContext(scope: navigation.scope, query: navigation.query))
         }
