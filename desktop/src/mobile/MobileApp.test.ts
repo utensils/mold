@@ -112,7 +112,11 @@ vi.mock("@studio/api/client", async (importOriginal) => ({
   apiJsonTo,
 }));
 vi.mock("../lib/api/sse", () => ({ sseStream }));
-vi.mock("../lib/sourceFitPreprocess", () => ({ applyH3BoundaryFit, applySourceFitPreprocess }));
+vi.mock("../lib/sourceFitPreprocess", () => ({
+  applyH3BoundaryFit,
+  applySourceFitPreprocess,
+  applyEndpointFrameFit: vi.fn(async (source, end) => ({ source, end })),
+}));
 vi.mock("../lib/api/expand", () => ({ expandPrompt }));
 vi.mock("../lib/api/remix", () => ({ remixPrompt }));
 vi.mock("../lib/api/catalog", async (importOriginal) => ({
@@ -6835,6 +6839,34 @@ describe("MobileApp wan source conditioning", () => {
       lastFrame: null,
       references: [],
     };
+    liveForm.h3Authoring.lastFrame = {
+      ...liveForm.h3Authoring.firstFrame!,
+      data: "LAST",
+      width: 768,
+      height: 1024,
+    };
+    await flushPromises();
+    expect([liveForm.width, liveForm.height]).toEqual([1344, 768]);
+    liveForm.h3Authoring.firstFrame = null;
+    await flushPromises();
+    expect([liveForm.width, liveForm.height]).toEqual([768, 1024]);
+    liveForm.h3Authoring.lastFrame = {
+      ...liveForm.h3Authoring.lastFrame!,
+      data: "SQUARE",
+      width: 768,
+      height: 768,
+    };
+    await flushPromises();
+    expect([liveForm.width, liveForm.height]).toEqual([768, 768]);
+    liveForm.h3Authoring.firstFrame = {
+      ...liveForm.h3Authoring.lastFrame,
+      data: "QUJD",
+      width: 1344,
+      height: 768,
+    };
+    await flushPromises();
+    liveForm.h3Authoring.lastFrame = null;
+    await flushPromises();
     await fieldControl("Prompt").setValue("a pickup crossing a desert at dusk");
     await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
     await vi.waitFor(() => expect(admittedRequests()).toHaveLength(1));

@@ -748,3 +748,14 @@ such as `/generate` and `/catalog` render Page Not Found:
 ### Continuous Library rows
 
 Library thumbnails on native macOS, native iOS, Tauri desktop and web use continuous justified rows: each picture keeps its aspect ratio, with narrow seams and square corners. Thumbnail size and window changes reflow the rows while keeping a visible print in place. The final incomplete row stays left aligned without enlarging a lone print. iOS thumbnails omit machine-name badges; image details and machine filtering still show the owning machines.
+
+For styles with first/last boundary frames, automatic canvas sizing follows the
+first frame when present, otherwise the last frame, choosing the closest
+supported aspect. Removing both frames keeps the current canvas. A manual
+canvas survives removing the first frame; attaching or replacing a boundary
+frame selects its automatic canvas again. Reuse settings preserves the saved
+canvas.
+
+Fit to canvas remains available when only a last frame is attached. Boundary
+frames use Crop to fill by default; both attached endpoints are fitted to the
+chosen canvas on submission while the composer keeps the original pictures.

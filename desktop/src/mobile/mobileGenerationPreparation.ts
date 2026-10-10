@@ -18,6 +18,7 @@ import { buildRequest, type GenerateForm } from "../lib/generateForm";
 import { mobileMediaBudgetValidationError } from "../lib/generateValidation";
 import {
   applyH3BoundaryFit,
+  applyEndpointFrameFit,
   applySourceFitPreprocess,
   type SourceFitCanvasOps,
 } from "../lib/sourceFitPreprocess";
@@ -90,6 +91,7 @@ export async function prepareMobileGenerationRequest(
   };
 
   if (capabilities.sourceImageMode === "h3-boundaries") {
+    draft.sourceFit = coerceSourceFitForMaskless(draft.sourceFit);
     draft.h3Authoring =
       (await applyH3BoundaryFit(
         draft.h3Authoring,
@@ -102,6 +104,17 @@ export async function prepareMobileGenerationRequest(
     // before the request is built, so upload conversion, placement preview,
     // and the frozen route all see the cropped reference.
     draft.h3Authoring = await applyMinimaxH3ReferenceCrops(draft.h3Authoring, services.ops);
+  } else if (capabilities.supportsEndFrame && draft.endFrame) {
+    draft.sourceFit = coerceSourceFitForMaskless(draft.sourceFit);
+    const fitted = await applyEndpointFrameFit(
+      draft.sourceImage,
+      draft.endFrame,
+      draft.sourceFit,
+      { width: draft.width, height: draft.height },
+      preprocessing,
+    );
+    draft.sourceImage = fitted.source;
+    draft.endFrame = fitted.end;
   } else if (capabilities.sourceImageMode === "qwen-edit" && draft.imageAttachments[0]) {
     const target = resolveSourceConditioningTarget(
       { width: draft.width, height: draft.height },

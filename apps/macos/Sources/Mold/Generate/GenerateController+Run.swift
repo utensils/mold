@@ -21,13 +21,15 @@ extension GenerateController {
     /// below against the requests going out (`RetainedMediaHydration`).
     func submit(on host: MoldHost, backend: any MoldBackend,
                 routing: ChainRouting.Decision = .single(),
-                retained: RetainedMediaHydration? = nil) {
+                retained: RetainedMediaHydration? = nil,
+                recipe: GenerationRecipe? = nil) {
         guard let modelName else {
             let message = "Choose a model before generating."
             submissionFeedback.begin(message, phase: .refused)
             if !run.isBusy { run = .failed(message) }
             return
         }
+        let capturedDraft = draft
         let feedbackID = submissionFeedback.begin("Sending to \(host.name)…", phase: .submitting)
         // The Batch control already caps at `maxBatchOutputs`; this is a belt
         // on the one path a stale draft could still exceed it.
@@ -63,8 +65,26 @@ extension GenerateController {
         }
         let task = Task { [weak self] in
             do {
+                var preparedAdmission = admission
+                if let recipe, BoundaryFramePolicy.resolve(capabilities: recipe.capabilities) != nil {
+                    // Fit one immutable submission snapshot, then copy only its
+                    // endpoint media into the already identified/seeded children.
+                    // Ordinary Mac sources retain their canvas-space mask pipeline.
+                    let fitted = try await capturedDraft.fittingBoundaryFrames(recipe: recipe)
+                    let media = RenderRequest.one(fitted, model: modelName)
+                    let requests = admission.requests.map { request in
+                        var request = request
+                        request.sourceImage = media.sourceImage
+                        request.sourceImageName = media.sourceImageName
+                        request.keyframes = media.keyframes
+                        request.maskImage = media.maskImage
+                        request.sourceFit = media.sourceFit
+                        return request
+                    }
+                    preparedAdmission = BatchAdmission(clientBatchId: admission.clientBatchId, requests: requests)
+                }
                 let accepted = try await backend.submit(
-                    RetainedMedia.hydrated(admission, with: retained, on: host, backend: backend))
+                    RetainedMedia.hydrated(preparedAdmission, with: retained, on: host, backend: backend))
                 guard let self else { return }
                 self.submissionFeedback.update(
                     accepted.children.contains { $0.state == .running }

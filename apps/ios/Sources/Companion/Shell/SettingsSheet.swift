@@ -1,8 +1,8 @@
 import MoldClient
 import SwiftUI
 
-/// Settings, as a sheet (DESIGN.md §5.6). There is deliberately no Appearance
-/// section: the system decides. Section headers are drawn in `.secondaryText`
+/// Settings, as a sheet (DESIGN.md §5.6). Appearance defaults to System.
+/// Section headers are drawn in `.secondaryText`
 /// -- the system header colour failed the contrast audit on white.
 struct SettingsSheet: View {
     @State private var access = SettingsAccess()

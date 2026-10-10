@@ -5,6 +5,12 @@ paths:
 
 # Native Mac interaction contracts
 
+Boundary-frame fit controls remain available for last-only inputs. Fit active
+endpoints once on the captured submission snapshot before admission, preserving
+original authoring bytes, roles, batch IDs, seeds and synchronous queue reservation.
+Ordinary sources keep their existing canvas-space mask fitting pipeline; boundary
+frames never gain repaint masks. Test crop/pad pixels through the submitted batch.
+
 Library and Generate media viewers fit both viewport axes by default and reserve
 space for their toolbar/transport controls. Actual Size means one media pixel per
 display backing pixel, with scrolling when the picture exceeds the viewport.

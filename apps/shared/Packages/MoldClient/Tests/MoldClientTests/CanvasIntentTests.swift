@@ -112,6 +112,103 @@ struct CanvasIntentTests {
         #expect(draft.width == 1024)
         #expect(draft.height == 576)
     }
+    @Test func h3CanvasFollowsOriginalOpeningPixelsAfterFitting() {
+        func encoded(_ width: Int, _ height: Int) -> String {
+            let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+                bytesPerRow: 0, space: CGColorSpaceCreateDeviceGray(),
+                bitmapInfo: CGImageAlphaInfo.none.rawValue)!
+            return SourceFitRender.encodePNG(context.makeImage()!)!.base64EncodedString()
+        }
+        let video = recipe(ladder, wire: "h3-endpoints")
+        var draft = RenderDraft().adopting(video, isNewModel: true)
+        draft.canvasIntent = .source
+        draft.media.sourceImageOriginal = encoded(90, 160)
+        draft.media.sourceImage = encoded(160, 90)
+        #expect(BoundaryFramePolicy.canvasImage(draft: draft, capabilities: video.capabilities)
+                == draft.media.sourceImageOriginal)
+        let adopted = draft.adopting(video, isNewModel: true)
+        #expect(adopted.width == 1024 && adopted.height == 1024)
+    }
+
+    @Test func advertisedBoundaryRecipesKeepTheirOwnCanvasContract() throws {
+        struct Document: Decodable {
+            struct Row: Decodable { let profile: GenerationProfileSet }
+            let profiles: [Row]
+        }
+        let root = try #require(RepoFixtures.repoRoot)
+        let document = try MoldJSON.decoder.decode(Document.self, from: Data(contentsOf:
+            root.appending(path: "docs/generated/generation-profiles-v1.json")))
+        let recipes = document.profiles.flatMap(\.profile.recipes).filter {
+            BoundaryFramePolicy.resolve(capabilities: $0.capabilities) != nil
+        }
+        #expect(!recipes.isEmpty)
+        let context = CGContext(data: nil, width: 90, height: 160, bitsPerComponent: 8,
+            bytesPerRow: 0, space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGImageAlphaInfo.none.rawValue)!
+        let data = SourceFitRender.encodePNG(context.makeImage()!)!
+        let picture = ImportedPicture(encoded: data.base64EncodedString(), name: "portrait.png", data: data)
+        for video in recipes {
+            var draft = RenderDraft().adopting(video, isNewModel: true)
+            BoundaryFramePolicy.set(first: false, picture: picture, draft: &draft,
+                                    capabilities: video.capabilities, recipe: video)
+            if let expected = CanvasFit.automatic((90, 160), recipe: video) {
+                #expect(draft.width == expected.width && draft.height == expected.height)
+                let adopted = draft.adopting(video, isNewModel: true)
+                #expect(adopted.width == expected.width && adopted.height == expected.height)
+            }
+            let request = RenderRequest.one(draft, model: "advertised-boundary-model")
+            #expect(request.width == draft.width && request.height == draft.height)
+            #expect(request.keyframes?.first?.image == picture.encoded)
+        }
+    }
+
+    @Test(arguments: ["wan-pair", "h3-endpoints"])
+    func lastBoundaryDrivesWithoutFirstAndRemovalTransfersAuthority(wire: String) {
+        let video = recipe(ladder, wire: wire)
+        func picture(_ width: Int, _ height: Int) -> ImportedPicture {
+            let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+                bytesPerRow: 0, space: CGColorSpaceCreateDeviceGray(),
+                bitmapInfo: CGImageAlphaInfo.none.rawValue)!
+            let data = SourceFitRender.encodePNG(context.makeImage()!)!
+            return ImportedPicture(encoded: data.base64EncodedString(), name: "frame.png", data: data)
+        }
+        var draft = RenderDraft()
+        BoundaryFramePolicy.set(first: false, picture: picture(160, 90), draft: &draft,
+                                capabilities: video.capabilities, recipe: video)
+        #expect(draft.width == 1344 && draft.height == 768)
+        draft.media.adoptedReferenceCapabilities = video.capabilities
+        let adopted = draft.adopting(video, isNewModel: true)
+        #expect(adopted.width == 1344 && adopted.height == 768)
+        let request = RenderRequest.one(draft, model: "advertised-boundary-model")
+        #expect(request.width == 1344 && request.height == 768)
+        #expect(request.sourceImage == nil)
+        #expect(request.keyframes?.count == 1)
+        BoundaryFramePolicy.set(first: true, picture: picture(90, 160), draft: &draft,
+                                capabilities: video.capabilities, recipe: video)
+        #expect(draft.width == 1024 && draft.height == 1024)
+        var manual = draft
+        manual.canvasIntent = .manual
+        manual.width = 512; manual.height = 512
+        BoundaryFramePolicy.set(first: true, picture: nil, draft: &manual,
+                                capabilities: video.capabilities, recipe: video)
+        #expect(manual.width == 512 && manual.height == 512)
+        #expect(manual.canvasIntent == .manual)
+        BoundaryFramePolicy.set(first: true, picture: nil, draft: &draft,
+                                capabilities: video.capabilities, recipe: video)
+        #expect(draft.width == 1344 && draft.height == 768)
+        BoundaryFramePolicy.set(first: false, picture: picture(90, 160), draft: &draft,
+                                capabilities: video.capabilities, recipe: video)
+        #expect(draft.width == 1024 && draft.height == 1024)
+        draft.canvasIntent = .manual
+        draft.width = 512; draft.height = 512
+        BoundaryFramePolicy.set(first: false, picture: picture(160, 90), draft: &draft,
+                                capabilities: video.capabilities, recipe: video)
+        #expect(draft.width == 1344 && draft.height == 768)
+        BoundaryFramePolicy.set(first: false, picture: nil, draft: &draft,
+                                capabilities: video.capabilities, recipe: video)
+        #expect(draft.width == 1344 && draft.height == 768)
+    }
+
     @Test(arguments: ["wan-pair", "h3-endpoints"])
     func firstBoundaryPictureSelectsAspectAndLastPictureCannotChangeIt(wire: String) throws {
         let video = recipe(ladder, wire: wire)
@@ -133,23 +230,34 @@ struct CanvasIntentTests {
                                 capabilities: video.capabilities, recipe: video)
         #expect(draft.width == 1344)
         #expect(draft.height == 768)
-        // Reattaching the same first frame must not undo a later manual size.
+        // Matching first-frame bytes in a newly replaced last frame do not
+        // make the last attachment the driving endpoint.
         draft.canvasIntent = .manual
-        draft.width = 512
-        draft.height = 512
+        draft.width = 512; draft.height = 512
+        BoundaryFramePolicy.set(first: false, picture: picture(160, 90), draft: &draft,
+                                capabilities: video.capabilities, recipe: video)
+        #expect(draft.width == 512 && draft.height == 512)
+        #expect(draft.canvasIntent == .manual)
+        // Reattaching the same first frame must not undo a later manual size.
         BoundaryFramePolicy.set(first: true, picture: picture(160, 90), draft: &draft,
                                 capabilities: video.capabilities, recipe: video)
         #expect(draft.width == 512)
         #expect(draft.height == 512)
         #expect(draft.canvasIntent == .manual)
         // Replacing the first frame re-arms automatic sizing, including over
-        // a manual selection; the closing frame never owns this decision.
+        // a manual selection; the closing frame waits while a first frame is present.
         draft.canvasIntent = .manual
         BoundaryFramePolicy.set(first: true, picture: picture(90, 160), draft: &draft,
                                 capabilities: video.capabilities, recipe: video)
         #expect(draft.width == 1024)
         #expect(draft.height == 1024)
         #expect(draft.canvasIntent == .source)
+        draft.canvasIntent = .manual
+        draft.width = 512; draft.height = 512
+        BoundaryFramePolicy.set(first: false, picture: picture(90, 160), draft: &draft,
+                                capabilities: video.capabilities, recipe: video)
+        #expect(draft.width == 512 && draft.height == 512)
+        #expect(draft.canvasIntent == .manual)
     }
 
 }

@@ -57,6 +57,40 @@ describe("mobile generation request preparation", () => {
     applySourceFitPreprocess.mockReset();
   });
 
+  it("fits both Wan endpoints before serializing keyframes and preserves draft source facts", async () => {
+    const selected = model({ name: "wan22-ti2v-5b:fp16", family: "wan", source_image: "optional" });
+    const draft = newGenerateForm();
+    Object.assign(draft, {
+      model: selected.name,
+      family: selected.family,
+      sourceImageCapability: "optional",
+      sourceImage: "FIRST",
+      sourceImageName: "first.png",
+      endFrame: { filename: "last.png", base64: "LAST" },
+      width: 1280,
+      height: 720,
+      frames: 81,
+      sourceFit: { mode: "pad-repaint" },
+    });
+    const deps = services();
+    deps.ops.imageSize.mockResolvedValue({ width: 720, height: 1280 });
+    deps.ops.fitImage.mockImplementation(async (bytes: string) => `FIT(${bytes})`);
+    const request = await prepareMobileGenerationRequest(
+      {
+        target: { baseUrl: "http://studio.test:7680", apiKey: "secret" },
+        draft,
+        selectedModel: selected,
+      },
+      deps,
+    );
+    expect(request.keyframes).toEqual([
+      { frame: 0, image: "FIT(FIRST)", name: "first.png" },
+      { frame: 80, image: "FIT(LAST)", name: "last.png" },
+    ]);
+    expect(deps.ops.buildMask).not.toHaveBeenCalled();
+    expect(request.source_fit).toMatchObject({ mode: "crop-fill" });
+  });
+
   it("fits an ordinary source and mask on the frozen draft", async () => {
     const selected = model();
     const draft = newGenerateForm();

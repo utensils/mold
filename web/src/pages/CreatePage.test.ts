@@ -1,3 +1,5 @@
+import * as licenseAcceptanceModule from "@studio/composables/useLicenseAcceptance";
+import { domCanvasOps } from "@studio/lib/sourceFitCanvas";
 import { setOriginApiKey } from "../lib/originAuth";
 import { enableAutoUnmount, flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -2841,21 +2843,147 @@ describe("CreatePage layout and behavior", () => {
       filename: "close.png",
       base64: "LAST",
     };
+    form.state.value.sourceFitPolicy = { mode: "pad-repaint" };
+    form.state.value.maskImage = {
+      kind: "upload",
+      filename: "stale-mask.png",
+      base64: "MASK",
+    };
     await nextTick();
 
+    const imageSize = vi
+      .spyOn(domCanvasOps, "imageSize")
+      .mockResolvedValue({ width: 720, height: 1280 });
+    const fitImage = vi
+      .spyOn(domCanvasOps, "fitImage")
+      .mockImplementation(async (base64) => `FIT(${base64})`);
+    const buildMask = vi.spyOn(domCanvasOps, "buildMask");
     await wrapper.get("[data-test='composer-submit']").trigger("click");
     await flushPromises();
 
-    expect(submitMock).toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(submitMock, wrapper.text()).toHaveBeenCalled(),
+    );
     const request = submitMock.mock.calls.at(-1)![0] as {
       source_image?: string | null;
       keyframes?: { frame: number; image: string }[];
     };
-    expect(request.source_image).toBe("FIRST");
+    expect((request as { source_fit?: unknown }).source_fit).toMatchObject({
+      mode: "crop-fill",
+    });
+    expect((request as { mask_image?: string }).mask_image).toBeUndefined();
+    expect(request.source_image).toBe("FIT(FIRST)");
     expect(request.keyframes).toEqual([
-      { frame: 0, image: "FIRST", name: "open.png" },
-      { frame: 80, image: "LAST", name: "close.png" },
+      { frame: 0, image: "FIT(FIRST)", name: "open.png" },
+      { frame: 80, image: "FIT(LAST)", name: "close.png" },
     ]);
+    expect(form.state.value.imageAttachments[0]?.base64).toBe("FIRST");
+    expect(form.state.value.endFrame?.base64).toBe("LAST");
+    expect(buildMask).not.toHaveBeenCalled();
+    imageSize.mockRestore();
+    fitImage.mockRestore();
+    buildMask.mockRestore();
+  });
+
+  it("refuses a changed endpoint while boundary fitting is in flight", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("wan22-ti2v-5b:fp16", "wan"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "wan22-ti2v-5b:fp16",
+      modelFamily: "wan",
+      prompt: "a lighthouse",
+      sourceImageCapability: "optional",
+      frames: 81,
+      imageAttachments: [
+        { kind: "upload", filename: "first.png", base64: "FIRST" },
+      ],
+      endFrame: { kind: "upload", filename: "last.png", base64: "LAST" },
+      sourceFitPolicy: { mode: "crop-fill" },
+    });
+    await nextTick();
+    let finish!: (value: string) => void;
+    const pending = new Promise<string>((resolve) => {
+      finish = resolve;
+    });
+    const imageSize = vi
+      .spyOn(domCanvasOps, "imageSize")
+      .mockResolvedValue({ width: 720, height: 1280 });
+    const fitImage = vi
+      .spyOn(domCanvasOps, "fitImage")
+      .mockReturnValue(pending);
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await vi.waitFor(() => expect(fitImage).toHaveBeenCalledTimes(1));
+    form.state.value.endFrame = {
+      kind: "upload",
+      filename: "replacement.png",
+      base64: "NEW_LAST",
+    };
+    finish("FITTED");
+    await vi.waitFor(() =>
+      expect(
+        wrapper.getComponent({ name: "ComposerCard" }).props("cancellable"),
+      ).toBe(false),
+    );
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(fitImage).toHaveBeenCalledTimes(1);
+    imageSize.mockRestore();
+    fitImage.mockRestore();
+  });
+
+  it("refuses canvas changes while finalized boundary submission awaits acceptance", async () => {
+    let finish!: (value: { accepted: boolean; downloaded: boolean }) => void;
+    const pending = new Promise<{ accepted: boolean; downloaded: boolean }>(
+      (resolve) => {
+        finish = resolve;
+      },
+    );
+    const acceptance = licenseAcceptanceModule.useLicenseAcceptance();
+    const request = vi.fn(() => pending);
+    const useAcceptance = vi
+      .spyOn(licenseAcceptanceModule, "useLicenseAcceptance")
+      .mockReturnValue({ ...acceptance, request });
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("wan22-ti2v-5b:fp16", "wan"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "wan22-ti2v-5b:fp16",
+      modelFamily: "wan",
+      prompt: "a lighthouse",
+      sourceImageCapability: "optional",
+      frames: 81,
+      imageAttachments: [
+        { kind: "upload", filename: "first.png", base64: "FIRST" },
+      ],
+      endFrame: { kind: "upload", filename: "last.png", base64: "LAST" },
+      sourceFitPolicy: { mode: "crop-fill" },
+    });
+    await nextTick();
+    const imageSize = vi
+      .spyOn(domCanvasOps, "imageSize")
+      .mockResolvedValue({ width: 720, height: 1280 });
+    const fitImage = vi
+      .spyOn(domCanvasOps, "fitImage")
+      .mockImplementation(async (bytes) => `FIT(${bytes})`);
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+    form.state.value.width += 32;
+    finish({ accepted: true, downloaded: false });
+    await vi.waitFor(() =>
+      expect(
+        wrapper.getComponent({ name: "ComposerCard" }).props("cancellable"),
+      ).toBe(false),
+    );
+    expect(submitMock).not.toHaveBeenCalled();
+    imageSize.mockRestore();
+    fitImage.mockRestore();
+    useAcceptance.mockRestore();
   });
 
   it("says the end frame could not be restored when reusing a first/last-frame print", async () => {
@@ -6154,6 +6282,64 @@ describe("CreatePage prompt gate", () => {
     ];
     await nextTick();
     expect(blockerText(wrapper)).toBeNull();
+  });
+
+  it("uses last-only H3 canvas, gives first priority, and follows removal and last replacement", async () => {
+    const model = modelWithOptionalPrompt(
+      "minimax-h3-fl2va:official-bf16",
+      "minimax-h3",
+      {
+        source_image: "optional",
+        generation_profile: undefined,
+        recommended_dimensions: [
+          { width: 1344, height: 768 },
+          { width: 768, height: 1344 },
+          { width: 1024, height: 1024 },
+        ],
+      },
+    );
+    hostModelsMock.mockResolvedValue([model]);
+    mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = model.name;
+    form.state.value.modelFamily = "minimax-h3";
+    const boundary = (data: string, width: number, height: number) => ({
+      data,
+      width,
+      height,
+      filename: "frame.png",
+      mimeType: "image/png",
+    });
+    form.state.value.h3Authoring = {
+      firstFrame: null,
+      lastFrame: boundary("LAST", 1080, 1920),
+      references: [],
+    };
+    await nextTick();
+    expect([form.state.value.width, form.state.value.height]).toEqual([
+      768, 1344,
+    ]);
+    form.state.value.h3Authoring.firstFrame = boundary("FIRST", 1920, 1080);
+    await nextTick();
+    expect([form.state.value.width, form.state.value.height]).toEqual([
+      1344, 768,
+    ]);
+    form.state.value.h3Authoring.firstFrame = null;
+    await nextTick();
+    expect([form.state.value.width, form.state.value.height]).toEqual([
+      768, 1344,
+    ]);
+    form.state.value.h3Authoring.lastFrame = boundary("SQUARE", 1000, 1000);
+    await nextTick();
+    expect([form.state.value.width, form.state.value.height]).toEqual([
+      1024, 1024,
+    ]);
+    form.state.value.h3Authoring.lastFrame = null;
+    await nextTick();
+    expect([form.state.value.width, form.state.value.height]).toEqual([
+      1024, 1024,
+    ]);
   });
 
   it("reads an H3 first frame as the conditioning and still refuses without one", async () => {

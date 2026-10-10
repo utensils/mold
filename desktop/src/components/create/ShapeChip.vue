@@ -52,6 +52,8 @@ const shape = useOutputShape({
   canvasIntent: () => props.canvasIntent,
   contractModel: () => props.contractModel,
   supportsSourceImage: () => caps.value.supportsSourceImage,
+  sourceImageMode: () => caps.value.sourceImageMode,
+  supportsEndFrame: () => caps.value.supportsEndFrame,
   onCanvasIntent: (intent) => emit("canvas-intent", intent),
 });
 

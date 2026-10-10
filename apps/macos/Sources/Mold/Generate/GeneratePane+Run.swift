@@ -72,7 +72,7 @@ extension GeneratePane {
             on: host, backend: hosts.backend(for: host), routing: routing,
             retained: reuse.take(for: controller.draft).map {
                 RetainedMediaHydration(authority: $0, hosts: hosts)
-            })
+            }, recipe: recipe)
     }
 
     /// Puts the print's picture in the source well, then runs -- or says why

@@ -402,6 +402,10 @@ Native iOS keeps **Cancel**, **Retry**, and **Pause/Resume** in queue-row swipe 
 
 Native iOS and macOS generation controls support ordered MiniMax H3 image/video/audio references, Hunyuan3D named views, and Wan/MiniMax boundary frames. See the [native reference parity audit](docs/plans/native-reference-parity.md) and native app guides for limits and media formats.
 
+For first/last-frame video authoring, the first frame controls automatic aspect matching when present; otherwise the last frame does. Removing the first frame or replacing a last-only frame updates the canvas to the remaining image's closest supported shape. Required-frame rules still come from the selected recipe.
+
+Frame fitting defaults to Crop to Fill, including when only the last frame is attached. Supported fit choices apply to the submitted endpoints without replacing the original images in the editor.
+
 ### Media export controls
 
 Native iOS and Tauri offer clip GIF exports with Loop/Bounce, Forever/Once,

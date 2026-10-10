@@ -16,6 +16,8 @@
  * intent it implies — so whichever control the user reached for, the other
  * agrees on the next render.
  */
+import { canvasSource, canvasSourceDimensions } from "@studio/lib/canvasSource";
+import type { SourceImageMode } from "@studio/lib/generationCapabilities";
 import { computed, type ComputedRef } from "vue";
 import {
   intentForCanvas,
@@ -37,6 +39,8 @@ export interface OutputShapeOptions {
   /** Whether this recipe reads a still at all. A parked image must not
    * project Source controls for a checkpoint that cannot carry it. */
   supportsSourceImage: () => boolean;
+  sourceImageMode?: () => SourceImageMode;
+  supportsEndFrame?: () => boolean;
   /** Told which intent the write implies, so the owner can persist it. */
   onCanvasIntent: (intent: CanvasIntent) => void;
 }
@@ -45,9 +49,19 @@ export function useOutputShape(options: OutputShapeOptions) {
   const sourceDimensions = computed(() => {
     if (!options.supportsSourceImage()) return null;
     const form = options.form();
-    return form.sourceImageWidth && form.sourceImageHeight
-      ? { width: form.sourceImageWidth, height: form.sourceImageHeight }
-      : null;
+    return canvasSourceDimensions(
+      canvasSource({
+        mode: options.sourceImageMode?.() ?? "single",
+        supportsEndFrame: options.supportsEndFrame?.() ?? false,
+        source: {
+          base64: form.sourceImage ?? "",
+          width: form.sourceImageWidth,
+          height: form.sourceImageHeight,
+        },
+        end: form.endFrame,
+        h3: form.h3Authoring,
+      }),
+    );
   });
   const sourceResolution = computed(() => {
     const form = options.form();

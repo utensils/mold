@@ -44,6 +44,26 @@ describe("SourceImageWell", () => {
   beforeEach(() => setActivePinia(createPinia()));
   afterEach(() => (document.body.innerHTML = ""));
 
+  it("shows Crop fill for a last-only H3 boundary", () => {
+    const form = formFor("minimax-h3");
+    form.model = "minimax-h3-fl2va:official-bf16";
+    form.h3Authoring = {
+      firstFrame: null,
+      lastFrame: {
+        data: "LAST",
+        filename: "last.png",
+        mimeType: "image/png",
+        width: 720,
+        height: 1280,
+      },
+      references: [],
+    };
+    const wrapper = mount(SourceImageWell, { props: { form } });
+    const select = wrapper.get("[data-test='source-fit-policy']").element as HTMLSelectElement;
+    expect(select.value).toBe("crop-fill");
+    expect(Array.from(select.options).map((option) => option.value)).toContain("crop-fill");
+  });
+
   it("sets the source image from an ImagePickerModal pick", async () => {
     const form = formFor("sd15");
     const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
@@ -404,6 +424,15 @@ describe("SourceImageWell — per-model source conditioning (#772, #779)", () =>
       sourceImageCapability: sourceImage,
     });
   }
+
+  it("keeps the fit selector visible with only an ordinary closing frame", () => {
+    const form = wanForm("optional");
+    form.endFrame = { filename: "last.png", base64: "LAST" };
+    const wrapper = mount(SourceImageWell, { props: { form } });
+    expect(
+      (wrapper.get("[data-test='source-fit-policy']").element as HTMLSelectElement).value,
+    ).toBe("crop-fill");
+  });
 
   it("exposes Ref2VA ordered references through the multi-image Library picker", async () => {
     const form = reactive({

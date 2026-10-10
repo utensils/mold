@@ -154,6 +154,62 @@ final class ReferenceParityTests: XCTestCase {
         shot.name = "Start frame aspect and selected menu"; shot.lifetime = .keepAlways; add(shot)
     }
 
+    @MainActor func testLastFrameAspectAfterRemovingAndReplacingFirst() async throws {
+        continueAfterFailure = false
+        let machine = try FixtureMachine(aspectFixture: true, referenceFixture: true, galleryPrints: 2)
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        defer { app.terminate(); machine.stop() }
+        cleanUpFixture(machine, port: port, app: app)
+        app.launch(); try addMachine(app, port: port)
+        try choose("minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p", in: app)
+        try pickLibrary("Last frame, empty", image: 1, app: app)
+        try assertBoundaryAspect("4:7", app: app)
+        try pickLibrary("First frame, empty", image: 0, app: app)
+        try assertBoundaryAspect("16:9", app: app)
+        let first = app.buttons["First frame"]
+        reveal(first, app: app); first.tap()
+        app.buttons["Remove"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["First frame, empty"].waitForExistence(timeout: 5))
+        try assertBoundaryAspect("4:7", app: app)
+        try pickLibrary("Last frame", image: 0, app: app)
+        try assertBoundaryAspect("16:9", app: app)
+        try pickLibrary("Last frame", image: 1, app: app)
+        try assertBoundaryAspect("4:7", app: app)
+        XCTAssertTrue(machine.generationRequests.isEmpty, "Aspect selection must never generate")
+    }
+
+    @MainActor private func assertBoundaryAspect(_ aspect: String, app: XCUIApplication) throws {
+        let options = app.buttons["Options"].firstMatch
+        reveal(options, app: app); tapMenu(options)
+        XCTAssertTrue(app.navigationBars["More Options"].waitForExistence(timeout: 5))
+        let shape = app.buttons["options-shape"].firstMatch
+        XCTAssertTrue(shape.waitForExistence(timeout: 5))
+        XCTAssertTrue(shape.label.contains(aspect), "Expected \(aspect): \(shape.label)")
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "Boundary canvas \(aspect)"; shot.lifetime = .keepAlways; add(shot)
+        let optionsForm = app.descendants(matching: .any)["generation-options-form"].firstMatch
+        XCTAssertTrue(optionsForm.waitForExistence(timeout: 5))
+        let fit = app.descendants(matching: .any)["options-source-fit"].firstMatch
+        let top = app.navigationBars["More Options"].frame.maxY + 8
+        for _ in 0..<6 {
+            if fit.exists, fit.isHittable, fit.frame.minY >= top,
+               fit.frame.maxY <= optionsForm.frame.maxY - 12 { break }
+            if fit.exists, fit.frame.minY < top { optionsForm.swipeDown() }
+            else { optionsForm.swipeUp() }
+        }
+        XCTAssertTrue(fit.exists, "Boundary endpoints must offer fitting controls")
+        XCTAssertGreaterThanOrEqual(fit.frame.minY, top)
+        XCTAssertLessThanOrEqual(fit.frame.maxY, optionsForm.frame.maxY - 12,
+                                 "The complete fit control must be visibly inside Options")
+        XCTAssertTrue(fit.label.contains("Crop to fill") || (fit.value as? String)?.contains("Crop to fill") == true,
+                      "Default boundary fit must be Crop to fill: \(fit.label)")
+        let fitShot = XCTAttachment(screenshot: app.screenshot())
+        fitShot.name = "Boundary Crop to fill \(aspect)"; fitShot.lifetime = .keepAlways; add(fitShot)
+        app.buttons["Done"].firstMatch.tap()
+        XCTAssertTrue(app.navigationBars["More Options"].waitForNonExistence(timeout: 5))
+    }
+
     @MainActor func testNamedViewsAndBoundaryWellsFollowModelCapabilities() async throws {
         continueAfterFailure = false
         let machine = try FixtureMachine(referenceFixture: true, galleryPrints: 4)

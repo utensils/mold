@@ -34,7 +34,10 @@ struct SourceFitSection: View {
                         Text("Bottom").tag(SourceFitAlignY.bottom)
                     }
                 }
-            } header: { SectionHeader(String(localized: "Source image")) }
+            } header: {
+                SectionHeader(BoundaryFramePolicy.resolve(capabilities: recipe.capabilities) == nil
+                    ? String(localized: "Source image") : String(localized: "Boundary frames"))
+            }
         }
     }
 }

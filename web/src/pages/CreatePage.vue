@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { canvasSource } from "@studio/lib/canvasSource";
 import { PromptClearRecovery } from "@studio/lib/promptClearRecovery";
 import { restoreRetainedDraftMedia } from "@studio/lib/retainedDraftMedia";
 import { originAuthenticatedFetch as fetch } from "../lib/originAuth";
@@ -1140,6 +1141,54 @@ function preserveRestoredSourceCanvas(base64: string) {
   canvasIntent.value = "manual";
 }
 
+const activeCanvasSource = computed(() =>
+  canvasSource({
+    mode: capabilities.value.sourceImageMode,
+    supportsEndFrame: capabilities.value.supportsEndFrame,
+    source: form.state.value.imageAttachments[0] ?? null,
+    end: form.state.value.endFrame,
+    h3: form.state.value.h3Authoring,
+  }),
+);
+let previousClosingCanvasSource = "";
+let canvasSourceInitialized = false;
+let previousCanvasRecipe = "";
+function preserveBoundaryRemovalCanvas() {
+  const closing =
+    capabilities.value.sourceImageMode === "h3-boundaries"
+      ? (form.state.value.h3Authoring?.lastFrame?.data ?? "")
+      : capabilities.value.supportsEndFrame
+        ? (form.state.value.endFrame?.base64 ?? "")
+        : "";
+  const selected = activeCanvasSource.value?.base64 ?? "";
+  const recipe = `${form.state.value.model}:${form.state.value.pipeline ?? ""}`;
+  // The web draft already holds the restored canvas when Create mounts.
+  // Dedicated boundary images must not turn that remount into a fresh upload.
+  if (
+    !canvasSourceInitialized &&
+    selected &&
+    capabilities.value.sourceImageMode === "h3-boundaries"
+  ) {
+    preservedSourceReplacement = selected;
+    canvasIntent.value = "manual";
+  }
+  // Removal preserves a manual canvas; deliberate replacement rearms it.
+  if (
+    canvasIntent.value === "manual" &&
+    selected &&
+    (!canvasSourceInitialized ||
+      recipe !== previousCanvasRecipe ||
+      (selected === closing &&
+        previousStillSource &&
+        closing === previousClosingCanvasSource))
+  ) {
+    preservedSourceReplacement = selected;
+  }
+  previousClosingCanvasSource = closing;
+  canvasSourceInitialized = true;
+  previousCanvasRecipe = recipe;
+}
+
 function syncSourceCanvas(
   image: {
     base64: string | null;
@@ -1219,38 +1268,8 @@ function syncSourceCanvas(
   return { base64: image.base64, resolution, automaticResolution };
 }
 
-watch(
-  [
-    () => form.state.value.imageAttachments[0]?.base64 ?? null,
-    () => currentModel.value?.name ?? form.state.value.model,
-    () => form.state.value.pipeline ?? null,
-    () => currentModel.value?.generation_profile?.profile_hash ?? null,
-    () => currentModel.value?.max_pixels ?? null,
-    () => currentModel.value?.max_axis_pixels ?? null,
-    () => currentModel.value?.dimension_alignment ?? null,
-    () =>
-      currentModel.value?.recommended_dimensions
-        ?.map(({ width, height }) => `${width}x${height}`)
-        .join("|") ?? "",
-  ],
-  () => {
-    const next = syncSourceCanvas(
-      form.state.value.imageAttachments[0] ?? null,
-      {
-        base64: previousStillSource,
-        resolution: previousStillResolution,
-        automaticResolution: previousStillAutomaticResolution,
-      },
-    );
-    previousStillSource = next.base64;
-    previousStillResolution = next.resolution;
-    previousStillAutomaticResolution = next.automaticResolution;
-  },
-  { immediate: true },
-);
-
 const activeSourceDimensions = computed(() => {
-  const image = form.state.value.imageAttachments[0];
+  const image = activeCanvasSource.value;
   return image?.width && image.height
     ? { width: image.width, height: image.height }
     : null;
@@ -1288,6 +1307,40 @@ const capabilities = computed(() =>
     activeRecipe.value,
   ),
 );
+watch(
+  [
+    () => activeCanvasSource.value?.base64 ?? null,
+    () =>
+      `${activeCanvasSource.value?.width ?? ""}x${activeCanvasSource.value?.height ?? ""}`,
+    () =>
+      form.state.value.h3Authoring?.lastFrame?.data ??
+      form.state.value.endFrame?.base64 ??
+      "",
+    () => currentModel.value?.name ?? form.state.value.model,
+    () => form.state.value.pipeline ?? null,
+    () => currentModel.value?.generation_profile?.profile_hash ?? null,
+    () => currentModel.value?.max_pixels ?? null,
+    () => currentModel.value?.max_axis_pixels ?? null,
+    () => currentModel.value?.dimension_alignment ?? null,
+    () =>
+      currentModel.value?.recommended_dimensions
+        ?.map(({ width, height }) => `${width}x${height}`)
+        .join("|") ?? "",
+  ],
+  () => {
+    preserveBoundaryRemovalCanvas();
+    const next = syncSourceCanvas(activeCanvasSource.value, {
+      base64: previousStillSource,
+      resolution: previousStillResolution,
+      automaticResolution: previousStillAutomaticResolution,
+    });
+    previousStillSource = next.base64;
+    previousStillResolution = next.resolution;
+    previousStillAutomaticResolution = next.automaticResolution;
+  },
+  { immediate: true },
+);
+
 /** The model's image-attachment shape — the one shared policy. */
 const sourcePlan = computed(() => sourceMediaPlan(capabilities.value));
 /**
@@ -1754,6 +1807,8 @@ watch(
       });
       if (!result || !retainedSourceReuseIsCurrent(snapshot.version)) return;
       form.state.value = { ...form.state.value, ...result.patch };
+      const restored = activeCanvasSource.value;
+      if (restored) preserveRestoredSourceCanvas(restored.base64);
       setRetainedSourceReuseIntentIfCurrent(snapshot.version, {
         ...intent,
         inventory: result.inventory,
@@ -3810,6 +3865,29 @@ async function onSubmitInner(
     }
     if (!isCurrent()) return;
   }
+  const boundaryStamp = () =>
+    JSON.stringify([
+      form.state.value.model,
+      form.state.value.pipeline,
+      form.state.value.width,
+      form.state.value.height,
+      form.state.value.sourceFitPolicy,
+      form.state.value.imageAttachments[0],
+      form.state.value.endFrame,
+      form.state.value.h3Authoring?.firstFrame,
+      form.state.value.h3Authoring?.lastFrame,
+    ]);
+  const boundaryExpected =
+    capabilities.value.supportsEndFrame ||
+    capabilities.value.sourceImageMode === "h3-boundaries";
+  const submittedBoundaryStamp = boundaryStamp();
+  const boundaryIsCurrent = () => {
+    if (!isCurrent()) return false;
+    if (boundaryStamp() === submittedBoundaryStamp) return true;
+    composerError.value =
+      "Frame endpoints or canvas settings changed while preparing. Generate again to use the current settings.";
+    return false;
+  };
   const currentRequest = withBatchOverride(
     form.toRequest(currentModel.value),
     batchSize,
@@ -3897,6 +3975,7 @@ async function onSubmitInner(
     }
     route = result.route;
   }
+  if (boundaryExpected && !boundaryIsCurrent()) return;
   const preparedSource = await prepareStillSourceToRequest(
     route,
     undefined,
@@ -3904,6 +3983,7 @@ async function onSubmitInner(
   );
   if (!isCurrent()) return;
   if (preparedSource === false) return;
+  if (boundaryExpected && !boundaryIsCurrent()) return;
   let req = withBatchOverride(form.toRequest(currentModel.value), batchSize);
   const finalizedCopies = requestCopyCount(req);
   if (quick) req.original_prompt = quick.originalPrompt;
@@ -3914,6 +3994,11 @@ async function onSubmitInner(
   // same client-side fit, coerced maskless.
   if (isMinimaxH3Identity(currentFamily.value, form.state.value.model)) {
     const h3 = form.state.value.h3Authoring;
+    if (h3?.firstFrame?.data || h3?.lastFrame?.data)
+      req.source_fit = coerceSourceFitForMaskless(
+        parseSourceFitPolicy(form.state.value.sourceFitPolicy) ??
+          defaultSourceFitPolicy(),
+      );
     if (h3Cropped) req.references = minimaxH3ReferenceProjection(h3Cropped);
     const boundaryRoute: HostRoute | null = route || null;
     const fitBoundary = async (
@@ -3941,7 +4026,7 @@ async function onSubmitInner(
         },
         signal,
       );
-      if (fitted === false) return false;
+      if (fitted === false || !boundaryIsCurrent()) return false;
       return fitted.source?.base64 ?? base64;
     };
     if (typeof req.source_image === "string" && h3?.firstFrame) {
@@ -3964,6 +4049,59 @@ async function onSubmitInner(
     req.source_image = preparedSource.source?.base64 ?? null;
     if (preparedSource.mask) req.mask_image = preparedSource.mask.base64;
     else delete req.mask_image;
+  }
+  // Ordinary boundary recipes serialize BOTH frames as keyframes. Fit the
+  // closing frame too and replace only wire bytes, preserving indices/names.
+  if (
+    capabilities.value.supportsEndFrame &&
+    form.state.value.endFrame &&
+    req.keyframes?.length
+  ) {
+    const end = form.state.value.endFrame;
+    const endpointSettings = {
+      family: currentFamily.value,
+      frames: req.frames ?? null,
+      width: req.width ?? form.state.value.width,
+      height: req.height ?? form.state.value.height,
+      policy:
+        parseSourceFitPolicy(form.state.value.sourceFitPolicy) ??
+        defaultSourceFitPolicy(),
+    };
+    req.source_fit = coerceSourceFitForMaskless(endpointSettings.policy);
+    delete req.mask_image;
+    const opening = await prepareStillSourceToRequest(
+      route,
+      {
+        source: form.state.value.imageAttachments[0] ?? null,
+        mask: null,
+        maskless: true,
+        settings: endpointSettings,
+      },
+      signal,
+    );
+    if (!boundaryIsCurrent() || opening === false) return;
+    if (req.source_image && opening.source)
+      req.source_image = opening.source.base64;
+    const fitted = await prepareStillSourceToRequest(
+      route,
+      {
+        source: { kind: "upload", filename: end.filename, base64: end.base64 },
+        mask: null,
+        maskless: true,
+        settings: endpointSettings,
+      },
+      signal,
+    );
+    if (!boundaryIsCurrent() || fitted === false) return;
+    req.keyframes = req.keyframes.map((frame) => ({
+      ...frame,
+      image:
+        frame.frame === 0
+          ? (opening.source?.base64 ?? frame.image)
+          : frame.image === end.base64
+            ? (fitted.source?.base64 ?? frame.image)
+            : frame.image,
+    }));
   }
   if (req.source_image && originalSource) {
     void persistGenerationSourceMedia(req.source_image, originalSource);
@@ -4031,7 +4169,7 @@ async function onSubmitInner(
           { signal },
         )
       : await routing.resolveFeasible(req, finalizedCopies, { signal });
-  if (!isCurrent()) return;
+  if (!isCurrent() || (boundaryExpected && !boundaryIsCurrent())) return;
   if (finalizedResult.kind !== "route") {
     toast("error", feasibilityMessage(finalizedResult, "this finalized print"));
     return;
@@ -4056,6 +4194,7 @@ async function onSubmitInner(
     ),
   });
   if (!accepted || !isCurrent()) return;
+  if (boundaryExpected && !boundaryIsCurrent()) return;
   if (!submitRequestCopies(req, decision, route)) return;
   clearRetainedSourceReuseIntent();
   quickPrepared.value = null;

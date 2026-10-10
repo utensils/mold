@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { canvasSource } from "@studio/lib/canvasSource";
 import { PromptClearRecovery } from "@studio/lib/promptClearRecovery";
 import { minimaxH3TaskForModel } from "@studio/lib/minimaxH3Authoring";
 import { restoreRetainedDraftMedia } from "@studio/lib/retainedDraftMedia";
@@ -164,7 +165,11 @@ import {
   wanRecipeValidationError,
 } from "../lib/generateValidation";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
-import { applyH3BoundaryFit, applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
+import {
+  applyH3BoundaryFit,
+  applySourceFitPreprocess,
+  applyEndpointFrameFit,
+} from "../lib/sourceFitPreprocess";
 import {
   coerceSourceFitForMaskless,
   defaultSourceFitPolicy,
@@ -1226,6 +1231,49 @@ function preserveRestoredSourceCanvas(base64: string) {
   canvasIntent.value = "manual";
 }
 
+const activeCanvasSource = computed(() =>
+  canvasSource({
+    mode: caps.value.sourceImageMode,
+    supportsEndFrame: caps.value.supportsEndFrame,
+    source:
+      requestConditioning.value === "references"
+        ? { base64: form.imageAttachments[0] ?? "" }
+        : {
+            base64: form.sourceImage ?? "",
+            width: form.sourceImageWidth,
+            height: form.sourceImageHeight,
+          },
+    end: form.endFrame,
+    h3: form.h3Authoring,
+  }),
+);
+let previousClosingCanvasSource = "";
+let canvasSourceInitialized = false;
+let previousCanvasRecipe = "";
+function preserveBoundaryRemovalCanvas() {
+  const closing =
+    caps.value.sourceImageMode === "h3-boundaries"
+      ? (form.h3Authoring?.lastFrame?.data ?? "")
+      : caps.value.supportsEndFrame
+        ? (form.endFrame?.base64 ?? "")
+        : "";
+  const selected = activeCanvasSource.value?.base64 ?? "";
+  const recipe = `${form.model}:${form.pipeline ?? ""}`;
+  // Removal preserves a manual canvas; deliberate replacement rearms it.
+  if (
+    canvasIntent.value === "manual" &&
+    selected &&
+    (!canvasSourceInitialized ||
+      recipe !== previousCanvasRecipe ||
+      (selected === closing && previousStillSource && closing === previousClosingCanvasSource))
+  ) {
+    preservedSourceReplacement = selected;
+  }
+  previousClosingCanvasSource = closing;
+  canvasSourceInitialized = true;
+  previousCanvasRecipe = recipe;
+}
+
 function applyDecodedSourceResolution(
   base64: string | null,
   previous: {
@@ -1249,7 +1297,9 @@ function applyDecodedSourceResolution(
   const dimensions =
     base64 === previous.base64 && previous.resolution
       ? previous.resolution.source
-      : imageDimensionsFromBase64(base64);
+      : activeCanvasSource.value?.width && activeCanvasSource.value.height
+        ? { width: activeCanvasSource.value.width, height: activeCanvasSource.value.height }
+        : imageDimensionsFromBase64(base64);
   if (!dimensions) {
     setDimensions(null, null);
     return { base64, resolution: null, automaticResolution: null };
@@ -1302,10 +1352,9 @@ function applyDecodedSourceResolution(
 
 watch(
   [
-    () =>
-      requestConditioning.value === "references"
-        ? (form.imageAttachments[0] ?? null)
-        : form.sourceImage,
+    () => activeCanvasSource.value?.base64 ?? null,
+    () => `${activeCanvasSource.value?.width ?? ""}x${activeCanvasSource.value?.height ?? ""}`,
+    () => form.h3Authoring?.lastFrame?.data ?? form.endFrame?.base64 ?? "",
     () => contractEntry.value?.name ?? form.model,
     () => form.pipeline ?? null,
     () => contractEntry.value?.generation_profile?.profile_hash ?? null,
@@ -1318,6 +1367,7 @@ watch(
         .join("|") ?? "",
   ],
   ([base64]) => {
+    preserveBoundaryRemovalCanvas();
     // This watcher also runs when Create remounts. Keep it limited to derived
     // dimensions; source attachment boundaries own their one-time fit default
     // so a route change cannot overwrite the user's selected policy.
@@ -1329,8 +1379,10 @@ watch(
         automaticResolution: previousStillAutomaticResolution,
       },
       (width, height) => {
-        form.sourceImageWidth = width;
-        form.sourceImageHeight = height;
+        if (activeCanvasSource.value?.base64 === form.sourceImage) {
+          form.sourceImageWidth = width;
+          form.sourceImageHeight = height;
+        }
       },
     );
     previousStillSource = next.base64;
@@ -3132,6 +3184,7 @@ async function preprocessSourceFit(
   // H3 FL2VA boundaries take the same client-side fit as an ordinary source,
   // coerced maskless (H3 has no repaint mask).
   if (draftCaps.sourceImageMode === "h3-boundaries") {
+    draft.sourceFit = coerceSourceFitForMaskless(draft.sourceFit);
     try {
       draft.h3Authoring =
         (await applyH3BoundaryFit(
@@ -3212,6 +3265,38 @@ async function preprocessSourceFit(
       return false;
     } finally {
       preprocessingStatus.value = null;
+    }
+  }
+  if (draftCaps.supportsEndFrame && draft.endFrame) {
+    draft.sourceFit = coerceSourceFitForMaskless(draft.sourceFit);
+    try {
+      const fitted = await applyEndpointFrameFit(
+        draft.sourceImage,
+        draft.endFrame,
+        draft.sourceFit,
+        { width: draft.width, height: draft.height },
+        {
+          ops: domCanvasOps,
+          cache: sourceFitCache,
+          upscale: (image, model) =>
+            upscaleImage({
+              model,
+              image,
+              ...(route ? { target: route.target } : {}),
+              ...(signal ? { signal } : {}),
+            }),
+        },
+      );
+      draft.sourceImage = fitted.source;
+      draft.endFrame = fitted.end;
+      return true;
+    } catch (error) {
+      if (signal?.aborted) return false;
+      toasts.push(
+        `Source preprocessing failed: ${error instanceof Error ? error.message : String(error)}`,
+        "error",
+      );
+      return false;
     }
   }
   // Source fit applies to the image the request will actually carry — on an
@@ -4071,6 +4156,8 @@ watch(
       if (!result || !composer.isRetainedSourceCurrent(version)) return;
       authoritativeReuseApply = true;
       Object.assign(form, result.patch);
+      const restored = activeCanvasSource.value;
+      if (restored) preserveRestoredSourceCanvas(restored.base64);
       composer.setRetainedSourceIfCurrent(version, { ...handoff, inventory: result.inventory });
       await nextTick();
     } catch (error) {
