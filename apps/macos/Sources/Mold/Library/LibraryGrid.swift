@@ -30,6 +30,7 @@ struct LibraryGrid: View {
     @State private var nativePosition = ScrollPosition()
     @State var keyboardReveal: PrintID?
     @State private var visibleIDs: Set<PrintID> = []
+    @State private var fullyVisibleIDs: Set<PrintID> = []
     /// The grid must HOLD key focus, or its arrows, Return and Space never
     /// reach it -- including when the viewer closes and hands the cursor back.
     @FocusState private var focused: Bool
@@ -53,13 +54,18 @@ struct LibraryGrid: View {
                         Section {
                             ForEach(laid.rows) { row in
                                 HStack(spacing: JustifiedLayout.gap) {
-                                    ForEach(row.items, id: \.index) { item in
+                                    ForEach(row.items) { item in
                                         cell(section.items[item.index], points: max(item.width, row.height), selectedTargets: selectedTargets, selectedPlan: selectedPlan)
                                             .frame(width: item.width, height: row.height)
                                     }
                                 }
                                 .frame(height: row.height)
                                 .id(row.id)
+                                .onScrollVisibilityChange(threshold: 0.99) { visible in
+                                    if visible { fullyVisibleIDs.insert(row.id) }
+                                    else { fullyVisibleIDs.remove(row.id) }
+                                }
+                                .onDisappear { fullyVisibleIDs.remove(row.id) }
                             }
                         } header: {
                             // A section with no day is the whole list in one
@@ -84,7 +90,9 @@ struct LibraryGrid: View {
                 visibleIDs = Set(ids)
             }
             .onChange(of: keyboardReveal) { _, lead in
-                guard let lead, !visibleIDs.contains(rowAnchor(lead)) else { return }
+                guard let lead, !fullyVisibleIDs.contains(rowAnchor(lead)) else { return }
+                // The 10% visibility set is only a reflow anchor. A sliver of
+                // the selected row is not enough for keyboard navigation.
                 withAnimation(.snappy) { scroller.scrollTo(rowAnchor(lead), anchor: .center) }
             }
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { newWidth in

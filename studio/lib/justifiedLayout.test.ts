@@ -33,6 +33,19 @@ describe("continuous library rows", () => {
     expect(aspectOf(image(1, 10000))).toBe(0.0001);
     expect(layoutJustifiedRows([image(100)], 0)).toEqual([]);
   });
+  it("closes a row before gaps consume all space for very thin portraits", () => {
+    const items = Array.from({ length: 100 }, () => image(1, 10000));
+    for (const width of [2, 100, 600]) {
+      const rows = layoutJustifiedRows(items, width, 180);
+      expect(rows.flatMap((row) => row.items).length).toBe(items.length);
+      for (const row of rows) {
+        expect(row.height).toBeGreaterThan(0);
+        expect(row.height).toBeLessThanOrEqual(270);
+        for (const tile of row.items)
+          expect(tile.width / tile.height).toBeCloseTo(0.0001, 8);
+      }
+    }
+  });
   it("windows a 30,000-item library in both directions with correct offsets", () => {
     const rows = layoutJustifiedRows(
       Array.from({ length: 30000 }, (_, i) => image([50, 100, 180][i % 3]!)),

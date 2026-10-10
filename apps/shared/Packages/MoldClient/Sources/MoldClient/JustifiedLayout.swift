@@ -46,6 +46,8 @@ public enum JustifiedLayout {
             sum = 0
         }
         for index in ratios.indices {
+            // Very thin portraits can otherwise fill a row with seams alone.
+            if index > start, gap * Double(index - start) >= width { flush(index, justify: false) }
             let fit = (width - gap * Double(index - start)) / (sum + ratios[index])
             if index > start, fit <= targetHeight {
                 let previous = (width - gap * Double(index - start - 1)) / sum
@@ -64,11 +66,19 @@ public enum JustifiedLayout {
 /// Cache geometry separately from selection, visibility and thumbnail updates.
 /// A redraw may compare the section value but must not allocate 30K new tiles.
 @MainActor public final class JustifiedLibraryLayout {
+    /// Cell identity follows the print when deletion or sorting changes its
+    /// section index; thumbnail state must never transfer to its replacement.
+    public struct PrintTile: Identifiable {
+        public let id: PrintID
+        public let index: Int
+        public let x: Double
+        public let width: Double
+    }
     /// SwiftUI's lazy scroll targets take the ForEach identity, not a nested
     /// view's .id modifier. Use the first print so visibility is typed PrintID.
     public struct PrintRow: Identifiable {
         public let id: PrintID
-        public let items: [JustifiedLayout.Tile]
+        public let items: [PrintTile]
         public let height: Double
         public let top: Double
     }
@@ -91,7 +101,9 @@ public enum JustifiedLayout {
             Section(source: section, rows: JustifiedLayout.rows(aspects: section.items.map {
                 JustifiedLayout.aspect(width: $0.print.metadata.width, height: $0.print.metadata.height)
             }, width: width, targetHeight: targetHeight).map { row in
-                PrintRow(id: section.items[row.id].id, items: row.items, height: row.height, top: row.top)
+                PrintRow(id: section.items[row.id].id, items: row.items.map {
+                    PrintTile(id: section.items[$0.index].id, index: $0.index, x: $0.x, width: $0.width)
+                }, height: row.height, top: row.top)
             })
         }
         return sections

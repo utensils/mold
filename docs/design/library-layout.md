@@ -29,11 +29,15 @@ application-owned implementations with matching Swift and TypeScript tests.
   retains TanStack row virtualization and its flat print-keyed thumbnail layer.
   Both keep decoded nodes when a print moves across row boundaries. Native apps
   use lazy rows and a geometry cache independent of image/selection state.
+  Native row cells use print identities across deletion/reordering, and canceled
+  thumbnail loads cannot replace the current image.
 - Resize and zoom retain a visible print anchor. Browser grids also retain the
   offset into its row. Native pinch retains its initial top print. Viewer return
   retains the exact covered viewport, including a partially visible row.
 - macOS Up/Down selects the closest horizontal center in the adjacent row;
   Left/Right and Shift/Command keep the existing ordered selection contract.
+  Keyboard reveal requires the row to be almost completely visible; the lower
+  visibility threshold used for reflow anchors cannot suppress that scroll.
 - iOS captures the visible print before size bindings change. Its Favorites
   rotor uses [explicit per-print targets](https://developer.apple.com/documentation/swiftui/view/accessibilityrotorentry(id:in:))
   and reveals the containing lazy row before VoiceOver moves to a print.
@@ -43,4 +47,6 @@ application-owned implementations with matching Swift and TypeScript tests.
 Geometry: `studio/lib/justifiedLayout.ts` and
 `apps/shared/Packages/MoldClient/Sources/MoldClient/JustifiedLayout.swift`.
 Tests cover row width, ratios, ordering, final rows, invalid dimensions,
-panoramas, 30,000 items and native keyboard geometry.
+panoramas, 30,000 items and native keyboard geometry. Extremely thin portraits
+close a capped row before seams consume its image area; this rare row may leave
+spare width rather than collapsing its tiles to zero height.

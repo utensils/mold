@@ -48,7 +48,7 @@ struct LibraryGrid: View {
                         Section {
                             ForEach(laid.rows) { row in
                                 HStack(spacing: JustifiedLayout.gap) {
-                                    ForEach(row.items, id: \.index) { item in
+                                    ForEach(row.items) { item in
                                         let entry = section.items[item.index]
                                         cell(entry, points: max(item.width, row.height), showsHost: projection.showsHost)
                                         .frame(width: item.width, height: row.height)

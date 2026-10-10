@@ -55,6 +55,8 @@ struct LibraryThumbnail: View {
     private var bucket: Int { edge > 160 ? 512 : 256 }
 
     private func load() async {
-        image = await cache.image(for: entry, host: host, size: bucket)
+        let loaded = await cache.image(for: entry, host: host, size: bucket)
+        guard !Task.isCancelled else { return }
+        image = loaded
     }
 }

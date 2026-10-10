@@ -70,6 +70,9 @@ export function layoutJustifiedRows<T extends DimensionedMedia>(
   };
   for (let i = 0; i < images.length; i++) {
     const ratio = aspectOf(images[i]!);
+    // A run of very thin portraits can fill the width with seams alone.
+    // Close before that happens, retaining positive image area and ratios.
+    if (i > start && gap * (i - start) >= containerWidth) flush(i, false);
     const fit = (containerWidth - gap * (i - start)) / (sum + ratio);
     if (i > start && fit <= targetHeight) {
       const previous = (containerWidth - gap * (i - start - 1)) / sum;

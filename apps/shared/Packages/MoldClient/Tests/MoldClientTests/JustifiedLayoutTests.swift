@@ -22,6 +22,14 @@ struct JustifiedLayoutTests {
                 }
             }
         }
+        let original = cache.resolve(LibraryGrouping.byDay(entries), width: 800, targetHeight: 180)[0].rows[0]
+        let remaining = entries.enumerated().filter { $0.offset != 1 }.map(\.element)
+        let afterDeletion = cache.resolve(LibraryGrouping.byDay(remaining), width: 800, targetHeight: 180)[0].rows[0]
+        #expect(original.id == afterDeletion.id)
+        // The third print moves into index 1, but must keep its own cell state.
+        #expect(afterDeletion.items[1].index == 1)
+        #expect(afterDeletion.items[1].id == original.items[2].id)
+        #expect(afterDeletion.items[1].id != original.items[1].id)
     }
     @Test func continuousRows() {
         let ratios = [0.5, 1.5, 1, 2, 0.6, 1, 1.6, 0.7]
@@ -45,5 +53,15 @@ struct JustifiedLayoutTests {
         let rows = JustifiedLayout.rows(aspects: Array(repeating: 1.5, count: 30000), width: 1000, targetHeight: 180)
         #expect(rows.flatMap(\.items).count == 30000)
         #expect(rows.allSatisfy { $0.height > 0 && $0.height <= 270 })
+    }
+    @Test func gapsCannotConsumeAllSpaceForThinPortraits() {
+        for width in [2.0, 100.0, 600.0] {
+            let rows = JustifiedLayout.rows(aspects: Array(repeating: 0.0001, count: 100), width: width, targetHeight: 180)
+            #expect(rows.flatMap(\.items).count == 100)
+            for row in rows {
+                #expect(row.height > 0 && row.height <= 270)
+                for tile in row.items { #expect(abs(tile.width / row.height - 0.0001) < 0.00000001) }
+            }
+        }
     }
 }
