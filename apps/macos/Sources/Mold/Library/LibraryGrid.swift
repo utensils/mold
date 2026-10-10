@@ -54,7 +54,7 @@ struct LibraryGrid: View {
                             ForEach(laid.rows) { row in
                                 HStack(spacing: JustifiedLayout.gap) {
                                     ForEach(row.items, id: \.index) { item in
-                                        cell(section.items[item.index], selectedTargets: selectedTargets, selectedPlan: selectedPlan)
+                                        cell(section.items[item.index], points: max(item.width, row.height), selectedTargets: selectedTargets, selectedPlan: selectedPlan)
                                             .frame(width: item.width, height: row.height)
                                     }
                                 }
@@ -150,12 +150,12 @@ struct LibraryGrid: View {
         })
     }
 
-    @ViewBuilder private func cell(_ entry: LibraryEntry,
+    @ViewBuilder private func cell(_ entry: LibraryEntry, points: CGFloat,
                                    selectedTargets: [LibraryEntry],
                                    selectedPlan: LibraryMenuPlan?) -> some View {
         if let host = hosts.first(where: { $0.id == entry.hostID }) {
             LibraryCell(
-                entry: entry, host: host, edge: edge,
+                entry: entry, host: host, edge: points,
                 isSelected: selection.items.contains(entry.id),
                 isLead: selection.lead == entry.id,
                 showsHostBadge: showsHostBadges,

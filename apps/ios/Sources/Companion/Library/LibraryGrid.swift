@@ -51,6 +51,7 @@ struct LibraryGrid: View {
                                         let entry = section.items[item.index]
                                         cell(entry, points: max(item.width, row.height), showsHost: projection.showsHost)
                                         .frame(width: item.width, height: row.height)
+                                        .clipped()
                                         .background {
                                             if selecting {
                                                 GeometryReader { geometry in
@@ -193,7 +194,6 @@ struct LibraryGrid: View {
         let next = TileSize.pinched(from: start, magnification: scale, current: tile)
         guard next != tile else { return }
         withAnimation(.snappy(duration: 0.25)) { tile = next }
-
     }
 
     private func rowAnchor(for id: PrintID, in sections: [JustifiedLibraryLayout.Section]) -> PrintID {

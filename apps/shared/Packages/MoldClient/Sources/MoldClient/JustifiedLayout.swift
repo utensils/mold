@@ -66,7 +66,7 @@ public enum JustifiedLayout {
 @MainActor public final class JustifiedLibraryLayout {
     /// SwiftUI's lazy scroll targets take the ForEach identity, not a nested
     /// view's .id modifier. Use the first print so visibility is typed PrintID.
-    public struct Row: Identifiable {
+    public struct PrintRow: Identifiable {
         public let id: PrintID
         public let items: [JustifiedLayout.Tile]
         public let height: Double
@@ -74,7 +74,7 @@ public enum JustifiedLayout {
     }
     public struct Section: Identifiable {
         public let source: LibrarySection
-        public let rows: [Row]
+        public let rows: [JustifiedLibraryLayout.PrintRow]
         public var id: String { source.id }
     }
     private var source: [LibrarySection] = []
@@ -91,7 +91,7 @@ public enum JustifiedLayout {
             Section(source: section, rows: JustifiedLayout.rows(aspects: section.items.map {
                 JustifiedLayout.aspect(width: $0.print.metadata.width, height: $0.print.metadata.height)
             }, width: width, targetHeight: targetHeight).map { row in
-                Row(id: section.items[row.id].id, items: row.items, height: row.height, top: row.top)
+                PrintRow(id: section.items[row.id].id, items: row.items, height: row.height, top: row.top)
             })
         }
         return sections
