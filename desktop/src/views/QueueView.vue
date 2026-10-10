@@ -6,6 +6,8 @@
  * not to watch pixels arrive; selecting a row brings it to the canvas.
  */
 import { computed, ref } from "vue";
+import { queueModelDownloadAvailability } from "@studio/lib/queueModelDownload";
+import { useJobsStore } from "../stores/jobs";
 import QueueDownloadControl from "@studio/components/QueueDownloadControl.vue";
 import AuthedMedia from "../components/gallery/AuthedMedia.vue";
 import QueueRowMenu from "../components/shell/QueueRowMenu.vue";
@@ -30,6 +32,7 @@ import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
 
 const gallery = useGalleryStore();
+const jobs = useJobsStore();
 const generation = useGenerationStore();
 const hostModels = useHostModelsStore();
 const hosts = useHostsStore();
@@ -40,7 +43,8 @@ const title = (row: QueueRow) => rowTitle(row, hostModels.unionInstalled);
 const status = (row: QueueRow) => rowStatusLine(row, rowContext.contextFor.value(row));
 
 function downloadContext(row: QueueRow) {
-  const host = hosts.all.find((host) => host.id === commands.hostIdFor(row));
+  const hostId = commands.hostIdFor(row);
+  const host = hosts.all.find((host) => host.id === hostId);
   const job = row.kind === "print" ? row.print.id : row.shared.id;
   const held = row.kind === "print" ? !!row.print.holdError : row.shared.phase === "held";
   return {
@@ -48,6 +52,12 @@ function downloadContext(row: QueueRow) {
     instance: host?.instanceId,
     job,
     held,
+    downloadAvailable: (() => {
+      const entry = hostId
+        ? jobs.queues[hostId]?.entries.find((entry) => entry.id === job)
+        : undefined;
+      return entry ? queueModelDownloadAvailability(entry) : undefined;
+    })(),
     online: host?.status === "ready",
   };
 }
@@ -289,6 +299,7 @@ function previewSrc(row: QueueRow): string | null {
               :target="downloadContext(row).target"
               :instance="downloadContext(row).instance"
               :job="downloadContext(row).job"
+              :download-available="downloadContext(row).downloadAvailable"
               :host="machine(row)"
               :online="downloadContext(row).online"
               controls

@@ -11,6 +11,11 @@ enum RowAxis: Equatable {
     case horizontal
     case vertical
 
+    /// Active model downloads need the full row for progress and controls.
+    static func model(_ size: DynamicTypeSize, downloading: Bool) -> RowAxis {
+        downloading ? .vertical : Self.for(size)
+    }
+
     /// Side by side through xxxLarge, stacked from AX1 up. The seven standard
     /// sizes all fit a label and a short value on a phone's width; the five
     /// accessibility sizes run 28-53 pt body text, where "Video memory" alone

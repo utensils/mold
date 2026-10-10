@@ -47,8 +47,8 @@ struct QueueDownloadRecoveryTests {
         #expect(QueueDownloadSettlement.progress(jobs: [completed, DownloadJob(id: "new", model: "wan", status: .active)]).fraction == nil)
     }
 
-    @Test func knownMissingModelUsesReadableCopyAndOtherErrorsStayIntact() {
-        #expect(QueueHold.missingModel("wan", sentence: "Run: mold pull wan").summary(modelName: "Wan", hostName: "Workstation") == "Wan isn’t installed on Workstation.")
+    @Test func missingModelKeepsTheSpecificCauseAndOtherErrorsStayIntact() {
+        #expect(QueueHold.missingModel("wan", sentence: "The adapter file is missing.").summary(modelName: "Wan", hostName: "Workstation") == "The adapter file is missing.")
         #expect(QueueHold.prose("Disk full", retryable: false).summary(modelName: "Wan", hostName: "Workstation") == "Disk full")
     }
 }
@@ -83,6 +83,41 @@ struct QueueDownloadRecoveryLifecycleTests {
             #expect(recovery.state(host: host, job: "q")?.phase == (success ? .complete : .failed))
         }
     }
+    @Test func freshMalformedHintBlocksLegacyAcquisition() async throws {
+        for hint in ["null", "false", #"{"model":"other"}"#] {
+            let (recovery, fake, host, entry, authority) = try fixture()
+            let current = try decode(QueueEntry.self,
+                #"{"id":"q","state":"held","model":"wan","batch_id":"b","client_batch_id":"c","retryable":true,"model_download":\#(hint)}"#)
+            fake.stub("queueJob(id:)", returning: QueueJobDetail(job: current))
+            recovery.start(entry: entry, host: host, authority: authority, backend: fake, every: .milliseconds(5))
+            try await settle { recovery.state(host: host, job: "q")?.phase == .failed || fake.count("startDownload(_:)") > 0 }
+            #expect(fake.count("startDownload(_:)") == 0)
+            #expect(fake.count("retryJob(_:)") == 0)
+            recovery.cancel(host: host, job: "q")
+        }
+    }
+
+    @Test func withdrawnHintCannotAcquireButCompletedRepairCanRetry() async throws {
+        for withdrawBefore in [true, false] {
+            let (recovery, fake, host, original, authority) = try fixture()
+            var entry = original
+            entry.modelDownload = QueueEntry.ModelDownload(model: "wan")
+            if !withdrawBefore { fake.stub("queueJob(id:)", returning: QueueJobDetail(job: entry)) }
+            recovery.start(entry: entry, host: host, authority: authority, backend: fake, every: .milliseconds(5))
+            if withdrawBefore {
+                try await settle { recovery.state(host: host, job: "q")?.phase == .failed || fake.count("startDownload(_:)") > 0 }
+                #expect(fake.count("startDownload(_:)") == 0)
+                recovery.cancel(host: host, job: "q")
+            } else {
+                try await settle { fake.count("downloads()") > 0 }
+                fake.stub("queueJob(id:)", returning: QueueJobDetail(job: original))
+                recovery.observe(try decode(DownloadEvent.self, #"{"type":"job_done","id":"ticket","model":"wan"}"#), on: host)
+                try await settle { recovery.state(host: host, job: "q")?.phase == .complete }
+                #expect(fake.count("retryJob(_:)") == 1)
+            }
+        }
+    }
+
     @Test func licenceDismissalAndApprovalSettleTheExactAttempt() async throws {
         for approve in [true, false] {
             let (recovery, fake, host, entry, authority) = try fixture()

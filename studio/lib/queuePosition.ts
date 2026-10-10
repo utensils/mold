@@ -1,3 +1,4 @@
+import { queueModelDownloadAvailability } from "./queueModelDownload";
 /**
  * Live queue position and blocked-reason copy, shared by web, desktop, and
  * iPhone.
@@ -13,6 +14,7 @@ import type { QueueEntry, QueuePlan, QueueWorkItem } from "../api/queuePlan";
 import { formatByteProgress } from "./formatBytes";
 
 export interface QueueStatus {
+  downloadAvailable?: boolean | undefined;
   /** The row's lifecycle as the host listed it (`queued`, `running`, `held`), or null. */
   state: string | null;
   /** Live 0-based dispatch order, or null when the host did not list the job. */
@@ -299,6 +301,7 @@ export function buildQueueStatusIndex(
       const state = typeof entry.state === "string" ? entry.state : null;
       index.set(queueStatusKey(source.hostId, entry.id), {
         state,
+        downloadAvailable: queueModelDownloadAvailability(entry),
         position: finitePosition(entry.position),
         // Held is an operator-action state and running work continues through
         // a queue pause. Only ordinary queued work inherits the global gate.

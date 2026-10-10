@@ -52,6 +52,35 @@ function model(entry: Partial<QueueEntry> = {}, extra = {}) {
 }
 
 describe("QueueEntryDetail", () => {
+  it("hides generic retry refusal while model recovery is available", async () => {
+    const wrapper = mount(QueueEntryDetail, {
+      props: {
+        model: model({ state: "held", retryable: true }),
+        inputTarget: { baseUrl: "http://fixture", apiKey: null },
+        inputInstanceId: "fixture",
+      },
+      global: {
+        stubs: {
+          QueueDownloadControl: {
+            name: "QueueDownloadControl",
+            template:
+              "<button @click=\"$emit('available', true)\">recovery</button>",
+          },
+        },
+      },
+    });
+    expect(wrapper.find('[data-test="queue-detail-retry-hint"]').exists()).toBe(
+      true,
+    );
+    await wrapper
+      .findComponent({ name: "QueueDownloadControl" })
+      .vm.$emit("available", true);
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('[data-test="queue-detail-retry-hint"]').exists()).toBe(
+      false,
+    );
+  });
+
   it("bounds compact details and actions to viewport-safe columns", () => {
     const root = componentSource.match(/\.qed\s*\{([^}]*)\}/s);
     const compactActions = componentSource.match(

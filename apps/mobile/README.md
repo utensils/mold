@@ -1014,7 +1014,7 @@ remain authoritative. See [the presentation audit](../../../docs/error-presentat
 
 ### Queue model downloads
 
-A missing-model held job offers **Download and Retry** in Queue or Job Details.
+A held job with a verified missing model or downloadable component (including an adapter) offers **Download and Retry** directly in Queue or Job Details. Its explanation, Details and Move to remain available. The server’s exact-model recovery hint takes precedence over legacy missing-model codes; malformed hints never choose a different download.
 The job shows Starting, download-queue status, live bytes/progress, license review,
 reconnection and failures in place. Closing details does not stop recovery.
 The download runs on the job’s owning machine; retry occurs only after every

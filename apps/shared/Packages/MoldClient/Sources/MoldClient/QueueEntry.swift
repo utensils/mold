@@ -2,6 +2,12 @@ import Foundation
 
 /// A job on a host's queue.
 public struct QueueEntry: Codable, Hashable, Sendable, Identifiable {
+    public struct ModelDownload: Codable, Hashable, Sendable {
+        public let model: String?
+    }
+    /// Nil means an older response omitted the hint. A present malformed hint
+    /// remains non-nil with no model, so legacy recovery cannot override it.
+    public var modelDownload: ModelDownload? = nil
     public let id: String
     public let model: String?
     public var metadata: OutputMetadata? = nil
@@ -40,6 +46,14 @@ public struct QueueEntry: Codable, Hashable, Sendable, Identifiable {
     /// Whether the row was resumed from the journal rather than submitted by
     /// a live client.
     public let replayed: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case modelDownload, id, model, metadata, seedPinned
+        case modelDisplayName, state, position, startedAtUnixMs, heldReason
+        case error, errorDetail, retryable, durable, batchId
+        case clientBatchId, dispatchAttempts, gpu, targetGpu, batchIndex
+        case explicitlyPaused, replayed
+    }
 
     public var startedAt: Date? {
         startedAtUnixMs.map { Date(timeIntervalSince1970: TimeInterval($0) / 1000) }

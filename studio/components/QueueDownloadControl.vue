@@ -14,6 +14,7 @@ const props = withDefaults(
     host: string;
     online?: boolean | undefined;
     controls?: boolean;
+    downloadAvailable?: boolean | undefined;
   }>(),
   { target: null, instance: null, online: true, controls: false },
 );
@@ -30,6 +31,7 @@ watch(
     props.job,
     props.online,
     props.controls,
+    props.downloadAvailable,
   ],
   async (_, __, onCleanup) => {
     let current = true;
@@ -40,6 +42,11 @@ watch(
     emit("available", false);
     if (!props.controls || !props.online || !props.target || !props.instance)
       return;
+    if (props.downloadAvailable !== undefined) {
+      available.value = props.downloadAvailable;
+      emit("available", available.value);
+      return;
+    }
     async function probe() {
       const missing = await missingQueueModel(
         props.target!,

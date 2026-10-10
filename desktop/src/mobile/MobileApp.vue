@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { queueModelDownloadAvailability } from "@studio/lib/queueModelDownload";
 import { useSourceMediaVisibility } from "@studio/lib/sourceMediaVisibility";
 import SourceMediaBrowser from "@studio/components/SourceMediaBrowser.vue";
 import {
@@ -12491,6 +12492,13 @@ onBeforeUnmount(() => {
   generation.resetJobs();
   for (const url of objectUrls) URL.revokeObjectURL(url);
 });
+function queueDownloadHint(hostId: string, jobId: string | null | undefined) {
+  const row = liveQueues.value[hostId]?.entries.find((entry) => entry.id === jobId);
+  return row ? queueModelDownloadAvailability(row) : undefined;
+}
+function sharedHeldQueueRow(hostId: string, jobId: string) {
+  return liveQueues.value[hostId]?.entries.find((entry) => entry.id === jobId)?.state === "held";
+}
 type MobileActivityRow = (typeof activityRows.value)[number];
 
 /**
@@ -12537,9 +12545,11 @@ function mobileQueueRowActions(row: MobileActivityRow): SwipeRowAction[] {
   ) {
     actions.push({
       id: "retry",
-      label: ["MODEL_NOT_FOUND", "UNKNOWN_MODEL"].includes(durableHold(row.print)?.code ?? "")
-        ? "Download and Retry"
-        : "Retry",
+      label:
+        (queueDownloadHint(activityRowHostId(row), activityRowJobId(row)) ??
+        ["MODEL_NOT_FOUND", "UNKNOWN_MODEL"].includes(durableHold(row.print)?.code ?? ""))
+          ? "Download and Retry"
+          : "Retry",
     });
   }
   const executing = ["loading", "denoising", "finishing"].includes(row.print.status);
@@ -12573,7 +12583,8 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
     if (
       authority &&
       jobId &&
-      ["MODEL_NOT_FOUND", "UNKNOWN_MODEL"].includes(durableHold(row.print)?.code ?? "")
+      (queueDownloadHint(activityRowHostId(row), activityRowJobId(row)) ??
+        ["MODEL_NOT_FOUND", "UNKNOWN_MODEL"].includes(durableHold(row.print)?.code ?? ""))
     )
       void startQueueDownloadRecovery(
         authority.target,
@@ -14625,6 +14636,15 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                     <MobileGenerationQueueCard
                       :source-target="retainedQueueSource(activityRowHostId(entry.local))"
                       :source-job-id="activityRowJobId(entry.local)"
+                      :held="!!durableHold(entry.local.print)"
+                      :download-available="
+                        queueDownloadHint(
+                          activityRowHostId(entry.local),
+                          activityRowJobId(entry.local),
+                        )
+                      "
+                      :source-host-label="entry.local.print.hostLabel ?? 'this machine'"
+                      :source-online="!!activityRowQueueAuthority(entry.local)?.host.online"
                       :source-instance-id="retainedQueueInstance(activityRowHostId(entry.local))"
                       :title="queuePrintTitle(entry.local.print)"
                       :subtitle="`${modelLabel(entry.local.print.model)} · ${entry.local.print.hostLabel}`"
@@ -14667,6 +14687,12 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                     <MobileGenerationQueueCard
                       :source-target="retainedQueueSource(entry.shared.hostId)"
                       :source-job-id="entry.shared.id"
+                      :held="sharedHeldQueueRow(entry.shared.hostId, entry.shared.id)"
+                      :download-available="queueDownloadHint(entry.shared.hostId, entry.shared.id)"
+                      :source-host-label="entry.shared.hostLabel"
+                      :source-online="
+                        !!connectedHosts.find((host) => host.id === entry.shared.hostId)?.online
+                      "
                       :source-instance-id="retainedQueueInstance(entry.shared.hostId)"
                       :row-test-id="`fleet-job-${entry.shared.key}`"
                       :title="sharedQueueTitle(entry.shared)"

@@ -1,3 +1,4 @@
+import { queueModelDownloadAvailability } from "./queueModelDownload";
 import { userFacingError } from "./userFacingError";
 /**
  * Everything one server-queue row can say about itself, decided once for web,
@@ -113,6 +114,7 @@ export interface QueueEntryDetailModel {
   waitLabel: string;
   running: boolean;
   held: boolean;
+  downloadAvailable?: boolean | undefined;
   prompt: string | null;
   negativePrompt: string | null;
   title: string | null;
@@ -598,6 +600,7 @@ export function queueEntryDetailModel(
               : queueWaitLabel(wait),
     running,
     held,
+    downloadAvailable: queueModelDownloadAvailability(entry),
     prompt: text(metadata?.prompt),
     negativePrompt: text(metadata?.negative_prompt),
     title: text(metadata?.title),

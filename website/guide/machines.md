@@ -58,7 +58,7 @@ LAN for the web UI.
 
 ### Queue model downloads
 
-A missing-model held job offers **Download and Retry** in Queue or Job Details.
+A held job with a server-verified missing model or downloadable component, such as an adapter, offers **Download and Retry** directly in Queue, machine queues and Job Details. The original diagnostic, Details and Move to remain available. The recovery hint must name the exact queued model; malformed hints never choose a different download.
 The job shows Starting, download-queue status, live bytes/progress, license review,
 reconnection and failures in place. Closing details does not stop recovery.
 The download runs on the job’s owning machine; retry occurs only after every

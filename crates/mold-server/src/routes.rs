@@ -449,6 +449,7 @@ use crate::queue::clean_error_message;
     ),
     components(schemas(
         crate::queue_input_thumbnail::QueueInput,
+        mold_core::QueueModelDownload,
         mold_core::GenerateRequest,
         mold_core::CollectionRef,
         mold_core::Ltx2ControlAdapterInfo,
@@ -7040,7 +7041,7 @@ async fn list_queue(
         })
     });
     let returned = durable_page.rows.len();
-    let (entries, live_only_entries) = project_durable_queue_page(
+    let (mut entries, live_only_entries) = project_durable_queue_page(
         durable_page.rows,
         listing.entries,
         &durable_live_ids,
@@ -7048,6 +7049,7 @@ async fn list_queue(
         schedulable_offset,
     )?;
 
+    enrich_queue_model_downloads(&state, &mut entries).await?;
     let page = mold_core::QueuePage {
         limit,
         offset,
@@ -7067,7 +7069,6 @@ async fn list_queue(
     // `entries` array, so fold the bounded registry-only set into the first
     // durable page. Reindex the merged projection to avoid counting a live
     // durable overlay once in the registry and again in SQLite.
-    let mut entries = entries;
     entries.extend(live_only_entries);
     crate::job_registry::assign_positions(&mut entries, 0);
     let page = page.next_cursor.is_some().then_some(page);
@@ -7163,6 +7164,7 @@ async fn get_queue_job(
             job.client_batch_id = projection.client_batch_id.clone();
             job.batch_index = projection.batch_index;
         }
+        enrich_queue_model_downloads(&state, std::slice::from_mut(&mut job)).await?;
         return Ok(Json(QueueJobEntry { job, work_item }));
     }
     let (Some(projection), Some(window)) = (projection, window) else {
@@ -7183,10 +7185,9 @@ async fn get_queue_job(
         .iter()
         .position(|projected| projected.id == projection.id)
         .unwrap_or(window.rows.len());
-    Ok(Json(QueueJobEntry {
-        job: job_entry_from_durable_row(projection, &row, position),
-        work_item,
-    }))
+    let mut job = job_entry_from_durable_row(projection, &row, position);
+    enrich_queue_model_downloads(&state, std::slice::from_mut(&mut job)).await?;
+    Ok(Json(QueueJobEntry { job, work_item }))
 }
 
 /// Project one durable row, adding the settings the payload-free projection
@@ -7384,6 +7385,63 @@ async fn get_queue_job_preview(
         .ok_or_else(|| ApiError::queue_job_not_found(format!("queue job {id} is no longer live")))
 }
 
+/// File presence is blocking I/O, inspected once per exact model per snapshot.
+async fn enrich_queue_model_downloads(
+    state: &AppState,
+    entries: &mut [crate::job_registry::JobEntry],
+) -> Result<(), ApiError> {
+    for entry in entries.iter_mut() {
+        entry.model_download = None;
+    }
+    let models: Vec<_> = entries
+        .iter()
+        .filter(|entry| {
+            entry.state == crate::job_registry::JobLifecycle::Held && entry.retryable == Some(true)
+        })
+        .map(|entry| entry.model.clone())
+        .collect();
+    if models.is_empty() {
+        return Ok(());
+    }
+    let config = state.config.read().await.clone();
+    let hints = tokio::task::spawn_blocking(move || {
+        inspect_queue_model_downloads(models, |model| {
+            model_manager::queue_model_download(&config, model)
+        })
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("queue model inspection failed: {error}")))?;
+    for entry in entries {
+        entry.model_download = if entry.state == crate::job_registry::JobLifecycle::Held
+            && entry.retryable == Some(true)
+        {
+            hints.get(&entry.model).cloned().flatten()
+        } else {
+            None
+        };
+    }
+    Ok(())
+}
+
+fn inspect_queue_model_downloads(
+    models: Vec<String>,
+    mut inspect: impl FnMut(&str) -> Option<String>,
+) -> std::collections::HashMap<String, Option<Option<mold_core::QueueModelDownload>>> {
+    let mut hints = std::collections::HashMap::new();
+    for model in models {
+        hints.entry(model.clone()).or_insert_with(|| {
+            // Catalog acquisition has its own supported legacy batch-code
+            // recovery. This local manifest inspector does not judge it.
+            if mold_catalog::resolve::looks_like_catalog_id(&model) {
+                None
+            } else {
+                Some(inspect(&model).map(|model| mold_core::QueueModelDownload { model }))
+            }
+        });
+    }
+    hints
+}
+
 /// Turn a payload-free durable page into public queue rows, overlaying the
 /// registry only when that exact durable id is live. The complementary
 /// registry-only set is returned separately because those jobs have no
@@ -7477,6 +7535,7 @@ fn job_entry_from_durable_projection(
         dispatch_attempts: Some(row.dispatch_attempts),
         held_reason: row.held_reason,
         error_detail: error.clone(),
+        model_download: None,
         error,
         retryable: (state == crate::job_registry::JobLifecycle::Held).then_some(row.retryable),
         batch_id: row.batch_id,
@@ -12418,6 +12477,105 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+
+    #[test]
+    fn queue_model_download_inspection_is_once_per_model_including_negative_results() {
+        let mut calls = Vec::new();
+        let hints = inspect_queue_model_downloads(
+            vec![
+                "missing".into(),
+                "complete".into(),
+                "hf:owner/repo".into(),
+                "cv:123".into(),
+                "missing".into(),
+                "complete".into(),
+            ],
+            |model| {
+                calls.push(model.to_string());
+                (model == "missing").then(|| model.to_string())
+            },
+        );
+        assert_eq!(calls, ["missing", "complete"]);
+        assert_eq!(
+            hints["missing"].as_ref().unwrap().as_ref().unwrap().model,
+            "missing"
+        );
+        assert_eq!(hints["complete"], Some(None));
+        assert_eq!(hints["hf:owner/repo"], None);
+        assert_eq!(hints["cv:123"], None);
+    }
+
+    #[tokio::test]
+    async fn queue_model_download_enrichment_matches_single_detail_and_preserves_diagnostics() {
+        let _environment = crate::test_support::hermetic_store_env();
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::for_tests();
+        state.config.write().await.models_dir = root.path().display().to_string();
+        state.job_registry.register("fixture", "sd15:fp16");
+        let mut held = state.job_registry.entry("fixture").unwrap();
+        // Registry-only rows lack journal-owned retry authority, including
+        // the journal-disabled and explicit live_only_entries projections.
+        let mut live = vec![held.clone()];
+        enrich_queue_model_downloads(&state, &mut live)
+            .await
+            .unwrap();
+        assert_eq!(live[0].model_download, None);
+        held.state = crate::job_registry::JobLifecycle::Held;
+        held.retryable = Some(true);
+        held.error_detail = Some("original diagnostic remains available".into());
+        let mut listing = vec![held.clone(), held.clone()];
+        enrich_queue_model_downloads(&state, &mut listing)
+            .await
+            .unwrap();
+        enrich_queue_model_downloads(&state, std::slice::from_mut(&mut held))
+            .await
+            .unwrap();
+        assert_eq!(listing[0].model_download, held.model_download);
+        assert_eq!(
+            held.model_download
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .model,
+            "sd15:fp16"
+        );
+        assert_eq!(
+            held.error_detail.as_deref(),
+            Some("original diagnostic remains available")
+        );
+        state.config.write().await.models.insert(
+            "sd15:fp16".into(),
+            mold_core::ModelConfig {
+                vae: Some(
+                    root.path()
+                        .join("custom-missing.safetensors")
+                        .display()
+                        .to_string(),
+                ),
+                ..Default::default()
+            },
+        );
+        enrich_queue_model_downloads(&state, std::slice::from_mut(&mut held))
+            .await
+            .unwrap();
+        let negative = serde_json::to_value(&held).unwrap();
+        assert!(negative.as_object().unwrap().contains_key("model_download"));
+        assert!(negative["model_download"].is_null());
+        held.model = "hf:owner/repo".into();
+        enrich_queue_model_downloads(&state, std::slice::from_mut(&mut held))
+            .await
+            .unwrap();
+        assert!(serde_json::to_value(&held)
+            .unwrap()
+            .get("model_download")
+            .is_none());
+        held.retryable = Some(false);
+        enrich_queue_model_downloads(&state, std::slice::from_mut(&mut held))
+            .await
+            .unwrap();
+        assert_eq!(held.model_download, None);
     }
 
     #[tokio::test(flavor = "current_thread")]

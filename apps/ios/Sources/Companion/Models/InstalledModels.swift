@@ -185,7 +185,8 @@ struct DownloadRow: View {
             layout {
                 Text(verbatim: row.sentence(bytesPerSecond: rate)).font(.caption.monospacedDigit()).foregroundStyle(.secondaryText)
                 if RowAxis.for(size) == .horizontal { Spacer(minLength: 8) }
-                Button("Cancel Download", role: .destructive, action: cancel).buttonStyle(.bordered)
+                Button(role: .destructive, action: cancel) { Text("Cancel").frame(minWidth: 44, minHeight: 44) }
+                    .buttonStyle(.bordered).accessibilityLabel("Cancel Download")
             }
         }
         .padding(.vertical, 2)

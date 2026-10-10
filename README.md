@@ -446,7 +446,11 @@ local failures are recorded in OSLog with privacy-protected details.
 
 ### Queue model downloads
 
-A missing-model held job offers **Download and Retry** in Queue or Job Details.
+A held job with missing downloadable model components offers **Download and Retry**
+on its queue card and in Job Details across native, web and Tauri clients. Current
+servers identify repairable missing companions, including adapters, even when the
+main model is installed. The original error, Failure Details and eligible
+**Move to…** control remain available during recovery.
 The job shows Starting, download-queue status, live bytes/progress, license review,
 reconnection and failures in place. Closing details does not stop recovery.
 The download runs on the job’s owning machine; retry occurs only after every

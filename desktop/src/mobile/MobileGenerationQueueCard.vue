@@ -23,6 +23,9 @@ import ProgressBar from "@ui/components/ProgressBar.vue";
 const props = withDefaults(
   defineProps<{
     title: string;
+    held?: boolean;
+    downloadAvailable?: boolean | undefined;
+    sourceHostLabel?: string;
     sourceTarget?: ApiTarget | null | undefined;
     sourceJobId?: string | null | undefined;
     sourceInstanceId?: string | null | undefined;
@@ -51,6 +54,8 @@ const props = withDefaults(
   }>(),
   {
     sourceOnline: true,
+    held: false,
+    sourceHostLabel: "this machine",
     detail: null,
     cancelling: false,
     thumbnailUrl: null,
@@ -90,16 +95,16 @@ const active = computed(() => Boolean(props.thumbnailUrl) || props.progress !== 
       'mobile-generation-job--warning': tone === 'warning',
       'mobile-generation-job--leading': Boolean(thumbnailUrl) || Boolean(position),
     }"
-    role="button"
-    tabindex="0"
+    :role="held ? 'group' : 'button'"
+    :tabindex="held ? undefined : 0"
     :aria-label="
       [ariaLabel?.trim() || displayTitle, status, friendlyDetail].filter(Boolean).join('. ')
     "
     data-test="mobile-generation-queue-card"
     :data-row-test="rowTestId ?? undefined"
     @click="emit('activate')"
-    @keydown.enter.prevent="emit('activate')"
-    @keydown.space.prevent="emit('activate')"
+    @keydown.enter.self.prevent="emit('activate')"
+    @keydown.space.self.prevent="emit('activate')"
   >
     <QueueSourceThumbnail
       :target="sourceTarget"
@@ -158,11 +163,18 @@ const active = computed(() => Boolean(props.thumbnailUrl) || props.progress !== 
       <span v-if="!running" data-test="mobile-generation-status">{{ status }}</span>
       <span v-if="cancelling" data-test="mobile-generation-cancelling"> Cancelling… </span>
     </div>
+    <button v-if="held" type="button" class="mobile-held-details" @click.stop="emit('activate')">
+      Details
+    </button>
     <QueueDownloadControl
+      :class="{ 'mobile-held-recovery': held }"
       :target="sourceTarget"
       :instance="sourceInstanceId"
       :job="sourceJobId ?? ''"
-      host="this machine"
+      :host="sourceHostLabel"
+      :online="sourceOnline"
+      :controls="held"
+      :download-available="downloadAvailable"
     />
   </div>
 </template>

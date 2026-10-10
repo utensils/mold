@@ -1,4 +1,5 @@
 import { reactive } from "vue";
+import { queueModelDownloadAvailability } from "../lib/queueModelDownload";
 import { ApiError, apiJsonTo, type ApiTarget } from "../api/client";
 import { getGenerationBatch } from "../api/generationAdmission";
 import {
@@ -32,7 +33,7 @@ export function queueDownloadKey(
   instance: string,
   job: string,
 ): string {
-  return JSON.stringify([target.baseUrl, instance, job]);
+  return JSON.stringify([target.baseUrl, target.apiKey ?? null, instance, job]);
 }
 export function queueDownloadState(
   target: ApiTarget | null | undefined,
@@ -81,6 +82,8 @@ export async function missingQueueModel(
     !row.client_batch_id
   )
     return false;
+  const verified = queueModelDownloadAvailability(row);
+  if (verified !== undefined) return verified;
   const lookup = await getGenerationBatch(target, row.batch_id);
   if (lookup.kind !== "found" || lookup.batch.instance_id !== instance)
     return false;
@@ -102,7 +105,8 @@ export function cancelQueueDownloadRecovery(
   const consent = useLicenseAcceptance();
   if (
     states[key]?.phase === "license" &&
-    consent.pending.value?.target.baseUrl === target.baseUrl
+    consent.pending.value?.target.baseUrl === target.baseUrl &&
+    (consent.pending.value?.target.apiKey ?? null) === (target.apiKey ?? null)
   )
     consent.cancel();
   controllers.delete(key);
@@ -187,6 +191,8 @@ export async function startQueueDownloadRecovery(
           const consent = useLicenseAcceptance();
           if (
             consent.pending.value?.target.baseUrl === target.baseUrl &&
+            (consent.pending.value?.target.apiKey ?? null) ===
+              (target.apiKey ?? null) &&
             consent.pending.value.requirements.some(
               (requirement) => requirement.installModel === row.model,
             )
@@ -204,6 +210,10 @@ export async function startQueueDownloadRecovery(
       installModel: row.model,
       start: async () => {
         await current();
+        if (!(await missingQueueModel(target, instance, job)))
+          throw new Error(
+            "This job no longer needs a model download. Refresh Queue.",
+          );
         const catalog =
           row.model.startsWith("hf:") || row.model.startsWith("cv:");
         try {
