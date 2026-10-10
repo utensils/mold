@@ -1077,13 +1077,13 @@ describe("Library navigation", () => {
   });
   it("persists expansion independently of the sidebar's collapsed width", async () => {
     const wrapper = await mountAt("/library");
-    const toggle = wrapper.findAll("button").find((button) => button.text() === "▾ Library")!;
+    const toggle = wrapper.get('button[aria-label="Collapse library"]');
     await toggle.trigger("click");
     expect(navButton(wrapper, "Source Media")).toBeUndefined();
     wrapper.unmount();
     const next = await mountAt("/library");
     expect(navButton(next, "Source Media")).toBeUndefined();
-    expect(next.findAll("button").some((button) => button.text() === "▸ Library")).toBe(true);
+    expect(next.find('button[aria-label="Expand library"]').exists()).toBe(true);
     next.unmount();
   });
 });

@@ -24,8 +24,9 @@ MOLD_DEV_SIGN_IDENTITY ?= $(shell security find-identity -v -p codesigning 2>/de
 # Release is signed depth-first by sign-release.sh after Xcode links the app.
 # Signing the build itself with Developer ID makes SwiftPM's MoldMesh resource
 # bundle demand a development team (then conflict with its automatic signing).
+# Only the app target consumes this custom setting; SwiftPM keeps its defaults.
 # Build Release ad hoc and let the release signer handle every nested bundle.
-SIGN := CODE_SIGN_IDENTITY="$(if $(filter Release,$(CONFIG)),-,$(or $(MOLD_DEV_SIGN_IDENTITY),-))"
+SIGN := MOLD_APP_SIGN_IDENTITY="$(if $(filter Release,$(CONFIG)),-,$(or $(MOLD_DEV_SIGN_IDENTITY),-))"
 
 # Sparkle decides which build is newer by comparing CFBundleVersion, and it
 # compares across BOTH channels -- a nightly and a stable are the same app.
@@ -148,6 +149,7 @@ test: gen ## Run every test bundle: the package, then the app's own store tests
 	@scripts/tests/native-workflows-parse.sh
 	@scripts/tests/engine-freshness.sh
 	@bash scripts/tests/h3-engine-features.sh
+	@bash scripts/tests/dev-signing-scope.sh
 	@cd $(PACKAGES)/MoldClient && swift test
 	@cd $(PACKAGES)/MoldStyle && swift test
 	@cd $(PACKAGES)/MoldMesh && swift test

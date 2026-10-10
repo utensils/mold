@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import Icon from "@ui/components/Icon.vue";
 import { useRoute, useRouter } from "vue-router";
 import { scopedCollectionInventory } from "@studio/lib/collectionVisibility";
 import { useContextMenuStore } from "../../stores/contextMenu";
@@ -73,9 +74,11 @@ function drop(event: DragEvent, slug: string) {
     <button
       class="library-group ms-toolbar-button w-full text-left"
       :aria-expanded="expanded"
+      :aria-label="expanded ? 'Collapse library' : 'Expand library'"
       @click="toggle('library')"
     >
-      {{ expanded ? "▾" : "▸" }} Library
+      <Icon :name="expanded ? 'chevron-down' : 'chevron-right'" :size="18" />
+      Library
     </button>
     <div v-if="expanded" class="library-children">
       <button
@@ -95,12 +98,13 @@ function drop(event: DragEvent, slug: string) {
       </button>
       <div v-if="gallery.anyOrganizeCapable" class="flex">
         <button
-          class="ms-toolbar-button"
-          aria-label="Expand collections"
+          class="library-disclosure ms-toolbar-button"
+          :aria-label="collectionsExpanded ? 'Collapse collections' : 'Expand collections'"
+          :title="collectionsExpanded ? 'Collapse collections' : 'Expand collections'"
           :aria-expanded="collectionsExpanded"
           @click="toggle('collections')"
         >
-          {{ collectionsExpanded ? "▾" : "▸" }}
+          <Icon :name="collectionsExpanded ? 'chevron-down' : 'chevron-right'" :size="18" />
         </button>
         <button
           class="ms-toolbar-button flex-1 text-left"
@@ -194,6 +198,22 @@ function drop(event: DragEvent, slug: string) {
   background: color-mix(in srgb, var(--mold-blue) 12%, transparent);
   color: var(--mold-blue);
   font-weight: 600;
+}
+.library-navigation .library-disclosure {
+  width: 32px;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
+  flex-shrink: 0;
+  justify-content: center;
+}
+.library-navigation button:focus-visible {
+  outline: 2px solid var(--mold-blue);
+  outline-offset: -2px;
+}
+.library-navigation svg {
+  flex-shrink: 0;
+  pointer-events: none;
 }
 .library-navigation .library-group {
   font-size: var(--mold-fs-micro);
