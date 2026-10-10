@@ -443,6 +443,7 @@ onBeforeUnmount(() => {
   }
   .source-browser__grid {
     grid-template-columns: repeat(auto-fill, minmax(min(100%, 148px), 1fr));
+    align-items: start;
     gap: 10px;
   }
 }

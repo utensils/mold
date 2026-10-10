@@ -270,3 +270,11 @@ it("refreshes only the owner named by an authenticated gallery event", async () 
   expect(inventory.mock.calls[0]![0]).toEqual(["1.png"]);
   view.unmount();
 });
+
+it("keeps adjacent phone cards at their own height when a usage chooser expands", async () => {
+  const { default: source } = await import("./SourceMediaBrowser.vue?raw");
+  const phoneStyles = source.slice(source.indexOf("@media (max-width: 600px)"));
+  expect(phoneStyles).toMatch(
+    /\.source-browser__grid\s*\{[^}]*align-items:\s*start/,
+  );
+});
