@@ -825,7 +825,8 @@ Media actions on a machine-filtered view affect only its displayed copies.
 
 **Sync All to This Mac** starts an immediate copy and repeats at the interval selected in Settings (five minutes by default)
 for this app session. The Library status shows completion, issues and the next
-run. **Stop Sync** ends repeats and lets active transfers settle. Successful runs
+run. During a transfer, one progress banner replaces the recurring-sync countdown,
+with a single **Stop Sync** control. **Stop Sync** ends repeats and lets active transfers settle. Successful runs
 need no confirmation. **Details** keeps the full report available. **Done**, Return, and Escape dismiss
 the report; a successful report shows only Copy Details and Done. Its checkbox
 acknowledges unchanged per-media issues, while changed issues and connection or
