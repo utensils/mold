@@ -391,15 +391,83 @@ impl Attention {
         let k = apply_rotary(&k, cos, sin)?.contiguous()?;
         let k = candle_transformers::utils::repeat_kv(k, self.kv_groups)?.contiguous()?;
         let v = candle_transformers::utils::repeat_kv(v, self.kv_groups)?.contiguous()?;
-        let scores = (matmul_with_cpu_bf16_fallback(&q, &k.transpose(2, 3)?)? * self.scale)?
-            .to_dtype(DType::F32)?;
-        let scores = scores.broadcast_add(causal_mask)?;
-        let probabilities = candle_nn::ops::softmax_last_dim(&scores)?.to_dtype(v.dtype())?;
-        let output = matmul_with_cpu_bf16_fallback(&probabilities, &v)?
-            .transpose(1, 2)?
-            .reshape((batch, sequence, self.num_heads * self.head_dim))?
-            .to_dtype(dtype)?;
+        let output = causal_attention(
+            &q,
+            &k,
+            &v,
+            causal_mask,
+            self.scale,
+            TEXT_ATTENTION_SCORE_ELEMENT_BUDGET,
+        )?
+        .transpose(1, 2)?
+        .reshape((batch, sequence, self.num_heads * self.head_dim))?
+        .to_dtype(dtype)?;
         self.o_proj.forward(&output)
+    }
+}
+
+/// Score elements one text-attention chunk may materialize: `heads x Q x S`.
+///
+/// Candle's CUDA softmax indexes `row * ncols + col` in a signed 32-bit int
+/// (`candle-kernels/src/reduce.cu`, `softmax`), so one dense `[1, 64, S, S]`
+/// score tensor writes far outside its buffer once `64 * S^2` passes
+/// `i32::MAX` — S > 5,792, which a Ref2VA prompt with five full-size photo references reaches —
+/// and the GPU faults with Xid 31 (#1852). Softmax is per query row, so
+/// chunking the QUERY axis is exact. 2^28 elements keeps every chunk an eighth
+/// of that index space and leaves any sequence up to 2,048 rows (a prompt-only
+/// or single-endpoint FL2VA conditioner) one chunk, byte-identical to before.
+const TEXT_ATTENTION_SCORE_ELEMENT_BUDGET: usize = 1 << 28;
+
+#[cfg(test)]
+fn text_attention_query_chunk_rows(num_heads: usize, sequence: usize) -> usize {
+    query_chunk_rows_for_budget(num_heads, sequence, TEXT_ATTENTION_SCORE_ELEMENT_BUDGET)
+}
+
+fn query_chunk_rows_for_budget(num_heads: usize, sequence: usize, budget: usize) -> usize {
+    let per_row = num_heads.max(1) * sequence.max(1);
+    (budget / per_row).clamp(1, sequence.max(1))
+}
+
+/// Causal attention over `[batch, heads, S, head_dim]` with the query axis
+/// split into chunks of at most `budget` score elements.
+fn causal_attention(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    causal_mask: &Tensor,
+    scale: f64,
+    budget: usize,
+) -> Result<Tensor> {
+    let (_, heads, sequence, _) = q.dims4()?;
+    let rows_per_chunk = query_chunk_rows_for_budget(heads, sequence, budget);
+    if heads * rows_per_chunk * sequence > i32::MAX as usize {
+        candle::bail!(
+            "H3 text attention chunk of {heads} x {rows_per_chunk} x {sequence} scores exceeds the \
+             32-bit softmax index space"
+        );
+    }
+    let key_transposed = k.transpose(2, 3)?;
+    let mut outputs = Vec::with_capacity(sequence.div_ceil(rows_per_chunk));
+    for start in (0..sequence).step_by(rows_per_chunk) {
+        let rows = rows_per_chunk.min(sequence - start);
+        let (query, mask) = if rows == sequence {
+            (q.clone(), causal_mask.clone())
+        } else {
+            (
+                q.narrow(2, start, rows)?,
+                causal_mask.narrow(2, start, rows)?,
+            )
+        };
+        let scores = (matmul_with_cpu_bf16_fallback(&query, &key_transposed)? * scale)?
+            .to_dtype(DType::F32)?
+            .broadcast_add(&mask)?;
+        let probabilities = candle_nn::ops::softmax_last_dim(&scores)?.to_dtype(v.dtype())?;
+        outputs.push(matmul_with_cpu_bf16_fallback(&probabilities, v)?);
+    }
+    if outputs.len() == 1 {
+        Ok(outputs.pop().expect("one chunk"))
+    } else {
+        Tensor::cat(&outputs, 2)
     }
 }
 
@@ -925,6 +993,65 @@ mod tests {
     use candle::{DType, Device};
     use candle_nn::VarMap;
     use std::collections::HashMap;
+
+    /// #1852: the CUDA softmax kernel indexes `row * ncols + col` in a signed
+    /// 32-bit int, so one dense `[1, 64, S, S]` score tensor faulted the GPU
+    /// (Xid 31 FAULT_PDE VIRT_WRITE) once S exceeded 5,792 — every 5-reference
+    /// Ref2VA print. Each chunk must stay far below that index space, and a
+    /// prompt-only sequence must stay one chunk so its arithmetic is unchanged.
+    #[test]
+    fn text_attention_chunks_keep_softmax_indices_inside_i32() {
+        let heads = 64;
+        for sequence in [5_793, 6_400, 8_384, 16_384, 40_000] {
+            let rows = text_attention_query_chunk_rows(heads, sequence);
+            assert!(rows >= 1 && rows < sequence, "S={sequence} rows={rows}");
+            assert!(
+                heads * rows * sequence <= TEXT_ATTENTION_SCORE_ELEMENT_BUDGET,
+                "S={sequence} rows={rows}"
+            );
+            assert!(heads * rows * sequence < i32::MAX as usize);
+        }
+        for sequence in [1, 300, 2_048] {
+            assert_eq!(text_attention_query_chunk_rows(heads, sequence), sequence);
+        }
+    }
+
+    /// Softmax is per query row, so the chunked attention must reproduce the
+    /// dense attention, including the causal mask's per-row slice.
+    #[test]
+    fn query_chunked_causal_attention_matches_dense_attention() {
+        let (heads, sequence, head_dim) = (2, 13, 4);
+        let values = |seed: usize| {
+            Tensor::from_vec(
+                (0..heads * sequence * head_dim)
+                    .map(|i| ((i * seed % 101) as f32 / 101.0) - 0.5)
+                    .collect::<Vec<_>>(),
+                (1, heads, sequence, head_dim),
+                &Device::Cpu,
+            )
+            .unwrap()
+        };
+        let (q, k, v) = (values(31), values(17), values(7));
+        let mask = causal_mask(sequence, &Device::Cpu).unwrap();
+        let scale = 0.5;
+        let dense = causal_attention(&q, &k, &v, &mask, scale, usize::MAX).unwrap();
+        // 2 heads x 13 columns = 26 elements per query row; 100 forces 3-row
+        // chunks (4 full chunks + 1 row).
+        assert_eq!(query_chunk_rows_for_budget(heads, sequence, 100), 3);
+        let chunked = causal_attention(&q, &k, &v, &mask, scale, 100).unwrap();
+        assert_eq!(chunked.dims(), dense.dims());
+        let delta = (chunked - dense)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert!(delta < 1e-6, "max delta {delta}");
+    }
 
     #[test]
     fn qwen_bounds_queued_layer_temporaries_only_on_metal() {
