@@ -774,7 +774,7 @@ for the reviewed native surfaces and runtime verification boundaries.
 
 Queue rows show the owning machine’s sealed conditioning images across models. Job Details shows every ordered reference separately with its role, including identity photos, named views, masks, control images and boundary frames. Audio/video references are listed by kind; unavailable previews are disclosed. Inputs remain separate from live denoise previews and are fetched through authenticated routes, including work submitted from another device. Older servers retain their singular source preview.
 
-Native Library marks media added since the previous Library visit with a session-only New badge. The first visit establishes a baseline; badges stay through viewer navigation and clear on the next visit. Machine and playback labels share one fitted row on iOS so they never overlap.
+Native Library marks media added since the previous Library visit with a session-only New badge. The first visit establishes a baseline; viewing media clears its badge immediately, while unopened badges clear on the next visit. Machine and playback labels share one fitted row on iOS so they never overlap.
 
 ## Error messages
 
