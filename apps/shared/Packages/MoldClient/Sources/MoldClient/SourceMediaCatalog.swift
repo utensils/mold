@@ -76,42 +76,96 @@ public final class SourceMediaCatalog {
         for owner in pending { cached[owner.id] = nil }
         completed = owners.count - pending.count
         publish(owners: owners)
-        // Four initial owners yield first content quickly; subsequent batches stay bounded.
-        var start = 0
-        while start < pending.count {
-            guard !Task.isCancelled, generation == token else { return }
-            let end = min(start + (start == 0 ? 4 : 25), pending.count)
-            let page = Array(pending[start..<end]); start = end
-            for (host, entries) in Dictionary(grouping: page, by: \.hostID) {
-                let capturedRoute = route(host), capturedInstance = instance(host)
+        // Resolve routes before dispatch. Tasks carry only immutable, Sendable request data.
+        let batches = Self.batches(pending)
+        let requests = batches.map { entries in
+            let host = entries[0].hostID
+            let capturedRoute = route(host), capturedInstance = instance(host)
+            let valid = entries.allSatisfy { allowed[$0.id] == SourceMediaAuthority(owner: $0, route: capturedRoute, instance: capturedInstance) }
+            return Request(entries: entries, client: valid ? backend(host) : nil,
+                           route: capturedRoute, instance: capturedInstance)
+        }
+        let positions = Dictionary(owners.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
+        var resolved = owners.filter { cached[$0.id] != nil }
+        var publishedCount = resolved.count
+        await withTaskGroup(of: (Int, Result<RetainedSourceMedia.Inventories, Error>).self) { group in
+            var next = 0
+            func enqueue() {
+                guard next < requests.count else { return }
+                let index = next, request = requests[next]; next += 1
+                let host = request.entries[0].hostID
+                let current = route(host) == request.route && instance(host) == request.instance
+                group.addTask {
+                    do {
+                        try Task.checkCancellation()
+                        guard current else { throw MoldClientError.unreachable("The machine changed while reading sources. Retry to refresh its inventory.") }
+                        guard let client = request.client else { throw MoldClientError.unreachable("Connect this machine to read its source media.") }
+                        return (index, .success(try await client.retainedSourceMediaInventories(filenames: request.entries.map { $0.print.filename })))
+                    } catch { return (index, .failure(error)) }
+                }
+            }
+            enqueue(); enqueue()
+            while let (index, response) = await group.next() {
+                guard !Task.isCancelled, generation == token else { group.cancelAll(); return }
+                let request = requests[index], entries = request.entries, host = request.entries[0].hostID
                 do {
-                    guard entries.allSatisfy({ allowed[$0.id] == SourceMediaAuthority(owner: $0, route: capturedRoute, instance: capturedInstance) }) else {
+                    guard entries.allSatisfy({ allowed[$0.id] == SourceMediaAuthority(owner: $0, route: request.route, instance: request.instance) }),
+                          route(host) == request.route, instance(host) == request.instance else {
                         throw MoldClientError.unreachable("The machine changed while reading sources. Retry to refresh its inventory.")
                     }
-                    guard let client = backend(host) else { throw MoldClientError.unreachable("Connect this machine to read its source media.") }
-                    let result = try await client.retainedSourceMediaInventories(filenames: entries.map { $0.print.filename })
-                    guard !Task.isCancelled, generation == token else { return }
-                    guard route(host) == capturedRoute, instance(host) == capturedInstance,
-                          result.instanceId == nil || capturedInstance == nil || result.instanceId == capturedInstance else {
+                    let result = try response.get()
+                    guard result.instanceId == nil || request.instance == nil || result.instanceId == request.instance else {
                         throw MoldClientError.unreachable("The machine changed while reading sources. Retry to refresh its inventory.")
                     }
                     for owner in entries {
                         guard let inventory = result.inventories[owner.print.filename] else {
                             failures[owner.id] = "The machine did not return this print's source inventory."; continue
                         }
-                        cached[owner.id] = Cached(authority: .init(owner: owner, route: capturedRoute, instance: capturedInstance), inventory: inventory, fetched: now)
+                        cached[owner.id] = Cached(authority: .init(owner: owner, route: request.route, instance: request.instance), inventory: inventory, fetched: now)
                         if inventory.availability != .available && (inventory.availability != .unavailableLegacy || RetainedSourceMedia.disclosable(owner.print.metadata)) {
                             failures[owner.id] = RetainedSourceMedia.disclosure(inventory.availability) ?? "Source media unavailable."
                         }
                     }
                 } catch {
-                    guard !Task.isCancelled, generation == token else { return }
                     for owner in entries { failures[owner.id] = error.localizedDescription }
                 }
                 completed += entries.count
-                publish(owners: owners)
+                resolved.append(contentsOf: entries)
+                // Geometric publication bounds repeated grouping work; progress stays live.
+                if resolved.count >= max(1, publishedCount * 2) || completed == total {
+                    publish(owners: resolved.sorted { positions[$0.id, default: 0] < positions[$1.id, default: 0] })
+                    publishedCount = resolved.count
+                }
+                enqueue()
             }
         }
+    }
+
+    private struct Request: Sendable {
+        let entries: [LibraryEntry]
+        let client: (any MoldBackend)?
+        let route: MoldHost?
+        let instance: String?
+    }
+
+    /// Each host gets a small first-paint request before any bulk requests.
+    static func batches(_ owners: [LibraryEntry]) -> [[LibraryEntry]] {
+        var order: [UUID] = [], hosts: [UUID: [LibraryEntry]] = [:]
+        for owner in owners {
+            if hosts[owner.hostID] == nil { order.append(owner.hostID) }
+            hosts[owner.hostID, default: []].append(owner)
+        }
+        var initial: [[LibraryEntry]] = [], bulk: [[LibraryEntry]] = []
+        for host in order {
+            let entries = hosts[host]!
+            initial.append(Array(entries.prefix(4)))
+            var start = min(4, entries.count)
+            while start < entries.count {
+                let end = min(start + 100, entries.count)
+                bulk.append(Array(entries[start..<end])); start = end
+            }
+        }
+        return initial + bulk
     }
 
     /// Details and browser share fresh answers; this does not change the browser scope.
@@ -128,11 +182,13 @@ public final class SourceMediaCatalog {
     }
 
     private func publish(owners: [LibraryEntry]) {
-        rows = owners.flatMap { owner -> [Row] in
+        let updated = owners.flatMap { owner -> [Row] in
             guard let hit = cached[owner.id], hit.inventory.availability == .available else { return [] }
             return hit.inventory.members.map { Row(owner: owner, member: $0, route: hit.authority.route, instance: hit.authority.instance) }
         }
-        sources = Self.group(rows)
+        guard updated != rows else { return }
+        rows = updated
+        sources = Self.group(updated)
     }
 
     public nonisolated static func group(_ rows: [Row]) -> [Source] {
