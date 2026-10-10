@@ -95,3 +95,14 @@ downloads and changed job identity never trigger a retry.
 **Queue action-state invariant:** Mutations follow the exact owning host and job, current route/instance and supported lifecycle, capabilities, and shared per-row busy reservations. Queued/paused jobs alone offer Pause/Resume; Held recovery requires durable authority and uses the existing typed missing-model download/license flow. Unknown/cancelling/terminal jobs are read-only. Mobile swipes retain a Details fallback when no mutation is eligible. Held cancellation captures and persists only-held intent before DELETE, including automatic retries; a 409 clears that intent rather than broadening it to running work.
 
 Library unread state is client-local and individually viewed. Opening Library, filtering, polling, or preloading must never mark unread media viewed. Preserve legacy read baselines, deduplicate visible merged copies, exclude hidden collections and Trash, and surface local persistence failures without overwriting prior history. Manual-save progress counts processed selections when copy-versus-existing evidence is unavailable.
+
+Continuous Library rows preserve actual metadata aspect ratios with 2-point seams
+and square corners. Missing/invalid dimensions use a square placeholder; decode
+completion never changes geometry. Incomplete final rows stay left aligned at
+target height. Valid extreme ratios remain uncropped. Keep ordered row geometry
+shared (studio/lib/justifiedLayout.ts and MoldClient.JustifiedLayout), lazy/windowed
+rendering, stable item identities, and a visible item anchor through resize/zoom.
+Native macOS vertical arrows follow adjacent row centers, never a guessed column
+count. Viewer return restores the covered viewport; native previews explicitly
+inject thumbnail loaders. Native iOS omits the visual host-name thumbnail badge;
+Info and host sorting/filtering retain their authority. Unseen semantics are unchanged.

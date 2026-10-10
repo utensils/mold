@@ -12,7 +12,7 @@ struct LibraryCell: View {
     var fresh = false
 
     var body: some View {
-        LibraryThumbnail(entry: entry, host: host, edge: edge)
+        LibraryThumbnail(entry: entry, host: host, edge: edge, continuous: true)
             .overlay(alignment: .bottomTrailing) { badges }
             .overlay(alignment: .topTrailing) { trashCountdown }
             .overlay(alignment: .topLeading) {
@@ -22,6 +22,7 @@ struct LibraryCell: View {
                 }
             }
             .overlay { selectionRing }
+            .clipped()
             .contentShape(Rectangle())
             // One element, not five: the badges are facts ABOUT the print and
             // belong in its sentence, not as separate stops on the way past it.
@@ -43,7 +44,7 @@ struct LibraryCell: View {
         if isSelected {
             // The lead is drawn heavier: with several selected, the arrow keys
             // move from ONE of them and you need to see which.
-            RoundedRectangle(cornerRadius: Chrome.thumbnailRadius, style: .continuous)
+            Rectangle()
                 .strokeBorder(Color.accentColor, lineWidth: isLead ? 3 : 2)
                 .opacity(isLead ? 1 : 0.6)
         }

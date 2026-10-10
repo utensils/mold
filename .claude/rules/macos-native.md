@@ -111,3 +111,14 @@ host, known applicable state and current rendered job identity; reserve the exac
 print/job key until the authoritative transition response reconciles its state.
 
 Queue rows reserve fixed preview and progress slots across state changes. Preview caching must fence host, instance and job, bound decoded memory and concurrent reads, and coalesce in-flight requests; loading images must not move the scroll anchor. Sync resume receipts precede retained-input and organization work; only stable final source/destination evidence may seal skip tokens.
+
+Continuous Library rows preserve actual metadata aspect ratios with 2-point seams
+and square corners. Missing/invalid dimensions use a square placeholder; decode
+completion never changes geometry. Incomplete final rows stay left aligned at
+target height. Valid extreme ratios remain uncropped. Keep ordered row geometry
+shared (studio/lib/justifiedLayout.ts and MoldClient.JustifiedLayout), lazy/windowed
+rendering, stable item identities, and a visible item anchor through resize/zoom.
+Native macOS vertical arrows follow adjacent row centers, never a guessed column
+count. Viewer return restores the covered viewport; native previews explicitly
+inject thumbnail loaders. Native iOS omits the visual host-name thumbnail badge;
+Info and host sorting/filtering retain their authority. Unseen semantics are unchanged.

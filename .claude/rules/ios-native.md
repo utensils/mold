@@ -221,3 +221,14 @@ Queue Cancel remains reachable through native swipe actions and Job Details for 
 Queue context-menu and Edit-mode reordering use row-aware `canMove`. Reserve every planned mover atomically through refresh, just as row Cancel/Pause does. Empty Queue reserves the currently affected queued, paused and Held IDs, refusing overlapping actions; keep existing bulk endpoint semantics, recheck host route/instance and current Held identity after its await, and retain the Held-only endpoint.
 
 **Landscape video.** Phone clip pages hide gallery bars and the status bar in a landscape window, extending AVKit across the display with aspect-fit video. Keep a safe-area Close action; portrait and nonclip pages restore their ordinary chrome. Observe window geometry without replacing the paging/player hierarchy or reloading the stream. `LandscapePlaybackTests` covers both orientations, portrait restoration and dismissal using a local 16:9 clip.
+
+Continuous Library rows preserve actual metadata aspect ratios with 2-point seams
+and square corners. Missing/invalid dimensions use a square placeholder; decode
+completion never changes geometry. Incomplete final rows stay left aligned at
+target height. Valid extreme ratios remain uncropped. Keep ordered row geometry
+shared (studio/lib/justifiedLayout.ts and MoldClient.JustifiedLayout), lazy/windowed
+rendering, stable item identities, and a visible item anchor through resize/zoom.
+Native macOS vertical arrows follow adjacent row centers, never a guessed column
+count. Viewer return restores the covered viewport; native previews explicitly
+inject thumbnail loaders. Native iOS omits the visual host-name thumbnail badge;
+Info and host sorting/filtering retain their authority. Unseen semantics are unchanged.

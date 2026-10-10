@@ -1,0 +1,1 @@
+- **Continuous Library thumbnails.** Native macOS, native iOS, Tauri desktop and web now use dense justified rows that preserve each picture’s aspect ratio and reflow with thumbnail size and available width. Viewer return preserves the viewport. iOS removes machine-name thumbnail badges while keeping machine information in details and filters.

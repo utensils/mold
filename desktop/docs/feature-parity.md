@@ -545,3 +545,7 @@ Shared generation activity includes model loading as an executing phase. Cancel 
 ## Local viewing history
 
 Library New badges and unread counts are saved on each client independently. Media discovered after the initial machine baseline stays new until that client successfully displays it in the viewer. Opening Library, filters, refreshes and neighboring preloads do not clear it. Merged copies count once; hidden collections and Trash do not count. Existing read history is preserved on upgrade. Native icon badges follow the same history, with the existing permission or preference controls. Browser, desktop and mobile-shell histories are separate. Storage errors are visible and preserve the previous saved history.
+
+### Continuous Library rows
+
+Library thumbnails on native macOS, native iOS, Tauri desktop and web use continuous justified rows: each picture keeps its aspect ratio, with narrow seams and square corners. Thumbnail size and window changes reflow the rows while keeping a visible print in place. The final incomplete row stays left aligned without enlarging a lone print. iOS thumbnails omit machine-name badges; image details and machine filtering still show the owning machines.

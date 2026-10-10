@@ -355,3 +355,7 @@ Reordering and Empty Queue reserve the jobs they affect until the machine listin
 When another connected machine can generate, **Move to…** is available on queued, paused, and held jobs until the source machine begins rendering. The prompt, seed, settings, and retained reference media move together. The destination must accept the job before the original is removed. Older servers support Held-only moves. Jobs that depend on machine-local LoRAs or workflows are refused without moving them.
 
 If a connection is interrupted during a move, retry the same destination so Mold can check whether it already accepted the job. The source remains reserved while that result is unknown, preventing duplicate rendering. A confirmed destination rejection releases the original only after the destination records that this transfer cannot be admitted later.
+
+### Continuous Library rows
+
+Library thumbnails on native macOS, native iOS, Tauri desktop and web use continuous justified rows: each picture keeps its aspect ratio, with narrow seams and square corners. Thumbnail size and window changes reflow the rows while keeping a visible print in place. The final incomplete row stays left aligned without enlarging a lone print. iOS thumbnails omit machine-name badges; image details and machine filtering still show the owning machines.

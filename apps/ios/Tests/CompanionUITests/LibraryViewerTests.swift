@@ -182,3 +182,47 @@ final class LibraryViewerTests: XCTestCase {
 
     }
 }
+
+extension LibraryViewerTests {
+    @MainActor func testContinuousRowsPreserveAspectAndZoom() async throws {
+        continueAfterFailure = false
+        let machine = try FixtureMachine(justifiedFixture: true, galleryPrints: 300, galleryFavorites: 30)
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        cleanUpFixture(machine, port: port, app: app)
+        app.launch()
+        XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
+        app.buttons["Add a Machine"].firstMatch.tap()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        let address = app.textFields["machine-address"]
+        XCTAssertTrue(address.waitForExistence(timeout: 5))
+        address.tap(); address.typeText("127.0.0.1:\(port)")
+        app.buttons["Add"].firstMatch.tap()
+        XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
+        let tiles = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Fixture '"))
+        XCTAssertTrue(tiles.firstMatch.waitForExistence(timeout: 10))
+        for index in 0..<3 {
+            let tile = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Fixture \(index),")).firstMatch
+            XCTAssertTrue(tile.exists)
+            XCTAssertEqual(tile.frame.width / tile.frame.height, [0.5, 1.5, 1][index], accuracy: 0.025)
+        }
+        app.scrollViews.firstMatch.swipeUp(velocity: .slow)
+        app.scrollViews.firstMatch.swipeUp(velocity: .slow)
+        let anchor = try XCTUnwrap(tiles.allElementsBoundByIndex.first {
+            $0.isHittable && $0.frame.minY > app.navigationBars.firstMatch.frame.maxY
+        })
+        let stableAnchor = app.buttons[anchor.label].firstMatch
+        let before = stableAnchor.frame.height
+        app.buttons["View Options"].tap()
+        app.buttons["Largest"].firstMatch.tap()
+        XCTAssertTrue(stableAnchor.waitForExistence(timeout: 5))
+        XCTAssertTrue(stableAnchor.isHittable, "zoom keeps the scrolled print in view")
+        XCTAssertGreaterThan(stableAnchor.frame.height, before)
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "Continuous mixed-aspect Library at largest size"
+        shot.lifetime = .keepAlways
+        add(shot)
+        app.buttons["View Options"].tap()
+        app.buttons["Medium"].firstMatch.tap()
+    }
+}

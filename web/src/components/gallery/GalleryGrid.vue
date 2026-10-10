@@ -1,8 +1,8 @@
 <script setup lang="ts">
 /*
  * Gallery grid — the grid-first Mold Studio library view (spec §06, prototype
- * WEB GALLERY). Renders session prints as square @ui MediaTiles on a responsive
- * grid whose target pixel size comes from the shared Library toolbar. Freshly
+ * WEB GALLERY). Renders session prints as uncropped @ui MediaTiles in justified rows
+ * whose target pixel size comes from the shared Library toolbar. Freshly
  * arrived prints carry a NEW badge; video
  * prints show a play glyph + duration in the tile's overlay corner.
  *
@@ -29,7 +29,10 @@ import type { ModelInfoExtended } from "../../types";
 import { mediaKind } from "../../types";
 import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
 import { purgeCountdownFromPurgeAt } from "@studio/lib/libraryOrganization";
-import { virtualGridWindow } from "@studio/lib/virtualGrid";
+import {
+  layoutJustifiedRows,
+  justifiedWindow,
+} from "@studio/lib/justifiedLayout";
 import type { ThumbnailPriority } from "@studio/lib/thumbnailScheduler";
 
 const props = withDefaults(
@@ -97,51 +100,61 @@ const viewportSize = ref(0);
 let resizeObserver: ResizeObserver | null = null;
 let frame = 0;
 
-const gridWindow = computed(() =>
-  virtualGridWindow({
-    itemCount: props.entries.length,
-    containerWidth: containerWidth.value,
-    minimumItemWidth:
-      containerWidth.value < 640
-        ? containerWidth.value / 2
-        : props.thumbnailSize,
-    minimumColumns: containerWidth.value < 640 ? 2 : 1,
-    gap: 12,
-    viewportStart: viewportStart.value,
-    viewportSize: viewportSize.value,
-    overscanRows: 2,
-  }),
+const rows = computed(() =>
+  layoutJustifiedRows(
+    props.entries,
+    containerWidth.value > 0 ? containerWidth.value : 800,
+    props.thumbnailSize,
+  ),
 );
-
-const visibleEntries = computed(() => {
-  // DOM-less unit tests have no layout. Keep their small fixture observable;
-  // real rendered surfaces always measure a positive width on mount.
-  if (containerWidth.value <= 0) return props.entries.slice(0, 150);
-  return props.entries.slice(
-    gridWindow.value.startIndex,
-    gridWindow.value.endIndex,
+const gridWindow = computed(() => {
+  const band = justifiedWindow(
+    rows.value,
+    viewportStart.value,
+    viewportSize.value,
+    2,
+  );
+  const last = rows.value.at(-1);
+  return { ...band, totalSize: last ? last.top + last.height : 0 };
+});
+const visibleTiles = computed(() => {
+  const band = gridWindow.value;
+  // Small DOM-less fixtures remain testable without inventing production sizes.
+  const shown =
+    containerWidth.value <= 0
+      ? rows.value.slice(0, 30)
+      : rows.value.slice(band.start, band.end);
+  return shown.flatMap((row) =>
+    row.items.map((tile) => ({
+      ...tile,
+      y: row.top,
+      priority: (row.top + row.height >= viewportStart.value &&
+      row.top <= viewportStart.value + viewportSize.value
+        ? "visible"
+        : "near") as ThumbnailPriority,
+    })),
   );
 });
 
-/** The on-screen band inside the window (the rest is overscan): tiles in
- *  it request their thumbnail at `visible`, the overscan rows at `near`. */
-const onScreenRange = computed(() => {
-  const { columns, rowStep } = gridWindow.value;
-  if (containerWidth.value <= 0 || rowStep <= 0) {
-    return { start: 0, end: Number.MAX_SAFE_INTEGER };
-  }
-  const firstRow = Math.floor(viewportStart.value / rowStep);
-  const lastRow = Math.ceil(
-    (viewportStart.value + viewportSize.value) / rowStep,
+// Capture identity and within-row offset before geometry changes. This also
+// keeps the decoded, print-keyed DOM nodes alive across row boundaries.
+watch(rows, async (next, previous) => {
+  if (containerWidth.value <= 0 || viewportStart.value <= 0) return;
+  const old = previous.find((r) => r.top + r.height >= viewportStart.value);
+  const anchor = old?.items[0];
+  if (!old || !anchor) return;
+  const row = next.find((r) =>
+    r.items.some((t) => keyOf(t.item) === keyOf(anchor.item)),
   );
-  return { start: firstRow * columns, end: lastRow * columns };
+  if (!row) return;
+  const offset = Math.min(viewportStart.value - old.top, row.height);
+  await nextTick();
+  window.scrollTo({
+    top: containerDocumentTop.value + row.top + offset,
+    behavior: "instant",
+  });
+  measureWindow();
 });
-
-function tilePriority(offset: number): ThumbnailPriority {
-  const index = gridWindow.value.startIndex + offset;
-  const { start, end } = onScreenRange.value;
-  return index >= start && index < end ? "visible" : "near";
-}
 
 function measureWindow() {
   frame = 0;
@@ -368,21 +381,23 @@ onBeforeUnmount(() => {
 
     <template v-else>
       <div class="gg__window" :style="{ height: `${gridWindow.totalSize}px` }">
-        <div
-          class="gg__grid gg__grid--virtual"
-          :style="{ transform: `translateY(${gridWindow.offset}px)` }"
-        >
+        <div class="gg__grid--virtual">
           <div
-            v-for="(entry, offset) in visibleEntries"
+            v-for="{ item: entry, ...tile } in visibleTiles"
             :key="keyOf(entry)"
             class="gg__cell"
+            :style="{
+              width: `${tile.width}px`,
+              height: `${tile.height}px`,
+              transform: `translate(${tile.x}px, ${tile.y}px)`,
+            }"
             :data-filename="entry.filename"
             :data-print-key="keyOf(entry)"
             :data-selected="selection.has(keyOf(entry)) ? 'true' : 'false'"
             @contextmenu.prevent="onContextMenu(entry, $event)"
           >
             <MediaTile
-              :src="tileSrc(entry, tilePriority(offset))"
+              :src="tileSrc(entry, tile.priority)"
               :alt="entry.metadata.prompt || entry.filename"
               :fresh="fresh.has(keyOf(entry))"
               :alpha="tileKind(entry) === 'image' && showsAlphaBed(entry)"
@@ -573,11 +588,12 @@ onBeforeUnmount(() => {
 }
 
 .gg__cell {
-  position: relative;
+  position: absolute;
+  top: 0;
+  left: 0;
   min-width: 0;
-  aspect-ratio: 1;
   overflow: hidden;
-  border-radius: var(--radius-control);
+  border-radius: 0;
   contain: inline-size layout paint;
 }
 
@@ -585,6 +601,18 @@ onBeforeUnmount(() => {
   aspect-ratio: 1;
   border-radius: var(--radius-control-lg);
   background: color-mix(in srgb, var(--rebate) 5%, transparent);
+}
+
+.gg__cell :deep(.ms-tile),
+.gg__cell :deep(.ms-tile:hover) {
+  height: 100%;
+  aspect-ratio: auto;
+  border-radius: 0;
+  transform: none;
+  box-shadow: none;
+}
+:deep(.ms-tile__img) {
+  object-fit: contain;
 }
 
 /* Video/animated badge stays top-right so gallery metadata owns the bottom edge. */
@@ -763,7 +791,7 @@ onBeforeUnmount(() => {
   position: absolute;
   inset: 0;
   border: 2px solid transparent;
-  border-radius: var(--radius-control-lg);
+  border-radius: 0;
   background: transparent;
   cursor: pointer;
   transition: border-color var(--dur-quick) var(--ease);

@@ -39,6 +39,16 @@ struct LibraryView: View {
         scrollPosition.reset()
     }
 
+    /// Capture before changing the size: visibility can report the new layout
+    /// before the grid's onChange callback runs.
+    private var tileChoice: Binding<TileSize> {
+        Binding(get: { tile }, set: { next in
+            guard next != tile else { return }
+            scrollPosition.prepareReflow()
+            tile = next
+        })
+    }
+
     var body: some View {
         let showing = showing()
         let projection = gridCache.project(entries: showing.visible, revision: library.revision,
@@ -52,7 +62,7 @@ struct LibraryView: View {
             } else if showing.visible.isEmpty {
                 empty
             } else {
-                LibraryGrid(sections: showing.sections, tile: $tile, position: $scrollPosition,
+                LibraryGrid(sections: showing.sections, tile: tileChoice, position: $scrollPosition,
                             projection: projection,
                             viewport: viewport, returnGeneration: returnGeneration, selecting: selecting,
                             selection: $selection, trashed: scope.isTrash, zoom: zoom, visible: showing.visible)
@@ -197,13 +207,13 @@ struct LibraryView: View {
                 Picker("Sort By", selection: $sort) {
                     ForEach(LibrarySort.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
-                Picker("Tile Size", selection: $tile) {
+                Picker("Tile Size", selection: tileChoice) {
                     ForEach(TileSize.allCases) { Text($0.title).tag($0) }
                 }
-                Button("Larger Tiles") { tile = tile.stepped(bigger: true) }
+                Button("Larger Tiles") { tileChoice.wrappedValue = tile.stepped(bigger: true) }
                     .keyboardShortcut("+", modifiers: .command)
                     .disabled(tile == .large)
-                Button("Smaller Tiles") { tile = tile.stepped(bigger: false) }
+                Button("Smaller Tiles") { tileChoice.wrappedValue = tile.stepped(bigger: false) }
                     .keyboardShortcut("-", modifiers: .command)
                     .disabled(tile == .small)
                 if scope.isTrash, !library.trashPool.isEmpty {
