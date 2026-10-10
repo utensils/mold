@@ -390,16 +390,17 @@ Two things are worth reading off that table. Peak VRAM barely moves between
 1080p and 1440p; the composition is what bounds it, since every stage-2 tile
 is denoised at a shape inside the trained span and the residency planner
 simply streams one more transformer block (38/10 resident/streamed at 1080p,
-37/11 at 1440p, 36/12 at 4K). And the default 1280px tile is the thing that
+37/11 at 1440p, 36/12 at 4K). The former default 1280px tile is the thing that
 does not fit at 4K: the diffusion completes either way, but the VAE decode
 needs the smaller tile.
 
-::: warning 4K needs `--spatial-tile 768` on a 24 GB card.
+::: warning Historical GPU measurements are not a long-clip guarantee.
 
-With the default `auto` tiling, 4K reaches the VAE decode and fails there with
-an out-of-memory error naming the phase and the numbers. It does not silently
-render something smaller. Pass `--spatial-tile 768` (upstream's own advice for
-lower-VRAM GPUs) and the whole render completes at 18.2 GB.
+The table predates the current VAE Auto policy. Its explicit
+`--spatial-tile 768` runs used square tiles with 256-px overlap. Current Auto
+uses upstream aspect-coupled 768-px long-side tiles with 64-px overlap,
+independent of estimated free memory. These geometries have different seams
+and memory costs; the historical numbers do not qualify the new policy.
 
 These are single-configuration measurements at **25 frames**, not a support
 matrix. Activation cost scales with frame count, and upstream's own table (for
@@ -438,15 +439,19 @@ This is upstream's technique, from
 `--spatial-tile` (or `MOLD_LTX2_SPATIAL_TILE`, which `mold serve` also reads)
 controls it:
 
-| Value              | Effect                                                                                                  |
-| ------------------ | ------------------------------------------------------------------------------------------------------- |
-| `auto` _(default)_ | Tile only past the 2048px trained span, and only decode-tile when the decode would not otherwise fit.   |
-| `off`              | Never tile. A render past the trained span is **refused** rather than quietly degraded.                 |
-| `<px>`             | Force tiles of at most `<px>` on each spatial axis, with a 256px overlap. Multiples of 32, at least 64. |
-| `<px>:<overlap>`   | As above with an explicit overlap, also a multiple of 32 and smaller than the tile.                     |
+| Value              | Effect                                                                                                                        |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| `auto` _(default)_ | Tile stage 2 past 2048px; convolutional VAE decode independently uses aspect-coupled 768px long-side tiles with 64px overlap. |
+| `off`              | Never tile. A render past the trained span is **refused** rather than quietly degraded.                                       |
+| `<px>`             | Force tiles of at most `<px>` on each spatial axis, with a 256px overlap. Multiples of 32, at least 64.                       |
+| `<px>:<overlap>`   | As above with an explicit overlap, also a multiple of 32 and smaller than the tile.                                           |
 
-`auto` engages exactly at the 2048px span and not one pixel earlier, so every
-resolution up to and including 1080p renders as it always has. `off` past the
+VAE Auto follows upstream
+[`tiling_config_for_vae`](https://github.com/Lightricks/LTX-2/blob/9ec55f9f22798a3198d9c923856824821bc3317e/packages/ltx-pipelines/src/ltx_pipelines/utils/helpers.py#L137-L175)
+and latent-grid aspect coupling. Shapes whose longest axis is at most 768px
+keep the untiled decode path. Temporal context and full output accumulation
+still consume memory; spatial tiling does not guarantee a long clip fits.
+Stage-2 Auto retains its 2048px threshold. `off` past that
 span is an error, not a warning: the failure mode there is a finished video
 with degraded large-scale structure, which nobody would notice was wrong.
 Forcing a tile size is mainly a way to compare a tiled render against an
@@ -1076,3 +1081,5 @@ mold run ltx-video-0.9.8-2b-distilled:bf16 \
   [FerrisMind/candle-video](https://github.com/FerrisMind/candle-video), itself
   a Rust port of Hugging Face diffusers. The Apache-2.0 portions are recorded
   in `THIRD_PARTY_NOTICES.md`.
+
+The convolutional VAE Auto short-axis minimum is four latent cells (128px), rather than upstream's three, because Mold's existing pairwise crossfade requires both overlap ramps to fit inside each tile. This preserves the existing blend algorithm and avoids triple overlaps on narrow frames.

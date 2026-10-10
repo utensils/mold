@@ -184,3 +184,5 @@ All GUI surfaces expose duration prediction only when the selected model adverti
 `supports_duration_prediction` and is not runtime-disabled. Automatic mode omits
 `frames`; explicit duration sends its frame count. Native persisted auto preference
 parks on unsupported models without suppressing their explicit frames.
+
+For convolutional LTX video VAE decoding, spatial Auto uses aspect-coupled 768px long-side tiles and 64px overlap independently of the temporal memory estimate. This is not a guarantee that long clips fit: temporal context and full output accumulation still consume memory. Explicit `--spatial-tile` overrides retain their existing geometry. After an observed OOM, smaller retry suggestions are estimates, not a fit guarantee.

@@ -3031,8 +3031,9 @@ pub(crate) fn oom_user_message_for_request(
     oom_user_message_with_advice(model_name, family_slug, req, None)
 }
 
-/// `supported_shape_advice` names a concrete resolution/frame combination that
-/// fits this card. Without it the video branch could only say "reduce --frames
+/// Runtime shape advice names estimated smaller retry candidates without
+/// promising that they fit after an observed allocation failure. Without it the
+/// video branch could only say "reduce --frames
 /// below N (e.g. 17 or 9)", which is a guess: it does not know whether the
 /// shortfall is frames or resolution, and 17 or 9 frames is far below what the
 /// card can actually run (#641).
@@ -3054,7 +3055,7 @@ pub(crate) fn oom_user_message_with_advice(
         if let Some(advice) = shape_advice {
             return format!(
                 "GPU ran out of memory loading or running '{model_name}'.{requested_size} \
-                 This shape {advice}. Use that shape, a quantized variant if available, \
+                 {advice}. You can also try a quantized variant if available, \
                  or close other GPU apps."
             );
         }
@@ -3187,8 +3188,8 @@ fn upscale_generated_image_on_worker(
 }
 
 /// Re-run the corrected LTX-2 estimator over the supported shape grid for the
-/// card that just OOMed, so the rejection names a resolution/frame count the
-/// user can actually run.
+/// card that just OOMed. Suggest smaller candidates, never the failed shape,
+/// and keep the distinction between estimates and observed runtime feasibility.
 fn ltx2_oom_shape_advice(
     worker: &GpuWorker,
     family_slug: Option<&str>,
@@ -3200,7 +3201,7 @@ fn ltx2_oom_shape_advice(
     }
     let req = req?;
     let facts = crate::ltx2_admission::checkpoint_facts_cached(&paths?.transformer)?;
-    crate::ltx2_admission::supported_shape_advice(
+    crate::ltx2_admission::post_oom_shape_advice(
         &facts,
         crate::ltx2_admission::Ltx2ShapeHint::from_request(req),
         worker.gpu.total_vram_bytes,
@@ -14186,7 +14187,7 @@ mod tests {
         )
         .unwrap();
         request.source_image = Some(vec![0x89, 0x50, 0x4e, 0x47]);
-        let advice = crate::ltx2_admission::supported_shape_advice(
+        let advice = crate::ltx2_admission::post_oom_shape_advice(
             &facts,
             crate::ltx2_admission::Ltx2ShapeHint::from_request(&request),
             25_757_220_864,

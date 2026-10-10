@@ -1523,9 +1523,9 @@ impl AutoencoderKLLtx2Video {
     ) -> Result<Tensor> {
         let (_batch, _channels, _frames, latent_height, latent_width) = latents.dims5()?;
         let scale = self.spatial_compression_ratio.max(1);
-        let rows = split_by_size(latent_height, tiling.tile_cells, tiling.overlap_cells)
+        let rows = split_by_size(latent_height, tiling.height_cells, tiling.overlap_cells)
             .map_err(|err| candle_core::Error::Msg(err.to_string()))?;
-        let columns = split_by_size(latent_width, tiling.tile_cells, tiling.overlap_cells)
+        let columns = split_by_size(latent_width, tiling.width_cells, tiling.overlap_cells)
             .map_err(|err| candle_core::Error::Msg(err.to_string()))?;
         if rows.len() <= 1 && columns.len() <= 1 {
             return self.decode_frames(latents);
@@ -2585,7 +2585,8 @@ mod tests {
             )
             .unwrap();
             tiled.spatial_decode_tiling = Some(SpatialDecodeTiling {
-                tile_cells,
+                height_cells: tile_cells,
+                width_cells: tile_cells,
                 overlap_cells,
             });
             let (_output, video) = tiled.decode(&latents, None, false, false).unwrap();
@@ -2600,6 +2601,26 @@ mod tests {
                 .to_scalar::<f32>()
                 .unwrap()
         };
+
+        // Exercise genuinely asymmetric spatial geometry through the real decoder.
+        let mut asymmetric =
+            AutoencoderKLLtx2Video::new(config.clone(), patterned_autoencoder_var_builder(&config))
+                .unwrap();
+        asymmetric.spatial_decode_tiling = Some(SpatialDecodeTiling {
+            height_cells: 4,
+            width_cells: 8,
+            overlap_cells: 2,
+        });
+        let (_, video) = asymmetric.decode(&latents, None, false, false).unwrap();
+        assert_eq!(video.dims(), full_video.dims());
+        assert!(video
+            .abs()
+            .unwrap()
+            .max_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap()
+            .is_finite());
 
         let narrow = deviation(6, 2);
         let wide = deviation(12, 8);

@@ -7859,6 +7859,14 @@ fn decode_video_frames_with_telemetry(
     decoded
 }
 
+fn vae_spatial_decode_policy(policy: SpatialTilePolicy, force_full: bool) -> SpatialTilePolicy {
+    if force_full && policy == SpatialTilePolicy::Auto {
+        SpatialTilePolicy::Off
+    } else {
+        policy
+    }
+}
+
 fn configure_ltx2_vae_decode_memory_mode(
     vae: &mut AutoencoderKLLtx2Video,
     latents: &Tensor,
@@ -7871,20 +7879,22 @@ fn configure_ltx2_vae_decode_memory_mode(
             fmt_gb(projected_ltx2_vae_decode_workspace_bytes(vae, latents)?)
         );
     }
-    // Temporal chunking bounds how many frames are in flight, not how large
-    // one frame is. Past the trained span a single frame is the problem, so
-    // the same memory verdict also splits it spatially.
+    // Spatial Auto follows upstream convolutional VAE geometry independently
+    // of temporal memory estimates, which can undercount convolution workspace.
     let (_, _, _, latent_height, latent_width) = latents.dims5()?;
     vae.spatial_decode_tiling = plan_spatial_decode_tiling(
         latent_height,
         latent_width,
-        spatial_tile_policy()?,
-        vae.use_framewise_decoding,
+        vae_spatial_decode_policy(
+            spatial_tile_policy()?,
+            crate::runtime_env::value("MOLD_LTX2_VAE_FORCE_FULL_DECODE").is_some(),
+        ),
     );
     if let Some(tiling) = vae.spatial_decode_tiling {
         tracing::info!(
-            "LTX-2 VAE decode using {}-px spatial tiles with {}-px overlap",
-            tiling.tile_cells * crate::ltx2::tiling::LATENT_PIXEL_STRIDE,
+            "LTX-2 VAE decode using {}x{}-px spatial tiles (height x width) with {}-px overlap",
+            tiling.height_cells * crate::ltx2::tiling::LATENT_PIXEL_STRIDE,
+            tiling.width_cells * crate::ltx2::tiling::LATENT_PIXEL_STRIDE,
             tiling.overlap_cells * crate::ltx2::tiling::LATENT_PIXEL_STRIDE,
         );
     }
@@ -8652,6 +8662,98 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use candle_core::{DType, Device, Tensor};
+
+    /// Manual decoder-only qualification. Requires a separately reserved GPU;
+    /// CUDA_VISIBLE_DEVICES does not reserve it from the serving scheduler.
+    #[test]
+    #[ignore = "requires explicit GPU reservation and an LTX-2.5 convolutional VAE checkpoint"]
+    fn ltx25_spatial_auto_cuda_decode_qualification() -> anyhow::Result<()> {
+        let checkpoint = std::env::var("LTX25_UAT_VAE_PATH")?;
+        anyhow::ensure!(
+            std::path::Path::new(&checkpoint).is_file(),
+            "VAE checkpoint missing"
+        );
+        anyhow::ensure!(
+            std::env::var("CUDA_VISIBLE_DEVICES")?.split(',').count() == 1,
+            "expose exactly one separately reserved GPU"
+        );
+        for name in [
+            "MOLD_LTX2_VAE_FORCE_FULL_DECODE",
+            "MOLD_LTX2_VAE_FORCE_FRAMEWISE",
+            "MOLD_LTX2_SPATIAL_TILE",
+        ] {
+            anyhow::ensure!(
+                crate::runtime_env::value(name).is_none(),
+                "remove diagnostic override {name}"
+            );
+        }
+        let mut request = req(
+            "ltx-2.5-22b-distilled:int8-conv",
+            OutputFormat::Mp4,
+            Some(false),
+        );
+        request.width = 1408;
+        request.height = 2560;
+        request.frames = Some(193);
+        let temp = tempfile::tempdir()?;
+        let conditioning = conditioning::stage_conditioning(&request, temp.path())?;
+        let mut plan = build_plan(
+            &request,
+            preset_for_model(&request.model).unwrap(),
+            conditioning,
+        );
+        plan.vae_checkpoint_path = checkpoint;
+        plan.vae_in_checkpoint = false;
+        let device = super::new_native_cuda_device(0)?;
+        let dtype = DType::BF16;
+        let mut vae = super::load_ltx2_video_vae(&plan, &device, dtype, None)?;
+        let latents = Tensor::zeros((1, 128, 25, 80, 44), dtype, &device)?;
+        super::configure_ltx2_vae_decode_memory_mode(&mut vae, &latents, &device)?;
+        let tiles = vae
+            .spatial_decode_tiling
+            .expect("Auto must spatially tile this shape");
+        assert_eq!(
+            (tiles.height_cells, tiles.width_cells, tiles.overlap_cells),
+            (24, 13, 2)
+        );
+        let probe = crate::device::PhaseVramProbe::enter("ltx25.cuda_decode_qualification");
+        let decoded = vae.decode(&latents, None, false, false);
+        device.synchronize()?;
+        eprintln!("{}", probe.finish());
+        let (_, video) = decoded?;
+        assert_eq!(video.dims(), &[1, 3, 193, 2560, 1408]);
+        // Scalar reductions avoid copying the multi-GB output to host memory.
+        anyhow::ensure!(
+            video.eq(&video)?.min_all()?.to_scalar::<u8>()? == 1,
+            "NaN decoded output"
+        );
+        let minimum = video.min_all()?.to_dtype(DType::F32)?.to_scalar::<f32>()?;
+        let maximum = video.max_all()?.to_dtype(DType::F32)?.to_scalar::<f32>()?;
+        anyhow::ensure!(
+            minimum.is_finite() && maximum.is_finite(),
+            "nonfinite decoded output"
+        );
+        eprintln!(
+            "decoded_shape={:?} min={minimum} max={maximum}",
+            video.dims()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn full_decode_diagnostic_bypasses_only_automatic_spatial_tiling() {
+        use crate::ltx2::tiling::SpatialTilePolicy;
+        assert_eq!(
+            super::vae_spatial_decode_policy(SpatialTilePolicy::Auto, true),
+            SpatialTilePolicy::Off
+        );
+        assert_eq!(
+            super::vae_spatial_decode_policy(SpatialTilePolicy::Auto, false),
+            SpatialTilePolicy::Auto
+        );
+        let forced = SpatialTilePolicy::parse("768:64").unwrap();
+        assert_eq!(super::vae_spatial_decode_policy(forced, true), forced);
+    }
 
     #[cfg(feature = "metal")]
     #[test]
