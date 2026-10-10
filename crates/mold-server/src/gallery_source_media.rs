@@ -194,7 +194,30 @@ pub(crate) fn resolve_members(
         .gallery_publication_gate
         .validated_retained_media_for_item(&output_dir, filename)
         .map_err(|error| ApiError::internal(format!("gallery authority read failed: {error:#}")))?;
-    resolve_lookup(state, lookup)
+    let revision = retained_lookup_revision(&lookup)?;
+    let resolved = resolve_lookup(state, lookup)?;
+    let current = state
+        .gallery_publication_gate
+        .validated_retained_media_for_item(&output_dir, filename)
+        .map_err(|error| ApiError::internal(format!("gallery authority read failed: {error:#}")))?;
+    if retained_lookup_revision(&current)? != revision {
+        return Err(ApiError::not_found("retained source owner changed"));
+    }
+    Ok(resolved)
+}
+
+fn retained_lookup_revision(
+    lookup: &crate::batch_transaction::ValidatedRetainedMedia,
+) -> Result<Option<String>, ApiError> {
+    match lookup {
+        crate::batch_transaction::ValidatedRetainedMedia::Present { identity, pins, .. } => {
+            let bytes = serde_json::to_vec(&(identity, pins))
+                .map_err(|_| ApiError::internal("retained owner identity unavailable"))?;
+            Ok(Some(format!("{:x}", Sha256::digest(bytes))))
+        }
+        crate::batch_transaction::ValidatedRetainedMedia::Missing => Ok(None),
+        crate::batch_transaction::ValidatedRetainedMedia::Invalid => Ok(Some("invalid".into())),
+    }
 }
 
 fn resolve_lookup(
@@ -271,6 +294,7 @@ pub(crate) fn resolve_members_from_pins(
                 sha256: entry.sha256_hex.clone(),
                 member: Member {
                     member_id: member_id(&pin.media_set, &pin.pin_id, index),
+                    content_sha256: entry.content_sha256.clone(),
                     role: entry.role.clone(),
                     display_name: safe_display_name(&entry.name, &entry.role, index),
                     size_bytes: entry.size_bytes,
@@ -517,9 +541,14 @@ pub(crate) async fn batch_inventory(
             .gallery_publication_gate
             .validated_retained_media_for_items(&root, &request.filenames)
             .map_err(|e| ApiError::internal(format!("gallery authority read failed: {e:#}")))?;
-        request
+        let revisions = lookups
+            .iter()
+            .map(retained_lookup_revision)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut inventories = request
             .filenames
-            .into_iter()
+            .iter()
+            .cloned()
             .zip(lookups)
             .map(|(filename, lookup)| {
                 Ok((
@@ -527,7 +556,26 @@ pub(crate) async fn batch_inventory(
                     inventory_response(resolve_lookup(&state, lookup)?),
                 ))
             })
-            .collect::<Result<std::collections::BTreeMap<_, _>, ApiError>>()
+            .collect::<Result<std::collections::BTreeMap<_, _>, ApiError>>()?;
+        // A cold scan can outlive a deletion/transfer. Recheck one fresh authority
+        // snapshot before publishing, without holding a publication lock over I/O.
+        let current = state
+            .gallery_publication_gate
+            .validated_retained_media_for_items(&root, &request.filenames)
+            .map_err(|e| ApiError::internal(format!("gallery authority read failed: {e:#}")))?;
+        for ((filename, previous), current) in request.filenames.iter().zip(revisions).zip(current)
+        {
+            if retained_lookup_revision(&current)? != previous {
+                inventories.insert(
+                    filename.clone(),
+                    Inventory {
+                        availability: Availability::UnavailableMissingOrCorrupt,
+                        members: Vec::new(),
+                    },
+                );
+            }
+        }
+        Ok::<_, ApiError>(inventories)
     })
     .await
     .map_err(|_| ApiError::internal("source inventory task failed"))??;
@@ -1302,6 +1350,10 @@ mod tests {
         let member = &response.inventories["saved.png"].members[0];
         assert_eq!(member.media_kind.as_deref(), Some("image"));
         assert_eq!(member.position, Some(0));
+        assert_eq!(
+            member.content_sha256.as_deref(),
+            Some(format!("{:x}", Sha256::digest(&original)).as_str())
+        );
         let args = ("saved.png".to_string(), member.member_id.clone());
         let raw = download(State(state.clone()), None, None, AxumPath(args.clone()))
             .await
@@ -1335,7 +1387,60 @@ mod tests {
             .await
             .unwrap();
         assert!(image::load_from_memory(&preview).is_ok());
+        let cache_store = state
+            .queue_journal
+            .queue_media_lifecycle()
+            .unwrap()
+            .runtime_store()
+            .unwrap();
+        let scans_before = cache_store
+            .gallery_decode_calls
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let reads_before = cache_store
+            .gallery_member_reads
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let second = crate::gallery_source_thumbnail::get(
+            State(state.clone()),
+            None,
+            None,
+            AxumPath(args.clone()),
+        )
+        .await
+        .unwrap();
+        let second = to_bytes(second.into_body(), 2 * 1024 * 1024).await.unwrap();
+        assert_eq!(preview, second);
+        assert_eq!(
+            cache_store
+                .gallery_decode_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            scans_before
+        );
+        assert_eq!(
+            cache_store
+                .gallery_member_reads
+                .load(std::sync::atomic::Ordering::SeqCst),
+            reads_before
+        );
+        assert_eq!(
+            state
+                .queue_journal
+                .queue_media_lifecycle()
+                .unwrap()
+                .runtime_store()
+                .unwrap()
+                .gallery_thumbnail_renders
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
         std::fs::remove_file(gallery.path().join("saved.png")).unwrap();
+        assert!(crate::gallery_source_thumbnail::get(
+            State(state.clone()),
+            None,
+            None,
+            AxumPath(args.clone())
+        )
+        .await
+        .is_err());
         assert!(content(State(state), None, None, AxumPath(args))
             .await
             .is_err());
@@ -1364,6 +1469,7 @@ mod tests {
             sha256: "sha".into(),
             member: Member {
                 member_id: "id".into(),
+                content_sha256: None,
                 role: "keyframes".into(),
                 display_name: "frame".into(),
                 size_bytes: 3,
@@ -1721,6 +1827,7 @@ mod tests {
             sha256: "a".repeat(64),
             member: Member {
                 member_id: "processed-front".into(),
+                content_sha256: None,
                 role: "matting_processed_references".into(),
                 display_name: "front".into(),
                 size_bytes: 3,

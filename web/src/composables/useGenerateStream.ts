@@ -1,3 +1,4 @@
+import { sourceMediaGalleryEvent } from "@studio/lib/sourceMediaResources";
 import { originAuthenticatedFetch, originApiTarget } from "../lib/originAuth";
 import { computed, onUnmounted, reactive, ref, watch, type Ref } from "vue";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
@@ -1822,6 +1823,9 @@ function handleDurableEvent(
     // stream's explicit resync frame or wake/open snapshot performs repair.
     return;
   }
+  if (eventName === "resync_required") {
+    sourceMediaGalleryEvent(routeApiTarget(route), { type: "resync_required" });
+  }
   if (eventName === "authority" || eventName === "resync_required") {
     // Event data is only a hint. Even an authority mismatch must be confirmed
     // by the bulk REST authority before it can detach locally tracked work.
@@ -1831,6 +1835,7 @@ function handleDurableEvent(
   if (eventName !== "event" || typeof data.type !== "string") {
     return;
   }
+  sourceMediaGalleryEvent(routeApiTarget(route), data);
   let exactJob: Job | undefined;
   if (typeof data.id === "string") {
     exactJob = jobs.value.find(

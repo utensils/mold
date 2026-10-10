@@ -26,7 +26,30 @@ public struct HTTPBackend: MoldBackend {
     }
 
     public func queue() async throws -> QueueListing {
-        try await get("/api/queue")
+        var listing: QueueListing = try await get("/api/queue")
+        guard listing.page?.nextCursor != nil else { return listing }
+        var entries: [QueueEntry] = []
+        var indexByID: [String: Int] = [:]
+        var cursors: Set<String> = []
+        while true {
+            try Task.checkCancellation()
+            // Registry-only rows repeat on each page. Newer observations overlay
+            // earlier ones without duplicating a row or changing its stable order.
+            for entry in listing.entries + (listing.liveOnlyEntries ?? []) {
+                if let index = indexByID[entry.id] {
+                    entries[index] = entry
+                } else {
+                    indexByID[entry.id] = entries.count
+                    entries.append(entry)
+                }
+            }
+            guard let cursor = listing.page?.nextCursor else { break }
+            guard !cursor.isEmpty, cursors.insert(cursor).inserted else {
+                throw MoldClientError.malformedResponse
+            }
+            listing = try await get("/api/queue?cursor=" + RouteEscaping.escapedQueryValue(cursor))
+        }
+        return QueueListing(entries: entries, liveOnlyEntries: nil)
     }
 
     public func gallery(etag: String?) async throws -> Fetched<[GalleryPrint]> {

@@ -9,6 +9,8 @@ import MoldClient
 /// the machine's ETag, so an unchanged library costs a 304 and no decoding.
 @Observable
 final class LibraryStore {
+    let sourceMediaCatalog = SourceMediaCatalog()
+    var openSourceDetails: [UUID: SourceMediaAuthority] = [:]
     private(set) var unreadMedia: LibraryUnreadLedger
     var unreadCount: Int { unreadMedia.count }
     @ObservationIgnored private let readDefaults: UserDefaults
@@ -274,6 +276,7 @@ final class LibraryStore {
     private func heard(_ event: MoldEvent, from id: MoldHost.ID) {
         switch event {
         case .gallery, .resyncRequired:
+            sourceMediaChanged(event, host: id)
             pending[id]?.cancel()
             pending[id] = Task { [weak self] in
                 try? await Task.sleep(for: .milliseconds(300))

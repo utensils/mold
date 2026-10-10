@@ -2593,3 +2593,24 @@ an explicit local `mold system metal-memory` command.
 Pre-render moves require `queue.pre_render_transfer` on both machines. Reservation, sealing, and destination abort records survive restarts. Clients reconcile accepted batches by the reserved transfer ID before completing the source; after an interrupted attempt they retry the same destination. Older source servers retain Held-only transfers.
 
 `GET /api/gallery/sync-checkpoint` returns protocol version 1, the server instance ID, and opaque revisions keyed by filename. It performs metadata and retained-manifest checks without hashing output payloads. Missing or unverifiable entries must use the ordinary transfer verification path. Revisions are not a cursor or permission to skip changed source/destination identities.
+
+### Source Media identities and preview performance
+
+Retained source inventory members may include `content_sha256`, a lowercase
+SHA-256 digest of the exact bytes returned for independent reuse. Keyframe
+identities describe the extracted image, not its serialized frame envelope.
+Older servers and content that cannot be safely identified omit the field;
+clients must not infer identity from filenames, size or archived recipe metadata.
+The same content may have several owning prints and roles. Grouping these usages
+in a browser does not merge storage or change the final-owner retention lifecycle.
+
+Inventory requests remain bounded to 100 exact output filenames and private
+previews remain authenticated, `private, no-store` responses. The server keeps
+bounded process-memory caches (256 verified manifests/8 MiB and 256 previews/32
+MiB), validates current output ownership and private pin identity before reuse,
+and limits cold gallery decrypt/render work to two operations. A separate two-slot
+preview pipeline bound covers selected plaintext from extraction through rendering. A previously unseen
+archive still needs one full authenticated scan with the existing encrypted
+format. Warm manifest reads and previews avoid repeated decrypt/render work;
+selected-member reads avoid materializing other inputs. Nothing is cached as
+plaintext on disk.

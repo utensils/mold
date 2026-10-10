@@ -113,19 +113,27 @@ export async function sourceMediaInventories(
     if (!(error instanceof ApiError) || ![404, 405].includes(error.status))
       throw error;
     const result: SourceMediaInventories = { inventories: {}, errors: {} };
-    for (const filename of filenames) {
-      signal?.throwIfAborted();
-      try {
-        result.inventories[filename] = await retainedSourceMediaInventory(
-          filename,
-          target,
-          signal,
-        );
-      } catch (failure) {
-        result.errors![filename] =
-          failure instanceof Error ? failure.message : String(failure);
+    let next = 0;
+    async function worker() {
+      while (next < filenames.length) {
+        signal?.throwIfAborted();
+        const filename = filenames[next++]!;
+        try {
+          result.inventories[filename] = await retainedSourceMediaInventory(
+            filename,
+            target,
+            signal,
+          );
+        } catch (failure) {
+          signal?.throwIfAborted();
+          result.errors![filename] =
+            failure instanceof Error ? failure.message : String(failure);
+        }
       }
     }
+    await Promise.all(
+      Array.from({ length: Math.min(4, filenames.length) }, worker),
+    );
     return result;
   }
   const result = JSON.parse(

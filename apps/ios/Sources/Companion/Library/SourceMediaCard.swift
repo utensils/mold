@@ -3,6 +3,7 @@ import SwiftUI
 
 /// One exact publication-owned member; preview and original bytes stay separate.
 struct SourceMediaCard: View {
+    @Environment(LibraryStore.self) private var library
     @Environment(HostStore.self) private var hosts
     @Environment(GenerateController.self) private var generate
     @Environment(AppRouter.self) private var router
@@ -11,8 +12,12 @@ struct SourceMediaCard: View {
     let member: RetainedSourceMedia.Member
     var gallery = false
     @State private var preview: UIImage?
+    @State private var displayedKey: SourcePreviewKey?
     @State private var choice: SourceMediaAttachment?
     @State private var failure: String?
+    private var previewKey: SourcePreviewKey {
+        .init(authority: .init(owner: owner, route: hosts.host(owner.hostID), instance: hosts.instanceID(of: owner.hostID)), member: member)
+    }
     private var recipe: GenerationRecipe? { generate.recipe }
     private var target: UUID? { generate.target?.id }
     private var choices: [SourceMediaAttachment] {
@@ -24,7 +29,7 @@ struct SourceMediaCard: View {
             let layout = gallery ? AnyLayout(VStackLayout(alignment: .leading, spacing: 10)) : AnyLayout(HStackLayout(alignment: .top, spacing: 12))
             layout {
                 Group {
-                    if let preview { Image(uiImage: preview).resizable().scaledToFit() }
+                    if let preview, displayedKey == previewKey { Image(uiImage: preview).resizable().scaledToFit() }
                     else { Image(systemName: member.sourceSymbol).font(.largeTitle).foregroundStyle(.secondaryText) }
                 }
                 .frame(maxWidth: gallery ? .infinity : 72)
@@ -60,7 +65,14 @@ struct SourceMediaCard: View {
         .padding(gallery ? 12 : 0)
         .background(.quaternary.opacity(gallery ? 0.25 : 0), in: RoundedRectangle(cornerRadius: 16))
         .accessibilityElement(children: .contain)
-        .task(id: hosts.host(owner.hostID)) { await loadPreview() }
+        .onDisappear { preview = nil; displayedKey = nil }
+        .task(id: previewKey) {
+            await loadPreview()
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(60)) } catch { return }
+                await loadPreview()
+            }
+        }
         .task(id: choice) {
             guard let choice else { return }
             await attach(choice)
@@ -69,28 +81,29 @@ struct SourceMediaCard: View {
     }
 
     private func loadPreview() async {
-        preview = nil
-        guard member.contentKind == "image", let host = hosts.host(owner.hostID) else { return }
+        preview = nil; displayedKey = nil
+        guard library.allowsSource(previewKey.authority, detail: !gallery), member.contentKind == "image", let host = hosts.host(owner.hostID) else { return }
         let instance = hosts.instanceID(of: owner.hostID)
-        do {
-            let data = try await hosts.backend(for: host).retainedSourceMediaThumbnail(for: owner.print.filename, member: member.memberId)
-            guard !Task.isCancelled, hosts.host(owner.hostID) == host, hosts.instanceID(of: owner.hostID) == instance else { return }
-            preview = UIImage(data: data)
-        } catch { /* The labeled media tile remains available without a preview. */ }
+        let image = await SourceMediaPreview.image(key: previewKey, backend: hosts.backend(for: host))
+        guard !Task.isCancelled, library.allowsSource(previewKey.authority, detail: !gallery), hosts.host(owner.hostID) == host, hosts.instanceID(of: owner.hostID) == instance else { return }
+        preview = image; displayedKey = previewKey
     }
 
     private func attach(_ destination: SourceMediaAttachment) async {
-        guard let host = hosts.host(owner.hostID), let recipe else { return }
+        guard library.allowsSource(previewKey.authority, detail: !gallery), let host = hosts.host(owner.hostID), let recipe else { return }
         let instance = hosts.instanceID(of: owner.hostID)
         let fence = ReferenceImportFence(model: generate.modelName, host: target, recipe: recipe, media: generate.draft.media)
         let destinationRoute = target.flatMap(hosts.host)
         let destinationInstance = target.flatMap { hosts.instanceID(of: $0) }
         let revisions = generate.mediaRevisions
         let snapshot = generate.draft
+        let sourceAuthority = previewKey.authority
+        let sourceRevision = library.sourceMediaCatalog.revision
         do {
             let data = try await hosts.backend(for: host).retainedSourceMediaContent(for: owner.print.filename, member: member)
             let staged = try await destination.applying(data: data, member: member, to: snapshot, recipe: recipe)
-            guard !Task.isCancelled, hosts.host(owner.hostID) == host, hosts.instanceID(of: owner.hostID) == instance,
+            guard !Task.isCancelled, library.allowsSource(previewKey.authority, detail: !gallery), hosts.host(owner.hostID) == host, hosts.instanceID(of: owner.hostID) == instance,
+                  library.allowsSource(sourceAuthority, detail: !gallery), library.sourceMediaCatalog.revision == sourceRevision,
                   destinationRoute == target.flatMap(hosts.host),
                   destinationInstance == target.flatMap { hosts.instanceID(of: $0) },
                   revisions == generate.mediaRevisions,

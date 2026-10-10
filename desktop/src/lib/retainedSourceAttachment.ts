@@ -54,6 +54,11 @@ export async function attachRetainedSource(
     : () => {};
   const current = () => !changed && stillCurrent() && JSON.stringify(form) === before;
   try {
+    if (!current())
+      return {
+        ok: false,
+        error: "The draft or source machine changed. Try attaching the source again.",
+      };
     const blob = await read();
     if (!current())
       return {

@@ -68,6 +68,7 @@ struct RootView: View {
         // store is built from, not a peer. So the machine list is watched
         // HERE rather than in the Models pane: a stream for a machine that is
         // gone must stop when it goes, not when somebody next opens Models.
+        .modifier(SourceMediaAccessMonitor())
         .onChange(of: hosts.hosts) { _, _ in downloads.reconcile() }
         .onChange(of: destination) { _, new in stored = new.rawValue }
         .onChange(of: columnVisibility) { _, new in storedVisibility = new.stored }

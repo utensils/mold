@@ -1,3 +1,4 @@
+import { sourceMediaGalleryEvent } from "@studio/lib/sourceMediaResources";
 import type { ApiTarget } from "../lib/api/client";
 import { sseStream } from "../lib/api/sse";
 
@@ -83,6 +84,8 @@ export function watchMobileGenerationHost(
         reconcile("malformed");
         return;
       }
+      if (!stopped && (event === "event" || event === "message"))
+        sourceMediaGalleryEvent(options.target, payload);
       if (event === "authority") {
         if (typeof payload.instance_id !== "string") {
           reconcile("malformed");
@@ -101,6 +104,7 @@ export function watchMobileGenerationHost(
           reconcile("malformed");
           return;
         }
+        if (!stopped) sourceMediaGalleryEvent(options.target, { type: "resync_required" });
         options.onGap({
           instanceId: payload.instance_id,
           missedEvents: Number(payload.missed_events),

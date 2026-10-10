@@ -150,6 +150,32 @@ describe("App — fleet event subscription", () => {
     expect(resubscribe).toHaveBeenCalled();
   });
 
+  it("keeps streams on telemetry updates but re-probes a changed primary route", async () => {
+    const events = useEventsStore();
+    const resubscribe = vi.spyOn(events, "resubscribe").mockResolvedValue(undefined);
+    const wrapper = await mountApp();
+    remoteOnlyFleet();
+    await nextTick();
+    resubscribe.mockClear();
+    const hosts = useHostsStore();
+    for (let queueDepth = 0; queueDepth < 3; queueDepth++) {
+      hosts.telemetry.plato = {
+        queueDepth,
+        queueCapacity: 200,
+        version: "fixture",
+        instanceId: "i-plato",
+      };
+      await nextTick();
+    }
+    expect(resubscribe).not.toHaveBeenCalled();
+
+    const connection = useConnectionStore();
+    connection.info = { mode: "remote", baseUrl: "http://new-primary:7680", apiKey: null };
+    await nextTick();
+    expect(resubscribe).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
   it("does not tear the fleet's streams down when this device's engine drops", async () => {
     const events = useEventsStore();
     vi.spyOn(events, "resubscribe").mockResolvedValue(undefined);

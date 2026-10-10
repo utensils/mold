@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useSourceMediaVisibility } from "@studio/lib/sourceMediaVisibility";
 import { viewerAfterRemoval } from "@studio/lib/viewerRemoval";
 import { useLibraryUnread } from "../stores/libraryUnread";
 import { collectionAvailability } from "@studio/lib/collectionVisibility";
@@ -258,6 +259,7 @@ const sourceOwners = computed(() =>
     .filter((owner): owner is SourceMediaOwner => owner !== null),
 );
 
+useSourceMediaVisibility(() => sourceOwners.value);
 function toggleSourceView() {
   clearSelection();
   closeLightbox(false);

@@ -556,7 +556,7 @@ The compact prompt stays bounded while you type. **Edit prompt** opens a spaciou
 
 ### Retained source media
 
-Desktop and the Tauri mobile client show retained input thumbnails and role labels in each print's details. Source Media in the library browses the same visible owners across selected machines, with original-byte attachment to the current draft and navigation to the owning output. Hidden collections stay excluded from the general source browser. Sources have no independent upload, pin, or delete action: the owning output continues to control retention, including Trash.
+Desktop and the Tauri mobile client show retained input thumbnails and role labels in each print's details. Source Media in the library browses the same visible owners across selected machines, with original-byte attachment to the current draft and navigation to the owning output. Hidden collections stay excluded from the general source browser. Identical verified source bytes appear once with their individual print/role usages available to select. Source cards page independently from library discovery; search and counts describe loaded sources. Refresh sources rechecks retained inputs, and warm previews reuse bounded private memory without writing source bytes to disk. Sources have no independent upload, pin, or delete action: the owning output continues to control retention, including Trash.
 
 The desktop sidebar also expands Library and Collections, remembers expansion, shows collection counts and machine availability, and opens the existing collection creation, rename, visibility, and deletion controls. Drag a print onto a collection to file it; in selection mode hold Option/Alt while dragging to file the selected prints (ordinary drag retains sweep selection).
 

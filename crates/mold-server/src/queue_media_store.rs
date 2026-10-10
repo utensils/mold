@@ -207,14 +207,34 @@ pub(crate) struct GalleryPinInspection {
     pub(crate) untouched: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct GalleryPinVersion {
+    path: PathBuf,
+    identity: [u64; 7],
+}
+
+type GalleryThumbnailCache =
+    crate::gallery_source_cache::PrivateCache<(GalleryPinVersion, usize), Arc<Zeroizing<Vec<u8>>>>;
+
 #[derive(Clone)]
 pub struct QueueMediaStore {
+    gallery_manifests:
+        Arc<crate::gallery_source_cache::PrivateCache<GalleryPinVersion, MediaSetManifest>>,
+    pub(crate) gallery_thumbnails: Arc<GalleryThumbnailCache>,
+    pub(crate) gallery_cold_work: Arc<crate::gallery_source_cache::ColdWork>,
+    pub(crate) gallery_preview_payloads: Arc<crate::gallery_source_cache::ColdWork>,
+    #[cfg(test)]
+    pub(crate) gallery_thumbnail_renders: Arc<AtomicUsize>,
     root: PathBuf,
     key: Arc<Zeroizing<[u8; KEY_BYTES]>>,
     #[cfg(unix)]
     runtime_staging: Arc<QueueMediaRuntimeStaging>,
     #[cfg(test)]
     inspection_calls: Arc<AtomicUsize>,
+    #[cfg(test)]
+    pub(crate) gallery_decode_calls: Arc<AtomicUsize>,
+    #[cfg(test)]
+    pub(crate) gallery_member_reads: Arc<AtomicUsize>,
 }
 
 #[cfg(unix)]
@@ -442,6 +462,9 @@ pub struct MediaManifestEntry {
     pub name: String,
     pub size_bytes: u64,
     pub sha256_hex: String,
+    /// Derived only from fully authenticated content, never persisted in the wire format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_sha256: Option<String>,
     pub sink: QueueMediaSink,
 }
 
@@ -1098,6 +1121,7 @@ impl From<WireMediaSink> for QueueMediaSink {
 
 #[derive(Debug)]
 struct DataObservation {
+    content_sha256: Option<String>,
     index: u32,
     size_bytes: u64,
     sha256_hex: String,
@@ -1201,12 +1225,28 @@ impl QueueMediaStore {
         #[cfg(unix)]
         let runtime_staging = Arc::new(establish_runtime_staging(&version_root.join("ephemeral"))?);
         let store = Self {
+            gallery_manifests: Arc::new(crate::gallery_source_cache::PrivateCache::new(
+                256,
+                8 * 1024 * 1024,
+            )),
+            gallery_thumbnails: Arc::new(crate::gallery_source_cache::PrivateCache::new(
+                256,
+                32 * 1024 * 1024,
+            )),
+            gallery_cold_work: Arc::new(crate::gallery_source_cache::ColdWork::new(2)),
+            gallery_preview_payloads: Arc::new(crate::gallery_source_cache::ColdWork::new(2)),
+            #[cfg(test)]
+            gallery_thumbnail_renders: Arc::new(AtomicUsize::new(0)),
             root: version_root,
             key: Arc::new(key),
             #[cfg(unix)]
             runtime_staging,
             #[cfg(test)]
             inspection_calls: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            gallery_decode_calls: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            gallery_member_reads: Arc::new(AtomicUsize::new(0)),
         };
         store.cleanup_empty_job_artifacts_at_startup();
         Ok(OpenedQueueMediaStore {
@@ -1676,12 +1716,138 @@ impl QueueMediaStore {
         &self,
         pin: &GalleryMediaPinRef,
     ) -> Result<MediaSetManifest, QueueMediaError> {
+        let (file, version) = self.open_gallery_pin(pin)?;
+        let flight = version
+            .as_ref()
+            .map(|key| self.gallery_manifests.flight(key));
+        let _single = flight
+            .as_ref()
+            .map(|flight| flight.lock().unwrap_or_else(|p| p.into_inner()));
+        // Reopen after waiting: a removed/replaced pin never inherits a cached answer.
+        if let Some(version) = &version {
+            if self.gallery_pin_version(pin)?.as_ref() != Some(version) {
+                return Err(QueueMediaError::NotFound);
+            }
+            if let Some(manifest) = self.gallery_manifests.get(version) {
+                return Ok(manifest);
+            }
+        }
+        let _permit = self.gallery_cold_work.enter();
+        #[cfg(test)]
+        self.gallery_decode_calls.fetch_add(1, Ordering::SeqCst);
+        let manifest = self
+            .decode_bundle_from_file(&pin.media_set, file, None, true)?
+            .manifest;
+        if let Some(version) = version {
+            if self.gallery_pin_version(pin)?.as_ref() != Some(&version) {
+                return Err(QueueMediaError::Authentication);
+            }
+            let cost = manifest
+                .entries
+                .iter()
+                .map(|e| {
+                    e.role.len()
+                        + e.name.len()
+                        + e.sha256_hex.len()
+                        + e.content_sha256.as_ref().map_or(0, String::len)
+                        + std::mem::size_of::<MediaManifestEntry>()
+                })
+                .sum::<usize>()
+                + std::mem::size_of::<MediaSetManifest>()
+                + version.path.as_os_str().len();
+            self.gallery_manifests
+                .insert(version, manifest.clone(), cost);
+        }
+        Ok(manifest)
+    }
+
+    fn open_gallery_pin(
+        &self,
+        pin: &GalleryMediaPinRef,
+    ) -> Result<(File, Option<GalleryPinVersion>), QueueMediaError> {
         validate_gallery_pin_ref(pin)?;
         let path = self.gallery_pin_path(pin);
         let metadata = symlink_metadata_optional(&path)?.ok_or(QueueMediaError::NotFound)?;
         verify_private_bundle_metadata(&path, &metadata)?;
-        self.decode_bundle_from_path(&pin.media_set, &path, None)
-            .map(|decoded| decoded.manifest)
+        let file = mold_core::secure_file::open_regular_file_no_follow(&path)
+            .map_err(|error| QueueMediaError::InsecurePath(error.to_string()))?;
+        verify_private_bundle_file(&path, &file)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = file.metadata()?;
+            let version = GalleryPinVersion {
+                path,
+                identity: [
+                    metadata.dev(),
+                    metadata.ino(),
+                    metadata.len(),
+                    metadata.mtime() as u64,
+                    metadata.mtime_nsec() as u64,
+                    metadata.ctime() as u64,
+                    metadata.ctime_nsec() as u64,
+                ],
+            };
+            Ok((file, Some(version)))
+        }
+        #[cfg(not(unix))]
+        {
+            Ok((file, None))
+        }
+    }
+
+    pub(crate) fn gallery_pin_version(
+        &self,
+        pin: &GalleryMediaPinRef,
+    ) -> Result<Option<GalleryPinVersion>, QueueMediaError> {
+        self.open_gallery_pin(pin).map(|(_, version)| version)
+    }
+
+    /// Authenticate the stream but retain only the requested payload, including
+    /// private-staging members. No plaintext sibling files are materialized.
+    pub(crate) fn read_gallery_member(
+        &self,
+        pin: &GalleryMediaPinRef,
+        index: usize,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, QueueMediaError> {
+        let manifest = self.load_from_gallery_pin(pin)?;
+        if manifest
+            .entries
+            .get(index)
+            .is_none_or(|entry| entry.size_bytes > max_bytes)
+        {
+            return Err(QueueMediaError::NotFound);
+        }
+        let (file, version) = self.open_gallery_pin(pin)?;
+        let _permit = self.gallery_cold_work.enter();
+        let mut reader = BufReader::new(file);
+        let mut magic = [0; V2_MAGIC.len()];
+        reader.read_exact(&mut magic).map_err(map_truncation)?;
+        if &magic != V2_MAGIC {
+            return Err(QueueMediaError::ProjectionUnavailable(
+                QueueMediaProjectionFailure::LegacyV1,
+            ));
+        }
+        let index = u32::try_from(index).map_err(|_| QueueMediaError::NotFound)?;
+        #[cfg(test)]
+        self.gallery_member_reads.fetch_add(1, Ordering::SeqCst);
+        let mut decoded = self.decode_v2_from_reader(
+            &pin.media_set,
+            reader,
+            None,
+            true,
+            Some((index, max_bytes)),
+            true,
+        )?;
+        if decoded.manifest != manifest || self.gallery_pin_version(pin)? != version {
+            return Err(QueueMediaError::Authentication);
+        }
+        decoded
+            .memory
+            .remove(&index)
+            .map(SensitiveBytes::into_vec)
+            .ok_or(QueueMediaError::NotFound)
     }
 
     /// Idempotently release one gallery binding. Other hard-linked sibling
@@ -2657,6 +2823,16 @@ impl QueueMediaStore {
     ) -> Result<DecodedBundle, QueueMediaError> {
         let file = mold_core::secure_file::open_regular_file_no_follow(path)
             .map_err(|error| QueueMediaError::InsecurePath(error.to_string()))?;
+        self.decode_bundle_from_file(media_set, file, output, false)
+    }
+
+    fn decode_bundle_from_file(
+        &self,
+        media_set: &MediaSetRef,
+        file: File,
+        output: Option<&Path>,
+        derive_content: bool,
+    ) -> Result<DecodedBundle, QueueMediaError> {
         let mut reader = BufReader::new(file);
         let mut magic = [0_u8; MAGIC.len()];
         reader.read_exact(&mut magic).map_err(map_truncation)?;
@@ -2664,7 +2840,14 @@ impl QueueMediaStore {
             if output.is_some() {
                 return Err(QueueMediaError::MixedSinkHydrationRequired);
             }
-            return self.decode_v2_from_reader(media_set, reader, output, false, None);
+            return self.decode_v2_from_reader(
+                media_set,
+                reader,
+                output,
+                false,
+                None,
+                derive_content,
+            );
         }
         if &magic != MAGIC {
             return Err(QueueMediaError::Corrupt("unknown bundle format".into()));
@@ -2769,7 +2952,7 @@ impl QueueMediaStore {
                 QueueMediaProjectionFailure::Malformed
             }));
         }
-        self.decode_v2_from_reader(media_set, reader, output, mixed, selected_index)
+        self.decode_v2_from_reader(media_set, reader, output, mixed, selected_index, false)
     }
 
     fn decode_v2_from_reader(
@@ -2779,6 +2962,7 @@ impl QueueMediaStore {
         output: Option<&Path>,
         mixed: bool,
         selected_index: Option<(u32, u64)>,
+        derive_content: bool,
     ) -> Result<DecodedBundle, QueueMediaError> {
         let mut projection_nonce = [0_u8; PROJECTION_NONCE_BYTES];
         reader
@@ -2861,15 +3045,22 @@ impl QueueMediaStore {
                 break;
             }
             match plaintext.first().copied() {
-                Some(b'B') if !manifest_started => begin_v2_observation(
-                    &plaintext,
-                    output,
-                    mixed,
-                    selected_index,
-                    &mut current,
-                    &mut observations,
-                    &mut memory,
-                )?,
+                Some(b'B') if !manifest_started => {
+                    begin_v2_observation(
+                        &plaintext,
+                        output,
+                        mixed,
+                        selected_index,
+                        &mut current,
+                        &mut observations,
+                        &mut memory,
+                    )?;
+                    if derive_content {
+                        if let Some(file) = current.as_mut() {
+                            file.json_candidate = Some(Zeroizing::new(Vec::new()));
+                        }
+                    }
+                }
                 Some(b'D') if !manifest_started => {
                     consume_v2_data_record(&plaintext, &mut current)?
                 }
@@ -3325,6 +3516,7 @@ struct ObservedFile {
 }
 
 struct V2ObservedFile {
+    json_candidate: Option<Zeroizing<Vec<u8>>>,
     index: u32,
     next_chunk: u32,
     size_bytes: u64,
@@ -3375,6 +3567,7 @@ fn begin_v2_observation(
         })
         .transpose()?;
     *current = Some(V2ObservedFile {
+        json_candidate: None,
         index,
         next_chunk: 0,
         size_bytes: 0,
@@ -3408,6 +3601,20 @@ fn consume_v2_data_record(
         ));
     }
     let bytes = &plaintext[DATA_HEADER_BYTES..];
+    if let Some(candidate) = &mut file.json_candidate {
+        if candidate.len().saturating_add(bytes.len()) > 64 * 1024 * 1024 {
+            file.json_candidate = None;
+        } else {
+            candidate.extend_from_slice(bytes);
+            if candidate
+                .iter()
+                .find(|b| !b.is_ascii_whitespace())
+                .is_some_and(|b| *b != b'{')
+            {
+                file.json_candidate = None;
+            }
+        }
+    }
     file.digest.update(bytes);
     file.size_bytes = file
         .size_bytes
@@ -3452,7 +3659,17 @@ fn finalize_v2_observation(
             ));
         }
     }
+    let content_sha256 = file.json_candidate.as_ref().and_then(|bytes| {
+        let mut keyframe: mold_core::KeyframeCondition = serde_json::from_slice(bytes).ok()?;
+        if keyframe.image.is_empty() {
+            return None;
+        }
+        let digest = hex_encode(&Sha256::digest(&keyframe.image));
+        keyframe.image.zeroize();
+        Some(digest)
+    });
     observations.push(DataObservation {
+        content_sha256,
         index: file.index,
         size_bytes: file.size_bytes,
         sha256_hex: hex_encode(&file.digest.finalize()),
@@ -3532,6 +3749,7 @@ fn finalize_observation(
         output.sync_all()?;
     }
     observations.push(DataObservation {
+        content_sha256: None,
         index: file.index,
         size_bytes: file.size_bytes,
         sha256_hex: hex_encode(&file.digest.finalize()),
@@ -3626,7 +3844,15 @@ fn validate_manifest(
                 return Err(QueueMediaError::Authentication);
             }
         }
+        let content_sha256 = if entry.role == "keyframes" {
+            observed
+                .get(&entry.index)
+                .and_then(|actual| actual.content_sha256.clone())
+        } else {
+            Some(entry.sha256_hex.clone())
+        };
         public_entries.push(MediaManifestEntry {
+            content_sha256,
             role: entry.role,
             name: entry.name,
             size_bytes: entry.size_bytes,
@@ -4806,6 +5032,109 @@ mod tests {
             SealMedia::bytes("source", "secret-source.png", b"hello".to_vec()),
             SealMedia::bytes("mask", "secret-mask.png", b"mask".to_vec()),
         ]
+    }
+
+    #[test]
+    fn gallery_manifest_cache_singleflight_and_tamper_fence() {
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let reference = store
+            .seal("owner", "concurrent-cache", gallery_test_media())
+            .unwrap();
+        let pin = store
+            .pin_for_gallery_item(&reference, &gallery_pin_id(b"concurrent"))
+            .unwrap();
+        store.gallery_decode_calls.store(0, Ordering::SeqCst);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    store.load_from_gallery_pin(&pin).unwrap();
+                });
+            }
+        });
+        assert_eq!(store.gallery_decode_calls.load(Ordering::SeqCst), 1);
+        let path = store.gallery_pin_path(&pin);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        file.seek(SeekFrom::End(-1)).unwrap();
+        let mut byte = [0];
+        file.read_exact(&mut byte).unwrap();
+        file.seek(SeekFrom::End(-1)).unwrap();
+        file.write_all(&[byte[0] ^ 1]).unwrap();
+        file.sync_all().unwrap();
+        assert!(store.load_from_gallery_pin(&pin).is_err());
+        assert_eq!(store.gallery_decode_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gallery_content_digest_unwraps_keyframes_and_selected_reads_leave_no_siblings() {
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let image = b"same independently reusable image".to_vec();
+        let keyframe = serde_json::to_vec(&mold_core::KeyframeCondition {
+            frame: 24,
+            image: image.clone(),
+            name: None,
+        })
+        .unwrap();
+        let reference = store
+            .seal_v2_with_operation_fingerprint(
+                "owner",
+                "digest-cache",
+                &QueueMediaOperationFingerprint::sha256_v1(b"fixture"),
+                &QueueMediaProjection::default(),
+                vec![
+                    SealMedia::bytes("source_image", "scalar", image.clone()),
+                    SealMedia::bytes("keyframes", "item:0", keyframe.clone()),
+                    SealMedia::bytes("keyframes", "item:1", b"malformed".to_vec()),
+                ],
+            )
+            .unwrap();
+        let pin = store
+            .pin_for_gallery_item(&reference, &gallery_pin_id(b"digest"))
+            .unwrap();
+        let manifest = store.load_from_gallery_pin(&pin).unwrap();
+        let expected = hex_encode(&Sha256::digest(&image));
+        assert_eq!(
+            manifest.entries[0].content_sha256.as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(
+            manifest.entries[1].content_sha256.as_deref(),
+            Some(expected.as_str())
+        );
+        assert_ne!(manifest.entries[1].sha256_hex, expected);
+        assert_eq!(manifest.entries[2].content_sha256, None);
+        let before = fs::read_dir(&store.runtime_staging.root).unwrap().count();
+        assert_eq!(store.read_gallery_member(&pin, 1, 1024).unwrap(), keyframe);
+        assert_eq!(
+            fs::read_dir(&store.runtime_staging.root).unwrap().count(),
+            before
+        );
+        assert!(store.read_gallery_member(&pin, 1, 1).is_err());
+    }
+
+    #[test]
+    fn gallery_manifest_warm_reads_do_not_decrypt_again() {
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let reference = store
+            .seal("owner", "warm-cache", gallery_test_media())
+            .unwrap();
+        let pin = store
+            .pin_for_gallery_item(&reference, &gallery_pin_id(b"warm"))
+            .unwrap();
+        store.gallery_decode_calls.store(0, Ordering::SeqCst);
+        let first = store.load_from_gallery_pin(&pin).unwrap();
+        let second = store.load_from_gallery_pin(&pin).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(store.gallery_decode_calls.load(Ordering::SeqCst), 1);
+        store.release_gallery_pin(&pin).unwrap();
+        assert!(store.load_from_gallery_pin(&pin).is_err());
     }
 
     #[test]

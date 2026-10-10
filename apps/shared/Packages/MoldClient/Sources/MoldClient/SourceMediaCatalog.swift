@@ -9,30 +9,85 @@ public final class SourceMediaCatalog {
         public let member: RetainedSourceMedia.Member
         public let route: MoldHost?
         public let instance: String?
-        let publication: UUID
-        public var id: String { "\(publication)/\(owner.hostID)/\(owner.print.filename)/\(member.memberId)" }
+        public var id: String { "\(owner.hostID)/\(owner.print.filename)/\(member.memberId)" }
+        public let authority: SourceMediaAuthority
+        public init(owner: LibraryEntry, member: RetainedSourceMedia.Member, route: MoldHost?, instance: String?) {
+            self.owner = owner; self.member = member; self.route = route; self.instance = instance
+            authority = .init(owner: owner, route: route, instance: instance)
+        }
     }
+    public struct Source: Identifiable, Sendable {
+        public let id: String
+        public let usages: [Row]
+        public let searchKey: String
+        public var roles: String { Array(Set(usages.map { $0.member.sourceLabel })).sorted().joined(separator: " · ") }
+    }
+    public private(set) var revision = 0
+    @ObservationIgnored private var activeAuthorities: Set<SourceMediaAuthority> = []
     public private(set) var rows: [Row] = []
+    public private(set) var sources: [Source] = []
     public private(set) var failures: [PrintID: String] = [:]
     public private(set) var loading = false
     public private(set) var completed = 0
     public private(set) var total = 0
-    private var generation = UUID()
+    @ObservationIgnored private var generation = UUID()
+    @ObservationIgnored private var cached: [PrintID: Cached] = [:]
+    private struct Cached {
+        let authority: SourceMediaAuthority
+        let inventory: RetainedSourceMedia.Inventory
+        let fetched: Date
+    }
     public init() {}
+
+    public func invalidate(host: UUID, filename: String? = nil) {
+        let affected: (PrintID) -> Bool = { $0.host == host && (filename == nil || $0.filename == filename) }
+        generation = UUID()
+        cached = cached.filter { !affected($0.key) }
+        rows.removeAll { affected($0.owner.id) }
+        sources = Self.group(rows)
+        failures = failures.filter { !affected($0.key) }
+        loading = false
+        revision += 1
+    }
+
+    public func retain(authorities: Set<SourceMediaAuthority>) {
+        if !activeAuthorities.isSubset(of: authorities) { generation = UUID(); loading = false }
+        activeAuthorities.formIntersection(authorities)
+        cached = cached.filter { authorities.contains($0.value.authority) }
+        let kept = rows.filter { authorities.contains($0.authority) }
+        if kept.count != rows.count { rows = kept; sources = Self.group(kept) }
+    }
 
     public func load(owners: [LibraryEntry], backend: (UUID) -> (any MoldBackend)?,
                      route: (UUID) -> MoldHost? = { _ in nil },
-                     instance: (UUID) -> String? = { _ in nil }) async {
+                     instance: (UUID) -> String? = { _ in nil },
+                     refresh: Bool = false, now: Date = Date()) async {
         let token = UUID(); generation = token
-        rows = []; failures = [:]; completed = 0; total = owners.count; loading = true
+        let allowed = Dictionary(owners.map { ($0.id, SourceMediaAuthority(owner: $0, route: route($0.hostID), instance: instance($0.hostID))) }, uniquingKeysWith: { first, _ in first })
+        activeAuthorities = Set(allowed.values)
+        cached = cached.filter { allowed[$0.key] == $0.value.authority }
+        failures = [:]; total = owners.count; loading = true
         defer { if generation == token { loading = false } }
-        // Small batches bound metadata work; all pages are scanned, including search.
-        for start in stride(from: 0, to: owners.count, by: 25) {
+        let pending = owners.filter { owner in
+            guard !refresh, let hit = cached[owner.id], now.timeIntervalSince(hit.fetched) < 60 else { return true }
+            return hit.inventory.availability != .available && hit.inventory.availability != .unavailableLegacy
+        }
+        // Expired results are not authority while they are being revalidated.
+        for owner in pending { cached[owner.id] = nil }
+        completed = owners.count - pending.count
+        publish(owners: owners)
+        // Four initial owners yield first content quickly; subsequent batches stay bounded.
+        var start = 0
+        while start < pending.count {
             guard !Task.isCancelled, generation == token else { return }
-            let page = Array(owners[start ..< min(start + 25, owners.count)])
+            let end = min(start + (start == 0 ? 4 : 25), pending.count)
+            let page = Array(pending[start..<end]); start = end
             for (host, entries) in Dictionary(grouping: page, by: \.hostID) {
                 let capturedRoute = route(host), capturedInstance = instance(host)
                 do {
+                    guard entries.allSatisfy({ allowed[$0.id] == SourceMediaAuthority(owner: $0, route: capturedRoute, instance: capturedInstance) }) else {
+                        throw MoldClientError.unreachable("The machine changed while reading sources. Retry to refresh its inventory.")
+                    }
                     guard let client = backend(host) else { throw MoldClientError.unreachable("Connect this machine to read its source media.") }
                     let result = try await client.retainedSourceMediaInventories(filenames: entries.map { $0.print.filename })
                     guard !Task.isCancelled, generation == token else { return }
@@ -44,9 +99,8 @@ public final class SourceMediaCatalog {
                         guard let inventory = result.inventories[owner.print.filename] else {
                             failures[owner.id] = "The machine did not return this print's source inventory."; continue
                         }
-                        if inventory.availability == .available {
-                            rows += inventory.members.map { Row(owner: owner, member: $0, route: capturedRoute, instance: capturedInstance, publication: token) }
-                        } else if inventory.availability != .unavailableLegacy || RetainedSourceMedia.disclosable(owner.print.metadata) {
+                        cached[owner.id] = Cached(authority: .init(owner: owner, route: capturedRoute, instance: capturedInstance), inventory: inventory, fetched: now)
+                        if inventory.availability != .available && (inventory.availability != .unavailableLegacy || RetainedSourceMedia.disclosable(owner.print.metadata)) {
                             failures[owner.id] = RetainedSourceMedia.disclosure(inventory.availability) ?? "Source media unavailable."
                         }
                     }
@@ -55,7 +109,63 @@ public final class SourceMediaCatalog {
                     for owner in entries { failures[owner.id] = error.localizedDescription }
                 }
                 completed += entries.count
+                publish(owners: owners)
             }
         }
+    }
+
+    /// Details and browser share fresh answers; this does not change the browser scope.
+    public func inventory(for owner: LibraryEntry, backend: any MoldBackend, route: MoldHost,
+                          instance: String?, refresh: Bool = false) async throws -> RetainedSourceMedia.Inventory {
+        let authority = SourceMediaAuthority(owner: owner, route: route, instance: instance)
+        if !refresh, let hit = cached[owner.id], hit.authority == authority,
+           Date().timeIntervalSince(hit.fetched) < 60, hit.inventory.availability == .available {
+            return hit.inventory
+        }
+        // The caller owns its view/route fence; do not publish a detail-only request
+        // back into the browser cache after an await without that scope authority.
+        return try await backend.retainedSourceMedia(for: owner.print.filename)
+    }
+
+    private func publish(owners: [LibraryEntry]) {
+        rows = owners.flatMap { owner -> [Row] in
+            guard let hit = cached[owner.id], hit.inventory.availability == .available else { return [] }
+            return hit.inventory.members.map { Row(owner: owner, member: $0, route: hit.authority.route, instance: hit.authority.instance) }
+        }
+        sources = Self.group(rows)
+    }
+
+    public nonisolated static func group(_ rows: [Row]) -> [Source] {
+        var order: [String] = [], groups: [String: [Row]] = [:]
+        for row in rows {
+            let digest = row.member.contentSha256
+            let valid = digest?.count == 64 && digest!.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+            let key = valid ? "sha256/\(digest!)" : "member/\(row.id)"
+            if groups[key] == nil { order.append(key) }
+            groups[key, default: []].append(row)
+        }
+        return order.map { key in
+            let usages = groups[key]!
+            let search = usages.map { "\($0.member.sourceLabel) \($0.member.displayName) \($0.owner.print.displayName) \($0.owner.hostName)" }.joined(separator: " ")
+            return Source(id: key, usages: usages, searchKey: search.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current))
+        }
+    }
+}
+
+/// Cache authority excludes display-only title, favorite, collection and host name changes.
+public struct SourceMediaAuthority: Hashable, Sendable {
+    public let owner: PrintID
+    public let route: MoldHost?
+    public let instance: String?
+    private let version: String?
+    private let timestamp: UInt64
+    private let size: Int?
+    private let metadata: OutputMetadata
+    public init(owner: LibraryEntry, route: MoldHost?, instance: String?) {
+        self.owner = owner.id
+        var normalized = route; normalized?.name = ""
+        self.route = normalized; self.instance = instance
+        version = owner.print.mediaVersion; timestamp = owner.print.timestamp
+        size = owner.print.sizeBytes; metadata = owner.print.metadata
     }
 }
