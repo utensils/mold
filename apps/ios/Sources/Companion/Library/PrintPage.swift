@@ -156,7 +156,7 @@ struct ClipPlayer: View {
     var body: some View {
         ZStack {
             if let player, let item = player.currentItem {
-                NativeVideoPlayer(player: player)
+                NativeVideoPlayer(player: player, ready: ready)
                     .onReceive(item.publisher(for: \.status)) { status in
                         // Observe in the current view: the async playback task
                         // can miss a status transition while setting up AVKit.
@@ -169,8 +169,6 @@ struct ClipPlayer: View {
                 ProgressView().tint(.white).accessibilityIdentifier("viewer-clip-loading")
             }
         }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier(ready && playbackID == entry.id ? "viewer-clip-ready" : "viewer-clip-pending")
         // Page-style TabView prepares neighbouring pages. Only the selected
         // clip may fetch a stream or play audio; a swipe cancels that task.
         .task(id: "\(entry.id)|\(isSelected)") {
@@ -272,17 +270,25 @@ enum ClipPlayback {
 /// SwiftUI's VideoPlayer can suppress its controls inside a page-style TabView.
 struct NativeVideoPlayer: UIViewControllerRepresentable {
     let player: AVPlayer
+    var ready = false
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
         let controller = AVPlayerViewController()
         controller.player = player
         controller.showsPlaybackControls = true
         controller.videoGravity = .resizeAspect
+        updateReadiness(controller)
         return controller
     }
 
     func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
         if controller.player !== player { controller.player = player }
+        updateReadiness(controller)
+    }
+
+    private func updateReadiness(_ controller: AVPlayerViewController) {
+        controller.view.accessibilityIdentifier = ready ? "viewer-clip-ready" : "viewer-clip-loading"
+        controller.view.accessibilityValue = ready ? String(localized: "Ready") : String(localized: "Loading")
     }
 
     static func dismantleUIViewController(_ controller: AVPlayerViewController, coordinator: ()) {

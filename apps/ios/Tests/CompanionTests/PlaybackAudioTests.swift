@@ -81,6 +81,17 @@ struct PlaybackAudioTests {
         #expect(controller.player === player)
         #expect(controller.showsPlaybackControls)
         #expect(controller.videoGravity == .resizeAspect)
+        #expect(controller.view.accessibilityIdentifier == "viewer-clip-loading")
+        host.rootView = TabView {
+            NativeVideoPlayer(player: player, ready: true).tag(0)
+            Text("Next print").tag(1)
+        }.tabViewStyle(.page(indexDisplayMode: .never))
+        for _ in 0..<20 where controller.view.accessibilityIdentifier != "viewer-clip-ready" {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(controller.view.accessibilityIdentifier == "viewer-clip-ready")
+        #expect(controller.view.accessibilityValue == "Ready")
+        #expect(controller.showsPlaybackControls)
         NativeVideoPlayer.dismantleUIViewController(controller, coordinator: ())
         #expect(controller.player == nil)
     }
