@@ -2694,6 +2694,18 @@ fn has_fatal_cuda_error(message: &str) -> bool {
     .any(|needle| message.contains(needle))
 }
 
+/// The user-facing fatal message deliberately carries no driver detail, so the
+/// raw cause is logged here once, beside the quarantine. Without it the only
+/// record of WHICH operation faulted was the kernel's Xid line (#1852).
+fn log_fatal_cuda_cause(worker: &GpuWorker, model_name: &str, error: &anyhow::Error) {
+    tracing::error!(
+        gpu = worker.gpu.ordinal,
+        model = model_name,
+        error = %format!("{error:#}"),
+        "fatal CUDA error cause"
+    );
+}
+
 fn fatal_cuda_user_message(model_name: &str) -> String {
     format!(
         "fatal CUDA error while running '{model_name}'; this GPU worker was quarantined because its CUDA context is no longer safe to reuse. Restart the mold server to recover the GPU."
@@ -3595,6 +3607,7 @@ fn run_claimed_h3_generation(
             )
         }
         Ok(Err(error)) if is_fatal_cuda_error(&error) => {
+            log_fatal_cuda_cause(worker, &model_name, &error);
             quarantine_poisoned_worker(worker);
             contain_worker_cache(worker);
             reject_claimed_h3_generation_message(job, fatal_cuda_user_message(&model_name))
@@ -4396,6 +4409,7 @@ fn process_job_with_sink(
         let is_fatal_cuda = is_fatal_cuda_error(&e);
         let is_oom = is_cuda_oom(&e);
         let (err_msg, count_worker_failure) = if is_fatal_cuda {
+            log_fatal_cuda_cause(worker, &model_name, &e);
             quarantine_poisoned_worker(worker);
             (fatal_cuda_user_message(&model_name), false)
         } else if is_oom {
@@ -4581,6 +4595,11 @@ fn process_job_with_sink(
     // handles dangling. Quarantine until process restart instead.
     let fatal_cuda = matches!(&result, Ok(Err(e)) if is_fatal_cuda_error(e));
     let inference_panicked = result.is_err();
+    if let Ok(Err(error)) = &result {
+        if fatal_cuda {
+            log_fatal_cuda_cause(worker, &model_name, error);
+        }
+    }
     if fatal_cuda || inference_panicked {
         // Signal process teardown, then retain every suspect CUDA-backed
         // object for OS teardown. Even an apparently innocuous engine method
