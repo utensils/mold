@@ -422,16 +422,6 @@ fn mux_aac_track_to_mp4_bytes_with_limit(
         })
         .context("failed to add AAC track to MP4")?;
 
-    for sample_id in 1..=video.sample_count {
-        check_cancelled(cancelled, AvMuxPhase::CopyVideo)?;
-        let Some(sample) = reader.read_sample(video.track_id, sample_id)? else {
-            continue;
-        };
-        writer
-            .write_sample(1, &sample)
-            .with_context(|| format!("failed to copy video sample {sample_id} into A/V MP4"))?;
-    }
-
     let samples_per_channel = usize::try_from(encoder_info.frameLength)
         .context("AAC encoder returned a negative frame length")?;
     let input_channels = usize::try_from(encoder_info.inputChannels)
@@ -463,10 +453,38 @@ fn mux_aac_track_to_mp4_bytes_with_limit(
     }) {
         bail!("AAC encode exceeds its staging byte limit")
     }
+    // Samples are written in presentation order across both tracks, so
+    // mp4-rs's one-second chunks alternate. All video then all audio put the
+    // first AAC frame behind the whole picture track, and a demuxer reading
+    // the file front to back (WebKitGTK's qtdemux) could not preroll before
+    // it had buffered the entire clip.
     let mut start_time = 0u64;
     let mut remaining = output_samples_per_channel;
     let mut offset = 0usize;
-    while offset < pcm.len() {
+    let mut next_video_id = 1u32;
+    let mut pending_video: Option<(u32, Mp4Sample)> = None;
+    loop {
+        while pending_video.is_none() && next_video_id <= video.sample_count {
+            check_cancelled(cancelled, AvMuxPhase::CopyVideo)?;
+            pending_video = reader
+                .read_sample(video.track_id, next_video_id)?
+                .map(|sample| (next_video_id, sample));
+            next_video_id += 1;
+        }
+        let audio_due = offset < pcm.len()
+            && pending_video.as_ref().is_none_or(|(_, sample)| {
+                u128::from(start_time) * u128::from(video.timescale)
+                    <= u128::from(sample.start_time) * u128::from(sample_rate)
+            });
+        if !audio_due {
+            let Some((sample_id, sample)) = pending_video.take() else {
+                break;
+            };
+            writer
+                .write_sample(1, &sample)
+                .with_context(|| format!("failed to copy video sample {sample_id} into A/V MP4"))?;
+            continue;
+        }
         check_cancelled(cancelled, AvMuxPhase::EncodeAudio)?;
         let end = (offset + frame_samples).min(pcm.len());
         let mut frame = vec![0i16; frame_samples];
@@ -882,6 +900,96 @@ mod tests {
                 video_track_signature(&muxed.bytes),
                 video_track_signature(&video)
             );
+        }
+
+        /// Every chunk of every track as `(file offset, start seconds)`, in
+        /// file order — what a streaming demuxer reading front to back sees.
+        fn chunks_in_file_order(bytes: &[u8]) -> Vec<(u64, f64, TrackType)> {
+            let mut reader =
+                Mp4Reader::read_header(Cursor::new(bytes), bytes.len() as u64).unwrap();
+            let tracks: Vec<_> = reader
+                .tracks()
+                .iter()
+                .map(|(id, track)| {
+                    let stbl = &track.trak.mdia.minf.stbl;
+                    let offsets: Vec<u64> = match (&stbl.co64, &stbl.stco) {
+                        (Some(co64), _) => co64.entries.clone(),
+                        (None, Some(stco)) => stco.entries.iter().map(|&o| u64::from(o)).collect(),
+                        (None, None) => Vec::new(),
+                    };
+                    let stsc: Vec<(u32, u32)> = stbl
+                        .stsc
+                        .entries
+                        .iter()
+                        .map(|entry| (entry.first_chunk, entry.samples_per_chunk))
+                        .collect();
+                    (
+                        *id,
+                        track.track_type().unwrap(),
+                        track.timescale(),
+                        offsets,
+                        stsc,
+                    )
+                })
+                .collect();
+            let mut chunks = Vec::new();
+            for (track_id, track_type, timescale, offsets, stsc) in tracks {
+                let mut first_sample = 1u32;
+                for (index, offset) in offsets.iter().enumerate() {
+                    let chunk = index as u32 + 1;
+                    let per_chunk = stsc
+                        .iter()
+                        .rev()
+                        .find(|(first, _)| *first <= chunk)
+                        .unwrap()
+                        .1;
+                    let start = reader
+                        .read_sample(track_id, first_sample)
+                        .unwrap()
+                        .unwrap()
+                        .start_time;
+                    chunks.push((*offset, start as f64 / f64::from(timescale), track_type));
+                    first_sample += per_chunk;
+                }
+            }
+            chunks.sort_by_key(|(offset, _, _)| *offset);
+            chunks
+        }
+
+        /// A streaming demuxer (WebKitGTK's qtdemux behind a Range-capable
+        /// source) prerolls only once EVERY stream has data. All video then
+        /// all audio left the audio queue empty until the whole video had
+        /// been buffered, so the clip never prerolled and the Library showed
+        /// a blank, endlessly buffering player.
+        #[test]
+        fn interleaves_audio_with_video_in_presentation_order() {
+            let video = sample_video(72, 24);
+            let muxed = mux_aac_track_to_mp4_bytes(
+                &video,
+                &stereo_pcm(96_000, 32_000),
+                32_000,
+                2,
+                AacMuxOptions::match_video(),
+                &|_| false,
+            )
+            .unwrap();
+
+            let chunks = chunks_in_file_order(&muxed.bytes);
+            assert!(chunks
+                .iter()
+                .any(|(_, _, kind)| matches!(kind, TrackType::Audio)));
+            let mut latest = f64::NEG_INFINITY;
+            for (offset, start, kind) in &chunks {
+                // mp4-rs flushes a track's chunk once it holds one second, so
+                // a chunk may start up to one chunk behind the furthest one
+                // already written, never further.
+                assert!(
+                    *start > latest - 1.1,
+                    "{kind:?} chunk at byte {offset} starts at {start:.2}s, \
+                     after a chunk starting at {latest:.2}s was already written"
+                );
+                latest = latest.max(*start);
+            }
         }
 
         #[test]
