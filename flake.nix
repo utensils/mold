@@ -1125,6 +1125,36 @@
               );
               pkgs.runCommand "mold-devshell-cuda-load-path-check" { } "touch $out";
 
+            # `desktop-dev` runs WebKitGTK unwrapped, so nothing tells GStreamer
+            # where its plugins are (the packaged app gets that from
+            # wrapGAppsHook3). Without `autoaudiosink` WebKit's
+            # `MediaPlayerPrivateGStreamer::createAudioSink` hits a release
+            # assert and the web process aborts the moment any <video> or
+            # <audio> loads — every clip preview in the Library killed the page.
+            devshell-gstreamer-plugins =
+              let
+                plain = builtins.unsafeDiscardStringContext;
+                matches = lib.filter (
+                  entry: entry.name == "GST_PLUGIN_SYSTEM_PATH_1_0"
+                ) config.devshells.default.env;
+                entries = lib.splitString ":" (plain (lib.head matches).value);
+                required = lib.mapAttrs (_: drv: plain "${lib.getLib drv}/lib/gstreamer-1.0") {
+                  # playbin, decodebin, appsink, audioconvert
+                  base = pkgs.gst_all_1.gst-plugins-base;
+                  # autoaudiosink / pulsesink, isomp4 demux
+                  good = pkgs.gst_all_1.gst-plugins-good;
+                  # avdec_h264
+                  libav = pkgs.gst_all_1.gst-libav;
+                };
+                missing = lib.filter (name: !builtins.elem required.${name} entries) (lib.attrNames required);
+              in
+              assert lib.assertMsg (matches != [ ]) "the devshell sets no GST_PLUGIN_SYSTEM_PATH_1_0";
+              assert lib.assertMsg (missing == [ ]) (
+                "devshell GST_PLUGIN_SYSTEM_PATH_1_0 is missing GStreamer plugin sets: "
+                + lib.concatStringsSep ", " missing
+              );
+              pkgs.runCommand "mold-devshell-gstreamer-plugins-check" { } "touch $out";
+
             web-ui-module =
               let
                 evaluate =
@@ -1450,6 +1480,15 @@
               {
                 name = "LD_LIBRARY_PATH";
                 value = devshellLinuxLdLibraryPath;
+              }
+              # WebKitGTK media for `desktop-dev` (see the
+              # `devshell-gstreamer-plugins` check): the same plugin sets the
+              # packaged app's wrapGAppsHook3 puts on this variable.
+              {
+                name = "GST_PLUGIN_SYSTEM_PATH_1_0";
+                value = lib.makeSearchPathOutput "lib" "lib/gstreamer-1.0" (
+                  lib.filter (drv: lib.hasPrefix "gst" (drv.pname or "")) desktopLinuxBuildInputs
+                );
               }
             ];
 

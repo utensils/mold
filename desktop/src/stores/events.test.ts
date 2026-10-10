@@ -783,3 +783,58 @@ describe("fleet-wide event streams", () => {
     expect(vi.mocked(sseStream)).toHaveBeenCalledTimes(3);
   });
 });
+
+/*
+ * Dev builds install Pinia's devtools plugin, which invokes every action with a
+ * FRESH `Proxy` of the store as `this`. Bookkeeping keyed on `this` missed on
+ * every call, so a resubscribe never aborted the stream it replaced: each one
+ * leaked a live `/api/events`, and six of them filled WebKit's per-host pool so
+ * no Library preview to that machine ever loaded.
+ */
+describe("store identity under a per-call `this` proxy", () => {
+  /** What Pinia's devtools plugin does to every action in a dev build. */
+  function useDevtoolsWrappedEventsStore() {
+    const store = useEventsStore();
+    for (const name of [
+      "subscribe",
+      "unsubscribe",
+      "resubscribe",
+      "openStreams",
+      "syncHostStreams",
+      "openHostStream",
+      "closeHostStream",
+    ] as const) {
+      const action = store[name] as (...args: unknown[]) => unknown;
+      (store as unknown as Record<string, unknown>)[name] = function (...args: unknown[]) {
+        return action.apply(new Proxy(store, {}), args);
+      };
+    }
+    return store;
+  }
+
+  it("aborts the stream a resubscribe replaces", async () => {
+    vi.mocked(fetchServerCapabilities).mockResolvedValue(caps(true));
+    connectWithBucket();
+    const events = useDevtoolsWrappedEventsStore();
+
+    await events.subscribe();
+    await events.resubscribe();
+
+    const signals = vi.mocked(sseStream).mock.calls.map(([, options]) => options.signal);
+    expect(signals).toHaveLength(2);
+    expect(signals.filter((signal) => !signal.aborted)).toHaveLength(1);
+  });
+
+  it("aborts every stream on unsubscribe", async () => {
+    vi.mocked(fetchServerCapabilities).mockResolvedValue(caps(true));
+    connectWithBucket();
+    const events = useDevtoolsWrappedEventsStore();
+
+    await events.subscribe();
+    events.unsubscribe();
+
+    const signals = vi.mocked(sseStream).mock.calls.map(([, options]) => options.signal);
+    expect(signals).toHaveLength(1);
+    expect(signals[0]!.aborted).toBe(true);
+  });
+});

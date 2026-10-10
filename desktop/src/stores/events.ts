@@ -1,6 +1,6 @@
 import { sourceMediaGalleryEvent } from "@studio/lib/sourceMediaResources";
 import { defineStore } from "pinia";
-import { watch } from "vue";
+import { toRaw, watch } from "vue";
 import { fetchServerCapabilities } from "../lib/api/serverCapabilities";
 import { sseStream } from "../lib/api/sse";
 import type { ServerEvent } from "../lib/api/types";
@@ -52,11 +52,22 @@ function hostIdentity(host: {
  */
 const subscriptions = new WeakMap<object, Subscription>();
 
+/**
+ * The key for this store's off-state bookkeeping. Never `this` itself: in a
+ * dev build Pinia's devtools plugin calls every action with a FRESH proxy of
+ * the store, so a map keyed on `this` misses on every call — a resubscribe
+ * then never aborted the stream it replaced, each one leaked a live
+ * `/api/events`, and six of them filled WebKit's per-host connection pool so
+ * no webview request to that machine (every Library preview) ever started.
+ */
+const storeKey = (store: object): object => toRaw(store);
+
 function subscriptionFor(store: object): Subscription {
-  let sub = subscriptions.get(store);
+  const key = storeKey(store);
+  let sub = subscriptions.get(key);
   if (!sub) {
     sub = { streams: new Map(), silent: new Map(), stopWatch: null };
-    subscriptions.set(store, sub);
+    subscriptions.set(key, sub);
   }
   return sub;
 }
@@ -298,12 +309,12 @@ export const useEventsStore = defineStore("events", {
     },
     refreshAuthoritativePrimary() {
       this.refreshAgain = true;
-      if (this.refreshScheduled || authoritativeRefreshes.has(this)) return;
+      if (this.refreshScheduled || authoritativeRefreshes.has(storeKey(this))) return;
       this.refreshScheduled = true;
       const epoch = this.refreshEpoch;
       queueMicrotask(() => {
         this.refreshScheduled = false;
-        if (epoch !== this.refreshEpoch || authoritativeRefreshes.has(this)) return;
+        if (epoch !== this.refreshEpoch || authoritativeRefreshes.has(storeKey(this))) return;
         const refresh = (async () => {
           do {
             this.refreshAgain = false;
@@ -314,13 +325,13 @@ export const useEventsStore = defineStore("events", {
                 .catch(() => undefined);
           } while (this.refreshAgain && epoch === this.refreshEpoch);
         })().finally(() => {
-          authoritativeRefreshes.delete(this);
+          authoritativeRefreshes.delete(storeKey(this));
           // A resubscribe advances the epoch while the old host's read can
           // still be in flight. Preserve an invalidation raised by the new
           // stream and start it only after the old wave releases single-flight.
           if (this.refreshAgain) this.refreshAuthoritativePrimary();
         });
-        authoritativeRefreshes.set(this, refresh);
+        authoritativeRefreshes.set(storeKey(this), refresh);
       });
     },
     /**
