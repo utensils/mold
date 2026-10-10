@@ -33,8 +33,11 @@ struct Sidebar: View {
         List(selection: selection) {
             Section {
                 ForEach(SidebarRows.destinations) { item in
-                    Label(item.title, systemImage: item.symbol).tag(SidebarRow.destination(item))
+                    Label(item.title, systemImage: item.symbol)
                         .badge(item == .queue ? queue.badge : 0)
+                        // List reads the outer row's tag. The badge otherwise
+                        // exposes ForEach's Destination ID, not SidebarRow.
+                        .tag(SidebarRow.destination(item))
                 }
             }
 

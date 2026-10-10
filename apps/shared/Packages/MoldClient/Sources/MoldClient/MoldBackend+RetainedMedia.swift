@@ -8,6 +8,7 @@ import Foundation
 /// are different concerns, and the reuse session is the only route in the app
 /// that mints a credential.
 public protocol MoldRetainedMediaBackend: Sendable {
+    func retainedSourceMediaFile(for filename: String, member: RetainedSourceMedia.Member) async throws -> SourceMediaFile
     func retainedSourceMediaContent(for filename: String, member: RetainedSourceMedia.Member) async throws -> Data
     func retainedSourceMediaInventories(filenames: [String]) async throws -> RetainedSourceMedia.Inventories
     func retainedSourceMediaThumbnail(for filename: String, member memberId: String) async throws -> Data
@@ -27,6 +28,10 @@ public protocol MoldRetainedMediaBackend: Sendable {
 }
 
 public extension MoldRetainedMediaBackend {
+    func retainedSourceMediaFile(for filename: String, member: RetainedSourceMedia.Member) async throws -> SourceMediaFile {
+        throw MoldClientError.http(status: 404, code: nil, message: "Original viewing is unavailable from this connection.")
+    }
+
     func retainedSourceMediaInventories(filenames: [String]) async throws -> RetainedSourceMedia.Inventories {
         var inventories: [String: RetainedSourceMedia.Inventory] = [:]
         guard filenames.count <= 100 else { throw MoldClientError.malformedResponse }

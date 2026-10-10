@@ -390,6 +390,7 @@ extension LibraryStore {
         localSaveRunning = true
         defer { localSaveRunning = false }
         localSaveIssueKeys = [:]
+        localSaveNotices = []
         localSaveAlertPresented = false
         let visibilityGeneration = collectionVisibility.generation
         defer { localSaveTask = nil }
@@ -580,7 +581,14 @@ extension LibraryStore {
         var organizationFailedFiles: Set<String> = []
         var alreadyLocal = 0
         var transferred = 0
-        var legacyInputsUnavailable = 0
+        func recordIssue(_ message: String, target: MirrorTarget) {
+            guard targetVersioned(target.print) else { return }
+            let context = [target.originContext,
+                           target.print.mediaVersion ?? "", LocalSyncRecord.recipe(target.print) ?? "",
+                           local.baseURL.absoluteString, hosts.instanceID(of: local.id) ?? "", message].joined(separator: "\n")
+            let key = SHA256.hash(data: Data(context.utf8)).map { String(format: "%02x", $0) }.joined()
+            localSaveIssueKeys[message] = Array(Set((localSaveIssueKeys[message]?.split(separator: ":").map(String.init) ?? []) + [key])).sorted().joined(separator: ":")
+        }
         var completed = 0
         func record(_ target: MirrorTarget, as filename: String, organize: Bool) {
             if syncAll { successfulCopies.append((target, filename)) }
@@ -685,7 +693,12 @@ extension LibraryStore {
             for await (index, result) in group {
                 completed += 1
                 if let name = result.filename {
-                    if result.sourceMedia == .legacyInputsUnavailable { legacyInputsUnavailable += 1 }
+                    if result.sourceMedia == .legacyInputsUnavailable {
+                        let target = targets[index]
+                        let notice = "\(hosts.name(of: target.hostID) ?? target.hostID.uuidString) · \(target.print.filename): Original inputs are unavailable; the finished file is saved."
+                        localSaveNotices.append(notice)
+                        recordIssue(notice, target: target)
+                    }
                     if result.alreadyLocal { alreadyLocal += 1 }
                     else { transferred += 1 }
                     let sourceKey = LocalSyncRecord.key(hostID: targets[index].hostID,
@@ -705,18 +718,7 @@ extension LibraryStore {
                 } else {
                     let failure = "\(targets[index].print.filename): \(result.error ?? "save failed")"
                     failures.append(failure)
-                    if result.repeatAcknowledgable, targetVersioned(targets[index].print) {
-                        let target = targets[index]
-                        let context = [target.originContext,
-                                       target.print.mediaVersion ?? "",
-                                       LocalSyncRecord.recipe(target.print) ?? "",
-                                       local.baseURL.absoluteString,
-                                       hosts.instanceID(of: local.id) ?? "", failure].joined(separator: "\n")
-                        // Same text from two sources must acknowledge BOTH
-                        // current identities, not overwrite one with another.
-                        let key = SHA256.hash(data: Data(context.utf8)).map { String(format: "%02x", $0) }.joined()
-                        localSaveIssueKeys[failure] = Array(Set((localSaveIssueKeys[failure]?.split(separator: ":").map(String.init) ?? []) + [key])).sorted().joined(separator: ":")
-                    }
+                    if result.repeatAcknowledgable { recordIssue(failure, target: targets[index]) }
                 }
                 if completed % 10 == 0 || completed == work.count {
                     localSaveProgress = "Checked \(completed.formatted()) of \(work.count.formatted()) · Copied \(transferred.formatted()) · Already here \(alreadyLocal.formatted()) · Issues \(failures.count.formatted())"
@@ -861,11 +863,7 @@ extension LibraryStore {
         if alreadyLocal > 0 {
             summary += alreadyLocal == 1 ? " 1 was already here." : " \(alreadyLocal) were already here."
         }
-        if legacyInputsUnavailable > 0 {
-            summary += legacyInputsUnavailable == 1
-                ? " Original inputs are unavailable on the source machine for 1 legacy print; its finished file is saved."
-                : " Original inputs are unavailable on the source machine for \(legacyInputsUnavailable) legacy prints; their finished files are saved."
-        }
+        summary += Self.legacyInputNotice(count: localSaveNotices.count)
         if createdCollections > 0 {
             summary += " Created \(createdCollections) \(createdCollections == 1 ? "collection" : "collections")."
         }
@@ -876,10 +874,7 @@ extension LibraryStore {
         if !failures.isEmpty { summary += " \(failures.count) issues need attention." }
         localSaveReport = summary
         localSaveFailures = failures
-        localSaveAlertPresented = failures.contains { failure in
-            guard let key = localSaveIssueKeys[failure] else { return true }
-            return syncSession.hasNewIssues([key])
-        }
+        localSaveAlertPresented = failures.contains(where: isUnacknowledgedSyncIssue)
     }
 
 }

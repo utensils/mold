@@ -178,3 +178,76 @@ extension SourceMediaCatalogTests {
         #expect(catalog.rows.count == 1)
     }
 }
+
+private actor CatalogConcurrencyProbe {
+    var active = 0
+    var peak = 0
+    func read() async -> RetainedSourceMedia.Inventory {
+        active += 1; peak = max(peak, active)
+        try? await Task.sleep(for: .milliseconds(2))
+        active -= 1
+        return .init(availability: .available, members: [])
+    }
+}
+
+extension SourceMediaCatalogTests {
+    @Test func coldReadsAreConcurrentButBoundedAndWarmReadsAreZero() async {
+        let probe = CatalogConcurrencyProbe(), backend = FakeBackend(), host = UUID()
+        backend.stub("retainedSourceMedia(for:)") { _ in await probe.read() }
+        let owners = (0..<205).map { PrintFixtures.entry("bounded-\($0).png", host: host) }
+        let catalog = SourceMediaCatalog()
+        await catalog.load(owners: owners, backend: { _ in backend })
+        #expect(await probe.peak == 2)
+        #expect(catalog.completed == 205)
+        await catalog.load(owners: owners, backend: { _ in backend })
+        #expect(backend.count("retainedSourceMedia(for:)") == 205)
+    }
+}
+
+extension SourceMediaCatalogTests {
+    @Test func thousandOwnerPlanUsesElevenBoundedHTTPRequests() {
+        let host = UUID()
+        let owners = (0..<1_000).map { PrintFixtures.entry("bulk-\($0).png", host: host) }
+        let batches = SourceMediaCatalog.batches(owners)
+        #expect(batches.count == 11) // Previously 41 sequential requests.
+        #expect(batches.first?.count == 4)
+        #expect(batches.allSatisfy { $0.count <= 100 })
+        #expect(batches.flatMap { $0 }.map(\.id) == owners.map(\.id))
+        let other = PrintFixtures.entry("other.png", host: UUID())
+        let mixed = SourceMediaCatalog.batches(owners + [other])
+        #expect(mixed[1].first?.id == other.id) // A slow first host cannot occupy both bootstrap slots.
+    }
+
+    @Test func revokedAuthorityCannotReturnFromConcurrentReads() async {
+        let probe = CatalogConcurrencyProbe(), backend = FakeBackend(), host = UUID()
+        backend.stub("retainedSourceMedia(for:)") { _ in
+            _ = await probe.read()
+            return RetainedSourceMedia.Inventory(availability: .available, members: [
+                .init(memberId: "one", role: "source_image", displayName: "image.png", sizeBytes: 1)
+            ])
+        }
+        let owners = (0..<205).map { PrintFixtures.entry("revoked-\($0).png", host: host) }
+        let catalog = SourceMediaCatalog()
+        let task = Task { await catalog.load(owners: owners, backend: { _ in backend }) }
+        while await probe.active == 0 { await Task.yield() }
+        catalog.retain(authorities: [])
+        await task.value
+        #expect(catalog.rows.isEmpty && catalog.sources.isEmpty)
+        #expect(!catalog.loading)
+        #expect(backend.count("retainedSourceMedia(for:)") < owners.count)
+    }
+
+    @Test func failedExpiredRefreshDropsPreviouslyVisibleMedia() async {
+        let backend = FakeBackend(), host = UUID()
+        backend.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .available, members: [
+            .init(memberId: "one", role: "source_image", displayName: "image.png", sizeBytes: 1)
+        ]))
+        let catalog = SourceMediaCatalog(), owner = PrintFixtures.entry("expired.png", host: host), now = Date()
+        await catalog.load(owners: [owner], backend: { _ in backend }, now: now)
+        #expect(catalog.rows.count == 1)
+        backend.stub("retainedSourceMedia(for:)") { _ in throw MoldClientError.unreachable("offline") }
+        await catalog.load(owners: [owner], backend: { _ in backend }, now: now.addingTimeInterval(61))
+        #expect(catalog.rows.isEmpty && catalog.sources.isEmpty)
+        #expect(catalog.failures[owner.id] != nil)
+    }
+}

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import SourceMediaViewer from "./SourceMediaViewer.vue";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   sourcePreviews,
@@ -16,6 +17,7 @@ const props = defineProps<{
   usages?: SourceMediaSelection[];
   showOwner?: boolean;
 }>();
+const viewer = ref<SourceMediaSelection>();
 const usageLimit = ref(20);
 const usageOpen = ref(false);
 function toggleUsages(event: Event) {
@@ -43,6 +45,19 @@ const selection = computed(
       (usage) => sourceMemberKind(usage.member) !== "unknown",
     ) ??
     props.selection,
+);
+watch(
+  usages,
+  () => {
+    if (!viewer.value) return;
+    const current = usages.value.find(
+      (usage) =>
+        usageKey(usage) === usageKey(viewer.value!) &&
+        usage.member.content_sha256 === viewer.value!.member.content_sha256,
+    );
+    viewer.value = current;
+  },
+  { flush: "sync" },
 );
 const roles = computed(() =>
   [...new Set(usages.value.map((usage) => sourceMemberLabel(usage.member)))]
@@ -137,7 +152,12 @@ onBeforeUnmount(() => observer?.disconnect());
 </script>
 <template>
   <article ref="root" class="source-card" data-test="source-media-card">
-    <div class="source-card__preview">
+    <button
+      type="button"
+      class="source-card__preview"
+      :aria-label="`View original ${selection.member.display_name}`"
+      @click="viewer = selection"
+    >
       <img v-if="url" :src="url" :alt="label" /><span v-else>{{
         kind === "image"
           ? "Preview unavailable"
@@ -145,7 +165,7 @@ onBeforeUnmount(() => observer?.disconnect());
             ? "Original file"
             : kind
       }}</span>
-    </div>
+    </button>
     <strong>{{ label }}</strong>
     <span v-if="usages.length > 1" class="source-card__notice"
       >{{ usages.length }} usages · {{ roles }}</span
@@ -209,6 +229,22 @@ onBeforeUnmount(() => observer?.disconnect());
     <span v-else class="source-card__notice"
       >This file type cannot be attached to a new creation.</span
     >
+    <SourceMediaViewer
+      v-if="viewer"
+      :selection="viewer"
+      :usages="usages"
+      :allow-open-owner="showOwner"
+      @close="viewer = undefined"
+      @choose="viewer = $event"
+      @use="
+        emit('use', $event);
+        viewer = undefined;
+      "
+      @open-owner="
+        emit('openOwner', $event);
+        viewer = undefined;
+      "
+    />
   </article>
 </template>
 <style scoped>
@@ -223,7 +259,9 @@ onBeforeUnmount(() => observer?.disconnect());
   background: var(--mold-surface, #8881);
   font-size: var(--mold-fs-sm);
 }
-.source-card__preview {
+.source-card button.source-card__preview {
+  padding: 0;
+  width: 100%;
   aspect-ratio: 4/3;
   display: grid;
   place-items: center;

@@ -190,8 +190,10 @@ retry when their original machines reconnect.
 session. Completion appears in the Library status; the countdown and **Stop Sync**
 make the next run explicit. During transfers, a single progress banner and
 **Stop Sync** button replace the countdown. **Done**, Return, and Escape close Sync Details;
-successful reports omit issue controls. **Details** shows issues and offers **Don’t show these
-unchanged media issues again**. Acknowledgment keeps retries running; new or
+reports without issues or source notices omit acknowledgment controls. **Details** offers
+**Never show me this again for these sources.** for unchanged source issues, including
+legacy prints whose original inputs are unavailable. Acknowledged notices disappear
+from the banner but remain in Details. Acknowledgment keeps retries running; new or
 changed errors and connection/authentication failures still appear. Removed local
 copies stay removed during Sync; use explicit Save to copy one again. An older
 server that cannot delete selected trash items must be updated; deletion reports

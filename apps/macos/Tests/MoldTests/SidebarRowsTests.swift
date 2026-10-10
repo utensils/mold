@@ -164,7 +164,8 @@ struct SidebarRowsTests {
         var destination = Destination.generate
         let view = NSHostingView(rootView: Sidebar(destination: Binding(
             get: { destination }, set: { destination = $0 }))
-            .environment(hosts).environment(library).environment(navigation).environment(engine))
+            .environment(hosts).environment(library).environment(navigation).environment(engine)
+            .environment(QueueStore(hosts: hosts)))
         let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 300, height: 700),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
@@ -183,6 +184,33 @@ struct SidebarRowsTests {
             if navigation.scope == .trash, destination == .library { selectedTrash = true; break }
         }
         #expect(selectedTrash, "The rendered Trash row must participate in native List selection")
+    }
+
+    @Test func renderedTopLevelRowsRemainReachableFromSourceMedia() async throws {
+        let hosts = HostStore(hosts: []) { FakeBackend(host: $0) }
+        let library = LibraryStore(hosts: hosts)
+        let navigation = LibraryNavigation(defaults: scratch())
+        var destination = Destination.sourceMedia
+        let view = NSHostingView(rootView: Sidebar(destination: Binding(
+            get: { destination }, set: { destination = $0 }))
+            .environment(hosts).environment(library).environment(navigation)
+            .environment(MoldEngine()).environment(QueueStore(hosts: hosts)))
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 300, height: 700),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = view
+        window.orderFront(nil)
+        defer { window.close() }
+        await settle { self.table(in: view)?.numberOfRows ?? 0 > 0 }
+        let table = try #require(self.table(in: view))
+        var reached = Set<Destination>()
+        for row in 0..<table.numberOfRows {
+            table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            try await Task.sleep(for: .milliseconds(30))
+            reached.insert(destination)
+        }
+        #expect(Set(SidebarRows.destinations).isSubset(of: reached),
+                "Badges must not hide the outer SidebarRow selection tag")
     }
 
     private func table(in view: NSView) -> NSTableView? {

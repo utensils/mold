@@ -108,8 +108,8 @@ private struct LibraryActivitySnapshot {
     init(_ library: LibraryStore) {
         localSaveProgress = library.localSaveProgress ?? (library.localSaveRunning ? "Finishing sync…" : nil)
         localSaveStopRequested = library.localSaveStopRequested
-        syncReport = library.localSaveReport
-        syncHasIssues = !library.localSaveFailures.isEmpty
+        syncReport = library.syncBannerReport
+        syncHasIssues = library.syncHasUnacknowledgedIssues
         syncEnabled = library.syncSession.isEnabled
         syncNextRun = library.syncSession.nextRun
         bulkProgress = library.bulkProgress

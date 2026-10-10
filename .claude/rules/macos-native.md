@@ -91,6 +91,13 @@ recreate destination trash or a recorded copy intentionally removed from the
 local listing. Explicit Save remains deliberate recovery. Copy hidden collection
 attributes for existing and empty replicas as well as newly filed outputs.
 
+Sidebar destination tags wrap badges so native List selection receives SidebarRow,
+not the ForEach destination ID. Verify rendered top-level navigation from Library.
+
+Legacy missing-input notices participate in per-source/version acknowledgment,
+including successful copies. The checkbox reads "Never show me this again for these sources."
+Acknowledgment removes repeated source notices from the banner, preserving full Details.
+
 The Sync report acknowledgment checkbox binds directly to eligible issue keys and the persisted session ledger; reopening, Reset, and new keys must update its visible state without a separate sheet-local toggle state.
 
 Sync Details dismisses both its request and native presentation on Done/Escape;
@@ -149,3 +156,9 @@ view lifetime; preserve authored scalar edits while a download completes.
 **Stable library status and clip duration.** Library connection/failure/cache status lives in an always-present toolbar slot, never an inserted grid row. Both native apps read model `supports_duration_prediction` and `runtime_ready` for automatic clip length: omit frames only for the active supported automatic preference, persist/restore that preference independently of the explicit frame count, and preserve it through unsupported models.
 
 Native model recovery prefers the queue row’s `model_download` hint, requiring a nonblank exact match to the row model. A present malformed/null/mismatched hint blocks legacy fallback without dropping the row. Only absent hints permit typed batch-code fallback. Preserve actual missing-component prose and diagnostics; use the existing exact-host, license-aware download-and-retry coordinator.
+
+Source browser filters project visible usages before selecting preview or reuse authority.
+Opening a source shows its original with existing native zoom/playback components,
+metadata and every host/print/member use; never collapse several roles in one print.
+Load only the selected original into a bounded private temporary file, cancel on
+dismissal, revoke on authority changes, and release playback/files on close.

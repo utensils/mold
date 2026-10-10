@@ -92,6 +92,53 @@ struct LibrarySyncSessionTests {
         #expect(!library.syncIssueAcknowledgment)
     }
 
+    @Test func previousJoinedAcknowledgmentsMigrateWithoutRepeatingSources() {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        defaults.set(["sourceA:sourceB"], forKey: "library.acknowledgedSyncIssues.v1")
+        let session = LibrarySyncSession(defaults: defaults)
+        #expect(!session.hasNewIssues(["sourceA", "sourceB"]))
+        session.unacknowledge(["sourceA"])
+        #expect(session.hasNewIssues(["sourceA"]))
+        #expect(!session.hasNewIssues(["sourceB"]))
+        #expect(!LibrarySyncSession(defaults: defaults).hasNewIssues(["sourceB"]))
+    }
+
+    @Test func acknowledgmentsFollowIndividualSourcesAcrossChangingGroups() {
+        let session = LibrarySyncSession(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        let library = LibraryStore(hosts: HostStore(hosts: []) { FakeBackend(host: $0) }, syncSession: session)
+        library.localSaveIssueKeys = ["legacy": "sourceA:v1sourceB"]
+        library.syncIssueAcknowledgment = true
+        library.localSaveIssueKeys = ["legacy": "sourceA"]
+        #expect(library.syncIssueAcknowledgment)
+        library.localSaveIssueKeys = ["legacy": "sourceA:v2sourceB"]
+        #expect(!library.syncIssueAcknowledgment)
+    }
+
+    @Test func legacyNoticesRemainInDetailsButAcknowledgedSourcesLeaveBanner() {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let library = LibraryStore(hosts: HostStore(hosts: []) { FakeBackend(host: $0) },
+                                   syncSession: LibrarySyncSession(defaults: defaults))
+        library.localSaveNotices = ["source A legacy inputs", "source B legacy inputs"]
+        library.localSaveIssueKeys = ["source A legacy inputs": "routeA-version1", "source B legacy inputs": "routeB-version1"]
+        library.localSaveReport = "Copied 2 prints." + LibraryStore.legacyInputNotice(count: 2)
+        #expect(library.syncHasUnacknowledgedIssues)
+        library.syncIssueAcknowledgment = true
+        #expect(library.syncBannerReport == "Copied 2 prints.")
+        #expect(library.localSaveReport.contains("2 legacy prints"))
+        #expect(!library.syncHasUnacknowledgedIssues)
+        #expect(!LibrarySyncSession(defaults: defaults).hasNewIssues(["routeA-version1"]))
+        library.localSaveIssueKeys["source B legacy inputs"] = "routeB-version2"
+        #expect(library.syncBannerReport.contains("1 legacy print;"))
+        #expect(!library.syncIssueAcknowledgment)
+        library.syncIssueAcknowledgment = true
+        library.localSaveFailures = ["Machine authentication failed"]
+        library.localSaveReport += " 1 issues need attention."
+        #expect(library.syncHasUnacknowledgedIssues)
+        #expect(library.syncBannerReport.contains("1 issues need attention."))
+        library.syncSession.resetAcknowledgments()
+        #expect(library.syncBannerReport.contains("2 legacy prints"))
+    }
+
     @Test func successfulSyncDoesNotPresentCompletionSheet() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let backend = FakeBackend(host: local)

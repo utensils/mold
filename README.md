@@ -314,7 +314,9 @@ desktop library copies also retain those sources on supported destinations.
 
 Every GUI's print details lists retained source media, including reference images,
 opening/ending frames, masks, control images, audio and video. **Source Media** in
-the library browses those inputs with their owning prints and machines; choose an
+the library browses those inputs with media-type, machine and text filters. Open
+a source to view its original and every use, including multiple roles or keyframe
+positions within the same print. Choose an
 input to use it in a new creation without restoring the original recipe. Sources
 follow existing collection visibility and machine selection. This browser does
 not create independent uploads or pins: permanent deletion releases each owning

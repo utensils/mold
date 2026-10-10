@@ -87,6 +87,7 @@ final class LibraryStore {
     var localSaveStopRequested = false
     var localSaveReport = ""
     var localSaveFailures: [String] = []
+    var localSaveNotices: [String] = []
     var localSaveAlertPresented = false
     let syncSession: LibrarySyncSession
     var localSaveIssueKeys: [String: String] = [:]

@@ -563,3 +563,9 @@ The desktop sidebar also expands Library and Collections, remembers expansion, s
 Library sidebar disclosures use the shared 18px chevron icons and independent, nonshrinking 32px collection toggle targets. Their accessible labels name the current expand/collapse action; toggling does not change the selected library shelf.
 
 Collection counts and hidden membership load with the initial library snapshot, before opening Collections. Hide/show updates immediately, including pending writes; a configured offline machine retains privacy evidence so its local mirrors remain hidden until explicitly opened.
+
+### Source media browsing
+
+Web, Tauri desktop and mobile share media-type, exact-machine and text filters, verified-byte deduplication, and an original-media viewer with bounded usage lists and owning-print navigation. Cached discovery survives reopening; filters narrow usages before choosing a preview or reuse route. Original preview limits are 64 MiB and, for PNG/JPEG/WebP images, 32 MP/8192 pixels per side. Existing print retention remains authoritative.
+
+Source discovery runs automatically while the browser is open: a small first page of 25 owners appears before background batches of at most 100, with two requests in flight. Progress reports checked library items; source cards still page independently at 48. Closing cancels pending discovery, and fresh cached inventories restore on reopening.

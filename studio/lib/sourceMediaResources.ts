@@ -123,6 +123,8 @@ export class SourcePreviewCache {
   }
 }
 export const sourcePreviews = new SourcePreviewCache();
+// Original viewer bytes never share thumbnail or cross-host authority keys.
+export const sourceOriginals = new SourcePreviewCache(16 * 1024 * 1024, 2);
 const inventoryCache = new Map<
   string,
   { value: RetainedSourceMediaInventory; at: number }
@@ -143,6 +145,7 @@ export function observeSourceInvalidation(
 export function invalidateSourceOwner(key: string, refresh = false) {
   inventoryCache.delete(key);
   sourcePreviews.invalidate(`${key}\n`);
+  sourceOriginals.invalidate(`${key}\n`);
   for (const listener of invalidators.get(key) ?? []) listener(refresh);
 }
 export function cachedSourceInventory(key: string) {
@@ -178,6 +181,7 @@ export function clearSourceResources() {
   for (const key of new Set([...inventoryCache.keys(), ...invalidators.keys()]))
     invalidateSourceOwner(key);
   sourcePreviews.invalidate("");
+  sourceOriginals.invalidate("");
 }
 
 // Exact-route event hints never merge authorities or invalidate ordinary polling.

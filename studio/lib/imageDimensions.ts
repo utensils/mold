@@ -211,6 +211,15 @@ export function imageDimensionsFromBase64(
 ): ImageDimensions | null {
   const bytes = decodedPrefix(normalizedPayload(base64));
   if (!bytes) return null;
+  return imageDimensionsFromBytes(bytes, formats);
+}
+
+/** Bounded original-viewer header probe, without allocating a base64 copy. */
+export function imageDimensionsFromBytes(
+  bytes: Uint8Array,
+  formats: readonly ImageInputFormat[] = DEFAULT_FORMATS,
+): ImageDimensions | null {
+  bytes = bytes.subarray(0, MAX_HEADER_BYTES);
   return (
     (formats.includes("png") ? pngDimensions(bytes) : null) ??
     (formats.includes("jpeg") ? jpegDimensions(bytes) : null) ??
