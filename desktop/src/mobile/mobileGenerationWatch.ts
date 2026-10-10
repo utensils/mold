@@ -104,6 +104,7 @@ export function watchMobileGenerationHost(
           reconcile("malformed");
           return;
         }
+        if (!stopped) sourceMediaGalleryEvent(options.target, { type: "resync_required" });
         options.onGap({
           instanceId: payload.instance_id,
           missedEvents: Number(payload.missed_events),

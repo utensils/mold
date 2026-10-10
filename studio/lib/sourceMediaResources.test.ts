@@ -1,7 +1,19 @@
 import { flushPromises } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
-import { SourcePreviewCache } from "./sourceMediaResources";
-import { groupSourceMedia, type SourceMediaOwner } from "./sourceMediaBrowser";
+import {
+  cacheSourceInventory,
+  cachedSourceInventory,
+  clearSourceResources,
+  observeSourceMediaEvents,
+  sourceEventMatches,
+  sourceMediaGalleryEvent,
+  SourcePreviewCache,
+} from "./sourceMediaResources";
+import {
+  groupSourceMedia,
+  sourceOwnerIdentity,
+  type SourceMediaOwner,
+} from "./sourceMediaBrowser";
 const owner: SourceMediaOwner = {
   key: "a",
   filename: "a.png",
@@ -112,4 +124,31 @@ it("recovers its request slots after a synchronous loader throw", async () => {
   expect((await good.promise).size).toBe(2);
   good.release();
   failed.release();
+});
+
+it("resync invalidates every source on the exact authenticated route only", () => {
+  clearSourceResources();
+  const target = { baseUrl: "http://fixture", apiKey: "one" };
+  const owners = [
+    { ...owner, target },
+    { ...owner, key: "b", filename: "b.png", target },
+    { ...owner, target: { ...target, apiKey: "two" } },
+    { ...owner, target: { ...target, baseUrl: "http://other" } },
+  ];
+  for (const item of owners)
+    cacheSourceInventory(sourceOwnerIdentity(item), {
+      availability: "available",
+      members: [],
+    });
+  const events: boolean[][] = [];
+  const stop = observeSourceMediaEvents((event) =>
+    events.push(owners.map((item) => sourceEventMatches(item, event))),
+  );
+  sourceMediaGalleryEvent(target, { type: "resync_required" });
+  expect(
+    owners.map((item) => !!cachedSourceInventory(sourceOwnerIdentity(item))),
+  ).toEqual([false, false, true, true]);
+  expect(events).toEqual([[true, true, false, false]]);
+  stop();
+  clearSourceResources();
 });

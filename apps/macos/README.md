@@ -900,7 +900,7 @@ inventories; individual keyframe reuse requires the newer content endpoint.
 
 Library connection status is always available in the toolbar. Offline and reconnecting updates change its icon and details without moving the gallery. Qualified models advertising duration prediction offer Automatic from prompt or an explicit clip length; the authored choice survives draft restoration and settings reuse, and parks on unsupported destinations.
 
-The Queue navigation badge totals unfinished jobs across all machines: rendering, queued, paused, held, and cancelling jobs. Finished, failed, and cancelled history is excluded; batches contribute their individual unfinished children, with runtime and durable copies counted once per machine.
+The Queue navigation badge reads every server page and totals unfinished jobs across all machines: rendering, queued, paused, held, and cancelling jobs. Finished, failed, and cancelled history is excluded; batches contribute their individual unfinished children, with runtime and durable copies counted once per machine.
 
 Developer builds retain a stable signing identity when one is available. The Makefile passes it through `MOLD_APP_SIGN_IDENTITY`, consumed only by the app target, so SwiftPM resource bundles do not inherit a Developer ID requirement. Release builds remain ad hoc until the release signing step. `MOLD_DEV_SIGN_IDENTITY=-` explicitly selects ad hoc development signing.
 

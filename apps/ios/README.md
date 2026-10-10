@@ -395,7 +395,7 @@ per-print browsing; individual keyframe reuse requires the content endpoint.
 
 Library connection status is always available in the toolbar. Offline and reconnecting updates change its icon and details without moving the gallery. Qualified models advertising duration prediction offer Automatic from prompt or an explicit clip length; the authored choice survives draft restoration and settings reuse, and parks on unsupported destinations.
 
-The Queue navigation badge totals unfinished jobs across all machines: rendering, queued, paused, held, and cancelling jobs. Finished, failed, and cancelled history is excluded; batches contribute their individual unfinished children, with runtime and durable copies counted once per machine.
+The Queue navigation badge reads every server page and totals unfinished jobs across all machines: rendering, queued, paused, held, and cancelling jobs. Finished, failed, and cancelled history is excluded; batches contribute their individual unfinished children, with runtime and durable copies counted once per machine.
 
 Source Media combines identical verified source bytes into one card while preserving every print, role and machine in **View prints and roles**. Unknown content identities remain separate. Choose a copy there before **Use source** to select its exact authoring origin. The grid starts with 48 sources and offers more on demand. Fresh inventories survive navigation, reordering and display-only edits for up to 60 seconds; Refresh revalidates immediately. Private previews stay in a 32 MiB decoded-memory cache, share repeated requests, and allow at most four downloads/decodes at once. They are never written to an offline source library; visibility and machine identity continue to fence preview and reuse.
 

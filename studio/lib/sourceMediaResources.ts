@@ -181,7 +181,7 @@ export function clearSourceResources() {
 }
 
 // Exact-route event hints never merge authorities or invalidate ordinary polling.
-type SourceEvent = { target: ApiTarget; filename: string };
+type SourceEvent = { target: ApiTarget; filename?: string };
 const sourceEvents = new Set<(event: SourceEvent) => void>();
 export function observeSourceMediaEvents(
   listener: (event: SourceEvent) => void,
@@ -195,17 +195,20 @@ export function sourceMediaGalleryEvent(
   target: ApiTarget,
   event: { type?: unknown; filename?: unknown },
 ) {
+  const resync = event.type === "resync_required";
   if (
-    ![
+    !resync &&
+    (![
       "gallery_added",
       "gallery_updated",
       "gallery_removed",
       "gallery_trashed",
       "gallery_restored",
     ].includes(String(event.type)) ||
-    typeof event.filename !== "string"
+      typeof event.filename !== "string")
   )
     return;
+  const filename = resync ? undefined : (event.filename as string);
   for (const key of new Set([
     ...inventoryCache.keys(),
     ...invalidators.keys(),
@@ -218,21 +221,21 @@ export function sourceMediaGalleryEvent(
     }
     if (!Array.isArray(identity)) continue;
     if (
-      identity[1] === event.filename &&
+      (resync || identity[1] === filename) &&
       identity[2] === target.baseUrl &&
       (identity[3] ?? null) === (target.apiKey ?? null)
     )
       invalidateSourceOwner(key);
   }
   for (const listener of sourceEvents)
-    listener({ target, filename: event.filename });
+    listener(filename === undefined ? { target } : { target, filename });
 }
 export function sourceEventMatches(
   owner: { filename: string; target: ApiTarget },
   event: SourceEvent,
 ) {
   return (
-    owner.filename === event.filename &&
+    (event.filename === undefined || owner.filename === event.filename) &&
     owner.target.baseUrl === event.target.baseUrl &&
     (owner.target.apiKey ?? null) === (event.target.apiKey ?? null)
   );

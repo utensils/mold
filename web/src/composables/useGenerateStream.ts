@@ -1823,6 +1823,9 @@ function handleDurableEvent(
     // stream's explicit resync frame or wake/open snapshot performs repair.
     return;
   }
+  if (eventName === "resync_required") {
+    sourceMediaGalleryEvent(routeApiTarget(route), { type: "resync_required" });
+  }
   if (eventName === "authority" || eventName === "resync_required") {
     // Event data is only a hint. Even an authority mismatch must be confirmed
     // by the bulk REST authority before it can detach locally tracked work.

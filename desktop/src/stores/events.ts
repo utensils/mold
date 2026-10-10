@@ -203,6 +203,9 @@ export const useEventsStore = defineStore("events", {
         },
         onEvent: (event, data) => {
           useGenerationStore().onDurableEvent(hostId, event, data);
+          if (event === "resync_required" && !abort.signal.aborted) {
+            sourceMediaGalleryEvent({ baseUrl, apiKey }, { type: "resync_required" });
+          }
           if (event !== "event" && event !== "message") return;
           let frame: ServerEvent;
           try {
