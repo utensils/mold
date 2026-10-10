@@ -124,3 +124,12 @@ private func id(_ n: Int, day: Int) -> PrintID {
     let selection = c.moving(.down, .none, from: .empty)
     #expect(selection.lead == id(0, day: 0))
 }
+
+@Test func justifiedArrowsFollowTheNearestHorizontalCenter() {
+    let items = (0..<5).map { entry($0, day: 0) }
+    let c = LibraryCursor(rows: [[(items[0].id, 40), (items[1].id, 240)],
+                                [(items[2].id, 30), (items[3].id, 140), (items[4].id, 260)]])
+    let selection = c.clicking(items[1].id, .none, from: .empty)
+    #expect(c.moving(.down, .none, from: selection).lead == items[4].id)
+    #expect(c.moving(.down, .extend, from: selection).items == Set(items[1...4].map(\.id)))
+}

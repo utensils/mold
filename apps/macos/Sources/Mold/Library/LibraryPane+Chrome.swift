@@ -84,11 +84,11 @@ extension LibraryPane {
                 scope: navigation.scope, actions: actions, entries: showing.visible,
                 shelves: library.shelves, enclosingShelf: enclosingShelf,
                 trashCount: actions.trashEntries.count,
-                selection: $selection,
+                selection: $selection, viewport: gridViewport,
                 returnToPrint: gridReturn?.scope == navigation.scope && gridReturn?.query == navigation.query
                     ? gridReturn?.id : nil,
                 onReturnRestored: { gridReturn = nil },
-                onOpen: { gridReturn = nil; viewing = $0 },
+                onOpen: { gridViewport.cover(); gridReturn = nil; viewing = $0 },
                 newMediaVisit: newMediaVisit
             )
             .id(LibraryGridContext(scope: navigation.scope, query: navigation.query))

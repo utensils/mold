@@ -101,8 +101,8 @@ import {
 } from "@studio/lib/upscale";
 import type { MeshExportGeometryCapabilities } from "@studio/lib/meshExport";
 
-const GAP = 8;
-const PAD = 16;
+const GAP = 2;
+const PAD = 0;
 /** Extra hosts have no SSE — their buckets poll while the view is open. */
 const EXTRA_POLL_MS = 15_000;
 /** Tags offered in the tile menu's Tags ▸ submenu. */
@@ -1892,7 +1892,28 @@ const visibleTiles = computed(() => {
 // alone does NOT invalidate that cache. When the justified layout re-flows
 // (container resize, entries arriving, row-height change) the cached offsets
 // go stale and rows render overlapping — re-measure on any re-flow.
-watch(rows, () => virtualizer.value?.measure?.());
+watch(rows, async (next, previous) => {
+  const scroller = scrollEl.value;
+  const top = scroller?.scrollTop ?? 0;
+  let oldTop = PAD;
+  const oldRow = previous.find((row) => {
+    if (oldTop + row.height >= top) return true;
+    oldTop += row.height + GAP;
+    return false;
+  });
+  const key = oldRow?.items[0]?.model.key;
+  virtualizer.value?.measure?.();
+  if (!scroller || top <= 0 || !key) return;
+  let newTop = PAD;
+  const newRow = next.find((row) => {
+    if (row.items.some((tile) => tile.model.key === key)) return true;
+    newTop += row.height + GAP;
+    return false;
+  });
+  if (!newRow) return;
+  await nextTick();
+  scroller.scrollTop = newTop + Math.min(top - oldTop, newRow.height);
+});
 
 // ── Thumbnail pre-warm (desktop only) ────────────────────────────────────────
 // Once a listing has laid out, quietly prepare the tiles below and above the
@@ -2729,15 +2750,15 @@ onUnmounted(() => {
           <div
             v-for="tile in visibleTiles"
             :key="tile.model.key"
-            class="ms-lib-tile group overflow-hidden rounded-control border"
+            class="ms-lib-tile group overflow-hidden"
             :class="
               (
                 selectMode
                   ? bulkSelection.has(tile.model.item.filename)
                   : isSelected(tile.model.entry)
               )
-                ? 'border-transparent ring-2 ring-accent'
-                : 'border-border'
+                ? 'ring-2 ring-inset ring-accent'
+                : ''
             "
             :style="{
               width: `${tile.width}px`,
@@ -3041,11 +3062,6 @@ onUnmounted(() => {
   left: 0;
   contain: layout paint style;
   transform: translate3d(var(--tile-x), var(--tile-y), 0);
-  transition: transform var(--mold-dur-quick) var(--mold-ease-out);
-}
-
-.ms-lib-tile:hover {
-  transform: translate3d(var(--tile-x), calc(var(--tile-y) - 2px), 0);
 }
 
 .ms-lib-tile-layer {

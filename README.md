@@ -438,3 +438,8 @@ other jobs may need.
 ### Reuse input media
 
 Reuse settings restores retained opening and closing frames into editable wells, preserving keyframe indices and ordered image references. Audio, source/continuation video, identity photos and control images restore with their saved settings where the selected recipe supports them. Continuation overlap and authored reference strength (including zero) are preserved. Older prints without recorded reference strength keep the server default. The original machine must retain the inputs; missing, damaged or oversized inputs are disclosed before generation. A new attachment or explicit removal wins over a late download, and restored wells never have a hidden archive fallback that can revive removed media.
+
+
+### Continuous Library rows
+
+Library thumbnails on native macOS, native iOS, Tauri desktop and web use continuous justified rows: each picture keeps its aspect ratio, with narrow seams and square corners. Thumbnail size and window changes reflow the rows while keeping a visible print in place. The final incomplete row stays left aligned without enlarging a lone print. iOS thumbnails omit machine-name badges; image details and machine filtering still show the owning machines.

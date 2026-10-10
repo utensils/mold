@@ -1,8 +1,7 @@
 import MoldClient
 import SwiftUI
 
-/// The day-sectioned grid. Columns come from a scaled minimum tile width, so
-/// larger text means larger, fewer tiles -- never clipped labels. A pinch
+/// The day-sectioned, aspect-preserving grid. Row height scales with text. A pinch
 /// walks the five sizes live (`TileSize.pinched`), keeping the print you were
 /// looking at in place.
 struct LibraryGrid: View {
@@ -29,6 +28,8 @@ struct LibraryGrid: View {
     @State private var pinchStart: TileSize?
     /// `anchor` as the pinch began: the print to bring back into place.
     @State private var pinchAnchor: PrintID?
+    @State private var layout = JustifiedLibraryLayout()
+    @State private var width: CGFloat = 0
     @State private var nativePosition = ScrollPosition()
     @State private var frames: [PrintID: CGRect] = [:]
     @State private var dragSelection: LibraryDragSelection?
@@ -37,24 +38,31 @@ struct LibraryGrid: View {
 
     var body: some View {
         let minimum = tile.basePoints * scale
-        let showsHost = projection.showsHost
+        let laidSections = layout.resolve(sections, width: width, targetHeight: minimum)
         ScrollViewReader { reader in
             ScrollView {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: minimum, maximum: minimum * 2), spacing: 3)],
-                          spacing: 3) {
-                    ForEach(sections) { section in
+                LazyVStack(alignment: .leading, spacing: JustifiedLayout.gap) {
+                    ForEach(laidSections) { laid in
+                        let section = laid.source
                         Section {
-                            ForEach(section.items) { entry in
-                                cell(entry, points: minimum * 1.25, showsHost: showsHost)
-                                    .id(entry.id)
-                                    .background {
-                                        if selecting {
-                                            GeometryReader { geometry in
-                                                Color.clear.preference(key: LibraryTileFrames.self,
-                                                                   value: [entry.id: geometry.frame(in: .global)])
+                            ForEach(laid.rows) { row in
+                                HStack(spacing: JustifiedLayout.gap) {
+                                    ForEach(row.items, id: \.index) { item in
+                                        let entry = section.items[item.index]
+                                        cell(entry, points: max(item.width, row.height), showsHost: projection.showsHost)
+                                        .frame(width: item.width, height: row.height)
+                                        .background {
+                                            if selecting {
+                                                GeometryReader { geometry in
+                                                    Color.clear.preference(key: LibraryTileFrames.self,
+                                                                       value: [entry.id: geometry.frame(in: .global)])
+                                                }
                                             }
                                         }
                                     }
+                                }
+                                .frame(height: row.height)
+                                .id(row.id)
                             }
                         } header: {
                             if let day = section.day {
@@ -74,6 +82,14 @@ struct LibraryGrid: View {
                     }
                 }
                 .scrollTargetLayout()
+            }
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { newWidth in
+                let keep = position.id
+                width = newWidth
+                if let keep { Task { @MainActor in
+                    await Task.yield()
+                    reader.scrollTo(rowAnchor(for: keep, in: layout.resolve(sections, width: newWidth, targetHeight: minimum)), anchor: .top)
+                } }
             }
             // Visibility is an observation, not a request to re-anchor every redraw.
             .onScrollTargetVisibilityChange(idType: PrintID.self, threshold: 0.1) { ids in
@@ -96,7 +112,14 @@ struct LibraryGrid: View {
                 if !enabled { frames = [:] }
             }
             .onDisappear { dragSelection = nil }
-            .gesture(PinchRecognizer(changed: { pinched($0, reader: reader) }, ended: { pinchStart = nil; pinchAnchor = nil }))
+            .gesture(PinchRecognizer(changed: { pinched($0) }, ended: { pinchStart = nil; pinchAnchor = nil }))
+            .onChange(of: tile) { _, next in
+                if let keep = pinchAnchor ?? position.id { Task { @MainActor in
+                    await Task.yield()
+                    reader.scrollTo(rowAnchor(for: keep, in: layout.resolve(sections, width: width,
+                        targetHeight: next.basePoints * scale)), anchor: .top)
+                } }
+            }
             .sensoryFeedback(.selection, trigger: tile)
             .accessibilityRotor("Days") {
                 ForEach(sections.filter { $0.day != nil }) { section in
@@ -161,7 +184,7 @@ struct LibraryGrid: View {
     }
 
     /// Walks the sizes live as the fingers move, keeping the top print put.
-    private func pinched(_ scale: CGFloat, reader: ScrollViewProxy) {
+    private func pinched(_ scale: CGFloat) {
         let start = pinchStart ?? tile
         if pinchStart == nil {
             pinchStart = start
@@ -170,14 +193,16 @@ struct LibraryGrid: View {
         let next = TileSize.pinched(from: start, magnification: scale, current: tile)
         guard next != tile else { return }
         withAnimation(.snappy(duration: 0.25)) { tile = next }
-        // Bring the print that was on top back to the top once the new
-        // layout exists (writing the same id in the same pass does nothing).
-        if let keep = pinchAnchor {
-            Task { @MainActor in
-                reader.scrollTo(keep, anchor: .top)
-                position.report(keep)
+
+    }
+
+    private func rowAnchor(for id: PrintID, in sections: [JustifiedLibraryLayout.Section]) -> PrintID {
+        for section in sections {
+            for row in section.rows where row.items.contains(where: { section.source.items[$0.index].id == id }) {
+                return row.id
             }
         }
+        return id
     }
 
     private func hit(_ point: CGPoint) -> PrintID? {

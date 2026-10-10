@@ -75,6 +75,7 @@ extension LibraryPane {
     /// A new shelf is a new list, and a selection made in the old one names
     /// prints that may not be in it.
     func clearSelection() {
+        gridViewport.reset()
         gridReturn = nil
         selection = LibraryCursor.Selection.empty
         viewing = nil

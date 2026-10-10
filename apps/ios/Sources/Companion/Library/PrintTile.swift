@@ -1,12 +1,11 @@
 import MoldClient
 import SwiftUI
 
-/// One print in the grid: the picture, square, radius 5, with the Mac's
+/// One print in an aspect-preserving continuous row, with the Mac's
 /// badges -- a star, a clip's length, a 3-D cube, the machine when there is
 /// more than one, and a countdown in Recently Deleted. VoiceOver reads the
 /// whole tile as one sentence (`spokenDescription`).
 struct PrintTile: View {
-    @Environment(\.dynamicTypeSize) private var size
     let entry: LibraryEntry
     let points: CGFloat
     let trashed: Bool
@@ -23,11 +22,10 @@ struct PrintTile: View {
 
     var body: some View {
         Color.clear
-            .aspectRatio(1, contentMode: .fit)
-            .overlay { PrintThumbnail(entry: entry, points: points, trashed: trashed) }
+            .overlay { PrintThumbnail(entry: entry, points: points, trashed: trashed, contentMode: .fit) }
             .overlay { if drawsBadges { badges } }
             .overlay(alignment: .topLeading) { selectMark }
-            .clipShape(.rect(cornerRadius: 5))
+            .clipped()
             .contentShape(.rect)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel((fresh && !trashed ? String(localized: "New") + ", " : "") + entry.spokenDescription(showsHost: showsHost))
@@ -41,7 +39,7 @@ struct PrintTile: View {
             .overlay(alignment: .topTrailing) { topBadge }
             .overlay(alignment: .bottom) {
                 HStack(spacing: 0) {
-                    hostBadge.frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                    Spacer(minLength: 0)
                     kindBadge.layoutPriority(1)
                 }
             }
@@ -57,14 +55,6 @@ struct PrintTile: View {
                 if fresh { Badge(text: String(localized: "New"), accent: true) }
                 if entry.isFavorite { Badge(symbol: "star.fill") }
             }
-        }
-    }
-
-    /// Hidden at accessibility sizes, where it would cover the picture; the
-    /// spoken label and the Info sheet still say it.
-    @ViewBuilder private var hostBadge: some View {
-        if showsHost, !size.isAccessibilitySize, !isCompact {
-            Badge(text: entry.hostBadge(compact: points < 150))
         }
     }
 

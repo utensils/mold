@@ -53,7 +53,7 @@ final class FixtureMachine: @unchecked Sendable {
     private let modelMemoryFixture: Bool
     private var residentModels: Set<String> = []
 
-    init(landscapePlaybackFixture: Bool = false, exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, retainedFrameFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil, queueDownloadFixture: Bool = false, requiresDownloadLicense: Bool = false, trashFixture: Bool = false, queueFailureFixture: Bool = false, queueSwipeFixture: Bool = false, queueDestinationFixture: Bool = false) throws {
+    init(justifiedFixture: Bool = false, landscapePlaybackFixture: Bool = false, exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, retainedFrameFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil, queueDownloadFixture: Bool = false, requiresDownloadLicense: Bool = false, trashFixture: Bool = false, queueFailureFixture: Bool = false, queueSwipeFixture: Bool = false, queueDestinationFixture: Bool = false) throws {
         self.landscapePlaybackFixture = landscapePlaybackFixture
         self.exportFixture = exportFixture
         self.unsupportedExportFormats = unsupportedExportFormats
@@ -102,6 +102,12 @@ final class FixtureMachine: @unchecked Sendable {
              "collections": collectionFixture && index == 0 ? ["fixture-collection"] : [],
              "metadata": retainedMediaFixture ? ["prompt": "\(galleryID.map { "Photos-" + $0 } ?? "Fixture") \(index)", "model": "flux-dev:q4"] : ["prompt": "\(galleryID.map { "Photos-" + $0 } ?? "Fixture") \(index)"]] as [String: Any]
         })
+        if justifiedFixture, var rows = try JSONSerialization.jsonObject(with: gallery) as? [[String: Any]] {
+            for index in rows.indices {
+                rows[index]["metadata"] = ["prompt": "Fixture \(index)", "width": [200, 600, 400][index % 3], "height": 400]
+            }
+            gallery = try JSONSerialization.data(withJSONObject: rows)
+        }
         if trashFixture, var rows = try JSONSerialization.jsonObject(with: gallery) as? [[String: Any]] {
             for index in rows.indices { rows[index]["trashed_at"] = 1_790_000_100 }
             trashGallery = try JSONSerialization.data(withJSONObject: rows)

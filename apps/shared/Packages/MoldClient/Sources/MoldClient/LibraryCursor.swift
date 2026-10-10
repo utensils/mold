@@ -11,6 +11,7 @@ public struct LibraryCursor: Sendable {
     /// Where each day starts in `order`, so a row can be found within its day.
     private let sectionStarts: [Int]
     public let columns: Int
+    private var geometryRows: [[(id: PrintID, center: Double)]] = []
 
     public init(sections: [LibrarySection], columns: Int) {
         var order: [PrintID] = []
@@ -22,6 +23,15 @@ public struct LibraryCursor: Sendable {
         self.order = order
         self.sectionStarts = starts
         self.columns = Swift.max(columns, 1)
+    }
+
+    /// Actual row centers for an aspect-preserving layout. Up/down chooses
+    /// the closest horizontal center, including across day boundaries.
+    public init(rows: [[(PrintID, Double)]]) {
+        geometryRows = rows.filter { !$0.isEmpty }.map { $0.map { (id: $0.0, center: $0.1) } }
+        order = geometryRows.flatMap { $0.map(\.id) }
+        sectionStarts = [0]
+        columns = 1
     }
 
     public enum Move: Sendable { case left, right, up, down, first, last }
@@ -120,6 +130,15 @@ public struct LibraryCursor: Sendable {
         case .first: return 0
         case .last: return last
         case .up, .down:
+            if !geometryRows.isEmpty,
+               let rowIndex = geometryRows.firstIndex(where: { $0.contains { $0.id == order[index] } }),
+               let cell = geometryRows[rowIndex].first(where: { $0.id == order[index] }) {
+                let next = rowIndex + (move == .up ? -1 : 1)
+                guard geometryRows.indices.contains(next),
+                      let target = geometryRows[next].min(by: { abs($0.center - cell.center) < abs($1.center - cell.center) })
+                else { return index }
+                return order.firstIndex(of: target.id) ?? index
+            }
             // Rows are counted WITHIN a day, because each day starts a new row
             // in the grid -- stepping by `columns` across the whole list would
             // land in the wrong column whenever a day doesn't fill its row.

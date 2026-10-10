@@ -774,7 +774,7 @@ for the reviewed native surfaces and runtime verification boundaries.
 
 Queue rows show the owning machine’s sealed conditioning images across models. Job Details shows every ordered reference separately with its role, including identity photos, named views, masks, control images and boundary frames. Audio/video references are listed by kind; unavailable previews are disclosed. Inputs remain separate from live denoise previews and are fetched through authenticated routes, including work submitted from another device. Older servers retain their singular source preview.
 
-Native Library marks media added since the previous Library visit with a session-only New badge. The first visit establishes a baseline; viewing media clears its badge immediately, while unopened badges clear on the next visit. Machine and playback labels share one fitted row on iOS so they never overlap.
+Native Library marks media added since the previous Library visit with a session-only New badge. The first visit establishes a baseline; viewing media clears its badge immediately, while unopened badges clear on the next visit. iOS keeps playback badges on thumbnails and machine information in image details.
 
 ## Error messages
 
@@ -854,4 +854,9 @@ Shared generation jobs keep supported Cancel controls during model loading; auto
 
 ### New gallery media
 
-Native Library marks media added since the previous Library visit with a session-only New badge. Opening a picture, video or 3-D print removes its badge immediately during that visit; prepared neighboring pages and long-press previews do not count as viewing. The first visit still establishes a baseline, and returning for the next visit clears the remaining badges. Before the Library is opened, the iOS Home Screen and macOS Dock icons count new gallery media, once per merged print, excluding hidden collections and Trash. Opening Library clears that count using the existing seen behavior. Icon counts are saved locally across launches; paired machines establish an initial baseline. iOS updates while active and during opportunistic background refresh, subject to notification badge permission; the server has no push. Machine and playback labels share one fitted row on iOS so they never overlap.
+Native Library marks media added since the previous Library visit with a session-only New badge. Opening a picture, video or 3-D print removes its badge immediately during that visit; prepared neighboring pages and long-press previews do not count as viewing. The first visit still establishes a baseline, and returning for the next visit clears the remaining badges. Before the Library is opened, the iOS Home Screen and macOS Dock icons count new gallery media, once per merged print, excluding hidden collections and Trash. Opening Library clears that count using the existing seen behavior. Icon counts are saved locally across launches; paired machines establish an initial baseline. iOS updates while active and during opportunistic background refresh, subject to notification badge permission; the server has no push. iOS keeps playback badges on thumbnails and machine information in image details.
+
+
+### Continuous Library rows
+
+Library thumbnails on native macOS, native iOS, Tauri desktop and web use continuous justified rows: each picture keeps its aspect ratio, with narrow seams and square corners. Thumbnail size and window changes reflow the rows while keeping a visible print in place. The final incomplete row stays left aligned without enlarging a lone print. iOS thumbnails omit machine-name badges; image details and machine filtering still show the owning machines.
