@@ -157,7 +157,7 @@ jobs:
 #         appearance: [light, dark]
 #         suite:
 #           - name: app
-#             classes: GenerationInteractionTests PopulatedGenerationTests ShellAccessibilityTests LandscapePlaybackTests
+#             classes: GenerationInteractionTests PopulatedGenerationTests PromptEditorUITests ShellAccessibilityTests LandscapePlaybackTests
 #           - name: references
 #             classes: ReferenceParityTests
 #           - name: library

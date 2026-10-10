@@ -480,3 +480,27 @@ describe("ComposerCard — the rewrite's progress", () => {
     expect(wrapper.emitted("expand")).toBeUndefined();
   });
 });
+
+it("opens a live prompt editor while preserving the page authoring contract", async () => {
+  const wrapper = factory();
+  await wrapper.get('[data-test="edit-prompt"]').trigger("click");
+  const editor = document.querySelector<HTMLTextAreaElement>(
+    'textarea[aria-label="Prompt text"]',
+  )!;
+  editor.value = "roomy\nnew words";
+  editor.dispatchEvent(new Event("input", { bubbles: true }));
+  expect(wrapper.emitted("update:prompt")?.at(-1)).toEqual([
+    "roomy\nnew words",
+    "typed",
+  ]);
+  editor.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Enter",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+  expect(wrapper.emitted("submit")).toBeUndefined();
+  wrapper.unmount();
+});

@@ -20,6 +20,15 @@ stage line cover the bed only until the first preview arrives. Once a run
 completes, the Seed section offers **lock last (seed)** to pin that print's
 seed for the next generate.
 
+## Editing long prompts
+
+Choose **Edit prompt** in the composer for a spacious editor on native Mac/iOS,
+web and Tauri desktop/mobile. Keep typing short prompts directly in the compact
+field, or use the editor for long text and selection. Edits stay in the current
+draft on **Done** or dismissal. **Recent prompts** lets you search and reuse text
+without replacing generation settings; **Clear** has an immediate **Undo clear**.
+The editor keeps Return and arrow keys for writing rather than submitting a render.
+
 ## Basic Usage
 
 ```bash

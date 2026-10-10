@@ -10,6 +10,10 @@ struct Composer: View {
     @Environment(GenerateController.self) private var generate
     @Environment(\.dynamicTypeSize) private var size
     @Binding var showsOptions: Bool
+    @Binding var showsPromptEditor: Bool
+    @Binding var expansionUndo: PromptExpansionUndo
+    @Binding var expandingPrompt: Bool
+    @Binding var promptSuggestions: [String]
     let estimate: String?
     let maximumHeight: CGFloat
     var inline = false
@@ -17,6 +21,7 @@ struct Composer: View {
     @FocusState private var editing: Bool
     @Environment(HostStore.self) private var hosts
     @State private var historyHost: MoldHost?
+    @AccessibilityFocusState private var editorOpenerFocused: Bool
 
     var body: some View {
         Group {
@@ -45,11 +50,32 @@ struct Composer: View {
         }
         .toolbar {
             ToolbarItemGroup(placement: .keyboard) {
-                Spacer()
-                Button("Done") { editing = false }
+                if !showsPromptEditor {
+                    Spacer()
+                    Button("Done") { editing = false }
+                }
             }
         }
-        .sheet(item: $historyHost) { host in PromptHistorySheet(host: host, hosts: hosts) }
+        .sheet(isPresented: $showsPromptEditor, onDismiss: { generate.saveDraft(); editorOpenerFocused = true }) {
+            PromptEditorSheet(expansionUndo: $expansionUndo, expandingPrompt: $expandingPrompt,
+                              promptSuggestions: $promptSuggestions)
+        }
+        .sheet(item: $historyHost) { host in
+            PromptHistorySheet(host: host, hosts: hosts) { text in
+                expansionUndo = PromptExpansionUndo()
+                promptSuggestions = []
+                PromptHistoryStore.recall(text, into: &generate.draft)
+            }
+        }
+        .sheet(isPresented: Binding(get: { !showsPromptEditor && historyHost == nil && !promptSuggestions.isEmpty }, set: {
+            if !$0 && !showsPromptEditor && historyHost == nil { promptSuggestions = [] }
+        })) {
+            SuggestionsSheet(suggestions: promptSuggestions) { chosen in
+                expansionUndo.record(original: generate.draft, expanded: chosen)
+                generate.draft.prompt = chosen
+                promptSuggestions = []
+            }
+        }
     }
 
     private var content: some View {
@@ -76,13 +102,21 @@ struct Composer: View {
                                 .foregroundStyle(.secondaryText), axis: .vertical)
                         // At the smallest text one line is too short a
                         // target to hit; two reserved lines are not.
-                        .lineLimit((size <= .small ? 2 : 1) ... (size.isAccessibilitySize ? 3 : 6))
+                        .lineLimit((size <= .small ? 2 : 1) ... 3)
                         .focused($editing)
                         .accessibilityIdentifier("generation-prompt")
                         .id("prompt")
                         .frame(minHeight: 44)
-                    ExpandButton()
+                    ExpandButton(undo: $expansionUndo, working: $expandingPrompt,
+                                 suggestions: $promptSuggestions, shortcutEnabled: !showsPromptEditor)
                 }
+                Button("Edit prompt", systemImage: "square.and.pencil") {
+                    editing = false
+                    showsPromptEditor = true
+                }
+                .frame(minHeight: 44)
+                .accessibilityIdentifier("prompt-editor-open")
+                .accessibilityFocused($editorOpenerFocused)
             } else {
                 Text("This model works from a picture, not a description.")
                     .foregroundStyle(.secondaryText)
@@ -129,7 +163,7 @@ struct Composer: View {
                     optionsButton
                 }
             }
-            if !inline || inlineAction { GenerateRow(estimate: estimate) }
+            if !inline || inlineAction { GenerateRow(estimate: estimate, promptEditorPresented: showsPromptEditor) }
             if case let .failed(reason) = generate.run {
                 Text(reason).foregroundStyle(.secondaryText)
             }
@@ -150,6 +184,7 @@ struct GenerateRow: View {
     @Environment(GenerateController.self) private var generate
     @Environment(\.dynamicTypeSize) private var size
     let estimate: String?
+    var promptEditorPresented = false
 
     static func stacks(at size: DynamicTypeSize, phone: Bool = false) -> Bool { phone || size >= .xxLarge }
 
@@ -161,14 +196,14 @@ struct GenerateRow: View {
             Text(estimate ?? " ").monospacedDigit().foregroundStyle(.secondaryText)
                 .accessibilityHidden(estimate == nil)
             if !stacked { Spacer(minLength: 0) }
-            Button { generate.generate() } label: {
+            Button { if !promptEditorPresented { generate.generate() } } label: {
                 Label("Generate", systemImage: "wand.and.sparkles")
                     .frame(maxWidth: stacked ? .infinity : nil)
             }
             .prominentAction()
             .controlSize(.large)
             .keyboardShortcut(.return, modifiers: .command)
-            .disabled(generate.blocker != nil)
+            .disabled(generate.blocker != nil || promptEditorPresented)
             .accessibilityIdentifier("submit-generation")
             .accessibilityShowsLargeContentViewer()
             .sensoryFeedback(.impact(weight: .light), trigger: generate.queued.count + (generate.run.isBusy ? 1 : 0))

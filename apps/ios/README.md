@@ -359,3 +359,9 @@ If a connection is interrupted during a move, retry the same destination so Mold
 ### Continuous Library rows
 
 Library thumbnails on native macOS, native iOS, Tauri desktop and web use continuous justified rows: each picture keeps its aspect ratio, with narrow seams and square corners. Thumbnail size and window changes reflow the rows while keeping a visible print in place. The final incomplete row stays left aligned without enlarging a lone print. iOS thumbnails omit machine-name badges; image details and machine filtering still show the owning machines.
+
+Long prompts use **Edit prompt** in Generate. Its large native editor keeps the
+live draft, supports multiline text, Recent prompts, Clear/Undo clear and the
+existing Expand menu; Done or dismissal retains edits. Settings ▸ Library has a
+persisted **Show date separators** preference, on by default, for Library, Search
+and collection shelves.

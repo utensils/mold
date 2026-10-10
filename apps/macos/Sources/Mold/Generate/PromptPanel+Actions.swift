@@ -104,7 +104,7 @@ extension PromptPanel {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .keyboardShortcut(.return, modifiers: .command)
-                .disabled(submitRefusal != nil || controller.submissionFeedback.isPreparing)
+                .disabled(isEditingPrompt || submitRefusal != nil || controller.submissionFeedback.isPreparing)
                 .help(controller.run.isBusy
                       ? "Add another generation to the machine’s queue"
                       : (submitRefusal ?? "Send this prompt and settings to the selected machine"))

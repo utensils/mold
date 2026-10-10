@@ -52,6 +52,8 @@ struct LibraryPane: View {
     /// all of that per pass is work proportional to the whole library for a
     /// change that moved the cursor. See `LibraryShowingCache`.
     @State private var index = LibraryShowingCache()
+    @AppStorage("libraryShowDateSeparators", store: AppStorageSuite.defaults)
+    private var showDateSeparators = true
     /// The shelf being renamed from the MENU BAR. The sidebar row has its own;
     /// both open the same sheet.
     @State var renamingShelf: CollectionShelf?
@@ -83,7 +85,8 @@ struct LibraryPane: View {
     var body: some View {
         @Bindable var library = library
         let showing = index.showing(pool: pool, revision: library.rows.value,
-                                    query: resolved, selection: selection.items)
+                                    query: resolved, selection: selection.items,
+                                    showDateSeparators: showDateSeparators)
         return watched(showing)
             .safeAreaInset(edge: .bottom) { LibraryActivityStatus() }
             .focusedSceneValue(\.refreshAction) { Task { await actions.reload() } }

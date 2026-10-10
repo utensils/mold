@@ -22,13 +22,14 @@ public struct LibraryShowing: Sendable {
         self.selected = selected
     }
 
-    public init(pool: [LibraryEntry], query: LibraryQuery, selection: Set<PrintID>) {
+    public init(pool: [LibraryEntry], query: LibraryQuery, selection: Set<PrintID>,
+                showDateSeparators: Bool = true) {
         self.pool = pool
         self.visible = query.apply(to: pool)
         // The sections ARE `visible`, cut -- never re-ordered. The grid draws
         // these and the viewer's ← → walk `visible`, so anything else is two
         // orders for one list.
-        self.sections = query.sort.groupsByDay
+        self.sections = showDateSeparators && query.sort.groupsByDay
             ? LibraryGrouping.byDay(visible)
             : LibraryGrouping.ungrouped(visible)
         self.selected = visible.filter { selection.contains($0.id) }

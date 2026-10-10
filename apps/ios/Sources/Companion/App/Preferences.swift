@@ -8,6 +8,7 @@ enum Preference {
     static let notifyHeld = "notify.held"
     static let liveActivities = "liveActivities"
     static let autoSaveToPhotos = "library.autoSave"
+    static let showDateSeparators = "library.showDateSeparators"
     /// Megabytes the offline library may take (`OfflineLimit`).
     static let offlineLimit = "library.offlineLimitMB"
 

@@ -6,6 +6,7 @@ import SwiftUI
 /// looking at in place.
 struct LibraryGrid: View {
     let sections: [LibrarySection]
+    var showDateSeparators = true
     @Binding var tile: TileSize
     @Binding var position: LibraryScrollPosition
     let projection: LibraryGridProjection
@@ -121,6 +122,13 @@ struct LibraryGrid: View {
                     await Task.yield()
                     reader.scrollTo(rowAnchor(for: keep, in: layout.resolve(sections, width: width,
                         targetHeight: next.basePoints * scale)), anchor: .top)
+                } }
+            }
+            .onChange(of: showDateSeparators) {
+                if let keep = position.id { Task { @MainActor in
+                    await Task.yield()
+                    reader.scrollTo(rowAnchor(for: keep, in: layout.resolve(sections, width: width,
+                        targetHeight: tile.basePoints * scale)), anchor: .top)
                 } }
             }
             .sensoryFeedback(.selection, trigger: tile)

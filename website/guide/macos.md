@@ -77,12 +77,17 @@ and API only), RunPod provisioning, and the 3-D authoring workflows.
 
 ## Working in Generate
 
-Drag the handle above the prompt upward to make the editor taller, or Control-click
-it for size options. Your preferred height is remembered and fits the available
-window space. Drag the settings inspector divider to change its width; click any
-section heading to show or hide its controls. Recent prompts initially shows five
-items, with search and **Show more** for older entries. Choosing a recent prompt
-keeps your other settings.
+Use the compact prompt field for quick edits, or choose **Edit prompt** for a
+spacious text editor. Changes stay in your draft as you type; **Done** returns to
+Generate. **Recent prompts** searches previous text without changing your model,
+settings or source images. **Clear** offers **Undo clear**, and the existing prompt
+rewrite tools remain available. In the editor, Return adds a line and arrow keys
+move through your text.
+
+Drag the settings inspector divider to change its width; click a section heading
+to show or hide its controls. In **Settings → Library**, **Show date separators**
+controls the day headings and daily row breaks. Turn it off for one continuous
+grid in the current sort order. The preference is saved on this Mac.
 
 **Random each time** chooses a new seed for every submission. **Keep this seed**
 reuses the displayed starting number; **New seed** chooses another without

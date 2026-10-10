@@ -32,8 +32,9 @@ struct PromptPanel: View {
     @Environment(GenerateController.self) var controller
     @Environment(ExpandStore.self) private var expansions
     @Environment(PromptHistoryStore.self) private var history
-    private enum FocusedField: Hashable { case prompt, negative }
+    private enum FocusedField: Hashable { case prompt, negative, editPrompt }
     @FocusState private var focusedField: FocusedField?
+    @State var isEditingPrompt = false
     @State private var cycler = PromptHistoryCycler()
     @State private var keyMonitor: Any?
     @State private var contentHeight: CGFloat = 0
@@ -81,9 +82,14 @@ struct PromptPanel: View {
         // Published the same way the Library's title and tag fields already
         // do, so `ResultStrip`'s arrow-key shortcuts stand down for a caret
         // here exactly as they do for one there.
-        .focusedValue(\.editingText, focusedField == nil ? nil : true)
+        .focusedValue(\.editingText, focusedField == .prompt || focusedField == .negative ? true : nil)
         .onAppear { installHistoryKeyMonitor() }
         .onDisappear { removeHistoryKeyMonitor() }
+        .sheet(isPresented: $isEditingPrompt, onDismiss: { focusedField = .editPrompt }) {
+            if let recipe {
+                PromptEditorSheet(draft: $draft, recipe: recipe, host: host, destination: $destination)
+            }
+        }
         .task(id: host?.id) {
             guard let host else { return }
             await history.refresh(on: host.id)
@@ -103,11 +109,11 @@ struct PromptPanel: View {
         default:
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 6) {
-                    PromptResizeHandle(preferredHeight: $preferredPromptHeight, available: promptAvailableHeight)
+                    PromptResizeHandle(preferredHeight: $preferredPromptHeight, available: min(144, promptAvailableHeight))
                     TextEditor(text: $draft.prompt)
                         .font(.body)
                         .scrollContentBackground(.hidden)
-                        .frame(height: PromptEditorHeight.resolve(preferredPromptHeight, available: promptAvailableHeight))
+                        .frame(height: PromptEditingLayout.compactHeight(preferred: preferredPromptHeight, available: promptAvailableHeight))
                         .overlay(alignment: .topLeading) {
                             if draft.prompt.isEmpty {
                                 Text(placeholder(recipe)).foregroundStyle(.secondary)
@@ -142,9 +148,15 @@ struct PromptPanel: View {
     /// way back out of it -- under the prompt rather than a glyph pinned to
     /// its corner (M8 decision 4).
     @ViewBuilder private func promptTools(_ recipe: GenerationRecipe) -> some View {
-        if recipe.capabilities.promptRequirement != .ignored, let host {
+        if recipe.capabilities.promptRequirement != .ignored {
             HStack(spacing: 10) {
-                PromptWand(recipe: recipe, host: host, draft: $draft, destination: $destination)
+                Button("Edit prompt", systemImage: "square.and.pencil") { isEditingPrompt = true }
+                    .accessibilityIdentifier("edit-prompt")
+                    .focused($focusedField, equals: .editPrompt)
+                if let host {
+                    PromptWand(recipe: recipe, host: host, draft: $draft, destination: $destination,
+                               presentationEnabled: !isEditingPrompt)
+                }
                 if expansions.canRevert(controller) {
                     Button("\(undoLabel) · Undo") { expansions.revert(controller) }
                         .buttonStyle(.plain)
@@ -192,7 +204,7 @@ struct PromptPanel: View {
     }
 
     private func historyKey(up: Bool) -> Bool {
-        guard focusedField == .prompt,
+        guard PromptEditingKeyboard.allowsHistory(editorOpen: isEditingPrompt, promptFocused: focusedField == .prompt),
               let editor = NSApp.keyWindow?.firstResponder as? NSTextView else { return false }
         let selection = editor.selectedRange()
         guard up ? PromptHistoryCaret.isOnFirstLine(draft.prompt, selection: selection)
@@ -210,6 +222,7 @@ struct PromptPanel: View {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+            if isEditingPrompt { return event }
             guard modifiers.isEmpty else { return event }
             switch event.keyCode {
             case 126 where historyKey(up: true): return nil

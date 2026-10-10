@@ -9,6 +9,7 @@ import {
   pushOverlay,
   resetOverlayStackForTests,
   useOverlayStack,
+  subscribeOverlayDepth,
 } from "./overlayStack";
 
 afterEach(() => {
@@ -129,4 +130,18 @@ describe("useOverlayStack", () => {
     over.unmount();
     under.unmount();
   });
+});
+
+it("notifies only actual overlay transitions and releases subscribers", () => {
+  const depths: number[] = [];
+  const unsubscribe = subscribeOverlayDepth((depth) => depths.push(depth));
+  const token = createOverlayToken();
+  pushOverlay(token);
+  pushOverlay(token);
+  popOverlay(token);
+  popOverlay(token);
+  expect(depths).toEqual([1, 0]);
+  unsubscribe();
+  pushOverlay(token);
+  expect(depths).toEqual([1, 0]);
 });

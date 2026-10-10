@@ -518,3 +518,32 @@ describe("ComposerCard — the Length chip", () => {
     }
   });
 });
+
+describe("spacious prompt editing", () => {
+  it("live authors the same form and blocks generation chords while editing", async () => {
+    const form = baseForm();
+    const wrapper = mountComposer(form);
+    await wrapper.get('[data-test="edit-prompt"]').trigger("click");
+    const editor = document.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Prompt text"]',
+    )!;
+    editor.value = "large\nmultiline draft";
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(form.prompt).toBe("large\nmultiline draft");
+    editor.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        metaKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(wrapper.emitted("generate")).toBeUndefined();
+    expect(wrapper.vm.isEditingPrompt()).toBe(true);
+    (document.querySelector('[data-test="prompt-done"]') as HTMLButtonElement).click();
+    await wrapper.vm.$nextTick();
+    expect(wrapper.vm.isEditingPrompt()).toBe(false);
+    expect(form.prompt).toBe("large\nmultiline draft");
+    wrapper.unmount();
+  });
+});

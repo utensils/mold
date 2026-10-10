@@ -51,6 +51,15 @@ matches offers **Clear Search**.
 Model search also keeps a **Close Model Search** action above the keyboard at
 large text sizes.
 
+Use **Edit prompt** to open a spacious editor above the keyboard. Changes stay in
+your draft when you tap **Done** or dismiss it. **Recent prompts** reuses just the
+text; **Clear** offers **Undo clear**. Your model, sources and other settings stay
+in place.
+
+In **Settings → Library**, turn **Show date separators** off for continuous rows
+without daily headings or breaks. The saved preference applies to Library views,
+including search and collections, while preserving their sort order.
+
 **Generate** never turns into Stop. Pressing it again queues another render;
 Stop is its own small button beside the progress sentence, e.g.
 "Adding detail — about 12s left" over `denoise 18/28`.
@@ -262,3 +271,7 @@ Reuse settings restores retained opening and closing frames into editable wells,
 When another connected machine can generate, **Move to…** is available on queued, paused, and held jobs until the source machine begins rendering. The prompt, seed, settings, and retained reference media move together. The destination must accept the job before the original is removed. Older servers support Held-only moves. Jobs that depend on machine-local LoRAs or workflows are refused without moving them.
 
 If a connection is interrupted during a move, retry the same destination so Mold can check whether it already accepted the job. The source remains reserved while that result is unknown, preventing duplicate rendering. A confirmed destination rejection releases the original only after the destination records that this transfer cannot be admitted later.
+
+### Editing long prompts
+
+The compact prompt stays bounded while you type. **Edit prompt** opens a spacious live editor; **Done**, Escape and backdrop dismissal retain edits and return focus to the opener. Enter inserts a newline, and arrow keys move through text. **Recent prompts** searches full prompt text and replaces only the prompt, preserving model and other settings. **Clear** offers immediate **Undo clear**; a later edit or history choice ends that recovery. Expand and Remix use the existing rewrite flow and return to the editor. The editor never submits a generation shortcut. Phone presentation fills the visible viewport, with controls retained when the keyboard reduces the available space.

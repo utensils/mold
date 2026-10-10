@@ -9,8 +9,11 @@ export interface PromptProvenanceDraft {
  *
  * - `typed`: the user edited the textarea by hand (or inserted a trigger word).
  * - `recalled`: a ↑/↓ prompt-history step replaced the whole prompt.
+ * - `clear` / `undo-clear`: immediate editor recovery, handled first by the
+ *   owning composer’s PromptClearRecovery without retiring its transform.
  */
-export type PromptAuthoringSource = "typed" | "recalled";
+export type PromptAuthoringSource =
+  "typed" | "recalled" | "clear" | "undo-clear";
 
 /**
  * Whether an active quick transform (Expand/Remix at batch 1) keeps its

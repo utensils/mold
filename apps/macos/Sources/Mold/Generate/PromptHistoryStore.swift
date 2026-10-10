@@ -13,6 +13,7 @@ final class PromptHistoryStore {
     /// The machines that answered 503 because their metadata DB is off. A
     /// machine with an EMPTY history and one with no history feature look
     /// identical in `byHost`, and the section says different things.
+    private(set) var failureByHost: [MoldHost.ID: String] = [:]
     private(set) var unavailable: Set<MoldHost.ID> = []
 
     /// Fifty is the server's own default and its listing is newest-first.
@@ -31,10 +32,13 @@ final class PromptHistoryStore {
         do {
             byHost[host] = try await client.history(limit: Self.limit).entries
             unavailable.remove(host)
+            failureByHost.removeValue(forKey: host)
             hosts.succeeded(on: host, doing: "list what it was last asked for")
         } catch let MoldClientError.http(status, code, _) where status == 503 && code == "HISTORY_UNAVAILABLE" {
             unavailable.insert(host)
+            failureByHost.removeValue(forKey: host)
         } catch {
+            failureByHost[host] = "Recent prompts could not be loaded. Check the machine connection and try again."
             hosts.report(error, on: host, doing: "list what it was last asked for")
         }
     }

@@ -232,3 +232,17 @@ Native macOS vertical arrows follow adjacent row centers, never a guessed column
 count. Viewer return restores the covered viewport; native previews explicitly
 inject thumbnail loaders. Native iOS omits the visual host-name thumbnail badge;
 Info and host sorting/filtering retain their authority. Unseen semantics are unchanged.
+
+**Prompt editor.** Keep quick prompt entry bounded to three lines; Edit prompt
+opens a large native, keyboard-safe TextEditor sheet bound to the authoritative
+draft. Done and ordinary dismissal retain and save edits. Native typing preserves
+existing provenance semantics; explicit history replacement and Clear release
+provenance. Reuse MoldClient PromptEditingSession for Clear/Undo clear. Disable
+background Generate and Expand shortcuts while editing; editor arrows and Enter
+remain text navigation/newline. Keep rewrite undo window-local across sheet
+reopen and fence it against a different authored prompt.
+
+**Library date separators.** Preference.showDateSeparators defaults on, persists
+per client, and appears only in Settings Library. Pass it to LibraryShowingCache
+for Library, Search and shelves; continuous sections retain sort, identities,
+selection and the print anchor during reflow.

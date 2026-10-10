@@ -19,6 +19,10 @@ companions, Discord bot, and REST/SSE API built on the same engine.
 
 ![Mold Studio desktop app generating an owl](website/public/screenshots/mold-studio-desktop.png)
 
+The generation composer offers **Edit prompt** for spacious long-text editing,
+recent-prompt search and Clear with Undo. Native iOS and macOS Library Settings
+also let you hide date separators for a continuous grid.
+
 ## Install
 
 Stable release:
@@ -436,7 +440,6 @@ other jobs may need.
 ### Reuse input media
 
 Reuse settings restores retained opening and closing frames into editable wells, preserving keyframe indices and ordered image references. Audio, source/continuation video, identity photos and control images restore with their saved settings where the selected recipe supports them. Continuation overlap and authored reference strength (including zero) are preserved. Older prints without recorded reference strength keep the server default. The original machine must retain the inputs; missing, damaged or oversized inputs are disclosed before generation. A new attachment or explicit removal wins over a late download, and restored wells never have a hidden archive fallback that can revive removed media.
-
 
 ### Continuous Library rows
 

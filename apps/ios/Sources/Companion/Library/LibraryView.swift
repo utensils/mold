@@ -11,6 +11,7 @@ struct LibraryView: View {
     @SceneStorage("library.scope") private var storedScope = ""
     @SceneStorage("library.tile") private var tile = TileSize.medium
     @SceneStorage("library.sort") private var sort = LibrarySort.newest
+    @AppStorage(Preference.showDateSeparators) private var showDateSeparators = true
     @State private var query = LibraryQuery()
     @State private var selecting = false
     @State private var managingCollections = false
@@ -62,7 +63,7 @@ struct LibraryView: View {
             } else if showing.visible.isEmpty {
                 empty
             } else {
-                LibraryGrid(sections: showing.sections, tile: tileChoice, position: $scrollPosition,
+                LibraryGrid(sections: showing.sections, showDateSeparators: showDateSeparators, tile: tileChoice, position: $scrollPosition,
                             projection: projection,
                             viewport: viewport, returnGeneration: returnGeneration, selecting: selecting,
                             selection: $selection, trashed: scope.isTrash, zoom: zoom, visible: showing.visible)
@@ -153,7 +154,8 @@ struct LibraryView: View {
 
     private func showing() -> LibraryShowing {
         return showingCache.showing(pool: scope.isTrash ? library.trashPool : library.pool,
-                                    revision: library.revision, query: showingQuery, selection: selection)
+                                    revision: library.revision, query: showingQuery, selection: selection,
+                                    showDateSeparators: showDateSeparators)
     }
 
     @ViewBuilder private var empty: some View {

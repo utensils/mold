@@ -172,8 +172,15 @@ guidance. Submitting, progress, results and failures retain the canvas. Both
 caps account for keyboard avoidance and iPad resizing; its prompt never moves between
 `ViewThatFits` alternatives. Top to bottom:
 
-1. **Prompt:** `TextField(axis: .vertical)` with up to six lines (three at
-   accessibility sizes). Keyboard toolbar: Expand, Done.
+1. **Prompt:** a bounded `TextField(axis: .vertical)` with up to three lines.
+   **Edit prompt** opens a large native sheet with a keyboard-safe `TextEditor`.
+   The editor live-binds the draft: Done and ordinary dismissal retain and save
+   edits. Enter inserts a newline; text navigation never recalls history.
+   Recent prompts searches the existing machine history and replaces only prompt
+   text. Clear offers Undo clear until a later edit or replacement. Generate
+   shortcuts are disabled behind the editor. Empty editors show a placeholder.
+   At accessibility sizes a labeled Prompt actions menu holds the same actions,
+   preserving useful editing space above the keyboard.
 2. **Expand** (`text.badge.star`), beside the prompt. Tapping it rewrites the
    prompt in place, and the original is kept for undo. Its menu offers
    "Suggest other ways", which opens a list sheet with Use.
@@ -226,6 +233,11 @@ The composer and its pinned Generate button remain in place. A fleet queue-count
 **Licence.** Gated downloads present the licence before Accept and Download.
 
 ### 5.2 Library
+
+Settings ▸ Library includes **Show date separators**, on by default and persisted
+on this device. Turning it off makes a continuous grid in the same sort order,
+including Search and collection shelves, while preserving print identities and
+the visible print anchor. The toggle stays out of Library chrome.
 
 **Grid.** `LazyVGrid(columns: [.adaptive(minimum: tileMin)])`, where `tileMin`
 is an `@ScaledMetric` from the Tiny / Small / Medium / Large / Largest ladder
