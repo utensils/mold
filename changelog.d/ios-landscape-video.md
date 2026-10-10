@@ -1,1 +1,0 @@
-- **iPhone landscape video.** Rotating a Library clip horizontally uses the full display with native playback controls and a Close action. Rotating upright restores gallery actions without restarting playback.

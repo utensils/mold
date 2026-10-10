@@ -1,2 +1,0 @@
-- Keep Library viewers on the next media item after deletion across native macOS/iOS, web, Tauri desktop and Tauri mobile, falling back to the previous item at the end and preserving surviving machine copies.
-- Remove the persistent native macOS completion notice after successful moves to Trash while retaining progress and failure feedback.
