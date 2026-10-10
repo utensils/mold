@@ -37,7 +37,11 @@ selected model's supported input flow. **Reuse settings** still restores the
 complete original recipe.
 
 Open **Library → Source Media** to browse sources independently of their original
-print. Each group links to its owner and identifies the machine holding it.
+print. Identical verified source bytes share one card. Its usage chooser keeps
+every input role, owning print and machine accessible; reuse takes the selected
+usage from that machine. Older machines without verified digests keep separate
+entries. In-memory previews and incremental inventory loading speed up return
+visits. Refresh sources checks for newly retained inputs.
 Machine filters and hidden collections keep the same library visibility. The
 browser checks owners in batches; search covers the loaded sources and **Check
 more library items** continues through the library.

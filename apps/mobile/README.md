@@ -1069,4 +1069,8 @@ The compact prompt stays bounded while you type. **Edit prompt** opens a spaciou
 
 Deleting the media currently open in a Library viewer keeps the viewer open on the next surviving item in the current filtered order, or the previous item at the end. It returns to the grid only when no items remain. A surviving machine copy stays visible after a partial deletion failure. Native macOS successful moves to Trash finish without a persistent completion notice; progress, interrupted work and failures remain visible.
 
-Retained source media is available in a print's Info sheet and the Library's Source Media section. Inputs retain their role labels and may be attached individually to a compatible current draft. The source browser follows machine selection and hidden-collection visibility; sources remain owned by their original library output and follow its existing Trash/permanent-deletion lifecycle.
+Retained source media is available in a print's Info sheet and the Library's Source Media section. Inputs retain their role labels and may be attached individually to a compatible current draft. Verified duplicates appear once with a usage chooser preserving their original print and role. Sources use 48-card pages, loaded-only search, incremental inventory discovery and an explicit refresh; private previews reuse bounded memory without disk caching. The source browser follows machine selection and hidden-collection visibility; sources remain owned by their original library output and follow its existing Trash/permanent-deletion lifecycle.
+
+Model-license settings keep descriptions at a readable width before wrapping the
+terms links, acceptance status and review action. Long model descriptions remain
+readable on narrow phones and at larger text sizes.

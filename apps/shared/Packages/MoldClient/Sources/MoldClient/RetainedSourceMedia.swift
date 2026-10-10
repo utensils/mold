@@ -41,16 +41,18 @@ public extension RetainedSourceMedia {
         public let position: Int?
         public let frameIndex: Int?
         public let imageRole: String?
+        public let contentSha256: String?
 
         public var id: String { memberId }
 
-        public init(memberId: String, role: String, displayName: String, sizeBytes: Int, label: String? = nil, mediaKind: String? = nil, position: Int? = nil, frameIndex: Int? = nil, imageRole: String? = nil) {
+        public init(memberId: String, role: String, displayName: String, sizeBytes: Int, label: String? = nil, mediaKind: String? = nil, position: Int? = nil, frameIndex: Int? = nil, imageRole: String? = nil, contentSha256: String? = nil) {
             self.memberId = memberId
             self.role = role
             self.displayName = displayName
             self.sizeBytes = sizeBytes
             self.label = label; self.mediaKind = mediaKind; self.position = position
             self.frameIndex = frameIndex; self.imageRole = imageRole
+            self.contentSha256 = contentSha256
         }
     }
 

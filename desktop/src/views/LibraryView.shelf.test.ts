@@ -63,6 +63,7 @@ vi.mock("../lib/api/client", () => ({
   apiFetch: vi.fn(),
   apiFetchTo,
   apiJsonTo,
+  conditionalApiJsonTo: (...args: unknown[]) => apiJsonTo(...args),
   currentTarget: () => ({ baseUrl: "http://x", apiKey: null }),
   ApiError: class ApiError extends Error {
     constructor(
@@ -360,7 +361,9 @@ describe("scopes + capability gating", () => {
     expect(wrapper.find("[data-test='favorites-chip']").exists()).toBe(false);
     expect(wrapper.findAll("[data-test='tag-chip']")).toHaveLength(0);
     expect(wrapper.findAll("[data-test='tile-favorite']")).toHaveLength(0);
-    await tileFor(wrapper, smurf04.filename).trigger("contextmenu");
+    // Collection-backed rows stay hidden until their visibility can be resolved.
+    // This legacy-host menu check uses an unfiled print.
+    await tileFor(wrapper, plain.filename).trigger("contextmenu");
     expect(menuEntry("Favourite")).toBeUndefined();
     expect(menuEntry("Delete")).toBeDefined();
     wrapper.unmount();
@@ -1303,4 +1306,80 @@ describe("selection-derived organize gating", () => {
     expect(useToastStore().items.at(-1)?.message).toContain("no album was created");
     wrapper.unmount();
   });
+});
+
+it("rejects retained source reuse when its visible owner disappears during download", async () => {
+  const attachment = await import("../lib/retainedSourceAttachment");
+  let finish!: () => void;
+  let afterDownload: boolean | undefined;
+  const attach = vi
+    .spyOn(attachment, "attachRetainedSource")
+    .mockImplementation(async (_form, _name, _kind, _read, current) => {
+      expect(current()).toBe(true);
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      afterDownload = current();
+      return { ok: false, error: "Source no longer visible" };
+    });
+  const { wrapper, gallery } = await mountView();
+  const vm = wrapper.vm as unknown as {
+    sourceOwners: import("@studio/lib/sourceMediaBrowser").SourceMediaOwner[];
+    useRetainedSource: (
+      selection: import("@studio/lib/sourceMediaBrowser").SourceMediaSelection,
+    ) => Promise<void>;
+  };
+  const owner = vm.sourceOwners[0]!;
+  expect(owner).toBeDefined();
+  const pending = vm.useRetainedSource({
+    owner,
+    member: { member_id: "one", role: "source_image", display_name: "source.png", size_bytes: 3 },
+  });
+  gallery.buckets["plato-7680"]!.items = [];
+  await flushPromises();
+  finish();
+  await pending;
+  expect(afterDownload).toBe(false);
+  wrapper.unmount();
+  attach.mockRestore();
+});
+
+it("keeps explicitly opened detail source reuse authorized outside catalog owner keys", async () => {
+  const attachment = await import("../lib/retainedSourceAttachment");
+  const attach = vi
+    .spyOn(attachment, "attachRetainedSource")
+    .mockImplementation(async (_form, _name, _kind, _read, current) => {
+      expect(current()).toBe(true);
+      return { ok: false, error: "test complete" };
+    });
+  const { wrapper } = await mountView();
+  const vm = wrapper.vm as unknown as {
+    sourceOwners: import("@studio/lib/sourceMediaBrowser").SourceMediaOwner[];
+    entries: import("../stores/gallery").MergedPrint[];
+    select: (entry: unknown) => void;
+    lightboxOpen: boolean;
+    useRetainedSource: (
+      selection: import("@studio/lib/sourceMediaBrowser").SourceMediaSelection,
+      details: boolean,
+    ) => Promise<void>;
+  };
+  const catalogOwner = vm.sourceOwners[0]!;
+  const entry = vm.entries[0]!;
+  vm.select(entry);
+  vm.lightboxOpen = true;
+  await flushPromises();
+  const owner = {
+    ...catalogOwner,
+    key: JSON.stringify([entry.sourceKey, catalogOwner.target.baseUrl, entry.item.filename]),
+  };
+  await vm.useRetainedSource(
+    {
+      owner,
+      member: { member_id: "one", role: "source_image", display_name: "source.png", size_bytes: 3 },
+    },
+    true,
+  );
+  expect(attach).toHaveBeenCalledOnce();
+  wrapper.unmount();
+  attach.mockRestore();
 });

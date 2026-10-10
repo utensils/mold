@@ -171,3 +171,21 @@ struct QueueStoreTests {
     }
 
 }
+
+
+extension QueueStoreTests {
+    @Test func queueBadgeTotalsRunningAndPendingAcrossHosts() throws {
+        let first = MoldHost(name: "First", baseURL: URL(string: "http://first")!)
+        let second = MoldHost(name: "Second", baseURL: URL(string: "http://second")!)
+        let queue = QueueStore(hosts: HostStore(hosts: [first, second]))
+        let listing = try MoldJSON.decoder.decode(QueueListing.self, from: Data(#"{"entries":[{"id":"same","state":"running"},{"id":"q","state":"queued"},{"id":"p","state":"paused"},{"id":"h","state":"held"},{"id":"c","state":"cancelling"},{"id":"done","state":"complete"},{"id":"failed","state":"failed"},{"id":"cancelled","state":"cancelled"}],"live_only_entries":[{"id":"same","state":"running"}]}"#.utf8))
+        queue.byHost[first.id] = listing.merged
+        queue.byHost[second.id] = listing.merged
+        // Runtime/durable copies merge within each host; separate host jobs count separately.
+        #expect(queue.badge == 10)
+        queue.byHost[first.id] = []
+        #expect(queue.badge == 5)
+        queue.byHost[second.id] = []
+        #expect(queue.badge == 0)
+    }
+}

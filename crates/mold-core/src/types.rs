@@ -11070,6 +11070,10 @@ pub enum RetainedSourceMediaAvailability {
 pub struct RetainedSourceMediaMember {
     /// Opaque item-scoped member id; never a server path or media-set id.
     pub member_id: String,
+    /// SHA-256 of independently reusable bytes, verified from retained content.
+    /// Absent on older servers or when safe extraction is unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_sha256: Option<String>,
     pub role: String,
     pub display_name: String,
     pub size_bytes: u64,

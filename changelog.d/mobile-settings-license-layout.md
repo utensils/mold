@@ -1,0 +1,1 @@
+- Fix cramped model-license descriptions in Mold Remote Settings: long descriptions keep a readable width and actions wrap below them on phones, with larger terms-link touch targets and review buttons that grow with accessibility text sizes.

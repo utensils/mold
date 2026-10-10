@@ -190,8 +190,7 @@ Library mirror checkpoints use authenticated `GET /api/gallery/sync-checkpoint`.
 Source Media browsing is a read-only projection of existing output ownership.
 `POST /api/gallery/source-media/inventory` accepts at most 100 exact filenames
 already selected by the client's logical visibility and machine scope. Resolve
-that bounded batch from one validated authority snapshot; inspect manifests,
-never decrypt source payloads to enumerate a library. The response includes
+that bounded batch from one validated authority snapshot and recheck it before publication. The existing encrypted stream format requires a full authenticated scan on a cold manifest miss; do not materialize sibling payloads or repeat that scan on a verified warm hit. The response includes
 `instance_id` and a filename-keyed `inventories` map. Each retained member may
 carry `label`, `media_kind`, zero-based `position`, `frame_index`, and
 `image_role`; unknown reference kinds remain unknown rather than assumed images.
@@ -207,3 +206,26 @@ not through an original-role session or a thumbnail. All inventory/content/previ
 responses are private/no-store. Browsing creates no pins; Trash and permanent
 deletion retain their existing ownership rules. There is no independent source
 upload, pinning or deletion action.
+
+
+**Source identity and derived caches remain subordinate to ownership.** Additive
+`content_sha256` is the SHA-256 of exact reusable bytes: raw members use their
+authenticated manifest digest, while keyframes hash the actual unwrapped image
+only after the whole stream authenticates. Archived keyframe metadata alone is
+not proof: a transferred member can differ. Missing/malformed/oversized identity
+stays absent and clients fall back to exact owner/member identity. Group by digest
+alone and preserve every visible usage; this changes no pins or storage retention.
+
+Caches live on one `QueueMediaStore`/key instance: verified manifests are bounded
+to 256 entries/8 MiB, derived 320px PNGs to 256 entries/32 MiB. Fresh no-follow,
+owner-private regular-file checks and dev/inode/length/mtime/ctime nanosecond
+versions fence every hit; platforms without that fingerprint bypass caching.
+Cold results are admitted only after final stream authentication and unchanged
+pin/publication checks. Same-key work coalesces; all gallery cold decrypt/render
+work shares two permits, never nested or held under the cache lock. Gallery-only
+JSON candidates are bounded to 64 MiB per scanned member, zeroized after digest
+extraction, and never added to queue hydration. Selected gallery reads authenticate
+the entire stream but retain only the requested member and create no sibling
+plaintext files. Responses stay private/no-store; caches never persist plaintext.
+
+Thumbnail misses additionally hold a separate two-slot payload-lifetime permit from selected-member extraction through rendering and plaintext drop; the shared cold-work permit alone cannot bound buffers waiting between phases.

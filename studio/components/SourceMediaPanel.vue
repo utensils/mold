@@ -1,5 +1,12 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { computed, ref, watch, onBeforeUnmount } from "vue";
+import {
+  observeSourceMediaEvents,
+  sourceEventMatches,
+  cachedSourceInventory,
+  cacheSourceInventory,
+  invalidateSourceOwner,
+} from "../lib/sourceMediaResources";
 import SourceMediaCard from "./SourceMediaCard.vue";
 import {
   retainedSourceMediaInventory,
@@ -8,6 +15,7 @@ import {
 } from "../api/gallerySourceMedia";
 import {
   sourceOwnerIdentity,
+  groupSourceMedia,
   type SourceMediaOwner,
   type SourceMediaSelection,
 } from "../lib/sourceMediaBrowser";
@@ -17,6 +25,21 @@ const inventory = ref<RetainedSourceMediaInventory>();
 const error = ref("");
 const loading = ref(false);
 const retry = ref(0);
+const page = ref(48);
+const groups = computed(() =>
+  groupSourceMedia(
+    (inventory.value?.members ?? []).map((member) => ({
+      owner: props.owner,
+      member,
+    })),
+  ),
+);
+watch(
+  () => groups.value.length,
+  (count) => {
+    page.value = Math.min(page.value, Math.max(48, Math.ceil(count / 48) * 48));
+  },
+);
 watch(
   [() => sourceOwnerIdentity(props.owner), retry],
   async (_, __, cleanup) => {
@@ -26,12 +49,19 @@ watch(
     error.value = "";
     loading.value = true;
     try {
-      const result = await retainedSourceMediaInventory(
-        props.owner.filename,
-        props.owner.target,
-        controller.signal,
-      );
-      if (!controller.signal.aborted) inventory.value = result;
+      const key = sourceOwnerIdentity(props.owner);
+      if (retry.value) invalidateSourceOwner(key, true);
+      const result =
+        cachedSourceInventory(key) ??
+        (await retainedSourceMediaInventory(
+          props.owner.filename,
+          props.owner.target,
+          controller.signal,
+        ));
+      if (!controller.signal.aborted) {
+        inventory.value = result;
+        cacheSourceInventory(key, result);
+      }
     } catch (failure) {
       if (!controller.signal.aborted)
         error.value =
@@ -42,6 +72,16 @@ watch(
   },
   { immediate: true },
 );
+const stopEvents = observeSourceMediaEvents((event) => {
+  if (sourceEventMatches(props.owner, event)) retry.value++;
+});
+const refreshTimer = setInterval(() => {
+  retry.value++;
+}, 60_000);
+onBeforeUnmount(() => {
+  clearInterval(refreshTimer);
+  stopEvents();
+});
 </script>
 <template>
   <section
@@ -61,11 +101,18 @@ watch(
       class="source-panel__grid"
     >
       <SourceMediaCard
-        v-for="member in inventory.members"
-        :key="member.member_id"
-        :selection="{ owner, member }"
+        v-for="group in groups.slice(page - 48, page)"
+        :key="group.key"
+        :selection="group.usages[0]!"
+        :usages="group.usages"
         @use="emit('use', $event)"
       />
+      <button v-if="page > 48" type="button" @click="page -= 48">
+        Previous sources
+      </button>
+      <button v-if="groups.length > page" type="button" @click="page += 48">
+        Next sources
+      </button>
     </div>
     <p
       v-else-if="

@@ -15090,3 +15090,88 @@ describe("MobileApp style sheet across output kinds", () => {
     await closeStyleSheet();
   });
 });
+
+it("rejects retained source reuse when its owner leaves the visible mobile scope during download", async () => {
+  const attachment = await import("../lib/retainedSourceAttachment");
+  let finish!: () => void;
+  let afterDownload: boolean | undefined;
+  const attach = vi
+    .spyOn(attachment, "attachRetainedSource")
+    .mockImplementation(async (_form, _name, _kind, _read, current) => {
+      expect(current()).toBe(true);
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      afterDownload = current();
+      return { ok: false, error: "Source no longer visible" };
+    });
+  wrapper = mountMobileApp();
+  await flushPromises();
+  await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+  await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+  const vm = wrapper.vm as unknown as {
+    mobileSourceOwners: import("@studio/lib/sourceMediaBrowser").SourceMediaOwner[];
+    libraryFilters: { hostId: string | null };
+    useMobileRetainedSource: (
+      selection: import("@studio/lib/sourceMediaBrowser").SourceMediaSelection,
+    ) => Promise<void>;
+  };
+  const owner = vm.mobileSourceOwners[0]!;
+  expect(owner).toBeDefined();
+  const pending = vm.useMobileRetainedSource({
+    owner,
+    member: { member_id: "one", role: "source_image", display_name: "source.png", size_bytes: 3 },
+  });
+  vm.libraryFilters.hostId = "another-machine";
+  await flushPromises();
+  expect(vm.mobileSourceOwners).toHaveLength(0);
+  finish();
+  await pending;
+  expect(afterDownload).toBe(false);
+  attach.mockRestore();
+});
+
+it("keeps explicitly opened mobile details reusable outside the source catalog scope", async () => {
+  const attachment = await import("../lib/retainedSourceAttachment");
+  const attach = vi
+    .spyOn(attachment, "attachRetainedSource")
+    .mockImplementation(async (_form, _name, _kind, _read, current) => {
+      expect(current()).toBe(true);
+      return { ok: false, error: "test complete" };
+    });
+  wrapper = mountMobileApp();
+  await flushPromises();
+  await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+  await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+  await wrapper.get("[data-test='gallery-item']").trigger("click");
+  const vm = wrapper.vm as unknown as {
+    mobileSourceOwners: import("@studio/lib/sourceMediaBrowser").SourceMediaOwner[];
+    selectedPrint: { cacheKey: string; filename: string };
+    libraryFilters: { hostId: string | null };
+    useMobileRetainedSource: (
+      selection: import("@studio/lib/sourceMediaBrowser").SourceMediaSelection,
+      details: "selected",
+    ) => Promise<void>;
+  };
+  const catalogOwner = vm.mobileSourceOwners[0]!;
+  const owner = {
+    ...catalogOwner,
+    key: JSON.stringify([
+      vm.selectedPrint.cacheKey,
+      catalogOwner.target.baseUrl,
+      vm.selectedPrint.filename,
+    ]),
+  };
+  vm.libraryFilters.hostId = "another-machine";
+  await flushPromises();
+  expect(vm.mobileSourceOwners).toHaveLength(0);
+  await vm.useMobileRetainedSource(
+    {
+      owner,
+      member: { member_id: "one", role: "source_image", display_name: "source.png", size_bytes: 3 },
+    },
+    "selected",
+  );
+  expect(attach).toHaveBeenCalledOnce();
+  attach.mockRestore();
+});

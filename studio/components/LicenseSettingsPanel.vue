@@ -213,8 +213,8 @@ watch(() => [props.target?.baseUrl, props.target?.apiKey], load);
 .license-settings__row {
   display: flex;
   align-items: center;
-  /* The phone shares this panel; a narrow row wraps rather than needing its
-     own breakpoint inside a settings list. */
+  /* Reserve readable prose width before placing actions on the same line.
+     A zero flex basis lets fixed-width links squeeze descriptions to a sliver. */
   flex-wrap: wrap;
   gap: 14px;
   min-height: 52px;
@@ -222,11 +222,19 @@ watch(() => [props.target?.baseUrl, props.target?.apiKey], load);
   padding: 13px 14px;
   border-bottom: var(--mold-bw) solid var(--mold-border);
 }
+.license-settings__row > .ms-toolbar-button {
+  height: auto;
+  min-height: 44px;
+  max-width: 100%;
+  padding-block: 8px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .license-settings__row:last-child {
   border-bottom: 0;
 }
 .license-settings__lede {
-  flex: 1;
+  flex: 1 1 22rem;
   min-width: 0;
   margin: 0;
   font-size: var(--mold-fs-sm);
@@ -234,7 +242,7 @@ watch(() => [props.target?.baseUrl, props.target?.apiKey], load);
 }
 .license-settings__what {
   display: flex;
-  flex: 1;
+  flex: 1 1 22rem;
   flex-direction: column;
   min-width: 0;
   gap: 2px;
@@ -247,6 +255,7 @@ watch(() => [props.target?.baseUrl, props.target?.apiKey], load);
 }
 .license-settings__name {
   min-width: 0;
+  overflow-wrap: anywhere;
   font-size: var(--mold-fs-sm);
   line-height: var(--mold-lh-body);
   color: var(--mold-text);
@@ -254,6 +263,9 @@ watch(() => [props.target?.baseUrl, props.target?.apiKey], load);
 /* Underlined at rest: a finger has no hover, so an underline that only
    appears on hover is no affordance at all on the phone. */
 .license-settings__link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
   flex-shrink: 0;
   font-size: var(--mold-fs-xs);
   color: var(--mold-blue);

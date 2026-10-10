@@ -517,7 +517,7 @@ Queue rows show the owning machine’s sealed conditioning images across models.
 
 ## Reuse original inputs
 
-The Images library offers **Source Media**, and each print’s Info sheet lists its retained inputs with role labels and image thumbnails. Choose **Use as source** to attach an original input to a new creation. The browser shows its owning print and machine, respects hidden collections and machine filters, and checks more library items on demand. Search applies to loaded sources. Audio, video and unknown files remain listed; unsupported attachment actions explain which input is needed.
+The Images library offers **Source Media**, and each print’s Info sheet lists its retained inputs with role labels and image thumbnails. Choose **Use as source** to attach an original input to a new creation. The browser shows its owning print and machine, respects hidden collections and machine filters, and checks more library items on demand. Search applies to loaded sources. Identical verified inputs share one card, with all owning prints and roles available through its usage chooser. Bounded in-memory previews and incremental inventory loading avoid refetching unchanged sources; Refresh sources checks for updates. Older machines without content digests keep separate entries. Audio, video and unknown files remain listed; unsupported attachment actions explain which input is needed.
 
 Source browsing does not create separate uploads, pins or deletion rules. Sources remain retained while an owning library print exists, including in Trash. Permanent deletion releases only that owner’s retention. Individual keyframe reuse requires a machine with the new content endpoint; older machines show an update message.
 

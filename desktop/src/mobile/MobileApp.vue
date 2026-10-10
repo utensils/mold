@@ -1,7 +1,9 @@
 <script setup lang="ts">
+import { useSourceMediaVisibility } from "@studio/lib/sourceMediaVisibility";
 import SourceMediaBrowser from "@studio/components/SourceMediaBrowser.vue";
 import {
   sourceMemberKind,
+  sourceOwnerIdentity,
   type SourceMediaOwner,
   type SourceMediaSelection,
 } from "@studio/lib/sourceMediaBrowser";
@@ -9929,6 +9931,7 @@ const mobileSourceOwners = computed<SourceMediaOwner[]>(() => {
       revision: print.media_version ?? "",
     }));
 });
+useSourceMediaVisibility(() => mobileSourceOwners.value);
 let retainedAttachEpoch = 0;
 watch(
   () => [
@@ -9946,9 +9949,43 @@ watch(
 onBeforeUnmount(() => {
   retainedAttachEpoch++;
 });
-async function useMobileRetainedSource(selection: SourceMediaSelection) {
+async function useMobileRetainedSource(
+  selection: SourceMediaSelection,
+  details?: "selected" | "generated",
+) {
   const epoch = ++retainedAttachEpoch;
   const owner = selection.owner;
+  const identity = sourceOwnerIdentity(owner);
+  const ownerCurrent = () => {
+    if (!details)
+      return mobileSourceOwners.value.some(
+        (candidate) => sourceOwnerIdentity(candidate) === identity,
+      );
+    const selected = selectedPrint.value;
+    const item =
+      details === "selected"
+        ? selected
+        : generatedViewerOpen.value
+          ? generatedPreviewItem.value
+          : null;
+    const target = details === "selected" ? selected?.target : generatedPreviewTarget.value;
+    const cacheKey =
+      details === "selected" ? selected?.cacheKey : (latestResultJob.value?.hostId ?? "generated");
+    const hostId = details === "selected" ? selected?.hostId : latestResultJob.value?.hostId;
+    return !!(
+      item &&
+      target &&
+      sourceOwnerIdentity({
+        ...owner,
+        key: JSON.stringify([cacheKey, target.baseUrl, item.filename]),
+        filename: item.filename,
+        target,
+        instanceId:
+          connectedHosts.value.find((candidate) => candidate.id === hostId)?.instanceId ?? "",
+        revision: item.media_version ?? "",
+      }) === identity
+    );
+  };
   const host = connectedHosts.value.find(
     (h) => mobileHostTarget(h).baseUrl === owner.target.baseUrl,
   );
@@ -9962,6 +9999,7 @@ async function useMobileRetainedSource(selection: SourceMediaSelection) {
     sourceMemberKind(selection.member),
     () => retainedSourceMediaContent(owner.filename, selection.member, owner.target),
     () =>
+      ownerCurrent() &&
       epoch === retainedAttachEpoch &&
       (!owner.instanceId || owner.instanceId === instance) &&
       destination === JSON.stringify(generationTarget.value) &&
@@ -14899,7 +14937,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
 
     <MobileGalleryViewer
       @viewed="markMobileMediaViewed"
-      @use-retained-source="useMobileRetainedSource"
+      @use-retained-source="useMobileRetainedSource($event, 'selected')"
       v-if="selectedPrint"
       :item="selectedPrint"
       :target="selectedPrint.target"
@@ -14967,7 +15005,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
          fails silently. -->
     <MobileGalleryViewer
       v-if="generatedViewerOpen && generatedPreviewItem && resultUrl"
-      @use-retained-source="useMobileRetainedSource"
+      @use-retained-source="useMobileRetainedSource($event, 'generated')"
       :item="generatedPreviewItem"
       :target="generatedPreviewTarget"
       :instance-id="

@@ -26,14 +26,10 @@ describe("retained source attachment", () => {
   it("rejects an origin change without touching the draft", async () => {
     const form = newGenerateForm();
     form.family = "flux";
-    const result = await attachRetainedSource(
-      form,
-      "source.png",
-      "image",
-      async () => new Blob(["abc"]),
-      () => false,
-    );
+    const read = vi.fn(async () => new Blob(["abc"]));
+    const result = await attachRetainedSource(form, "source.png", "image", read, () => false);
     expect(result.ok).toBe(false);
+    expect(read).not.toHaveBeenCalled();
     expect(form.sourceImage).toBeNull();
   });
 });

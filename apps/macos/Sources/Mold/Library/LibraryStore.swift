@@ -10,6 +10,8 @@ import MoldClient
 @MainActor
 @Observable
 final class LibraryStore {
+    let sourceMediaCatalog = SourceMediaCatalog()
+    var openSourceDetails: [UUID: SourceMediaAuthority] = [:]
     var unreadMedia: LibraryUnreadLedger
     let readDefaults: UserDefaults
     var unreadCount: Int { unreadMedia.count }
@@ -106,6 +108,7 @@ final class LibraryStore {
         // so sidebar shelves and counts do not wait for Library to open.
         hosts.onEvent { [weak self] host, event in
             guard let self else { return }
+            sourceMediaChanged(event, host: host)
             live.apply(event, from: host, in: self)
         }
     }

@@ -82,6 +82,12 @@ public enum QueueState: String, OpenWireEnum {
 
 /// `GET /api/queue`.
 public struct QueueListing: Codable, Sendable {
+    public struct Page: Codable, Sendable {
+        public let nextCursor: String?
+    }
+
+    /// Absent on older hosts and on an unpaginated default response.
+    public var page: Page? = nil
     public let entries: [QueueEntry]
     /// Rows the durable store does not know about yet. They are NOT a separate
     /// list to show -- merge them in by id, or a job appears twice or not at

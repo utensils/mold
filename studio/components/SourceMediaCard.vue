@@ -1,5 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import {
+  sourcePreviews,
+  observeSourceInvalidation,
+} from "../lib/sourceMediaResources";
 import { retainedSourceMediaThumbnail } from "../api/sourceMediaBrowser";
 import {
   sourceMemberKind,
@@ -7,13 +11,53 @@ import {
   sourceOwnerIdentity,
   type SourceMediaSelection,
 } from "../lib/sourceMediaBrowser";
-const props = defineProps<{ selection: SourceMediaSelection }>();
-const emit = defineEmits<{ use: [selection: SourceMediaSelection] }>();
+const props = defineProps<{
+  selection: SourceMediaSelection;
+  usages?: SourceMediaSelection[];
+  showOwner?: boolean;
+}>();
+const usageLimit = ref(20);
+const usageOpen = ref(false);
+function toggleUsages(event: Event) {
+  usageOpen.value = (event.target as HTMLDetailsElement).open;
+}
+const chosen = ref("");
+const previewEpoch = ref(0);
+const usages = computed(() => props.usages ?? [props.selection]);
+watch(
+  () => usages.value.length,
+  (count) => {
+    usageLimit.value = Math.min(
+      usageLimit.value,
+      Math.max(20, Math.ceil(count / 20) * 20),
+    );
+  },
+  { flush: "sync" },
+);
+const usageKey = (usage: SourceMediaSelection) =>
+  `${sourceOwnerIdentity(usage.owner)}\n${usage.member.member_id}`;
+const selection = computed(
+  () =>
+    usages.value.find((usage) => usageKey(usage) === chosen.value) ??
+    usages.value.find(
+      (usage) => sourceMemberKind(usage.member) !== "unknown",
+    ) ??
+    props.selection,
+);
+const roles = computed(() =>
+  [...new Set(usages.value.map((usage) => sourceMemberLabel(usage.member)))]
+    .slice(0, 4)
+    .join(" · "),
+);
+const emit = defineEmits<{
+  use: [selection: SourceMediaSelection];
+  openOwner: [owner: SourceMediaSelection["owner"]];
+}>();
 const root = ref<HTMLElement>();
 const visible = ref(false);
 const url = ref<string>();
-const kind = computed(() => sourceMemberKind(props.selection.member));
-const label = computed(() => sourceMemberLabel(props.selection.member));
+const kind = computed(() => sourceMemberKind(selection.value.member));
+const label = computed(() => sourceMemberLabel(selection.value.member));
 let observer: IntersectionObserver | undefined;
 onMounted(() => {
   if (typeof IntersectionObserver === "undefined") {
@@ -30,28 +74,57 @@ onMounted(() => {
 });
 watch(
   [
-    () => sourceOwnerIdentity(props.selection.owner),
-    () => props.selection.member.member_id,
+    () => sourceOwnerIdentity(selection.value.owner),
+    () => selection.value.member.member_id,
+    () => selection.value.member,
+    () => selection.value.member.content_sha256,
+    () => selection.value.member.media_kind,
     visible,
+    previewEpoch,
   ],
-  async (_, __, cleanup) => {
-    const controller = new AbortController();
+  async (_, previous, cleanup) => {
+    let cancelled = false;
+    let release: (() => void) | undefined;
+    let unobserve: (() => void) | undefined;
     let ownedURL: string | undefined;
+    const clear = () => {
+      cancelled = true;
+      url.value = undefined;
+      if (ownedURL) URL.revokeObjectURL(ownedURL);
+      ownedURL = undefined;
+      release?.();
+    };
     url.value = undefined;
     cleanup(() => {
-      controller.abort();
-      if (ownedURL) URL.revokeObjectURL(ownedURL);
+      clear();
+      unobserve?.();
     });
     if (!visible.value || kind.value !== "image") return;
-    const { owner, member } = props.selection;
+    const { owner, member } = selection.value;
     try {
-      const blob = await retainedSourceMediaThumbnail(
-        owner.filename,
-        member,
-        owner.target,
-        controller.signal,
+      const key = sourceOwnerIdentity(owner);
+      const digest =
+        member.content_sha256 && /^[a-f0-9]{64}$/.test(member.content_sha256)
+          ? member.content_sha256
+          : "unknown";
+      const resourceKey = `${key}\n${member.member_id}\n${digest}`;
+      if (digest === "unknown" && previous?.[2] && previous[2] !== member)
+        sourcePreviews.invalidate(resourceKey);
+      const lease = sourcePreviews.acquire(resourceKey, (signal) =>
+        retainedSourceMediaThumbnail(
+          owner.filename,
+          member,
+          owner.target,
+          signal,
+        ),
       );
-      if (controller.signal.aborted) return;
+      release = lease.release;
+      unobserve = observeSourceInvalidation(key, (refresh) => {
+        clear();
+        if (refresh) previewEpoch.value++;
+      });
+      const blob = await lease.promise;
+      if (cancelled) return;
       ownedURL = URL.createObjectURL(blob);
       url.value = ownedURL;
     } catch {
@@ -74,6 +147,49 @@ onBeforeUnmount(() => observer?.disconnect());
       }}</span>
     </div>
     <strong>{{ label }}</strong>
+    <span v-if="usages.length > 1" class="source-card__notice"
+      >{{ usages.length }} usages · {{ roles }}</span
+    >
+    <button
+      v-if="showOwner"
+      type="button"
+      class="source-card__owner"
+      @click="emit('openOwner', selection.owner)"
+    >
+      {{ selection.owner.title }} · {{ selection.owner.hostLabel }}
+    </button>
+    <details v-if="usages.length > 1" @toggle="toggleUsages">
+      <summary>Choose usage ({{ usages.length }})</summary>
+      <ul v-if="usageOpen" class="source-card__usages">
+        <li
+          v-for="(usage, index) in usages.slice(usageLimit - 20, usageLimit)"
+          :key="index"
+        >
+          <button
+            type="button"
+            :aria-pressed="usageKey(usage) === usageKey(selection)"
+            @click="chosen = usageKey(usage)"
+          >
+            {{ sourceMemberLabel(usage.member) }} · {{ usage.owner.title }} ·
+            {{ usage.owner.hostLabel }}
+          </button>
+        </li>
+      </ul>
+      <button
+        v-if="usageOpen && usageLimit > 20"
+        type="button"
+        @click="usageLimit -= 20"
+      >
+        Previous usages
+      </button>
+      <button
+        v-if="usageOpen && usages.length > usageLimit"
+        type="button"
+        @click="usageLimit += 20"
+      >
+        Next usages
+      </button>
+    </details>
     <span class="source-card__name" :title="selection.member.display_name">{{
       selection.member.display_name
     }}</span>
@@ -85,6 +201,7 @@ onBeforeUnmount(() => observer?.disconnect());
     <button
       v-if="['image', 'video', 'audio'].includes(kind)"
       type="button"
+      class="source-card__reuse"
       @click="emit('use', selection)"
     >
       Use as source
@@ -104,7 +221,7 @@ onBeforeUnmount(() => observer?.disconnect());
   border-radius: var(--mold-radius-3);
   padding: 10px;
   background: var(--mold-surface, #8881);
-  font-size: var(--mold-fs-xs);
+  font-size: var(--mold-fs-sm);
 }
 .source-card__preview {
   aspect-ratio: 4/3;
@@ -133,7 +250,34 @@ onBeforeUnmount(() => observer?.disconnect());
   background: transparent;
   color: inherit;
   cursor: pointer;
+  padding: 8px;
+  overflow-wrap: anywhere;
+}
+.source-card__reuse {
   margin-top: auto;
+}
+.source-card button.source-card__owner {
+  border: 0;
+  padding: 0;
+  min-height: 44px;
+}
+.source-card__owner {
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.source-card__usages {
+  padding-left: 16px;
+  max-height: 240px;
+  overflow: auto;
+}
+.source-card__usages button {
+  text-align: left;
+  width: 100%;
+}
+.source-card summary {
+  min-height: 44px;
+  cursor: pointer;
+  padding-block: 8px;
 }
 .source-card button:hover {
   background: var(--mold-accent-muted, #8882);

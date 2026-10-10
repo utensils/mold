@@ -1,7 +1,9 @@
 <script setup lang="ts">
+import { useSourceMediaVisibility } from "@studio/lib/sourceMediaVisibility";
 import SourceMediaBrowser from "@studio/components/SourceMediaBrowser.vue";
 import {
   sourceMemberKind,
+  sourceOwnerIdentity,
   type SourceMediaOwner,
   type SourceMediaSelection,
 } from "@studio/lib/sourceMediaBrowser";
@@ -239,14 +241,35 @@ const sourceOwners = computed<SourceMediaOwner[]>(() =>
       }),
     ),
 );
+useSourceMediaVisibility(() => sourceOwners.value);
 let retainedAttachEpoch = 0;
 
 onBeforeUnmount(() => {
   retainedAttachEpoch++;
 });
-async function useRetainedSource(selection: SourceMediaSelection) {
+async function useRetainedSource(selection: SourceMediaSelection, details = false) {
   const epoch = ++retainedAttachEpoch;
   const owner = selection.owner;
+  const identity = sourceOwnerIdentity(owner);
+  const ownerCurrent = () => {
+    if (!details)
+      return sourceOwners.value.some((candidate) => sourceOwnerIdentity(candidate) === identity);
+    const entry = selectedEntry.value;
+    const target = entry ? targetFor(entry) : null;
+    return !!(
+      lightboxOpen.value &&
+      entry &&
+      target &&
+      sourceOwnerIdentity({
+        ...owner,
+        key: JSON.stringify([entry.sourceKey, target.baseUrl, entry.item.filename]),
+        filename: entry.item.filename,
+        target,
+        instanceId: gallery.hostFor(entry.sourceKey)?.instanceId ?? "",
+        revision: entry.item.media_version ?? "",
+      }) === identity
+    );
+  };
   const sourceKey = gallery.sources.find((source) => {
     const target = gallery.targetOf(source.key);
     return target?.baseUrl === owner.target.baseUrl && target?.apiKey === owner.target.apiKey;
@@ -263,6 +286,7 @@ async function useRetainedSource(selection: SourceMediaSelection) {
     sourceMemberKind(selection.member),
     () => retainedSourceMediaContent(owner.filename, selection.member, owner.target),
     () =>
+      ownerCurrent() &&
       epoch === retainedAttachEpoch &&
       (!owner.instanceId || owner.instanceId === originalInstance) &&
       destination ===
@@ -2644,7 +2668,9 @@ watch(
       // the listing resolves those ids to slugs and hidden state.
       if (!copy.item.collections?.length) return false;
       const bucket = gallery.collectionsByHost[copy.sourceKey];
-      return !bucket || bucket.loading || (!bucket.loaded && bucket.error === null);
+      // A failed or capability-pending listing has not resolved visibility.
+      // Keep the notification route until a successful retry can reveal it.
+      return !bucket?.loaded || bucket.loading || !!bucket.error;
     });
     if (unsettledCollectionCopy) return;
 
@@ -3149,7 +3175,7 @@ onUnmounted(() => {
       @next="moveSelection(1)"
       @delete="removeSelected"
       @use-source="useSelectedAsSource"
-      @use-retained-source="useRetainedSource"
+      @use-retained-source="useRetainedSource($event, true)"
       @reuse="reuseSettings(selectedEntry!)"
       @rename="(title) => renamePrint(selectedEntry!, title)"
       @favorite="(value) => setFavorite([selectedEntry!], value)"
