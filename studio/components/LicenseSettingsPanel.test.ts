@@ -258,4 +258,31 @@ describe("LicenseSettingsPanel", () => {
       source.match(/@media \(hover: hover\)\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
     expect(hover).toContain(".license-settings__link:hover");
   });
+  it("reserves readable description width before wrapping license actions", () => {
+    const source = readFileSync(
+      join(import.meta.dirname, "LicenseSettingsPanel.vue"),
+      "utf8",
+    );
+    const description =
+      source.match(/\.license-settings__what\s*\{([^}]*)\}/)?.[1] ?? "";
+    // A zero flex basis lets the fixed-width links squeeze prose to one word per line.
+    expect(description).toMatch(/flex:\s*1 1 22rem/);
+    const lede =
+      source.match(/\.license-settings__lede\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(lede).toMatch(/flex:\s*1 1 22rem/);
+  });
+  it("lets review controls grow with accessibility text sizes", () => {
+    const source = readFileSync(
+      join(import.meta.dirname, "LicenseSettingsPanel.vue"),
+      "utf8",
+    );
+    const action =
+      source.match(
+        /\.license-settings__row > \.ms-toolbar-button\s*\{([^}]*)\}/,
+      )?.[1] ?? "";
+    expect(action).toMatch(/height:\s*auto/);
+    expect(action).toMatch(/min-height:\s*44px/);
+    expect(action).toMatch(/max-width:\s*100%/);
+    expect(action).toMatch(/white-space:\s*normal/);
+  });
 });
