@@ -11,7 +11,7 @@ enum NotificationFixture {
               arguments.indices.contains(index + 1),
               let url = URL(string: arguments[index + 1]), DeepLink(url) != nil else { return }
         Task {
-            guard let center, (try? await center.requestAuthorization(options: [.alert, .sound])) == true else { return }
+            guard let center, (try? await center.requestAuthorization(options: [.alert, .sound, .badge])) == true else { return }
             let content = UNMutableNotificationContent()
             content.title = "Render complete"
             content.body = "Notification tap regression fixture"

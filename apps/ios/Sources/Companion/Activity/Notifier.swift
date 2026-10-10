@@ -36,7 +36,12 @@ final class Notifier: NSObject {
         iconBadge = AppIconBadge(write: { count in
             try? await center?.setBadgeCount(count)
         }, authorize: {
-            guard let center, await center.notificationSettings().authorizationStatus == .notDetermined else { return }
+            guard let center else { return }
+            let settings = await center.notificationSettings()
+            guard settings.authorizationStatus != .denied, settings.badgeSetting != .enabled else { return }
+            // An earlier alerts-only request may have authorized notifications
+            // without registering badges. Request the full option set too;
+            // iOS retains any choices the person made in Settings.
             _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
         })
         super.init()

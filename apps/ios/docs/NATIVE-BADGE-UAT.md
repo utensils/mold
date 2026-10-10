@@ -1,45 +1,54 @@
-# Native gallery badge follow-up — incomplete UAT
+# Native gallery badge validation
 
-Recorded 2026-10-09. The owner requested an immediate wrap-up after a machine
-reset; no further builds, tests or app launches were performed afterward.
+The iOS and macOS galleries preserve their session-only visit baseline and
+whole-gallery seen behavior. Opening selected picture/video/3-D media removes
+its New label immediately. Neighboring prepared pages and previews remain unread
+within that visit. Home Screen/Dock counts persist locally and clear when Library
+opens; they use merged copy identities and exclude hidden collections and Trash.
 
-## Intended behavior
+## Automated acceptance
 
-- Preserve the existing session-only gallery-visit baseline and whole-gallery
-  seen behavior on iOS and macOS.
-- Opening the selected picture/video/3-D page removes its New label immediately;
-  neighboring preloaded pages and previews do not count as viewing.
-- Home Screen/Dock count new visible merged media before Library opens. Opening
-  Library clears the icon count. Persist icon read state locally across launches.
+`LibraryLongPressTests.testAppIconCountsNewMediaAndViewingClearsCurrentVisitImmediately`
+pairs a read-only loopback fixture and checks the actual SpringBoard icon:
 
-## Completed verification
+1. Establish a first-visit baseline, then add a picture and video while Generate
+   is showing. The icon must show two new media.
+2. Open Library and its picture. Returning to the grid immediately removes only
+   that picture's New label; the neighboring video retains New until opened.
+3. Confirm the icon has no badge, and the next visit preserves the old clearing
+   behavior.
+4. Add another picture, refresh after a settled background transition, and verify
+   the icon count before and after terminating/relaunching the app. The first
+   gallery visit after relaunch still has the old session-only baseline.
+5. Assert that the fixture received no generation requests.
 
-- Failing shared visit regression was recorded before adding `Visit.markViewed`.
-- Shared MoldClient suite: **1,265 tests passed**, including merged-copy identity,
-  unequal-size filename collisions, renamed read copies, visibility, unavailable
-  inventories, host removal and persisted read state.
-- iOS native unit suite: **220 tests passed** before the final ledger identity
-  revision. AppIconBadge tests cover permission suspension/latest-count ordering
-  and no prompts for background or zero-count updates.
-- Native iOS and macOS architecture lints passed.
-- macOS Debug build passed after correcting startup Dock access to use
-  `NSApplication.shared`; direct `NSApp` access before initialization had crashed
-  the first isolated UAT launch.
-- Independent peer review identified merge identity and macOS visibility-refresh
-  defects; both were fixed. Re-review reported no remaining source findings
-  before the final startup-access correction.
+The existing clip/machine-placement regression independently checks immediate
+viewer-return clearing. Shared `LibraryNewMediaTests` preserves next-visit
+semantics; `LibraryUnreadLedgerTests` covers distinct same-name outputs, renamed
+copies, persistence, visibility, unavailable inventories and host removal.
+`AppIconBadgeTests` checks suspended permission requests/latest-count ordering
+and no prompts for background or zero-count writes.
 
-## Outstanding verification / known failure
+## macOS acceptance
 
-The iPhone 17 Pro Simulator (iOS 26.5) Home Screen test did **not pass**.
-Persisted gallery state contained the two newly added media IDs, but the actual
-SpringBoard icon did not show the expected count. Notification permission/badge
-settings and delivery still require diagnosis. Do not consider the icon feature
-accepted based on the internal count alone.
+Use a remote-only Debug build, `MOLD_NATIVE_FRESH=1`, a disposable `MOLD_HOME`,
+and a read-only loopback gallery. Establish the baseline in Library, leave for
+Generate, add media via the fixture, then verify the actual Dock count. Return to
+Library, open each new media, and verify immediate label clearing. Use the
+existing gallery navigation and viewer controls; never submit a render.
 
-The final native unit suite, same-visit picture/video transitions, icon persistence
-and zero-count checks, macOS gallery/Dock interactions, and final peer review with
-runtime results remain incomplete. No physical-device UAT was performed.
+## Recorded validation
 
-The preceding landscape playback fix is separately merged as PR #1839. This
-follow-up must remain a draft until its remaining acceptance checks pass.
+On 2026-10-09, the shared suite passed 1,265 tests. The final iOS unit suite
+passed 220 tests, and the two initial badge/clip interaction checks passed on an
+iPhone 17 Pro Simulator running iOS 26.5 (222 passing tests in that result).
+Native architecture lints and the remote-only macOS Debug build passed.
+Additional relaunch and macOS interaction results are recorded in PR #1840.
+No physical-device UAT is claimed.
+
+An earlier Home Screen failure exposed alerts-only notification authorization:
+the Debug fixture had not requested badges, and the production authorizer only
+requested access for `notDetermined`. The authorizer now also registers badge
+options for previously authorized notifications, while respecting denied access
+and iOS Settings choices. The actual two-media Home Screen check passes with
+this correction.

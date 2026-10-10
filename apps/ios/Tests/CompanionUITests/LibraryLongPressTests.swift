@@ -100,6 +100,27 @@ final class LibraryLongPressTests: XCTestCase {
         XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
         XCTAssertFalse(freshPicture.exists)
         XCTAssertFalse(freshVideo.exists)
+        XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
+        await machine.addNewMedia(filename: "relaunch-\(identity).png", title: "Relaunch picture")
+        XCUIDevice.shared.press(.home)
+        try await Task.sleep(for: .seconds(1))
+        app.activate()
+        try await Task.sleep(for: .seconds(3))
+        XCUIDevice.shared.press(.home)
+        let one = NSPredicate { _, _ in (icon.value as? String)?.contains("1") == true || icon.label.contains("1 notification") }
+        await fulfillment(of: [expectation(for: one, evaluatedWith: icon)], timeout: 10)
+        app.terminate(); app.launch()
+        try await Task.sleep(for: .seconds(3))
+        XCUIDevice.shared.press(.home)
+        await fulfillment(of: [expectation(for: one, evaluatedWith: icon)], timeout: 10)
+        attach(springboard, name: "Home Screen count survives app relaunch")
+        app.activate()
+        XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'New, Relaunch picture'")).firstMatch.exists,
+                       "Session-only first-visit baseline remains unchanged after relaunch")
+        XCUIDevice.shared.press(.home)
+        await fulfillment(of: [expectation(for: noBadge, evaluatedWith: icon)], timeout: 5)
+        app.activate()
         XCTAssertTrue(machine.generationRequests.isEmpty)
     }
 
