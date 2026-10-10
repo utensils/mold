@@ -11,6 +11,34 @@ Pull requests do not edit the `[Unreleased]` section directly: each adds a
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-10-10
+
+- Keep Library viewers on the next media item after deletion across native macOS/iOS, web, Tauri desktop and Tauri mobile, falling back to the previous item at the end and preserving surviving machine copies.
+- Remove the persistent native macOS completion notice after successful moves to Trash while retaining progress and failure feedback.
+- **Follow the remaining video frame.** Automatic sizing for first/last-frame generation follows the first frame's aspect ratio when present and the last frame's aspect ratio otherwise. Removing the first frame or replacing a last-only frame now updates the canvas across native and web-based interfaces. Removing an endpoint preserves a manually chosen or restored canvas; attaching a new driving frame resumes automatic sizing.
+- **Choose iOS appearance.** Native iOS Settings now offers persistent System, Light and Dark appearance choices, with System as the default.
+- **Fit either video endpoint.** Crop to Fill and the other supported fit choices remain available for last-only frame inputs. Endpoint fitting applies to the submission snapshot while retaining the original attached images for future edits.
+- **Room for long prompts.** Open a spacious prompt editor from Generate on native macOS/iOS, web and Tauri desktop/mobile. Keep edits on dismissal, search recent prompt text without replacing other settings, and undo Clear. The compact composer remains available for quick edits.
+- **Optional Library date separators.** Native iOS and macOS Settings now remember whether Library views show daily headings and row breaks. Turning them off preserves the selected sort order in a continuous grid.
+- **Incremental Library sync.** Library Sync now skips unchanged verified copies using batched retained-media checkpoints on updated machines, preserving repairs when retained inputs change and retrying safely on older machines. Progress distinguishes checked, copied, already-local and failed prints.
+- **Resumable copies.** Interrupted Mac syncs remember acknowledged copies before retained-input and organization work, so retries can repair the remaining work without downloading the finished print again. Manual saves and iOS thumbnail caching now describe processed or checked items accurately.
+- **Client-local new media.** Keep new media unread on each client until that media successfully opens, including arrivals while Library is open. Native iOS navigation and app icon counts share the same persisted viewing history; native Mac, desktop and browser labels survive relaunch. Existing read status and the first inventory of a newly connected machine remain a compatibility baseline, preventing a historical badge flood.
+- **Stable Mac queue scrolling.** Mac queue rows retain their height as previews and progress load, preserving the scroll position; bounded shared preview caching reduces repeated reads.
+
+- **Configurable sync interval.** Mac Library Settings now remembers a configurable sync interval from one minute to one day, defaulting to five minutes. Changes update the pending repeat without overlapping transfers.
+- **Move waiting jobs between hosts.** Offer Move to another host for waiting, paused, and held jobs across native Mac/iOS, web, desktop, and the mobile shell. New servers persist source reservations and seal them before destination admission so concurrent clients, worker dispatch, and restarts cannot render both copies. Destination abort tombstones safely restore refused moves; interrupted transfers retry the same destination and identity while preserving original media and protecting reserved originals from Held retention sweeps. Older source servers retain held-job transfer support; new source hosts require updated transfer clients.
+- **Continuous Library thumbnails.** Native macOS, native iOS, Tauri desktop and web now use dense justified rows that preserve each picture’s aspect ratio and reflow with thumbnail size and available width. Viewer return preserves the viewport. iOS removes machine-name thumbnail badges while keeping machine information in details and filters.
+- **Native gallery New badges.** iOS and macOS immediately remove the New badge
+  when a photo, video or 3-D print is opened, preserving the existing gallery-visit
+  behavior. Home Screen and Dock icons count new visible gallery media until
+  Library opens, with device-local state retained across launches.
+- Fix tall dialogs (such as the model licence review listing many components) growing past the window and clipping their title and Accept/Cancel buttons; dialogs now fit the window and scroll their contents.
+- **iPhone landscape video.** Rotating a Library clip horizontally uses the full display with native playback controls and a Close action. Rotating upright restores gallery actions without restarting playback.
+- Keep cancellation available while shared generation jobs load models in Tauri and native macOS, respecting the machine's cancellation capability and the job's current authority.
+- Changed native iOS queue cards to keep Cancel, Retry and Pause/Resume in swipe actions and Job Details, with read-only Details when mutations are unavailable, preserving held explanations, model recovery progress and Move to controls. Prevented reordering and Empty Queue from overlapping pending actions on the same jobs.
+- Fixed native macOS queue action eligibility across rows, menus and details, including stale and in-flight actions, durable Held recovery, repeated Cancel while stopping, and narrow recovery-control layout. Added supported Cancel and paused Resume for reported long-clip chains, and guarded clip-upscale controls against stale or duplicate requests.
+- Aligned Tauri queue menus and touch actions with current job state and machine capabilities; preserved Held-only cancellation through ambiguous requests and app restarts, restored supported Held recovery, and corrected stopping and terminal state labels.
+
 ## [0.34.0] - 2026-10-09
 
 - **Held queue controls and failure details.** Native iOS and Tauri mobile keep Cancel available while job metadata loads. Native Mac, web and mobile surfaces expose copyable job failure details, and stale held cancellations cannot stop a job that has started running.
@@ -6302,7 +6330,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.34.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.35.0...HEAD
+[0.35.0]: https://github.com/utensils/mold/compare/v0.34.0...v0.35.0
 [0.34.0]: https://github.com/utensils/mold/compare/v0.33.0...v0.34.0
 [0.33.0]: https://github.com/utensils/mold/compare/v0.32.0...v0.33.0
 [0.32.0]: https://github.com/utensils/mold/compare/v0.31.0...v0.32.0
