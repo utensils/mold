@@ -58,10 +58,7 @@ describe("source media ownership browsing", () => {
       ...options,
     });
     await flushPromises();
-    expect(view.text()).toContain("25 of 101");
-    expect(view.findAll('[data-test="source-card"]')).toHaveLength(25);
-    await view.get(".source-browser__more").trigger("click");
-    await flushPromises();
+
     expect(view.text()).toContain("101 of 101");
     expect(view.findAll('[data-test="source-card"]')).toHaveLength(48);
     const moreSources = () =>
@@ -71,9 +68,7 @@ describe("source media ownership browsing", () => {
     await moreSources().trigger("click");
     await moreSources().trigger("click");
     expect(view.text()).toContain("Print 100");
-    expect(inventory.mock.calls.map((c) => c[0].length)).toEqual([
-      25, 25, 25, 25, 1,
-    ]);
+    expect(inventory.mock.calls.map((c) => c[0].length)).toEqual([25, 76]);
     view.unmount();
   });
   it("removes private owners immediately and ignores their delayed response", async () => {
@@ -277,4 +272,80 @@ it("keeps adjacent phone cards at their own height when a usage chooser expands"
   expect(phoneStyles).toMatch(
     /\.source-browser__grid\s*\{[^}]*align-items:\s*start/,
   );
+});
+
+it("restores previously discovered owners beyond the first batch on warm reopen", async () => {
+  const owners = Array.from({ length: 30 }, (_, n) => owner(n));
+  let view = mount(SourceMediaBrowser, { props: { owners }, ...options });
+  await flushPromises();
+
+  expect(view.findAll('[data-test="source-card"]')).toHaveLength(30);
+  const calls = inventory.mock.calls.length;
+  view.unmount();
+  view = mount(SourceMediaBrowser, { props: { owners }, ...options });
+  await flushPromises();
+  expect(view.findAll('[data-test="source-card"]')).toHaveLength(30);
+  expect(inventory).toHaveBeenCalledTimes(calls);
+  view.unmount();
+});
+it("keeps credentials out of machine filter option values", async () => {
+  const secure = {
+    ...owner(1),
+    target: { baseUrl: "https://machine", apiKey: "private-filter-key" },
+  };
+  const view = mount(SourceMediaBrowser, {
+    props: { owners: [secure] },
+    ...options,
+  });
+  await flushPromises();
+  expect(view.html()).not.toContain("private-filter-key");
+  await view.get('select[aria-label="Source machine"]').setValue("0");
+  expect(view.findAll('[data-test="source-card"]')).toHaveLength(1);
+  view.unmount();
+});
+
+it("publishes the small first page while bounded background discovery continues", async () => {
+  const pending: Array<{
+    names: string[];
+    finish: (value: ReturnType<typeof result>) => void;
+  }> = [];
+  inventory.mockImplementation(
+    (names: string[]) =>
+      new Promise((resolve) => pending.push({ names, finish: resolve })),
+  );
+  const view = mount(SourceMediaBrowser, {
+    props: { owners: Array.from({ length: 226 }, (_, n) => owner(n)) },
+    ...options,
+  });
+  expect(inventory.mock.calls.map((c) => c[0].length)).toEqual([25, 100]);
+  pending[0]!.finish(result(pending[0]!.names));
+  await flushPromises();
+  expect(view.text()).toContain("25 of 226");
+  expect(view.findAll('[data-test="source-card"]')).toHaveLength(25);
+  expect(inventory.mock.calls.map((c) => c[0].length)).toEqual([25, 100, 100]);
+  view.unmount();
+  expect(
+    inventory.mock.calls.slice(1).every((c) => (c[2] as AbortSignal).aborted),
+  ).toBe(true);
+  for (const item of pending.slice(1)) item.finish(result(item.names));
+  await flushPromises();
+  expect(inventory).toHaveBeenCalledTimes(3);
+});
+
+it("checks each machine's first page before bulk discovery", () => {
+  inventory.mockImplementation(() => new Promise(() => {}));
+  const view = mount(SourceMediaBrowser, {
+    props: {
+      owners: [
+        ...Array.from({ length: 200 }, (_, n) => owner(n)),
+        { ...owner(999), target: { baseUrl: "http://peer", apiKey: null } },
+      ],
+    },
+    ...options,
+  });
+  expect(inventory.mock.calls.map((c) => c[1].baseUrl)).toEqual([
+    "http://machine",
+    "http://peer",
+  ]);
+  view.unmount();
 });

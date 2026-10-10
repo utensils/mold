@@ -84,7 +84,7 @@ struct ZoomableStill: View {
     }
 }
 
-private struct ZoomingImage: UIViewRepresentable {
+struct ZoomingImage: UIViewRepresentable {
     let image: UIImage
 
     func makeUIView(context: Context) -> UIScrollView {

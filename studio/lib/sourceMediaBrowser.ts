@@ -101,3 +101,28 @@ export function groupSourceMedia(
   }
   return [...groups.values()];
 }
+
+export function sourceHostIdentity(owner: SourceMediaOwner): string {
+  return JSON.stringify([
+    owner.target.baseUrl,
+    owner.target.apiKey ?? null,
+    owner.instanceId ?? null,
+  ]);
+}
+export function filterSourceMedia(
+  selections: SourceMediaSelection[],
+  filters: { host?: string; kind?: string; search?: string },
+): SourceMediaGroup[] {
+  const query = filters.search?.trim().toLocaleLowerCase() ?? "";
+  return groupSourceMedia(
+    selections.filter(
+      ({ owner, member }) =>
+        (!filters.host || sourceHostIdentity(owner) === filters.host) &&
+        (!filters.kind || sourceMemberKind(member) === filters.kind) &&
+        (!query ||
+          `${owner.title} ${owner.hostLabel} ${sourceMemberLabel(member)} ${member.display_name}`
+            .toLocaleLowerCase()
+            .includes(query)),
+    ),
+  );
+}

@@ -5,7 +5,8 @@ import { sourceMediaInventories } from "../api/sourceMediaBrowser";
 import type { RetainedSourceMediaInventory } from "../api/gallerySourceMedia";
 import {
   sourceOwnerIdentity,
-  sourceMemberLabel,
+  filterSourceMedia,
+  sourceHostIdentity,
   groupSourceMedia,
   type SourceMediaOwner,
   type SourceMediaSelection,
@@ -30,6 +31,26 @@ const inventories = shallowRef<Record<string, RetainedSourceMediaInventory>>(
 );
 const failures = shallowRef<Record<string, string>>({});
 const search = ref("");
+const kind = ref("");
+const machine = ref("");
+const machines = computed(() => [
+  ...new Map(
+    props.owners.map((owner) => [sourceHostIdentity(owner), owner]),
+  ).entries(),
+]);
+const machineChoice = computed({
+  get: () =>
+    machine.value
+      ? String(
+          machines.value.findIndex(([identity]) => identity === machine.value),
+        )
+      : "",
+  set: (value: string) => {
+    machine.value =
+      value === "" ? "" : (machines.value[Number(value)]?.[0] ?? "");
+  },
+});
+
 const shown = ref(48);
 const active = ref(0);
 const loading = computed(() => active.value > 0);
@@ -57,18 +78,13 @@ const groups = computed(() =>
     }),
   ),
 );
-const rows = computed(() => {
-  const query = search.value.toLocaleLowerCase().trim();
-  return query
-    ? groups.value.filter((group) =>
-        group.usages.some(({ owner, member }) =>
-          `${owner.title} ${owner.hostLabel} ${sourceMemberLabel(member)} ${member.display_name}`
-            .toLocaleLowerCase()
-            .includes(query),
-        ),
-      )
-    : groups.value;
-});
+const rows = computed(() =>
+  filterSourceMedia(
+    groups.value.flatMap((group) => group.usages),
+    { search: search.value, kind: kind.value, host: machine.value },
+  ),
+);
+
 watch(
   () => rows.value.length,
   (count) => {
@@ -79,13 +95,15 @@ watch(
   },
   { flush: "sync" },
 );
-watch(search, () => {
+watch([search, kind, machine], () => {
   shown.value = 48;
 });
 async function load(owners: SourceMediaOwner[]) {
-  const missing = owners.filter(
-    (owner) => !checked.has(sourceOwnerIdentity(owner)),
-  );
+  const missing = [
+    ...new Map(
+      owners.map((owner) => [sourceOwnerIdentity(owner), owner]),
+    ).values(),
+  ].filter((owner) => !checked.has(sourceOwnerIdentity(owner)));
   if (!missing.length || disposed) return;
   const cached = { ...inventories.value };
   const hosts = new Map<string, SourceMediaOwner[]>();
@@ -107,12 +125,17 @@ async function load(owners: SourceMediaOwner[]) {
     batch.push(owner);
   }
   inventories.value = cached;
-  const batches = [...hosts.values()].flatMap((owners) =>
-    Array.from({ length: Math.ceil(owners.length / 25) }, (_, n) =>
-      owners.slice(n * 25, n * 25 + 25),
+  const hostOwners = [...hosts.values()];
+  const batches = [
+    ...hostOwners.map((owners) => owners.slice(0, 25)),
+    ...hostOwners.flatMap((owners) =>
+      Array.from(
+        { length: Math.ceil(Math.max(0, owners.length - 25) / 100) },
+        (_, n) => owners.slice(25 + n * 100, 125 + n * 100),
+      ),
     ),
-  );
-  // Two machines may progress independently; each server receives small cold pages.
+  ];
+  // Paint a small first page, then discover the full library in bounded background batches.
   queued.push(...batches);
   async function worker() {
     if (workers >= 2) return;
@@ -186,13 +209,6 @@ async function load(owners: SourceMediaOwner[]) {
   }
   await Promise.all([worker(), worker()]);
 }
-function more() {
-  void load(
-    props.owners
-      .filter((owner) => !checked.has(sourceOwnerIdentity(owner)))
-      .slice(0, 100),
-  );
-}
 function refresh() {
   queued.length = 0;
   for (const controller of requests.keys()) controller.abort();
@@ -233,15 +249,18 @@ watch(
       }
     inventories.value = values;
     failures.value = errors;
-    const added = props.owners
-      .filter(
-        (owner) =>
-          !known.has(sourceOwnerIdentity(owner)) ||
-          interrupted.has(sourceOwnerIdentity(owner)),
-      )
-      .slice(0, 25);
+    const added = props.owners.filter(
+      (owner) =>
+        !known.has(sourceOwnerIdentity(owner)) ||
+        interrupted.has(sourceOwnerIdentity(owner)),
+    );
     known = keys;
-    void load(added);
+    void load([
+      ...added,
+      ...props.owners.filter((owner) =>
+        cachedSourceInventory(sourceOwnerIdentity(owner)),
+      ),
+    ]);
   },
   { immediate: true, flush: "sync" },
 );
@@ -302,12 +321,35 @@ onBeforeUnmount(() => {
         their lifetime follows the prints that keep them.
       </p>
     </header>
-    <label class="source-browser__search"
-      >Search loaded sources<input
-        v-model="search"
-        type="search"
-        placeholder="Name, role, print or machine"
-    /></label>
+    <div class="source-browser__filters">
+      <label class="source-browser__search"
+        >Search loaded sources<input
+          v-model="search"
+          type="search"
+          placeholder="Name, role, print or machine"
+      /></label>
+      <label
+        >Media type<select v-model="kind" aria-label="Source media type">
+          <option value="">All media</option>
+          <option value="image">Images</option>
+          <option value="video">Video</option>
+          <option value="audio">Audio</option>
+          <option value="unknown">Other files</option>
+        </select></label
+      >
+      <label
+        >Machine<select v-model="machineChoice" aria-label="Source machine">
+          <option value="">All machines</option>
+          <option
+            v-for="([key, owner], index) in machines"
+            :key="key"
+            :value="String(index)"
+          >
+            {{ owner.hostLabel }} · {{ owner.target.baseUrl }}
+          </option>
+        </select></label
+      >
+    </div>
     <p class="source-browser__status" role="status">
       {{ scanned }} of {{ owners.length }} library items checked ·
       {{ groups.length }} unique sources loaded<span v-if="loading">
@@ -344,8 +386,8 @@ onBeforeUnmount(() => {
     </div>
     <p v-if="!loading && !rows.length">
       {{
-        search
-          ? "No loaded sources match your search."
+        search || kind || machine
+          ? "No loaded sources match these filters."
           : "No retained sources found in the checked library items."
       }}
     </p>
@@ -354,15 +396,6 @@ onBeforeUnmount(() => {
     </button>
     <button v-if="rows.length > shown" type="button" @click="shown += 48">
       Next sources ({{ Math.min(shown, rows.length) }} of {{ rows.length }})
-    </button>
-    <button
-      v-if="scanned < owners.length"
-      class="source-browser__more"
-      type="button"
-      :disabled="loading"
-      @click="more"
-    >
-      {{ loading ? "Loading…" : "Check more library items" }}
     </button>
   </section>
 </template>
@@ -385,15 +418,32 @@ onBeforeUnmount(() => {
   color: var(--mold-text-dim, #888);
   font-size: var(--mold-fs-sm);
 }
+.source-browser__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-block: 20px;
+  align-items: end;
+}
+.source-browser__filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 160px;
+}
 .source-browser__search {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  margin-block: 20px;
+  margin-block: 0;
   font-size: var(--mold-fs-sm);
 }
-.source-browser input {
-  max-width: 480px;
+.source-browser input,
+.source-browser select {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
   padding: 10px 12px;
   background: var(--mold-surface, #8881);
   border: 1px solid var(--mold-border, #7775);

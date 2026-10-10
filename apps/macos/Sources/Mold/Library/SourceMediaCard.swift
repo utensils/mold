@@ -11,6 +11,8 @@ struct SourceMediaCard: View {
     let owner: LibraryEntry
     let member: RetainedSourceMedia.Member
     var gallery = false
+    var showsPreview = true
+    var openSource: (() -> Void)?
     @State private var preview: NSImage?
     @State private var displayedKey: SourcePreviewKey?
     @State private var choice: SourceMediaAttachment?
@@ -32,7 +34,7 @@ struct SourceMediaCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             let layout = gallery ? AnyLayout(VStackLayout(alignment: .leading, spacing: 10)) : AnyLayout(HStackLayout(alignment: .top, spacing: 12))
-            layout {
+            if showsPreview { layout {
                 Group {
                     if let preview, displayedKey == previewKey { Image(nsImage: preview).resizable().scaledToFit() }
                     else { Image(systemName: member.sourceSymbol).font(.largeTitle).foregroundStyle(.secondary) }
@@ -40,13 +42,22 @@ struct SourceMediaCard: View {
                 .frame(maxWidth: gallery ? .infinity : 72)
                 .frame(height: gallery ? 148 : 72)
                 .background(.quaternary.opacity(gallery ? 0.4 : 0), in: RoundedRectangle(cornerRadius: 10))
-                .accessibilityHidden(true)
+                .accessibilityHidden(openSource == nil)
+                .accessibilityLabel("Open source")
+                .accessibilityAddTraits(openSource == nil ? [] : .isButton)
+                .onTapGesture { openSource?() }
+                .accessibilityAction { openSource?() }
                 VStack(alignment: .leading, spacing: 4) {
                     Text(member.sourceLabel).font(.headline)
                     Text(member.displayName).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                     Text(ByteCountFormatter.string(fromByteCount: Int64(member.sizeBytes), countStyle: .file))
                         .font(.caption).foregroundStyle(.secondary)
                 }
+            }
+            }
+            if let openSource {
+                Button("Open source", systemImage: "arrow.up.left.and.arrow.down.right", action: openSource)
+                    .buttonStyle(.borderless)
             }
             if member.role.hasPrefix("matting_processed") {
                 Text("Processed image. Reuse adds it as a new input.").font(.caption).foregroundStyle(.secondary)
@@ -72,6 +83,7 @@ struct SourceMediaCard: View {
         .accessibilityElement(children: .contain)
         .onDisappear { preview = nil; displayedKey = nil }
         .task(id: previewKey) {
+            guard showsPreview else { return }
             await loadPreview()
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(60)) } catch { return }

@@ -20,6 +20,12 @@ struct SourceMediaBrowser: View {
         let allowed = Dictionary(owners.map { ($0.id, SourceMediaAuthority(owner: $0, route: routes[$0.hostID], instance: instances[$0.hostID] ?? nil)) }, uniquingKeysWith: { first, _ in first })
         SourceMediaContent(owners: owners, routes: routes, instances: instances, allowed: allowed, catalog: library.sourceMediaCatalog,
                            openOwner: { router.openedPrint = .init(id: $0) })
+            .toolbar {
+                Menu {
+                    Button("All machines") { library.machineID = nil }
+                    ForEach(hosts.hosts) { host in Button(host.name) { library.machineID = host.id } }
+                } label: { Label(library.machineID.flatMap { hosts.host($0)?.name } ?? "All machines", systemImage: "desktopcomputer") }
+            }
     }
 }
 
@@ -32,13 +38,14 @@ private struct SourceMediaContent: View {
     let catalog: SourceMediaCatalog
     let openOwner: (PrintID) -> Void
     @State private var search = ""
+    @State private var kind = SourceMediaFilter.all
     @State private var retry = 0
     @State private var limit = 48
     @State private var refreshed = 0
     var body: some View {
         let term = search.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
         let visible = catalog.sources.compactMap { source -> SourceMediaDisplay? in
-            let usages = source.usages.filter { allowed[$0.owner.id] == $0.authority }
+            let usages = source.usages.filter { allowed[$0.owner.id] == $0.authority && kind.includes($0.member) }
             guard !usages.isEmpty else { return nil }
             let key = usages.count == source.usages.count ? source.searchKey : usages.map { "\($0.member.sourceLabel) \($0.member.displayName) \($0.owner.print.displayName) \($0.owner.hostName)" }.joined(separator: " ").folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             guard term.isEmpty || key.contains(term) else { return nil }
@@ -48,8 +55,11 @@ private struct SourceMediaContent: View {
             LazyVStack(alignment: .leading, spacing: 20) {
                 Text("Your original inputs, ready to use again. Identical sources appear once; every use stays linked to its print.")
                     .font(.callout).foregroundStyle(.secondaryText)
+                Picker("Media type", selection: $kind) {
+                    ForEach(SourceMediaFilter.allCases) { filter in Text(filter.title).tag(filter) }
+                }.pickerStyle(.menu)
                 HStack {
-                    Text("\(visible.count) sources · \(catalog.completed) of \(owners.count) prints checked")
+                    Text("\(visible.count) \(visible.count == 1 ? "source" : "sources") · \(catalog.completed) of \(owners.count) prints checked")
                         .font(.caption).foregroundStyle(.secondaryText)
                     if catalog.loading { ProgressView().controlSize(.small) }
                 }
@@ -79,6 +89,7 @@ private struct SourceMediaContent: View {
         .navigationTitle("Source Media")
         .searchable(text: $search, prompt: "Search sources and owners")
         .onChange(of: search) { limit = 48 }
+        .onChange(of: kind) { limit = 48 }
         .toolbar { Button("Refresh", systemImage: "arrow.clockwise") { retry += 1 } }
         .task(id: SourceBrowserKey(owners: owners, routes: routes, instances: instances, retry: retry, revision: catalog.revision)) {
             let force = retry != refreshed
@@ -111,46 +122,25 @@ struct SourceMediaUsageCard: View {
     let source: SourceMediaDisplay
     let openOwner: (PrintID) -> Void
     var gallery = true
-    @State private var selection: String?
     @State private var showingUses = false
-    @State private var usageLimit = 48
     private var current: SourceMediaCatalog.Row {
-        source.usages.first { $0.id == selection }
-            ?? source.usages.first { $0.member.contentKind == "image" && (hosts.host($0.owner.hostID).map(hosts.isUp) ?? false) }
+        source.usages.first { $0.member.contentKind == "image" && (hosts.host($0.owner.hostID).map(hosts.isUp) ?? false) }
             ?? source.usages.first { (hosts.host($0.owner.hostID).map(hosts.isUp) ?? false) }
             ?? source.usages.first { $0.member.contentKind == "image" }
             ?? source.usages[0]
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            SourceMediaCard(owner: current.owner, member: current.member, gallery: gallery)
+            SourceMediaCard(owner: current.owner, member: current.member, gallery: gallery, openSource: { showingUses = true })
                 .id(SourcePreviewKey(authority: current.authority, member: current.member))
             Button { showingUses = true } label: {
-                Label("\(source.usages.count) \(source.usages.count == 1 ? "use" : "uses") · View prints and roles", systemImage: "link")
+                Label("\(source.usages.count) \(source.usages.count == 1 ? "use" : "uses") · Details and roles", systemImage: "link")
                     .font(.caption)
             }
             .buttonStyle(.plain).padding(.horizontal, 8)
         }
         .sheet(isPresented: $showingUses) {
-            NavigationStack {
-                List {
-                    ForEach(source.usages.prefix(usageLimit)) { row in
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(row.member.sourceLabel).font(.headline)
-                            Text("\(row.owner.print.displayName) · \(row.owner.hostName)").font(.caption)
-                            HStack {
-                                Button("Use this copy") { selection = row.id; showingUses = false }
-                                Spacer()
-                                Button("Open print") { showingUses = false; openOwner(row.owner.id) }
-                            }.buttonStyle(.borderless)
-                        }.padding(.vertical, 4)
-                    }
-                    if source.usages.count > usageLimit { Button("Show more uses") { usageLimit += 48 } }
-                }
-                .navigationTitle("Used in your library")
-                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showingUses = false } } }
-            }
-            .presentationDetents([.medium, .large])
+            SourceMediaDetails(source: source, initial: current.id, gallery: gallery, openOwner: openOwner)
         }
     }
 }

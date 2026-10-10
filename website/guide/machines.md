@@ -66,3 +66,7 @@ returned download ticket succeeds and the original held job and server identity
 are revalidated. Failed or cancelled downloads leave the job held. Global queue
 pause stays in effect. Cancelling a job does not cancel a model download that
 other jobs may need.
+
+In **Source Media**, filter loaded sources by machine and media type, or search their names, roles and owning prints. Identical verified sources across machines appear once; each retained use remains available. Open a source preview to view its original and inspect where it is used, then reuse that exact copy or open its owning print. Sources follow the retention of those prints.
+
+Source discovery runs automatically while the browser is open: a small first page of 25 owners appears before background batches of at most 100, with two requests in flight. Progress reports checked library items; source cards still page independently at 48. Closing cancels pending discovery, and fresh cached inventories restore on reopening.

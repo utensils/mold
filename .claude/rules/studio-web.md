@@ -132,3 +132,7 @@ Collection visibility intent must be reactive when recorded, superseded, and ack
 License settings prose uses a nonzero flex basis before fixed-width actions are
 wrapped. Do not restore `flex: 1` (zero basis) on its description or introduction:
 phone widths squeeze long license descriptions into single-word columns.
+
+Source browser media/machine/text filters apply to exact usages before grouping, preview selection and reuse. Reopening restores all fresh previously discovered inventories, not only the initial 25 owners. Original viewer composition reuses ModalPanel; selected originals have a separate 16 MiB memory-only LRU (two inflight), the same owner invalidation and 60-second freshness, a 64 MiB read limit, and a pre-decode 32 MP/8192-side PNG/JPEG/WebP header gate. Close/authority changes cancel reads and revoke URLs; owner navigation is distinct from independent source reuse.
+
+Source discovery runs automatically while the browser is open: a small first page of 25 owners appears before background batches of at most 100, with two requests in flight. Progress reports checked library items; source cards still page independently at 48. Closing cancels pending discovery, and fresh cached inventories restore on reopening.

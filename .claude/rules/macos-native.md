@@ -156,3 +156,9 @@ view lifetime; preserve authored scalar edits while a download completes.
 **Stable library status and clip duration.** Library connection/failure/cache status lives in an always-present toolbar slot, never an inserted grid row. Both native apps read model `supports_duration_prediction` and `runtime_ready` for automatic clip length: omit frames only for the active supported automatic preference, persist/restore that preference independently of the explicit frame count, and preserve it through unsupported models.
 
 Native model recovery prefers the queue row’s `model_download` hint, requiring a nonblank exact match to the row model. A present malformed/null/mismatched hint blocks legacy fallback without dropping the row. Only absent hints permit typed batch-code fallback. Preserve actual missing-component prose and diagnostics; use the existing exact-host, license-aware download-and-retry coordinator.
+
+Source browser filters project visible usages before selecting preview or reuse authority.
+Opening a source shows its original with existing native zoom/playback components,
+metadata and every host/print/member use; never collapse several roles in one print.
+Load only the selected original into a bounded private temporary file, cancel on
+dismissal, revoke on authority changes, and release playback/files on close.
