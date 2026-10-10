@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { PromptClearRecovery } from "@studio/lib/promptClearRecovery";
 import { restoreRetainedDraftMedia } from "@studio/lib/retainedDraftMedia";
 import { originAuthenticatedFetch as fetch } from "../lib/originAuth";
 
@@ -2050,10 +2051,12 @@ const pageStyle = computed(() =>
     : undefined,
 );
 
+const promptClearRecovery = new PromptClearRecovery();
 function onPromptAuthored(
   prompt: string,
   source: PromptAuthoringSource = "typed",
 ) {
+  if (promptClearRecovery.apply(form.state.value, prompt, source)) return;
   // A ↑/↓ recall replaces the whole prompt, so the prepared rewrite has
   // nothing left to describe: release it instead of raising the stale banner
   // whose recovery actions would re-expand a prompt no longer on screen.

@@ -64,4 +64,23 @@ struct LibraryGridKeysTests {
         }
         #expect(LibraryGridKeys.action(for: "a", modifiers: []) == nil)
     }
+    @Test func regroupingKeepsTheVisiblePrintDeepInTheLibrary() throws {
+        let host = MoldHost(name: "Fixture", baseURL: URL(string: "http://fixture.invalid")!)
+        let entries = try (0..<1000).map { index in
+            let json = "{\"filename\":\"\(index).png\",\"metadata\":{\"width\":1024,\"height\":1024},\"timestamp\":\(1000 + (index / 100) * 86400)}"
+            return LibraryEntry(host: host, print: try MoldJSON.decoder.decode(GalleryPrint.self, from: Data(json.utf8)))
+        }
+        let layout = JustifiedLibraryLayout()
+        let grouped = layout.resolve(LibraryGrouping.byDay(entries), width: 760, targetHeight: 132)
+        let visibleRow = try #require(grouped[5].rows.dropFirst(3).first)
+        let anchor = try #require(LibraryGrid.visibleAnchor(in: entries, visibleRowIDs: [visibleRow.id]))
+        #expect(anchor == visibleRow.id)
+        #expect(anchor != entries[0].id)
+        let continuous = layout.resolve(LibraryGrouping.ungrouped(entries), width: 760, targetHeight: 132)
+        let newRow = try #require(continuous[0].rows.first { row in
+            row.items.contains { continuous[0].source.items[$0.index].id == anchor }
+        })
+        #expect(newRow.items.contains { continuous[0].source.items[$0.index].id == anchor })
+    }
+
 }

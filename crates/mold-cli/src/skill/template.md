@@ -18,9 +18,9 @@ and machine. **Get More Models…** opens model management. Options uses separat
 rows for large text; clip/3-D drafts restore after profiles arrive. The viewer
 hides the main tabs to expose its media actions. On iPhone, landscape clips use
 the full display with native controls and Close; portrait restores the actions.
-Both native galleries immediately clear the selected media's New badge while
-keeping the previous visit baseline and next-visit clearing. New media counts
-appear on the iOS Home Screen/macOS Dock until Library opens; hidden collections
+Both native galleries keep new media unread until that client successfully
+displays it; entering Library does not clear other items. The iOS Library badge
+and native app-icon counts share this viewing history; hidden collections
 and Trash are excluded. Icon state is local and durable; iOS refresh is
 opportunistic while backgrounded and needs notification badge permission.
 Info has Done, and sharing
@@ -173,3 +173,5 @@ GUI library lifecycle actions follow the explicit machine filter: trash, restore
 Trash selections use `POST /api/gallery/trash/delete-selected` with a filenames array. The endpoint checks current trash membership under the publication writer; a restored live print is preserved with `409 GALLERY_NOT_TRASHED`. An older host returning 404 needs an update; never retry through the live-or-trash `delete-forever` endpoint.
 
 GUI Library thumbnails preserve media aspect ratios in continuous justified rows on native macOS/iOS, Tauri desktop and web. Zoom changes target row height. iOS omits machine-name thumbnail badges; details and machine filters retain host information. This changes no CLI/API or unseen-media behavior.
+
+GUI **Edit prompt** opens a spacious live draft editor with recent-prompt search, Clear and Undo clear. Dismissal keeps edits; history recall changes prompt text rather than the model, source media or other settings. Native iOS and macOS Library Settings persist **Show date separators**; turning it off removes daily row breaks while preserving sort order. These are client preferences and do not change CLI/API generation contracts.

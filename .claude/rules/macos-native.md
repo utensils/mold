@@ -122,3 +122,7 @@ Native macOS vertical arrows follow adjacent row centers, never a guessed column
 count. Viewer return restores the covered viewport; native previews explicitly
 inject thumbnail loaders. Native iOS omits the visual host-name thumbnail badge;
 Info and host sorting/filtering retain their authority. Unseen semantics are unchanged.
+
+The compact Generate prompt stays bounded; Edit prompt opens a spacious native sheet live-bound to the same authoritative draft. Done and ordinary dismissal retain edits. Keep native selection, clipboard, IME and undo; editor arrows never recall history, and generation shortcuts cannot dispatch behind the sheet. Clear/Undo clear preserve original prompt provenance and the existing rewrite undo marker until a later edit or replacement. Prompt-only history replacement clears unrelated rewrite provenance without changing model, inputs or settings; failed/offline history reads remain visible and retryable.
+
+Show date separators is a persisted Mac-local Library Settings preference, default on and included in preferences reset. Off projects one continuous section without changing visible sort/filter order, selection or unread identity. Include it in section cache invalidation and retain a visible print anchor through regrouping.

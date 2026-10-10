@@ -34,6 +34,22 @@ struct RecentTests {
 
     // MARK: - What the section says, versus what the machine says
 
+    @Test func explicitlyRecallingTheSameRewriteRetiresItsUndoMarker() {
+        var draft = RenderDraft()
+        draft.prompt = "rewritten prompt"
+        let expansions = ExpandStore()
+        expansions.lastAcceptedPrompt = LastAcceptedPrompt(
+            prompt: draft.prompt, previousPrompt: "original", previousOriginalPrompt: nil,
+            previousTransform: nil
+        )
+        let entry = HistoryEntry(prompt: draft.prompt, model: "flux-dev:q8", usedAt: 1)
+
+        RecentGroup.pick(entry, into: &draft, expansions: expansions)
+
+        #expect(draft.prompt == entry.prompt)
+        #expect(expansions.lastAcceptedPrompt == nil)
+    }
+
     @Test func aMachineWithNoHistoryFeatureSaysSoRatherThanLookingEmpty() {
         #expect(RecentGroup.Listing.resolve(hasLoaded: false, isUnavailable: false, entries: []) == .loading)
         #expect(RecentGroup.Listing.resolve(hasLoaded: true, isUnavailable: true, entries: []) == .unavailable)
@@ -117,4 +133,17 @@ struct RecentTests {
         #expect(!PromptWand.wantsRemix(optionHeld: true, canRemix: false))
         #expect(!PromptWand.wantsRemix(optionHeld: false, canRemix: true))
     }
+    @Test func failedHistoryReadIsRetryableAndNeverLooksLikeLoadingForever() async {
+        let host = machine()
+        let backend = FakeBackend(host: host)
+        let hosts = HostStore(hosts: [host]) { _ in backend }
+        let history = PromptHistoryStore(hosts: hosts)
+        await history.refresh(on: host.id)
+        #expect(history.failureByHost[host.id] != nil)
+        backend.historyRows = []
+        await history.refresh(on: host.id)
+        #expect(history.failureByHost[host.id] == nil)
+        #expect(history.hasLoaded(on: host.id))
+    }
+
 }

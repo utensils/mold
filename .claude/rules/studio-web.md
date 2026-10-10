@@ -106,3 +106,5 @@ Native macOS vertical arrows follow adjacent row centers, never a guessed column
 count. Viewer return restores the covered viewport; native previews explicitly
 inject thumbnail loaders. Native iOS omits the visual host-name thumbnail badge;
 Info and host sorting/filtering retain their authority. Unseen semantics are unchanged.
+
+PromptEditor is a live editor of the existing composer prompt, never a second persisted draft. Route typed/recalled/clear/undo-clear through the owning authoring handler. Immediate Clear recovery is per composer and preserves rewrite state while clearing wire originalPrompt; later edits/history retire recovery. Large-editor arrows remain ordinary text navigation and generation shortcuts must not escape to the shell, including native menu intents. Full-viewport editor is explicitly teleported outside positioned composers; it sits below nested rewrite modals and uses overlay-stack transitions for focus return. Keep phone editable text at least 16px, 44px action targets, visualViewport height/offset, scroll locking and opener restoration. Capability-ignored prompts have no editing door.

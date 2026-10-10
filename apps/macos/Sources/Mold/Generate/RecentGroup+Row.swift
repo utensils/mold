@@ -11,7 +11,7 @@ extension RecentGroup {
     func perform(_ action: GenerateAction, on entry: HistoryEntry) {
         switch action {
         case .usePrompt:
-            Self.pick(entry, into: &draft)
+            Self.pick(entry, into: &draft, expansions: expansions)
         case .copyPrompt:
             Clipboard.put(entry.prompt)
         default:
@@ -20,7 +20,7 @@ extension RecentGroup {
     }
 
     func row(_ entry: HistoryEntry) -> some View {
-        Button { Self.pick(entry, into: &draft) } label: {
+        Button { Self.pick(entry, into: &draft, expansions: expansions) } label: {
             VStack(alignment: .leading, spacing: 2) {
                 Text(entry.prompt).lineLimit(2)
                 Text("\(entry.model) · \(entry.usedAtDate, format: .relative(presentation: .named))")

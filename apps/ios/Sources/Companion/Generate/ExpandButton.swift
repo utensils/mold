@@ -6,43 +6,53 @@ import SwiftUI
 struct ExpandButton: View {
     @Environment(GenerateController.self) private var generate
     @Environment(HostStore.self) private var hosts
-    @State private var working = false
-    @State private var suggestions: [String] = []
-    @State private var original: String?
+    @Binding var undo: PromptExpansionUndo
+    @Binding var working: Bool
+    @Binding var suggestions: [String]
+    var shortcutEnabled = true
+    var menuItemsOnly = false
 
+    @ViewBuilder
     var body: some View {
-        Menu {
-            Button { Task { await expand(variations: 1) } } label: {
-                Label("Expand", systemImage: "text.badge.star")
+        if menuItemsOnly {
+            actions
+        } else {
+            Menu { actions } label: {
+                if working { ProgressView() } else { Label("Expand", systemImage: "text.badge.star") }
+            } primaryAction: {
+                Task { await expand(variations: 1) }
             }
-            Button { Task { await expand(variations: 4) } } label: {
-                Label("Suggest Other Ways", systemImage: "text.bubble")
-            }
-            if let original {
-                Button { generate.draft.prompt = original; self.original = nil } label: {
-                    Label("Undo Expand", systemImage: "arrow.uturn.backward")
-                }
-            }
-        } label: {
-            if working { ProgressView() } else { Label("Expand", systemImage: "text.badge.star") }
-        } primaryAction: {
-            Task { await expand(variations: 1) }
-        }
-        .frame(minWidth: 44, minHeight: 44)
-        .disabled(generate.draft.prompt.trimmingCharacters(in: .whitespaces).isEmpty || working
-                  || generate.target.flatMap { hosts.capabilities[$0.id]?.expand } == nil)
-        .keyboardShortcut("e", modifiers: .command)
-        .sheet(isPresented: Binding(get: { !suggestions.isEmpty }, set: { if !$0 { suggestions = [] } })) {
-            SuggestionsSheet(suggestions: suggestions) { chosen in
-                original = generate.draft.prompt
-                generate.draft.prompt = chosen
-                suggestions = []
-            }
+            .frame(minWidth: 44, minHeight: 44)
+            .disabled(unavailable)
+            .keyboardShortcut(shortcutEnabled ? KeyboardShortcut("e", modifiers: .command) : nil)
         }
     }
 
+    private var actions: some View {
+        Group {
+            Button { Task { await expand(variations: 1) } } label: {
+                Label("Expand", systemImage: "text.badge.star")
+            }
+            .keyboardShortcut(shortcutEnabled ? KeyboardShortcut("e", modifiers: .command) : nil)
+            Button { Task { await expand(variations: 4) } } label: {
+                Label("Suggest Other Ways", systemImage: "text.bubble")
+            }
+            if let original = undo.original(for: generate.draft) {
+                Button { generate.draft.prompt = original; undo = PromptExpansionUndo() } label: {
+                    Label("Undo Expand", systemImage: "arrow.uturn.backward")
+                }
+            }
+        }
+        .disabled(unavailable)
+    }
+
+    private var unavailable: Bool {
+        generate.draft.prompt.trimmingCharacters(in: .whitespaces).isEmpty || working
+            || generate.target.flatMap { hosts.capabilities[$0.id]?.expand } == nil
+    }
+
     private func expand(variations: Int) async {
-        guard let host = generate.target else { return }
+        guard !working, let host = generate.target else { return }
         working = true
         defer { working = false }
         let snapshot = generate.draft
@@ -55,7 +65,7 @@ struct ExpandButton: View {
             let answer = try await hosts.backend(for: host).expand(request)
             guard generate.draft == snapshot, generate.modelName == model, generate.target?.id == host.id else { return }
             if variations == 1, let first = answer.expanded.first {
-                original = generate.draft.prompt
+                undo.record(original: generate.draft, expanded: first)
                 generate.draft.prompt = first
             } else {
                 suggestions = answer.expanded
@@ -66,7 +76,7 @@ struct ExpandButton: View {
     }
 }
 
-private struct SuggestionsSheet: View {
+struct SuggestionsSheet: View {
     @Environment(\.dismiss) private var dismiss
     let suggestions: [String]
     let use: (String) -> Void

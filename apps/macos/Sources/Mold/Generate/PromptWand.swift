@@ -15,6 +15,7 @@ struct PromptWand: View {
     let host: MoldHost
     @Binding var draft: RenderDraft
     @Binding var destination: Destination
+    var presentationEnabled = true
 
     @Environment(GenerateController.self) private var controller
     @Environment(ExpandStore.self) private var expansions
@@ -82,14 +83,19 @@ struct PromptWand: View {
     }
 
     private var showsPopover: Binding<Bool> {
+        Self.popoverBinding(expansions: expansions, enabled: presentationEnabled)
+    }
+
+    static func popoverBinding(expansions: ExpandStore, enabled: Bool) -> Binding<Bool> {
         Binding(
             get: {
+                guard enabled else { return false }
                 switch expansions.expansion {
-                case .offering, .advised, .refused, .needsModel: true
-                case .idle, .working: false
+                case .offering, .advised, .refused, .needsModel: return true
+                case .idle, .working: return false
                 }
             },
-            set: { if !$0 { expansions.dismiss() } }
+            set: { if enabled && !$0 { expansions.dismiss() } }
         )
     }
 

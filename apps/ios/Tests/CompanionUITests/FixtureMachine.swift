@@ -43,6 +43,7 @@ final class FixtureMachine: @unchecked Sendable {
     private let queueFailureFixture: Bool
     private let enrichedQueue = Mutex(false)
     func enrichQueueFailure() { enrichedQueue.withLock { $0 = true } }
+    private let promptExpansionFixture: Bool
     private let queueControls: Bool
     private let queueSwipeFixture: Bool
     private let queueDestinationFixture: Bool
@@ -53,7 +54,7 @@ final class FixtureMachine: @unchecked Sendable {
     private let modelMemoryFixture: Bool
     private var residentModels: Set<String> = []
 
-    init(justifiedFixture: Bool = false, landscapePlaybackFixture: Bool = false, exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, retainedFrameFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil, queueDownloadFixture: Bool = false, requiresDownloadLicense: Bool = false, trashFixture: Bool = false, queueFailureFixture: Bool = false, queueSwipeFixture: Bool = false, queueDestinationFixture: Bool = false) throws {
+    init(justifiedFixture: Bool = false, landscapePlaybackFixture: Bool = false, exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, retainedFrameFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil, queueDownloadFixture: Bool = false, requiresDownloadLicense: Bool = false, trashFixture: Bool = false, queueFailureFixture: Bool = false, queueSwipeFixture: Bool = false, queueDestinationFixture: Bool = false, promptExpansionFixture: Bool = false) throws {
         self.landscapePlaybackFixture = landscapePlaybackFixture
         self.exportFixture = exportFixture
         self.unsupportedExportFormats = unsupportedExportFormats
@@ -67,6 +68,7 @@ final class FixtureMachine: @unchecked Sendable {
         self.queueDownloadFixture = queueDownloadFixture
         self.requiresDownloadLicense = requiresDownloadLicense
         self.queueControls = queueControls
+        self.promptExpansionFixture = promptExpansionFixture
         self.queueSwipeFixture = queueSwipeFixture
         self.queueDestinationFixture = queueDestinationFixture
         if queueSwipeFixture {
@@ -280,7 +282,7 @@ final class FixtureMachine: @unchecked Sendable {
             let export = exportFixture && request.first == "POST" && path.hasPrefix("/api/gallery/export/")
             if export { capturedExports.withLock { $0.append(Data(bodyText.utf8)) } }
             let exportRequest = (try? JSONSerialization.jsonObject(with: Data(bodyText.utf8))) as? [String: Any] ?? [:]
-            let allowed = acceptLicense || (queueDownloadFixture && path == "/api/generation-batches/status") || export || libraryMutation || (queueControls && (path.hasPrefix("/api/queue/") || path == "/api/history")) || install || unload || request.first == "GET" || path == "/api/generate/placement-preview" || patchCollection
+            let allowed = (promptExpansionFixture && path == "/api/expand") || acceptLicense || (queueDownloadFixture && path == "/api/generation-batches/status") || export || libraryMutation || (queueControls && (path.hasPrefix("/api/queue/") || path == "/api/history")) || install || unload || request.first == "GET" || path == "/api/generate/placement-preview" || patchCollection
             let historyQuery = request.count > 1 ? URLComponents(string: "http://fixture" + String(request[1]))?.queryItems?.first { $0.name == "query" }?.value : nil
             let isTrashListing = libraryMutations && path == "/api/gallery" && String(request[1]).contains("view=trash")
             let refusedExport = export && refuseExport
@@ -376,7 +378,10 @@ final class FixtureMachine: @unchecked Sendable {
         case "/api/status":
             if queueDestinationFixture { return Data(#"{"version":"0.32.0","busy":false,"uptime_secs":1,"instance_id":"queue-destination"}"#.utf8) }
             json = queueControls ? #"{"version":"0.32.0","busy":false,"uptime_secs":1,"instance_id":"queue-fixture"}"# : #"{"version":"0.32.0","busy":false,"uptime_secs":1}"#
+        case "/api/expand":
+            json = #"{"original":"Fixture prompt","expanded":["Expanded fixture prompt"]}"#
         case "/api/capabilities":
+            if promptExpansionFixture { return Data(#"{"max_batch_outputs":4,"expand":{"configured":true}}"#.utf8) }
             if queueDestinationFixture { return Data(#"{"max_batch_outputs":4,"queue":{"heterogeneous_batch_max_outputs":4}}"#.utf8) }
             if exportFixture { return Data(#"{"max_batch_outputs":4,"mesh":{"generation":true,"formats":["glb"],"export_formats":["glb","obj","zip","stl","ply","gif","apng"],"export_geometry":{"size_mm":{"min":1,"max":10000,"default":100},"up_axes":["y","z"],"origins":["center","floor"],"defaults":{"obj":{"up_axis":"y","origin":"floor"},"stl":{"size_mm":100,"up_axis":"z","origin":"floor"},"ply":{"size_mm":100,"up_axis":"z","origin":"floor"}}}}}"#.utf8) }
             if queueControls { return Data(#"{"max_batch_outputs":4,"queue":{"can_pause_job":true,"cooperative_cancellation":true}}"#.utf8) }

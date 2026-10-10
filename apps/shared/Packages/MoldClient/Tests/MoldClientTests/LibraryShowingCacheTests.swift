@@ -109,4 +109,28 @@ struct LibraryShowingCacheTests {
         #expect(showing.selected.map(\.id)
             == showing.visible.filter { showing.selected.map(\.id).contains($0.id) }.map(\.id))
     }
+    @Test func hidingDateSeparatorsReflowsWithoutChangingOrderOrSelection() {
+        let cache = LibraryShowingCache()
+        let rows = [
+            PrintFixtures.entry("older.png", host: workstation, timestamp: 1_700_000_000),
+            PrintFixtures.entry("newer.png", host: workstation, timestamp: 1_700_172_800),
+        ]
+        let selection: Set<PrintID> = [rows[0].id]
+        let grouped = cache.showing(pool: rows, revision: 1, query: LibraryQuery(), selection: selection)
+        #expect(grouped.sections.count == 2)
+        let continuous = cache.showing(pool: rows, revision: 1, query: LibraryQuery(),
+                                       selection: selection, showDateSeparators: false)
+        #expect(continuous.sections.count == 1)
+        #expect(continuous.sections.first?.day == nil)
+        #expect(continuous.sections.flatMap(\.items).map(\.id) == grouped.visible.map(\.id))
+        #expect(continuous.selected.map(\.id) == grouped.selected.map(\.id))
+        #expect(cache.derivations == 2)
+        _ = cache.showing(pool: rows, revision: 1, query: LibraryQuery(),
+                          selection: [], showDateSeparators: false)
+        #expect(cache.derivations == 2)
+        let restored = cache.showing(pool: rows, revision: 1, query: LibraryQuery(), selection: selection)
+        #expect(restored.sections.count == 2)
+        #expect(restored.visible.map(\.id) == continuous.visible.map(\.id))
+    }
+
 }

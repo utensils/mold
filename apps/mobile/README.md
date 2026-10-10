@@ -1062,3 +1062,7 @@ Manual Save Locally reports processed selected prints, including existing copies
 When another connected machine can generate, **Move to…** is available on queued, paused, and held jobs until the source machine begins rendering. The prompt, seed, settings, and retained reference media move together. The destination must accept the job before the original is removed. Older servers support Held-only moves. Jobs that depend on machine-local LoRAs or workflows are refused without moving them.
 
 If a connection is interrupted during a move, retry the same destination so Mold can check whether it already accepted the job. The source remains reserved while that result is unknown, preventing duplicate rendering. A confirmed destination rejection releases the original only after the destination records that this transfer cannot be admitted later.
+
+### Editing long prompts
+
+The compact prompt stays bounded while you type. **Edit prompt** opens a spacious live editor; **Done**, Escape and backdrop dismissal retain edits and return focus to the opener. Enter inserts a newline, and arrow keys move through text. **Recent prompts** searches full prompt text and replaces only the prompt, preserving model and other settings. **Clear** offers immediate **Undo clear**; a later edit or history choice ends that recovery. Expand and Remix use the existing rewrite flow and return to the editor. The editor never submits a generation shortcut. Phone presentation fills the visible viewport, with controls retained when the keyboard reduces the available space.

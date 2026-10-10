@@ -10,6 +10,7 @@ struct OfflineLibrarySection: View {
     @Binding var autoSave: Bool
     var photosRecovery: PermissionRecovery? = nil
     var requestPhotos: (() -> Void)? = nil
+    @AppStorage(Preference.showDateSeparators) private var showDateSeparators = true
     @AppStorage(Preference.offlineLimit) private var limitMB = OfflineLimit.standard.rawValue
     @State private var imageBytes: Int64?
     @State private var listingBytes: Int64?
@@ -19,6 +20,8 @@ struct OfflineLibrarySection: View {
 
     var body: some View {
         Section {
+            Toggle("Show date separators", isOn: $showDateSeparators)
+                .accessibilityIdentifier("library-show-date-separators")
             Toggle("Save Finished Prints to Photos", isOn: $autoSave)
             if let photosRecovery { PermissionSettingsButton(recovery: photosRecovery) }
             if let requestPhotos {

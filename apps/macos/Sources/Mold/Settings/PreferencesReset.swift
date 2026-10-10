@@ -28,6 +28,7 @@ enum PreferencesReset {
         "libraryShowsInspector",
         "libraryScope",
         "libraryEdge",
+        "libraryShowDateSeparators",
         "inspectorShowsProvenance",
         "createShowsAdapters",
         "createShowsSampler",

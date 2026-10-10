@@ -1,0 +1,2 @@
+- **Room for long prompts.** Open a spacious prompt editor from Generate on native macOS/iOS, web and Tauri desktop/mobile. Keep edits on dismissal, search recent prompt text without replacing other settings, and undo Clear. The compact composer remains available for quick edits.
+- **Optional Library date separators.** Native iOS and macOS Settings now remember whether Library views show daily headings and row breaks. Turning them off preserves the selected sort order in a continuous grid.

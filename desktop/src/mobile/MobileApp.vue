@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { PromptClearRecovery } from "@studio/lib/promptClearRecovery";
 import {
   missingQueueModel,
   startQueueDownloadRecovery,
@@ -132,7 +133,7 @@ import {
   promptPlaceholder,
   promptRequired,
 } from "@studio/lib/promptRequirement";
-import { applyAuthoredPrompt } from "@studio/lib/promptProvenance";
+import { applyAuthoredPrompt, type PromptAuthoringSource } from "@studio/lib/promptProvenance";
 import {
   appendMinimaxH3GalleryImageReference,
   isMinimaxH3Identity,
@@ -487,6 +488,8 @@ import MobileIdentityWell from "./MobileIdentityWell.vue";
 import MobileLibrarySheet from "./MobileLibrarySheet.vue";
 import MobileMediaPlaceholder from "./MobileMediaPlaceholder.vue";
 import MobileLoraControls from "./MobileLoraControls.vue";
+import PromptEditor from "@studio/components/PromptEditor.vue";
+import { fetchHistoryFrom } from "../lib/api/history";
 import MobilePromptTools from "./MobilePromptTools.vue";
 import MobileRemixReview, { type MobileRemixReviewVariant } from "./MobileRemixReview.vue";
 import MobilePreparedExpansionBatch from "./MobilePreparedExpansionBatch.vue";
@@ -5990,8 +5993,47 @@ function appendPromptWord(word: string): void {
   onPromptAuthored(form.prompt.trim() ? `${form.prompt.trimEnd()}, ${trimmed}` : trimmed);
 }
 
-function onPromptAuthored(prompt: string): void {
-  applyAuthoredPrompt(form, prompt, quickExpansionSnapshot.value !== null);
+const promptEditorOpen = ref(false);
+const editorHistory = ref<string[]>([]);
+const editorHistoryLoading = ref(false);
+const editorHistoryError = ref("");
+let editorHistoryEpoch = 0;
+watch(
+  [promptEditorOpen, () => selectedTarget.value?.baseUrl, () => selectedTarget.value?.apiKey],
+  async () => {
+    const epoch = ++editorHistoryEpoch;
+    if (!promptEditorOpen.value || !selectedTarget.value) {
+      editorHistoryLoading.value = false;
+      return;
+    }
+    editorHistory.value = [];
+    editorHistoryError.value = "";
+    editorHistoryLoading.value = true;
+    try {
+      const history = await fetchHistoryFrom(selectedTarget.value, "", 100);
+      if (epoch === editorHistoryEpoch) editorHistory.value = history.map((entry) => entry.prompt);
+    } catch {
+      if (epoch === editorHistoryEpoch)
+        editorHistoryError.value = "Recent prompts are unavailable on this machine.";
+    } finally {
+      if (epoch === editorHistoryEpoch) editorHistoryLoading.value = false;
+    }
+  },
+);
+const promptClearRecovery = new PromptClearRecovery();
+function onPromptAuthored(prompt: string, source: PromptAuthoringSource = "typed"): void {
+  if (promptClearRecovery.apply(form, prompt, source)) return;
+  if (source === "recalled") {
+    submissionAttempts.invalidate();
+    preparationGuard.invalidate();
+    quickExpansionOriginal.value = null;
+    quickExpansionSnapshot.value = null;
+    remixUndo.value = null;
+    appliedRemix.value = null;
+    remixReview.value = null;
+    clearExpansionRecovery();
+  }
+  applyAuthoredPrompt(form, prompt, quickExpansionSnapshot.value !== null, source);
 }
 
 let templateLoadEpoch = 0;
@@ -12850,6 +12892,58 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               @input="onPromptAuthored(($event.target as HTMLTextAreaElement).value)"
             />
           </label>
+          <button
+            v-if="caps.promptMode !== 'ignored'"
+            type="button"
+            class="secondary-button"
+            data-test="edit-prompt"
+            @click="promptEditorOpen = true"
+          >
+            Edit prompt
+          </button>
+          <PromptEditor
+            :open="promptEditorOpen"
+            :prompt="form.prompt"
+            :history="editorHistory"
+            :history-loading="editorHistoryLoading"
+            :history-error="editorHistoryError"
+            @authored="onPromptAuthored"
+            @close="promptEditorOpen = false"
+          >
+            <template #tools
+              ><button
+                type="button"
+                :disabled="
+                  form.prompt.trim().length === 0 ||
+                  expansionRunning ||
+                  !!preparedBatch ||
+                  !!remixReview ||
+                  !!promptTransformBlocked
+                "
+                @click="expandForCurrentBatch()"
+              >
+                Expand</button
+              ><button
+                type="button"
+                :disabled="
+                  form.prompt.trim().length === 0 ||
+                  expansionRunning ||
+                  !!preparedBatch ||
+                  !!remixReview ||
+                  !!promptTransformBlocked
+                "
+                @click="remixCurrent()"
+              >
+                Remix</button
+              ><button
+                v-if="quickExpansionOriginal !== null || remixUndo !== null"
+                type="button"
+                @click="undoPromptPreparation"
+              >
+                Undo rewrite
+              </button></template
+            >
+          </PromptEditor>
           <details v-show="caps.promptMode !== 'ignored'" class="mobile-prompt-modifiers">
             <summary>Prompt extras</summary>
             <MobilePromptTools
@@ -14773,3 +14867,10 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
     />
   </main>
 </template>
+
+<style scoped>
+.mobile-prompt-field textarea {
+  max-height: 96px;
+  overflow-y: auto;
+}
+</style>

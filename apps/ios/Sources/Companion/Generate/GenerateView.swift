@@ -10,6 +10,10 @@ struct GenerateView: View {
     @Environment(AppRouter.self) private var router
     @Environment(\.dynamicTypeSize) private var size
     @State private var showsOptions = false
+    @State private var showsPromptEditor = false
+    @State private var expansionUndo = PromptExpansionUndo()
+    @State private var expandingPrompt = false
+    @State private var promptSuggestions: [String] = []
     @State private var estimate: String?
     @State private var choosingSourceRole = false
 
@@ -23,7 +27,8 @@ struct GenerateView: View {
                 }
             } else {
                 ScrollView {
-                    Composer(showsOptions: $showsOptions, estimate: estimate,
+                    Composer(showsOptions: $showsOptions, showsPromptEditor: $showsPromptEditor, expansionUndo: $expansionUndo, expandingPrompt: $expandingPrompt,
+                             promptSuggestions: $promptSuggestions, estimate: estimate,
                              maximumHeight: .infinity, inline: true)
                         .padding(.bottom, 24)
                 }
@@ -32,7 +37,7 @@ struct GenerateView: View {
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     VStack(spacing: 8) {
                         QueueStatusLink()
-                        GenerateRow(estimate: estimate)
+                        GenerateRow(estimate: estimate, promptEditorPresented: showsPromptEditor)
                     }
                     .padding(16)
                     .frame(maxWidth: .infinity)
@@ -41,6 +46,7 @@ struct GenerateView: View {
 
             }
         }
+        .onChange(of: generate.draft) { _, draft in expansionUndo.observe(draft) }
         .navigationTitle(Destination.generate.title)
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $showsOptions) { MoreOptionsSheet() }

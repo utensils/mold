@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import PromptEditor from "@studio/components/PromptEditor.vue";
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { promptPlaceholder } from "@studio/lib/promptRequirement";
 import { promptTransformBlockedReason } from "@studio/lib/promptTransform";
@@ -162,6 +163,13 @@ function setLength(raw: string) {
 }
 
 const promptEl = ref<HTMLTextAreaElement | null>(null);
+const promptEditorOpen = ref(false);
+watch(
+  () => props.form.recipeCapabilities?.promptMode === "ignored",
+  (ignored) => {
+    if (ignored) promptEditorOpen.value = false;
+  },
+);
 const expandControl = ref<InstanceType<typeof ExpandControl> | null>(null);
 const cycler = new PromptCycler();
 
@@ -172,7 +180,7 @@ watch(
 );
 
 function growPrompt() {
-  if (promptEl.value) autoGrowRows(promptEl.value);
+  if (promptEl.value) autoGrowRows(promptEl.value, 3);
 }
 watch(promptText, () => void nextTick(growPrompt), { flush: "post" });
 onMounted(() => {
@@ -232,7 +240,7 @@ function expand() {
 function record(prompt: string) {
   cycler.record(prompt);
 }
-defineExpose({ focus, expand, record });
+defineExpose({ focus, expand, record, isEditingPrompt: () => promptEditorOpen.value });
 </script>
 
 <template>
@@ -257,6 +265,15 @@ defineExpose({ focus, expand, record });
           :estimate="estimateGeneration"
         />
       </div>
+      <button
+        v-if="form.recipeCapabilities?.promptMode !== 'ignored'"
+        type="button"
+        class="prompt-editor-opener"
+        data-test="edit-prompt"
+        @click="promptEditorOpen = true"
+      >
+        Edit prompt
+      </button>
       <div class="ms-composer__controls">
         <!-- The Style chip IS the picker (StylePicker.vue, filled by the view);
              it opens its menu in place rather than being a door to a second
@@ -347,6 +364,39 @@ defineExpose({ focus, expand, record });
       :reason="warningReason"
     />
   </div>
+  <PromptEditor
+    :open="promptEditorOpen"
+    :prompt="promptText"
+    :history="history"
+    @authored="
+      (text, source) => {
+        cycler.reset();
+        promptText = text;
+        emit('prompt-authored', text, source);
+      }
+    "
+    @close="promptEditorOpen = false"
+  >
+    <template #tools
+      ><button
+        type="button"
+        :disabled="
+          !promptText.trim() || expansionRunning || preparedBlocked || !!transformBlockedReason
+        "
+        @click="expand()"
+      >
+        Expand</button
+      ><button
+        type="button"
+        :disabled="
+          !promptText.trim() || expansionRunning || preparedBlocked || !!transformBlockedReason
+        "
+        @click="emit('remix')"
+      >
+        Remix</button
+      ><button v-if="canUndo" type="button" @click="emit('restore')">Undo rewrite</button></template
+    >
+  </PromptEditor>
 </template>
 
 <style scoped>
@@ -466,5 +516,37 @@ defineExpose({ focus, expand, record });
 }
 .ms-composer__blocker {
   margin-top: 8px;
+}
+</style>
+
+<style scoped>
+.prompt-editor-opener {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  min-height: 36px;
+  padding: 6px 10px;
+  margin: 4px 12px;
+  font: inherit;
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text-dim);
+  background: transparent;
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  cursor: pointer;
+}
+.prompt-editor-opener:hover {
+  color: var(--mold-text);
+  background: var(--mold-border-control);
+}
+.prompt-editor-opener:focus-visible {
+  outline: 2px solid var(--mold-blue);
+  outline-offset: 2px;
+}
+@media (max-width: 600px) {
+  .prompt-editor-opener {
+    min-height: 44px;
+  }
 }
 </style>

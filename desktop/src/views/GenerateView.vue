@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { PromptClearRecovery } from "@studio/lib/promptClearRecovery";
 import { minimaxH3TaskForModel } from "@studio/lib/minimaxH3Authoring";
 import { restoreRetainedDraftMedia } from "@studio/lib/retainedDraftMedia";
 import { relayFetch as fetch } from "@studio/api/relayTransport";
@@ -3082,7 +3083,9 @@ function appendPromptWord(word: string) {
   onPromptAuthored(form.prompt.trim() ? `${form.prompt.trimEnd()}, ${trimmed}` : trimmed);
 }
 
+const promptClearRecovery = new PromptClearRecovery();
 function onPromptAuthored(prompt: string, source: PromptAuthoringSource = "typed") {
+  if (promptClearRecovery.apply(form, prompt, source)) return;
   // A ↑/↓ recall replaces the whole prompt, so the prepared rewrite has
   // nothing left to describe: release it instead of raising the stale banner
   // whose recovery actions would re-expand a prompt no longer on screen.
@@ -4478,12 +4481,15 @@ onCreateIntent(
 onCreateIntent(
   "generate",
   () => ui.generateTick,
-  () => void generate(),
+  () => {
+    if (!composerRef.value?.isEditingPrompt?.()) void generate();
+  },
 );
 onCreateIntent(
   "expand",
   () => ui.expandTick,
   () => {
+    if (composerRef.value?.isEditingPrompt?.()) return;
     if (refusePromptTransform()) return;
     composerRef.value?.expand?.();
   },

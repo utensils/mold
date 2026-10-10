@@ -21,6 +21,7 @@ struct RecentGroup: View {
 
     @Environment(PromptHistoryStore.self) private var history
     @Environment(HostStore.self) private var hosts
+    @Environment(ExpandStore.self) var expansions
     @State private var search = ""
     @State private var visibleCount = 5
     @State private var pendingDestruction: LibraryActions.Destruction?
@@ -146,7 +147,12 @@ extension RecentGroup {
 
     /// Puts the prompt back -- and only the prompt.
     static func pick(_ entry: HistoryEntry, into draft: inout RenderDraft) {
-        draft.prompt = entry.prompt
+        PromptHistoryRecall.apply(entry.prompt, to: &draft)
+    }
+
+    static func pick(_ entry: HistoryEntry, into draft: inout RenderDraft, expansions: ExpandStore) {
+        pick(entry, into: &draft)
+        expansions.lastAcceptedPrompt = nil
     }
 
     /// There is no per-row delete: the server has no route for one, only a

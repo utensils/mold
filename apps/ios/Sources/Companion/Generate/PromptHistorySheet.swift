@@ -5,11 +5,13 @@ struct PromptHistorySheet: View {
     @Environment(GenerateController.self) private var generate
     @Environment(HostStore.self) private var hosts
     @Environment(\.dismiss) private var dismiss
+    private let recall: ((String) -> Void)?
     @State private var history: PromptHistoryStore
     @State private var query = ""
     @State private var confirmsClear = false
 
-    init(host: MoldHost, hosts: HostStore) {
+    init(host: MoldHost, hosts: HostStore, recall: ((String) -> Void)? = nil) {
+        self.recall = recall
         _history = State(initialValue: PromptHistoryStore(host: host, hosts: hosts))
     }
 
@@ -31,7 +33,9 @@ struct PromptHistorySheet: View {
                 notice
                 ForEach(history.entries) { entry in
                     Button {
-                        PromptHistoryStore.recall(entry.prompt, into: &generate.draft)
+                        if let recall { recall(entry.prompt) } else {
+                            PromptHistoryStore.recall(entry.prompt, into: &generate.draft)
+                        }
                         dismiss()
                     } label: {
                         VStack(alignment: .leading, spacing: 6) {
@@ -52,7 +56,7 @@ struct PromptHistorySheet: View {
             }
             .navigationTitle("Prompt History")
             .navigationBarTitleDisplayMode(.inline)
-            .searchable(text: $query, prompt: "Search prompts")
+            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search prompts")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
                 ToolbarItem(placement: .topBarLeading) {

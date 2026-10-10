@@ -103,6 +103,14 @@ struct LibraryGrid: View {
                     scroller.scrollTo(rowAnchor(anchor), anchor: .top)
                 } }
             }
+            .onChange(of: sections.first?.day != nil) { _, _ in
+                // A display preference changes row boundaries, not print identity.
+                // Retain the visible print while its new row is laid out.
+                if let anchor = firstVisible { Task { @MainActor in
+                    await Task.yield()
+                    scroller.scrollTo(rowAnchor(anchor), anchor: .top)
+                } }
+            }
             .onChange(of: edge) { _, _ in
                 if let anchor = firstVisible { Task { @MainActor in
                     await Task.yield()
@@ -137,7 +145,11 @@ struct LibraryGrid: View {
     }
 
     private var firstVisible: PrintID? {
-        entries.first { visibleIDs.contains($0.id) }?.id
+        Self.visibleAnchor(in: entries, visibleRowIDs: visibleIDs)
+    }
+
+    static func visibleAnchor(in entries: [LibraryEntry], visibleRowIDs: Set<PrintID>) -> PrintID? {
+        entries.first { visibleRowIDs.contains($0.id) }?.id
     }
 
     private func rowAnchor(_ id: PrintID) -> PrintID {

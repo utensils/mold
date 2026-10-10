@@ -18,6 +18,20 @@ import { onBeforeUnmount, watch, type Ref } from "vue";
 export type OverlayToken = symbol;
 
 const stack: OverlayToken[] = [];
+const depthListeners = new Set<(depth: number) => void>();
+
+/** Observe overlay transitions, without watching unrelated document changes. */
+export function subscribeOverlayDepth(
+  listener: (depth: number) => void,
+): () => void {
+  depthListeners.add(listener);
+  return () => {
+    depthListeners.delete(listener);
+  };
+}
+function notifyDepth() {
+  for (const listener of depthListeners) listener(stack.length);
+}
 
 /** A token for one overlay instance. The label is for debugging only. */
 export function createOverlayToken(label = "overlay"): OverlayToken {
@@ -29,12 +43,16 @@ export function createOverlayToken(label = "overlay"): OverlayToken {
 export function pushOverlay(token: OverlayToken): void {
   if (stack.includes(token)) return;
   stack.push(token);
+  notifyDepth();
 }
 
 /** Remove an overlay wherever it sits; unregistered tokens are ignored. */
 export function popOverlay(token: OverlayToken): void {
   const index = stack.lastIndexOf(token);
-  if (index >= 0) stack.splice(index, 1);
+  if (index >= 0) {
+    stack.splice(index, 1);
+    notifyDepth();
+  }
 }
 
 /** True while this overlay is the one the user is actually looking at. */

@@ -11,6 +11,9 @@ struct LibrarySettings: View {
     @Environment(LibraryStore.self) private var library
     @AppStorage("selectedMachine", store: AppStorageSuite.defaults) private var selectedMachine = ""
 
+    @AppStorage("libraryShowDateSeparators", store: AppStorageSuite.defaults)
+    private var showDateSeparators = true
+
     private var machine: MoldHost? { hosts.machine(selected: selectedMachine) }
 
     private var intervalBinding: Binding<Int> {
@@ -20,6 +23,10 @@ struct LibrarySettings: View {
 
     var body: some View {
         Form {
+            Section("Display on This Mac") {
+                Toggle("Show date separators", isOn: $showDateSeparators)
+                    .help("Group chronological views by day. Turn off for one continuous grid.")
+            }
             Section("Library Sync on This Mac") {
                 LabeledContent("Check every") {
                     HStack {

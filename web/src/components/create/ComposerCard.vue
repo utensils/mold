@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import PromptEditor from "@studio/components/PromptEditor.vue";
 /*
  * Composer card (Mold Studio Create) — the prompt bed. Autogrow textarea, a
  * mono summary line with an inline "expanded · undo" affordance, and the
@@ -99,6 +100,13 @@ const emit = defineEmits<{
 }>();
 
 const textarea = ref<HTMLTextAreaElement | null>(null);
+const promptEditorOpen = ref(false);
+watch(
+  () => !!props.transformBlockedReason,
+  (ignored) => {
+    if (ignored) promptEditorOpen.value = false;
+  },
+);
 
 const summaryLine = computed(() => {
   // A canvasless recipe (a 3-D mesh) renders at no pixel size at all, so the
@@ -228,7 +236,7 @@ watch(
     const el = textarea.value;
     if (!el) return;
     el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 8 * 28)}px`;
+    el.style.height = `${Math.min(el.scrollHeight, 3 * 28)}px`;
   },
   { immediate: true },
 );
@@ -247,6 +255,15 @@ watch(
       @keydown="onKeydown"
     />
 
+    <button
+      v-if="!transformBlockedReason"
+      type="button"
+      class="prompt-editor-opener"
+      data-test="edit-prompt"
+      @click="promptEditorOpen = true"
+    >
+      Edit prompt
+    </button>
     <div class="composer__chips" data-test="composer-chips">
       <slot name="style" />
       <slot name="shape" />
@@ -336,6 +353,36 @@ watch(
       :reason="disabledReason"
     />
   </div>
+  <PromptEditor
+    :open="promptEditorOpen"
+    :prompt="prompt"
+    :history="history"
+    @authored="
+      (text, source) => {
+        cycler.reset();
+        emit('update:prompt', text, source);
+      }
+    "
+    @close="promptEditorOpen = false"
+  >
+    <template #tools
+      ><button
+        type="button"
+        :disabled="transformsDisabled"
+        @click="emit('expand')"
+      >
+        Expand</button
+      ><button
+        type="button"
+        :disabled="transformsDisabled"
+        @click="emit('remix')"
+      >
+        Remix</button
+      ><button v-if="expanded" type="button" @click="emit('undo-expand')">
+        Undo rewrite
+      </button></template
+    >
+  </PromptEditor>
 </template>
 
 <style scoped>
@@ -477,5 +524,37 @@ watch(
 
 .composer__return {
   font-size: 15px;
+}
+</style>
+
+<style scoped>
+.prompt-editor-opener {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  min-height: 36px;
+  padding: 6px 10px;
+  margin: 4px 0;
+  font: inherit;
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text-dim);
+  background: transparent;
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  cursor: pointer;
+}
+.prompt-editor-opener:hover {
+  color: var(--mold-text);
+  background: var(--mold-border-control);
+}
+.prompt-editor-opener:focus-visible {
+  outline: 2px solid var(--mold-blue);
+  outline-offset: 2px;
+}
+@media (max-width: 600px) {
+  .prompt-editor-opener {
+    min-height: 44px;
+  }
 }
 </style>

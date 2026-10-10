@@ -956,6 +956,36 @@ describe("MobileApp generation lifecycle", () => {
     expect(wrapper.text()).not.toContain("Frames must be 4n+1");
   });
 
+  it("edits long mobile prompts live and restores Clear provenance without changing settings", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const form = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    form.prompt = "expanded mobile words";
+    form.originalPrompt = "mobile root";
+    const model = form.model;
+    await wrapper.get('[data-test="edit-prompt"]').trigger("click");
+    await flushPromises();
+    (document.querySelector('[data-test="prompt-clear"]') as HTMLButtonElement).click();
+    await flushPromises();
+    expect(form.prompt).toBe("");
+    expect(form.originalPrompt).toBeNull();
+    (document.querySelector('[data-test="prompt-undo-clear"]') as HTMLButtonElement).click();
+    await flushPromises();
+    expect(form.prompt).toBe("expanded mobile words");
+    expect(form.originalPrompt).toBe("mobile root");
+    const editor = document.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Prompt text"]',
+    )!;
+    editor.value = "new mobile\nmultiline words";
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushPromises();
+    expect(form.prompt).toBe("new mobile\nmultiline words");
+    expect(form.model).toBe(model);
+    (document.querySelector('[data-test="prompt-done"]') as HTMLButtonElement).click();
+    await flushPromises();
+    expect(fieldControl("Prompt").element).toHaveProperty("value", "new mobile\nmultiline words");
+  });
+
   it("retires dormant original-prompt provenance when a new prompt is authored", async () => {
     wrapper = mountMobileApp();
     await flushPromises();
