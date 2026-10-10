@@ -9,13 +9,14 @@ struct PrintThumbnail: View {
     let entry: LibraryEntry
     let points: CGFloat
     var trashed = false
+    var contentMode: ContentMode = .fill
     @State private var image: UIImage?
 
     var body: some View {
         ZStack {
             Rectangle().fill(.fill.tertiary)
             if let image {
-                Image(uiImage: image).resizable().scaledToFill()
+                Image(uiImage: image).resizable().aspectRatio(contentMode: contentMode)
             }
         }
         .task(id: "\(entry.hostID)|\(entry.id.filename)|\(ThumbnailLoader.version(entry.print))|\(ThumbnailLoader.bucket(Int(points * scale)))|\(trashed)") {

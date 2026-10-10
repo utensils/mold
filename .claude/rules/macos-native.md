@@ -112,3 +112,14 @@ before releasing the exact host/kind/job reservation. Durable authored sequences
 remain unsupported here. Existing framewise upscale controls require a connected
 host, known applicable state and current rendered job identity; reserve the exact
 print/job key until the authoritative transition response reconciles its state.
+
+Continuous Library rows preserve actual metadata aspect ratios with 2-point seams
+and square corners. Missing/invalid dimensions use a square placeholder; decode
+completion never changes geometry. Incomplete final rows stay left aligned at
+target height. Valid extreme ratios remain uncropped. Keep ordered row geometry
+shared (studio/lib/justifiedLayout.ts and MoldClient.JustifiedLayout), lazy/windowed
+rendering, stable item identities, and a visible item anchor through resize/zoom.
+Native macOS vertical arrows follow adjacent row centers, never a guessed column
+count. Viewer return restores the covered viewport; native previews explicitly
+inject thumbnail loaders. Native iOS omits the visual host-name thumbnail badge;
+Info and host sorting/filtering retain their authority. Unseen semantics are unchanged.

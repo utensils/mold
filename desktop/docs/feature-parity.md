@@ -541,3 +541,7 @@ servers, Held cancellation remains held-only even if another client starts the
 job before the request arrives.
 
 Shared generation activity includes model loading as an executing phase. Cancel remains capability-gated for ordinary jobs and follows chain-owned authority for automatic chains; terminal, cancelling, and unknown phases stay read-only. Native iOS receives loading jobs as `running` through the ordinary queue endpoint and uses its existing running cancellation capability.
+
+### Continuous Library rows
+
+Library thumbnails on native macOS, native iOS, Tauri desktop and web use continuous justified rows: each picture keeps its aspect ratio, with narrow seams and square corners. Thumbnail size and window changes reflow the rows while keeping a visible print in place. The final incomplete row stays left aligned without enlarging a lone print. iOS thumbnails omit machine-name badges; image details and machine filtering still show the owning machines.

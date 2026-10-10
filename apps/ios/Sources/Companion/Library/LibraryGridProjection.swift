@@ -80,13 +80,3 @@ final class LibraryGridProjection {
         return first?.id
     }
 }
-
-/// Geometry updates are observations, not view state invalidations. Freeze the
-/// exact viewport while navigation covers it, including a partial tile/header.
-final class LibraryViewport {
-    private var offset: CGFloat = 0
-    private var covered = false
-    func report(offset: CGFloat) { if !covered { self.offset = offset } }
-    func cover() { covered = true }
-    func uncover() -> CGFloat { covered = false; return offset }
-}

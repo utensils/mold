@@ -17,6 +17,7 @@ struct LibraryGrid: View {
     let enclosingShelf: CollectionShelf?
     let trashCount: Int
     @Binding var selection: LibraryCursor.Selection
+    let viewport: LibraryViewport
     let returnToPrint: PrintID?
     let onReturnRestored: () -> Void
     let onOpen: (PrintID) -> Void
@@ -24,9 +25,12 @@ struct LibraryGrid: View {
 
     /// Not `private`: the cursor the keyboard drives is built in
     /// `+Selection`, and `private` does not cross a file boundary.
-    @State var columns = 1
+    @State private var width: CGFloat = 0
+    @State private var layout = JustifiedLibraryLayout()
+    @State private var nativePosition = ScrollPosition()
     @State var keyboardReveal: PrintID?
     @State private var visibleIDs: Set<PrintID> = []
+    @State private var fullyVisibleIDs: Set<PrintID> = []
     /// The grid must HOLD key focus, or its arrows, Return and Space never
     /// reach it -- including when the viewer closes and hands the cursor back.
     @FocusState private var focused: Bool
@@ -41,12 +45,28 @@ struct LibraryGrid: View {
         let selectedPlan = selectedTargets.isEmpty ? nil : LibraryMenu(
             targets: selectedTargets, scope: scope, actions: actions, shelves: shelves,
             enclosingShelf: enclosingShelf, trashCount: trashCount, open: {}).plan
+        let laidSections = layout.resolve(sections, width: width, targetHeight: edge)
         return ScrollViewReader { scroller in
             ScrollView {
-                LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 16) {
-                    ForEach(sections) { section in
+                LazyVStack(alignment: .leading, spacing: JustifiedLayout.gap) {
+                    ForEach(laidSections) { laid in
+                        let section = laid.source
                         Section {
-                            ForEach(section.items) { cell($0, selectedTargets: selectedTargets, selectedPlan: selectedPlan) }
+                            ForEach(laid.rows) { row in
+                                HStack(spacing: JustifiedLayout.gap) {
+                                    ForEach(row.items) { item in
+                                        cell(section.items[item.index], points: max(item.width, row.height), selectedTargets: selectedTargets, selectedPlan: selectedPlan)
+                                            .frame(width: item.width, height: row.height)
+                                    }
+                                }
+                                .frame(height: row.height)
+                                .id(row.id)
+                                .onScrollVisibilityChange(threshold: 0.99) { visible in
+                                    if visible { fullyVisibleIDs.insert(row.id) }
+                                    else { fullyVisibleIDs.remove(row.id) }
+                                }
+                                .onDisappear { fullyVisibleIDs.remove(row.id) }
+                            }
                         } header: {
                             // A section with no day is the whole list in one
                             // piece, under an order days cannot describe.
@@ -54,29 +74,41 @@ struct LibraryGrid: View {
                         }
                     }
                 }
-                .padding(16)
                 .scrollTargetLayout()
             }
-            .onAppear {
-                // A newly created grid after closing the viewer should reveal
-                // its returned cursor once; pointer selections never request a scroll.
-                if let returnToPrint {
-                    scroller.scrollTo(returnToPrint, anchor: .center)
+            .scrollPosition($nativePosition)
+            .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { _, offset in
+                viewport.report(offset: offset)
+            }
+            .task(id: width > 0) {
+                if width > 0, returnToPrint != nil {
+                    nativePosition.scrollTo(y: viewport.uncover())
                     onReturnRestored()
                 }
             }
-            .onScrollTargetVisibilityChange(idType: PrintID.self, threshold: 0.95) { ids in
+            .onScrollTargetVisibilityChange(idType: PrintID.self, threshold: 0.1) { ids in
                 visibleIDs = Set(ids)
             }
             .onChange(of: keyboardReveal) { _, lead in
-                guard let lead, !visibleIDs.contains(lead) else { return }
-                withAnimation(.snappy) { scroller.scrollTo(lead, anchor: .center) }
+                guard let lead, !fullyVisibleIDs.contains(rowAnchor(lead)) else { return }
+                // The 10% visibility set is only a reflow anchor. A sliver of
+                // the selected row is not enough for keyboard navigation.
+                withAnimation(.snappy) { scroller.scrollTo(rowAnchor(lead), anchor: .center) }
             }
-        }
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
-            // The cursor needs the real column count for arrow keys to land
-            // where the eye expects.
-            columns = max(Int((width - 32 + 12) / (edge + 12)), 1)
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { newWidth in
+                let anchor = firstVisible
+                width = newWidth
+                if let anchor { Task { @MainActor in
+                    await Task.yield()
+                    scroller.scrollTo(rowAnchor(anchor), anchor: .top)
+                } }
+            }
+            .onChange(of: edge) { _, _ in
+                if let anchor = firstVisible { Task { @MainActor in
+                    await Task.yield()
+                    scroller.scrollTo(rowAnchor(anchor), anchor: .top)
+                } }
+            }
         }
         .focusable()
         .focusEffectDisabled()
@@ -104,27 +136,39 @@ struct LibraryGrid: View {
         }
     }
 
-    private var gridColumns: [GridItem] {
-        [GridItem(.adaptive(minimum: edge, maximum: .infinity), spacing: 12)]
+    private var firstVisible: PrintID? {
+        entries.first { visibleIDs.contains($0.id) }?.id
     }
 
-    /// Not `private`: `+Selection` is what drives it.
+    private func rowAnchor(_ id: PrintID) -> PrintID {
+        for section in layout.resolve(sections, width: width, targetHeight: edge) {
+            for row in section.rows where row.items.contains(where: { section.source.items[$0.index].id == id }) {
+                return row.id
+            }
+        }
+        return id
+    }
+
+    /// Geometry, rather than a guessed column count, owns vertical arrows.
     var cursor: LibraryCursor {
-        LibraryCursor(sections: sections, columns: columns)
+        LibraryCursor(rows: layout.resolve(sections, width: width, targetHeight: edge).flatMap { section in
+            section.rows.map { row in
+                row.items.map { (section.source.items[$0.index].id, $0.x + $0.width / 2) }
+            }
+        })
     }
 
-    @ViewBuilder private func cell(_ entry: LibraryEntry,
+    @ViewBuilder private func cell(_ entry: LibraryEntry, points: CGFloat,
                                    selectedTargets: [LibraryEntry],
                                    selectedPlan: LibraryMenuPlan?) -> some View {
         if let host = hosts.first(where: { $0.id == entry.hostID }) {
             LibraryCell(
-                entry: entry, host: host, edge: edge,
+                entry: entry, host: host, edge: points,
                 isSelected: selection.items.contains(entry.id),
                 isLead: selection.lead == entry.id,
                 showsHostBadge: showsHostBadges,
                 fresh: !scope.isTrash && (newMediaVisit?.contains(entry.print.filename) ?? false)
             )
-            .id(entry.id)
             .onTapGesture(count: 2) { onOpen(entry.id) }
             .onTapGesture { click(entry) }
             .draggable(actions.draggable(entry))
@@ -144,7 +188,8 @@ struct LibraryGrid: View {
                 .font(.subheadline).monospacedDigit().foregroundStyle(.secondary)
             Spacer()
         }
-        .padding(.top, 8)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
         .background(.bar)
     }
 }

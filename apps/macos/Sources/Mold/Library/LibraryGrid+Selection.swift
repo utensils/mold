@@ -14,8 +14,11 @@ extension LibraryGrid {
     func perform(_ action: LibraryGridAction?) -> KeyPress.Result {
         switch action {
         case let .move(move, modifier):
-            selection = cursor.moving(move, modifier, from: selection)
-            keyboardReveal = selection.lead
+            let next = cursor.moving(move, modifier, from: selection)
+            selection = next
+            // The parent's binding can still read its prior render here.
+            // Reveal the computed destination, not the previous selection.
+            keyboardReveal = next.lead
             return .handled
         case .open: return openLead()
         case .quickLook: return quickLookSelection()

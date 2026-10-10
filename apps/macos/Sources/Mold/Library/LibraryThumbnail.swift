@@ -5,13 +5,14 @@ import SwiftUI
 
 /// One tile's picture.
 ///
-/// The square is drawn immediately and the image is overlaid when it arrives,
+/// The metadata-sized placeholder is drawn immediately and the image is overlaid when it arrives,
 /// so the grid's geometry never depends on decode state -- tiles don't reflow
 /// under a scroll as pictures land.
 struct LibraryThumbnail: View {
     let entry: LibraryEntry
     let host: MoldHost
     let edge: CGFloat
+    var continuous = false
 
     @Environment(ThumbnailCache.self) private var cache
     @State private var image: NSImage?
@@ -19,17 +20,16 @@ struct LibraryThumbnail: View {
     var body: some View {
         Rectangle()
             .fill(.quaternary)
-            .aspectRatio(1, contentMode: .fit)
+            .aspectRatio(continuous ? JustifiedLayout.aspect(width: entry.print.metadata.width, height: entry.print.metadata.height) : 1, contentMode: .fit)
             .overlay {
                 if let image {
-                    // The picture fills the square, so the board under it is
-                    // the whole tile.
+                    // Preserve Library ratios; standalone square previews crop.
                     ZStack {
                         if entry.print.metadata.showsAlphaBed { AlphaBed() }
                         Image(nsImage: image)
                             .resizable()
                             .interpolation(.medium)
-                            .aspectRatio(contentMode: .fill)
+                            .aspectRatio(contentMode: continuous ? .fit : .fill)
                     }
                 } else {
                     // a11y: placeholder inside LibraryCell, which carries the label
@@ -41,7 +41,7 @@ struct LibraryThumbnail: View {
                         .foregroundStyle(.tertiary)
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: Chrome.thumbnailRadius, style: .continuous))
+            .clipShape(.rect(cornerRadius: continuous ? 0 : Chrome.thumbnailRadius))
             .task(id: taskKey) { await load() }
     }
 
@@ -55,6 +55,8 @@ struct LibraryThumbnail: View {
     private var bucket: Int { edge > 160 ? 512 : 256 }
 
     private func load() async {
-        image = await cache.image(for: entry, host: host, size: bucket)
+        let loaded = await cache.image(for: entry, host: host, size: bucket)
+        guard !Task.isCancelled else { return }
+        image = loaded
     }
 }

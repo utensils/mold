@@ -31,6 +31,7 @@ struct LibraryPane: View {
     @State var newMediaVisit: LibraryNewMedia.Visit?
     @State var selection = LibraryCursor.Selection.empty
     @State var viewing: PrintID?
+    @State var gridViewport = LibraryViewport()
     @State var gridReturn: (id: PrintID, scope: LibraryScope, query: LibraryQuery)?
     /// Cancels an attachment whose selection moved while its bytes loaded.
     @State var attachmentVersion = 0

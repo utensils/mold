@@ -6,6 +6,22 @@ import Testing
 
 @MainActor
 struct LibraryScrollPositionTests {
+    @Test func resizeCapturesThePrintBeforeNewGeometryReportsVisibility() {
+        let host = MoldHost.ID()
+        let before = PrintID(host: host, filename: "before.png")
+        let after = PrintID(host: host, filename: "after.png")
+        var position = LibraryScrollPosition()
+        position.report(before)
+        position.prepareReflow()
+        position.report(after)
+        position.prepareReflow() // Coalesced size changes keep the first anchor.
+        #expect(position.takeReflowAnchor() == before)
+        #expect(position.takeReflowAnchor() == nil)
+        position.prepareReflow()
+        position.reset()
+        #expect(position.takeReflowAnchor() == nil)
+    }
+
     @Test func viewerReturnRestoresViewportRatherThanOpenedTile() {
         let viewport = LibraryViewport()
         viewport.report(offset: 1234.5)
