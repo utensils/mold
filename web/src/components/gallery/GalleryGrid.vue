@@ -603,7 +603,8 @@ onBeforeUnmount(() => {
   background: color-mix(in srgb, var(--rebate) 5%, transparent);
 }
 
-:deep(.ms-tile) {
+.gg__cell :deep(.ms-tile),
+.gg__cell :deep(.ms-tile:hover) {
   height: 100%;
   aspect-ratio: auto;
   border-radius: 0;
