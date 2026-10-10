@@ -17,15 +17,40 @@ final class DockBadge {
     /// What actually paints the Dock. A parameter so a test reads the label
     /// it was handed instead of an app's real tile.
     private let apply: (String?) -> Void
+    private let defaults: UserDefaults
+    private var unreadCount = 0
+    private var preferenceObserver: NSObjectProtocol?
     private var observation: Task<Void, Never>?
 
-    static let dockTile: (String?) -> Void = { NSApp.dockTile.badgeLabel = $0 }
+    static let dockTile: (String?) -> Void = { NSApplication.shared.dockTile.badgeLabel = $0 }
 
-    init(apply: @escaping (String?) -> Void = DockBadge.dockTile) {
+    init(defaults: UserDefaults = AppStorageSuite.defaults,
+         apply: @escaping (String?) -> Void = DockBadge.dockTile) {
+        self.defaults = defaults
         self.apply = apply
+        preferenceObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification, object: defaults, queue: nil
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.updateUnreadCount(self.unreadCount)
+            }
+        }
     }
 
-    deinit { observation?.cancel() }
+    isolated deinit {
+        observation?.cancel()
+        if let preferenceObserver { NotificationCenter.default.removeObserver(preferenceObserver) }
+    }
+
+    /// The persisted Library ledger is the production source; settings only
+    /// suppress presentation, so re-enabling restores the current count.
+    func updateUnreadCount(_ count: Int) {
+        unreadCount = count
+        let enabled = defaults.object(forKey: "badgeLandedPrints") == nil
+            || defaults.bool(forKey: "badgeLandedPrints")
+        paint(enabled ? count : 0)
+    }
 
     /// The label for a count. Zero is NO badge, not a badge reading "0".
     static func label(for count: Int) -> String? {

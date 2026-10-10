@@ -9,13 +9,15 @@ public struct LibraryNewMedia {
     public init() {}
 
     public struct Visit: Sendable {
+        private var viewed: Set<String> = []
         private let visited: Bool
         private let seen: Set<String>
         fileprivate init(visited: Bool, seen: Set<String>) {
             self.visited = visited
             self.seen = seen
         }
-        public func contains(_ filename: String) -> Bool { visited && !seen.contains(filename) }
+        public mutating func markViewed(_ filename: String) { viewed.insert(filename) }
+        public func contains(_ filename: String) -> Bool { visited && !seen.contains(filename) && !viewed.contains(filename) }
     }
 
     public mutating func beginVisit() -> Visit {

@@ -46,6 +46,7 @@ final class AppStores {
     let expansions: ExpandStore
     let notifications: MoldNotifications
     let heartbeat: HostHeartbeat
+    let dockBadge = DockBadge()
 
     /// `HostStore` first, since every other store is built by asking it which
     /// machines exist.
@@ -85,6 +86,8 @@ final class AppStores {
         notifications = MoldNotifications(
             landedPrints: landedPrints, queue: queue, hosts: hosts, library: library)
         heartbeat = HostHeartbeat(hosts: hosts, queue: queue)
+        library.unreadCountChanged = { [dockBadge] count in dockBadge.updateUnreadCount(count) }
+        dockBadge.updateUnreadCount(library.unreadCount)
         // Last, once every store that reads the machine list exists. The
         // probe runs off the main actor, so the window opens meanwhile.
         if EngineAutostart.atLaunch() { engine.start() }

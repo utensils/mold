@@ -24,3 +24,15 @@ import Testing
     #expect(!first.contains("loaded-later.png"))
     #expect(!session.beginVisit().contains("loaded-later.png"))
 }
+
+@Test func viewingClearsOnlySelectedBadgeWithinTheSameVisit() {
+    var media = LibraryNewMedia()
+    media.markSeen(["old.png"])
+    var visit = media.beginVisit()
+    media.markSeen(["old.png", "new.png", "new.mp4"])
+    #expect(visit.contains("new.png"))
+    visit.markViewed("new.png")
+    #expect(!visit.contains("new.png"))
+    #expect(visit.contains("new.mp4"))
+    #expect(!media.beginVisit().contains("new.mp4"), "The previous next-visit logic remains unchanged")
+}

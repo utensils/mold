@@ -47,6 +47,7 @@ extension LibraryStore {
     func setShelfHidden(_ shelf: CollectionShelf, hidden: Bool) async {
         collectionVisibility.set(shelf.slug, hidden: hidden, hosts: hosts.hosts)
         collectionVisibility.persist(to: AppStorageSuite.defaults, key: "library.collectionVisibility")
+        refreshUnreadMedia()
         await reconcileCollectionVisibility()
         await reloadCollections()
     }
@@ -56,6 +57,7 @@ extension LibraryStore {
         reconcilingCollectionVisibility = true
         defer {
             reconcilingCollectionVisibility = false
+            refreshUnreadMedia()
             collectionVisibility.persist(to: AppStorageSuite.defaults, key: "library.collectionVisibility")
         }
         await collectionVisibility.reconcile(hosts: { self.hosts.hosts },

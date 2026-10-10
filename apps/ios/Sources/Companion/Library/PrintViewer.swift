@@ -5,6 +5,7 @@ import SwiftUI
 /// tap to hide the chrome, Share / Favourite / Info / Delete along the bottom,
 /// and everything else in the ⋯ menu -- the grid's menu, word for word.
 struct PrintViewer: View {
+    @Environment(AppRouter.self) private var router
     @Environment(LibraryStore.self) private var library
     @Environment(PrintActions.self) private var actions
     @Environment(\.dismiss) private var dismiss
@@ -105,6 +106,12 @@ struct PrintViewer: View {
                     .background(.regularMaterial, in: .capsule)
                     .padding(.top, 8)
                     .onTapGesture { actions.status = nil }
+            }
+        }
+        .onChange(of: current ?? start, initial: true) { _, id in
+            if !trashed {
+                router.libraryVisit?.markViewed(id.filename)
+                library.markViewed(id)
             }
         }
         .onChange(of: ObjectIdentifier(projection)) { _, _ in

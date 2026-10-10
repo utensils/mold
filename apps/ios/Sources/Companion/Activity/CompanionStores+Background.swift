@@ -2,21 +2,22 @@ import BackgroundTasks
 import Foundation
 import MoldClient
 
-/// Background refresh (DESIGN.md §A): while any render this phone sent is
-/// still pending, iOS wakes the app about every 15 minutes to ask each
+/// Background refresh (DESIGN.md §A): while machines are paired, iOS can wake
+/// the app after a requested 15-minute minimum to ask each
 /// machine how it went -- notifications for what settled, the Live Activity
 /// for what did not, and a fresh widget snapshot.
 extension CompanionStores {
     static let refreshTask = "io.utensils.mold.companion.refresh"
 
     func scheduleRefresh() {
-        guard !generate.ledger.batches.isEmpty else { return }
+        guard !hosts.hosts.isEmpty else { return }
         let request = BGAppRefreshTaskRequest(identifier: Self.refreshTask)
         request.earliestBeginDate = .now.addingTimeInterval(15 * 60)
         try? BGTaskScheduler.shared.submit(request)
     }
 
     func backgroundRefresh() async {
+        await library.restoreSaved()
         await hosts.refreshAll()
         for batch in generate.ledger.batches {
             await reconcile(batch)
@@ -26,6 +27,8 @@ extension CompanionStores {
         async let library: Void = library.reload()
         async let queue: Void = queue.reload()
         _ = await (library, queue)
+        notifier.iconBadge.update(self.library.unreadCount, allowPrompt: false)
+        await notifier.iconBadge.flush()
         await widgets.refresh()
         scheduleRefresh()
     }

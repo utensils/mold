@@ -169,7 +169,13 @@ Queue inputs use shared QueueInput descriptors and QueueInputPreview loading. De
 
 Library New badges compare filenames with the previous session visit, using the
 whole active pool and a stable per-view snapshot. First visit establishes a
-baseline; viewer navigation preserves the visit. Badge rows must fit machine
+baseline; selected viewer media immediately calls `Visit.markViewed`, preserving
+unopened badges within the visit and the previous next-visit clearing behavior.
+`LibraryUnreadLedger` persists device-local icon counts across launches. Count the
+merged visible active inventory, excluding hidden collections and Trash; retain
+offline read state. Opening Library uses its existing whole-pool seen behavior
+to clear the icon count. iOS serializes badge writes and flushes background
+refresh; macOS updates the Dock. Badge rows must fit machine
 labels beside playback without overlap, including narrow tiles.
 
 Use These Settings starts from fresh selected-print media, including parked wells.

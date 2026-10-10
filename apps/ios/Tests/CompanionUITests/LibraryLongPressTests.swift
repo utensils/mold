@@ -32,11 +32,96 @@ final class LibraryLongPressTests: XCTestCase {
         fresh.tap()
         XCTAssertTrue(app.buttons["Info"].firstMatch.waitForExistence(timeout: 5))
         app.navigationBars.buttons.firstMatch.tap()
-        XCTAssertTrue(fresh.waitForExistence(timeout: 5), "Viewer return keeps this visit's New badge")
+        XCTAssertTrue(fresh.waitForNonExistence(timeout: 5), "Viewing immediately removes this visit's New badge")
         XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
         XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
         XCTAssertFalse(fresh.exists, "Next Library visit clears the badge")
-        attach(app, name: "Next visit clears New")
+        attach(app, name: "Viewed clip stays seen on next visit")
+    }
+
+    @MainActor func testAppIconCountsNewMediaAndViewingClearsCurrentVisitImmediately() async throws {
+        continueAfterFailure = false
+        let identity = UUID().uuidString
+        let machine = try FixtureMachine(galleryPrints: 3, galleryID: identity, mixedMedia: true)
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        defer { app.terminate(); machine.stop() }
+        cleanUpFixture(machine, port: port, app: app)
+        app.launch()
+        pair(port, in: app, name: "Badge workstation")
+        XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
+        if !app.navigationBars["All Prints"].exists { app.chooseLibraryShelf("All Prints") }
+        XCTAssertTrue(fixturePrint(in: app).waitForExistence(timeout: 10))
+        XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
+        await machine.addNewMedia(filename: "new-\(identity).png", title: "Unread picture")
+        await machine.addNewMedia(filename: "new-\(identity).mp4", title: "Unread video", clip: true)
+        // Foreground refresh from a route return without opening Library.
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
+        // Wait for refresh/permission before checking the real SpringBoard icon.
+        try await Task.sleep(for: .seconds(3))
+        XCUIDevice.shared.press(.home)
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let icon = springboard.icons.matching(NSPredicate(format: "label BEGINSWITH 'Mold Studio'")).firstMatch
+        XCTAssertTrue(icon.waitForExistence(timeout: 5))
+        let two = NSPredicate { _, _ in
+            (icon.value as? String)?.contains("2") == true || icon.label.contains("2")
+        }
+        await fulfillment(of: [expectation(for: two, evaluatedWith: icon)], timeout: 10)
+        XCTAssertTrue(two.evaluate(with: icon), icon.debugDescription)
+        attach(springboard, name: "Home Screen counts two new media")
+        app.activate()
+        XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
+        let freshPicture = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'New, Unread picture'")).firstMatch
+        let freshVideo = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'New, Unread video'")).firstMatch
+        XCTAssertTrue(freshPicture.waitForExistence(timeout: 10))
+        XCTAssertTrue(freshVideo.waitForExistence(timeout: 5))
+        freshPicture.tap()
+        XCTAssertTrue(app.buttons["Info"].firstMatch.waitForExistence(timeout: 5))
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(freshPicture.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(freshVideo.exists, "Preloaded neighboring pages are not viewed")
+        attach(app, name: "Only viewed picture loses New in current visit")
+        freshVideo.tap()
+        XCTAssertTrue(app.buttons["Info"].firstMatch.waitForExistence(timeout: 5))
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(freshVideo.waitForNonExistence(timeout: 5))
+        XCUIDevice.shared.press(.home)
+        let noBadge = NSPredicate { _, _ in
+            let value = icon.value as? String ?? ""
+            return (value.isEmpty || value == "0") && icon.label == "Mold Studio"
+        }
+        await fulfillment(of: [expectation(for: noBadge, evaluatedWith: icon)], timeout: 5)
+        XCTAssertTrue(noBadge.evaluate(with: icon), icon.debugDescription)
+        attach(springboard, name: "Home Screen badge cleared after Library visit")
+        app.activate()
+        XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
+        XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
+        XCTAssertFalse(freshPicture.exists)
+        XCTAssertFalse(freshVideo.exists)
+        XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
+        await machine.addNewMedia(filename: "relaunch-\(identity).png", title: "Relaunch picture")
+        XCUIDevice.shared.press(.home)
+        try await Task.sleep(for: .seconds(1))
+        app.activate()
+        try await Task.sleep(for: .seconds(3))
+        XCUIDevice.shared.press(.home)
+        let one = NSPredicate { _, _ in (icon.value as? String)?.contains("1") == true || icon.label.contains("1 notification") }
+        await fulfillment(of: [expectation(for: one, evaluatedWith: icon)], timeout: 10)
+        app.terminate(); app.launch()
+        try await Task.sleep(for: .seconds(3))
+        XCUIDevice.shared.press(.home)
+        await fulfillment(of: [expectation(for: one, evaluatedWith: icon)], timeout: 10)
+        attach(springboard, name: "Home Screen count survives app relaunch")
+        app.activate()
+        XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'New, Relaunch picture'")).firstMatch.exists,
+                       "Session-only first-visit baseline remains unchanged after relaunch")
+        XCUIDevice.shared.press(.home)
+        await fulfillment(of: [expectation(for: noBadge, evaluatedWith: icon)], timeout: 5)
+        app.activate()
+        XCTAssertTrue(machine.generationRequests.isEmpty)
     }
 
     @MainActor func testPopulatedLibrarySelectContrastAtLargestText() async throws {

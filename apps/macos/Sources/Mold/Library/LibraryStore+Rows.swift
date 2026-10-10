@@ -32,6 +32,7 @@ extension LibraryStore {
         let live = inMachineOrder(perHost).filter { $0.print.trashedAt == nil }
         items = LibraryMerge.merge(live, localHost: MoldEngine.localHostID, links: syncLinks())
             .sorted { $0.print.timestamp > $1.print.timestamp }
+        refreshUnreadMedia()
         rows.bump()
     }
 
