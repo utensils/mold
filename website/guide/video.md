@@ -153,20 +153,17 @@ composition. `/api/models` advertises the per-model `max_pixels`,
 `max_axis_pixels` and `recommended_dimensions`, so a picker never offers a rung
 the selected checkpoint would reject.
 
-**4K needs `--spatial-tile 768` on a 24 GB card.** Measured on an RTX 4090 with
-`ltx-2-19b-distilled:fp8` at 25 frames: 1080p peaks at 18.4 GB, 1440p at
-18.1 GB, and 4K completes at 18.2 GB with the smaller tile. With the default
-1280px tile, 4K reaches the VAE decode and fails there with an out-of-memory
-error naming the phase; it does not silently render something smaller. Those
-are single-configuration measurements at 25 frames, not a support matrix; see
-[LTX-2 → Resolution](/models/ltx2#resolution) for the full numbers and
-caveats.
+**VAE decoding uses spatial tiles automatically.** Convolutional LTX-2 VAE
+Auto uses upstream aspect-coupled 768px long-side tiles with 64px overlap,
+independent of the temporal workspace estimate. Temporal context, retained
+output strips and final output still use memory, so long clips can still OOM.
+The historical RTX 4090 measurements at 25 frames used an explicit square
+768px tile with 256px overlap; they do not qualify the current Auto geometry.
+See [LTX-2 → Resolution](/models/ltx2#resolution) for the measured configurations.
 
 `--spatial-tile` (or `MOLD_LTX2_SPATIAL_TILE`, which `mold serve` reads) takes
-`auto` (the default, which tiles only where it buys something) `off`, or an
-explicit `<px>` / `<px>:<overlap>` in multiples of 32. `auto` engages exactly
-at the span and no earlier, so every resolution up to 1080p renders as it
-always has; `off` past the span is refused rather than quietly degraded. See
+`auto` (default), `off`, or explicit `<px>` / `<px>:<overlap>` in multiples of 32. Bare explicit sizes retain a 256px overlap. Stage-2 Auto still engages
+only past the trained 2048px span; `off` past that span is refused. See
 [LTX-2 → Spatial tiling](/models/ltx2#spatial-tiling-spatial-tile).
 
 ## Multi-prompt scripts (v2)

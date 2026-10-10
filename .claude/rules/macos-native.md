@@ -144,3 +144,5 @@ imports by current model/recipe/media revisions, origin route/key/instance and
 view lifetime; preserve authored scalar edits while a download completes.
 
 **Stable library status and clip duration.** Library connection/failure/cache status lives in an always-present toolbar slot, never an inserted grid row. Both native apps read model `supports_duration_prediction` and `runtime_ready` for automatic clip length: omit frames only for the active supported automatic preference, persist/restore that preference independently of the explicit frame count, and preserve it through unsupported models.
+
+Native model recovery prefers the queue row’s `model_download` hint, requiring a nonblank exact match to the row model. A present malformed/null/mismatched hint blocks legacy fallback without dropping the row. Only absent hints permit typed batch-code fallback. Preserve actual missing-component prose and diagnostics; use the existing exact-host, license-aware download-and-retry coordinator.

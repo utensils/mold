@@ -8,6 +8,8 @@ import {
 import { runWithLicenseConsent } from "./useLicenseAcceptance";
 import {
   cancelQueueDownloadRecovery,
+  missingQueueModel,
+  queueDownloadKey,
   queueDownloadState,
   startQueueDownloadRecovery,
 } from "./useQueueDownloadRecovery";
@@ -200,4 +202,24 @@ describe("queue download recovery lifecycle", () => {
       busy: false,
     });
   });
+});
+
+it("accepts a verified exact-model repair hint without a batch error code", async () => {
+  vi.mocked(getQueueJob).mockResolvedValue({
+    job: { ...row, model_download: { model: row.model } },
+  });
+  expect(await missingQueueModel(target, "instance", "q")).toBe(true);
+  expect(getGenerationBatch).not.toHaveBeenCalled();
+});
+it("does not let a mismatched repair hint fall back to the legacy code", async () => {
+  vi.mocked(getQueueJob).mockResolvedValue({
+    job: { ...row, model_download: { model: "other" } },
+  });
+  expect(await missingQueueModel(target, "instance", "q")).toBe(false);
+  expect(getGenerationBatch).not.toHaveBeenCalled();
+});
+it("separates recovery state across credential changes on the same route", () => {
+  expect(
+    queueDownloadKey({ ...target, apiKey: "old" }, "instance", "q"),
+  ).not.toBe(queueDownloadKey({ ...target, apiKey: "new" }, "instance", "q"));
 });

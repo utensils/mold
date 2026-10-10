@@ -232,6 +232,7 @@ describe("buildQueueStatusIndex", () => {
     ]);
     expect(queueStatusFor(index, "alpha", "job-1")).toEqual({
       state: "running",
+      downloadAvailable: false,
       explicitlyPaused: null,
       position: null,
       blockedReason: null,

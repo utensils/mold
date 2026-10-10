@@ -86,7 +86,7 @@ public final class QueueDownloadRecovery {
         tasks[key] = Task {
             defer { if attempts[key] == attempt { tasks[key] = nil } }
             do {
-                try await validate(entry, authority: authority, backend: backend, isCurrent: isCurrent)
+                try await validate(entry, authority: authority, backend: backend, isCurrent: isCurrent, acquiring: true)
                 let deadline = ContinuousClock.now.advanced(by: budget)
                 let ids = try await acquire(model, entry: entry, authority: authority, key: key, backend: backend, hostName: hostName,
                                             interval: interval, deadline: deadline, isCurrent: isCurrent, license: license, attempt: attempt)
@@ -159,13 +159,13 @@ public final class QueueDownloadRecovery {
                 }
                 try Task.checkCancellation()
                 // Acceptance may have waited minutes: refence the server before acquiring anything.
-                try await validate(entry, authority: authority, backend: backend, isCurrent: isCurrent)
+                try await validate(entry, authority: authority, backend: backend, isCurrent: isCurrent, acquiring: true)
             }
         }
     }
 
     private func validate(_ entry: QueueEntry, authority: QueueAuthority, backend: any MoldBackend,
-                          isCurrent: @MainActor () -> Bool) async throws {
+                          isCurrent: @MainActor () -> Bool, acquiring: Bool = false) async throws {
         try Task.checkCancellation()
         guard isCurrent(), try await backend.status().instanceId == authority.instanceId else {
             throw RecoveryError("The machine identity changed. Reopen the job before retrying.")
@@ -176,6 +176,12 @@ public final class QueueDownloadRecovery {
               current.authority(instanceId: authority.instanceId) == authority, current.model == entry.model,
               try await backend.status().instanceId == authority.instanceId else {
             throw RecoveryError("This job changed or is no longer held. Download recovery stopped.")
+        }
+        if acquiring, entry.modelDownload != nil || current.modelDownload != nil {
+            guard current.retryable == true, let model = current.modelDownload?.model,
+                  model == entry.model, !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw RecoveryError("The machine no longer offers this model download. Refresh the job before trying again.")
+            }
         }
         try Task.checkCancellation()
         guard isCurrent() else { throw RecoveryError("This job or machine changed. Download recovery stopped.") }

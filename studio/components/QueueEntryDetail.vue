@@ -230,6 +230,7 @@ async function copyDetail(): Promise<void> {
         :target="inputTarget"
         :instance="inputInstanceId"
         :job="model.jobId"
+        :download-available="model.downloadAvailable"
         :host="model.hostLabel"
         :online="inputOnline !== false"
         controls
@@ -250,7 +251,11 @@ async function copyDetail(): Promise<void> {
         {{ model.reuse.blockedReason }}
       </p>
       <p
-        v-if="model.retry.applicable && !model.retry.available"
+        v-if="
+          model.retry.applicable &&
+          !model.retry.available &&
+          !missingModelDownload
+        "
         class="qed__hint"
         data-test="queue-detail-retry-hint"
       >

@@ -9,7 +9,7 @@ struct DiscoverRow: View {
     let host: MoldHost
 
     var body: some View {
-        let stacked = RowAxis.for(size) == .vertical
+        let stacked = RowAxis.model(size, downloading: models.progress(for: entry.id, on: host.id) != nil) == .vertical
         let layout = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
                              : AnyLayout(HStackLayout(alignment: .center, spacing: 12))
         layout {
@@ -34,10 +34,8 @@ struct DiscoverRow: View {
 
     @ViewBuilder private var action: some View {
         if let (job, row) = models.progress(for: entry.id, on: host.id) {
-            VStack(alignment: .trailing, spacing: 4) {
-                if let fraction = row.fraction { ProgressView(value: fraction).frame(minWidth: 80) }
-                Button("Cancel Download", role: .destructive) { Task { await models.cancel(job: job, on: host.id) } }
-                    .buttonStyle(.bordered)
+            ModelDownloadControls(row: row) {
+                Task { await models.cancel(job: job, on: host.id) }
             }
         } else if entry.installed {
             Text("Installed").foregroundStyle(.secondaryText)

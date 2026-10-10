@@ -461,9 +461,23 @@ pub(crate) fn supported_shapes(
     requested: Ltx2ShapeHint,
     available_bytes: u64,
 ) -> Vec<SupportedShape> {
+    search_supported_shapes(facts, requested, available_bytes, false)
+}
+
+fn search_supported_shapes(
+    facts: &Ltx2CheckpointFacts,
+    requested: Ltx2ShapeHint,
+    available_bytes: u64,
+    exclude_requested: bool,
+) -> Vec<SupportedShape> {
     let mut shapes: Vec<SupportedShape> = Vec::new();
 
     let fits = |width: u32, height: u32, frames: u32| {
+        if exclude_requested
+            && (width, height, frames) == (requested.width, requested.height, requested.frames)
+        {
+            return false;
+        }
         ltx2_shape_fits(
             facts,
             Ltx2ShapeHint {
@@ -506,7 +520,7 @@ pub(crate) fn supported_shapes(
 }
 
 /// Human-readable "needs ~X GB on a Y GB card; <shape> fits, or <shape>"
-/// remediation used by both admission rejection and the CUDA OOM message.
+/// remediation used by admission rejection.
 pub(crate) fn supported_shape_advice(
     facts: &Ltx2CheckpointFacts,
     requested: Ltx2ShapeHint,
@@ -530,6 +544,27 @@ pub(crate) fn supported_shape_advice(
         "needs ~{:.1} GB on a {:.1} GB card; {alternatives} fits",
         estimate.peak_bytes as f64 / 1_000_000_000.0,
         available_bytes as f64 / 1_000_000_000.0,
+    ))
+}
+
+/// An observed OOM disproves any fit promise for the failed shape. Keep the
+/// existing estimator solely as guidance for strictly smaller retry candidates.
+pub(crate) fn post_oom_shape_advice(
+    facts: &Ltx2CheckpointFacts,
+    requested: Ltx2ShapeHint,
+    available_bytes: u64,
+) -> Option<String> {
+    let shapes = search_supported_shapes(facts, requested, available_bytes, true);
+    if shapes.is_empty() {
+        return None;
+    }
+    let alternatives = shapes
+        .iter()
+        .map(SupportedShape::to_string)
+        .collect::<Vec<_>>()
+        .join(", or ");
+    Some(format!(
+        "Memory estimates suggest trying {alternatives}; these estimates are not guaranteed after an allocation failure"
     ))
 }
 
@@ -959,6 +994,41 @@ mod tests {
             assert_eq!(shape.frames % 8, 1);
             assert!(advice.contains(&shape.to_string()), "got: {advice}");
         }
+    }
+
+    #[test]
+    fn post_oom_advice_never_recommends_the_failed_shape_as_fitting() {
+        let facts = ltx2_19b_fp8_facts();
+        let failed = Ltx2ShapeHint {
+            width: 1408,
+            height: 2560,
+            frames: 193,
+            conditioned: false,
+        };
+        // Deliberately generous: even if the estimate says this shape fits,
+        // the observed allocation failure takes precedence in runtime advice.
+        let advice = post_oom_shape_advice(&facts, failed, 1_000_000_000_000).unwrap();
+        assert!(!advice.contains("1408x2560 at 193 frames"), "{advice}");
+        assert!(!advice.contains(" fits"), "{advice}");
+        assert!(advice.contains("estimate"), "{advice}");
+        assert!(advice.contains("not guaranteed"), "{advice}");
+        assert!(
+            advice.contains(" at "),
+            "retain concrete smaller alternatives: {advice}"
+        );
+    }
+
+    #[test]
+    fn post_oom_advice_falls_back_when_no_smaller_shape_exists() {
+        let facts = ltx2_19b_fp8_facts();
+        let failed = Ltx2ShapeHint {
+            width: 384,
+            height: 384,
+            frames: 9,
+            conditioned: false,
+        };
+        assert!(post_oom_shape_advice(&facts, failed, 1_000_000_000_000).is_none());
+        assert!(supported_shape_advice(&facts, failed, 1_000_000_000_000).is_some());
     }
 
     #[test]

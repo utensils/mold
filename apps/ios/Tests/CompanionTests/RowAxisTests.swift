@@ -7,6 +7,13 @@ import Testing
 /// never clips. These pin the ends of the scale; what happens in between is
 /// `RowAxis.for(_:)`'s decision.
 struct RowAxisTests {
+    @Test func activeModelDownloadAlwaysHasItsOwnFullWidthRow() {
+        for size in DynamicTypeSize.allCases {
+            #expect(RowAxis.model(size, downloading: true) == .vertical)
+            #expect(RowAxis.model(size, downloading: false) == RowAxis.for(size))
+        }
+    }
+
     @Test func everyStandardSizeStaysOnOneRow() {
         for size in [DynamicTypeSize.xSmall, .small, .medium, .large, .xLarge, .xxLarge] {
             #expect(RowAxis.for(size) == .horizontal, "\(size)")

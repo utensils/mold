@@ -620,3 +620,37 @@ it("formats legacy byte diagnostics without changing the held state", async () =
   expect(wrapper.text()).toContain("HELD");
   expect(wrapper.text()).not.toContain("22683045704");
 });
+
+it("exposes verified model repair beside a held diagnostic on a host queue", async () => {
+  const { wrapper } = await mountPanel(
+    [],
+    [
+      {
+        id: "repair",
+        model: "flux2-klein",
+        state: "held",
+        retryable: true,
+        model_download: { model: "flux2-klein" },
+        started_at_unix_ms: 1,
+        position: 0,
+        held_reason: "Adapter missing",
+        batch_id: "batch",
+        client_batch_id: "client",
+      },
+    ],
+  );
+  const control = wrapper.findComponent({ name: "QueueDownloadControl" });
+  expect(control.props("controls")).toBe(true);
+  expect(control.props("downloadAvailable")).toBe(true);
+  expect(wrapper.text()).toContain("Adapter missing");
+  const row = wrapper.get("[data-test='queue-row']");
+  expect(row.attributes("role")).toBe("group");
+  expect(row.attributes("tabindex")).toBeUndefined();
+  const details = row.get("[data-test='held-entry-details']");
+  await details.trigger("keydown", { key: "Enter" });
+  await flushPromises();
+  expect(wrapper.find("[data-test='queue-entry-drawer']").exists()).toBe(false);
+  await details.trigger("click");
+  await flushPromises();
+  expect(wrapper.find("[data-test='queue-entry-drawer']").exists()).toBe(true);
+});

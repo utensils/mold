@@ -10,7 +10,7 @@ struct CuratedModelRow: View {
     let host: MoldHost
 
     var body: some View {
-        let stacked = RowAxis.for(size) == .vertical
+        let stacked = RowAxis.model(size, downloading: models.progress(for: model.name, on: host.id) != nil) == .vertical
         let layout = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
             : AnyLayout(HStackLayout(alignment: .center, spacing: 12))
         layout {
@@ -35,10 +35,8 @@ struct CuratedModelRow: View {
 
     @ViewBuilder private var action: some View {
         if let (job, row) = models.progress(for: model.name, on: host.id) {
-            VStack(alignment: .leading, spacing: 4) {
-                if let fraction = row.fraction { ProgressView(value: fraction) }
-                Button("Cancel Download", role: .destructive) { Task { await models.cancel(job: job, on: host.id) } }
-                    .buttonStyle(.bordered)
+            ModelDownloadControls(row: row) {
+                Task { await models.cancel(job: job, on: host.id) }
             }
         } else if model.isReady {
             Text("Installed").foregroundStyle(.secondaryText)
@@ -72,5 +70,33 @@ struct ModelSourceLabel: View {
         .font(.caption)
         .foregroundStyle(.secondaryText)
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// Keep progress below the full-width model identity. The visual Cancel label
+/// is short, while VoiceOver names the operation and the hit area stays 44pt.
+struct ModelDownloadControls: View {
+    @Environment(\.dynamicTypeSize) private var size
+    let row: DownloadProgress
+    let cancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let fraction = row.fraction { ProgressView(value: fraction) }
+            let layout = RowAxis.for(size) == .vertical
+                ? AnyLayout(VStackLayout(alignment: .leading, spacing: 6))
+                : AnyLayout(HStackLayout(alignment: .center, spacing: 8))
+            layout {
+                Text(verbatim: row.sentence(bytesPerSecond: nil))
+                    .font(.caption.monospacedDigit()).foregroundStyle(.secondaryText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button(role: .destructive, action: cancel) {
+                    Text("Cancel").frame(minWidth: 44, minHeight: 44)
+                }
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel("Cancel Download")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

@@ -4488,6 +4488,13 @@ pub struct DiskUsage {
     pub free_bytes: u64,
 }
 
+/// Current repairable model prerequisite for a held job; not an error classification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct QueueModelDownload {
+    /// Exact model identity on the queue row, acquired on that same host.
+    pub model: String,
+}
+
 // ── GET /api/queue wire types ────────────────────────────────────────────────
 
 /// One row of `GET /api/queue` — the client-side, Deserialize-capable twin of
@@ -4544,6 +4551,9 @@ pub struct QueueJobEntryWire {
     /// Older servers omit this; `error` remains the presentation summary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_detail: Option<String>,
+    /// Current missing manifest artifact that acquiring this exact model repairs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_download: Option<QueueModelDownload>,
     /// Whether `POST /api/queue/{id}/retry` may safely resume this held row.
     /// A held row that answers `false` needs operator repair, not a retry.
     #[serde(default, skip_serializing_if = "Option::is_none")]

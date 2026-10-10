@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { queueModelDownloadAvailability } from "@studio/lib/queueModelDownload";
 import QueueDownloadControl from "@studio/components/QueueDownloadControl.vue";
 import { userFacingError } from "@studio/lib/userFacingError";
 /*
@@ -236,6 +237,7 @@ function queuedIndexOf(id: string): number {
           </span>
 
           <QueueDownloadControl
+            :download-available="queueModelDownloadAvailability(entry)"
             v-if="entry.state === 'held'"
             :target="target"
             :instance="instanceId"

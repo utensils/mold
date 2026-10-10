@@ -41,6 +41,8 @@ export interface QueueEntry {
   error?: string | null;
   /** Unabridged current machine diagnostic; absent on older servers. */
   error_detail?: string | null;
+  /** Verified missing downloadable components for this exact queued model. */
+  model_download?: { model: string } | null;
   /** Exact opt-in fence for POST /api/queue/{id}/retry. */
   retryable?: boolean | null;
   /** Durable retry authority exposed by current servers. */

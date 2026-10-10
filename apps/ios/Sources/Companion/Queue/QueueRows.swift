@@ -258,8 +258,9 @@ struct QueueHeldActions: View {
     private func buttons(stacked: Bool) -> some View {
         let layout = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8)) : AnyLayout(HStackLayout(spacing: 8))
         return layout {
-            if detail, case .missingModel = hold, queue.canRetry(entry, on: host.id) {
+            if case .missingModel = hold, queue.canRetry(entry, on: host.id) {
                 Button(recovery?.isBusy == true ? "Downloading…" : "Download and Retry") {
+                    guard queue.canRetry(entry, on: host.id), recovery?.isBusy != true else { return }
                     if let model = entry.model { models.pullThenRetry(model, entry: entry, on: host.id, presenter: router.presentationID) }
                 }
                 .disabled(recovery?.isBusy == true)

@@ -6565,3 +6565,19 @@ button:disabled {
     transition: none;
   }
 }
+
+/* Held recovery actions remain separate from the details activation target. */
+.mobile-held-recovery {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+.mobile-held-details {
+  grid-column: 1 / -1;
+  justify-self: start;
+  min-height: 44px;
+  padding: 8px 12px;
+  color: inherit;
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-surface);
+}

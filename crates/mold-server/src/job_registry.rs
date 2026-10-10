@@ -127,6 +127,11 @@ pub struct JobEntry {
     /// `error` and `held_reason` remain concise presentation summaries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_detail: Option<String>,
+    /// Current exact-model acquisition inspection at the HTTP boundary.
+    /// Outer None: uninspected/legacy-compatible. Some(None): authoritative
+    /// no-download result. Some(Some): acquire the exact named recipe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_download: Option<Option<mold_core::QueueModelDownload>>,
     /// Whether `POST /api/queue/{id}/retry` may safely resume this held job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retryable: Option<bool>,
@@ -875,6 +880,7 @@ impl JobRegistry {
                 held_reason: None,
                 error: None,
                 error_detail: None,
+                model_download: None,
                 retryable: None,
                 // Batch membership is durable state, projected by the route
                 // from the journal for the same reason `durable` is.
@@ -1010,6 +1016,7 @@ impl JobRegistry {
                 held_reason: None,
                 error: None,
                 error_detail: None,
+                model_download: None,
                 retryable: None,
                 // Batch membership is durable state, projected by the route
                 // from the journal for the same reason `durable` is.
@@ -1198,6 +1205,7 @@ mod tests {
                 held_reason: None,
                 error: None,
                 error_detail: None,
+                model_download: None,
                 retryable: None,
                 batch_id: None,
                 client_batch_id: None,

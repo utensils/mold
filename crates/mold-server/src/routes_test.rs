@@ -4752,6 +4752,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queue_model_download_http_listing_and_detail_agree_for_uncoded_hold() {
+        let _environment = crate::test_support::hermetic_store_env();
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db, root.path());
+        state.config.write().await.models_dir =
+            root.path().join("missing-models").display().to_string();
+        let model = "sd15:fp16";
+        let request: GenerateRequest =
+            serde_json::from_str(&generate_body_for_model("fixture", model, 64, 64)).unwrap();
+        let output = state.config.read().await.effective_output_dir();
+        state
+            .queue_journal
+            .record_batch(crate::queue_journal::BatchJournalAdmission {
+                id: "repair-batch",
+                client_batch_id: "repair-client",
+                request_sha256: "fixture",
+                children: &[crate::queue_journal::JournalAdmission {
+                    id: "repair-job",
+                    request: &request,
+                    output_dir: Some(&output),
+                    target_gpu: None,
+                    target_device_id: None,
+                    completion_payload: crate::state::SseCompletionPayload::MetadataOnly,
+                    batch_child: false,
+                }],
+            })
+            .unwrap();
+        let claim = state.queue_journal.claim_next_feeder().unwrap().unwrap();
+        state
+            .queue_journal
+            .attach_claimed(&claim.row.id, claim.claim_token)
+            .hold_retryable("fixture original failure detail");
+        for (path, pointer) in [
+            ("/api/queue", "/entries/0"),
+            ("/api/queue/repair-job", "/job"),
+        ] {
+            let response = app_with_state(state.clone())
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            let row = body.pointer(pointer).unwrap();
+            assert_eq!(row["model_download"]["model"], model, "{path}: {row}");
+            assert_eq!(row["error_detail"], "fixture original failure detail");
+            assert_eq!(row["retryable"], true);
+        }
+        // A current server must veto legacy missing-model fallback once the
+        // recipe is complete; absence would be mistaken for an older server.
+        let manifest = mold_core::manifest::find_manifest(model).unwrap();
+        let models_dir = state.config.read().await.resolved_models_dir();
+        for file in &manifest.files {
+            let path = models_dir.join(mold_core::manifest::storage_path(manifest, file));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"presence fixture").unwrap();
+        }
+        for (path, pointer) in [
+            ("/api/queue", "/entries/0"),
+            ("/api/queue/repair-job", "/job"),
+        ] {
+            let response = app_with_state(state.clone())
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            let row = body.pointer(pointer).unwrap();
+            assert!(
+                row.as_object().unwrap().contains_key("model_download"),
+                "missing authoritative negative: {path}"
+            );
+            assert!(row["model_download"].is_null());
+            assert_eq!(row["error_detail"], "fixture original failure detail");
+        }
+    }
+
+    #[tokio::test]
     async fn held_queue_and_batch_reports_keep_job_scoped_technical_details() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));

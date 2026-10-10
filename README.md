@@ -446,7 +446,11 @@ local failures are recorded in OSLog with privacy-protected details.
 
 ### Queue model downloads
 
-A missing-model held job offers **Download and Retry** in Queue or Job Details.
+A held job with missing downloadable model components offers **Download and Retry**
+on its queue card and in Job Details across native, web and Tauri clients. Current
+servers identify repairable missing companions, including adapters, even when the
+main model is installed. The original error, Failure Details and eligible
+**Move to…** control remain available during recovery.
 The job shows Starting, download-queue status, live bytes/progress, license review,
 reconnection and failures in place. Closing details does not stop recovery.
 The download runs on the job’s owning machine; retry occurs only after every
@@ -464,3 +468,5 @@ Reuse settings restores retained opening and closing frames into editable wells,
 Library thumbnails on native macOS, native iOS, Tauri desktop and web use continuous justified rows: each picture keeps its aspect ratio, with narrow seams and square corners. Thumbnail size and window changes reflow the rows while keeping a visible print in place. The final incomplete row stays left aligned without enlarging a lone print. iOS thumbnails omit machine-name badges; image details and machine filtering still show the owning machines.
 
 Deleting the media currently open in a Library viewer keeps the viewer open on the next surviving item in the current filtered order, or the previous item at the end. It returns to the grid only when no items remain. A surviving machine copy stays visible after a partial deletion failure. Native macOS successful moves to Trash finish without a persistent completion notice; progress, interrupted work and failures remain visible.
+
+LTX convolutional video VAE decoding uses aspect-coupled spatial Auto tiles independently of temporal memory estimates. Long clips still require memory for temporal context and output accumulation; see [spatial tiling](https://utensils.io/mold/models/ltx2#spatial-tiling-spatial-tile).

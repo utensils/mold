@@ -1,9 +1,14 @@
+import { readFileSync } from "node:fs";
 import errorFixtures from "../../../docs/contracts/user-errors.json";
 import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
 import MobileGenerationQueueCard from "./MobileGenerationQueueCard.vue";
 
 describe("MobileGenerationQueueCard", () => {
+  it("keeps held recovery on a full-width row", () => {
+    const css = readFileSync("src/mobile/mobile.css", "utf8");
+    expect(css).toMatch(/\.mobile-held-recovery\s*\{[^}]*grid-column:\s*1\s*\/\s*-1/s);
+  });
   it("gives a prompt-free mesh job a visible and accessible title without an empty text row", () => {
     const view = mount(MobileGenerationQueueCard, {
       props: { title: "", subtitle: "Hunyuan3D · plato", status: "Decoding volume", ariaLabel: "" },
@@ -166,4 +171,37 @@ it("uses readable errors in the visible and spoken legacy held row", () => {
   expect(view.text()).toContain(fixture.message);
   expect(view.attributes("aria-label")).toContain(fixture.message);
   expect(view.attributes("aria-label")).not.toContain("22683045704");
+});
+
+it("offers held recovery without nesting its download action in the details target", async () => {
+  const view = mount(MobileGenerationQueueCard, {
+    props: {
+      title: "Held clip",
+      subtitle: "H3 · Plato",
+      status: "HELD",
+      detail: "Adapter missing",
+      held: true,
+      downloadAvailable: true,
+      sourceOnline: true,
+    },
+    global: {
+      stubs: {
+        QueueDownloadControl: {
+          name: "QueueDownloadControl",
+          props: ["controls", "downloadAvailable", "online"],
+          template: '<button data-test="repair">Download model</button>',
+        },
+      },
+    },
+  });
+  const control = view.findComponent({ name: "QueueDownloadControl" });
+  expect(control.props("controls")).toBe(true);
+  expect(control.props("downloadAvailable")).toBe(true);
+  expect(view.get("[data-test=repair]").element.closest('[role="button"]')).toBeNull();
+  expect(view.text()).toContain("Adapter missing");
+  const details = view.get(".mobile-held-details");
+  await details.trigger("keydown", { key: "Enter" });
+  expect(view.emitted("activate")).toBeUndefined();
+  await details.trigger("click");
+  expect(view.emitted("activate")).toHaveLength(1);
 });

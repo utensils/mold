@@ -160,7 +160,13 @@ shortfall. Free memory on the machine doing the render. Do not treat that estima
 as a guaranteed allocation target or decide retryability from prose: use error
 codes and the queue’s retryable flag. Preserve required restart/cooldown advice.
 
-GUI queue recovery uses **Download and Retry** for typed missing-model holds,
+GUI queue recovery uses **Download and Retry** for repairable missing-model components,
+including missing adapters of installed recipes. Queue listing/detail rows may
+include `model_download: { model }` for explicitly retryable held jobs. Clients
+validate the exact model and preserve the original error, Failure Details and
+eligible Move to action. Explicit `model_download: null` vetoes model recovery;
+absent hints retain typed missing-model error fallback for older servers and
+uninspected catalog recipes,
 with inline starting/queued/progress/license/reconnecting/failure feedback.
 It follows exact returned download tickets, including companions, and revalidates
 server instance and held-job batch identity before retrying. Download failure or
@@ -184,3 +190,5 @@ All GUI surfaces expose duration prediction only when the selected model adverti
 `supports_duration_prediction` and is not runtime-disabled. Automatic mode omits
 `frames`; explicit duration sends its frame count. Native persisted auto preference
 parks on unsupported models without suppressing their explicit frames.
+
+For convolutional LTX video VAE decoding, spatial Auto uses aspect-coupled 768px long-side tiles and 64px overlap independently of the temporal memory estimate. This is not a guarantee that long clips fit: temporal context and full output accumulation still consume memory. Explicit `--spatial-tile` overrides retain their existing geometry. After an observed OOM, smaller retry suggestions are estimates, not a fit guarantee.

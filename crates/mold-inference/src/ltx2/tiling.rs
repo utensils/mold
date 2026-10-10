@@ -373,24 +373,16 @@ pub(crate) fn plan_stage2_tiling(
 
 // ── Policy: when does tiling engage at all? ──────────────────────────────────
 //
-// Tiling costs a full denoise pass per tile and blends across seams, so it must
-// never touch a shape that renders correctly today. Both consumers — stage-2
-// refinement and the VAE decode — resolve one `SpatialTilePolicy`, and `Auto`
-// is deliberately conservative enough that it cannot fire on any shape
-// `mold_core::validation::LTX2_MAX_AXIS_PIXELS` currently admits.
+// Stage-2 refinement follows the trained positional span. Convolutional VAE
+// decoding follows upstream's independent, shape-based spatial Auto policy.
 
-/// Default VAE spatial decode tile, in pixels. Upstream ships 768/64
-/// (`video_vae/tiling.py:67`); mold decodes larger tiles because its
-/// consumer-GPU target has already paid for a spatially tiled *denoise* by the
-/// time it gets here, and a wider tile means fewer decoder passes.
-pub(crate) const DEFAULT_VAE_SPATIAL_TILE_PIXELS: usize = 1_280;
+/// Upstream Lightricks/LTX-2 9ec55f9, utils/helpers.py:137-175: convolutional
+/// VAE Auto uses a 768-px long side and 64-px overlap, independent of free VRAM.
+pub(crate) const DEFAULT_VAE_SPATIAL_TILE_PIXELS: usize = 768;
+pub(crate) const DEFAULT_VAE_SPATIAL_OVERLAP_PIXELS: usize = 64;
 
-/// Default overlap between VAE decode tiles, in pixels. The decoder pads at
-/// tile edges instead of seeing real neighbours, so upstream discards a latent
-/// cell per edge and requires at least 64 px of overlap
-/// (`video_vae.py:437-446`). 256 px is 8 latent cells per side — enough that
-/// the trapezoid's ramp, not the padded edge, is what reaches the seam.
-pub(crate) const DEFAULT_VAE_SPATIAL_OVERLAP_PIXELS: usize = 256;
+/// Preserve the existing explicit `<pixels>` override's overlap contract.
+const FORCED_SPATIAL_OVERLAP_PIXELS: usize = 256;
 
 /// The pixel stride of one latent cell, re-exported for callers that reason in
 /// pixels (the knob's unit) rather than latent cells (the tiler's unit).
@@ -403,7 +395,7 @@ pub(crate) enum SpatialTilePolicy {
     /// the out-of-distribution ones.
     Off,
     /// Tile only where it buys something: stage 2 past the trained span, and
-    /// a VAE decode that both exceeds that span and does not fit.
+    /// a convolutional VAE decode past the upstream 768-px tile span.
     Auto,
     /// Always tile at this size, whatever the shape. This is the only way to
     /// exercise tiling at a resolution that does not need it, which is what
@@ -437,7 +429,7 @@ impl SpatialTilePolicy {
             Some(overlap) => overlap.trim().parse().map_err(|_| {
                 anyhow::anyhow!("invalid spatial tile overlap '{overlap}'; expected a pixel count")
             })?,
-            None => DEFAULT_VAE_SPATIAL_OVERLAP_PIXELS,
+            None => FORCED_SPATIAL_OVERLAP_PIXELS,
         };
         // Upstream's own validation (`video_vae/tiling.py:15-25`): a tile has
         // to be a whole number of latent cells, and an overlap that reaches
@@ -504,53 +496,64 @@ pub(crate) fn plan_stage2_tiling_with_policy(
     }
 }
 
-/// Pixel-space tile geometry for the VAE decode.
+/// Latent-space tile geometry for convolutional VAE decode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SpatialDecodeTiling {
-    /// Latent cells per tile along each spatial axis.
-    pub tile_cells: usize,
+    pub height_cells: usize,
+    pub width_cells: usize,
     /// Latent cells shared with each neighbour.
     pub overlap_cells: usize,
 }
 
-/// Choose a VAE spatial decode layout.
-///
-/// `needed` is the caller's memory verdict — the same projected-workspace
-/// check that already selects temporal chunking. `Auto` requires *both* that
-/// verdict and a frame past the trained span, so a 1080p or 2K decode that
-/// chunks temporally today keeps decoding exactly as it does today.
+/// Choose spatial geometry independently of the temporal memory heuristic.
+/// Upstream `ltx_core/tiling.py:867-909` scales each axis in latent units,
+/// rounding ties to even (Python round), with a minimum legal overlap stride.
+/// This does not bound temporal context or the full decoded output allocation.
 pub(crate) fn plan_spatial_decode_tiling(
     latent_height: usize,
     latent_width: usize,
     policy: SpatialTilePolicy,
-    needed: bool,
 ) -> Option<SpatialDecodeTiling> {
-    let (tile_cells, overlap_cells) = match policy {
+    let (height_cells, width_cells, overlap_cells) = match policy {
         SpatialTilePolicy::Off => return None,
         SpatialTilePolicy::Auto => {
-            let past_trained_span = latent_height.max(latent_width) > TRAINED_SPATIAL_LATENT_SPAN;
-            if !needed || !past_trained_span {
+            let span = latent_height.max(latent_width);
+            let tile = DEFAULT_VAE_SPATIAL_TILE_PIXELS / LATENT_PIXEL_STRIDE;
+            if span <= tile {
                 return None;
             }
-            (
-                DEFAULT_VAE_SPATIAL_TILE_PIXELS / LATENT_PIXEL_STRIDE,
-                DEFAULT_VAE_SPATIAL_OVERLAP_PIXELS / LATENT_PIXEL_STRIDE,
-            )
+            let overlap = DEFAULT_VAE_SPATIAL_OVERLAP_PIXELS / LATENT_PIXEL_STRIDE;
+            let axis_size = |axis: usize| {
+                // u128 keeps the rational arithmetic exact without overflowing usize.
+                let numerator = tile as u128 * axis as u128;
+                let denominator = span as u128;
+                let quotient = numerator / denominator;
+                let remainder = numerator % denominator;
+                let round_up = remainder * 2 > denominator
+                    || (remainder * 2 == denominator && quotient % 2 == 1);
+                // Mold's pairwise strip crossfade cannot represent triple
+                // overlaps; upstream's accumulation allows overlap + 1.
+                // Keep both ramps within each interior tile instead.
+                ((quotient + u128::from(round_up)) as usize).max(2.max(2 * overlap))
+            };
+            (axis_size(latent_height), axis_size(latent_width), overlap)
         }
         SpatialTilePolicy::Forced {
             tile_pixels,
             overlap_pixels,
         } => (
             tile_pixels / LATENT_PIXEL_STRIDE,
+            tile_pixels / LATENT_PIXEL_STRIDE,
             overlap_pixels / LATENT_PIXEL_STRIDE,
         ),
     };
-    if latent_height <= tile_cells && latent_width <= tile_cells {
+    if latent_height <= height_cells && latent_width <= width_cells {
         return None;
     }
     Some(SpatialDecodeTiling {
-        tile_cells,
-        overlap_cells: overlap_cells.min(tile_cells.saturating_sub(1)),
+        height_cells,
+        width_cells,
+        overlap_cells: overlap_cells.min(height_cells.min(width_cells).saturating_sub(1)),
     })
 }
 
@@ -816,7 +819,7 @@ mod tests {
             SpatialTilePolicy::parse("1280").unwrap(),
             SpatialTilePolicy::Forced {
                 tile_pixels: 1_280,
-                overlap_pixels: DEFAULT_VAE_SPATIAL_OVERLAP_PIXELS,
+                overlap_pixels: FORCED_SPATIAL_OVERLAP_PIXELS,
             }
         );
         assert_eq!(
@@ -840,22 +843,15 @@ mod tests {
         assert!(SpatialTilePolicy::parse("garbage").is_err());
     }
 
-    /// The compatibility constraint that matters more than anything else here:
-    /// no shape that renders today may start tiling because this landed.
+    /// VAE memory policy does not change the stage-2 positional span.
     #[test]
-    fn auto_never_tiles_a_shape_the_validator_admits_today() {
-        // `LTX2_MAX_AXIS_PIXELS` is 2048, so 64 latent cells is the largest
-        // axis that can reach the engine. Walk every 32-px rung up to it.
+    fn auto_stage2_preserves_the_trained_span() {
+        // Stage 2 remains untiled within its trained 2048-px axis span.
         for cells in 1..=TRAINED_SPATIAL_LATENT_SPAN {
             assert_eq!(
                 plan_stage2_tiling_with_policy(13, cells, cells, SpatialTilePolicy::Auto),
                 TileCountConfig::untiled(),
                 "{cells} latent cells is inside the trained span and must not tile"
-            );
-            assert_eq!(
-                plan_spatial_decode_tiling(cells, cells, SpatialTilePolicy::Auto, true),
-                None,
-                "{cells} latent cells must decode exactly as it does today"
             );
         }
     }
@@ -868,7 +864,7 @@ mod tests {
             TileCountConfig::untiled()
         );
         assert_eq!(
-            plan_spatial_decode_tiling(68, 120, SpatialTilePolicy::Off, true),
+            plan_spatial_decode_tiling(68, 120, SpatialTilePolicy::Off),
             None
         );
     }
@@ -942,18 +938,85 @@ mod tests {
     }
 
     #[test]
-    fn a_decode_that_fits_is_not_tiled_even_at_4k() {
-        // 3840x2160 latent cells, but the caller says the workspace fits.
+    fn auto_spatial_decode_does_not_trust_the_temporal_workspace_estimate() {
+        // Production regression: 1408x2560 at 193 frames exhausted a 48-GB
+        // CUDA device although the temporal workspace heuristic said it fit.
+        // Spatial Auto has no memory-verdict argument, including unknown VRAM.
         assert_eq!(
-            plan_spatial_decode_tiling(68, 120, SpatialTilePolicy::Auto, false),
-            None
+            plan_spatial_decode_tiling(44, 80, SpatialTilePolicy::Auto),
+            Some(SpatialDecodeTiling {
+                height_cells: 13,
+                width_cells: 24,
+                overlap_cells: 2
+            })
         );
         assert_eq!(
-            plan_spatial_decode_tiling(68, 120, SpatialTilePolicy::Auto, true),
+            plan_spatial_decode_tiling(80, 44, SpatialTilePolicy::Auto),
             Some(SpatialDecodeTiling {
-                tile_cells: DEFAULT_VAE_SPATIAL_TILE_PIXELS / LATENT_PIXEL_STRIDE,
-                overlap_cells: DEFAULT_VAE_SPATIAL_OVERLAP_PIXELS / LATENT_PIXEL_STRIDE,
+                height_cells: 24,
+                width_cells: 13,
+                overlap_cells: 2
             })
+        );
+    }
+
+    #[test]
+    fn auto_decode_keeps_single_tile_shapes_untiled() {
+        for height in 1..=24 {
+            for width in 1..=24 {
+                assert_eq!(
+                    plan_spatial_decode_tiling(height, width, SpatialTilePolicy::Auto),
+                    None
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn auto_decode_matches_upstream_latent_rounding_and_minimum_stride() {
+        // Python round(24 * 7 / 48) = 4; round(24 * 9 / 48) = 4.
+        for height in [7, 9] {
+            let tile = plan_spatial_decode_tiling(height, 48, SpatialTilePolicy::Auto).unwrap();
+            assert_eq!(
+                (tile.height_cells, tile.width_cells, tile.overlap_cells),
+                (4, 24, 2)
+            );
+        }
+        assert_eq!(
+            plan_spatial_decode_tiling(2, 128, SpatialTilePolicy::Auto)
+                .unwrap()
+                .height_cells,
+            4
+        );
+    }
+
+    #[test]
+    fn auto_decode_narrow_tiles_fit_the_pairwise_crossfade() {
+        for (height, width) in [(5, 64), (64, 5), (5, 128)] {
+            let plan = plan_spatial_decode_tiling(height, width, SpatialTilePolicy::Auto).unwrap();
+            for (length, tile) in [(height, plan.height_cells), (width, plan.width_cells)] {
+                for interval in split_by_size(length, tile, plan.overlap_cells).unwrap() {
+                    assert!(
+                        interval.left_ramp + interval.right_ramp <= interval.end - interval.start
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn forced_decode_preserves_square_geometry_and_default_overlap() {
+        assert_eq!(
+            plan_spatial_decode_tiling(44, 80, SpatialTilePolicy::parse("1280").unwrap()),
+            Some(SpatialDecodeTiling {
+                height_cells: 40,
+                width_cells: 40,
+                overlap_cells: 8
+            })
+        );
+        assert_eq!(
+            plan_spatial_decode_tiling(8, 8, SpatialTilePolicy::parse("256:64").unwrap()),
+            None
         );
     }
 }

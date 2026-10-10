@@ -1445,6 +1445,10 @@ requires the whole authority (`instance_id`, `batch_id`, `client_batch_id`,
 let a client holding a bare job id compose a retry. A row that was admitted
 outside a batch omits all three.
 
+Held, retryable rows can additionally include `model_download: { "model": "exact-row-model" }` in both listing and detail. This is a current local observation that a known downloadable recipe has a missing artifact at the destination its download will repair, including missing companion adapters beside an installed base checkpoint. It is not derived from error text and does not guarantee downloading fixes every cause of the hold. Inspected negative results use an explicit `model_download: null`: complete recipes, unknown non-catalog recipes, custom configured paths that differ from acquisition slots, and active global model path environment overrides. Clients must not fall back to an older batch error when this authoritative negative is present. Uninspected `hf:`/`cv:` catalog recipes omit the field and retain their existing typed batch-error acquisition fallback; older servers also omit it. Presence checks are deduplicated per model in each listing and perform no network requests or weight hashing.
+
+Clients offer **Download and Retry** using the exact host, credentials, instance, model, and durable job authority. Preserve the explanation, failure details, and Move to another host action. Wait for all owned download tickets to finish successfully before the existing explicit retry; failed or cancelled downloads leave the job held. Only an absent field permits the typed batch-error recovery fallback. Never infer a download action from an arbitrary missing-file message.
+
 Use `GET /api/queue/:id` to read ONE job in full, settings included:
 
 ```bash

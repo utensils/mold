@@ -1,3 +1,4 @@
+import { queueModelDownloadAvailability } from "@studio/lib/queueModelDownload";
 import {
   missingQueueModel,
   startQueueDownloadRecovery,
@@ -527,9 +528,14 @@ export function useQueueCommands(): QueueCommands {
 
   /** A held print (a style still downloading, a machine that refused for
    * now) is retried on its own host through the store's fence. */
+  function needsModelDownload(job: Job) {
+    const entry = jobs.queues[job.hostId ?? "local"]?.entries.find((entry) => entry.id === job.id);
+    const verified = entry ? queueModelDownloadAvailability(entry) : undefined;
+    return verified ?? ["MODEL_NOT_FOUND", "UNKNOWN_MODEL"].includes(job.holdCode ?? "");
+  }
   function retry(job: Job) {
     if (!job.retryable || job.retrying) return;
-    if (["MODEL_NOT_FOUND", "UNKNOWN_MODEL"].includes(job.holdCode ?? "")) {
+    if (needsModelDownload(job)) {
       const host = hosts.all.find((host) => host.id === (job.hostId ?? "local"));
       if (host?.status === "ready" && host.baseUrl && host.instanceId && job.id)
         void startQueueDownloadRecovery(
@@ -671,7 +677,10 @@ export function useQueueCommands(): QueueCommands {
         ...(sharedRetry && sharedEntry
           ? [
               {
-                label: "Retry now",
+                label:
+                  queueModelDownloadAvailability(sharedEntry) === true
+                    ? "Download and Retry"
+                    : "Retry now",
                 disabled: !connectedRow(row) || cancellingShared.value.includes(row.shared.key),
                 action: () => void retryShared(row.shared),
               },
@@ -701,9 +710,7 @@ export function useQueueCommands(): QueueCommands {
       ...(job.retryable
         ? [
             {
-              label: ["MODEL_NOT_FOUND", "UNKNOWN_MODEL"].includes(job.holdCode ?? "")
-                ? "Download and Retry"
-                : "Retry now",
+              label: needsModelDownload(job) ? "Download and Retry" : "Retry now",
               disabled: !connectedRow(row),
               action: () => {
                 if (connectedRow(row)) retry(job);

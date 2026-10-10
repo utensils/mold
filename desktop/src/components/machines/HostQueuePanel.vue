@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { queueModelDownloadAvailability } from "@studio/lib/queueModelDownload";
 import QueueDownloadControl from "@studio/components/QueueDownloadControl.vue";
 import { userFacingError } from "@studio/lib/userFacingError";
 /*
@@ -674,17 +675,22 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
             v-for="entry in lane.entries"
             :key="entry.id"
             :data-test="rowTestId"
-            role="button"
-            tabindex="0"
+            :role="entry.state === 'held' ? 'group' : 'button'"
+            :tabindex="entry.state === 'held' ? undefined : 0"
             class="border-border flex cursor-pointer items-center gap-3 rounded-control border bg-bg px-3 py-2 transition-colors hover:bg-bg-deep"
             :class="canDragEntry(entry) ? 'active:cursor-grabbing' : ''"
             :draggable="canDragEntry(entry)"
-            :aria-label="`Show details for ${modelLabel(entry.model)}`"
+            :aria-label="
+              entry.state === 'held'
+                ? modelLabel(entry.model)
+                : `Show details for ${modelLabel(entry.model)}`
+            "
             @dragstart="onDragStart(entry, $event)"
             @dragend="dragged = null"
             @contextmenu="openEntryMenu(entry, $event)"
             @click="openQueueDetail(entry)"
-            @keydown.enter="openQueueDetail(entry)"
+            @keydown.enter.self.prevent="openQueueDetail(entry)"
+            @keydown.space.self.prevent="openQueueDetail(entry)"
           >
             <QueueSourceThumbnail
               :target="host.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : null"
@@ -722,9 +728,12 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
                 {{ ownJob(entry)?.prompt ?? modelLabel(entry.model) }}
               </div>
               <QueueDownloadControl
+                class="host-queue-recovery"
+                :download-available="queueModelDownloadAvailability(entry)"
                 :target="host.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : null"
                 :instance="host.instanceId"
                 :job="entry.id"
+                :controls="entry.state === 'held'"
                 :host="host.label"
                 :online="host.status === 'ready' && !host.stale"
               />
@@ -759,6 +768,15 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
                 </span>
               </div>
             </div>
+            <button
+              v-if="entry.state === 'held'"
+              type="button"
+              data-test="held-entry-details"
+              class="h-7 shrink-0 rounded-control px-2.5 text-sm text-fg-dim hover:text-fg"
+              @click.stop="openQueueDetail(entry)"
+            >
+              Details
+            </button>
             <button
               v-if="caps?.canPauseJob && (entry.state === 'queued' || entry.state === 'paused')"
               type="button"
@@ -855,3 +873,10 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
     />
   </div>
 </template>
+
+<style scoped>
+.host-queue-recovery :deep(button) {
+  align-self: flex-start;
+  max-width: 100%;
+}
+</style>

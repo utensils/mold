@@ -273,6 +273,22 @@ const active = computed(
           :instance-id="row.shared.instanceId"
           :online="!row.shared.stale"
         />
+        <QueueDownloadControl
+          v-if="row.shared.phase === 'held'"
+          :target="sourceTarget(row.shared.hostId)"
+          :instance="row.shared.instanceId"
+          :job="row.shared.id"
+          :host="row.shared.hostLabel"
+          :online="
+            !row.shared.stale &&
+            sourceHost(row.shared.hostId)?.status === 'ready'
+          "
+          :download-available="
+            queueStatusFor(queueStatus, row.shared.hostId, row.shared.id)
+              ?.downloadAvailable
+          "
+          controls
+        />
         <LiveActivityList
           :rows="[row.shared]"
           :model-label="sharedModelLabel"
@@ -403,7 +419,10 @@ const active = computed(
             sourceHost(row.print.hostId ?? ORIGIN_HOST_ID)?.status === 'ready'
           "
         />
-        <div class="activity__pill">
+        <div
+          class="activity__pill"
+          :class="{ 'activity__pill--held': !!row.print.holdError }"
+        >
           <QueueMoveToControl
             v-if="!row.print.chain"
             :host-id="row.print.hostId ?? ORIGIN_HOST_ID"
@@ -428,18 +447,30 @@ const active = computed(
               >{{ queueLabel(row.print) }}</span
             >
             {{ promptFor(row.print) }}
-            <QueueDownloadControl
-              :target="sourceTarget(row.print.hostId ?? ORIGIN_HOST_ID)"
-              :instance="
-                sourceHost(row.print.hostId ?? ORIGIN_HOST_ID)?.instanceId
-              "
-              :job="row.print.serverId ?? ''"
-              :host="row.print.hostLabel ?? 'this machine'"
-            />
+
             <span v-if="row.print.holdError" class="activity__hold-error">
               · {{ row.print.holdError }}
             </span>
           </button>
+          <QueueDownloadControl
+            :controls="!!row.print.holdError"
+            :download-available="
+              queueStatusFor(
+                queueStatus,
+                row.print.hostId ?? ORIGIN_HOST_ID,
+                row.print.serverId,
+              )?.downloadAvailable
+            "
+            :online="
+              sourceHost(row.print.hostId ?? ORIGIN_HOST_ID)?.status === 'ready'
+            "
+            :target="sourceTarget(row.print.hostId ?? ORIGIN_HOST_ID)"
+            :instance="
+              sourceHost(row.print.hostId ?? ORIGIN_HOST_ID)?.instanceId
+            "
+            :job="row.print.serverId ?? ''"
+            :host="row.print.hostLabel ?? 'this machine'"
+          />
           <button
             v-if="expanded && row.print.serverId && !row.print.chain"
             type="button"
@@ -515,11 +546,25 @@ const active = computed(
 </template>
 
 <style scoped>
+.activity :deep(.queue-download button) {
+  align-self: flex-start;
+}
+@media (max-width: 600px) {
+  .activity :deep(.queue-download button) {
+    align-self: stretch;
+  }
+}
+
 .activity__shared {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   min-width: 0;
+}
+.activity__shared :deep(.queue-download) {
+  flex: 1 0 100%;
+  order: 1;
 }
 .activity__shared :deep(.live-activity-list) {
   flex: 1;
@@ -707,6 +752,20 @@ const active = computed(
   background: var(--bath);
   border-radius: var(--radius-pill);
   padding: 5px 8px 5px 12px;
+}
+
+.activity__pill--held {
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+.activity__pill--held :deep(.queue-download) {
+  flex: 1 0 100%;
+  order: 1;
+}
+.activity__pill--held .activity__pill-text {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  flex: 1 1 180px;
 }
 
 .activity__pill-text,

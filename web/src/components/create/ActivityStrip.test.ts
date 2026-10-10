@@ -539,3 +539,72 @@ describe("ActivityStrip live queue position", () => {
     ).toBe("Next up");
   });
 });
+
+it("keeps held repair as a sibling action beside diagnostic and Details", () => {
+  const wrapper = mount(ActivityStrip, {
+    props: {
+      jobs: [
+        makeJob({
+          serverId: "held",
+          workStarted: false,
+          holdError: "Adapter missing",
+          retryable: true,
+        }),
+      ],
+      expanded: true,
+      queueStatus: buildQueueStatusIndex([
+        {
+          hostId: ORIGIN_HOST_ID,
+          entries: [
+            {
+              id: "held",
+              model: "h3",
+              state: "held",
+              retryable: true,
+              model_download: { model: "h3" },
+              started_at_unix_ms: 0,
+              position: 0,
+            },
+          ],
+        },
+      ]),
+    },
+    global: {
+      stubs: {
+        QueueDownloadControl: {
+          name: "QueueDownloadControl",
+          props: ["controls", "downloadAvailable"],
+          template: '<button data-test="repair">Download model</button>',
+        },
+      },
+    },
+  });
+  const control = wrapper.findComponent({ name: "QueueDownloadControl" });
+  expect(control.props("controls")).toBe(true);
+  expect(control.props("downloadAvailable")).toBe(true);
+  expect(
+    wrapper
+      .get('[data-test="repair"]')
+      .element.parentElement?.closest("button"),
+  ).toBeNull();
+  expect(wrapper.text()).toContain("Adapter missing");
+  expect(wrapper.text()).toContain("Details");
+});
+
+it("reserves a full wrapped row for recovery instead of squeezing the job title", async () => {
+  const { default: source } = await import("./ActivityStrip.vue?raw");
+  expect(source).toMatch(/\.activity__shared\s*\{[^}]*flex-wrap:\s*wrap/);
+  expect(source).toMatch(
+    /\.activity__shared\s+:deep\(\.queue-download\)\s*\{[^}]*flex:\s*1 0 100%/,
+  );
+});
+
+it("keeps desktop repair buttons compact while retaining phone-width touch controls", async () => {
+  const { default: source } = await import("./ActivityStrip.vue?raw");
+  expect(source).toMatch(
+    /\.activity\s+:deep\(\.queue-download button\)\s*\{[^}]*align-self:\s*flex-start/,
+  );
+  expect(source).toMatch(
+    /@media\s*\(max-width:\s*600px\)\s*\{\s*\.activity\s+:deep\(\.queue-download button\)\s*\{[^}]*align-self:\s*stretch/,
+  );
+});

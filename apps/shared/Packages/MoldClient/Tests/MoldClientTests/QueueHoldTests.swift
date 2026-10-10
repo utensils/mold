@@ -67,3 +67,47 @@ private func child(errorCode: String?, retryable: Bool? = nil) -> BatchChild {
     #expect(hold?.summary(modelName: "Model", hostName: "Machine") == UserFacingError.message(raw))
     #expect(QueueFailureDetails.diagnostic(entry) == raw)
 }
+
+@Test func manifestDownloadHintRepairsAComponentWithoutBatchCode() throws {
+    let row = try MoldJSON.decoder.decode(QueueEntry.self, from: Data(#"{"id":"h3","state":"held","model":"h3-turbo","retryable":true,"held_reason":"Turbo adapter is missing.","model_download":{"model":"h3-turbo"}}"#.utf8))
+    let hold = QueueHold.resolve(entry: row, child: nil)
+    #expect(hold == .missingModel("h3-turbo", sentence: "Turbo adapter is missing."))
+    #expect(hold?.summary(modelName: "H3", hostName: "Machine") == "Turbo adapter is missing.")
+}
+
+@Test func mismatchedOrBlankDownloadHintsCannotOverrideTheJobModel() throws {
+    for name in ["other-model", "", "   "] {
+        let data = try JSONSerialization.data(withJSONObject: ["id": "job", "state": "held", "model": "h3", "retryable": true,
+                                                               "model_download": ["model": name]])
+        let row = try MoldJSON.decoder.decode(QueueEntry.self, from: data)
+        #expect(QueueHold.resolve(entry: row, child: child(errorCode: "MODEL_NOT_FOUND")) == .prose("", retryable: true))
+    }
+}
+
+@Test func nonretryableManifestHintCannotOfferDownload() throws {
+    let row = try MoldJSON.decoder.decode(QueueEntry.self, from: Data(#"{"id":"h3","state":"held","model":"h3","retryable":false,"model_download":{"model":"h3"}}"#.utf8))
+    #expect(QueueHold.resolve(entry: row, child: nil) == .prose("", retryable: false))
+}
+
+@Test func malformedPresentHintKeepsTheRowButDisablesLegacyRecovery() throws {
+    for hint: Any in [NSNull(), "wrong", 4, ["model": NSNull()], ["model": 4], [:]] {
+        let data = try JSONSerialization.data(withJSONObject: ["id": "job", "state": "held", "model": "h3", "retryable": true,
+                                                               "held_reason": "Keep this diagnostic", "model_download": hint])
+        let row = try MoldJSON.decoder.decode(QueueEntry.self, from: data)
+        #expect(row.heldReason == "Keep this diagnostic")
+        #expect(QueueHold.resolve(entry: row, child: child(errorCode: "MODEL_NOT_FOUND")) == .prose("Keep this diagnostic", retryable: true))
+    }
+}
+
+@Test func newHintRequiresExplicitRetryPermission() throws {
+    let row = try MoldJSON.decoder.decode(QueueEntry.self, from: Data(#"{"id":"h3","state":"held","model":"h3","model_download":{"model":"h3"}}"#.utf8))
+    #expect(QueueHold.resolve(entry: row, child: child(errorCode: "MODEL_NOT_FOUND")) == .prose("", retryable: true))
+}
+
+@Test func hintedQueueEntryRoundTripPreservesExistingFields() throws {
+    let data = Data(#"{"id":"job","model":"h3","model_download":{"model":"h3"},"state":"held","retryable":true,"error_detail":"adapter diagnostic","held_reason":"Adapter missing","batch_id":"batch","client_batch_id":"client","dispatch_attempts":2,"gpu":1,"target_gpu":2,"batch_index":3,"explicitly_paused":false,"replayed":true,"seed_pinned":true,"model_display_name":"H3","position":4,"started_at_unix_ms":123,"durable":true}"#.utf8)
+    let row = try MoldJSON.decoder.decode(QueueEntry.self, from: data)
+    #expect(try MoldJSON.decoder.decode(QueueEntry.self, from: MoldJSON.encoder.encode(row)) == row)
+    #expect(row.errorDetail == "adapter diagnostic")
+    #expect(row.modelDownload?.model == "h3")
+}

@@ -1639,6 +1639,92 @@ fn catalog_sidecar_component_status(
     Ok(components)
 }
 
+/// Read-only model repair hint; never classifies an error message.
+pub(crate) fn queue_model_download(config: &Config, model: &str) -> Option<String> {
+    if model.trim().is_empty() {
+        return None;
+    }
+    let canonical = mold_core::manifest::resolve_model_name(model);
+    let manifest = mold_core::manifest::find_manifest(&canonical)?;
+    mold_core::require_model_acquisition(&canonical, Some(&manifest.family)).ok()?;
+    // Global path overrides can redirect runtime loading independently of the
+    // manifest. Never suggest downloading to a destination we cannot prove.
+    const PATH_OVERRIDES: &[&str] = &[
+        "MOLD_TRANSFORMER_PATH",
+        "MOLD_LOW_NOISE_TRANSFORMER_PATH",
+        "MOLD_VAE_PATH",
+        "MOLD_SPATIAL_UPSCALER_PATH",
+        "MOLD_TEMPORAL_UPSCALER_PATH",
+        "MOLD_DISTILLED_LORA_PATH",
+        "MOLD_LOW_NOISE_DISTILLED_LORA_PATH",
+        "MOLD_T5_PATH",
+        "MOLD_CLIP_PATH",
+        "MOLD_T5_TOKENIZER_PATH",
+        "MOLD_CLIP_TOKENIZER_PATH",
+        "MOLD_CLIP2_PATH",
+        "MOLD_CLIP2_TOKENIZER_PATH",
+        "MOLD_TEXT_TOKENIZER_PATH",
+        "MOLD_DECODER_PATH",
+    ];
+    if PATH_OVERRIDES
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+    {
+        return None;
+    }
+    let root = config.resolved_models_dir();
+    let destinations: std::collections::HashSet<_> = manifest
+        .files
+        .iter()
+        .map(|file| root.join(mold_core::manifest::storage_path(manifest, file)))
+        .collect();
+    // Do not call discovery: it can remove stale .pulling markers. Explicit
+    // custom paths require operator repair, not a speculative manifest pull.
+    if let Some(configured) = config.lookup_model_config(model) {
+        let downloads = manifest
+            .files
+            .iter()
+            .map(|file| {
+                (
+                    file.component,
+                    root.join(mold_core::manifest::storage_path(manifest, file)),
+                )
+            })
+            .collect::<Vec<_>>();
+        let paths = mold_core::manifest::paths_from_downloads(&downloads, &manifest.family)?;
+        let expected = manifest.to_model_config(&paths);
+        macro_rules! require_same_slot {
+            ($($field:ident),+ $(,)?) => { $(
+                if configured.$field.is_some() && configured.$field != expected.$field { return None; }
+            )+ };
+        }
+        require_same_slot!(
+            transformer,
+            transformer_shards,
+            low_noise_transformer,
+            vae,
+            spatial_upscaler,
+            temporal_upscaler,
+            distilled_lora,
+            low_noise_distilled_lora,
+            t5_encoder,
+            clip_encoder,
+            t5_tokenizer,
+            clip_tokenizer,
+            clip_encoder_2,
+            clip_tokenizer_2,
+            text_encoder_files,
+            text_tokenizer,
+            decoder,
+            lora
+        );
+    }
+    destinations
+        .iter()
+        .any(|path| !path.is_file())
+        .then(|| model.to_string())
+}
+
 fn manifest_paths_with_config_overrides(config: &Config, model_name: &str) -> Option<ModelPaths> {
     let mut effective = config.resolved_model_config(model_name);
     if let Some(configured) = config.lookup_model_config(model_name) {
@@ -2845,6 +2931,63 @@ mod tests {
             require_catalog_intent_activation("cv:42", &intent, artifact_root).is_ok(),
             cfg!(feature = "h3")
         );
+    }
+
+    #[test]
+    fn queue_model_download_identifies_missing_reviewed_adapter_without_error_prose() {
+        let root = tempfile::tempdir().unwrap();
+        let _environment = IsolatedModelEnvironment::hermetic();
+        let mut config = Config::default();
+        config.models_dir = root.path().display().to_string();
+        let model = "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21";
+        let manifest = mold_core::manifest::find_manifest(model).unwrap();
+        for file in &manifest.files {
+            let path = root
+                .path()
+                .join(mold_core::manifest::storage_path(manifest, file));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"presence-only fixture").unwrap();
+        }
+        assert_eq!(queue_model_download(&config, model), None);
+        let adapter = manifest
+            .files
+            .iter()
+            .find(|file| file.component == mold_core::manifest::ModelComponent::DistilledLora)
+            .unwrap();
+        std::fs::remove_file(
+            root.path()
+                .join(mold_core::manifest::storage_path(manifest, adapter)),
+        )
+        .unwrap();
+        assert_eq!(queue_model_download(&config, model).as_deref(), Some(model));
+        let mut custom = config.clone();
+        custom.models.insert(
+            model.to_string(),
+            mold_core::ModelConfig {
+                distilled_lora: Some(
+                    root.path()
+                        .join("custom-missing.safetensors")
+                        .display()
+                        .to_string(),
+                ),
+                ..Default::default()
+            },
+        );
+        assert_eq!(queue_model_download(&custom, model), None);
+        // A path from another slot is not the adapter's acquisition target.
+        custom.models.get_mut(model).unwrap().distilled_lora = Some(
+            root.path()
+                .join(mold_core::manifest::storage_path(
+                    manifest,
+                    &manifest.files[0],
+                ))
+                .display()
+                .to_string(),
+        );
+        assert_eq!(queue_model_download(&custom, model), None);
+
+        assert_eq!(queue_model_download(&config, "unknown-custom-model"), None);
+        assert_eq!(queue_model_download(&config, ""), None);
     }
 
     #[tokio::test]

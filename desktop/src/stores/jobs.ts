@@ -42,6 +42,7 @@ export interface QueueEntry {
   /** Why the host parked this job. Present only for `state: "held"`. */
   held_reason?: string | null;
   error?: string | null;
+  model_download?: { model: string } | null;
   retryable?: boolean | null;
   batch_id?: string | null;
   client_batch_id?: string | null;
