@@ -132,22 +132,27 @@ struct LengthChip: View {
     let temporal: TemporalProfile
 
     var body: some View {
+        @Bindable var generate = generate
         let fps = Double(generate.draft.fps ?? temporal.fps.value)
         let frames = generate.draft.frames ?? temporal.frames.default
         let seconds = fps > 0 ? Double(frames) / fps : 0
         Menu {
+            if generate.draft.supportsDurationPrediction {
+                Toggle("Automatic from prompt", isOn: $generate.draft.prefersAutomaticDuration)
+                Divider()
+            }
             ForEach(lengths(fps: fps), id: \.frames) { option in
-                Button { generate.draft.frames = option.frames } label: {
+                Button { generate.draft.prefersAutomaticDuration = false; generate.draft.frames = option.frames } label: {
                     let text = String(localized: "\(option.seconds.formatted(.number.precision(.fractionLength(0...1)))) s")
-                    if option.frames == frames { Label(text, systemImage: "checkmark") } else { Text(text) }
+                    if !generate.draft.usesAutomaticDuration && option.frames == frames { Label(text, systemImage: "checkmark") } else { Text(text) }
                 }
             }
         } label: {
-            chipLabel(String(localized: "\(seconds.formatted(.number.precision(.fractionLength(0...1)))) s"),
-                      detail: "\(frames) f · \(Int(fps)) fps")
+            chipLabel(generate.draft.usesAutomaticDuration ? "Auto length" : String(localized: "\(seconds.formatted(.number.precision(.fractionLength(0...1)))) s"),
+                      detail: generate.draft.usesAutomaticDuration ? "From prompt" : "\(frames) f · \(Int(fps)) fps")
         }
         .buttonStyle(.bordered)
-        .accessibilityLabel(String(localized: "Length, \(seconds.formatted(.number.precision(.fractionLength(0...1)))) seconds"))
+        .accessibilityLabel(generate.draft.usesAutomaticDuration ? "Length, automatic from prompt" : String(localized: "Length, \(seconds.formatted(.number.precision(.fractionLength(0...1)))) seconds"))
     }
 
     /// Whole seconds up to the recipe's ceiling, each snapped to the grid.

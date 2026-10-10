@@ -13,6 +13,10 @@ extension RootView {
     @TabContentBuilder<TabSelection>
     func librarySection(_ library: LibraryStore) -> some TabContent<TabSelection> {
         TabSection {
+            Tab(value: TabSelection.sourceMedia) {
+                NavigationStack { SourceMediaBrowser() }
+            } label: { Label("Source Media", systemImage: "photo.stack") }
+            .defaultVisibility(.hidden, for: .tabBar)
             shelfTab(.favorites, library)
             ForEach(library.shelves, id: \.slug) { collection in
                 shelfTab(.collection(slug: collection.slug), library)

@@ -10,6 +10,7 @@ extension GenerateController {
         guard let recipe else { return }
         draft = draft.adopting(
             recipe, isNewModel: false, family: model.family, model: model.name,
-            profile: model.generationProfile, modelSupportsAudio: model.supportsAudio)
+            profile: model.generationProfile, modelSupportsAudio: model.supportsAudio,
+            modelSupportsDurationPrediction: model.offersDurationPrediction)
     }
 }

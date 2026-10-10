@@ -207,6 +207,7 @@ describe("AdvancedDrawer video duration", () => {
       { models: [model] },
     );
     expect(predicting.findAllComponents(VideoDurationSlider)).toHaveLength(0);
+    expect(predicting.find("[data-test=video-frames]").exists()).toBe(false);
     expect(
       predicting.find("[data-test='predicted-duration-hint']").exists(),
     ).toBe(true);

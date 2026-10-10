@@ -36,7 +36,7 @@ public enum RenderRequest {
             seed: draft.locksSeed ? draft.seed : nil
         )
         request.references = draft.media.generationReferences.isEmpty ? nil : draft.media.generationReferences
-        request.frames = draft.frames
+        request.frames = draft.usesAutomaticDuration ? nil : draft.frames
         request.fps = draft.fps
         request.pipeline = draft.pipeline
         // A controllable video recipe receives BOTH choices explicitly:

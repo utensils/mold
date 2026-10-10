@@ -194,7 +194,14 @@ pub(crate) fn resolve_members(
         .gallery_publication_gate
         .validated_retained_media_for_item(&output_dir, filename)
         .map_err(|error| ApiError::internal(format!("gallery authority read failed: {error:#}")))?;
-    let (identity, pins) = match lookup {
+    resolve_lookup(state, lookup)
+}
+
+fn resolve_lookup(
+    state: &AppState,
+    lookup: crate::batch_transaction::ValidatedRetainedMedia,
+) -> Result<Option<ResolvedGalleryMedia>, ApiError> {
+    let (identity, pins, metadata) = match lookup {
         crate::batch_transaction::ValidatedRetainedMedia::Missing => return Ok(None),
         crate::batch_transaction::ValidatedRetainedMedia::Invalid => {
             return Ok(Some(ResolvedGalleryMedia {
@@ -202,13 +209,21 @@ pub(crate) fn resolve_members(
                 members: Vec::new(),
                 legacy: false,
                 corrupt: true,
-            }));
+            }))
         }
-        crate::batch_transaction::ValidatedRetainedMedia::Present { identity, pins } => {
-            (identity, pins)
-        }
+        crate::batch_transaction::ValidatedRetainedMedia::Present {
+            identity,
+            pins,
+            metadata,
+        } => (identity, pins, metadata),
     };
-    resolve_members_from_pins(state, identity, pins)
+    let mut resolved = resolve_members_from_pins(state, identity, pins)?;
+    if let Some(resolved) = resolved.as_mut() {
+        for member in &mut resolved.members {
+            present_member(member, &metadata);
+        }
+    }
+    Ok(resolved)
 }
 
 pub(crate) fn resolve_members_from_pins(
@@ -259,6 +274,11 @@ pub(crate) fn resolve_members_from_pins(
                     role: entry.role.clone(),
                     display_name: safe_display_name(&entry.name, &entry.role, index),
                     size_bytes: entry.size_bytes,
+                    label: None,
+                    media_kind: None,
+                    position: None,
+                    frame_index: None,
+                    image_role: None,
                 },
             });
         }
@@ -278,6 +298,251 @@ pub(crate) fn archive_identity_sha256(
         ApiError::internal(format!("gallery identity encoding failed: {error}"))
     })?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+/// Display metadata is derived only from the exact owner's archived recipe.
+fn present_member(member: &mut ResolvedMember, metadata: &mold_core::OutputMetadata) {
+    let position = member
+        .position
+        .strip_prefix("item:")
+        .and_then(|v| v.parse::<u32>().ok());
+    let role = member.member.role.as_str();
+    let mut kind = "image";
+    let mut image_role = None;
+    let mut frame_index = None;
+    let mut label = match role {
+        "source_image" if metadata.frames.is_some_and(|frames| frames > 1) => {
+            image_role = Some("start_frame".into());
+            "Start frame".into()
+        }
+        "source_image" => "Source image".to_string(),
+        "identity_image" | "identity_images" => "Identity reference".into(),
+        "edit_images" => "Reference image".into(),
+        "mask_image" => "Mask".into(),
+        "control_image" => "Control image".into(),
+        "matting_processed_source_image" => "Processed source image".into(),
+        "matting_processed_references" => "Processed reference".into(),
+        "source_video" | "source_video_path" => {
+            kind = "video";
+            "Source video".into()
+        }
+        "extend_video" | "extend_video_path" => {
+            kind = "video";
+            "Continuation video".into()
+        }
+        "audio_file" | "audio_file_path" => {
+            kind = "audio";
+            "Source audio".into()
+        }
+        "references" => {
+            kind = "unknown";
+            if let Some(reference) =
+                position.and_then(|i| metadata.references.as_ref()?.iter().find(|r| r.index == i))
+            {
+                kind = match reference.kind {
+                    mold_core::GenerationReferenceKind::Image => "image",
+                    mold_core::GenerationReferenceKind::Video => "video",
+                    mold_core::GenerationReferenceKind::Audio => "audio",
+                    mold_core::GenerationReferenceKind::Mesh => "mesh",
+                };
+                image_role = reference
+                    .image_role
+                    .and_then(|r| serde_json::to_value(r).ok()?.as_str().map(str::to_string));
+            }
+            format!(
+                "{} reference",
+                match kind {
+                    "image" => "Image",
+                    "video" => "Video",
+                    "audio" => "Audio",
+                    "mesh" => "Mesh",
+                    _ => "Media",
+                }
+            )
+        }
+        "keyframes" => {
+            frame_index = position.and_then(|i| {
+                metadata
+                    .keyframes
+                    .as_ref()?
+                    .get(i as usize)
+                    .map(|k| k.frame)
+            });
+            match frame_index {
+                Some(0) => {
+                    image_role = Some("start_frame".into());
+                    "Start frame".into()
+                }
+                Some(frame)
+                    if metadata
+                        .frames
+                        .is_some_and(|count| count.checked_sub(1) == Some(frame)) =>
+                {
+                    image_role = Some("end_frame".into());
+                    "End frame".into()
+                }
+                Some(frame) => format!("Keyframe {frame}"),
+                None => position
+                    .map(|index| format!("Keyframe {}", u64::from(index) + 1))
+                    .unwrap_or_else(|| "Keyframe".into()),
+            }
+        }
+        role if role.starts_with("stage_source:") => match role
+            .strip_prefix("stage_source:")
+            .and_then(|v| v.parse::<u32>().ok())
+        {
+            Some(stage) => format!("Stage {} source", u64::from(stage) + 1),
+            None => {
+                kind = "unknown";
+                "Stage source".into()
+            }
+        },
+        _ => {
+            kind = "unknown";
+            "Source media".into()
+        }
+    };
+    if role != "keyframes" {
+        if let Some(index) = position {
+            label.push_str(&format!(" {}", u64::from(index) + 1));
+        }
+    }
+    member.member.label = Some(label);
+    member.member.media_kind = Some(kind.into());
+    member.member.position = position;
+    member.member.frame_index = frame_index;
+    member.member.image_role = image_role;
+}
+
+/// Keep the raw endpoint's structured record intact; only presentation and
+/// independent attachments unwrap the keyframe's original image.
+pub(crate) fn media_content(role: &str, bytes: Vec<u8>) -> Result<Vec<u8>, ApiError> {
+    if role != "keyframes" {
+        return Ok(bytes);
+    }
+    let bytes = zeroize::Zeroizing::new(bytes);
+    let keyframe: mold_core::KeyframeCondition = serde_json::from_slice(&bytes).map_err(|_| {
+        ApiError::with_code(
+            "retained keyframe is malformed",
+            "RETAINED_SOURCE_MEDIA_UNAVAILABLE",
+            StatusCode::CONFLICT,
+        )
+    })?;
+    if keyframe.image.is_empty() {
+        return Err(ApiError::not_found("retained keyframe image unavailable"));
+    }
+    Ok(keyframe.image)
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct BatchInventoryRequest {
+    filenames: Vec<String>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct BatchInventoryResponse {
+    instance_id: String,
+    inventories: std::collections::BTreeMap<String, Inventory>,
+}
+
+fn validate_inventory_filenames(filenames: &[String]) -> Result<(), ApiError> {
+    if filenames.len() > 100 {
+        return Err(ApiError::with_code(
+            "source inventory accepts at most 100 filenames",
+            "RETAINED_SOURCE_MEDIA_BATCH_TOO_LARGE",
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ));
+    }
+    for filename in filenames {
+        crate::routes::validate_gallery_filename(filename)?;
+    }
+    Ok(())
+}
+
+fn private_inventory_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    headers
+}
+
+fn inventory_response(resolved: Option<ResolvedGalleryMedia>) -> Inventory {
+    match resolved {
+        None => Inventory {
+            availability: Availability::UnavailableLegacy,
+            members: Vec::new(),
+        },
+        Some(resolved) => {
+            let availability = availability_of(&resolved);
+            Inventory {
+                availability,
+                members: if availability == Availability::Available {
+                    resolved.members.into_iter().map(|m| m.member).collect()
+                } else {
+                    Vec::new()
+                },
+            }
+        }
+    }
+}
+
+#[utoipa::path(post, path = "/api/gallery/source-media/inventory", tag = "gallery",
+    request_body = BatchInventoryRequest,
+    responses((status = 200, body = BatchInventoryResponse), (status = 401, description = "Authentication required")))]
+pub(crate) async fn batch_inventory(
+    State(state): State<AppState>,
+    auth: Option<Extension<crate::auth::AuthState>>,
+    authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
+    Json(request): Json<BatchInventoryRequest>,
+) -> Result<(HeaderMap, Json<BatchInventoryResponse>), ApiError> {
+    if !private_media_authorized(auth.as_ref(), authenticated.as_ref()) {
+        return Err(ApiError::with_code(
+            "API-key authentication required",
+            "RETAINED_SOURCE_MEDIA_AUTH_REQUIRED",
+            StatusCode::UNAUTHORIZED,
+        ));
+    }
+    validate_inventory_filenames(&request.filenames)?;
+    let instance_id = state.instance_id.to_string();
+    let inventories = tokio::task::spawn_blocking(move || {
+        let config = state.config.blocking_read();
+        if state.is_output_disabled(&config) {
+            return Err(ApiError::not_found("image output is disabled"));
+        }
+        let root = config.effective_output_dir();
+        drop(config);
+        let lookups = state
+            .gallery_publication_gate
+            .validated_retained_media_for_items(&root, &request.filenames)
+            .map_err(|e| ApiError::internal(format!("gallery authority read failed: {e:#}")))?;
+        request
+            .filenames
+            .into_iter()
+            .zip(lookups)
+            .map(|(filename, lookup)| {
+                Ok((
+                    filename,
+                    inventory_response(resolve_lookup(&state, lookup)?),
+                ))
+            })
+            .collect::<Result<std::collections::BTreeMap<_, _>, ApiError>>()
+    })
+    .await
+    .map_err(|_| ApiError::internal("source inventory task failed"))??;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    Ok((
+        headers,
+        Json(BatchInventoryResponse {
+            instance_id,
+            inventories,
+        }),
+    ))
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -510,9 +775,10 @@ pub(crate) async fn create_reuse_session(
         session_handle,
     })
     .into_response();
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
     Ok(response)
 }
 
@@ -765,12 +1031,15 @@ pub(crate) async fn inventory(
     auth: Option<Extension<crate::auth::AuthState>>,
     authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
     AxumPath(filename): AxumPath<String>,
-) -> Result<Json<Inventory>, ApiError> {
+) -> Result<(HeaderMap, Json<Inventory>), ApiError> {
     if !private_media_authorized(auth.as_ref(), authenticated.as_ref()) {
-        return Ok(Json(Inventory {
-            availability: Availability::UnavailableAuth,
-            members: Vec::new(),
-        }));
+        return Ok((
+            private_inventory_headers(),
+            Json(Inventory {
+                availability: Availability::UnavailableAuth,
+                members: Vec::new(),
+            }),
+        ));
     }
     crate::routes::validate_gallery_filename(&filename)?;
     let resolved = tokio::task::spawn_blocking(move || resolve_members(&state, &filename))
@@ -778,26 +1047,10 @@ pub(crate) async fn inventory(
         .map_err(|error| {
             ApiError::internal(format!("source-media inventory task failed: {error}"))
         })??;
-    Ok(Json(match resolved {
-        None => Inventory {
-            availability: Availability::UnavailableLegacy,
-            members: Vec::new(),
-        },
-        Some(resolved) => match availability_of(&resolved) {
-            Availability::Available => Inventory {
-                availability: Availability::Available,
-                members: resolved
-                    .members
-                    .into_iter()
-                    .map(|member| member.member)
-                    .collect(),
-            },
-            availability => Inventory {
-                availability,
-                members: Vec::new(),
-            },
-        },
-    }))
+    Ok((
+        private_inventory_headers(),
+        Json(inventory_response(resolved)),
+    ))
 }
 
 #[utoipa::path(
@@ -819,6 +1072,37 @@ pub(crate) async fn download(
     auth: Option<Extension<crate::auth::AuthState>>,
     authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
     AxumPath((filename, requested_member)): AxumPath<(String, String)>,
+) -> Result<Response, ApiError> {
+    download_member(
+        state,
+        auth,
+        authenticated,
+        filename,
+        requested_member,
+        false,
+    )
+    .await
+}
+
+#[utoipa::path(get, path = "/api/gallery/source-media/{filename}/{member_id}/content", tag = "gallery",
+    params(("filename" = String, Path), ("member_id" = String, Path)),
+    responses((status = 200, description = "Original attachable media bytes"), (status = 404, description = "Member unavailable")))]
+pub(crate) async fn content(
+    State(state): State<AppState>,
+    auth: Option<Extension<crate::auth::AuthState>>,
+    authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
+    AxumPath((filename, requested_member)): AxumPath<(String, String)>,
+) -> Result<Response, ApiError> {
+    download_member(state, auth, authenticated, filename, requested_member, true).await
+}
+
+async fn download_member(
+    state: AppState,
+    auth: Option<Extension<crate::auth::AuthState>>,
+    authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
+    filename: String,
+    requested_member: String,
+    extract_content: bool,
 ) -> Result<Response, ApiError> {
     if !private_media_authorized(auth.as_ref(), authenticated.as_ref()) {
         return Err(ApiError::with_code(
@@ -855,20 +1139,27 @@ pub(crate) async fn download(
             StatusCode::PAYLOAD_TOO_LARGE,
         ));
     }
-    let bytes = tokio::task::spawn_blocking(move || {
-        lifecycle.gallery_member_bytes(member.media_set, member.pin_id, member.index)
+    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, ApiError> {
+        let bytes = lifecycle
+            .gallery_member_bytes(member.media_set, member.pin_id, member.index)
+            .map_err(|error| ApiError::internal(format!("source-media decrypt failed: {error}")))?;
+        if extract_content {
+            media_content(&member.member.role, bytes)
+        } else {
+            Ok(bytes)
+        }
     })
     .await
-    .map_err(|error| ApiError::internal(format!("source-media decrypt task failed: {error}")))?
-    .map_err(|error| ApiError::internal(format!("source-media decrypt failed: {error}")))?;
+    .map_err(|error| ApiError::internal(format!("source-media decrypt task failed: {error}")))??;
     let mut response = bytes.into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),
     );
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
     let disposition = format!(
         "attachment; filename=\"{}\"",
         member.member.display_name.replace(['\\', '"'], "_")
@@ -885,6 +1176,442 @@ pub(crate) async fn download(
 mod tests {
     use super::*;
 
+    #[test]
+    fn content_extracts_keyframe_image_but_preserves_other_bytes() {
+        let json = br#"{"frame":12,"image":"YWJj","name":"frame.png"}"#.to_vec();
+        assert_eq!(media_content("keyframes", json).unwrap(), b"abc");
+        assert_eq!(
+            media_content("source_image", b"raw".to_vec()).unwrap(),
+            b"raw"
+        );
+        assert!(media_content("keyframes", b"broken".to_vec()).is_err());
+    }
+
+    #[test]
+    fn inventory_batch_rejects_oversized_and_path_requests() {
+        assert!(validate_inventory_filenames(&vec!["saved.png".into(); 101]).is_err());
+        assert!(validate_inventory_filenames(&["../secret.png".into()]).is_err());
+        assert!(validate_inventory_filenames(&["saved.png".into()]).is_ok());
+    }
+
+    #[tokio::test]
+    async fn batch_inventory_auth_and_exact_owner_scope() {
+        let (state, _home, gallery) = fixture().await;
+        let auth = Some(Extension(Some(std::sync::Arc::new(
+            crate::auth::ApiKeySet::new(HashSet::from(["fixture-key".to_string()])),
+        ))));
+        assert!(batch_inventory(
+            State(state.clone()),
+            auth,
+            None,
+            Json(BatchInventoryRequest {
+                filenames: vec!["one.png".into()]
+            })
+        )
+        .await
+        .is_err());
+        assert_eq!(std::fs::read_dir(gallery.path()).unwrap().count(), 0);
+        publish(&state, gallery.path(), "one.png").await;
+        publish(&state, gallery.path(), "hidden.png").await;
+        let (headers, Json(response)) = batch_inventory(
+            State(state.clone()),
+            None,
+            None,
+            Json(BatchInventoryRequest {
+                filenames: vec!["one.png".into()],
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(headers[header::CACHE_CONTROL], "private, no-store");
+        assert_eq!(response.inventories.len(), 1);
+        assert_eq!(
+            response.inventories["one.png"].availability,
+            Availability::UnavailableLegacy
+        );
+        std::fs::write(gallery.path().join("one.png"), b"replaced").unwrap();
+        let (_, Json(response)) = batch_inventory(
+            State(state),
+            None,
+            None,
+            Json(BatchInventoryRequest {
+                filenames: vec!["one.png".into()],
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            response.inventories["one.png"].availability,
+            Availability::UnavailableMissingOrCorrupt
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn keyframe_content_and_thumbnail_keep_raw_download_compatible() {
+        use axum::body::{to_bytes, Body};
+        let (state, _home, gallery) = fixture().await;
+        publish(&state, gallery.path(), "saved.png").await;
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(8, 8)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let original = png.into_inner();
+        let envelope = serde_json::to_vec(&mold_core::KeyframeCondition {
+            frame: 0,
+            image: original.clone(),
+            name: Some("first.png".into()),
+        })
+        .unwrap();
+        let (_, Json(offer)) = crate::gallery_media_transfer::offer(
+            State(state.clone()),
+            None,
+            None,
+            AxumPath("saved.png".into()),
+        )
+        .await
+        .unwrap();
+        let mut descriptor = serde_json::to_value(offer).unwrap();
+        descriptor["members"] = serde_json::json!([{
+            "role":"keyframes", "position":"item:0", "sink":"memory",
+            "size_bytes":envelope.len(), "sha256":format!("{:x}", Sha256::digest(&envelope))
+        }]);
+        let encoded = serde_json::to_vec(&descriptor).unwrap();
+        let mut body = (encoded.len() as u32).to_be_bytes().to_vec();
+        body.extend(encoded);
+        body.extend(&envelope);
+        let _ = crate::gallery_media_transfer::receive(
+            State(state.clone()),
+            None,
+            None,
+            AxumPath("saved.png".into()),
+            Body::from(body),
+        )
+        .await
+        .unwrap();
+        let (_, Json(response)) = batch_inventory(
+            State(state.clone()),
+            None,
+            None,
+            Json(BatchInventoryRequest {
+                filenames: vec!["saved.png".into()],
+            }),
+        )
+        .await
+        .unwrap();
+        let member = &response.inventories["saved.png"].members[0];
+        assert_eq!(member.media_kind.as_deref(), Some("image"));
+        assert_eq!(member.position, Some(0));
+        let args = ("saved.png".to_string(), member.member_id.clone());
+        let raw = download(State(state.clone()), None, None, AxumPath(args.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            to_bytes(raw.into_body(), 1024 * 1024)
+                .await
+                .unwrap()
+                .as_ref(),
+            envelope.as_slice()
+        );
+        let extracted = content(State(state.clone()), None, None, AxumPath(args.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            to_bytes(extracted.into_body(), 1024 * 1024)
+                .await
+                .unwrap()
+                .as_ref(),
+            original.as_slice()
+        );
+        let thumbnail = crate::gallery_source_thumbnail::get(
+            State(state.clone()),
+            None,
+            None,
+            AxumPath(args.clone()),
+        )
+        .await
+        .unwrap();
+        let preview = to_bytes(thumbnail.into_body(), 2 * 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(image::load_from_memory(&preview).is_ok());
+        std::fs::remove_file(gallery.path().join("saved.png")).unwrap();
+        assert!(content(State(state), None, None, AxumPath(args))
+            .await
+            .is_err());
+    }
+
+    #[test]
+    fn presentation_distinguishes_reference_kinds_and_frame_positions() {
+        let mut metadata =
+            mold_core::OutputMetadata::from_generate_request(&request(), 1, None, "test");
+        metadata.frames = Some(25);
+        metadata.keyframes = Some(vec![mold_core::KeyframeMetadata {
+            frame: 24,
+            name: None,
+            sha256: "a".repeat(64),
+        }]);
+        let mut member = ResolvedMember {
+            media_set: crate::queue_media_store::MediaSetRef {
+                owner_id: "owner".into(),
+                job_id: "job".into(),
+                set_id: "set".into(),
+            },
+            pin_id: "pin".into(),
+            index: 0,
+            position: "item:0".into(),
+            sink: crate::queue_media_store::QueueMediaSink::Memory,
+            sha256: "sha".into(),
+            member: Member {
+                member_id: "id".into(),
+                role: "keyframes".into(),
+                display_name: "frame".into(),
+                size_bytes: 3,
+                label: None,
+                media_kind: None,
+                position: None,
+                frame_index: None,
+                image_role: None,
+            },
+        };
+        present_member(&mut member, &metadata);
+        assert_eq!(member.member.label.as_deref(), Some("End frame"));
+        assert_eq!(member.member.frame_index, Some(24));
+        member.member.role = "references".into();
+        present_member(&mut member, &metadata);
+        assert_eq!(member.member.media_kind.as_deref(), Some("unknown"));
+        for kind in ["image", "video", "audio", "mesh"] {
+            metadata.references = Some(vec![serde_json::from_value(
+                serde_json::json!({"kind":kind,"index":0,"sha256":"sha","mime_type":"test"}),
+            )
+            .unwrap()]);
+            present_member(&mut member, &metadata);
+            assert_eq!(member.member.media_kind.as_deref(), Some(kind));
+        }
+    }
+    /// Opt-in authentic, encrypted fixture for browser/native visual acceptance.
+    /// MOLD_SOURCE_MEDIA_UAT_HOME must name a new absolute directory under /tmp.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "creates an isolated persistent UAT library only when explicitly requested"]
+    async fn build_source_media_uat_fixture() {
+        use axum::body::Body;
+        use mold_core::{OutputFormat, OutputMetadata};
+        use mold_db::{GenerationRecord, RecordSource};
+        let home = std::path::PathBuf::from(
+            std::env::var("MOLD_SOURCE_MEDIA_UAT_HOME").expect("set isolated fixture destination"),
+        );
+        assert!(home.is_absolute() && home.starts_with("/tmp") && !home.exists());
+        std::fs::create_dir_all(&home).unwrap();
+        let gallery = home.join("output");
+        std::fs::create_dir(&gallery).unwrap();
+        let db = std::sync::Arc::new(Some(
+            mold_db::MetadataDb::open(&home.join("mold.db")).unwrap(),
+        ));
+        let instance = crate::instance::resolve_instance_id(db.as_ref().as_ref(), 17681);
+        let journal = std::sync::Arc::new(crate::queue_journal::QueueJournal::new(
+            db.clone(),
+            Some(&home),
+            &instance,
+        ));
+        let lifecycle =
+            std::sync::Arc::new(crate::queue_media_lifecycle::QueueMediaLifecycle::new(
+                db.clone(),
+                home.clone(),
+                journal.owner_uuid().unwrap().to_string(),
+            ));
+        journal
+            .install_queue_media_lifecycle(lifecycle.clone())
+            .unwrap();
+        assert!(
+            crate::queue_media_startup::reconcile_claimed_owner(&journal, lifecycle.as_ref())
+                .unwrap()
+                .durable_media_ready
+        );
+        let mut state = AppState::for_tests();
+        state.queue_journal = journal;
+        state.metadata_db = db.clone();
+        state.config.write().await.output_dir = Some(gallery.to_string_lossy().into());
+        let mut pngs = Vec::new();
+        for variant in 0..3 {
+            let picture = image::RgbImage::from_fn(384, 256, |x, y| {
+                let wave = ((x / 24 + y / 24 + variant) % 2) as u8;
+                image::Rgb([
+                    ((x + variant * 55) % 255) as u8,
+                    (y % 255) as u8,
+                    70 + wave * 100,
+                ])
+            });
+            let mut encoded = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgb8(picture)
+                .write_to(&mut encoded, image::ImageFormat::Png)
+                .unwrap();
+            pngs.push(encoded.into_inner());
+        }
+        for (index, name) in ["source-study.png", "keyframe-study.png", "mixed-study.png"]
+            .iter()
+            .enumerate()
+        {
+            let mut req = request();
+            req.model = "flux2-klein:4b".into();
+            req.prompt = format!("Source Media UAT — study {}", index + 1);
+            req.width = 384;
+            req.height = 256;
+            req.frames = Some(25);
+            req.keyframes = Some(vec![mold_core::KeyframeCondition {
+                frame: 24,
+                image: pngs[1].clone(),
+                name: Some("Closing frame.png".into()),
+            }]);
+            let metadata = OutputMetadata::from_generate_request(&req, 1, None, "uat");
+            let record = GenerationRecord::from_save(
+                std::path::Path::new("unused"),
+                *name,
+                OutputFormat::Png,
+                metadata,
+                RecordSource::Server,
+                1,
+            );
+            let mut transaction = crate::batch_transaction::GalleryImportTransaction::begin(
+                &gallery,
+                &format!("uat-{index}"),
+                0,
+                serde_json::json!({"kind":"fixture"}),
+                record,
+            )
+            .unwrap();
+            std::fs::write(transaction.staging_path(), &pngs[index]).unwrap();
+            transaction.seal_staged_file().unwrap();
+            transaction.mark_prepared().unwrap();
+            transaction
+                .commit(&state.gallery_publication_gate, state.metadata_db.clone())
+                .await
+                .unwrap();
+            let keyframe = serde_json::to_vec(&req.keyframes.as_ref().unwrap()[0]).unwrap();
+            // A valid tiny PCM WAV supplies a non-image tile without generation.
+            let mut wav = b"RIFF".to_vec();
+            wav.extend(38_u32.to_le_bytes());
+            wav.extend(b"WAVEfmt ");
+            wav.extend(16_u32.to_le_bytes());
+            wav.extend(1_u16.to_le_bytes());
+            wav.extend(1_u16.to_le_bytes());
+            wav.extend(8000_u32.to_le_bytes());
+            wav.extend(16000_u32.to_le_bytes());
+            wav.extend(2_u16.to_le_bytes());
+            wav.extend(16_u16.to_le_bytes());
+            wav.extend(b"data");
+            wav.extend(2_u32.to_le_bytes());
+            wav.extend(0_i16.to_le_bytes());
+            let mut members = vec![
+                ("source_image", "scalar", pngs[0].clone()),
+                ("edit_images", "item:0", pngs[2].clone()),
+            ];
+            if index > 0 {
+                members.push(("keyframes", "item:0", keyframe));
+            }
+            if index > 1 {
+                members.extend([
+                    ("audio_file", "scalar", wav),
+                    ("mask_image", "scalar", pngs[1].clone()),
+                    ("stage_source:1", "authored-source", pngs[2].clone()),
+                ]);
+            }
+            let (_, Json(offer)) = crate::gallery_media_transfer::offer(
+                State(state.clone()),
+                None,
+                None,
+                AxumPath((*name).into()),
+            )
+            .await
+            .unwrap();
+            let mut descriptor = serde_json::to_value(offer).unwrap();
+            descriptor["members"] = serde_json::Value::Array(members.iter().map(|(role, position, bytes)| serde_json::json!({"role":role,"position":position,"sink":"memory","size_bytes":bytes.len(),"sha256":format!("{:x}", Sha256::digest(bytes))})).collect());
+            let encoded = serde_json::to_vec(&descriptor).unwrap();
+            let mut body = (encoded.len() as u32).to_be_bytes().to_vec();
+            body.extend(encoded);
+            for (_, _, bytes) in members {
+                body.extend(bytes);
+            }
+            let _ = crate::gallery_media_transfer::receive(
+                State(state.clone()),
+                None,
+                None,
+                AxumPath((*name).into()),
+                Body::from(body),
+            )
+            .await
+            .unwrap();
+        }
+        let db = db.as_ref().as_ref().unwrap();
+        let collection = db
+            .create_collection("Source studies", Some("Retained input UAT fixtures"))
+            .unwrap();
+        db.collection_add(
+            &collection.id,
+            &gallery,
+            &["source-study.png".into(), "keyframe-study.png".into()],
+        )
+        .unwrap();
+        crate::gallery_authority::release_gallery_writer_leases();
+        println!("UAT fixture: {} (port 17681)", home.display());
+    }
+    async fn fixture() -> (AppState, tempfile::TempDir, tempfile::TempDir) {
+        let home = tempfile::tempdir().unwrap();
+        let gallery = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let journal = std::sync::Arc::new(crate::queue_journal::QueueJournal::new(
+            db.clone(),
+            Some(home.path()),
+            "transfer-test",
+        ));
+        let lifecycle =
+            std::sync::Arc::new(crate::queue_media_lifecycle::QueueMediaLifecycle::new(
+                db.clone(),
+                home.path().into(),
+                journal.owner_uuid().unwrap().to_string(),
+            ));
+        journal
+            .install_queue_media_lifecycle(lifecycle.clone())
+            .unwrap();
+        assert!(
+            crate::queue_media_startup::reconcile_claimed_owner(&journal, lifecycle.as_ref())
+                .unwrap()
+                .durable_media_ready
+        );
+        let mut state = AppState::for_tests();
+        state.queue_journal = journal;
+        state.metadata_db = db;
+        state.config.write().await.output_dir = Some(gallery.path().to_string_lossy().into());
+        (state, home, gallery)
+    }
+    async fn publish(state: &AppState, gallery: &std::path::Path, name: &str) {
+        use mold_core::{GenerateRequest, OutputFormat, OutputMetadata};
+        use mold_db::{GenerationRecord, RecordSource};
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({"prompt":"fixture", "model":"test", "width":64,"height":64,"steps":1,"guidance":1.0})).unwrap();
+        let record = GenerationRecord::from_save(
+            std::path::Path::new("unused"),
+            name,
+            OutputFormat::Png,
+            OutputMetadata::from_generate_request(&request, 1, None, "test"),
+            RecordSource::Server,
+            1,
+        );
+        let mut transaction = crate::batch_transaction::GalleryImportTransaction::begin(
+            gallery,
+            &format!("import-{name}"),
+            0,
+            serde_json::json!({"kind":"fixture"}),
+            record,
+        )
+        .unwrap();
+        std::fs::write(transaction.staging_path(), name.as_bytes()).unwrap();
+        transaction.seal_staged_file().unwrap();
+        transaction.mark_prepared().unwrap();
+        transaction
+            .commit(&state.gallery_publication_gate, state.metadata_db.clone())
+            .await
+            .unwrap();
+    }
     fn request() -> mold_core::GenerateRequest {
         serde_json::from_value(serde_json::json!({
             "prompt": "reuse retained source",
@@ -997,6 +1724,11 @@ mod tests {
                 role: "matting_processed_references".into(),
                 display_name: "front".into(),
                 size_bytes: 3,
+                label: None,
+                media_kind: None,
+                position: None,
+                frame_index: None,
+                image_role: None,
             },
         };
         let resolved = ResolvedGalleryMedia {

@@ -195,9 +195,9 @@ final class QueueStore {
         QueueHold.resolve(entry: entry, child: child(for: entry, on: id))
     }
 
-    /// The Queue tab's badge: what is being made or held, fleet-wide.
+    /// The Queue tab's badge: individual jobs waiting to run, fleet-wide.
     var badge: Int {
-        listings.values.joined().filter { $0.state == .running || $0.state == .held }.count
+        listings.values.joined().filter(\.state.isWaiting).count
     }
 
     /// An unanswered queue cannot establish that nothing is waiting.

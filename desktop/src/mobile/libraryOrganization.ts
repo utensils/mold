@@ -56,15 +56,17 @@ import type { GalleryImage, OutputMetadata, ServerCapabilities } from "../lib/ap
  * the additive organization fields older hosts omit. */
 export type MobileGalleryImage = GalleryImage & GalleryOrganizationFields;
 
-export type MobileLibraryScope = "prints" | "collections" | "trash";
+export type MobileLibraryScope = "prints" | "collections" | "sources" | "trash";
 
 export const MOBILE_LIBRARY_SCOPES: readonly MobileLibraryScope[] = [
   "prints",
   "collections",
+  "sources",
   "trash",
 ];
 
 export const MOBILE_LIBRARY_SCOPE_LABELS: Record<MobileLibraryScope, string> = {
+  sources: "Source Media",
   prints: "Prints",
   collections: "Collections",
   trash: "Trash",

@@ -25,6 +25,7 @@ import {
 import type { GalleryKindFilter, LibraryScope } from "../../stores/gallery";
 
 export interface ScopeCounts {
+  sources?: number;
   prints: number;
   favorites: number;
   collections: number;
@@ -59,6 +60,7 @@ const emit = defineEmits<{
 }>();
 
 const SCOPE_LABELS: Record<LibraryScope, string> = {
+  sources: "Source Media",
   prints: "Everything",
   favorites: "Favourites",
   collections: "Albums",
@@ -69,7 +71,8 @@ const scopeOptions = computed(() =>
   props.scopes.map((scope) => ({
     value: scope,
     label: SCOPE_LABELS[scope],
-    sub: String(props.counts[scope]),
+    sub:
+      scope === "sources" || props.counts[scope] === undefined ? "" : String(props.counts[scope]),
   })),
 );
 
@@ -108,6 +111,7 @@ defineExpose({ focusSearch });
          labels, so the search is the one elastic child: it gives first, rather
          than pushing Refresh, History and Select out of the clipped row. -->
     <label
+      v-if="scope !== 'sources'"
       class="flex h-[26px] min-w-0 shrink basis-[170px] items-center gap-1.5 rounded-control border border-border bg-bg px-2 focus-within:border-border-focus"
     >
       <Icon name="search" :size="14" class="shrink-0 text-fg-dim" />
@@ -125,7 +129,12 @@ defineExpose({ focusSearch });
 
     <!-- Flat chips, as the mock draws them (mock:655-660) — a second bordered
          segmented group here costs ~90px the row does not have. -->
-    <div class="flex shrink-0 gap-0.5" role="radiogroup" aria-label="Media kind">
+    <div
+      v-if="scope !== 'sources'"
+      class="flex shrink-0 gap-0.5"
+      role="radiogroup"
+      aria-label="Media kind"
+    >
       <button
         v-for="option in kindOptions"
         :key="option.value"
@@ -149,6 +158,7 @@ defineExpose({ focusSearch });
     <div class="flex-1" />
 
     <ThumbnailSizeSlider
+      v-if="scope !== 'sources'"
       :model-value="thumbnailSize"
       :min="GALLERY_THUMBNAIL_SIZE_MIN"
       :max="GALLERY_THUMBNAIL_SIZE_MAX"
@@ -162,6 +172,7 @@ defineExpose({ focusSearch });
       :class="selectMode ? 'ms-toolbar-button--on' : ''"
       :aria-pressed="selectMode"
       title="Select pictures"
+      v-if="scope !== 'sources'"
       aria-label="Toggle select mode"
       @click="emit('toggleSelect')"
     >

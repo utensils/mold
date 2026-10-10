@@ -72,22 +72,31 @@ struct LengthControl: View {
     @Binding var draft: RenderDraft
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if draft.supportsDurationPrediction {
+                Toggle("Automatic from prompt", isOn: $draft.prefersAutomaticDuration)
+                    .toggleStyle(.checkbox)
+                    .help("Let the model choose the clip length from your prompt.")
+            }
         SliderControl(
             name: "Length",
             value: Binding(
                 get: { Double(draft.frames ?? temporal.frames.default) },
-                set: { draft.frames = min(temporal.snap(Int($0.rounded())), bounds.max) }
+                set: { draft.prefersAutomaticDuration = false; draft.frames = min(temporal.snap(Int($0.rounded())), bounds.max) }
             ),
             range: Double(bounds.min)...Double(max(bounds.max, bounds.min + 1)),
             step: Double(max(temporal.frames.step, 1))
         ) {
             Text(seconds)
         }
+        .disabled(draft.usesAutomaticDuration)
         .accessibilityValue(seconds)
         .help("Choose the clip’s length. It currently uses \(draft.frames ?? temporal.frames.default) frames at \(temporal.fps.value) frames per second.")
+        }
     }
 
     private var seconds: String {
+        if draft.usesAutomaticDuration { return "Auto" }
         let duration = temporal.duration(forFrames: draft.frames ?? temporal.frames.default)
         return duration.formatted(.number.precision(.fractionLength(1))) + "s"
     }

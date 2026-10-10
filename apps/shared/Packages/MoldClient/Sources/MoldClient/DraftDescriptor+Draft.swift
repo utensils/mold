@@ -22,6 +22,7 @@ public extension DraftDescriptor {
         seed = draft.seed
         locksSeed = draft.locksSeed
         frames = draft.frames
+        prefersAutomaticDuration = draft.prefersAutomaticDuration
         fps = draft.fps
         pipeline = draft.pipeline
         enableAudio = draft.enableAudio
@@ -67,6 +68,7 @@ public extension DraftDescriptor {
         draft.seed = seed
         draft.locksSeed = locksSeed
         draft.frames = frames
+        draft.prefersAutomaticDuration = prefersAutomaticDuration ?? false
         draft.fps = fps
         draft.pipeline = pipeline
         if hasAudioPreference == nil {

@@ -8,6 +8,8 @@ import Foundation
 /// are different concerns, and the reuse session is the only route in the app
 /// that mints a credential.
 public protocol MoldRetainedMediaBackend: Sendable {
+    func retainedSourceMediaContent(for filename: String, member: RetainedSourceMedia.Member) async throws -> Data
+    func retainedSourceMediaInventories(filenames: [String]) async throws -> RetainedSourceMedia.Inventories
     func retainedSourceMediaThumbnail(for filename: String, member memberId: String) async throws -> Data
     func retainedSourceMediaPreviewBytes(for filename: String, member memberId: String) async throws -> Data
     func retainedMediaTransferOffer(for filename: String) async throws -> RetainedSourceMedia.TransferOffer
@@ -25,6 +27,22 @@ public protocol MoldRetainedMediaBackend: Sendable {
 }
 
 public extension MoldRetainedMediaBackend {
+    func retainedSourceMediaInventories(filenames: [String]) async throws -> RetainedSourceMedia.Inventories {
+        var inventories: [String: RetainedSourceMedia.Inventory] = [:]
+        guard filenames.count <= 100 else { throw MoldClientError.malformedResponse }
+        for filename in filenames {
+            try Task.checkCancellation()
+            inventories[filename] = try await retainedSourceMedia(for: filename)
+        }
+        return .init(instanceId: nil, inventories: inventories)
+    }
+    func retainedSourceMediaContent(for filename: String, member: RetainedSourceMedia.Member) async throws -> Data {
+        guard member.role != "keyframes" else {
+            throw MoldClientError.http(status: 404, code: nil, message: "Update this machine to reuse individual keyframes.")
+        }
+        return try await retainedSourceMediaBytes(for: filename, member: member.memberId)
+    }
+
     func retainedSourceMediaPreviewBytes(for filename: String, member memberId: String) async throws -> Data {
         throw MoldClientError.http(status: 404, code: nil, message: nil)
     }

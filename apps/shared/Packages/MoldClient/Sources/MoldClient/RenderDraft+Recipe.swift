@@ -9,7 +9,8 @@ public extension RenderDraft {
     func adopting(_ recipe: GenerationRecipe, isNewModel: Bool, for model: Model) -> RenderDraft {
         adopting(recipe, isNewModel: isNewModel, family: model.family,
                  model: model.name, profile: model.generationProfile,
-                 modelSupportsAudio: model.supportsAudio)
+                 modelSupportsAudio: model.supportsAudio,
+                 modelSupportsDurationPrediction: model.offersDurationPrediction)
     }
 
     /// Adopts a recipe: takes its defaults for anything the previous model
@@ -36,9 +37,11 @@ public extension RenderDraft {
     public func adopting(
         _ recipe: GenerationRecipe, isNewModel: Bool,
         family: String? = nil, model: String? = nil,
-        profile: GenerationProfileSet? = nil, modelSupportsAudio: Bool? = nil
+        profile: GenerationProfileSet? = nil, modelSupportsAudio: Bool? = nil,
+        modelSupportsDurationPrediction: Bool = false
     ) -> RenderDraft {
         var draft = self
+        draft.supportsDurationPrediction = modelSupportsDurationPrediction && recipe.temporal != nil
         let capabilities = recipe.capabilities.resolvingLegacyReferences(model: model)
         if isNewModel {
             draft.width = recipe.defaults.width

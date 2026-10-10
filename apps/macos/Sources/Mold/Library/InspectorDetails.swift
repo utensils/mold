@@ -15,6 +15,7 @@ struct InspectorDetails: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
+            SourceMediaSection(entry: entry)
             ForEach(PrintDetails.groups(for: entry)) { group in
                 LabeledSection(group.title) {
                     VStack(alignment: .leading, spacing: 6) {

@@ -34,6 +34,10 @@ public struct RenderDraft: Hashable, Sendable {
     public var locksSeed: Bool = false
     /// Clip length, for the families that make one.
     public var frames: Int?
+    /// Authored preference parks while a destination lacks qualified duration prediction.
+    public var prefersAutomaticDuration = false
+    public var supportsDurationPrediction = false
+    public var usesAutomaticDuration: Bool { prefersAutomaticDuration && supportsDurationPrediction }
     public var fps: Int?
     /// LTX-2's chosen way of running, echoed straight from the adopted
     /// recipe's own `request_selector.pipeline` -- `nil` on `auto`, which

@@ -51,11 +51,12 @@ struct ZoomableStill: View {
                     .padding(.bottom, 24)
             }
         }
-        .onChange(of: isSelected, initial: true) { _, selected in
-            if ViewerReadBoundary.allows(displayed: displayedID, current: entry.id, selected: selected && scenePhase == .active, trashed: trashed) { library.markViewed(entry.id) }
-        }
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .active && ViewerReadBoundary.allows(displayed: displayedID, current: entry.id, selected: isSelected, trashed: trashed) { library.markViewed(entry.id) }
+        // Neighbor pages preload before selection. Observe the live display
+        // boundary: a task's captured isSelected can be stale when bytes arrive.
+        .onChange(of: ViewerReadBoundary(displayed: displayedID, current: entry.id,
+                                        selected: isSelected && scenePhase == .active,
+                                        trashed: trashed), initial: true) { _, boundary in
+            if boundary.shouldMarkViewed { library.markViewed(boundary.current) }
         }
         .task(id: entry.id) {
             // The grid's thumbnail at once; the print itself when it arrives
@@ -69,10 +70,7 @@ struct ZoomableStill: View {
             guard !Task.isCancelled else { return }
             image = loaded
             displayedID = loaded == nil ? nil : requestID
-            let original = await ViewerReadBoundary.originalAfterPreview(
-                displayed: displayedID, current: entry.id, selected: isSelected && scenePhase == .active, trashed: trashed,
-                markViewed: { library.markViewed(entry.id) },
-                load: { await loader.original(for: entry, trashed: trashed) })
+            let original = await loader.original(for: entry, trashed: trashed)
             if let full = original {
                 guard !Task.isCancelled else { return }
                 image = full
@@ -81,9 +79,6 @@ struct ZoomableStill: View {
             } else {
                 guard !Task.isCancelled else { return }
                 isPreview = image != nil
-            }
-            if ViewerReadBoundary.allows(displayed: displayedID, current: entry.id, selected: isSelected && scenePhase == .active, trashed: trashed, cancelled: Task.isCancelled) {
-                library.markViewed(entry.id)
             }
         }
     }
@@ -298,15 +293,16 @@ struct NativeVideoPlayer: UIViewControllerRepresentable {
 }
 
 /// Only loaded media belonging to the selected physical copy may advance history.
-enum ViewerReadBoundary {
-    /// Showing a selected preview advances history before a slow original fetch.
-    @MainActor static func originalAfterPreview<Original>(
-        displayed: PrintID?, current: PrintID, selected: Bool, trashed: Bool,
-        markViewed: () -> Void, load: @MainActor () async -> Original
-    ) async -> Original {
-        if allows(displayed: displayed, current: current, selected: selected, trashed: trashed, cancelled: Task.isCancelled) { markViewed() }
-        return await load()
+struct ViewerReadBoundary: Equatable {
+    let displayed: PrintID?
+    let current: PrintID
+    let selected: Bool
+    let trashed: Bool
+
+    var shouldMarkViewed: Bool {
+        Self.allows(displayed: displayed, current: current, selected: selected, trashed: trashed)
     }
+
     static func allows(displayed: PrintID?, current: PrintID, selected: Bool, trashed: Bool, cancelled: Bool = false) -> Bool {
         displayed == current && selected && !trashed && !cancelled
     }

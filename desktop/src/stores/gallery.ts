@@ -83,7 +83,7 @@ let refetchTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** Library header scope: the grid, the favourites, the albums shelf, or
  *  the trash. Never a sixth workspace — it lives inside Library. */
-export type LibraryScope = "prints" | "favorites" | "collections" | "trash";
+export type LibraryScope = "prints" | "favorites" | "collections" | "sources" | "trash";
 
 /** One host's collections listing. */
 export interface CollectionsBucket {

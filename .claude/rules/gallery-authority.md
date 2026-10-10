@@ -186,3 +186,24 @@ older than a visibility edit. A fresh listing confirms convergence; a PATCH
 response alone does not supersede a newer edit.
 
 Library mirror checkpoints use authenticated `GET /api/gallery/sync-checkpoint`. Per-print opaque revisions bind archive facts and retained-member manifests independently of the output media version; corrupt or missing manifest evidence cannot establish trust. Client skip decisions require matching source and destination evidence, current route/instance identities and output records. Checkpoints batch metadata work; they do not claim an O(1) delta feed. Older or oversized unsupported responses retain the full repair path.
+
+Source Media browsing is a read-only projection of existing output ownership.
+`POST /api/gallery/source-media/inventory` accepts at most 100 exact filenames
+already selected by the client's logical visibility and machine scope. Resolve
+that bounded batch from one validated authority snapshot; inspect manifests,
+never decrypt source payloads to enumerate a library. The response includes
+`instance_id` and a filename-keyed `inventories` map. Each retained member may
+carry `label`, `media_kind`, zero-based `position`, `frame_index`, and
+`image_role`; unknown reference kinds remain unknown rather than assumed images.
+Presentation derives from the exact owner's archived metadata. Clients paginate
+visible owners and preserve partial errors, cancellation and identity fencing.
+
+`GET /api/gallery/source-media/:filename/:member_id/content` returns original
+attachable bytes. Keyframes are the sole structured exception: unwrap the retained
+`KeyframeCondition` envelope into its original image, also for thumbnails. The
+raw member download remains unchanged for full-recipe replay and transfer.
+Independent reuse attaches those original bytes through normal authoring flows,
+not through an original-role session or a thumbnail. All inventory/content/preview
+responses are private/no-store. Browsing creates no pins; Trash and permanent
+deletion retain their existing ownership rules. There is no independent source
+upload, pinning or deletion action.

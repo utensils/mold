@@ -1307,6 +1307,19 @@ const capabilities = computed(() =>
     activeRecipe.value,
   ),
 );
+/** Which conditioning the request will carry — the shared decision. */
+const requestConditioning = computed(() =>
+  conditioningForRequest(capabilities.value.sourceImageMode, {
+    hasSource: Boolean(form.state.value.imageAttachments[0]?.base64),
+    referenceCount:
+      capabilities.value.sourceImageMode === "single-or-references" ||
+      capabilities.value.sourceImageMode === "single-and-references"
+        ? (form.state.value.referenceImages?.length ?? 0)
+        : form.state.value.imageAttachments.length,
+    lastWrite: form.state.value.exclusiveWell ?? null,
+  }),
+);
+
 watch(
   [
     () => activeCanvasSource.value?.base64 ?? null,
@@ -1424,18 +1437,6 @@ watch(
       form.state.value.height = next.height;
     }
   },
-);
-/** Which conditioning the request will carry — the shared decision. */
-const requestConditioning = computed(() =>
-  conditioningForRequest(capabilities.value.sourceImageMode, {
-    hasSource: Boolean(form.state.value.imageAttachments[0]?.base64),
-    referenceCount:
-      capabilities.value.sourceImageMode === "single-or-references" ||
-      capabilities.value.sourceImageMode === "single-and-references"
-        ? (form.state.value.referenceImages?.length ?? 0)
-        : form.state.value.imageAttachments.length,
-    lastWrite: form.state.value.exclusiveWell ?? null,
-  }),
 );
 
 // ── Face identity (PuLID, #1224) ──────────────────────────────────────

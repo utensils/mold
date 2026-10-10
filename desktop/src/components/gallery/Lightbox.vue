@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import SourceMediaPanel from "@studio/components/SourceMediaPanel.vue";
+import type { SourceMediaOwner, SourceMediaSelection } from "@studio/lib/sourceMediaBrowser";
+
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useOverlayStack } from "@ui/lib/overlayStack";
 import Icon from "@ui/components/Icon.vue";
@@ -90,6 +93,7 @@ const props = withDefaults(
     source?: GallerySource;
     /** Origin host to fetch media from; null = the primary connection. */
     target?: ApiTarget | null;
+    instanceId?: string;
     /** Blob-cache bucket, usually the origin host id. */
     cacheKey?: string | null;
     /** Origin host's friendly name for the metadata block. */
@@ -149,6 +153,7 @@ const emit = defineEmits<{
   next: [];
   delete: [];
   useSource: [];
+  useRetainedSource: [selection: SourceMediaSelection];
   /** One-shot reuse. The OWNER runs it: retained private source media is
    *  attached there, and doing it here would drop it. */
   reuse: [];
@@ -292,6 +297,19 @@ onBeforeUnmount(() => restoreFocusEl?.focus?.());
 
 /** How long the render took, when the print knows (additive metadata). */
 const took = computed(() => formatGenerationTime(meta.value.generation_time_ms));
+const retainedOwner = computed<SourceMediaOwner | null>(() =>
+  props.target
+    ? {
+        key: JSON.stringify([props.cacheKey, props.target.baseUrl, props.item.filename]),
+        filename: props.item.filename,
+        title: props.item.filename,
+        hostLabel: props.hostLabel ?? "",
+        target: { ...props.target },
+        instanceId: props.instanceId ?? "",
+        revision: props.item.media_version ?? "",
+      }
+    : null,
+);
 const meta = computed(() => props.item.metadata);
 /** A still carrying alpha is drawn on the checkerboard, and its img is sized
  * to the picture itself (never the stage), so letterbox bars stay plain. */
@@ -989,6 +1007,11 @@ async function performVideoExport(options: VideoExportOptions) {
           >
         </div>
 
+        <SourceMediaPanel
+          v-if="retainedOwner"
+          :owner="retainedOwner"
+          @use="emit('useRetainedSource', $event)"
+        />
         <template v-if="showOrganization">
           <div class="flex flex-col gap-1.5">
             <span class="ms-group-label uppercase">Tags</span>

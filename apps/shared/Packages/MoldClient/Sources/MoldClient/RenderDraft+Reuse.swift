@@ -103,6 +103,7 @@ public extension RenderDraft {
 
     private mutating func restoreOutput(from metadata: OutputMetadata) {
         frames = metadata.frames
+        prefersAutomaticDuration = metadata.durationPredictionRequested == true
         fps = metadata.fps.map { Int($0.rounded()) }
         // Absence is an untouched choice. Once the recipe is adopted that
         // means its capability-owned default (ON for sound-capable video),

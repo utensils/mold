@@ -32,7 +32,7 @@ struct SidebarRowsTests {
     @Test func theLibraryIsNotATopLevelRow() {
         #expect(!SidebarRows.destinations.contains(.library))
         #expect(SidebarRows.destinations == [.generate, .queue, .models, .machines])
-        #expect(SidebarRows.destinations.count == Destination.allCases.count - 1)
+        #expect(SidebarRows.destinations.count == Destination.allCases.count - 2)
     }
 
     /// The single-highlight rule, over every destination there is: the
@@ -54,7 +54,7 @@ struct SidebarRowsTests {
             #expect(row == expected)
             #expect(row != .destination(.library))
             if case let .destination(item) = row {
-                #expect(SidebarRows.destinations.contains(item))
+                #expect(SidebarRows.destinations.contains(item) || item == .sourceMedia)
             }
         }
     }
@@ -98,7 +98,7 @@ struct SidebarRowsTests {
     /// (`MoldCommands.swift`'s View group). Dropping Library from the SIDEBAR
     /// must not move them: ⌘2 is still Library.
     @Test func theDestinationShortcutsAreUnmoved() {
-        #expect(Destination.allCases == [.generate, .library, .queue, .models, .machines])
+        #expect(Destination.allCases == [.generate, .library, .queue, .models, .machines, .sourceMedia])
         #expect(Destination.allCases.firstIndex(of: .library) == 1)
     }
 

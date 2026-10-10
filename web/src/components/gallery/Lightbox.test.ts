@@ -1,3 +1,7 @@
+// Retained source transport is verified by its shared component/API suites.
+vi.mock("@studio/components/SourceMediaPanel.vue", () => ({
+  default: { template: "<section />" },
+}));
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Lightbox from "./Lightbox.vue";

@@ -11,6 +11,7 @@ import NavItem from "@ui/components/NavItem.vue";
 import logoUrl from "../../assets/logo.png";
 import PanelResizeHandle from "./PanelResizeHandle.vue";
 import QueueRail from "./QueueRail.vue";
+import LibraryNavigation from "./LibraryNavigation.vue";
 import { dragWidth } from "../../lib/panelResize";
 import { shortcutLabel } from "../../lib/platform";
 import { useAppPrefsStore } from "../../stores/appPrefs";
@@ -156,6 +157,8 @@ onBeforeUnmount(() => {
         </template>
       </NavItem>
     </div>
+
+    <LibraryNavigation v-if="!collapsed" class="max-h-[40vh] shrink-0 overflow-y-auto" />
 
     <!-- SETUP -->
     <div v-if="!collapsed" class="ms-group-label mt-3 shrink-0 px-[9px] pt-1.5 pb-1 uppercase">

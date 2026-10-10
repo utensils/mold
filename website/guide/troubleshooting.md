@@ -218,3 +218,24 @@ appears on your phone. Close other apps on that machine, reduce the model,
 output size or batch, or move the job to another machine. GPU quarantine messages
 explicitly require restarting Mold; a cooldown message explains when waiting
 can help. Job error codes and retry controls retain their original meaning.
+
+### Isolated retained-media UI fixtures
+
+Developers can create an authentic encrypted Source Media library without running
+a generation. The ignored server test uses `MOLD_SOURCE_MEDIA_UAT_HOME` to select
+a **new, absolute directory under `/tmp`**; it refuses an existing directory.
+The fixture includes image references, a closing keyframe, audio, a mask, a chain
+stage source and a collection. This environment variable is test-only and has no
+server runtime effect.
+
+```bash
+MOLD_SOURCE_MEDIA_UAT_HOME=/tmp/mold-source-media-uat \
+  cargo test -p mold-ai-server --lib build_source_media_uat_fixture \
+  -- --ignored --nocapture
+./scripts/ensure-web-dist.sh
+MOLD_HOME=/tmp/mold-source-media-uat cargo run -p mold-ai -- \
+  serve --bind 127.0.0.1 --port 17681 --gpus none
+```
+
+Use the isolated server for browsing, thumbnails and attachment staging. It has
+no inference weights; generation execution is outside this fixture's scope.

@@ -43,6 +43,7 @@ public struct DraftDescriptor: Codable, Hashable, Sendable {
     public var seed: UInt64?
     public var locksSeed: Bool
     public var frames: Int?
+    public var prefersAutomaticDuration: Bool?
     public var fps: Int?
     public var pipeline: String?
     public var enableAudio: Bool
@@ -80,7 +81,7 @@ public struct DraftDescriptor: Codable, Hashable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case version, localInputsSHA256, model, family, recipeID, prompt, negativePrompt, width, height
-        case steps, guidance, batchSize, seed, locksSeed, frames, fps, pipeline
+        case steps, guidance, batchSize, seed, locksSeed, frames, fps, pipeline, prefersAutomaticDuration
         case enableAudio, preferredAudio, hasAudioPreference, videoOnly, strength, title, tags,
              collectionName, autoTagTitle
         case outputFormat, transparentBackground, upscaleModel, savesToGallery, canvasIntent,

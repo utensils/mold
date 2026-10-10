@@ -1,4 +1,13 @@
 <script setup lang="ts">
+import SourceMediaBrowser from "@studio/components/SourceMediaBrowser.vue";
+import {
+  sourceMemberKind,
+  type SourceMediaOwner,
+  type SourceMediaSelection,
+} from "@studio/lib/sourceMediaBrowser";
+import { retainedSourceMediaContent } from "@studio/api/sourceMediaBrowser";
+import { attachRetainedSource } from "../lib/retainedSourceAttachment";
+
 import { viewerAfterRemoval } from "@studio/lib/viewerRemoval";
 import { canvasSource } from "@studio/lib/canvasSource";
 import { PromptClearRecovery } from "@studio/lib/promptClearRecovery";
@@ -9415,6 +9424,7 @@ const libraryScopes = computed(() =>
   MOBILE_LIBRARY_SCOPES.filter(
     (scope) =>
       scope === "prints" ||
+      scope === "sources" ||
       (scope === "collections" && libraryOrganizeEnabled.value) ||
       (scope === "trash" && libraryTrashEnabled.value),
   ),
@@ -9655,6 +9665,7 @@ watch(
   { immediate: true },
 );
 const libraryScopeCounts = computed<Record<MobileLibraryScope, number>>(() => ({
+  sources: mobileSourceOwners.value.length,
   prints: libraryPrintCount.value,
   collections: libraryCollectionCards.value.length,
   trash: trashCount.value,
@@ -9664,7 +9675,7 @@ const libraryScopeOptions = computed(() =>
   libraryScopes.value.map((scope) => ({
     value: scope,
     label: MOBILE_LIBRARY_SCOPE_LABELS[scope],
-    sub: String(libraryScopeCounts.value[scope]),
+    sub: scope === "sources" ? "" : String(libraryScopeCounts.value[scope]),
   })),
 );
 const trashRetention = computed(() =>
@@ -9807,13 +9818,13 @@ function visibleRepresentatives(): PendingGalleryPrint[] {
     groups.map((group) => [group.representative, group.copies]),
   );
   const filters =
-    libraryScope.value === "prints"
+    libraryScope.value === "prints" || libraryScope.value === "sources"
       ? { ...libraryFilters, collectionSlug: null }
       : libraryScope.value === "collections"
         ? { ...EMPTY_LIBRARY_FILTERS, collectionSlug: libraryFilters.collectionSlug }
         : { ...EMPTY_LIBRARY_FILTERS };
   const filtered = filterLibraryPrints(
-    libraryScope.value === "prints"
+    libraryScope.value === "prints" || libraryScope.value === "sources"
       ? representatives.filter(
           (p) =>
             !(organizationOf(p)?.collections ?? []).some((slug) =>
@@ -9824,7 +9835,9 @@ function visibleRepresentatives(): PendingGalleryPrint[] {
     filters,
     scopedOrganizationOf,
     (print) => copiesByRepresentative.get(print) ?? [print],
-    libraryScope.value === "prints" ? hiddenCollectionSlugs.value : new Set(),
+    libraryScope.value === "prints" || libraryScope.value === "sources"
+      ? hiddenCollectionSlugs.value
+      : new Set(),
   );
   if (!librarySearchQuery.value.trim()) return filtered;
   return filtered.filter((print) =>
@@ -9894,6 +9907,104 @@ function mobileVisibilityHosts() {
     listingOk: collectionListingOk[host.id] === true && host.online,
     readRevision: collectionReadRevisions[host.id] ?? 0,
   }));
+}
+
+const mobileSourceOwners = computed<SourceMediaOwner[]>(() => {
+  const visible = new Set(visibleRepresentatives().map((print) => galleryPrintKey(print)));
+  return groupLogicalGalleryPrints(scopedLibraryCopies(galleryCopies, libraryFilters.hostId))
+    .filter((group) => visible.has(galleryPrintKey(group.representative)))
+    .flatMap((group) => group.copies)
+    .map((print) => ({
+      key: JSON.stringify([
+        print.hostId,
+        print.target.baseUrl,
+        connectedHosts.value.find((h) => h.id === print.hostId)?.instanceId,
+        print.filename,
+      ]),
+      filename: print.filename,
+      title: printCaption(print),
+      hostLabel: print.hostName,
+      target: { ...print.target },
+      instanceId: connectedHosts.value.find((h) => h.id === print.hostId)?.instanceId ?? "",
+      revision: print.media_version ?? "",
+    }));
+});
+let retainedAttachEpoch = 0;
+watch(
+  () => [
+    selectedPrint.value?.filename,
+    tab.value,
+    libraryScope.value,
+    JSON.stringify(generationTarget.value),
+    JSON.stringify(connectedHosts.value.map((h) => [h.id, h.instanceId, mobileHostTarget(h)])),
+  ],
+  () => {
+    retainedAttachEpoch++;
+  },
+  { flush: "sync" },
+);
+onBeforeUnmount(() => {
+  retainedAttachEpoch++;
+});
+async function useMobileRetainedSource(selection: SourceMediaSelection) {
+  const epoch = ++retainedAttachEpoch;
+  const owner = selection.owner;
+  const host = connectedHosts.value.find(
+    (h) => mobileHostTarget(h).baseUrl === owner.target.baseUrl,
+  );
+  const instance = host?.instanceId;
+  const destination = JSON.stringify(generationTarget.value);
+  usingPrintAsSource.value = true;
+  reusePrintError.value = "";
+  const outcome = await attachRetainedSource(
+    form,
+    selection.member.display_name,
+    sourceMemberKind(selection.member),
+    () => retainedSourceMediaContent(owner.filename, selection.member, owner.target),
+    () =>
+      epoch === retainedAttachEpoch &&
+      (!owner.instanceId || owner.instanceId === instance) &&
+      destination === JSON.stringify(generationTarget.value) &&
+      connectedHosts.value.some(
+        (h) =>
+          h.id === host?.id &&
+          h.instanceId === instance &&
+          JSON.stringify(mobileHostTarget(h)) === JSON.stringify(owner.target),
+      ),
+  );
+  usingPrintAsSource.value = false;
+  if (!outcome.ok) {
+    reusePrintError.value = outcome.error;
+    organizationError.value = outcome.error;
+    return;
+  }
+  closePrint();
+  generatedViewerOpen.value = false;
+  tab.value = "generate";
+}
+function openMobileSourceOwner(owner: SourceMediaOwner) {
+  const print =
+    gallery.value.find(
+      (p) =>
+        p.filename === owner.filename &&
+        p.target.baseUrl === owner.target.baseUrl &&
+        p.target.apiKey === owner.target.apiKey,
+    ) ??
+    galleryCopies.find(
+      (p) =>
+        p.filename === owner.filename &&
+        p.target.baseUrl === owner.target.baseUrl &&
+        p.target.apiKey === owner.target.apiKey,
+    );
+  if (print)
+    openPrint({
+      ...print,
+      thumbnailUrl:
+        "thumbnailUrl" in print && typeof print.thumbnailUrl === "string"
+          ? print.thumbnailUrl
+          : GALLERY_THUMBNAIL_PLACEHOLDER,
+      thumbnailPending: false,
+    });
 }
 
 function setLibraryScope(scope: MobileLibraryScope): void {
@@ -12552,7 +12663,9 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             <span aria-hidden="true">＋</span>
           </button>
           <button
-            v-if="libraryScope !== 'collections' || activeCollection"
+            v-if="
+              libraryScope !== 'sources' && (libraryScope !== 'collections' || activeCollection)
+            "
             class="mobile-header-action mobile-header-action--text"
             type="button"
             :aria-pressed="gallerySelectMode"
@@ -13482,7 +13595,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       </template>
 
       <template v-else-if="!settingsOpen && tab === 'gallery'">
-        <p class="section-note" data-test="mobile-library-note">
+        <p v-if="libraryScope !== 'sources'" class="section-note" data-test="mobile-library-note">
           {{
             gallerySelectMode
               ? `${gallerySelection.size} selected`
@@ -13494,7 +13607,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           }}
         </p>
         <div
-          v-if="libraryScope !== 'collections' || activeCollection"
+          v-if="libraryScope !== 'sources' && (libraryScope !== 'collections' || activeCollection)"
           class="mobile-library-search"
         >
           <label class="field">
@@ -13615,7 +13728,13 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           {{ organizationError }}
         </p>
 
-        <template v-if="libraryScope === 'collections' && !activeCollection">
+        <SourceMediaBrowser
+          v-if="libraryScope === 'sources'"
+          :owners="mobileSourceOwners"
+          @use="useMobileRetainedSource"
+          @open-owner="openMobileSourceOwner"
+        />
+        <template v-else-if="libraryScope === 'collections' && !activeCollection">
           <ul
             v-if="libraryCollectionCards.length"
             class="mobile-collection-list"
@@ -14780,9 +14899,13 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
 
     <MobileGalleryViewer
       @viewed="markMobileMediaViewed"
+      @use-retained-source="useMobileRetainedSource"
       v-if="selectedPrint"
       :item="selectedPrint"
       :target="selectedPrint.target"
+      :instance-id="
+        connectedHosts.find((host) => host.id === selectedPrint!.hostId)?.instanceId ?? ''
+      "
       :cache-key="selectedPrint.cacheKey"
       :host-name="selectedPrint.hostName"
       :thumbnail-url="selectedPrint.thumbnailUrl"
@@ -14844,8 +14967,12 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
          fails silently. -->
     <MobileGalleryViewer
       v-if="generatedViewerOpen && generatedPreviewItem && resultUrl"
+      @use-retained-source="useMobileRetainedSource"
       :item="generatedPreviewItem"
       :target="generatedPreviewTarget"
+      :instance-id="
+        connectedHosts.find((host) => host.id === latestResultJob?.hostId)?.instanceId ?? ''
+      "
       :cache-key="latestResultJob?.hostId ?? 'generated'"
       :host-name="latestResultJob?.hostLabel ?? selectedHost?.name ?? 'Mold host'"
       :thumbnail-url="resultPoster || resultUrl"

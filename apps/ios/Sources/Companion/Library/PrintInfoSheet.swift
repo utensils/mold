@@ -42,6 +42,7 @@ struct PrintInfoSheet: View {
                             .foregroundStyle(.secondaryText)
                     }
                 }
+                Section { SourceMediaSection(entry: entry) }
                 ForEach(PrintDetails.groups(for: entry)) { group in
                     Section {
                         ForEach(group.rows, id: \.label) { row in

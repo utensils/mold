@@ -145,6 +145,7 @@ final class GenerateController {
         lastModel[kind] = model.name
         recipeID = nil
         if let recipe { draft = draft.adopting(recipe, isNewModel: isNew, for: model) }
+        else { draft.supportsDurationPrediction = false }
     }
 
     func chooseRecipe(_ id: String) {
@@ -152,6 +153,7 @@ final class GenerateController {
         guard let model else { return }
         recipeID = id
         if let recipe { draft = draft.adopting(recipe, isNewModel: false, for: model) }
+        else { draft.supportsDurationPrediction = false }
     }
 
     /// Keep a saved choice while its machine reconnects; only an explicit

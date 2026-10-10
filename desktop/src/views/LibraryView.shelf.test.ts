@@ -321,8 +321,15 @@ describe("scopes + capability gating", () => {
     const control = wrapper.get("[data-test='library-scope']");
     const labels = control
       .findAll("button")
-      .map((b) => `${b.find(".ms-seg__label").text()} ${b.find(".ms-seg__sub").text()}`);
-    expect(labels).toEqual(["Everything 4", "Favourites 1", "Albums 2", "Trash 1"]);
+      .map((b) =>
+        [
+          b.find(".ms-seg__label").text(),
+          b.find(".ms-seg__sub").exists() ? b.find(".ms-seg__sub").text() : "",
+        ]
+          .filter(Boolean)
+          .join(" "),
+      );
+    expect(labels).toEqual(["Everything 4", "Favourites 1", "Albums 2", "Trash 1", "Source Media"]);
     expect(wrapper.find("[data-test='library-count']").exists()).toBe(false);
     expect(wrapper.find("[data-test='library-chip-row']").exists()).toBe(true);
     wrapper.unmount();
@@ -346,9 +353,9 @@ describe("scopes + capability gating", () => {
     wrapper.unmount();
   });
 
-  it("collapses to Prints only (no chip row, no ♥) on an old server", async () => {
+  it("keeps Source Media accessible on an old server without organization actions", async () => {
     const { wrapper } = await mountView("/library", { organize: false, trash: false });
-    expect(wrapper.find("[data-test='library-scope']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='library-scope']").text()).toContain("Source Media");
     // The chip row survives for the host chips, but carries no ♥ or tags.
     expect(wrapper.find("[data-test='favorites-chip']").exists()).toBe(false);
     expect(wrapper.findAll("[data-test='tag-chip']")).toHaveLength(0);

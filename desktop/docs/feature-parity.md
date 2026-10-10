@@ -553,3 +553,9 @@ Library thumbnails on native macOS, native iOS, Tauri desktop and web use contin
 ### Editing long prompts
 
 The compact prompt stays bounded while you type. **Edit prompt** opens a spacious live editor; **Done**, Escape and backdrop dismissal retain edits and return focus to the opener. Enter inserts a newline, and arrow keys move through text. **Recent prompts** searches full prompt text and replaces only the prompt, preserving model and other settings. **Clear** offers immediate **Undo clear**; a later edit or history choice ends that recovery. Expand and Remix use the existing rewrite flow and return to the editor. The editor never submits a generation shortcut. Phone presentation fills the visible viewport, with controls retained when the keyboard reduces the available space.
+
+### Retained source media
+
+Desktop and the Tauri mobile client show retained input thumbnails and role labels in each print's details. Source Media in the library browses the same visible owners across selected machines, with original-byte attachment to the current draft and navigation to the owning output. Hidden collections stay excluded from the general source browser. Sources have no independent upload, pin, or delete action: the owning output continues to control retention, including Trash.
+
+The desktop sidebar also expands Library and Collections, remembers expansion, shows collection counts and machine availability, and opens the existing collection creation, rename, visibility, and deletion controls. Drag a print onto a collection to file it; in selection mode hold Option/Alt while dragging to file the selected prints (ordinary drag retains sweep selection).

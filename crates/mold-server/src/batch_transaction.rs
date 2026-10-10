@@ -274,38 +274,54 @@ impl GalleryPublicationGate {
         output_dir: &Path,
         filename: &str,
     ) -> anyhow::Result<ValidatedRetainedMedia> {
+        self.validated_retained_media_for_items(output_dir, &[filename.to_string()])?
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("missing lookup result"))
+    }
+
+    /// One validated authority snapshot for a bounded caller-selected inventory.
+    pub(crate) fn validated_retained_media_for_items(
+        &self,
+        output_dir: &Path,
+        filenames: &[String],
+    ) -> anyhow::Result<Vec<ValidatedRetainedMedia>> {
         let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
         let canonical = bookkeeping.canonical_root();
         let index = self.committed_archive_index_while_locked(canonical, &bookkeeping)?;
-        if index.quarantined_names.contains(filename) {
-            return Ok(ValidatedRetainedMedia::Invalid);
-        }
-        if let Some(entry) = index.entries.get(filename) {
-            return Ok(
-                if crate::gallery_authority::current_file_matches(canonical, entry)? {
-                    ValidatedRetainedMedia::Present {
-                        identity: entry.identity.clone(),
-                        pins: entry.retained_media.clone(),
-                    }
-                } else {
-                    ValidatedRetainedMedia::Invalid
-                },
-            );
-        }
-        if let Some(entry) = index.retired_entries.get(filename) {
-            let trash_path = gallery_trash_dir(canonical).join(filename);
-            return Ok(
-                if crate::gallery_authority::file_matches_entry_at(&trash_path, entry)? {
-                    ValidatedRetainedMedia::Present {
-                        identity: entry.identity.clone(),
-                        pins: entry.retained_media.clone(),
-                    }
-                } else {
-                    ValidatedRetainedMedia::Invalid
-                },
-            );
-        }
-        Ok(ValidatedRetainedMedia::Missing)
+        let resolve = |filename: &str| -> anyhow::Result<ValidatedRetainedMedia> {
+            if index.quarantined_names.contains(filename) {
+                return Ok(ValidatedRetainedMedia::Invalid);
+            }
+            if let Some(entry) = index.entries.get(filename) {
+                return Ok(
+                    if crate::gallery_authority::current_file_matches(canonical, entry)? {
+                        ValidatedRetainedMedia::Present {
+                            identity: entry.identity.clone(),
+                            pins: entry.retained_media.clone(),
+                            metadata: Box::new(entry.record.metadata.clone()),
+                        }
+                    } else {
+                        ValidatedRetainedMedia::Invalid
+                    },
+                );
+            }
+            if let Some(entry) = index.retired_entries.get(filename) {
+                let trash_path = gallery_trash_dir(canonical).join(filename);
+                return Ok(
+                    if crate::gallery_authority::file_matches_entry_at(&trash_path, entry)? {
+                        ValidatedRetainedMedia::Present {
+                            identity: entry.identity.clone(),
+                            pins: entry.retained_media.clone(),
+                            metadata: Box::new(entry.record.metadata.clone()),
+                        }
+                    } else {
+                        ValidatedRetainedMedia::Invalid
+                    },
+                );
+            }
+            Ok(ValidatedRetainedMedia::Missing)
+        };
+        filenames.iter().map(|filename| resolve(filename)).collect()
     }
 
     /// Return bytes, recipe and retained pins from one validated archive snapshot.
@@ -1049,6 +1065,7 @@ pub(crate) enum ValidatedRetainedMedia {
     Present {
         identity: ArchivedChildIdentity,
         pins: Vec<GalleryMediaPin>,
+        metadata: Box<mold_core::OutputMetadata>,
     },
 }
 

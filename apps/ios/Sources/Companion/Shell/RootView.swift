@@ -94,7 +94,7 @@ struct RootView: View {
             guard new != .regular else { return }
             switch router.selection {
             case .go(.models), .machine, .settings: router.selection = .go(.machines)
-            case .shelf: router.selection = .go(.library)
+            case .shelf, .sourceMedia: router.selection = .go(.library)
             default: break
             }
         }
@@ -105,7 +105,7 @@ struct RootView: View {
             switch new {
             case .go(let destination): stored = destination.rawValue
             case .search: stored = Self.searchKey
-            case .shelf: stored = Destination.library.rawValue
+            case .shelf, .sourceMedia: stored = Destination.library.rawValue
             case .machine, .settings: stored = Destination.machines.rawValue
             }
         }
