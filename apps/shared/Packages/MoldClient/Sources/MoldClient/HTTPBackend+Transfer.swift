@@ -5,6 +5,24 @@ import Foundation
 /// Three calls the client orchestrates itself: there is no server-to-server
 /// push (design M6 fact 4, `routes.rs:7548-7599`, `:2973-2994`).
 public extension HTTPBackend {
+    func abortDestinationTransfer(_ request: QueueTransferAbortRequest) async throws -> QueueTransferAbortResult {
+        let data = try await postRaw("/api/generation-transfers/abort", body: request)
+        return try MoldJSON.decoder.decode(QueueTransferAbortResult.self, from: data)
+    }
+    func transferReservation(id: String) async throws -> QueueTransferReservation? {
+        let data = try await bytes(for: request("/api/queue/\(escaped(id))/transfer/reservation"))
+        return try MoldJSON.decoder.decode(QueueTransferReservation?.self, from: data)
+    }
+    func reserveTransfer(_ request: QueueTransferReservationRequest) async throws {
+        _ = try await postRaw("/api/queue/\(escaped(request.jobId))/transfer/reserve", body: request)
+    }
+    func sealTransfer(_ request: QueueTransferReservationRequest) async throws {
+        _ = try await postRaw("/api/queue/\(escaped(request.jobId))/transfer/seal", body: request)
+    }
+    func releaseTransfer(_ request: QueueTransferReservationRequest) async throws {
+        _ = try await postRaw("/api/queue/\(escaped(request.jobId))/transfer/release", body: request)
+    }
+
     /// Exports a HELD row as a portable request with its media inlined.
     ///
     /// The bytes are OPAQUE and stay that way: the destination's admission

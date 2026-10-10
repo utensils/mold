@@ -30,7 +30,7 @@ struct OfflineLibrarySection: View {
             usage
             if let saving = thumbnails.saving {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Saving thumbnails… \(saving.done) of \(saving.total)")
+                    Text("Checking thumbnails… \(saving.done) of \(saving.total)")
                     ProgressView(value: Double(saving.done), total: Double(max(saving.total, 1)))
                 }
                 .accessibilityElement(children: .combine)

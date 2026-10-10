@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import QueueMoveToControl from "@studio/components/QueueMoveToControl.vue";
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { parseDeviceListResponse, setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
 import {
@@ -1312,6 +1313,7 @@ onBeforeUnmount(() => {
         </div>
         <ul v-if="displayQueue.length" class="mobile-data-list" data-test="host-detail-queue">
           <li v-for="entry in displayQueue" :key="entry.id" class="mobile-queue-item">
+            <QueueMoveToControl :host-id="host.id" :job-id="entry.id" :state="entry.state" />
             <SwipeActionRow
               :actions="queueRowActions(entry)"
               :label="`${modelLabel(entry.model)} job`"

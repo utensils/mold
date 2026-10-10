@@ -67,7 +67,8 @@ extension RunCanvas {
                 exports: MeshExport.Split(files: [], animations: []),
                 canSave: true,
                 canShowInLibrary: true,
-                perform: { perform($0, on: selectedResult(in: outcome)) })
+                perform: { perform($0, on: selectedResult(in: outcome)) },
+                onReady: { if let host { markResultDisplayed(PrintID(host: host.id, filename: filename)) } })
         case let .unavailable(sentence):
             // Only the BYTES failed to arrive, so the route out is the
             // copy the machine already filed.
@@ -108,7 +109,9 @@ extension RunCanvas {
                         + "cannot show. It is in the Library."))
                     return
                 }
+                guard !Task.isCancelled, self.host?.id == host.id, resultFilename == filename else { return }
                 show(.picture(image, alphaBed: ResultAlpha.showsBed(data, named: filename)))
+                markResultDisplayed(PrintID(host: host.id, filename: filename))
             } catch {
                 // Not `reasonSentence`: a refusal with no route is a dead end.
                 show(.unavailable(error.failureSentence))

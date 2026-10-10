@@ -158,6 +158,7 @@ const props = withDefaults(
 );
 
 const emit = defineEmits<{
+  viewed: [];
   close: [];
   reuse: [];
   previous: [];
@@ -854,8 +855,28 @@ function retry(): void {
  * from the viewer that just loaded the file: `MeshViewer` hands over its
  * stats, a media element carries its duration.
  */
+let displayedReadKey = "";
+const readKey = () => `${mediaLoadKey.value}|${mediaUrl.value}`;
+function readDisplayedMedia(): void {
+  if (!document.hidden && displayedReadKey && displayedReadKey === readKey()) emit("viewed");
+}
+onMounted(() => document.addEventListener("visibilitychange", readDisplayedMedia));
+onBeforeUnmount(() => document.removeEventListener("visibilitychange", readDisplayedMedia));
 function mediaReady(detail?: unknown): void {
+  let successfullyViewed = true;
+  if (detail instanceof Event) {
+    const element = detail.currentTarget as HTMLImageElement | HTMLMediaElement;
+    successfullyViewed = Boolean(
+      mediaUrl.value &&
+      element.currentSrc === new URL(mediaUrl.value, document.baseURI).href &&
+      (!(element instanceof HTMLMediaElement) || detail.type === "loadeddata"),
+    );
+  }
   loading.value = false;
+  if (successfullyViewed) {
+    displayedReadKey = readKey();
+    readDisplayedMedia();
+  }
   if (detail instanceof Event) {
     const element = detail.target;
     if (element instanceof HTMLMediaElement && Number.isFinite(element.duration)) {
@@ -1499,6 +1520,7 @@ onBeforeUnmount(() => {
           preload="metadata"
           data-test="gallery-viewer-audio"
           @loadedmetadata="mediaReady"
+          @loadeddata="mediaReady"
           @error="mediaFailed"
         />
       </div>
@@ -1513,6 +1535,7 @@ onBeforeUnmount(() => {
         preload="metadata"
         data-test="gallery-viewer-video"
         @loadedmetadata="mediaReady"
+        @loadeddata="mediaReady"
         @error="mediaFailed"
       />
       <span v-if="upscaled" data-test="upscaled-badge" class="gallery-upscaled-badge">

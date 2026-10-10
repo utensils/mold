@@ -143,6 +143,7 @@ const props = withDefaults(
   },
 );
 const emit = defineEmits<{
+  viewed: [];
   close: [];
   prev: [];
   next: [];
@@ -197,6 +198,21 @@ watch(
 );
 
 // ── Title (Library organization, D5) ─────────────────────────────────────────
+let displayedReadKey = "";
+const readKey = () =>
+  [props.item.filename, props.cacheKey, props.target?.baseUrl, props.source, props.trashed].join(
+    "|",
+  );
+function readDisplayedMedia(): void {
+  if (!document.hidden && displayedReadKey && displayedReadKey === readKey()) emit("viewed");
+}
+function mediaReady(): void {
+  displayedReadKey = readKey();
+  readDisplayedMedia();
+}
+onMounted(() => document.addEventListener("visibilitychange", readDisplayedMedia));
+onBeforeUnmount(() => document.removeEventListener("visibilitychange", readDisplayedMedia));
+
 // The aside leads with an editable title; the raw filename drops to a mono
 // detail row. Enter commits (emit `rename`), Escape reverts, blur commits a
 // changed draft. The placeholder is the display fallback (prompt excerpt or
@@ -702,6 +718,7 @@ async function performVideoExport(options: VideoExportOptions) {
               :path="galleryMediaPath(item.filename, source, false, fromTrash)"
               :target="target"
               :cache-key="cacheKey"
+              @ready="mediaReady"
               audio
               controls
               :alt="meta.prompt"
@@ -712,6 +729,7 @@ async function performVideoExport(options: VideoExportOptions) {
             :path="galleryMediaPath(item.filename, source, false, fromTrash)"
             :target="target"
             :cache-key="cacheKey"
+            @ready="mediaReady"
             :video="video"
             :mesh="mesh"
             :poster-path="galleryMediaPath(item.filename, source, true, fromTrash)"

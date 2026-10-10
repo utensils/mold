@@ -9,12 +9,15 @@ import SwiftUI
 /// under Reduce Motion. A mesh that cannot be drawn shows its poster and says
 /// why, in one line.
 struct MeshPage: View {
+    @Environment(LibraryStore.self) private var library
+    @Environment(\.scenePhase) private var scenePhase
     @Environment(HostStore.self) private var hosts
     let entry: LibraryEntry
     var isSelected = true
     @State private var retry = 0
     @State private var loaded: (MeshRenderer, MeshScene)?
     @State private var problem: String?
+    @State private var displayedID: PrintID?
 
     var body: some View {
         ZStack {
@@ -33,6 +36,9 @@ struct MeshPage: View {
                 ProgressView().tint(.white)
             }
         }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active && displayedID == entry.id && isSelected && entry.print.trashedAt == nil { library.markViewed(entry.id) }
+        }
         .task(id: identity) {
             guard isSelected else { loaded = nil; return }
             await load()
@@ -47,6 +53,7 @@ struct MeshPage: View {
     private func load() async {
         guard let host = hosts.host(entry.hostID) else { return }
         loaded = nil
+        displayedID = nil
         problem = nil
         let requestIdentity = identity
         var downloaded = false
@@ -67,6 +74,8 @@ struct MeshPage: View {
                 return
             }
             loaded = (renderer, scene)
+            displayedID = entry.id
+            if scenePhase == .active && isSelected && entry.print.trashedAt == nil { library.markViewed(entry.id) }
         } catch is CancellationError {
             return
         } catch let failure as MeshViewFailure {

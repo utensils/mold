@@ -106,6 +106,7 @@ const props = withDefaults(
 );
 
 const emit = defineEmits<{
+  (e: "viewed", item: GalleryImage): void;
   (e: "close"): void;
   (e: "copy-link", item: GalleryImage): void;
   (e: "prev"): void;
@@ -213,8 +214,41 @@ const meshGeometryOpen = ref(false);
 const meshGeometryFormat = ref("");
 let meshCapabilitiesGeneration = 0;
 
+let displayedReadKey = "";
+const readKey = () =>
+  props.item ? `${props.item.filename}|${mediaSrc.value}` : "";
+function readDisplayedMedia(): void {
+  if (
+    !document.hidden &&
+    props.item &&
+    displayedReadKey &&
+    displayedReadKey === readKey()
+  )
+    emit("viewed", props.item);
+}
+onMounted(() =>
+  document.addEventListener("visibilitychange", readDisplayedMedia),
+);
+onBeforeUnmount(() =>
+  document.removeEventListener("visibilitychange", readDisplayedMedia),
+);
+function mediaReady(event: Event) {
+  const element = event.currentTarget as HTMLImageElement | HTMLMediaElement;
+  if (
+    props.item &&
+    mediaSrc.value &&
+    element.currentSrc === new URL(mediaSrc.value, document.baseURI).href
+  ) {
+    displayedReadKey = readKey();
+    readDisplayedMedia();
+  }
+}
 function onMeshReady(stats: { bounds?: MeshBounds }) {
   meshBounds.value = stats?.bounds ?? null;
+  if (props.item) {
+    displayedReadKey = readKey();
+    readDisplayedMedia();
+  }
 }
 
 async function resolveMeshExports() {
@@ -787,6 +821,7 @@ async function performVideoExport(options: VideoExportOptions) {
             v-else-if="isVideoFile && mediaSrc"
             :src="mediaSrc"
             :poster="posterSrc"
+            @loadeddata="mediaReady"
             class="lb__media"
             controls
             autoplay
@@ -801,7 +836,13 @@ async function performVideoExport(options: VideoExportOptions) {
               :alt="`Waveform for ${item.filename}`"
               class="lb__audio-waveform"
             />
-            <audio :src="mediaSrc" class="lb__audio-player" controls autoplay />
+            <audio
+              :src="mediaSrc"
+              class="lb__audio-player"
+              controls
+              autoplay
+              @loadeddata="mediaReady"
+            />
           </div>
           <img
             v-else-if="mediaSrc"
@@ -809,6 +850,7 @@ async function performVideoExport(options: VideoExportOptions) {
             :alt="prompt || item.filename"
             class="lb__media"
             :class="{ 'ms-alpha-bed': alphaBed }"
+            @load="mediaReady"
             data-test="lightbox-image"
           />
           <button
@@ -1280,6 +1322,7 @@ async function performVideoExport(options: VideoExportOptions) {
             v-else-if="isVideoFile && mediaSrc"
             :src="mediaSrc"
             :poster="posterSrc"
+            @loadeddata="mediaReady"
             class="lb__media"
             controls
             autoplay
@@ -1294,7 +1337,13 @@ async function performVideoExport(options: VideoExportOptions) {
               :alt="`Waveform for ${item.filename}`"
               class="lb__audio-waveform"
             />
-            <audio :src="mediaSrc" class="lb__audio-player" controls autoplay />
+            <audio
+              :src="mediaSrc"
+              class="lb__audio-player"
+              controls
+              autoplay
+              @loadeddata="mediaReady"
+            />
           </div>
           <img
             v-else-if="mediaSrc"
@@ -1302,6 +1351,7 @@ async function performVideoExport(options: VideoExportOptions) {
             :alt="prompt || item.filename"
             class="lb__media"
             :class="{ 'ms-alpha-bed': alphaBed }"
+            @load="mediaReady"
             data-test="lightbox-image"
           />
           <button

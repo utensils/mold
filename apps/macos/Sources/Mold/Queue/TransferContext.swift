@@ -12,7 +12,9 @@ struct TransferContext {
     let destClient: any MoldBackend
     let destName: String
     let expectedDest: String
-    let clientBatchId: String
+    let destinationTransferIdentity: String
+    var clientBatchId: String
+    let reservedProtocol: Bool
     let verb: String
 
     func next(_ step: TransferPlan.Step, _ outcome: TransferPlan.Outcome) -> TransferPlan.Result {

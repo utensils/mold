@@ -6,6 +6,7 @@ import {
   type ComputedRef,
   type InjectionKey,
 } from "vue";
+import { queueTransferEligible } from "../lib/queueTransferEligibility";
 import type { QueueTransferHost } from "../api/queueTransfer";
 
 export function createHeldQueueTransfer(
@@ -20,7 +21,12 @@ export function createHeldQueueTransfer(
     return (
       !!source &&
       hosts.value.some(
-        (host) => host.ready && host.instanceId !== source.instanceId,
+        (host) =>
+          host.ready &&
+          host.generates !== false &&
+          host.instanceId !== source.instanceId &&
+          (!source.transferIdentity ||
+            host.transferIdentity !== source.transferIdentity),
       )
     );
   };
@@ -32,10 +38,21 @@ export function createHeldQueueTransfer(
       if (!busy.value) selection.value = null;
     },
     canSend,
+    canSendState(hostId: string, state: string) {
+      const host = hosts.value.find((host) => host.id === hostId);
+      return (
+        canSend(hostId) &&
+        queueTransferEligible(state, host?.preRenderTransfer === true)
+      );
+    },
     destinations: computed(() =>
       hosts.value.filter(
         (host) =>
-          host.ready && host.instanceId !== selection.value?.source.instanceId,
+          host.ready &&
+          host.generates !== false &&
+          host.instanceId !== selection.value?.source.instanceId &&
+          (!selection.value?.source.transferIdentity ||
+            host.transferIdentity !== selection.value.source.transferIdentity),
       ),
     ),
     open(hostId: string, jobId: string) {

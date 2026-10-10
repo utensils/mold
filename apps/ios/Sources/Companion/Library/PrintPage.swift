@@ -14,7 +14,7 @@ struct PrintPage: View {
         switch entry.print.kind {
         case .clip: ClipPlayer(entry: entry, isSelected: isSelected)
         case .mesh: MeshPage(entry: entry, isSelected: isSelected)
-        default: ZoomableStill(entry: entry, trashed: trashed)
+        default: ZoomableStill(entry: entry, trashed: trashed, isSelected: isSelected)
         }
     }
 }
@@ -25,7 +25,11 @@ struct ZoomableStill: View {
     @Environment(ThumbnailLoader.self) private var loader
     let entry: LibraryEntry
     let trashed: Bool
+    let isSelected: Bool
+    @Environment(LibraryStore.self) private var library
+    @Environment(\.scenePhase) private var scenePhase
     @State private var image: UIImage?
+    @State private var displayedID: PrintID?
     @State private var isPreview = false
 
     var body: some View {
@@ -47,16 +51,39 @@ struct ZoomableStill: View {
                     .padding(.bottom, 24)
             }
         }
-        .task(id: entry.id.filename) {
+        .onChange(of: isSelected, initial: true) { _, selected in
+            if ViewerReadBoundary.allows(displayed: displayedID, current: entry.id, selected: selected && scenePhase == .active, trashed: trashed) { library.markViewed(entry.id) }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active && ViewerReadBoundary.allows(displayed: displayedID, current: entry.id, selected: isSelected, trashed: trashed) { library.markViewed(entry.id) }
+        }
+        .task(id: entry.id) {
             // The grid's thumbnail at once; the print itself when it arrives
             // (from disk after the first view, so offline too).
-            image = loader.cachedThumbnail(for: entry)
-            if image == nil { image = await loader.image(for: entry, pixels: 512, trashed: trashed) }
-            if let full = await loader.original(for: entry, trashed: trashed) {
+            let requestID = entry.id
+            image = nil
+            displayedID = nil
+            isPreview = false
+            var loaded = loader.cachedThumbnail(for: entry)
+            if loaded == nil { loaded = await loader.image(for: entry, pixels: 512, trashed: trashed) }
+            guard !Task.isCancelled else { return }
+            image = loaded
+            displayedID = loaded == nil ? nil : requestID
+            let original = await ViewerReadBoundary.originalAfterPreview(
+                displayed: displayedID, current: entry.id, selected: isSelected && scenePhase == .active, trashed: trashed,
+                markViewed: { library.markViewed(entry.id) },
+                load: { await loader.original(for: entry, trashed: trashed) })
+            if let full = original {
+                guard !Task.isCancelled else { return }
                 image = full
+                displayedID = requestID
                 isPreview = false
             } else {
+                guard !Task.isCancelled else { return }
                 isPreview = image != nil
+            }
+            if ViewerReadBoundary.allows(displayed: displayedID, current: entry.id, selected: isSelected && scenePhase == .active, trashed: trashed, cancelled: Task.isCancelled) {
+                library.markViewed(entry.id)
             }
         }
     }
@@ -113,6 +140,7 @@ private struct ZoomingImage: UIViewRepresentable {
 /// URL, never the whole file buffered first (`playableURL`). A ticket that
 /// expires mid-watch is re-minted once.
 struct ClipPlayer: View {
+    @Environment(LibraryStore.self) private var library
     @Environment(HostStore.self) private var hosts
     let entry: LibraryEntry
     let isSelected: Bool
@@ -122,20 +150,30 @@ struct ClipPlayer: View {
     @State private var player: AVPlayer?
     @State private var problem: String?
     @State private var playbackFile: URL?
+    @State private var ready = false
+    @State private var playbackID: PrintID?
 
     var body: some View {
         ZStack {
-            if let player {
+            if let player, let item = player.currentItem {
                 NativeVideoPlayer(player: player)
+                    .onReceive(item.publisher(for: \.status)) { status in
+                        // Observe in the current view: the async playback task
+                        // can miss a status transition while setting up AVKit.
+                        if playbackID == entry.id && player.currentItem === item { ready = status == .readyToPlay }
+                    }
+                if !ready { ProgressView().tint(.white).accessibilityIdentifier("viewer-clip-loading") }
             } else if let problem {
                 Text(problem).foregroundStyle(.white).padding()
             } else {
-                ProgressView().tint(.white)
+                ProgressView().tint(.white).accessibilityIdentifier("viewer-clip-loading")
             }
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(ready && playbackID == entry.id ? "viewer-clip-ready" : "viewer-clip-pending")
         // Page-style TabView prepares neighbouring pages. Only the selected
         // clip may fetch a stream or play audio; a swipe cancels that task.
-        .task(id: isSelected) {
+        .task(id: "\(entry.id)|\(isSelected)") {
             if isSelected { await load() }
             else { ClipPlayback.sync(player, isSelected: false) }
         }
@@ -144,8 +182,12 @@ struct ClipPlayer: View {
             player?.replaceCurrentItem(with: nil)
             releasePlaybackFile()
         }
+        .onChange(of: ready) { _, displayed in
+            if displayed && playbackID == entry.id && isSelected && scenePhase == .active && entry.print.trashedAt == nil { library.markViewed(entry.id) }
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { player?.pause() }
+            else if ready && playbackID == entry.id && isSelected && entry.print.trashedAt == nil { library.markViewed(entry.id) }
         }
         .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
             guard repeats, isSelected, scenePhase == .active, let player,
@@ -164,6 +206,8 @@ struct ClipPlayer: View {
     }
 
     private func load() async {
+        ready = false
+        playbackID = nil
         player?.pause()
         player = nil
         releasePlaybackFile()
@@ -193,11 +237,16 @@ struct ClipPlayer: View {
             problem = String(localized: "This clip can't be played here: \(error.reasonSentence)")
             return
         }
+        ready = false
+        playbackID = entry.id
         if let player { player.replaceCurrentItem(with: item) } else { player = AVPlayer(playerItem: item) }
         if let time { await player?.seek(to: time) }
         guard !Task.isCancelled, isSelected else { player?.pause(); return }
         if autoplay || reminted { ClipPlayback.sync(player, isSelected: true) }
-        for await status in item.publisher(for: \.status).values where status == .failed {
+        for await status in item.publisher(for: \.status).values {
+            guard !Task.isCancelled, isSelected else { return }
+            if status == .readyToPlay { ready = true }
+            guard status == .failed else { continue }
             guard !Task.isCancelled else { return }
             guard !reminted else {
                 player = nil
@@ -239,5 +288,20 @@ struct NativeVideoPlayer: UIViewControllerRepresentable {
     static func dismantleUIViewController(_ controller: AVPlayerViewController, coordinator: ()) {
         controller.player?.pause()
         controller.player = nil
+    }
+}
+
+/// Only loaded media belonging to the selected physical copy may advance history.
+enum ViewerReadBoundary {
+    /// Showing a selected preview advances history before a slow original fetch.
+    @MainActor static func originalAfterPreview<Original>(
+        displayed: PrintID?, current: PrintID, selected: Bool, trashed: Bool,
+        markViewed: () -> Void, load: @MainActor () async -> Original
+    ) async -> Original {
+        if allows(displayed: displayed, current: current, selected: selected, trashed: trashed, cancelled: Task.isCancelled) { markViewed() }
+        return await load()
+    }
+    static func allows(displayed: PrintID?, current: PrintID, selected: Bool, trashed: Bool, cancelled: Bool = false) -> Bool {
+        displayed == current && selected && !trashed && !cancelled
     }
 }

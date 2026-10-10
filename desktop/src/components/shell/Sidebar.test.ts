@@ -950,8 +950,9 @@ describe("Sidebar destination badges", () => {
     await flushPromises();
     expect(navButton(wrapper, "My images")?.find(".ms-nav__badge").exists()).toBe(false);
 
-    gallery.markLibrarySeen();
+    gallery.observeUnreadMedia();
     gallery.buckets.local.items = [image("b.png", 3), image("a.png", 1)];
+    gallery.observeUnreadMedia();
     await flushPromises();
     const badge = navButton(wrapper, "My images")!.find(".ms-nav__badge");
     expect(badge.exists()).toBe(true);

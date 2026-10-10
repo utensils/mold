@@ -99,6 +99,7 @@ struct QueueEntryRow: View {
             .accessibilityIdentifier("queue-open-" + entry.id)
             .accessibilityHint("Show job details and controls")
             QueueItemActions(entry: entry, host: host)
+            if entry.state != .held { MoveToMenu(entry: entry, host: host) }
             if QueueFailureDetails.diagnostic(entry, child: queue.child(for: entry, on: host.id)) != nil {
                 Button { showingFailure = true } label: {
                     Text("Failure Details").fixedSize(horizontal: false, vertical: true)

@@ -15,6 +15,7 @@ import { useRouter } from "vue-router";
 import { requestChoice, toast, undoableAction } from "../lib/toasts";
 import ComposerCard from "../components/create/ComposerCard.vue";
 import ResultCanvas from "../components/create/ResultCanvas.vue";
+import { useLibraryUnread } from "../stores/libraryUnread";
 import { REQUIRED_PROMPT_GUIDANCE } from "../components/create/emptyCanvasGuidance";
 import { generationProgressCopy } from "@studio/lib/generationProgress";
 import ControlsAside from "../components/create/ControlsAside.vue";
@@ -2623,6 +2624,11 @@ const resultFilename = computed(() => {
   if (!result) return "";
   return result.filename ?? canvasPrintRow.value?.filename ?? "";
 });
+const resultUnread = useLibraryUnread();
+function markDisplayedCanvasResult(): void {
+  if (resultFilename.value)
+    resultUnread.viewPhysical(resultHostId(), resultFilename.value);
+}
 /** Copy link needs a filename to address — a print the host did not name has
  * no Library row to open, so the action is not offered rather than copying a
  * URL that resolves to nothing. */
@@ -5468,6 +5474,7 @@ onBeforeUnmount(() => {
             <ColdStartGuide />
           </div>
           <ResultCanvas
+            @viewed="markDisplayedCanvasResult"
             v-else
             :mode="canvasMode"
             :empty-guidance="emptyCanvasGuidance"

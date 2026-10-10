@@ -72,7 +72,7 @@ final class GalleryLive {
             // The bulk-save task performs one final local refresh. Redrawing
             // the full grid for every imported picture makes a large save
             // quadratic, even though the event still reaches other clients.
-            if imported && host == MoldEngine.localHostID && store.localSaveProgress != nil { return }
+            if imported && host == MoldEngine.localHostID && store.localSaveSuppressImports { return }
             if let row { insert(row, on: host, in: store) } else {
                 Task { await relists.run(host) { await relist(host, in: store) } }
             }

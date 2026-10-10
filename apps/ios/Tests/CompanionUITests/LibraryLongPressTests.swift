@@ -8,7 +8,8 @@ final class LibraryLongPressTests: XCTestCase {
 
     @MainActor func testNewClipBadgeAndMachinePlaybackPlacement() async throws {
         continueAfterFailure = false
-        let machine = try FixtureMachine(galleryPrints: 3, mixedMedia: true)
+        let identity = UUID().uuidString
+        let machine = try FixtureMachine(landscapePlaybackFixture: true, galleryPrints: 3, galleryID: identity, mixedMedia: true)
         let other = try FixtureMachine(galleryPrints: 1, galleryID: "other")
         let port = try await machine.start()
         let otherPort = try await other.start()
@@ -20,10 +21,10 @@ final class LibraryLongPressTests: XCTestCase {
         pair(port, in: app, name: "Long media workstation East")
         pair(otherPort, in: app, name: "Other workstation")
         XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
-        XCTAssertTrue(fixturePrint(in: app).waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Photos-\(identity) 0,")).firstMatch.waitForExistence(timeout: 10))
         XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'New, '")).firstMatch.exists)
         XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
-        await machine.addNewClip()
+        await machine.addNewMedia(filename: "fixture-new-\(identity).mp4", title: "New clip", clip: true)
         XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
         app.swipeDown()
         let fresh = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'New, New clip'")).firstMatch
@@ -31,18 +32,19 @@ final class LibraryLongPressTests: XCTestCase {
         attach(app, name: "New clip and separated machine playback badges")
         fresh.tap()
         XCTAssertTrue(app.buttons["Info"].firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["viewer-clip-ready"].firstMatch.waitForExistence(timeout: 10), app.debugDescription)
         app.navigationBars.buttons.firstMatch.tap()
-        XCTAssertTrue(fresh.waitForNonExistence(timeout: 5), "Viewing immediately removes this visit's New badge")
+        XCTAssertTrue(fresh.waitForNonExistence(timeout: 5), "Successful selected playback removes the print's New badge")
         XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
         XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
-        XCTAssertFalse(fresh.exists, "Next Library visit clears the badge")
+        XCTAssertFalse(fresh.exists, "The viewed clip stays read on the next Library visit")
         attach(app, name: "Viewed clip stays seen on next visit")
     }
 
     @MainActor func testAppIconCountsNewMediaAndViewingClearsCurrentVisitImmediately() async throws {
         continueAfterFailure = false
         let identity = UUID().uuidString
-        let machine = try FixtureMachine(galleryPrints: 3, galleryID: identity, mixedMedia: true)
+        let machine = try FixtureMachine(landscapePlaybackFixture: true, galleryPrints: 3, galleryID: identity, mixedMedia: true)
         let port = try await machine.start()
         let app = XCUIApplication()
         defer { app.terminate(); machine.stop() }
@@ -51,10 +53,10 @@ final class LibraryLongPressTests: XCTestCase {
         pair(port, in: app, name: "Badge workstation")
         XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
         if !app.navigationBars["All Prints"].exists { app.chooseLibraryShelf("All Prints") }
-        XCTAssertTrue(fixturePrint(in: app).waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Photos-\(identity) 0,")).firstMatch.waitForExistence(timeout: 10))
         XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
-        await machine.addNewMedia(filename: "new-\(identity).png", title: "Unread picture")
-        await machine.addNewMedia(filename: "new-\(identity).mp4", title: "Unread video", clip: true)
+        await machine.addNewMedia(filename: "fixture-new-\(identity).png", title: "Unread picture")
+        await machine.addNewMedia(filename: "fixture-new-\(identity).mp4", title: "Unread video", clip: true)
         // Foreground refresh from a route return without opening Library.
         XCUIDevice.shared.press(.home)
         app.activate()
@@ -77,6 +79,7 @@ final class LibraryLongPressTests: XCTestCase {
         let freshVideo = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'New, Unread video'")).firstMatch
         XCTAssertTrue(freshPicture.waitForExistence(timeout: 10))
         XCTAssertTrue(freshVideo.waitForExistence(timeout: 5))
+        attach(app, name: "Library navigation shows two unread media")
         freshPicture.tap()
         XCTAssertTrue(app.buttons["Info"].firstMatch.waitForExistence(timeout: 5))
         app.navigationBars.buttons.firstMatch.tap()
@@ -85,6 +88,9 @@ final class LibraryLongPressTests: XCTestCase {
         attach(app, name: "Only viewed picture loses New in current visit")
         freshVideo.tap()
         XCTAssertTrue(app.buttons["Info"].firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["viewer-clip-ready"].firstMatch.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'This clip'")).firstMatch.exists, app.debugDescription)
+        attach(app, name: "Selected clip successfully displays before becoming read")
         app.navigationBars.buttons.firstMatch.tap()
         XCTAssertTrue(freshVideo.waitForNonExistence(timeout: 5))
         XCUIDevice.shared.press(.home)
@@ -94,14 +100,14 @@ final class LibraryLongPressTests: XCTestCase {
         }
         await fulfillment(of: [expectation(for: noBadge, evaluatedWith: icon)], timeout: 5)
         XCTAssertTrue(noBadge.evaluate(with: icon), icon.debugDescription)
-        attach(springboard, name: "Home Screen badge cleared after Library visit")
+        attach(springboard, name: "Home Screen badge cleared after viewing both media")
         app.activate()
         XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
         XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
         XCTAssertFalse(freshPicture.exists)
         XCTAssertFalse(freshVideo.exists)
         XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
-        await machine.addNewMedia(filename: "relaunch-\(identity).png", title: "Relaunch picture")
+        await machine.addNewMedia(filename: "fixture-relaunch-\(identity).png", title: "Relaunch picture")
         XCUIDevice.shared.press(.home)
         try await Task.sleep(for: .seconds(1))
         app.activate()
@@ -116,8 +122,17 @@ final class LibraryLongPressTests: XCTestCase {
         attach(springboard, name: "Home Screen count survives app relaunch")
         app.activate()
         XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
-        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'New, Relaunch picture'")).firstMatch.exists,
-                       "Session-only first-visit baseline remains unchanged after relaunch")
+        let relaunchedPicture = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'New, Relaunch picture'")).firstMatch
+        XCTAssertTrue(relaunchedPicture.waitForExistence(timeout: 10), "Unread media stays New across relaunch and Library visits")
+        XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
+        XCUIDevice.shared.press(.home)
+        await fulfillment(of: [expectation(for: one, evaluatedWith: icon)], timeout: 5)
+        app.activate()
+        XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
+        relaunchedPicture.tap()
+        XCTAssertTrue(app.buttons["Info"].firstMatch.waitForExistence(timeout: 5))
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(relaunchedPicture.waitForNonExistence(timeout: 5))
         XCUIDevice.shared.press(.home)
         await fulfillment(of: [expectation(for: noBadge, evaluatedWith: icon)], timeout: 5)
         app.activate()

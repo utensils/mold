@@ -1,3 +1,4 @@
+import { loadLibraryUnreadLedger, saveLibraryUnreadLedger } from "@studio/lib/libraryUnreadLedger";
 import {
   desiredCollectionHidden,
   collectionVisibilityRevision,
@@ -159,6 +160,13 @@ export interface MergedPrint {
    *  input to `organizationOf`. Optional so single-bucket views and tests
    *  that build entries by hand keep working. */
   copies?: GalleryCopy[];
+}
+
+function unreadCopyKeys(entry: MergedPrint): string[] {
+  const copies = entry.copies?.length
+    ? entry.copies
+    : [{ sourceKey: entry.sourceKey, item: entry.item }];
+  return copies.map((copy) => `${copy.sourceKey}|${copy.item.filename}`);
 }
 
 export interface GalleryChip {
@@ -358,14 +366,8 @@ export const useGalleryStore = defineStore("gallery", {
     /** Session-only text query over filename/model/prompt. The view owns
      *  debouncing; the store only holds the settled value. */
     query: "" as string,
-    /** Filenames the Library grid has already shown to the user. A print not
-     *  in this set (once the Library has been opened at least once) wears a
-     *  NEW badge — "developed since your last Library visit". Session-scoped;
-     *  the view snapshots it on open, then calls `markLibrarySeen`. */
-    seenFilenames: new Set<string>(),
-    /** Whether the Library has been opened this session — nothing is NEW on the
-     *  very first visit (that visit only establishes the baseline). */
-    libraryVisited: false,
+    unreadMedia: loadLibraryUnreadLedger("mold.desktop.libraryUnread.v1"),
+    unreadPersistenceError: null as string | null,
     /** Prints optimistically removed from the grid, pending commit or undo.
      *  Keyed `${sourceKey}::${filename}`; excluded from every view
      *  the moment delete is pressed, restored by undo, and only DELETEd on
@@ -876,6 +878,7 @@ export const useGalleryStore = defineStore("gallery", {
     },
     /** First bucket error, labeled — the header's error line. */
     firstError(): string | null {
+      if (this.unreadPersistenceError) return this.unreadPersistenceError;
       for (const source of this.sources) {
         const error = this.buckets[source.key]?.error;
         if (error) return `${source.label}: ${error}`;
@@ -886,19 +889,11 @@ export const useGalleryStore = defineStore("gallery", {
     items(): GalleryImage[] {
       return this.merged.map((e) => e.item);
     },
-    /**
-     * Prints developed since the last Library visit — drives the Library nav
-     * badge. Zero until the Library has been opened once (that visit
-     * only establishes the baseline), then counts every merged print not yet
-     * marked seen. Re-opening Library calls `markLibrarySeen`, resetting it.
-     */
+    /** Unviewed visible merged media, independent of the current filter. */
     newCount(): number {
-      if (!this.libraryVisited) return 0;
-      let n = 0;
-      for (const entry of this.merged) {
-        if (!this.seenFilenames.has(entry.item.filename)) n++;
-      }
-      return n;
+      return this.unreadMedia.count(
+        this.merged.filter(this.visibleInDefaultLibrary).map((entry) => unreadCopyKeys(entry)),
+      );
     },
   },
   actions: {
@@ -951,10 +946,32 @@ export const useGalleryStore = defineStore("gallery", {
      *  on open (after its prints load) so the NEW badges shown this visit are
      *  gone next time. The view snapshots the pre-visit set first, so marking
      *  seen here never erases the badges the user is looking at right now. */
-    markLibrarySeen() {
-      for (const entry of this.merged) this.seenFilenames.add(entry.item.filename);
-      this.libraryVisited = true;
+    observeUnreadMedia() {
+      const hosts = useHostsStore();
+      if (hosts.initialized)
+        this.unreadMedia.retainHosts(["local", ...hosts.all.map((host) => host.id)]);
+      this.unreadMedia.observe(
+        this.merged.map((entry) => unreadCopyKeys(entry)),
+        this.sources
+          .filter((source) => this.buckets[source.key]?.loaded)
+          .map((source) => source.key),
+      );
+      this.unreadPersistenceError = saveLibraryUnreadLedger(
+        "mold.desktop.libraryUnread.v1",
+        this.unreadMedia,
+      );
     },
+    isUnread(entry: MergedPrint): boolean {
+      return this.unreadMedia.isUnread(unreadCopyKeys(entry));
+    },
+    markViewed(entry: MergedPrint) {
+      this.unreadMedia.view(unreadCopyKeys(entry));
+      this.unreadPersistenceError = saveLibraryUnreadLedger(
+        "mold.desktop.libraryUnread.v1",
+        this.unreadMedia,
+      );
+    },
+
     /** Drop buckets whose source disappeared; their cached media goes too. */
     syncBuckets() {
       const keys = new Set(this.sources.map((s) => s.key));

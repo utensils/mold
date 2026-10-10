@@ -7,6 +7,18 @@ import MoldClient
 // Same rules as every other route on this fake: unplanted THROWS, so a store
 // that reaches for an inventory a test did not plant fails the test.
 extension FakeBackend {
+    func galleryPrint(_ filename: String) async throws -> GalleryPrint? {
+        try record("galleryPrint")
+        if let galleryPrintResponder { return try await galleryPrintResponder(filename) }
+        return prints.first { $0.filename == filename }
+    }
+
+    func gallerySyncCheckpoint() async throws -> GallerySyncCheckpoint? {
+        try record("gallerySyncCheckpoint")
+        await pause("gallerySyncCheckpoint")
+        return syncCheckpoint.map { GallerySyncCheckpoint(instanceId: host.id.uuidString, revisions: $0) }
+    }
+
     func retainedMediaTransferOffer(for filename: String) async throws -> RetainedSourceMedia.TransferOffer {
         try record("retainedMediaTransferOffer")
         if let retainedTransferOfferResponder { return try await retainedTransferOfferResponder(filename) }

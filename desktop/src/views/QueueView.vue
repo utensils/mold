@@ -307,7 +307,17 @@ function previewSrc(row: QueueRow): string | null {
           </div>
           <span class="truncate font-mono text-xs text-fg-dim">{{ model(row) }}</span>
           <span class="truncate text-right font-mono text-xs text-fg-dim">{{ machine(row) }}</span>
-          <span class="justify-self-end"><QueueRowMenu :row="row" /></span>
+          <span class="justify-self-end">
+            <button
+              v-if="commands.canTransfer(row)"
+              type="button"
+              data-test="queue-move-to"
+              @click.stop="commands.transferTo(row)"
+            >
+              Move to…
+            </button>
+            <QueueRowMenu :row="row" />
+          </span>
         </div>
       </div>
     </div>

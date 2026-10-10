@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useLibraryUnread } from "../stores/libraryUnread";
 import { collectionAvailability } from "@studio/lib/collectionVisibility";
 import { libraryLink } from "../lib/libraryLinks";
 import { workspaceLabel } from "../lib/workspaces";
@@ -586,30 +587,23 @@ function allCopiesTrash(entry: GalleryImage | null): boolean {
   );
 }
 
-// ── NEW badge tracking ──────────────────────────────────────────────────────
-// Prints present on first load are "seen" (never badged). Anything that
-// arrives on a later refresh is fresh until the next reload.
-const seen = new Set<string>();
-const fresh = ref<Set<string>>(new Set());
-let firstLoadDone = false;
-function reconcileFresh(list: GalleryImage[]) {
-  if (!firstLoadDone) {
-    for (const e of list) seen.add(keyOf(e));
-    firstLoadDone = true;
-    return;
+// New labels share persistent client-local viewing history.
+const unread = useLibraryUnread();
+const fresh = computed(() => {
+  const freshKeys = new Set<string>();
+  for (const group of groupLogicalGalleryPrints(rawEntries.value)) {
+    const keys = group.copies.map(keyOf);
+    if (unread.ledger.isUnread(keys))
+      for (const key of keys) freshKeys.add(key);
   }
-  let changed = false;
-  const next = new Set(fresh.value);
-  for (const e of list) {
-    const key = keyOf(e);
-    if (!seen.has(key)) {
-      seen.add(key);
-      next.add(key);
-      changed = true;
-    }
-  }
-  if (changed) fresh.value = next;
-}
+  return freshKeys;
+});
+onMounted(() => {
+  unread.libraryReaders += 1;
+});
+onBeforeUnmount(() => {
+  unread.libraryReaders -= 1;
+});
 
 // ── Multi-select ────────────────────────────────────────────────────────────
 const selectMode = ref(false);
@@ -1718,7 +1712,7 @@ async function performRefresh() {
     syncLogicalEntries();
     unreachableHostIds.value = merged.unreachableHostIds;
     remoteHostCount.value = merged.remoteHostCount;
-    reconcileFresh(entries.value);
+    unread.observe(merged.rawEntries, merged.reachableHostIds);
     // Only a total wipe-out (no host answered) is an error; one box down just
     // shows an "unreachable" note while the rest render.
     if (
@@ -1804,6 +1798,18 @@ watch([scopeOptions, snapshots], () => {
 const selected = ref<GalleryImage | null>(null);
 const selectedIndex = ref<number>(-1);
 const lightbox = ref<InstanceType<typeof Lightbox> | null>(null);
+function markViewed(entry: GalleryImage) {
+  if (
+    scope.value === "trash" ||
+    !selected.value ||
+    keyOf(selected.value) !== keyOf(entry)
+  )
+    return;
+  const group = groupLogicalGalleryPrints(rawEntries.value).find((group) =>
+    group.copies.some((copy) => keyOf(copy) === keyOf(entry)),
+  );
+  unread.view(group?.copies ?? [entry as HostGalleryImage]);
+}
 
 function printQuery(item: GalleryImage) {
   return {
@@ -2954,9 +2960,15 @@ onBeforeUnmount(() => {
     </div>
 
     <main class="gal__main">
-      <div v-if="errorMessage" class="gal__error" role="alert">
+      <div
+        v-if="errorMessage || unread.persistenceError"
+        class="gal__error"
+        role="alert"
+      >
         <p class="gal__error-title">Couldn't load the gallery.</p>
-        <p class="gal__error-body">{{ errorMessage }}</p>
+        <p class="gal__error-body">
+          {{ errorMessage || unread.persistenceError }}
+        </p>
       </div>
 
       <!-- Collections shelf -->
@@ -3420,6 +3432,7 @@ onBeforeUnmount(() => {
       <router-link to="/machines">Check machines</router-link>
     </p>
     <Lightbox
+      @viewed="markViewed"
       ref="lightbox"
       :item="selected"
       :models="models"

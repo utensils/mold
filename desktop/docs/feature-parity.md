@@ -541,3 +541,7 @@ servers, Held cancellation remains held-only even if another client starts the
 job before the request arrives.
 
 Shared generation activity includes model loading as an executing phase. Cancel remains capability-gated for ordinary jobs and follows chain-owned authority for automatic chains; terminal, cancelling, and unknown phases stay read-only. Native iOS receives loading jobs as `running` through the ordinary queue endpoint and uses its existing running cancellation capability.
+
+## Local viewing history
+
+Library New badges and unread counts are saved on each client independently. Media discovered after the initial machine baseline stays new until that client successfully displays it in the viewer. Opening Library, filters, refreshes and neighboring preloads do not clear it. Merged copies count once; hidden collections and Trash do not count. Existing read history is preserved on upgrade. Native icon badges follow the same history, with the existing permission or preference controls. Browser, desktop and mobile-shell histories are separate. Storage errors are visible and preserve the previous saved history.

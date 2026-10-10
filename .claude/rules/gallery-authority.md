@@ -184,3 +184,5 @@ absence. Persist explicit collection visibility intent with route/installation
 identity, serialize mirror and reconciliation writers, and reject snapshots
 older than a visibility edit. A fresh listing confirms convergence; a PATCH
 response alone does not supersede a newer edit.
+
+Library mirror checkpoints use authenticated `GET /api/gallery/sync-checkpoint`. Per-print opaque revisions bind archive facts and retained-member manifests independently of the output media version; corrupt or missing manifest evidence cannot establish trust. Client skip decisions require matching source and destination evidence, current route/instance identities and output records. Checkpoints batch metadata work; they do not claim an O(1) delta feed. Older or oversized unsupported responses retain the full repair path.

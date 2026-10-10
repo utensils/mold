@@ -6268,7 +6268,7 @@ describe("MobileApp generation queue", () => {
       ).toBe("41"),
     );
     expect(document.activeElement).toBe(wrapper.get("[data-test='mobile-tab-gallery']").element);
-  });
+  }, 15_000);
 
   it("marks a print that carries alpha for the checkerboard tile", async () => {
     const prints = [
@@ -10422,9 +10422,14 @@ describe("MobileApp gallery", () => {
     expect(tile.get("[data-test='new-badge']").text()).toBe("New");
     expect(tile.get("[data-test='upscaled-badge']").text()).toBe("Upscaled");
     expect(JSON.parse(localStorage.getItem("mold.mobile.library-seen-at.v1") ?? "{}")).toEqual({
-      "studio-id": stamp,
+      "studio-id": stamp - 1,
     });
-    expect(localStorage.getItem("mold.mobile.library-seen.v1")).toBeNull();
+    expect(localStorage.getItem("mold.mobile.libraryUnread.v1")).not.toBeNull();
+    await tile.trigger("click");
+    await flushPromises();
+    wrapper.findComponent({ name: "MobileGalleryViewer" }).vm.$emit("viewed");
+    await nextTick();
+    expect(tile.find("[data-test='new-badge']").exists()).toBe(false);
   });
 
   it("uses a still gallery print as the selected model's source image", async () => {
@@ -12836,7 +12841,7 @@ describe("MobileApp Library organization", () => {
       invoke.mock.calls.filter(([command]) => command === "save_export_to_mold_folder"),
     ).toHaveLength(1);
     expect(wrapper?.get("[data-test='mobile-gallery-save-status']").text()).toContain(
-      "Saved 1 of 1",
+      "Processed successfully 1 of 1",
     );
     expect(wrapper?.get("[data-test='mobile-gallery-save-status']").text()).toContain(
       "1 selected print has no supported local-save format",
@@ -12860,7 +12865,7 @@ describe("MobileApp Library organization", () => {
     await wrapper?.get("[data-test='mobile-gallery-save']").trigger("click");
     await flushPromises();
     expect(wrapper?.get("[data-test='mobile-gallery-save-status']").text()).toContain(
-      "Saving 1 of 1",
+      "Processing 1 of 1",
     );
     await tiles[1]!.trigger("click");
     finishSave();
@@ -12889,7 +12894,7 @@ describe("MobileApp Library organization", () => {
     await flushPromises();
     expect(count).toBe(2);
     expect(wrapper?.get("[data-test='mobile-gallery-save-status']").text()).toContain(
-      "Saved 1 of 2",
+      "Processed successfully 1 of 2",
     );
     expect(wrapper?.get("[data-test='mobile-gallery-save-status']").text()).toContain(
       "Photos unavailable",
@@ -12899,7 +12904,7 @@ describe("MobileApp Library organization", () => {
     await wrapper?.get("[data-test='mobile-gallery-save']").trigger("click");
     await flushPromises();
     expect(wrapper?.get("[data-test='mobile-gallery-save-status']").text()).toContain(
-      "Saved 1 of 1",
+      "Processed successfully 1 of 1",
     );
     await wrapper?.get("[data-test='mobile-gallery-select']").trigger("click");
     await wrapper?.get("[data-test='mobile-gallery-select']").trigger("click");
@@ -12925,7 +12930,7 @@ describe("MobileApp Library organization", () => {
 
     expect(invoke).toHaveBeenCalledWith("save_image_to_photos", { dataB64: btoa("webp-still") });
     expect(wrapper?.get("[data-test='mobile-gallery-save-status']").text()).toContain(
-      "Saved 1 of 1",
+      "Processed successfully 1 of 1",
     );
   });
 

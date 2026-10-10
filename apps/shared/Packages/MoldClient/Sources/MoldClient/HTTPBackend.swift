@@ -34,8 +34,10 @@ public struct HTTPBackend: MoldBackend {
     }
 
     /// `view` is `trash` for the deleted shelf, absent for the live library.
-    func galleryListing(view: String?, etag: String?) async throws -> Fetched<[GalleryPrint]> {
-        var request = self.request(view.map { "/api/gallery?view=\($0)" } ?? "/api/gallery")
+    func galleryListing(view: String?, etag: String?, filename: String? = nil) async throws -> Fetched<[GalleryPrint]> {
+        var path = view.map { "/api/gallery?view=\($0)" } ?? "/api/gallery"
+        if let filename { path += (view == nil ? "?" : "&") + "filename=" + RouteEscaping.escapedQueryValue(filename) }
+        var request = self.request(path)
         // The index is large and mostly unchanged between refreshes, so ask
         // the host whether it changed at all before it serializes 1.2 MB.
         if let etag { request.setValue(etag, forHTTPHeaderField: "If-None-Match") }

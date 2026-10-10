@@ -385,6 +385,8 @@ export interface ServerCapabilities {
   queue?: {
     can_pause?: boolean;
     can_pause_job?: boolean;
+    pre_render_transfer?: boolean;
+    transfer_identity?: string;
     can_cancel_all?: boolean;
     can_reorder?: boolean;
     /** Running singleton generations accept cooperative cancellation. */

@@ -294,6 +294,19 @@ describe("MobileGalleryViewer", () => {
     expect(view.find("[role='status']").exists()).toBe(true);
     await video.trigger("loadedmetadata");
     expect(view.find("[role='status']").exists()).toBe(false);
+    expect(view.emitted("viewed")).toBeUndefined();
+    Object.defineProperty(video.element, "currentSrc", {
+      configurable: true,
+      value: "https://studio/media/full",
+    });
+    await video.trigger("loadeddata");
+    expect(view.emitted("viewed")).toHaveLength(1);
+    Object.defineProperty(video.element, "currentSrc", {
+      configurable: true,
+      value: "https://studio/media/stale",
+    });
+    await video.trigger("loadeddata");
+    expect(view.emitted("viewed")).toHaveLength(1);
 
     await view.get("dialog").trigger("cancel");
     expect(view.emitted("close")).toHaveLength(1);
@@ -2440,5 +2453,32 @@ describe("MobileGalleryViewer alpha bed", () => {
     await flushPromises();
     expect(viewer.find("[data-test='gallery-viewer-alpha-bed']").exists()).toBe(false);
     expect(viewer.find("[data-test='gallery-viewer-image']").exists()).toBe(true);
+  });
+});
+
+describe("viewed visibility boundary", () => {
+  it("defers loaded media until foreground and fences a changed print", async () => {
+    const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+    const wrapper = mountViewer();
+    try {
+      await flushPromises();
+      const media = wrapper.get("[data-test='gallery-viewer-image']");
+      Object.defineProperty(media.element, "currentSrc", {
+        configurable: true,
+        value: new URL(media.attributes("src")!, document.baseURI).href,
+      });
+      await media.trigger("load");
+      expect(wrapper.emitted("viewed")).toBeUndefined();
+      hidden.mockReturnValue(false);
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(wrapper.emitted("viewed")).toHaveLength(1);
+      await wrapper.setProps({ item: { ...image, filename: "next.png" } });
+      await flushPromises();
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(wrapper.emitted("viewed")).toHaveLength(1);
+    } finally {
+      wrapper.unmount();
+      hidden.mockRestore();
+    }
   });
 });

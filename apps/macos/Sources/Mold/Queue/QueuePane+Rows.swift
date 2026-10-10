@@ -67,6 +67,8 @@ extension QueuePane {
                     moveUp: { move(entry.id, .up, host: host, entries: entries) },
                     moveDown: { move(entry.id, .down, host: host, entries: entries) },
                     inspect: { detailTarget = QueueDetailTarget(entry: entry, host: host) },
+                    moveToDestinations: queue.canTransfer(entry, on: host.id) && transfers.transferring == nil ? transfers.transferDestinations(from: host.id) : [],
+                    moveTo: { moveTo(entry, from: host, to: $0) },
                     act: { act($0, on: entry, host: host) })
             }
         }

@@ -6,6 +6,54 @@ import Testing
 
 @MainActor
 struct LibrarySyncSessionTests {
+    @Test func intervalPersistsAndRejectsInvalidValues() {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let session = LibrarySyncSession(defaults: defaults)
+        #expect(session.intervalMinutes == 5)
+        session.intervalMinutes = 12
+        #expect(LibrarySyncSession(defaults: defaults).intervalMinutes == 12)
+        session.intervalMinutes = 0
+        #expect(session.intervalMinutes == 1)
+        session.intervalMinutes = 10000
+        #expect(session.intervalMinutes == 1440)
+    }
+
+    @Test func editingIntervalReschedulesPendingWaitWithoutStartingAnotherRun() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let backend = FakeBackend(host: local)
+        let hosts = HostStore(hosts: [local]) { _ in backend }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let session = LibrarySyncSession(defaults: UserDefaults(suiteName: UUID().uuidString)!, interval: 30)
+        let library = LibraryStore(hosts: hosts, syncSession: session)
+        session.start(in: library)
+        await settle { session.nextRun != nil }
+        let reads = backend.callCount("gallery")
+        session.intervalMinutes = 12
+        #expect((session.nextRun?.timeIntervalSinceNow ?? 0) > 700)
+        await Task.yield()
+        #expect(backend.callCount("gallery") == reads)
+        session.stop(in: library)
+        #expect(session.nextRun == nil)
+    }
+
+    @Test func stoppedWaitingTaskCannotClearRestartedSessionCountdown() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let backend = FakeBackend(host: local)
+        let hosts = HostStore(hosts: [local]) { _ in backend }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let session = LibrarySyncSession(defaults: UserDefaults(suiteName: UUID().uuidString)!, interval: 30)
+        let library = LibraryStore(hosts: hosts, syncSession: session)
+        session.start(in: library)
+        await settle { session.nextRun != nil }
+        session.stop(in: library)
+        session.start(in: library)
+        await settle { session.nextRun != nil }
+        await Task.yield()
+        #expect(session.isEnabled)
+        #expect(session.nextRun != nil)
+        session.stop(in: library)
+    }
+
     @Test func acknowledgmentsOnlySuppressExactIssuesAndCanBeReset() throws {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let session = LibrarySyncSession(defaults: defaults)

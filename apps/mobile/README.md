@@ -386,7 +386,7 @@ overlay register calls top acts on either.
   or delete the chosen prints. Delete removes every matching copy from
   reachable saved hosts; a host failure leaves that copy visible and reports
   the partial cleanup.
-  Persistent New badges match desktop Library visits, and post-generation
+  Persistent New badges follow this client’s individual viewing history, and post-generation
   upscaled images carry the shared Upscaled badge. The full-media viewer also
   offers **Upscale…** for images and **Framewise upscale…** for videos through
   the shared model/progress dialog, including first-use model download and
@@ -704,8 +704,9 @@ WebView local storage contains non-secret mobile state:
   the "tag new prints with their title" preference (absent on installs saved
   before File under; it migrates to the on default)
 - `mold.mobile.generation.templates.v1` — mobile-local generation templates
-- `mold.mobile.library-seen-at.v1` / `mold.mobile.library-visited.v1` — bounded
-  per-host latest-print timestamps and the first-visit marker for New badges
+- `mold.mobile.library-seen-at.v1` / `mold.mobile.library-visited.v1` — legacy
+  timestamp baseline migrated into individual viewing history
+- `mold.mobile.libraryUnread.v1` — compact client-local individual viewing history
 
 Per-host API keys live in the iOS Keychain under
 `com.utensils.mold.remote-api-key`. Android encrypts them with a non-exportable
@@ -1049,3 +1050,15 @@ host’s advertised support; completed, cancelled and failed jobs remain read-on
 Busy, offline or changed-machine rows keep Details accessible. On current Mold
 servers, Held cancellation remains held-only even if another client starts the
 job before the request arrives.
+
+### Local viewing history
+
+Library New badges and unread counts are saved on each client independently. Media discovered after the initial machine baseline stays new until that client successfully displays it in the viewer. Opening Library, filters, refreshes and neighboring preloads do not clear it. Merged copies count once; hidden collections and Trash do not count. Existing read history is preserved on upgrade. Native icon badges follow the same history, with the existing permission or preference controls. Browser and Tauri clients persist compact histories locally. If browser storage is full, the client reports the persistence failure and preserves the previously saved history.
+
+Manual Save Locally reports processed selected prints, including existing copies, rather than claiming each processed item was copied. Native iOS offline progress describes checking thumbnails, including cache hits.
+
+### Move queued work to another machine
+
+When another connected machine can generate, **Move to…** is available on queued, paused, and held jobs until the source machine begins rendering. The prompt, seed, settings, and retained reference media move together. The destination must accept the job before the original is removed. Older servers support Held-only moves. Jobs that depend on machine-local LoRAs or workflows are refused without moving them.
+
+If a connection is interrupted during a move, retry the same destination so Mold can check whether it already accepted the job. The source remains reserved while that result is unknown, preventing duplicate rendering. A confirmed destination rejection releases the original only after the destination records that this transfer cannot be admitted later.

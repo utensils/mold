@@ -8,6 +8,7 @@
  * recently. The per-GPU lane view lives in host detail.
  */
 import { computed } from "vue";
+import QueueMoveToControl from "@studio/components/QueueMoveToControl.vue";
 import QueueDownloadControl from "@studio/components/QueueDownloadControl.vue";
 import QueueSourceThumbnail from "@studio/components/QueueSourceThumbnail.vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
@@ -256,6 +257,16 @@ const active = computed(
 
     <template v-for="row in activeRows" :key="row.key">
       <div v-if="row.kind === 'shared'" class="activity__shared">
+        <QueueMoveToControl
+          v-if="
+            row.shared.kind === 'generation' && row.shared.execution !== 'chain'
+          "
+          :host-id="row.shared.hostId"
+          :job-id="row.shared.id"
+          :state="
+            row.shared.phase === 'preparing' ? 'queued' : row.shared.phase
+          "
+        />
         <QueueSourceThumbnail
           :target="sourceTarget(row.shared.hostId)"
           :job-id="row.shared.id"
@@ -393,6 +404,12 @@ const active = computed(
           "
         />
         <div class="activity__pill">
+          <QueueMoveToControl
+            v-if="!row.print.chain"
+            :host-id="row.print.hostId ?? ORIGIN_HOST_ID"
+            :job-id="row.print.serverId"
+            :state="row.print.holdError ? 'held' : 'queued'"
+          />
           <button
             type="button"
             class="activity__pill-text"

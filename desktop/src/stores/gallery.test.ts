@@ -101,6 +101,7 @@ function localSnapshot(images: GalleryImage[], target = true) {
 }
 
 beforeEach(() => {
+  localStorage.clear();
   setActivePinia(createPinia());
   vi.clearAllMocks();
   vi.mocked(apiJsonTo).mockResolvedValue([]);
@@ -1006,18 +1007,21 @@ describe("new-since-last-visit count (G11 nav badge)", () => {
     expect(gallery.newCount).toBe(0);
   });
 
-  it("counts prints developed since the last visit and resets on the next", () => {
+  it("keeps arrivals new through Library visits and reads one selected print", () => {
     connectLocal();
     const gallery = useGalleryStore();
     gallery.buckets.local = loadedBucket([img("a.png", 1)]);
-    gallery.markLibrarySeen();
+    gallery.observeUnreadMedia();
     expect(gallery.newCount).toBe(0);
 
     gallery.buckets.local.items = [img("b.png", 3), img("c.png", 2), img("a.png", 1)];
+    gallery.observeUnreadMedia();
     expect(gallery.newCount).toBe(2);
 
-    gallery.markLibrarySeen();
-    expect(gallery.newCount).toBe(0);
+    gallery.observeUnreadMedia();
+    expect(gallery.newCount).toBe(2);
+    gallery.markViewed(gallery.merged.find((entry) => entry.item.filename === "b.png")!);
+    expect(gallery.newCount).toBe(1);
   });
 });
 

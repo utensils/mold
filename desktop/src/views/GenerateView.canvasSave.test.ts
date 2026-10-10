@@ -50,6 +50,7 @@ vi.mock("../lib/clipboard", () => ({
 }));
 
 import GenerateView from "./GenerateView.vue";
+import { useGalleryStore } from "../stores/gallery";
 import { newJob } from "../lib/generationJob";
 import { useConnectionStore } from "../stores/connection";
 import { useContextMenuStore } from "../stores/contextMenu";
@@ -165,4 +166,32 @@ describe("GenerateView — saving the print on the canvas", () => {
     expect(copyImageBytesToClipboard).toHaveBeenCalledTimes(1);
     vi.unstubAllGlobals();
   });
+});
+
+it("reads a displayed generated result only in foreground and fences subsequent results", async () => {
+  const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+  const gallery = useGalleryStore();
+  const viewed = vi.spyOn(gallery, "markViewed");
+  const wrapper = await mountView(false);
+  try {
+    const job = finishDurablePrint();
+    await flushPromises();
+    const image = wrapper.get('img[src="blob:print-1"]');
+    Object.defineProperty(image.element, "currentSrc", {
+      configurable: true,
+      value: "blob:print-1",
+    });
+    await image.trigger("load");
+    expect(viewed).not.toHaveBeenCalled();
+    hidden.mockReturnValue(false);
+    document.dispatchEvent(new Event("visibilitychange"));
+    expect(viewed).toHaveBeenCalledTimes(1);
+    job.result!.filename = "next.png";
+    await flushPromises();
+    document.dispatchEvent(new Event("visibilitychange"));
+    expect(viewed).toHaveBeenCalledTimes(1);
+  } finally {
+    wrapper.unmount();
+    hidden.mockRestore();
+  }
 });

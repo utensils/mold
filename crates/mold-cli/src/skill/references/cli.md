@@ -767,3 +767,22 @@ without the original host. First-stage settings reuse hydrates stage 0 only;
 complete authored-sequence replay is a separate workflow. Unsupported or damaged source transfers fail explicitly. Native Mac copies with explicitly unavailable legacy inputs can finish after output verification, while reporting that the original inputs remain unavailable; they are not complete reproducible archives.
 
 Image sizing is automatic for supported roles: model reference pixel budgets describe engine processing, not a requirement to manually shrink original pictures. Identity photographs and oversized ordered-reference groups are bounded before transport; original files remain untouched. Decode/download/body ceilings, formats, counts and unsupported roles still apply.
+
+Native Mac Library Sync has a configurable app-local interval (1–1440 minutes, default five) and remains session opt-in. Its progress distinguishes checking existing copies from copying outputs. Updated servers expose authenticated `GET /api/gallery/sync-checkpoint` for bounded per-print archive and retained-input revisions; clients must preserve ordinary retained-input repair when this additive contract is unavailable.
+
+Library unread history is local to each native, browser, desktop and mobile-shell client. Only successfully displayed viewer media becomes read; entering Library and refreshes preserve unread items. Newly paired machines establish an initial baseline. Mac queue rows retain their geometry while previews and progress load.
+
+### Pre-render queue transfer recovery
+
+Servers advertising `queue.pre_render_transfer` allow queued, paused, and held source jobs to move until authoritative worker dispatch (`running`, shown as Rendering). Clients require the capability on both source and destination for the modern protocol; older source servers keep the existing Held-only path.
+
+- `GET /api/queue/:id/transfer/reservation` returns a saved transfer ID and stable destination queue identity, or null.
+- `queue.transfer_identity` is an opaque hash of the durable queue owner. Modern `destination_transfer_identity` transfer bindings use this stable identity across destination restarts; actual destination admission still fences the current runtime instance. A replaced queue owner cannot reconcile an old reservation.
+- `POST /api/queue/:id/transfer/reserve` atomically reserves the original against dispatch using current queue authority plus `transfer_id` and `destination_transfer_identity`.
+- `POST /api/queue/:id/transfer/seal` must succeed before destination admission.
+- On new source hosts every export and completion, including Held jobs, must include the matching reserved `transfer_id` and `destination_transfer_identity`. Old clients receive `QUEUE_TRANSFER_RESERVATION_REQUIRED` and must update; older source servers retain Held-only compatibility. Both hosts must advertise the new protocol for pre-render transfers.
+- Existing portable export, destination `/api/generation-batches/transfer` admission, lookup by client batch ID, and source completion remain the data path. The reserved transfer ID is the destination client batch ID.
+- `POST /api/generation-transfers/abort` takes `transfer_id` and `destination_transfer_identity`. A durable abort receipt prevents any late admission for that identity; a null receipt means admission already won and the client must reconcile its accepted batch.
+- `POST /api/queue/:id/transfer/release` restores the source only before sealing, or with a matching destination abort receipt after sealing.
+
+Reservations and abort tombstones survive restarts. Held retention sweeps cannot purge a reserved source or its original media. Accepted single-child transfers that durably failed or were cancelled can also obtain an abort receipt and restore the original; running, held, paused, and completed destination jobs cannot. An ambiguous response never permits blindly resuming the source. Reserved originals reject conflicting Resume, Retry, Cancel, and bulk queue mutations. Receipt forwarding uses the authenticated client's existing authority; it is not independent server-to-server proof. No inference or generation is needed to test the protocol.

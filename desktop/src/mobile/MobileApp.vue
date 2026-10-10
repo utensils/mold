@@ -20,6 +20,7 @@ import {
   forgetConnectionRoutes,
 } from "@studio/api/connectionRoutes";
 import HeldQueueTransferDialog from "@studio/components/HeldQueueTransferDialog.vue";
+import QueueMoveToControl from "@studio/components/QueueMoveToControl.vue";
 import { provideHeldQueueTransfer } from "@studio/composables/useHeldQueueTransfer";
 
 import { hostRoutingLoad } from "@studio/lib/hostRouting";
@@ -87,6 +88,8 @@ import {
   type SourceResolutionResult,
 } from "@studio/lib/sourceResolution";
 import { restoredCanvasIntent, type CanvasIntent } from "@studio/lib/outputShape";
+import { loadLibraryUnreadLedger, saveLibraryUnreadLedger } from "@studio/lib/libraryUnreadLedger";
+import { observeTimestampViewingHistory } from "@studio/lib/libraryUnreadMigration";
 import { groupLogicalGalleryPrints } from "@studio/lib/galleryPrintIdentity";
 import { virtualGridWindow } from "@studio/lib/virtualGrid";
 import { galleryThumbnailScheduler, type ThumbnailHandle } from "@studio/lib/thumbnailScheduler";
@@ -699,8 +702,8 @@ interface MobileAppliedRemix {
 
 const STORAGE_KEY = "mold.mobile.hosts.v1";
 const SELECTED_KEY = "mold.mobile.selected-host.v1";
+const MOBILE_UNREAD_KEY = "mold.mobile.libraryUnread.v1";
 const LIBRARY_SEEN_AT_KEY = "mold.mobile.library-seen-at.v1";
-const LEGACY_LIBRARY_SEEN_KEY = "mold.mobile.library-seen.v1";
 const LIBRARY_VISITED_KEY = "mold.mobile.library-visited.v1";
 const LIVE_ACTIVITY_KEY = "mold.mobile.live-activity.v1";
 const GALLERY_CAPABILITIES_KEY = "mold.mobile.gallery-capabilities.v1";
@@ -1357,8 +1360,10 @@ function loadLibrarySeenAt(): Record<string, number> {
     return {};
   }
 }
-let librarySeenAtBaseline = loadLibrarySeenAt();
-let libraryPreviouslyVisited = localStorage.getItem(LIBRARY_VISITED_KEY) === "true";
+const mobileUnread = reactive(loadLibraryUnreadLedger(MOBILE_UNREAD_KEY));
+const librarySeenAtBaseline =
+  localStorage.getItem(LIBRARY_VISITED_KEY) === "true" ? loadLibrarySeenAt() : {};
+let mobileUnreadGroups = new Map<string, string[]>();
 
 // Ephemeral per-host telemetry from the /api/status probe (VRAM + queue), kept
 // out of the persisted host identity so the Machines cards can mirror the host
@@ -1398,6 +1403,9 @@ const queueTransfer = provideHeldQueueTransfer(
               ready: host.online && !host.stale,
               gpuCount: hostTelemetry[host.id]?.routingLoad.gpuCount,
               queueDepth: hostTelemetry[host.id]?.queueDepth,
+              transferIdentity: serverCapabilities[host.id]?.queue?.transfer_identity,
+              preRenderTransfer: serverCapabilities[host.id]?.queue?.pre_render_transfer === true,
+              generates: !!serverCapabilities[host.id]?.queue?.heterogeneous_batch_max_outputs,
             },
           ]
         : [],
@@ -8341,6 +8349,7 @@ async function performGalleryRefresh(): Promise<void> {
   });
   if (galleryCopies.length === 0 && cachedCopies.length > 0) {
     galleryCopies = cachedCopies.sort((a, b) => b.timestamp - a.timestamp);
+    observeMobileLibraryMedia(galleryCopies);
     rebuildGalleryOrganization();
     pendingGallery = visibleRepresentatives();
     await loadMoreGalleryPage();
@@ -8458,6 +8467,10 @@ async function performGalleryRefresh(): Promise<void> {
     return;
   }
   galleryCopies = refreshedCopies;
+  observeMobileLibraryMedia(
+    galleryCopies,
+    results.flatMap((result) => (result.status === "fulfilled" ? [result.value.host.id] : [])),
+  );
   mobileGalleryPrewarmAttempted.clear();
   rebuildGalleryOrganization();
   // The Trash listing is refetched on its own schedule; a live refresh only
@@ -8513,7 +8526,7 @@ async function loadMoreGalleryPage(): Promise<void> {
   for (const print of gallery.value) {
     galleryByThumbnailKey.set(galleryThumbnailRetryKey(print), print);
   }
-  markMobileLibrarySeen(galleryCopies);
+  observeMobileLibraryMedia(galleryCopies);
   if (pendingLibraryScrollRestore) restoreMobileLibraryScroll();
   // A cached snapshot and its live replacement commonly contain the exact
   // same physical keys. The visible-key watcher therefore does not fire for
@@ -10377,7 +10390,7 @@ async function saveSelectedGalleryPrints(): Promise<void> {
   let firstError = "";
   try {
     for (const [index, print] of targets.entries()) {
-      gallerySaveStatus.value = `Saving ${index + 1} of ${targets.length}…`;
+      gallerySaveStatus.value = `Processing ${index + 1} of ${targets.length} selected prints…`;
       try {
         if (isMeshItem(print)) {
           await invoke("save_export_to_mold_folder", {
@@ -10407,7 +10420,7 @@ async function saveSelectedGalleryPrints(): Promise<void> {
     }
     gallerySaveStatus.value =
       selectionVersion === gallerySaveSelectionVersion
-        ? `Saved ${saved} of ${targets.length}.${skipped ? ` ${skipped} selected ${skipped === 1 ? "print has" : "prints have"} no supported local-save format.` : ""} Photos and videos go to Photos; meshes go to the Mold folder.${firstError ? ` ${firstError}` : ""}`
+        ? `Processed successfully ${saved} of ${targets.length}.${skipped ? ` ${skipped} selected ${skipped === 1 ? "print has" : "prints have"} no supported local-save format.` : ""} Photos and videos go to Photos; meshes go to the Mold folder.${firstError ? ` ${firstError}` : ""}`
         : "";
   } finally {
     gallerySaveBusy.value = false;
@@ -11453,18 +11466,85 @@ async function deleteSelectedGalleryPrints(): Promise<void> {
 }
 
 function isFreshMobilePrint(print: GalleryPrint): boolean {
-  const seenAt = librarySeenAtBaseline[print.hostId];
-  return libraryPreviouslyVisited && seenAt != null && print.timestamp > seenAt;
+  return mobileUnread.isUnread(
+    mobileUnreadGroups.get(galleryPrintKey(print)) ?? [galleryPrintKey(print)],
+  );
 }
 
-function markMobileLibrarySeen(prints: Array<GalleryPrint | PendingGalleryPrint>): void {
-  const seenAt = { ...librarySeenAtBaseline };
-  for (const print of prints) {
-    seenAt[print.hostId] = Math.max(seenAt[print.hostId] ?? 0, print.timestamp);
+function observeMobileLibraryMedia(
+  prints: Array<GalleryPrint | PendingGalleryPrint>,
+  loadedHosts = [...new Set(prints.map((print) => print.hostId))],
+): void {
+  const groups = observeTimestampViewingHistory(
+    mobileUnread,
+    prints,
+    loadedHosts,
+    librarySeenAtBaseline,
+  );
+  mobileUnreadGroups = new Map(groups.flatMap((keys) => keys.map((key) => [key, keys] as const)));
+  const failure = saveLibraryUnreadLedger(MOBILE_UNREAD_KEY, mobileUnread);
+  if (failure) galleryError.value = failure;
+}
+function markMobileMediaViewed(): void {
+  const print = selectedPrint.value;
+  if (!print || selectedPrintTrashed.value) return;
+  mobileUnread.view(mobileUnreadGroups.get(galleryPrintKey(print)) ?? [galleryPrintKey(print)]);
+  const failure = saveLibraryUnreadLedger(MOBILE_UNREAD_KEY, mobileUnread);
+  if (failure) galleryError.value = failure;
+}
+
+let unreadObserverBusy = false;
+async function observeMobileGalleryArrivals(): Promise<void> {
+  if (unmounted || unreadObserverBusy || document.hidden || tab.value === "gallery") return;
+  unreadObserverBusy = true;
+  const observingHosts = connectedHosts.value;
+  try {
+    const cached = await Promise.all(
+      observingHosts.map(async (host) => {
+        const cacheKey = mobileGalleryCacheKey(host);
+        const target = { baseUrl: host.baseUrl, apiKey: host.apiKey || null };
+        return (await loadCachedGallery(cacheKey).catch(() => [])).map((print) => ({
+          ...print,
+          hostId: host.id,
+          hostName: host.name,
+          cacheKey,
+          target,
+        }));
+      }),
+    );
+    if (unmounted) return;
+    observeMobileLibraryMedia(cached.flat());
+    const inventories = await Promise.allSettled(
+      observingHosts.map(async (host) => {
+        const target = { baseUrl: host.baseUrl, apiKey: host.apiKey || null };
+        const prints = await apiJsonTo<MobileGalleryImage[]>(target, "/api/gallery", {
+          signal: AbortSignal.timeout(GALLERY_HOST_TIMEOUT_MS),
+        });
+        const current = connectedHosts.value.find((candidate) => candidate.id === host.id);
+        if (!current || mobileGalleryCacheKey(current) !== mobileGalleryCacheKey(host))
+          throw new Error("Machine changed during gallery observation");
+        return {
+          host,
+          prints: prints.map((print) => ({
+            ...print,
+            hostId: host.id,
+            hostName: host.name,
+            cacheKey: mobileGalleryCacheKey(host),
+            target,
+          })),
+        };
+      }),
+    );
+    if (!unmounted)
+      observeMobileLibraryMedia(
+        inventories.flatMap((result) => (result.status === "fulfilled" ? result.value.prints : [])),
+        inventories.flatMap((result) =>
+          result.status === "fulfilled" ? [result.value.host.id] : [],
+        ),
+      );
+  } finally {
+    unreadObserverBusy = false;
   }
-  localStorage.setItem(LIBRARY_SEEN_AT_KEY, JSON.stringify(seenAt));
-  localStorage.removeItem(LEGACY_LIBRARY_SEEN_KEY);
-  localStorage.setItem(LIBRARY_VISITED_KEY, "true");
 }
 
 function navigateSelectedPrint(delta: -1 | 1): void {
@@ -11667,8 +11747,6 @@ watch(tab, (next, previous) => {
     });
   }
   if (next === "gallery") {
-    librarySeenAtBaseline = loadLibrarySeenAt();
-    libraryPreviouslyVisited = localStorage.getItem(LIBRARY_VISITED_KEY) === "true";
     pendingLibraryScrollRestore = sessionScrollPosition(MOBILE_LIBRARY_SCROLL_KEY);
     void refreshGallery().then(restoreMobileLibraryScroll);
   } else {
@@ -12056,7 +12134,10 @@ onMounted(async () => {
   if (unmounted) return;
   // Start the cadence before awaiting individual tailnet hosts. One slow host
   // must not prevent every other saved host from being probed on schedule.
-  hostProbeTimer = setInterval(probeHosts, 10_000);
+  hostProbeTimer = setInterval(() => {
+    void probeHosts();
+    void observeMobileGalleryArrivals();
+  }, 10_000);
   liveActivityTimer = setTimeout(pollMobileActivity, 0);
   document.addEventListener("visibilitychange", handleForegroundResume);
   window.addEventListener("pageshow", handleForegroundResume);
@@ -12184,8 +12265,14 @@ function mobileQueueRowActions(row: MobileActivityRow): SwipeRowAction[] {
       label: activityRowQueuePaused(row) ? "Resume" : "Pause",
     });
   }
-  if (durableHold(row.print) && row.print.hostId && queueTransfer.canSend(row.print.hostId)) {
-    actions.push({ id: "transfer", label: "Send to…" });
+  if (
+    row.print.hostId &&
+    queueTransfer.canSendState(
+      row.print.hostId,
+      durableHold(row.print) ? "held" : activityRowQueuePaused(row) ? "paused" : row.print.status,
+    )
+  ) {
+    actions.push({ id: "transfer", label: "Move to…" });
   }
   if (
     durableHold(row.print)?.retryable &&
@@ -14203,6 +14290,17 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               </h3>
               <template v-for="entry in group.rows" :key="entry.key">
                 <div v-if="entry.kind === 'local'" class="mobile-generation-row">
+                  <QueueMoveToControl
+                    :host-id="activityRowHostId(entry.local)"
+                    :job-id="activityRowJobId(entry.local)"
+                    :state="
+                      durableHold(entry.local.print)
+                        ? 'held'
+                        : activityRowQueuePaused(entry.local)
+                          ? 'paused'
+                          : entry.local.print.status
+                    "
+                  />
                   <SwipeActionRow
                     :actions="mobileQueueRowActions(entry.local)"
                     :label="
@@ -14237,6 +14335,17 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                      meter, which made the fleet's work read as a lesser kind
                      of job on the one screen that exists to compare them. -->
                 <div v-else class="mobile-generation-row">
+                  <QueueMoveToControl
+                    v-if="entry.shared.kind === 'generation' && entry.shared.execution !== 'chain'"
+                    :host-id="entry.shared.hostId"
+                    :job-id="entry.shared.id"
+                    :state="
+                      liveQueues[entry.shared.hostId]?.entries.find(
+                        (row) => row.id === entry.shared.id,
+                      )?.state ??
+                      (entry.shared.phase === 'preparing' ? 'queued' : entry.shared.phase)
+                    "
+                  />
                   <SwipeActionRow
                     :actions="sharedQueueRowActions(entry.shared)"
                     :label="sharedQueueTitle(entry.shared)"
@@ -14515,6 +14624,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
     </div>
 
     <MobileGalleryViewer
+      @viewed="markMobileMediaViewed"
       v-if="selectedPrint"
       :item="selectedPrint"
       :target="selectedPrint.target"

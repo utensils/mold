@@ -268,6 +268,10 @@ struct OfflineLibraryTests {
         let fresh = LibraryEntry(host: hosts.hosts[0], print: try print("b.png", version: "v1"))
         await loader.disk.store(image, for: try #require(ThumbnailLoader.diskKey(saved, size: 512)))
         loader.save([saved, fresh])
+        // The UI says Checking: the denominator includes disk-cache hits,
+        // while the network count below covers only actual downloads.
+        #expect(loader.saving?.done == 0)
+        #expect(loader.saving?.total == 2)
         for _ in 0..<100 where loader.saving != nil { try await Task.sleep(for: .milliseconds(20)) }
         #expect(loader.saving == nil)
         #expect(fake.count("thumbnail(_:size:trashed:)") == 1)

@@ -20,7 +20,7 @@ struct LibraryGrid: View {
     let returnToPrint: PrintID?
     let onReturnRestored: () -> Void
     let onOpen: (PrintID) -> Void
-    var newMediaVisit: LibraryNewMedia.Visit?
+    @Environment(LibraryStore.self) private var library
 
     /// Not `private`: the cursor the keyboard drives is built in
     /// `+Selection`, and `private` does not cross a file boundary.
@@ -122,7 +122,7 @@ struct LibraryGrid: View {
                 isSelected: selection.items.contains(entry.id),
                 isLead: selection.lead == entry.id,
                 showsHostBadge: showsHostBadges,
-                fresh: !scope.isTrash && (newMediaVisit?.contains(entry.print.filename) ?? false)
+                fresh: !scope.isTrash && library.unreadMedia.isUnread(entry)
             )
             .id(entry.id)
             .onTapGesture(count: 2) { onOpen(entry.id) }

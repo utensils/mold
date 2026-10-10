@@ -45,18 +45,15 @@ corrupt snapshots block Generate and remain preserved until the user explicitly
 chooses **Use current inputs** after reattaching any needed files. This snapshot
 behavior is Mac-only; preserve the existing scalar-only iOS persistence path.
 
-Library New badges compare filenames with the previous session visit, using the
-whole active pool and a stable per-view snapshot. First visit establishes a
-baseline; selected viewer media immediately calls `Visit.markViewed`, preserving
-unopened badges within the visit and the previous next-visit clearing behavior.
-`LibraryUnreadLedger` persists device-local icon counts across launches. Count the
-merged visible active inventory, excluding hidden collections and Trash; retain
-offline read state. Opening Library uses its existing whole-pool seen behavior
-to clear the icon count. iOS serializes badge writes and flushes background
-refresh; macOS updates the Dock through one preference-aware controller. The
-existing Dock badge toggle suppresses presentation and immediately clears it;
-re-enabling restores the current ledger count. Never also follow LandedPrints
-for the Dock, since app activation would overwrite the persisted count.
+Library New badges and unread counts share persisted client-local viewing state.
+Only individually displayed viewer media is read; opening Library, refreshes,
+filters and neighboring preloads must not clear unread media. Preserve current
+read status on upgrade and establish an initial baseline for newly connected
+hosts. Later arrivals remain unread across visits and relaunches. Count merged
+visible active inventory, excluding hidden collections and Trash; retain offline
+history. iOS navigation and native icon badges follow that same ledger, with the
+existing permission/preference controls. Do not let activation-only arrival
+trackers overwrite the persistent count.
 Badge rows must fit machine
 labels beside playback without overlap, including narrow tiles.
 
@@ -76,8 +73,8 @@ partial/offline writes, fences superseded edits and routes, and repairs mixed
 hidden replicas; protect logical hidden media before pruning copies for display.
 A fresh read must confirm a visibility write before retiring its pending intent.
 
-Library Sync is opt-in for the current app session: immediate run, five-minute
-non-overlapping repeats, visible next-run/completion status and Stop. Successful
+Library Sync is opt-in for the current app session: immediate run, configurable
+non-overlapping repeats (app-local Settings, 1–1440 minutes, default five), visible next-run/completion status and Stop. Successful
 runs never require a completion sheet. Repeat issue acknowledgment is bound to
 origin route/instance, output version/recipe and exact error, never authentication
 or connectivity failures; preserve retries and inspectable details. Sync must not
@@ -112,3 +109,5 @@ before releasing the exact host/kind/job reservation. Durable authored sequences
 remain unsupported here. Existing framewise upscale controls require a connected
 host, known applicable state and current rendered job identity; reserve the exact
 print/job key until the authoritative transition response reconciles its state.
+
+Queue rows reserve fixed preview and progress slots across state changes. Preview caching must fence host, instance and job, bound decoded memory and concurrent reads, and coalesce in-flight requests; loading images must not move the scroll anchor. Sync resume receipts precede retained-input and organization work; only stable final source/destination evidence may seal skip tokens.

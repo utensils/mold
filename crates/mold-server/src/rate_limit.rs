@@ -180,6 +180,7 @@ pub fn classify_route(path: &str, method: &axum::http::Method) -> Option<RouteTi
             | "/api/generate/stream"
             | "/api/generation-batches"
             | "/api/generation-batches/transfer"
+            | "/api/generation-transfers/abort"
             | "/api/generate/placement-preview"
             | "/api/chain-jobs/placement-preview"
             | "/api/expand"
@@ -196,7 +197,10 @@ pub fn classify_route(path: &str, method: &axum::http::Method) -> Option<RouteTi
             if path.starts_with("/api/queue/")
                 && (path.ends_with("/retry")
                     || path.ends_with("/transfer")
-                    || path.ends_with("/transfer/complete")) =>
+                    || path.ends_with("/transfer/complete")
+                    || path.ends_with("/transfer/reserve")
+                    || path.ends_with("/transfer/seal")
+                    || path.ends_with("/transfer/release")) =>
         {
             Some(RouteTier::Generation)
         }
@@ -285,6 +289,26 @@ pub async fn inject_rate_limit_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transfer_protocol_mutations_use_generation_tier() {
+        use axum::http::Method;
+        for path in [
+            "/api/generation-transfers/abort",
+            "/api/queue/job/transfer/reserve",
+            "/api/queue/job/transfer/seal",
+            "/api/queue/job/transfer/release",
+        ] {
+            assert_eq!(
+                classify_route(path, &Method::POST),
+                Some(RouteTier::Generation)
+            );
+        }
+        assert_eq!(
+            classify_route("/api/queue/job/transfer/reservation", &Method::GET),
+            Some(RouteTier::Read)
+        );
+    }
 
     #[test]
     fn parse_rate_per_minute() {

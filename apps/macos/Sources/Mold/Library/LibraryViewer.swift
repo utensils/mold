@@ -1,3 +1,4 @@
+import Combine
 import AVKit
 import AppKit
 import MoldClient
@@ -19,12 +20,16 @@ struct LibraryViewer: View {
     let onClose: () -> Void
     let onStep: (Int) -> Void
 
+    @Environment(LibraryStore.self) var library
     @Environment(ThumbnailCache.self) private var cache
     @Environment(HostStore.self) private var hosts
+    @State private var displayedReadID: PrintID?
     @State private var full: NSImage?
     /// Not `private`: the mesh arm lives in `+Mesh` for size.
     @State var placeholder: NSImage?
     @State private var player: AVPlayer?
+    @State private var playbackID: PrintID?
+    @State private var readyVideoID: PrintID?
     @State private var playbackFile: URL?
     /// Anything being typed into keeps the keyboard for its caret. A key
     /// equivalent is checked BEFORE the focused field sees the key, so every
@@ -72,6 +77,10 @@ struct LibraryViewer: View {
                                  trashCount: trashCount, open: nil))
         .task(id: entry.id) { await load() }
         .onDisappear { clearPlayback() }
+        .onChange(of: readyVideoID) { _, id in
+            if id == entry.id { markMediaDisplayed() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in readDisplayedMedia() }
         .onReceive(NotificationCenter.default.publisher(for: MeshMetalView.claimChanged)) { _ in
             readArrowClaim()
         }
@@ -86,8 +95,11 @@ struct LibraryViewer: View {
     /// URL is minted with a media ticket on a keyed host and is the plain URL
     /// on a keyless one.
     @ViewBuilder private var video: some View {
-        if let player {
+        if let player, let item = player.currentItem {
             VideoPlaybackView(player: player)
+                .onReceive(item.publisher(for: \.status)) { status in
+                    if status == .readyToPlay && playbackID == entry.id { readyVideoID = playbackID }
+                }
                 .onDisappear { player.pause() }
         } else {
             ProgressView()
@@ -131,7 +143,9 @@ struct LibraryViewer: View {
                 return
             }
             if url.isFileURL { playbackFile = url }
-            let player = AVPlayer(url: url)
+            let item = AVPlayerItem(url: url)
+            let player = AVPlayer(playerItem: item)
+            playbackID = entry.id
             self.player = player
             return
         }
@@ -143,9 +157,23 @@ struct LibraryViewer: View {
         // downloaded to produce a nil. The interactive viewer is what will
         // want them (see `mesh`).
         guard !entry.print.isMesh, let data = await actions.data(for: entry) else { return }
+        guard !Task.isCancelled else { return }
         full = NSImage(data: data)
+        if full != nil { markMediaDisplayed() }
     }
+    func markMediaDisplayed() {
+        displayedReadID = entry.id
+        readDisplayedMedia()
+    }
+
+    private func readDisplayedMedia() {
+        guard NSApp.isActive, !scope.isTrash, displayedReadID == entry.id else { return }
+        library.markViewed(entry.id)
+    }
+
     private func clearPlayback() {
+        playbackID = nil
+        readyVideoID = nil
         player?.pause()
         player = nil
         if let playbackFile { try? FileManager.default.removeItem(at: playbackFile) }

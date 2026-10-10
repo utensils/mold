@@ -32,7 +32,6 @@ import { useGenerationStore } from "./stores/generation";
 import { useHostsStore } from "./stores/hosts";
 import { useHostStatusStore } from "./stores/hostStatus";
 import { useJobsStore } from "./stores/jobs";
-import { useLandedPrintsStore } from "./stores/landedPrints";
 import { useLibraryPrefsStore } from "./stores/libraryPrefs";
 import { useUpdaterStore } from "./stores/updater";
 
@@ -40,6 +39,7 @@ const stub = { template: "<div />" };
 let router: Router;
 
 beforeEach(() => {
+  localStorage.clear();
   setActivePinia(createPinia());
   __resetQueueCommandState();
 });
@@ -192,40 +192,41 @@ describe("App — fleet event subscription", () => {
   });
 });
 
-/*
- * The Dock badge answers "what landed while you were away", fleet-wide, and
- * clears the moment the window comes back — the way a messages badge does.
- * It deliberately no longer counts this app's own pending jobs: a long clip
- * left a standing number nobody could clear, and work another machine did
- * never showed at all.
- */
+/** Dock presentation follows the same persisted viewing history as Library. */
 describe("App — Dock badge", () => {
-  it("badges prints that landed while the app was in the background", async () => {
+  function seedUnread(count: number) {
+    const gallery = useGalleryStore();
+    vi.spyOn(gallery, "sources", "get").mockReturnValue([{ key: "local", label: "Local" }]);
+    gallery.unreadMedia.observe([], ["local"]);
+    gallery.buckets.local = {
+      items: Array.from(
+        { length: count },
+        (_, i) => ({ filename: `${i}.png`, timestamp: i, metadata: { seed: i } }) as never,
+      ),
+      loaded: true,
+      loading: false,
+      error: null,
+    };
+    gallery.observeUnreadMedia();
+    return gallery;
+  }
+  it("badges unread gallery media regardless of foreground state", async () => {
     const { ipc } = await import("./lib/ipc");
+    seedUnread(2);
     await mountApp();
-    const landed = useLandedPrintsStore();
-
-    landed.unseen = new Map([
-      ["a.png", "local"],
-      ["b.png", "plato"],
-    ]);
     await nextTick();
-
     expect(ipc.setDockBadge).toHaveBeenLastCalledWith(2);
   });
-
-  it("clears the badge when the window comes back", async () => {
+  it("keeps unread state on focus and clears only successfully viewed media", async () => {
     const { ipc } = await import("./lib/ipc");
+    const gallery = seedUnread(1);
     await mountApp();
-    const landed = useLandedPrintsStore();
-    landed.unseen = new Map([["a.png", "local"]]);
-    await nextTick();
-    expect(ipc.setDockBadge).toHaveBeenLastCalledWith(1);
-
     window.dispatchEvent(new Event("focus"));
     await nextTick();
-
-    expect(landed.count).toBe(0);
+    expect(gallery.newCount).toBe(1);
+    expect(ipc.setDockBadge).toHaveBeenLastCalledWith(1);
+    gallery.markViewed(gallery.merged[0]!);
+    await nextTick();
     expect(ipc.setDockBadge).toHaveBeenLastCalledWith(null);
   });
 

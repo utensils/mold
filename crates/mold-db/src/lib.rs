@@ -27,6 +27,7 @@ pub mod paired_clients;
 mod path;
 pub mod persist;
 mod prompt_history;
+pub mod queue_transfer;
 mod reconcile;
 mod record;
 pub mod scan;

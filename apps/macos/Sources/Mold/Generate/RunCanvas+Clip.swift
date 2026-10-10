@@ -13,6 +13,7 @@ extension RunCanvas {
     func playClip(
         _ filename: String, backend: any MoldBackend, remintsLeft: Int
     ) async {
+        let resultHost = host?.id
         let player: AVPlayer
         do {
             // `AVPlayer` builds its own requests and cannot carry `X-Api-Key`,
@@ -29,6 +30,7 @@ extension RunCanvas {
         while !Task.isCancelled {
             switch item.status {
             case .readyToPlay:
+                if let resultHost, host?.id == resultHost, resultFilename == filename { markResultDisplayed(PrintID(host: resultHost, filename: filename)) }
                 return
             case .failed:
                 player.pause()

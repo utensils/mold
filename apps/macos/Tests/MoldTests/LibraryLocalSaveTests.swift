@@ -7,6 +7,126 @@ import Testing
 
 @MainActor
 struct LibraryLocalSaveTests {
+    @Test func cachedCheckpointCannotSkipAfterRouteChangesDuringDestinationProbe() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("checkpoint-route-race")
+        let source = FakeBackend(host: remote, noRetainedMedia: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true)
+        let print = versionedPrint("checkpoint-route-race.png", prompt: "fox")
+        source.prints = [print]
+        source.mediaAnswer = Data([1, 2, 3])
+        source.syncCheckpoint = [print.filename: "source-v1"]
+        target.syncCheckpoint = [print.filename: "local-v1"]
+        let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? target : source }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+        await library.syncAllLocally()
+        target.prints = [print]
+        target.mediaAnswers[print.filename] = Data([1, 2, 3])
+        await library.syncAllLocally()
+        let probes = target.callCount("gallerySyncCheckpoint")
+        let imports = target.importedNames.count
+        target.delays["gallerySyncCheckpoint"] = .milliseconds(100)
+        let run = Task { await library.syncAllLocally() }
+        await settle { target.callCount("gallerySyncCheckpoint") > probes }
+        var replacement = remote
+        replacement.baseURL = URL(string: "http://replacement-checkpoint-origin")!
+        hosts.hosts = [local, replacement]
+        await run.value
+        #expect(library.localSaveFailures.contains { $0.contains("machine route changed") })
+        #expect(target.importedNames.count == imports)
+    }
+
+    @Test func unchangedCheckpointSkipsPerPrintProbesAndChangedInputsRepair() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("checkpoint-remote")
+        let source = FakeBackend(host: remote, noRetainedMedia: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true)
+        let print = versionedPrint("checkpoint.png", prompt: "fox")
+        source.prints = [print]
+        source.mediaAnswer = Data([1, 2, 3])
+        source.syncCheckpoint = [print.filename: "source-v1"]
+        target.syncCheckpoint = [print.filename: "local-v1"]
+        let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? target : source }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+        await library.syncAllLocally()
+        target.prints = [print]
+        target.mediaAnswers[print.filename] = Data([1, 2, 3])
+        await library.syncAllLocally()
+        let probes = source.callCount("retainedMediaTransferOffer")
+        source.conditionalGallery = true
+        await library.syncAllLocally()
+        #expect(source.galleryETags.last! == "fake-etag")
+        #expect(source.callCount("retainedMediaTransferOffer") == probes)
+        source.syncCheckpoint = [print.filename: "source-v2"]
+        await library.syncAllLocally()
+        #expect(source.callCount("retainedMediaTransferOffer") > probes)
+    }
+
+    @Test func relaunchAfterOrganizationFailureUsesDurableCopyWithoutOutputDownload() async throws {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("resume-checkpoint-remote")
+        let source = FakeBackend(host: remote, noRetainedMedia: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true)
+        var json = try JSONSerialization.jsonObject(with: MoldJSON.encoder.encode(versionedPrint("resume-checkpoint.png", prompt: "fox"))) as! [String: Any]
+        json["favorite"] = true
+        let print = try MoldJSON.decoder.decode(GalleryPrint.self, from: JSONSerialization.data(withJSONObject: json))
+        source.prints = [print]
+        source.mediaAnswer = Data([1, 2, 3])
+        source.retainedTransferOfferResponder = { _ in
+            if !target.importedNames.isEmpty { target.prints = [print] }
+            return .init(archiveIdentitySha256: String(repeating: "a", count: 64), members: [],
+                         outputSha256: "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
+                         outputSizeBytes: 3, metadata: print.metadata)
+        }
+        target.refuses.insert("mutate")
+        let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? target : source }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        await LibraryStore(hosts: hosts).syncAllLocally()
+        let downloads = source.callCount("mediaFile")
+        #expect(downloads == 1)
+        target.refuses.remove("mutate")
+        await LibraryStore(hosts: hosts).syncAllLocally()
+        #expect(source.callCount("mediaFile") == downloads)
+        #expect(target.mutationRequests.contains { $0.favorite == true })
+    }
+
+    @Test func failedRetainedCopyResumesFromDurableOutputReceiptAfterRelaunch() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("output-receipt-remote")
+        let source = FakeBackend(host: remote, noRetainedMedia: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true)
+        let print = versionedPrint("output-receipt.png", prompt: "fox")
+        source.prints = [print]
+        source.mediaAnswer = Data([1, 2, 3])
+        target.galleryPrintResponder = { _ in
+            if !target.importedNames.isEmpty { target.prints = [print] }
+            return target.prints.first
+        }
+        var failRetained = true
+        source.retainedTransferOfferResponder = { _ in
+            if failRetained && !target.importedNames.isEmpty {
+                throw MoldClientError.http(status: 409, code: "RETAINED_MEDIA_COPY_INCOMPLETE", message: "fixture interrupted")
+            }
+            return .init(archiveIdentitySha256: String(repeating: "a", count: 64), members: [],
+                         outputSha256: "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
+                         outputSizeBytes: 3, metadata: print.metadata)
+        }
+        let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? target : source }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let first = LibraryStore(hosts: hosts)
+        await first.syncAllLocally()
+        #expect(!first.localSaveFailures.isEmpty)
+        let downloads = source.callCount("mediaFile")
+        failRetained = false
+        let resumed = LibraryStore(hosts: hosts)
+        await resumed.syncAllLocally()
+        #expect(resumed.localSaveFailures.isEmpty)
+        #expect(source.callCount("mediaFile") == downloads)
+        #expect(target.importedNames.count == 1)
+    }
+
     private func retainedOffer(metadata: OutputMetadata) -> RetainedSourceMedia.TransferOffer {
         .init(archiveIdentitySha256: String(repeating: "a", count: 64), members: [
             .init(memberId: "source", role: "source_image", position: "scalar", sizeBytes: 3,

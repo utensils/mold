@@ -672,6 +672,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 38,
         kind: MigrationKind::Sql(V38_RETIRE_TUI_SETTINGS),
     },
+    Migration {
+        version: 39,
+        kind: MigrationKind::Sql(V39_QUEUE_TRANSFERS),
+    },
 ];
 
 /// The gallery listing is `WHERE output_dir = ? ORDER BY
@@ -931,7 +935,7 @@ DELETE FROM settings WHERE key LIKE 'tui.%';
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 38;
+pub const SCHEMA_VERSION: i64 = 39;
 
 /// Downloadable files that belong to one gallery print. The generation row
 /// remains the lifecycle authority, so permanent deletion cascades while
@@ -1762,7 +1766,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 38);
+        assert_eq!(SCHEMA_VERSION, 39);
         assert!(table_exists(&conn, "device_preferences"));
         assert!(table_exists(&conn, "mesh_workflow_jobs"));
         assert!(table_exists(&conn, "mesh_workflow_stages"));
@@ -1918,7 +1922,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 38);
+        assert_eq!(SCHEMA_VERSION, 39);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -2055,7 +2059,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 38);
+        assert_eq!(SCHEMA_VERSION, 39);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -2328,6 +2332,8 @@ mod tests {
                ('work', 'tui.last_model', 'sdxl', 'string', 1),
                ('default', 'tui.theme', 'dark', 'string', 1),
                ('default', 'tui.host_key.plato', 'k', 'string', 1);
+             DROP TABLE generation_queue_transfers;
+             DROP TABLE generation_transfer_aborts;
              PRAGMA user_version = 37;",
         )
         .unwrap();
@@ -2389,7 +2395,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 38);
+        assert_eq!(SCHEMA_VERSION, 39);
     }
 
     #[test]
@@ -2939,3 +2945,22 @@ mod v34_tests {
         );
     }
 }
+
+/// A transfer reservation remains explicit across restart. Never expire one:
+/// a lost destination response does not prove that the copy did not land.
+const V39_QUEUE_TRANSFERS: &str = r#"
+CREATE TABLE generation_transfer_aborts (
+ owner_uuid TEXT NOT NULL, transfer_id TEXT NOT NULL, receipt TEXT NOT NULL,
+ PRIMARY KEY(owner_uuid, transfer_id)
+);
+CREATE TABLE generation_queue_transfers (
+    job_id TEXT PRIMARY KEY REFERENCES generation_queue(id) ON DELETE CASCADE,
+    owner_uuid TEXT NOT NULL,
+    transfer_id TEXT NOT NULL,
+    destination_identity TEXT NOT NULL,
+    original_state TEXT NOT NULL CHECK(original_state IN ('queued','paused','held')),
+    original_explicit_pause INTEGER NOT NULL,
+    sealed INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+);
+"#;

@@ -21,6 +21,7 @@ struct LibraryStoreLiveTests {
         let hosts = HostStore(hosts: [local]) { _ in fake }
         let library = LibraryStore(hosts: hosts)
         library.localSaveProgress = "Saving…"
+        library.localSaveSuppressImports = true
         let revision = library.rows.value
         for index in 0..<100 {
             library.live.apply(.gallery(.added(filename: "\(index).png",
@@ -32,6 +33,12 @@ struct LibraryStoreLiveTests {
         library.live.apply(.gallery(.added(filename: "render.png",
             row: FakeFixtures.print("render.png"))), from: local.id, in: library)
         #expect(library.items.map(\.print.filename) == ["render.png"])
+        library.localSaveSuppressImports = false
+        library.localSaveProgress = "Verifying copied prints and retained inputs…"
+        library.live.apply(.gallery(.added(filename: "late-import.png",
+            row: FakeFixtures.print("late-import.png"), imported: true)),
+            from: local.id, in: library)
+        #expect(Set(library.items.map(\.print.filename)) == ["render.png", "late-import.png"])
     }
 
     @Test func aPrintLandingDuringOneOfOurEditsStillAppears() async {

@@ -23960,6 +23960,213 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reserved_queue_transfer_fences_resume_retry_and_cancellation() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db, root.path());
+        let id = hold_one_durable_job(&state, 80, 100).await;
+        state
+            .metadata_db
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE generation_queue SET request_json=?2 WHERE id=?1",
+                    [id.as_str(), generate_body("a cat", 64, 64).as_str()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let a = serde_json::json!({"instance_id":state.instance_id.as_str(),"job_id":id,"batch_id":"held-batch-80","client_batch_id":"client-80"});
+        let mut reserve = a.clone();
+        reserve["transfer_id"] = uuid::Uuid::new_v4().to_string().into();
+        reserve["destination_transfer_identity"] = "destination-instance".into();
+        let app = app_with_state(state.clone());
+        let post = |path: &str, body: &serde_json::Value| {
+            Request::post(path)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        assert_eq!(
+            app.clone()
+                .oneshot(post(&format!("/api/queue/{id}/retry"), &a))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        state.job_registry.register(id.clone(), "flux-dev");
+        let reserved_response = app
+            .clone()
+            .oneshot(post(&format!("/api/queue/{id}/transfer/reserve"), &reserve))
+            .await
+            .unwrap();
+        let reserved_status = reserved_response.status();
+        let reserved_body = json_body(reserved_response).await;
+        assert_eq!(reserved_status, StatusCode::OK, "{reserved_body}");
+        for action in ["pause", "resume", "retry"] {
+            assert_eq!(
+                app.clone()
+                    .oneshot(post(&format!("/api/queue/{id}/{action}"), &a))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::CONFLICT,
+                "{action}"
+            );
+        }
+        for path in [format!("/api/queue/{id}"), "/api/queue".into()] {
+            assert_eq!(
+                app.clone()
+                    .oneshot(Request::delete(path).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::CONFLICT
+            );
+        }
+        assert_eq!(
+            state.queue_journal.row(&id).unwrap().unwrap().state,
+            mold_db::generation_queue::QueueRowState::Paused
+        );
+        assert!(state
+            .job_registry
+            .dispatch_if_queued(&id, 0, (), |()| Ok(()))
+            .is_err());
+        assert_eq!(
+            app.clone()
+                .oneshot(post(&format!("/api/queue/{id}/transfer/release"), &reserve))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+        assert!(state
+            .job_registry
+            .dispatch_if_queued(&id, 0, (), |()| Ok(()))
+            .is_ok());
+        assert_eq!(
+            app.oneshot(post(&format!("/api/queue/{id}/transfer/reserve"), &reserve))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[tokio::test]
+    async fn queue_transfer_reservation_and_worker_dispatch_have_one_winner() {
+        for index in 90..98 {
+            let root = tempfile::tempdir().unwrap();
+            let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+            let (state, _rx) = durable_state(db, root.path());
+            let id = hold_one_durable_job(&state, index, 100).await;
+            state
+                .metadata_db
+                .as_ref()
+                .as_ref()
+                .unwrap()
+                .with_conn(|conn| {
+                    conn.execute(
+                        "UPDATE generation_queue SET request_json=?2 WHERE id=?1",
+                        [id.as_str(), generate_body("a cat", 64, 64).as_str()],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            let a = mold_core::GenerationRetryRequest {
+                instance_id: state.instance_id.to_string(),
+                job_id: id.clone(),
+                batch_id: format!("held-batch-{index}"),
+                client_batch_id: format!("client-{index}"),
+            };
+            assert_eq!(
+                state
+                    .queue_journal
+                    .retry_held(&state.instance_id, &a)
+                    .unwrap(),
+                mold_db::generation_batches::OwnedRetry::Retried
+            );
+            state.job_registry.register(id.clone(), "flux-dev");
+            let mut body = serde_json::to_value(a).unwrap();
+            body["transfer_id"] = uuid::Uuid::new_v4().to_string().into();
+            body["destination_transfer_identity"] = "destination-instance".into();
+            let gate = Arc::new(tokio::sync::Barrier::new(2));
+            let dispatch_state = state.clone();
+            let dispatch_id = id.clone();
+            let dispatch_gate = gate.clone();
+            let dispatch = tokio::spawn(async move {
+                dispatch_gate.wait().await;
+                let _fence = dispatch_state.scheduler_mutation_fence.lock().await;
+                dispatch_state
+                    .job_registry
+                    .dispatch_if_queued(&dispatch_id, 0, (), |()| Ok(()))
+                    .is_ok()
+            });
+            gate.wait().await;
+            let response = app_with_state(state.clone())
+                .oneshot(
+                    Request::post(format!("/api/queue/{id}/transfer/reserve"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let reserved = response.status() == StatusCode::OK;
+            let dispatched = dispatch.await.unwrap();
+            assert_ne!(
+                reserved, dispatched,
+                "exactly one dispatch/reservation owns {id}"
+            );
+            assert_eq!(
+                state.queue_journal.transfer_reserved(&id).unwrap(),
+                reserved
+            );
+            if reserved {
+                assert_eq!(
+                    state.queue_journal.row(&id).unwrap().unwrap().state,
+                    mold_db::generation_queue::QueueRowState::Paused
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn transfer_abort_reconciles_destination_restart_but_refuses_replaced_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        let identity = state.queue_journal.transfer_identity().unwrap();
+        state.instance_id = Arc::new("new-process-instance".into());
+        let id = uuid::Uuid::new_v4().to_string();
+        let request = |destination: &str| {
+            Request::post("/api/generation-transfers/abort")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"transfer_id":id,"destination_transfer_identity":destination})
+                        .to_string(),
+                ))
+                .unwrap()
+        };
+        let app = app_with_state(state);
+        let response = app.clone().oneshot(request(&identity)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let receipt = json_body(response).await;
+        assert_eq!(receipt["destination_transfer_identity"], identity);
+        assert!(receipt["abort_receipt"].is_string());
+        assert_eq!(
+            app.oneshot(request("replacement-owner"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[tokio::test]
     async fn held_queue_transfer_admission_fences_destination_before_persisting() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
@@ -24012,7 +24219,15 @@ mod tests {
             })
             .unwrap();
         let authority = serde_json::json!({"instance_id": state.instance_id.as_str(), "job_id": id,
-            "batch_id":"held-batch-70", "client_batch_id":"client-70"});
+            "batch_id":"held-batch-70", "client_batch_id":"client-70", "transfer_id":uuid::Uuid::new_v4().to_string(),"destination_transfer_identity":"destination"});
+        state
+            .queue_journal
+            .reserve_transfer(
+                &id,
+                authority["transfer_id"].as_str().unwrap(),
+                "destination",
+            )
+            .unwrap();
         let app = app_with_state(state.clone());
         let post = |suffix: &str, body: &serde_json::Value| {
             Request::post(format!("/api/queue/{id}/{suffix}"))
@@ -24041,6 +24256,22 @@ mod tests {
                 .unwrap()
                 .status(),
             StatusCode::CONFLICT
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(post("retry", &authority))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(post("transfer/release", &authority))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NO_CONTENT
         );
         // Another client resumes the original during transfer. Completion must
         // leave that queued work alone, rather than cancelling the new attempt.
@@ -24074,7 +24305,11 @@ mod tests {
         let id = hold_one_durable_job(&state, 71, 100).await;
         let other = hold_one_durable_job(&state, 72, 100).await;
         let body = serde_json::json!({"instance_id":state.instance_id.as_str(), "job_id":id,
-            "batch_id":"held-batch-71", "client_batch_id":"client-71"});
+            "batch_id":"held-batch-71", "client_batch_id":"client-71", "transfer_id":uuid::Uuid::new_v4().to_string(),"destination_transfer_identity":"destination"});
+        state
+            .queue_journal
+            .reserve_transfer(&id, body["transfer_id"].as_str().unwrap(), "destination")
+            .unwrap();
         let response = app_with_state(state.clone())
             .oneshot(
                 Request::post(format!("/api/queue/{id}/transfer/complete"))

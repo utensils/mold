@@ -683,3 +683,30 @@ describe("Lightbox alpha bed", () => {
     );
   });
 });
+
+describe("viewed visibility boundary", () => {
+  it("defers loaded media until foreground and fences a changed print", async () => {
+    const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+    const wrapper = mountWide();
+    try {
+      await flushPromises();
+      const media = wrapper.get("img");
+      Object.defineProperty(media.element, "currentSrc", {
+        configurable: true,
+        value: new URL(media.attributes("src")!, document.baseURI).href,
+      });
+      await media.trigger("load");
+      expect(wrapper.emitted("viewed")).toBeUndefined();
+      hidden.mockReturnValue(false);
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(wrapper.emitted("viewed")).toHaveLength(1);
+      await wrapper.setProps({ item: { ...item, filename: "next.png" } });
+      await flushPromises();
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(wrapper.emitted("viewed")).toHaveLength(1);
+    } finally {
+      wrapper.unmount();
+      hidden.mockRestore();
+    }
+  });
+});

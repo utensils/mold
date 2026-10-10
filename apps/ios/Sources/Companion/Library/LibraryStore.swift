@@ -9,15 +9,14 @@ import MoldClient
 /// the machine's ETag, so an unchanged library costs a 304 and no decoding.
 @Observable
 final class LibraryStore {
-    var newMedia = LibraryNewMedia()
     private(set) var unreadMedia: LibraryUnreadLedger
     var unreadCount: Int { unreadMedia.count }
     @ObservationIgnored private let readDefaults: UserDefaults
     @ObservationIgnored var unreadCountChanged: ((Int) -> Void)?
 
     func markViewed(_ id: PrintID) {
-        guard let entry = pool.first(where: { $0.everyCopy.contains { $0.id == id } }) else { return }
-        unreadMedia.view(entry)
+        if let entry = pool.first(where: { $0.everyCopy.contains { $0.id == id } }) { unreadMedia.view(entry) }
+        else { unreadMedia.view(id) }
         unreadMedia.save(to: readDefaults)
         unreadCountChanged?(unreadCount)
     }
@@ -27,14 +26,7 @@ final class LibraryStore {
     var reconcilingCollectionVisibility = false
     var collectionInventory: [MoldHost.ID: [Collection]] { collections }
 
-    func markLibrarySeen() {
-        guard !live.isEmpty else { return }
-        newMedia.markSeen(pool.map { $0.print.filename })
-        let previous = unreadMedia
-        unreadMedia.markSeen(pool)
-        if unreadMedia != previous { unreadMedia.save(to: readDefaults) }
-        if unreadMedia.count != previous.count { unreadCountChanged?(unreadCount) }
-    }
+
 
     private(set) var pool: [LibraryEntry] = []
     private(set) var trashPool: [LibraryEntry] = []

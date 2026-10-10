@@ -72,6 +72,10 @@ const queueTransfer = provideHeldQueueTransfer(
               ready: host.status === "ready" && !host.stale,
               gpuCount: host.routingLoad?.gpuCount,
               queueDepth: host.queueDepth,
+              transferIdentity: hostsStore.capabilities[host.id]?.queue?.transfer_identity,
+              preRenderTransfer:
+                hostsStore.capabilities[host.id]?.queue?.pre_render_transfer === true,
+              generates: !!hostsStore.capabilities[host.id]?.queue?.heterogeneous_batch_max_outputs,
             },
           ]
         : [],
@@ -147,14 +151,16 @@ async function listenForNotificationActions() {
   openNotificationAction(await ipc.takeNotificationAction().catch(() => null));
 }
 
-// Dock badge counts prints that landed on ANY connected machine, made by any
-// client, while this app was in the background — and clears the moment the
-// window comes back. It deliberately does not mirror this app's own queue: a
-// long clip left a number nobody could clear, and work another machine did
-// never showed at all.
+// Persisted viewing history owns both the Library and Dock badge.
 watch(
-  () => [landed.count, appPrefs.dockBadge] as const,
+  () => [gallery.merged, gallery.sources, gallery.loaded],
+  () => gallery.observeUnreadMedia(),
+  { immediate: true },
+);
+watch(
+  () => [gallery.newCount, appPrefs.dockBadge] as const,
   ([count, enabled]) => void ipc.setDockBadge(dockBadgeValue(count, enabled)),
+  { immediate: true },
 );
 
 // Cross-surface notifications. A generation finishing while the user

@@ -10,6 +10,8 @@ import Foundation
 /// a missing one.
 public struct QueueAuthority: Codable, Hashable, Sendable {
     public let instanceId, batchId, clientBatchId, jobId: String
+    public var transferId: String? = nil
+    public var destinationTransferIdentity: String? = nil
 
     public init(instanceId: String, batchId: String, clientBatchId: String, jobId: String) {
         self.instanceId = instanceId

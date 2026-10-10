@@ -43,6 +43,8 @@ export interface QueueCommands {
   stopEverythingBusy: Ref<boolean>;
   /** What the confirm says it is about to stop, in pictures and machines. */
   stopEverythingSummary: ComputedRef<string>;
+  canTransfer(row: QueueRow): boolean;
+  transferTo(row: QueueRow): void;
   canCancel(row: QueueRow): boolean;
   cancel(row: QueueRow): Promise<void>;
   /** Whether this row may be dragged: its host offers reorder and the row is
@@ -628,16 +630,31 @@ export function useQueueCommands(): QueueCommands {
     else void openLiveWork(row.shared);
   }
 
+  function canTransfer(row: QueueRow): boolean {
+    const source = serverRef(row);
+    const entry = queueEntryOf(row);
+    const state =
+      entry?.state ??
+      (row.kind === "print" && row.print.holdError
+        ? "held"
+        : row.kind === "print" && row.print.status === "queued"
+          ? "queued"
+          : "running");
+    return !!source && connectedRow(row) && !!transfer?.canSendState(source.hostId, state);
+  }
+  function transferTo(row: QueueRow) {
+    const source = serverRef(row);
+    if (source && canTransfer(row)) transfer?.open(source.hostId, source.id);
+  }
+
   function menu(row: QueueRow): MenuEntry[] {
     const source = serverRef(row);
-    const held =
-      queueEntryOf(row)?.state === "held" || (row.kind === "print" && row.print.holdError !== null);
     const transferEntries: MenuEntry[] =
-      held && connectedRow(row) && source && transfer?.canSend(source.hostId)
+      canTransfer(row) && source && transfer
         ? [
             {
-              label: "Send to another machine…",
-              action: () => transfer.open(source.hostId, source.id),
+              label: "Move to…",
+              action: () => transferTo(row),
             },
           ]
         : [];
@@ -743,6 +760,8 @@ export function useQueueCommands(): QueueCommands {
     stopEverythingOpen,
     stopEverythingBusy,
     stopEverythingSummary,
+    canTransfer,
+    transferTo,
     canCancel,
     cancel,
     canReorder,

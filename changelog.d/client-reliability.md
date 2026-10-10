@@ -1,0 +1,11 @@
+### Fixed
+
+- Library Sync now skips unchanged verified copies using batched retained-media checkpoints on updated machines, preserving repairs when retained inputs change and retrying safely on older machines. Progress distinguishes checked, copied, already-local and failed prints.
+- Interrupted Mac syncs remember acknowledged copies before retained-input and organization work, so retries can repair the remaining work without downloading the finished print again. Manual saves and iOS thumbnail caching now describe processed or checked items accurately.
+- Keep new media unread on each client until that media successfully opens, including arrivals while Library is open. Native iOS navigation and app icon counts share the same persisted viewing history; native Mac, desktop and browser labels survive relaunch. Existing read status and the first inventory of a newly connected machine remain a compatibility baseline, preventing a historical badge flood.
+- Mac queue rows retain their height as previews and progress load, preserving the scroll position; bounded shared preview caching reduces repeated reads.
+
+### Added
+
+- Mac Library Settings now remembers a configurable sync interval from one minute to one day, defaulting to five minutes. Changes update the pending repeat without overlapping transfers.
+- Offer Move to another host for waiting, paused, and held jobs across native Mac/iOS, web, desktop, and the mobile shell. New servers persist source reservations and seal them before destination admission so concurrent clients, worker dispatch, and restarts cannot render both copies. Destination abort tombstones safely restore refused moves; interrupted transfers retry the same destination and identity while preserving original media and protecting reserved originals from Held retention sweeps. Older source servers retain held-job transfer support; new source hosts require updated transfer clients.

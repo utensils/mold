@@ -50,6 +50,8 @@ final class TransferStore {
     func transferDestinations(from source: MoldHost.ID) -> [TransferDestination] {
         guard let sourceInstance = hosts.instanceID(of: source) else { return [] }
         return hosts.hosts.compactMap { host -> TransferDestination? in
+            if let sourceIdentity = hosts.capabilities[source]?.queue?.transferIdentity,
+               hosts.capabilities[host.id]?.queue?.transferIdentity == sourceIdentity { return nil }
             guard host.id != source, hosts.isUp(host), hosts.capabilities[host.id]?.generates == true,
                   hosts.instanceID(of: host.id) != sourceInstance
             else { return nil }
@@ -79,10 +81,10 @@ final class TransferStore {
         defer { transferring = nil }
 
         let clientBatchId = QueueTransferID.derive(source: expectedSource, jobId: entry.id, destination: expectedDest)
-        let context = TransferContext(
+        var context = TransferContext(
             source: source, sourceClient: sourceClient, sourceName: sourceHost.name,
             destClient: destClient, destName: destinationName,
-            expectedDest: expectedDest, clientBatchId: clientBatchId, verb: verb)
+            expectedDest: expectedDest, destinationTransferIdentity: hosts.capabilities[destination]?.queue?.transferIdentity ?? expectedDest, clientBatchId: clientBatchId, reservedProtocol: hosts.capabilities[source]?.queue?.preRenderTransfer == true, verb: verb)
 
         do {
             let sourceStatus = try await sourceClient.status()
@@ -95,6 +97,23 @@ final class TransferStore {
             hosts.report(error, on: source, doing: verb)
             return nil
         }
+        if context.reservedProtocol && (hosts.capabilities[destination]?.queue?.transferIdentity?.isEmpty != false) { return report(.refused("Update or refresh destination; durable transfer identity unavailable."),context) }
+        if context.reservedProtocol && hosts.capabilities[destination]?.queue?.preRenderTransfer != true {
+            return report(.refused("Update the destination server before moving waiting jobs; it must support safe transfer recovery."),context)
+        }
+        if context.reservedProtocol {
+            do {
+                if let reservation = try await sourceClient.transferReservation(id: entry.id) {
+                    guard reservation.destinationTransferIdentity == context.destinationTransferIdentity else {
+                        return report(.refused("The original is reserved for another machine. Retry that destination to reconcile acceptance."), context)
+                    }
+                    context.clientBatchId = reservation.transferId
+                } else { context.clientBatchId = UUID().uuidString.lowercased() }
+            } catch { hosts.report(error, on: source, doing: verb); return nil }
+        }
+        guard !queue.isActing(entry, on: source) else { return nil }
+        queue.acting[source, default: []].insert(entry.id)
+        defer { queue.acting[source]?.remove(entry.id) }
         let outcome = await afterIdentities(entry, authorityInstance: expectedSource, context: context)
         if case let .sent(_, message) = outcome { caption(message) }
         return outcome

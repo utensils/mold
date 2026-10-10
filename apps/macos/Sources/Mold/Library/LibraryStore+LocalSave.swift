@@ -74,6 +74,11 @@ private struct LocalSyncRecord: Codable {
     let destinationSize: Int
     let destinationRecipe: String
     let destinationInstance: String?
+    var sourceCheckpoint: String?
+    var destinationCheckpoint: String?
+    var sourceRoute: String?
+    var destinationRoute: String?
+
 
     private static let syncRecordStorageKey = "librarySyncCopiesV1"
 
@@ -117,16 +122,41 @@ private struct LocalSyncRecord: Codable {
 
     @MainActor private static var linkCache: (data: Data?, links: [PrintID: PrintID])?
 
+    private struct CompletedCopy: Codable { let key: String; let record: LocalSyncRecord }
+    private static let completedPrefix = "librarySyncCompletedCopyV1."
+    @MainActor static func checkpoint(_ record: Self, key: String) {
+        guard let data = try? MoldJSON.encoder.encode(CompletedCopy(key: key, record: record)) else { return }
+        let digest = SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined()
+        AppStorageSuite.defaults.set(data, forKey: completedPrefix + digest)
+        linkCache = nil
+    }
+
     static func load() -> [String: Self] {
-        guard let data = AppStorageSuite.defaults.data(forKey: syncRecordStorageKey),
-              let records = try? MoldJSON.decoder.decode([String: Self].self, from: data)
-        else { return [:] }
+        let data = AppStorageSuite.defaults.data(forKey: syncRecordStorageKey)
+        var records = data.flatMap { try? MoldJSON.decoder.decode([String: Self].self, from: $0) } ?? [:]
+        for (key, value) in AppStorageSuite.defaults.dictionaryRepresentation() where key.hasPrefix(completedPrefix) {
+            if let data = value as? Data, let completed = try? MoldJSON.decoder.decode(CompletedCopy.self, from: data) {
+                records[completed.key] = completed.record
+            }
+        }
         return records
     }
 
-    static func save(_ records: [String: Self]) {
-        guard let data = try? MoldJSON.encoder.encode(records) else { return }
+    @MainActor static func save(_ records: [String: Self]) {
+        var merged = records
+        // Include output-only receipts written by a transfer that failed
+        // before returning a complete MirrorResult to the caller.
+        for (key, value) in AppStorageSuite.defaults.dictionaryRepresentation() where key.hasPrefix(completedPrefix) {
+            if let data = value as? Data, let completed = try? MoldJSON.decoder.decode(CompletedCopy.self, from: data) {
+                merged[completed.key] = completed.record
+            }
+        }
+        guard let data = try? MoldJSON.encoder.encode(merged) else { return }
         AppStorageSuite.defaults.set(data, forKey: syncRecordStorageKey)
+        for key in AppStorageSuite.defaults.dictionaryRepresentation().keys where key.hasPrefix(completedPrefix) {
+            AppStorageSuite.defaults.removeObject(forKey: key)
+        }
+        linkCache = nil
     }
 
     init?(source: GalleryPrint, local: GalleryPrint, destinationInstance: String? = nil) {
@@ -240,7 +270,7 @@ private func repairCachedSources(_ target: MirrorTarget, to destination: any Mol
 private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
                     as requestedName: String, occupied: Bool,
                     knownPrints: [String: GalleryPrint],
-                    pending: PendingSyncOrganization?) async -> MirrorResult {
+                    pending: PendingSyncOrganization?, destinationInstance: String?) async -> MirrorResult {
     do {
         guard await target.isCurrent() else { throw MoldClientError.unreachable("The machine route changed. Refresh the Library before copying.") }
         try checkSyncStagingSpace(for: target.print)
@@ -284,6 +314,13 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
         do {
             let imported = try await destination.importPrint(item, as: filename)
             if imported != filename { await pending?.mark(sourceKey, filename: imported) }
+            if pending != nil, let localPrint = try? await destination.galleryPrint(imported),
+               let checkpoint = LocalSyncRecord(source: target.print, local: localPrint, destinationInstance: destinationInstance) {
+                // Output receipt is durable even if retained-input transfer is
+                // interrupted. No checkpoint tokens means resume MUST repair
+                // retained inputs before declaring the copy complete.
+                await LocalSyncRecord.checkpoint(checkpoint, key: sourceKey)
+            }
             let sourceMedia = try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
                 from: target.source, to: destination, as: imported, expectedSourceArchiveIdentity: sourceIdentity, downloadedOutput: file)
             return MirrorResult(filename: imported, alreadyLocal: false, error: nil, sourceMedia: sourceMedia)
@@ -298,8 +335,33 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
     }
 }
 
+struct SyncListingSnapshot {
+    let host: MoldHost
+    let instance: String?
+    let prints: [GalleryPrint]
+    let etag: String?
+}
+
 @MainActor
 extension LibraryStore {
+    private func syncListing(on host: MoldHost, from backend: any MoldBackend, trash: Bool = false) async throws -> [GalleryPrint] {
+        let key = host.id.uuidString + (trash ? ":trash" : ":active")
+        let instance = hosts.instanceID(of: host.id)
+        let cached = syncListings[key].flatMap { $0.host == host && $0.instance == instance ? $0 : nil }
+        let fetched = try await (trash ? backend.trashedPrints(etag: cached?.etag) : backend.gallery(etag: cached?.etag))
+        guard hosts.host(host.id) == host, hosts.instanceID(of: host.id) == instance else {
+            throw MoldClientError.unreachable("The machine changed while reading its Library.")
+        }
+        switch fetched {
+        case let .fresh(prints, etag):
+            syncListings[key] = SyncListingSnapshot(host: host, instance: instance, prints: prints, etag: etag)
+            return prints
+        case .notModified:
+            guard let cached else { throw MoldClientError.malformedResponse }
+            return cached.prints
+        }
+    }
+
     static func canSaveLocally(_ entry: LibraryEntry) -> Bool {
         guard entry.print.kind == .picture else { return false }
         return canSyncLocally(entry)
@@ -339,10 +401,12 @@ extension LibraryStore {
             localSaveAlertPresented = true
             return
         }
+        localSaveSuppressImports = true
         localSaveProgress = syncAll ? "Finding remote prints and collections…"
             : "Preparing \(candidates.count.formatted()) prints…"
         defer {
             localSaveProgress = nil
+            localSaveSuppressImports = false
             localSaveStopRequested = false
         }
 
@@ -351,6 +415,7 @@ extension LibraryStore {
         var sourceMachines: [MoldHost.ID: (MoldHost, any MoldBackend)] = [:]
         var originContexts: [MoldHost.ID: String] = [:]
         var sourceCollections: [MoldHost.ID: [String: Collection]] = [:]
+        var sourceCheckpoints: [MoldHost.ID: GallerySyncCheckpoint] = [:]
         var hostErrors: [MoldHost.ID: String] = [:]
         let sourceHostIDs = syncAll
             ? Set(hosts.hosts.filter { $0.id != local.id }.map(\.id))
@@ -368,10 +433,11 @@ extension LibraryStore {
             originContexts[hostID] = [hostID.uuidString, hosts.host(hostID)?.baseURL.absoluteString ?? "",
                                      hosts.instanceID(of: hostID) ?? ""].joined(separator: "\n")
             do {
-                guard case let .fresh(prints, _) = try await source.gallery(etag: nil) else {
-                    throw MoldClientError.malformedResponse
-                }
+                let prints = try await syncListing(on: sourceHost, from: source)
                 guard hosts.host(hostID) == sourceHost else { throw MoldClientError.unreachable("The machine route changed while reading its Library.") }
+                if syncAll, let checkpoint = try? await source.gallerySyncCheckpoint() {
+                    sourceCheckpoints[hostID] = checkpoint
+                }
                 sourcePrints[hostID] = Dictionary(prints.map { ($0.filename, $0) },
                                                   uniquingKeysWith: { first, _ in first })
                 if syncAll {
@@ -438,10 +504,7 @@ extension LibraryStore {
         let destination = hosts.backend(for: local)
         let localPrints: [GalleryPrint]
         do {
-            guard case let .fresh(prints, _) = try await destination.gallery(etag: nil) else {
-                throw MoldClientError.malformedResponse
-            }
-            localPrints = prints
+            localPrints = try await syncListing(on: local, from: destination)
         } catch {
             localSaveReport = "Couldn’t read This Mac’s Library: \(error.sentence)"
             localSaveFailures = failures
@@ -451,9 +514,7 @@ extension LibraryStore {
         let localTrashNames: Set<String>
         if syncAll {
             do {
-                guard case let .fresh(prints, _) = try await destination.trashedPrints(etag: nil) else {
-                    throw MoldClientError.malformedResponse
-                }
+                let prints = try await syncListing(on: local, from: destination, trash: true)
                 localTrashNames = Set(prints.map(\.filename))
             } catch {
                 localSaveReport = "Couldn’t read This Mac’s Trash safely: \(error.sentence)"
@@ -464,6 +525,7 @@ extension LibraryStore {
         } else { localTrashNames = [] }
         let localByName = Dictionary(localPrints.map { ($0.filename, $0) },
                                      uniquingKeysWith: { first, _ in first })
+        let destinationCheckpoint = syncAll ? try? await destination.gallerySyncCheckpoint() : nil
         var syncedCopies = syncAll ? LocalSyncRecord.load() : [:]
         let pendingOrganization = syncAll ? PendingSyncOrganization() : nil
         let localCollections: [Collection]
@@ -569,10 +631,26 @@ extension LibraryStore {
                     original, marker: target.hostID.uuidString.lowercased())
             }
             if syncAll,
-               pendingOrganization?.destination(for: sourceKey) == nil,
                let cached = syncedCopies[sourceKey],
                let existing = localByName[cached.destinationFilename],
                cached.matches(source: target.print, local: existing) {
+                let sourceToken = sourceCheckpoints[target.hostID].flatMap { checkpoint in
+                    checkpoint.revisions[original].map { checkpoint.instanceId + ":" + $0 }
+                }
+                let destinationToken = destinationCheckpoint.flatMap { checkpoint in
+                    checkpoint.revisions[existing.filename].map { checkpoint.instanceId + ":" + $0 }
+                }
+                if pendingOrganization?.destination(for: sourceKey) == nil,
+                   await target.isCurrent(),
+                   let sourceToken, let destinationToken,
+                   cached.sourceCheckpoint == sourceToken, cached.destinationCheckpoint == destinationToken,
+                   cached.sourceRoute == target.originContext,
+                   cached.destinationRoute == local.baseURL.absoluteString,
+                   cached.destinationInstance == hosts.instanceID(of: local.id) {
+                    alreadyLocal += 1
+                    record(target, as: existing.filename, organize: false)
+                    continue
+                }
                 work.append((index, target, requestedName, true, existing.filename))
                 continue
             }
@@ -583,6 +661,8 @@ extension LibraryStore {
         // Keep those batches serial; do the same when free space cannot
         // comfortably hold three 512 MiB transfers with three staged copies.
         var next = 0
+        let destinationInstance = hosts.instanceID(of: local.id)
+        localSaveProgress = "Checking \(work.count.formatted()) changed prints · Already here \(alreadyLocal.formatted())"
         await withTaskGroup(of: (Int, MirrorResult).self) { group in
             let free = (try? FileManager.default.attributesOfFileSystem(
                 forPath: FileManager.default.temporaryDirectory.path)[.systemFreeSize]
@@ -599,7 +679,7 @@ extension LibraryStore {
                     return (index, await mirror(target, to: destination,
                                                 as: filename, occupied: occupied,
                                                 knownPrints: localByName,
-                                                pending: pendingOrganization))
+                                                pending: pendingOrganization, destinationInstance: destinationInstance))
                 }
             }
             for await (index, result) in group {
@@ -613,6 +693,15 @@ extension LibraryStore {
                     let pendingMatch = pendingOrganization?.destination(for: sourceKey) == name
                     record(targets[index], as: name,
                            organize: !result.alreadyLocal || pendingMatch)
+                    // A response-proven output and retained copy gets its own
+                    // durable checkpoint before organization. Targeted listing
+                    // reads one row rather than the whole destination gallery.
+                    if syncAll, let localPrint = try? await destination.galleryPrint(name),
+                       let checkpoint = LocalSyncRecord(source: targets[index].print, local: localPrint,
+                           destinationInstance: hosts.instanceID(of: local.id)) {
+                        syncedCopies[sourceKey] = checkpoint
+                        LocalSyncRecord.checkpoint(checkpoint, key: sourceKey)
+                    }
                 } else {
                     let failure = "\(targets[index].print.filename): \(result.error ?? "save failed")"
                     failures.append(failure)
@@ -629,8 +718,8 @@ extension LibraryStore {
                         localSaveIssueKeys[failure] = Array(Set((localSaveIssueKeys[failure]?.split(separator: ":").map(String.init) ?? []) + [key])).sorted().joined(separator: ":")
                     }
                 }
-                if completed % 10 == 0 || completed == targets.count {
-                    localSaveProgress = "Saving \(completed.formatted()) of \(targets.count.formatted())…"
+                if completed % 10 == 0 || completed == work.count {
+                    localSaveProgress = "Checked \(completed.formatted()) of \(work.count.formatted()) · Copied \(transferred.formatted()) · Already here \(alreadyLocal.formatted()) · Issues \(failures.count.formatted())"
                 }
                 if next < work.count && !Task.isCancelled && !localSaveStopRequested {
                     let (index, target, filename, occupied, cached) = work[next]
@@ -640,7 +729,7 @@ extension LibraryStore {
                         return (index, await mirror(target, to: destination,
                                                     as: filename, occupied: occupied,
                                                     knownPrints: localByName,
-                                                    pending: pendingOrganization))
+                                                    pending: pendingOrganization, destinationInstance: destinationInstance))
                     }
                 }
             }
@@ -649,6 +738,7 @@ extension LibraryStore {
             failures.append("Save stopped. Remaining prints were not transferred.")
         }
 
+        localSaveProgress = "Organizing copied prints and collections…"
         // A host resolves a collection name to its own slug and creates the
         // local copy once. Never send the source machine's collection ID.
         for slug in collectionFiles.keys.sorted() {
@@ -698,26 +788,71 @@ extension LibraryStore {
         // End suppression before the final read. An unrelated client may
         // import while collections load; the read then catches it, and later
         // events apply normally.
-        localSaveProgress = nil
+        localSaveSuppressImports = false
+        localSaveProgress = "Refreshing This Mac’s Library…"
         await refresh(on: local.id)
         await reconcileCollectionVisibility()
-        if syncAll {
+        if syncAll && !work.isEmpty {
+            localSaveProgress = "Verifying copied prints and retained inputs…"
+            let verifiedDestinationCheckpoint = try? await destination.gallerySyncCheckpoint()
+            var checkpointFailures: Set<String> = []
+            let checkedKeys = Set(work.map { LocalSyncRecord.key(hostID: $0.1.hostID, filename: $0.1.print.filename) })
+            if verifiedDestinationCheckpoint != nil {
+                // Capture evidence BEFORE checking bindings. A foreign writer
+                // changing a binding after copy must not seal a stale success.
+                for (target, filename) in successfulCopies where checkedKeys.contains(LocalSyncRecord.key(hostID: target.hostID, filename: target.print.filename)) {
+                    if Task.isCancelled || localSaveStopRequested { checkpointFailures.insert(filename); continue }
+                    let result = await repairCachedSources(target, to: destination, as: filename)
+                    if result.filename == nil {
+                        checkpointFailures.insert(filename)
+                        failures.append("\(target.print.filename): \(result.error ?? "copy verification failed")")
+                    }
+                }
+            }
+            let finalDestinationCheckpoint = try? await destination.gallerySyncCheckpoint()
+            var stableSourceCheckpoints: [MoldHost.ID: GallerySyncCheckpoint] = [:]
+            for (hostID, before) in sourceCheckpoints {
+                if let backend = sourceMachines[hostID]?.1,
+                   let after = try? await backend.gallerySyncCheckpoint(),
+                   after.instanceId == before.instanceId {
+                    stableSourceCheckpoints[hostID] = after
+                }
+            }
             let refreshed = Dictionary((perHost[local.id] ?? []).map {
                 ($0.print.filename, $0.print)
             }, uniquingKeysWith: { first, _ in first })
             for (target, filename) in successfulCopies {
                 let sourceKey = LocalSyncRecord.key(hostID: target.hostID,
                                                     filename: target.print.filename)
-                guard !organizationFailedFiles.contains(filename),
+                guard checkedKeys.contains(sourceKey),
+                      !organizationFailedFiles.contains(filename),
                       !unresolvedCollections.contains(sourceKey),
                       !target.collections.contains(where: {
                           failedCollectionSlugs.contains($0.slug)
                       }) else { continue }
                 guard let localPrint = refreshed[filename],
-                      let record = LocalSyncRecord(source: target.print, local: localPrint, destinationInstance: hosts.instanceID(of: local.id))
+                      var record = LocalSyncRecord(source: target.print, local: localPrint, destinationInstance: hosts.instanceID(of: local.id))
                 else { continue }
+                if let before = sourceCheckpoints[target.hostID],
+                   let after = stableSourceCheckpoints[target.hostID],
+                   let token = before.revisions[target.print.filename],
+                   after.revisions[target.print.filename] == token {
+                    record.sourceCheckpoint = before.instanceId + ":" + token
+                }
+                if !checkpointFailures.contains(filename),
+                   await target.isCurrent(),
+                   let checkpoint = finalDestinationCheckpoint,
+                   let verified = verifiedDestinationCheckpoint,
+                   checkpoint.instanceId == verified.instanceId,
+                   let token = checkpoint.revisions[filename],
+                   verified.revisions[filename] == token {
+                    record.destinationCheckpoint = checkpoint.instanceId + ":" + token
+                }
+                record.sourceRoute = target.originContext
+                record.destinationRoute = local.baseURL.absoluteString
                 syncedCopies[sourceKey] = record
                 pendingOrganization?.clear(sourceKey)
+                LocalSyncRecord.checkpoint(record, key: sourceKey)
             }
             LocalSyncRecord.save(syncedCopies)
         }

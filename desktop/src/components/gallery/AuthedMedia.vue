@@ -65,6 +65,12 @@ const props = withDefaults(
   },
 );
 
+const emit = defineEmits<{ ready: [] }>();
+function mediaReady(event: Event) {
+  const element = event.currentTarget as HTMLImageElement | HTMLMediaElement;
+  if (src.value && element.currentSrc === new URL(src.value, document.baseURI).href) emit("ready");
+}
+
 const videoPlayback = useVideoPlaybackStore();
 
 const src = ref<string | null>(null);
@@ -244,6 +250,7 @@ onUnmounted(() => {
     :src="src"
     :muted="videoPlayback.muted"
     :volume="videoPlayback.volume"
+    @loadeddata="mediaReady"
     @volumechange="videoPlayback.syncFromPlayer"
     class="h-full w-full object-contain"
     :controls="controls"
@@ -258,8 +265,9 @@ onUnmounted(() => {
     :alt="alt"
     class="h-full w-full"
     @fail="onMeshFail"
+    @ready="emit('ready')"
   />
-  <audio v-else-if="audio && src" :src="src" class="w-full" controls />
+  <audio v-else-if="audio && src" :src="src" class="w-full" controls @loadeddata="mediaReady" />
   <img
     v-else-if="src"
     :src="src"
@@ -267,6 +275,7 @@ onUnmounted(() => {
     class="h-full w-full object-cover"
     :class="{ 'ms-alpha-bed': alpha }"
     :data-alpha="alpha ? 'true' : undefined"
+    @load="mediaReady"
     decoding="async"
     draggable="false"
   />

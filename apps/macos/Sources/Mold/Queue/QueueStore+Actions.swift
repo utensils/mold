@@ -37,9 +37,9 @@ extension QueueStore {
 
     func canTransfer(_ entry: QueueEntry, on host: MoldHost.ID) -> Bool {
         guard let machine = hosts.host(host), hosts.isUp(machine), !isActing(entry, on: host),
-              let current = entries(on: host).first(where: { $0.id == entry.id }), current.state == .held,
-              entry.state == .held, let instance = hosts.instanceID(of: host) else { return false }
-        return current.authority(instanceId: instance) != nil
+              let current = entries(on: host).first(where: { $0.id == entry.id }), current.state == entry.state,
+              QueueTransferEligibility.allows(current.state, reservedProtocol: hosts.capabilities[host]?.queue?.preRenderTransfer == true), let instance = hosts.instanceID(of: host) else { return false }
+        return current.transferAuthority(instanceId: instance, reservedProtocol: hosts.capabilities[host]?.queue?.preRenderTransfer == true) != nil
     }
 
     func cancel(_ entry: QueueEntry, on host: MoldHost.ID) async {

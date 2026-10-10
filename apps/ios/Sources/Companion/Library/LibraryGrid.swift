@@ -17,7 +17,6 @@ struct LibraryGrid: View {
     let trashed: Bool
     let zoom: Namespace.ID
     let visible: [LibraryEntry]
-    var newMediaVisit: LibraryNewMedia.Visit?
 
     /// The accessibility audit's lazy-grid exemption keys on this.
     static let dayHeader = "day-header"
@@ -132,7 +131,7 @@ struct LibraryGrid: View {
         let tile = PrintTile(entry: entry, points: points, trashed: trashed,
                              selecting: selecting, selected: selection.contains(entry.id),
                              showsHost: showsHost, drawsBadges: false,
-                             fresh: !trashed && (newMediaVisit?.contains(entry.print.filename) ?? false))
+                             fresh: !trashed && library.unreadMedia.isUnread(entry))
         let tileView = tile.matchedTransitionSource(id: entry.id, in: zoom)
         if selecting {
             Button { toggle(entry.id) } label: { tileView }

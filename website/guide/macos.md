@@ -151,7 +151,7 @@ New oversized input pictures are fitted proportionally, with orientation and tra
 
 Queue rows show the owning machine’s sealed conditioning images across models. Job Details shows every ordered reference separately with its role, including identity photos, named views, masks, control images and boundary frames. Audio/video references are listed by kind; unavailable previews are disclosed. Inputs remain separate from live denoise previews and are fetched through authenticated routes, including work submitted from another device. Older servers retain their singular source preview.
 
-Native Library marks media added since the previous Library visit with a session-only New badge. Opening a picture, video or 3-D print removes its badge immediately during that visit; prepared neighboring pages and long-press previews do not count as viewing. The first visit still establishes a baseline, and returning for the next visit clears the remaining badges. Before the Library is opened, the iOS Home Screen and macOS Dock icons count new gallery media, once per merged print, excluding hidden collections and Trash. Opening Library clears that count using the existing seen behavior. Icon counts are saved locally across launches; paired machines establish an initial baseline. iOS updates while active and during opportunistic background refresh, subject to notification badge permission; the server has no push. Machine and playback labels share one fitted row on iOS so they never overlap.
+Library New badges and unread counts are saved on each client independently. Media discovered after the initial machine baseline stays new until that client successfully displays it in the viewer. Opening Library, filters, refreshes and neighboring preloads do not clear it. Merged copies count once; hidden collections and Trash do not count. Existing read history is preserved on upgrade. Native icon badges follow the same history, with the existing permission or preference controls.
 
 ### Queue model downloads
 
@@ -178,7 +178,7 @@ inventory. **All Machines** keeps the merged view available. Hidden collection
 visibility is shared across same-slug replicas, and pending hide/show changes
 retry when their original machines reconnect.
 
-**Sync All to This Mac** copies now and repeats every five minutes for this app
+**Sync All to This Mac** copies now and repeats at the interval selected in Settings (five minutes by default) for this app
 session. Completion appears in the Library status; the countdown and **Stop Sync**
 make the next run explicit. **Done**, Return, and Escape close Sync Details;
 successful reports omit issue controls. **Details** shows issues and offers **Don’t show these
@@ -190,6 +190,10 @@ that refusal without falling back to deleting live media.
 
 Reopening Sync Details shows the saved acknowledgment choice. New media issues leave the checkbox unchecked; Reset Acknowledgments clears the saved choice immediately.
 
-Queue row buttons, contextual menus, the Queue menu and Job Details share the same action eligibility. Queued jobs offer Pause and paused jobs offer Resume when supported by the machine. Held jobs offer Retry or Download and Retry when recovery is supported. Move to remains available for eligible held jobs. Running cancellation requires machine support. Offline, stopping, settled and currently updating jobs retain inspection without mutation controls. Recovery controls stack in narrow windows so their labels stay readable.
+Queue row buttons, contextual menus, the Queue menu and Job Details share the same action eligibility. Queued jobs offer Pause and paused jobs offer Resume when supported by the machine. Held jobs offer Retry or Download and Retry when recovery is supported. Move to is available for eligible queued, paused, and held jobs on current servers; it stops being available when rendering starts. Older servers retain Held-only moves. Running cancellation requires machine support. Offline, stopping, settled and currently updating jobs retain inspection without mutation controls. Recovery controls stack in narrow windows so their labels stay readable.
 
 Also Running offers Cancel for reported long-clip chains when the machine permits it, and Resume for paused chains. Clip-upscale controls also check that the machine is connected and the displayed job is still current before acting. Durable authored sequences remain managed in the machine's web app.
+
+Library Settings remembers the sync interval between launches; enabling Sync remains specific to the current app session. Changing the interval restarts the pending countdown. Sync reports checking existing copies separately from copying outputs. Updated hosts provide batched retained-input evidence so unchanged verified copies can skip individual transfer probes; older hosts continue checking retained inputs so late repairs are not missed.
+
+Queue rows keep their height while previews and render progress load, preserving the scroll position. Interrupted Library syncs resume from acknowledged output copies and repair remaining retained-input or organization work. The interval accepts one minute to one day.

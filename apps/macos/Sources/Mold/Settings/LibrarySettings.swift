@@ -13,9 +13,28 @@ struct LibrarySettings: View {
 
     private var machine: MoldHost? { hosts.machine(selected: selectedMachine) }
 
+    private var intervalBinding: Binding<Int> {
+        Binding(get: { library.syncSession.intervalMinutes },
+                set: { library.syncSession.intervalMinutes = $0 })
+    }
+
     var body: some View {
-        SettingsPaneBody(hosts: hosts, store: store, machine: machine) { machine in
-            Form {
+        Form {
+            Section("Library Sync on This Mac") {
+                LabeledContent("Check every") {
+                    HStack {
+                        TextField("Minutes", value: intervalBinding, format: .number)
+                            .textFieldStyle(.roundedBorder).frame(width: 80)
+                            .accessibilityLabel("Library sync interval in minutes")
+                        Text("minutes")
+                        Stepper("Minutes", value: intervalBinding, in: 1...1440)
+                            .labelsHidden().fixedSize()
+                    }
+                }
+                Text("Sync starts when enabled in Library and repeats after each run finishes.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            SettingsPaneBody(hosts: hosts, store: store, machine: machine) { machine in
                 SettingsMachineHeader(hosts: hosts, selectedMachine: $selectedMachine)
                 Section {
                     SettingRowList(settings: SettingKeys.library, machine: machine)
@@ -28,8 +47,8 @@ struct LibrarySettings: View {
                     }
                 }
             }
-            .formStyle(.grouped)
         }
+        .formStyle(.grouped)
         .task(id: machine?.id) {
             guard let id = machine?.id else { return }
             if library.trashPerHost[id] == nil { await library.refreshTrash() }
