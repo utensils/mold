@@ -15,6 +15,7 @@
         "index.ts",
         "components/HeldQueueTransferDialog.vue",
         "components/QueueMoveToControl.vue",
+        "components/SourceMediaPanel.vue",
         "**/*.test.ts"
       ],
       "project": ["**/*.{ts,vue}"]
