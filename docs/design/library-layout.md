@@ -34,6 +34,9 @@ application-owned implementations with matching Swift and TypeScript tests.
   retains the exact covered viewport, including a partially visible row.
 - macOS Up/Down selects the closest horizontal center in the adjacent row;
   Left/Right and Shift/Command keep the existing ordered selection contract.
+- iOS captures the visible print before size bindings change. Its Favorites
+  rotor uses [explicit per-print targets](https://developer.apple.com/documentation/swiftui/view/accessibilityrotorentry(id:in:))
+  and reveals the containing lazy row before VoiceOver moves to a print.
 - iOS removes only the visible host-name badge. Details, host scope, other badges,
   preview environment injection and unseen-media semantics remain intact.
 

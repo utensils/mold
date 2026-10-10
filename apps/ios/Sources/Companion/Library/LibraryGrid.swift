@@ -31,6 +31,7 @@ struct LibraryGrid: View {
     @State private var layout = JustifiedLibraryLayout()
     @State private var width: CGFloat = 0
     @State private var nativePosition = ScrollPosition()
+    @Namespace private var rotor
     @State private var frames: [PrintID: CGRect] = [:]
     @State private var dragSelection: LibraryDragSelection?
     @State private var deleting: [LibraryEntry]?
@@ -52,6 +53,7 @@ struct LibraryGrid: View {
                                         cell(entry, points: max(item.width, row.height), showsHost: projection.showsHost)
                                         .frame(width: item.width, height: row.height)
                                         .clipped()
+                                        .accessibilityRotorEntry(id: entry.id, in: rotor)
                                         .background {
                                             if selecting {
                                                 GeometryReader { geometry in
@@ -115,7 +117,8 @@ struct LibraryGrid: View {
             .onDisappear { dragSelection = nil }
             .gesture(PinchRecognizer(changed: { pinched($0) }, ended: { pinchStart = nil; pinchAnchor = nil }))
             .onChange(of: tile) { _, next in
-                if let keep = pinchAnchor ?? position.id { Task { @MainActor in
+                let prepared = position.takeReflowAnchor()
+                if let keep = pinchAnchor ?? prepared ?? position.id { Task { @MainActor in
                     await Task.yield()
                     reader.scrollTo(rowAnchor(for: keep, in: layout.resolve(sections, width: width,
                         targetHeight: next.basePoints * scale)), anchor: .top)
@@ -129,7 +132,9 @@ struct LibraryGrid: View {
             }
             .accessibilityRotor("Favourites") {
                 ForEach(projection.favorites) { entry in
-                    AccessibilityRotorEntry(Text(entry.spokenName), id: entry.id)
+                    AccessibilityRotorEntry(Text(entry.spokenName), id: entry.id, in: rotor) {
+                        reader.scrollTo(rowAnchor(for: entry.id, in: laidSections), anchor: .center)
+                    }
                 }
             }
             .onChange(of: returnGeneration) { _, _ in
@@ -228,12 +233,20 @@ struct LibraryGrid: View {
 /// it; an explicit shelf or search change starts from the top instead.
 struct LibraryScrollPosition {
     private(set) var id: PrintID?
+    private var reflowAnchor: PrintID?
+
+    mutating func prepareReflow() { reflowAnchor = reflowAnchor ?? id }
+
+    mutating func takeReflowAnchor() -> PrintID? {
+        defer { reflowAnchor = nil }
+        return reflowAnchor
+    }
 
     mutating func report(_ visible: PrintID?) {
         if let visible { id = visible }
     }
 
-    mutating func reset() { id = nil }
+    mutating func reset() { id = nil; reflowAnchor = nil }
 }
 
 private struct LibraryTileFrames: PreferenceKey {
