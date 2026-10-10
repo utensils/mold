@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useSourceMediaVisibility } from "@studio/lib/sourceMediaVisibility";
 import SourceMediaBrowser from "@studio/components/SourceMediaBrowser.vue";
 import {
   sourceMemberKind,
@@ -239,6 +240,7 @@ const sourceOwners = computed<SourceMediaOwner[]>(() =>
       }),
     ),
 );
+useSourceMediaVisibility(() => sourceOwners.value);
 let retainedAttachEpoch = 0;
 
 onBeforeUnmount(() => {
@@ -2644,7 +2646,9 @@ watch(
       // the listing resolves those ids to slugs and hidden state.
       if (!copy.item.collections?.length) return false;
       const bucket = gallery.collectionsByHost[copy.sourceKey];
-      return !bucket || bucket.loading || (!bucket.loaded && bucket.error === null);
+      // A failed or capability-pending listing has not resolved visibility.
+      // Keep the notification route until a successful retry can reveal it.
+      return !bucket?.loaded || bucket.loading || !!bucket.error;
     });
     if (unsettledCollectionCopy) return;
 

@@ -1449,6 +1449,7 @@ mod tests {
     fn member(id: &str, role: &str, name: &str, size: u64) -> mold_core::RetainedSourceMediaMember {
         mold_core::RetainedSourceMediaMember {
             member_id: id.to_string(),
+            content_sha256: None,
             role: role.to_string(),
             display_name: name.to_string(),
             size_bytes: size,

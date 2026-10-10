@@ -63,6 +63,7 @@ vi.mock("../lib/api/client", () => ({
   apiFetch: vi.fn(),
   apiFetchTo,
   apiJsonTo,
+  conditionalApiJsonTo: (...args: unknown[]) => apiJsonTo(...args),
   currentTarget: () => ({ baseUrl: "http://x", apiKey: null }),
   ApiError: class ApiError extends Error {
     constructor(
@@ -360,7 +361,9 @@ describe("scopes + capability gating", () => {
     expect(wrapper.find("[data-test='favorites-chip']").exists()).toBe(false);
     expect(wrapper.findAll("[data-test='tag-chip']")).toHaveLength(0);
     expect(wrapper.findAll("[data-test='tile-favorite']")).toHaveLength(0);
-    await tileFor(wrapper, smurf04.filename).trigger("contextmenu");
+    // Collection-backed rows stay hidden until their visibility can be resolved.
+    // This legacy-host menu check uses an unfiled print.
+    await tileFor(wrapper, plain.filename).trigger("contextmenu");
     expect(menuEntry("Favourite")).toBeUndefined();
     expect(menuEntry("Delete")).toBeDefined();
     wrapper.unmount();

@@ -4484,6 +4484,7 @@ mod tests {
                 availability: RetainedSourceMediaAvailability::Available,
                 members: vec![crate::RetainedSourceMediaMember {
                     member_id: "m/1".into(),
+                    content_sha256: None,
                     role: "source_image".into(),
                     display_name: "armchair.png".into(),
                     size_bytes: 5,

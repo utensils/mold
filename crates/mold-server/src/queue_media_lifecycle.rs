@@ -495,25 +495,9 @@ impl QueueMediaLifecycle {
         pin_id: String,
         member_index: usize,
     ) -> Result<Vec<u8>, QueueMediaError> {
-        use crate::queue_media_store::DecryptedQueueMediaPayload;
-        use std::io::Read as _;
-
         let pin = GalleryMediaPinRef::new(media_set, pin_id)?;
-        let mut decrypted = self.runtime_store()?.decrypt_mixed_from_gallery_pin(&pin)?;
-        let member = decrypted
-            .media
-            .get_mut(member_index)
-            .ok_or(QueueMediaError::NotFound)?;
-        match &mut member.payload {
-            DecryptedQueueMediaPayload::Bytes(bytes) => Ok(std::mem::take(bytes)),
-            DecryptedQueueMediaPayload::PrivatePath(path) => {
-                let mut file = mold_core::secure_file::open_regular_file_no_follow(path)
-                    .map_err(|error| QueueMediaError::InsecurePath(error.to_string()))?;
-                let mut bytes = Vec::new();
-                file.read_to_end(&mut bytes)?;
-                Ok(bytes)
-            }
-        }
+        self.runtime_store()?
+            .read_gallery_member(&pin, member_index, 512 * 1024 * 1024)
     }
 
     pub(crate) fn active_candidates(&self) -> Result<Vec<QueueMediaGcCandidate>, AdapterError> {

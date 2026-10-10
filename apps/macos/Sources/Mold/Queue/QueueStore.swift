@@ -89,8 +89,8 @@ final class QueueStore {
     /// `byHost` is "not yet asked", not "asked and got nothing".
     func hasLoaded(on host: MoldHost.ID) -> Bool { byHost[host] != nil }
 
-    /// Individual jobs waiting to run across the listed machines.
-    var badge: Int { all.filter(\.state.isWaiting).count }
+    /// All unfinished jobs across the listed machines, including running work.
+    var badge: Int { all.filter(\.state.isLive).count }
 
     var all: [QueueEntry] { byHost.values.flatMap(\.self) }
 

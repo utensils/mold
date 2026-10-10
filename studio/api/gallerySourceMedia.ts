@@ -8,6 +8,8 @@ export type RetainedSourceMediaAvailability =
 
 export interface RetainedSourceMediaMember {
   member_id: string;
+  /** Verified SHA-256 of the independently reusable bytes; absent on older hosts. */
+  content_sha256?: string;
   role: string;
   display_name: string;
   size_bytes: number;

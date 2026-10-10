@@ -77,6 +77,7 @@ struct RootView: View {
         }
         .printSheets(presentsActions: router.openedPrint == nil)
         .modifier(RootLinks(router: router))
+        .modifier(SourceMediaAccessMonitor())
         .modifier(UndoBridge())
         .environment(router)
         .environment(actions)

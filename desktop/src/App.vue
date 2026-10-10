@@ -99,11 +99,10 @@ const libraryPrefs = useLibraryPrefsStore();
 // primary's target changing still re-probes, because a different server may
 // not support /api/events.
 watch(
-  () =>
-    [
-      hostsStore.all.some((host) => host.status === "ready" && host.baseUrl),
-      connection.baseUrl,
-    ] as const,
+  [
+    () => hostsStore.all.some((host) => host.status === "ready" && host.baseUrl),
+    () => connection.baseUrl,
+  ],
   ([anyReady]) => {
     if (anyReady) void events.resubscribe();
     else events.unsubscribe();

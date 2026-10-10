@@ -83,3 +83,23 @@ describe("source media browser boundaries", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
+it("bounds older-server inventory fallback concurrency", async () => {
+  let active = 0,
+    peak = 0;
+  fetchMock.mockRejectedValueOnce(new ApiError("old", 404));
+  fetchMock.mockImplementation(async () => {
+    active++;
+    peak = Math.max(peak, active);
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    active--;
+    return new Response(
+      JSON.stringify({ availability: "available", members: [] }),
+    );
+  });
+  const answer = await sourceMediaInventories(
+    Array.from({ length: 10 }, (_, n) => `${n}.png`),
+    target,
+  );
+  expect(Object.keys(answer.inventories)).toHaveLength(10);
+  expect(peak).toBe(4);
+});

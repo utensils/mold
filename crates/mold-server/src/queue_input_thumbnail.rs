@@ -235,6 +235,7 @@ mod tests {
             MediaManifestEntry, MediaSetManifest, MediaSetRef, QueueMediaSink,
         };
         let entry = |role: &str, name: &str, size| MediaManifestEntry {
+            content_sha256: None,
             role: role.into(),
             name: name.into(),
             size_bytes: size,

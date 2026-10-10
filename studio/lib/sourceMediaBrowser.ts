@@ -80,3 +80,24 @@ export function sourceMemberLabel(member: RetainedSourceMediaMember): string {
     ? label
     : `${label} ${member.position + 1}`;
 }
+
+export interface SourceMediaGroup {
+  key: string;
+  usages: SourceMediaSelection[];
+}
+export function groupSourceMedia(
+  selections: SourceMediaSelection[],
+): SourceMediaGroup[] {
+  const groups = new Map<string, SourceMediaGroup>();
+  for (const selection of selections) {
+    const digest = selection.member.content_sha256;
+    const key =
+      digest && /^[a-f0-9]{64}$/.test(digest)
+        ? `content:${digest}`
+        : `usage:${sourceOwnerIdentity(selection.owner)}:${selection.member.member_id}`;
+    let group = groups.get(key);
+    if (!group) groups.set(key, (group = { key, usages: [] }));
+    group.usages.push(selection);
+  }
+  return [...groups.values()];
+}

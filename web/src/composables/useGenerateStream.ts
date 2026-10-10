@@ -1,3 +1,4 @@
+import { sourceMediaGalleryEvent } from "@studio/lib/sourceMediaResources";
 import { originAuthenticatedFetch, originApiTarget } from "../lib/originAuth";
 import { computed, onUnmounted, reactive, ref, watch, type Ref } from "vue";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
@@ -1831,6 +1832,7 @@ function handleDurableEvent(
   if (eventName !== "event" || typeof data.type !== "string") {
     return;
   }
+  sourceMediaGalleryEvent(routeApiTarget(route), data);
   let exactJob: Job | undefined;
   if (typeof data.id === "string") {
     exactJob = jobs.value.find(

@@ -264,3 +264,7 @@ bounded and separate from original attachment content. `SourceMediaAttachment`
 offers current-recipe destinations, and card imports fence model, recipe, media
 revisions, origin route/key/instance and view lifetime. Keep Source Media in the
 phone Library navigation and iPad Shelves sidebar rather than adding a phone tab.
+
+Native Queue navigation badges total `QueueState.isLive` across every host listing: queued, running, paused, held and cancelling. Count merged individual entries rather than batch groups; completed, failed and cancelled history does not contribute.
+
+Source Media groups only verified reusable-byte digests and keeps every owning print/role selectable. Browser authority follows visible library scope; an explicitly opened live or Trash detail can authorize that exact owner without exposing it in the general browser. Preview caches are bounded and memory-only, expire after 60 seconds, and evict revoked owners even when the browser is closed. Named gallery events invalidate only that owner; resync invalidates the host. Reuse must recheck the captured owner, route, instance and draft after downloading.

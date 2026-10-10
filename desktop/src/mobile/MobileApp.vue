@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useSourceMediaVisibility } from "@studio/lib/sourceMediaVisibility";
 import SourceMediaBrowser from "@studio/components/SourceMediaBrowser.vue";
 import {
   sourceMemberKind,
@@ -9929,6 +9930,7 @@ const mobileSourceOwners = computed<SourceMediaOwner[]>(() => {
       revision: print.media_version ?? "",
     }));
 });
+useSourceMediaVisibility(() => mobileSourceOwners.value);
 let retainedAttachEpoch = 0;
 watch(
   () => [

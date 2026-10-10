@@ -195,9 +195,9 @@ final class QueueStore {
         QueueHold.resolve(entry: entry, child: child(for: entry, on: id))
     }
 
-    /// The Queue tab's badge: individual jobs waiting to run, fleet-wide.
+    /// The Queue tab's badge: all unfinished jobs across the fleet.
     var badge: Int {
-        listings.values.joined().filter(\.state.isWaiting).count
+        listings.values.joined().filter(\.state.isLive).count
     }
 
     /// An unanswered queue cannot establish that nothing is waiting.

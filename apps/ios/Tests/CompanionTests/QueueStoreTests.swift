@@ -194,7 +194,7 @@ struct QueueStoreTests {
 
     @Test func theBadgeCountsRenderingAndHeldJobs() async throws {
         let (queue, hosts, _) = try await Self.setUp()
-        #expect(queue.badge == 2)
+        #expect(queue.badge == 4)
         #expect(queue.groups(for: hosts.hosts[0].id).count == 4)
     }
 
@@ -378,5 +378,27 @@ struct QueueStoreTests {
         #expect(!queue.isQueuePaused(id))
         await queue.setQueuePaused(true, on: [id])
         #expect(queue.isQueuePaused(id))
+    }
+}
+
+
+extension QueueStoreTests {
+    @Test func queueBadgeTotalsRunningAndPendingAcrossHosts() async throws {
+        let (queue, hosts, fake) = try await Self.setUp()
+        try hosts.add(name: "Second", address: "10.0.0.5", apiKey: nil, makeDefault: false)
+        let listing = try Self.decode(QueueListing.self, #"{"entries":[{"id":"same","state":"running"},{"id":"q","state":"queued"},{"id":"p","state":"paused"},{"id":"h","state":"held"},{"id":"c","state":"cancelling"},{"id":"done","state":"complete"},{"id":"failed","state":"failed"},{"id":"cancelled","state":"cancelled"}],"live_only_entries":[{"id":"same","state":"running"}]}"#)
+        fake.stub("queue()", returning: listing)
+        for host in hosts.hosts {
+            let status = try Self.decode(ServerStatus.self, #"{"version":"0.34.0","busy":true,"uptime_secs":1}"#)
+            hosts.setReachability(.up(status), for: host.id)
+            await queue.poll(host.id)
+        }
+        #expect(hosts.hosts.count == 2)
+        #expect(queue.badge == 10)
+        fake.stub("queue()", returning: try Self.decode(QueueListing.self, #"{"entries":[]}"#))
+        await queue.poll(hosts.hosts[0].id)
+        #expect(queue.badge == 5)
+        await queue.poll(hosts.hosts[1].id)
+        #expect(queue.badge == 0)
     }
 }
