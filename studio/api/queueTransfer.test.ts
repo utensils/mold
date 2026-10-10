@@ -39,6 +39,8 @@ const destination: QueueTransferHost = {
   id: "plato",
   label: "Plato",
   instanceId: "destination-instance",
+  preRenderTransfer: true,
+  transferIdentity: "destination-instance",
   ready: true,
   target: { baseUrl: "http://plato", apiKey: "destination-key" },
 };
@@ -59,6 +61,9 @@ const batch = () => ({
 beforeEach(async () => {
   vi.clearAllMocks();
   clientId = await queueTransferId(source, "job", destination);
+  vi.spyOn(crypto, "randomUUID").mockReturnValue(
+    clientId as `${string}-${string}-${string}-${string}-${string}`,
+  );
   mocks.json.mockImplementation(async (target, path) =>
     path === "/api/status"
       ? {
@@ -67,9 +72,17 @@ beforeEach(async () => {
               ? source.instanceId
               : destination.instanceId,
         }
-      : path === "/api/capabilities"
-        ? {}
-        : request,
+      : path.endsWith("/reservation")
+        ? null
+        : path === "/api/generation-transfers/abort"
+          ? {
+              transfer_id: clientId,
+              destination_transfer_identity: destination.instanceId,
+              abort_receipt: "11111111-1111-4111-8111-111111111111",
+            }
+          : path === "/api/capabilities"
+            ? {}
+            : request,
   );
   mocks.detail.mockResolvedValue({
     job: {
@@ -188,4 +201,297 @@ it("uses the cross-language transfer identity without secure-context browser API
   } finally {
     vi.stubGlobal("crypto", crypto);
   }
+});
+
+describe("reserved pre-render queue transfer", () => {
+  it.each(["queued", "paused"])(
+    "reserves %s before reading media or admitting",
+    async (state) => {
+      mocks.detail.mockResolvedValue({
+        job: {
+          id: "job",
+          state,
+          batch_id: "original-batch",
+          client_batch_id: "original-client",
+        },
+      });
+      const result = await sendHeldQueueJob({
+        source: { ...source, preRenderTransfer: true },
+        destination,
+        jobId: "job",
+      });
+      expect(result.sourceRemoved).toBe(true);
+      const reservation = mocks.json.mock.calls.find(
+        ([, path]) => path === "/api/queue/job/transfer/reserve",
+      );
+      expect(reservation).toBeDefined();
+      expect(JSON.parse(reservation![2].body)).toMatchObject({
+        transfer_id: clientId,
+        destination_transfer_identity: destination.instanceId,
+      });
+      expect(
+        mocks.json.mock.invocationCallOrder[
+          mocks.json.mock.calls.indexOf(reservation!)
+        ],
+      ).toBeLessThan(mocks.admit.mock.invocationCallOrder[0]!);
+    },
+  );
+
+  it("does not widen waiting transfer on an older source", async () => {
+    mocks.detail.mockResolvedValue({
+      job: {
+        id: "job",
+        state: "queued",
+        batch_id: "batch",
+        client_batch_id: "client",
+      },
+    });
+    await expect(
+      sendHeldQueueJob({ source, destination, jobId: "job" }),
+    ).rejects.toThrow();
+    expect(mocks.admit).not.toHaveBeenCalled();
+  });
+});
+
+describe("reserved transfer failure recovery", () => {
+  it("restores the source only after a durable destination abort receipt", async () => {
+    mocks.admit.mockRejectedValue(new ApiError("incompatible", 422));
+    await expect(
+      sendHeldQueueJob({
+        source: { ...source, preRenderTransfer: true },
+        destination,
+        jobId: "job",
+      }),
+    ).rejects.toThrow("incompatible");
+    expect(
+      mocks.json.mock.calls.some(([, path]) => path.endsWith("/transfer/seal")),
+    ).toBe(true);
+    expect(
+      mocks.fetch.mock.calls.some(([, path]) =>
+        path.endsWith("/transfer/release"),
+      ),
+    ).toBe(true);
+    expect(
+      mocks.fetch.mock.calls.some(([, path]) => path.endsWith("/complete")),
+    ).toBe(false);
+  });
+  it("never admits after a rejected source seal", async () => {
+    const json = mocks.json.getMockImplementation()!;
+    mocks.json.mockImplementation(async (target, path, options) => {
+      if (path.endsWith("/transfer/seal"))
+        throw new ApiError("reservation released", 409);
+      return json(target, path, options);
+    });
+    await expect(
+      sendHeldQueueJob({
+        source: { ...source, preRenderTransfer: true },
+        destination,
+        jobId: "job",
+      }),
+    ).rejects.toThrow("reservation released");
+    expect(mocks.admit).not.toHaveBeenCalled();
+  });
+  it("completes the source when a competing admit beats destination abort", async () => {
+    const json = mocks.json.getMockImplementation()!;
+    mocks.json.mockImplementation(async (target, path, options) =>
+      path === "/api/generation-transfers/abort"
+        ? {
+            transfer_id: clientId,
+            destination_transfer_identity: destination.instanceId,
+            abort_receipt: null,
+          }
+        : json(target, path, options),
+    );
+    mocks.lookup
+      .mockResolvedValueOnce({ kind: "missing" })
+      .mockResolvedValue({ kind: "found", batch: batch() });
+    mocks.admit.mockRejectedValue(new ApiError("other client raced", 422));
+    const result = await sendHeldQueueJob({
+      source: { ...source, preRenderTransfer: true },
+      destination,
+      jobId: "job",
+    });
+    expect(result.sourceRemoved).toBe(true);
+    expect(
+      mocks.fetch.mock.calls.some(([, path]) => path.endsWith("/release")),
+    ).toBe(false);
+  });
+  it("does not restore after a mismatched destination abort receipt", async () => {
+    const json = mocks.json.getMockImplementation()!;
+    mocks.json.mockImplementation(async (target, path, options) =>
+      path === "/api/generation-transfers/abort"
+        ? {
+            transfer_id: clientId,
+            destination_transfer_identity: "wrong",
+            abort_receipt: "11111111-1111-4111-8111-111111111111",
+          }
+        : json(target, path, options),
+    );
+    mocks.admit.mockRejectedValue(new ApiError("refused", 422));
+    await expect(
+      sendHeldQueueJob({
+        source: { ...source, preRenderTransfer: true },
+        destination,
+        jobId: "job",
+      }),
+    ).rejects.toThrow("identity changed");
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+  it.each(["failed", "cancelled"])(
+    "restores the original after accepted destination %s",
+    async (state) => {
+      const accepted = batch();
+      accepted.children[0]!.state = state;
+      mocks.lookup.mockResolvedValue({ kind: "found", batch: accepted });
+      await expect(
+        sendHeldQueueJob({
+          source: { ...source, preRenderTransfer: true },
+          destination,
+          jobId: "job",
+        }),
+      ).rejects.toThrow("original was restored");
+      expect(
+        mocks.fetch.mock.calls.some(([, path]) => path.endsWith("/release")),
+      ).toBe(true);
+      expect(
+        mocks.fetch.mock.calls.some(([, path]) => path.endsWith("/complete")),
+      ).toBe(false);
+    },
+  );
+  it("reconciles a restarted destination only with the same durable transfer identity", async () => {
+    const json = mocks.json.getMockImplementation()!;
+    mocks.json.mockImplementation(async (target, path, options) =>
+      path.endsWith("/reservation")
+        ? {
+            transfer_id: clientId,
+            destination_transfer_identity: "stable-destination",
+          }
+        : path === "/api/status" &&
+            target.baseUrl === destination.target.baseUrl
+          ? { instance_id: "new-process" }
+          : json(target, path, options),
+    );
+    const accepted = { ...batch(), instance_id: "new-process" };
+    mocks.lookup.mockResolvedValue({ kind: "found", batch: accepted });
+    const result = await sendHeldQueueJob({
+      source: { ...source, preRenderTransfer: true },
+      destination: {
+        ...destination,
+        instanceId: "new-process",
+        transferIdentity: "stable-destination",
+      },
+      jobId: "job",
+    });
+    expect(result.sourceRemoved).toBe(true);
+    expect(mocks.admit).not.toHaveBeenCalled();
+    await expect(
+      sendHeldQueueJob({
+        source: { ...source, preRenderTransfer: true },
+        destination: {
+          ...destination,
+          instanceId: "new-process",
+          transferIdentity: "replaced-owner",
+        },
+        jobId: "job",
+      }),
+    ).rejects.toThrow("reserved for another");
+  });
+  it("refuses missing durable destination identity before reservation", async () => {
+    await expect(
+      sendHeldQueueJob({
+        source: { ...source, preRenderTransfer: true },
+        destination: { ...destination, transferIdentity: undefined },
+        jobId: "job",
+      }),
+    ).rejects.toThrow("identity is unavailable");
+    expect(
+      mocks.json.mock.calls.some(([, path]) => path.endsWith("/reserve")),
+    ).toBe(false);
+    expect(mocks.admit).not.toHaveBeenCalled();
+  });
+  it("leaves the reservation after ambiguous destination acceptance", async () => {
+    const json = mocks.json.getMockImplementation()!;
+    mocks.json.mockImplementation(async (target, path, options) => {
+      if (path === "/api/generation-transfers/abort")
+        throw new TypeError(
+          "destination unreachable; acceptance not confirmed",
+        );
+      return json(target, path, options);
+    });
+    mocks.admit.mockRejectedValue(new TypeError("lost response"));
+    await expect(
+      sendHeldQueueJob({
+        source: { ...source, preRenderTransfer: true },
+        destination,
+        jobId: "job",
+      }),
+    ).rejects.toThrow("not confirmed");
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("reservation restart reconciliation", () => {
+  it("reuses persisted transfer identity after the source restarted", async () => {
+    const oldClientId = clientId;
+    const json = mocks.json.getMockImplementation()!;
+    mocks.json.mockImplementation(async (target, path, options) =>
+      path.endsWith("/reservation")
+        ? {
+            transfer_id: oldClientId,
+            destination_transfer_identity: destination.instanceId,
+          }
+        : path === "/api/status" && target.baseUrl === source.target.baseUrl
+          ? { instance_id: "source-restarted" }
+          : json(target, path, options),
+    );
+    mocks.lookup.mockImplementation(async (_target, id) =>
+      id === oldClientId
+        ? { kind: "found", batch: batch() }
+        : { kind: "missing" },
+    );
+    mocks.detail.mockResolvedValue({
+      job: {
+        id: "job",
+        state: "paused",
+        batch_id: "original-batch",
+        client_batch_id: "original-client",
+      },
+    });
+    const result = await sendHeldQueueJob({
+      source: {
+        ...source,
+        instanceId: "source-restarted",
+        preRenderTransfer: true,
+      },
+      destination,
+      jobId: "job",
+    });
+    expect(result.sourceRemoved).toBe(true);
+    expect(mocks.admit).not.toHaveBeenCalled();
+    expect(
+      mocks.json.mock.calls.some(([, path]) =>
+        path.endsWith("/transfer/reserve"),
+      ),
+    ).toBe(false);
+  });
+  it("refuses another destination while acceptance remains unresolved", async () => {
+    const json = mocks.json.getMockImplementation()!;
+    mocks.json.mockImplementation(async (target, path, options) =>
+      path.endsWith("/reservation")
+        ? {
+            transfer_id: clientId,
+            destination_transfer_identity: "other-destination",
+          }
+        : json(target, path, options),
+    );
+    await expect(
+      sendHeldQueueJob({
+        source: { ...source, preRenderTransfer: true },
+        destination,
+        jobId: "job",
+      }),
+    ).rejects.toThrow("reserved for another");
+    expect(mocks.admit).not.toHaveBeenCalled();
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
 });

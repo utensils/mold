@@ -140,19 +140,12 @@ const modelLabel = (name: string) => modelLabelMemo.value(name);
 
 const targetFor = (entry: MergedPrint): ApiTarget | null => gallery.targetOf(entry.sourceKey);
 
-// ── NEW badges ──────────────────────────────────────────────────────────────
-// A print not seen as of the last Library visit wears a NEW badge. Snapshot the
-// pre-visit "seen" set (and whether we've ever visited) at setup so this
-// visit's badges survive `markLibrarySeen` below; the very first visit only
-// establishes the baseline and shows nothing new.
-const freshBaseline = new Set(gallery.seenFilenames);
-const hadVisited = gallery.libraryVisited;
-const isFresh = (entry: MergedPrint) => hadVisited && !freshBaseline.has(entry.item.filename);
-// Mark the current prints seen once they've loaded, so re-opening clears NEW.
+// Persisted client-local viewing history also drives the navigation/Dock counts.
+const isFresh = (entry: MergedPrint) => gallery.isUnread(entry);
 watch(
   () => gallery.loaded,
   (loaded) => {
-    if (loaded) gallery.markLibrarySeen();
+    if (loaded) gallery.observeUnreadMedia();
   },
   { immediate: true },
 );
@@ -303,7 +296,7 @@ async function saveSelectedLocally(selection: MergedPrint[]) {
   const failures: string[] = [];
   try {
     for (const [index, entry] of targets.entries()) {
-      localSaveProgress.value = `Saving ${index + 1} of ${targets.length}…`;
+      localSaveProgress.value = `Processing ${index + 1} of ${targets.length} selected prints…`;
       try {
         const source = localMirrorSource(entry);
         if (!source) throw new Error("The source machine is unavailable.");
@@ -327,7 +320,7 @@ async function saveSelectedLocally(selection: MergedPrint[]) {
         ? `${selection.length - targets.length} prints unavailable for local saving.`
         : "");
     toasts.push(
-      `Saved locally ${saved} of ${targets.length} prints`,
+      `Processed successfully ${saved} of ${targets.length} prints`,
       failures.length ? "error" : "info",
       description ? { description } : {},
     );
@@ -2951,6 +2944,7 @@ onUnmounted(() => {
       :collections="gallery.mergedCollections"
       :collection-counts="gallery.collectionCounts"
       :tag-suggestions="gallery.mergedTags"
+      @viewed="selectedEntry && scope !== 'trash' && gallery.markViewed(selectedEntry)"
       @close="lightboxOpen = false"
       @prev="moveSelection(-1)"
       @next="moveSelection(1)"

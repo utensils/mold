@@ -10,7 +10,7 @@
  *    plus Discard / Queue N.
  * Presentational only: the parent owns job state and the submit paths.
  */
-import { computed, ref, watch } from "vue";
+import { computed, onMounted, onBeforeUnmount, ref, watch } from "vue";
 import EmptyStateBlock from "@ui/components/EmptyStateBlock.vue";
 import ErrorNotice from "@ui/components/ErrorNotice.vue";
 import ProgressRing from "@ui/components/ProgressRing.vue";
@@ -120,10 +120,54 @@ const emit = defineEmits<{
   "context-menu": [event: MouseEvent];
   /** result — the docked action bar. The page owns the file, the link shape
    *  and the prepared-variations submission; the bed only reports intent. */
+  viewed: [];
   download: [];
   "copy-link": [];
   "make-variations": [];
 }>();
+
+let displayedResultKey = "";
+const resultIdentity = () =>
+  [
+    props.resultSrc,
+    props.resultVideoSrc,
+    props.resultAudioSrc,
+    props.resultMeshSrc,
+  ].join("|");
+function readDisplayedResult(): void {
+  if (
+    !document.hidden &&
+    props.mode === "result" &&
+    displayedResultKey &&
+    displayedResultKey === resultIdentity()
+  )
+    emit("viewed");
+}
+function recordMeshDisplayed(): void {
+  displayedResultKey = resultIdentity();
+  readDisplayedResult();
+}
+onMounted(() =>
+  document.addEventListener("visibilitychange", readDisplayedResult),
+);
+onBeforeUnmount(() =>
+  document.removeEventListener("visibilitychange", readDisplayedResult),
+);
+function markDisplayedResult(event: Event): void {
+  const media = event.currentTarget as HTMLImageElement | HTMLMediaElement;
+  const expected =
+    media instanceof HTMLImageElement
+      ? props.resultAudioSrc
+        ? ""
+        : props.resultSrc
+      : media instanceof HTMLVideoElement
+        ? props.resultVideoSrc
+        : props.resultAudioSrc;
+  if (expected && media.currentSrc === new URL(expected, location.href).href) {
+    displayedResultKey = resultIdentity();
+    readDisplayedResult();
+  }
+}
 
 /*
  * A clip and an audio print carry their own transport along the bottom edge,
@@ -245,6 +289,7 @@ watch(
         :src="resultMeshSrc"
         :poster="resultSrc"
         alt="Generated 3-D mesh"
+        @ready="recordMeshDisplayed"
         auto-rotate
         expandable
       />
@@ -256,12 +301,14 @@ watch(
         controls
         loop
         playsinline
+        @loadeddata="markDisplayedResult"
         data-test="canvas-video"
       />
       <img
         v-else-if="resultSrc"
         class="canvas__img"
         :class="{ 'ms-alpha-bed': resultAlpha && !resultAudioSrc }"
+        @load="markDisplayedResult"
         data-test="canvas-image"
         :src="resultSrc"
         :alt="
@@ -273,6 +320,7 @@ watch(
         class="canvas__audio"
         controls
         :src="resultAudioSrc"
+        @loadeddata="markDisplayedResult"
         data-test="canvas-audio"
       />
       <div

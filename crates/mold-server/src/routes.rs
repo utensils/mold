@@ -387,6 +387,11 @@ use crate::queue::clean_error_message;
         get_queue_job,
         export_held_queue_job,
         complete_held_queue_transfer,
+        crate::queue_transfer_reservation::lookup,
+        crate::queue_transfer_reservation::reserve,
+        crate::queue_transfer_reservation::seal,
+        crate::queue_transfer_reservation::release,
+        crate::queue_transfer_reservation::abort_destination,
         get_queue_job_preview,
         crate::queue_input_thumbnail::get,
         crate::queue_input_thumbnail::list,
@@ -645,6 +650,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/generate/stream", post(generate_stream))
         .route("/api/generation-batches", post(admit_generation_batch))
         .route(
+            "/api/generation-transfers/abort",
+            post(crate::queue_transfer_reservation::abort_destination),
+        )
+        .route(
             "/api/generation-batches/transfer",
             post(admit_generation_transfer),
         )
@@ -772,6 +781,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/models/pull", post(pull_model_endpoint))
         .route("/api/models/unload", delete(unload_model))
         .route("/api/gallery", get(list_gallery))
+        .route(
+            "/api/gallery/sync-checkpoint",
+            get(crate::gallery_sync::checkpoint),
+        )
         .route(
             "/api/gallery/source-media/:filename",
             get(crate::gallery_source_media::inventory),
@@ -964,6 +977,22 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/queue/:id/retry", post(retry_queue_job))
         .route("/api/queue/:id/transfer", post(export_held_queue_job))
+        .route(
+            "/api/queue/:id/transfer/reservation",
+            get(crate::queue_transfer_reservation::lookup),
+        )
+        .route(
+            "/api/queue/:id/transfer/reserve",
+            post(crate::queue_transfer_reservation::reserve),
+        )
+        .route(
+            "/api/queue/:id/transfer/seal",
+            post(crate::queue_transfer_reservation::seal),
+        )
+        .route(
+            "/api/queue/:id/transfer/release",
+            post(crate::queue_transfer_reservation::release),
+        )
         .route(
             "/api/queue/:id/transfer/complete",
             post(complete_held_queue_transfer),
@@ -3380,6 +3409,20 @@ pub(crate) async fn cancel_generation_batch_children(
         .filter(|child| !matches!(child.state.as_str(), "complete" | "failed" | "cancelled"))
         .map(|child| child.job_id.clone())
         .collect();
+    let journal = state.queue_journal.clone();
+    let transfer_candidates = pending.clone();
+    let reserved = spawn_queue_read(move || {
+        for job in transfer_candidates {
+            if journal.transfer_reserved(&job)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    })
+    .await?;
+    if reserved {
+        return Err(ApiError::with_code("A batch child is reserved for a transfer. Resolve its destination before cancelling this batch.", "QUEUE_TRANSFER_RESERVED", StatusCode::CONFLICT));
+    }
     for job_id in pending {
         cancel_one_queue_job(state, &job_id).await?;
     }
@@ -7675,6 +7718,11 @@ async fn cancel_queue_job(
     // in-memory lifecycle transition and explicitly dropped before the final
     // DB mutation.
     let _durable_transition = state.queue_journal.lock_durable_transition().await;
+    let journal = state.queue_journal.clone();
+    let transfer_id = id.clone();
+    if spawn_queue_read(move || journal.transfer_reserved(&transfer_id)).await? {
+        return Err(ApiError::with_code("This job is reserved for a transfer. Retry that destination to reconcile acceptance before cancelling.", "QUEUE_TRANSFER_RESERVED", StatusCode::CONFLICT));
+    }
     if query.only_held {
         // Checked under the same transition lock Retry and feeder publication
         // take, so a held row cannot be retried and start rendering between
@@ -7767,10 +7815,26 @@ async fn cancel_one_queue_job(
 
 /// Fence transfer operations to one held batch child. Called under the same
 /// durable transition lock as Retry, Cancel and feeder publication.
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+struct TransferAuthority {
+    #[serde(flatten)]
+    authority: mold_core::GenerationRetryRequest,
+    #[serde(default)]
+    transfer_id: Option<String>,
+    #[serde(default)]
+    destination_transfer_identity: Option<String>,
+}
+impl std::ops::Deref for TransferAuthority {
+    type Target = mold_core::GenerationRetryRequest;
+    fn deref(&self) -> &Self::Target {
+        &self.authority
+    }
+}
+
 async fn validate_held_transfer(
     state: &AppState,
     id: &str,
-    authority: &mold_core::GenerationRetryRequest,
+    authority: &TransferAuthority,
 ) -> Result<(), ApiError> {
     let journal = state.queue_journal.clone();
     let lookup_id = id.to_string();
@@ -7779,8 +7843,8 @@ async fn validate_held_transfer(
         .ok_or_else(|| ApiError::queue_job_not_found("Held job no longer exists"))?;
     if authority.instance_id != *state.instance_id
         || authority.job_id != id
-        || row.batch_id.as_deref() != Some(&authority.batch_id)
-        || row.client_batch_id.as_deref() != Some(&authority.client_batch_id)
+        || row.batch_id.as_deref().unwrap_or_default() != authority.batch_id
+        || row.client_batch_id.as_deref().unwrap_or_default() != authority.client_batch_id
     {
         return Err(ApiError::with_code(
             "The source job's identity changed. Refresh and try again.",
@@ -7788,7 +7852,33 @@ async fn validate_held_transfer(
             StatusCode::CONFLICT,
         ));
     }
-    if row.state != mold_db::generation_queue::QueueRowState::Held {
+    let journal = state.queue_journal.clone();
+    let lookup_id = id.to_string();
+    let reserved = spawn_queue_read(move || journal.transfer_reserved(&lookup_id)).await?;
+    if !reserved {
+        return Err(ApiError::with_code("Update this client to move jobs: reserve the original before exporting or completing a transfer.","QUEUE_TRANSFER_RESERVATION_REQUIRED",StatusCode::CONFLICT));
+    }
+    if reserved {
+        let binding = state
+            .queue_journal
+            .transfer_reservation(id)
+            .map_err(|_| ApiError::internal("Could not read transfer binding"))?;
+        if binding
+            != authority
+                .transfer_id
+                .clone()
+                .zip(authority.destination_transfer_identity.clone())
+        {
+            return Err(ApiError::with_code(
+                "This job is reserved by another transfer. Retry its destination.",
+                "QUEUE_TRANSFER_CONFLICT",
+                StatusCode::CONFLICT,
+            ));
+        }
+    }
+    if row.state != mold_db::generation_queue::QueueRowState::Held
+        && !(reserved && row.state == mold_db::generation_queue::QueueRowState::Paused)
+    {
         return Err(ApiError::with_code(
             "This job is no longer held. Nothing was changed on the source.",
             "QUEUE_JOB_NOT_HELD",
@@ -7800,13 +7890,13 @@ async fn validate_held_transfer(
 
 #[utoipa::path(post, path = "/api/queue/{id}/transfer", tag = "queue",
     params(("id" = String, Path, description = "Held job id")),
-    request_body = mold_core::GenerationRetryRequest,
+    request_body = TransferAuthority,
     responses((status = 200, description = "Portable original request and media", body = GenerateRequest),
               (status = 409, description = "Job is not held or identity changed")))]
 async fn export_held_queue_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(authority): Json<mold_core::GenerationRetryRequest>,
+    Json(authority): Json<TransferAuthority>,
 ) -> Result<impl IntoResponse, ApiError> {
     {
         let _transition = state.queue_journal.lock_durable_transition().await;
@@ -7836,13 +7926,13 @@ async fn export_held_queue_job(
 
 #[utoipa::path(post, path = "/api/queue/{id}/transfer/complete", tag = "queue",
     params(("id" = String, Path, description = "Held source job id")),
-    request_body = mold_core::GenerationRetryRequest,
+    request_body = TransferAuthority,
     responses((status = 204, description = "Held source cancelled after destination acceptance"),
               (status = 409, description = "Source is no longer held")))]
 async fn complete_held_queue_transfer(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(authority): Json<mold_core::GenerationRetryRequest>,
+    Json(authority): Json<TransferAuthority>,
 ) -> Result<StatusCode, ApiError> {
     let _transition = state.queue_journal.lock_durable_transition().await;
     validate_held_transfer(&state, &id, &authority).await?;
@@ -8122,6 +8212,14 @@ async fn cancel_all_queue(
     State(state): State<AppState>,
 ) -> Result<Json<QueueCancelAllResponse>, ApiError> {
     let _durable_transition = state.queue_journal.lock_durable_transition().await;
+    let journal = state.queue_journal.clone();
+    if spawn_queue_read(move || journal.any_transfer_reserved()).await? {
+        return Err(ApiError::with_code(
+            "A job is reserved for a transfer. Resolve that transfer before emptying this queue.",
+            "QUEUE_TRANSFER_RESERVED",
+            StatusCode::CONFLICT,
+        ));
+    }
     let live_cancelled = {
         let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
         state.job_registry.cancel_all_queued_ids()
@@ -8375,6 +8473,8 @@ async fn server_capabilities(
         queue: mold_core::QueueCapabilities {
             can_pause: true,
             can_pause_job: true,
+            pre_render_transfer: durable_queue,
+            transfer_identity: state.queue_journal.transfer_identity(),
             can_cancel_all: true,
             can_reorder: true,
             stable_device_pins: true,

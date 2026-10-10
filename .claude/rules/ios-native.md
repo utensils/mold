@@ -167,15 +167,16 @@ Native CI splits media exports into delivery, video accessibility and mesh acces
 
 Queue inputs use shared QueueInput descriptors and QueueInputPreview loading. Details independently load every ordered input, with role labels and explicit failed/nonimage previews; rows show an input image and additional-input count. Older hosts fall back only on missing additive routes. A failed member must not hide later images. Host/instance/job fencing and removal pruning apply to the entire set.
 
-Library New badges compare filenames with the previous session visit, using the
-whole active pool and a stable per-view snapshot. First visit establishes a
-baseline; selected viewer media immediately calls `Visit.markViewed`, preserving
-unopened badges within the visit and the previous next-visit clearing behavior.
-`LibraryUnreadLedger` persists device-local icon counts across launches. Count the
-merged visible active inventory, excluding hidden collections and Trash; retain
-offline read state. Opening Library uses its existing whole-pool seen behavior
-to clear the icon count. iOS serializes badge writes and flushes background
-refresh; macOS updates the Dock. Badge rows must fit machine
+Library New badges and unread counts share persisted client-local viewing state.
+Only individually displayed viewer media is read; opening Library, refreshes,
+filters and neighboring preloads must not clear unread media. Preserve current
+read status on upgrade and establish an initial baseline for newly connected
+hosts. Later arrivals remain unread across visits and relaunches. Count merged
+visible active inventory, excluding hidden collections and Trash; retain offline
+history. iOS navigation and native icon badges follow that same ledger, with the
+existing permission/preference controls. Do not let activation-only arrival
+trackers overwrite the persistent count.
+Badge rows must fit machine
 labels beside playback without overlap, including narrow tiles.
 
 Use These Settings starts from fresh selected-print media, including parked wells.

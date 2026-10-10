@@ -2,6 +2,11 @@ import Foundation
 
 // Changing what is in a gallery, and getting things out of it.
 public extension HTTPBackend {
+    func galleryPrint(_ filename: String) async throws -> GalleryPrint? {
+        guard case let .fresh(prints, _) = try await galleryListing(view: nil, etag: nil, filename: filename) else { throw MoldClientError.malformedResponse }
+        return prints.first { $0.filename == filename }
+    }
+
     func patch(_ filename: String, with patch: GalleryPatch) async throws {
         var request = self.request("/api/gallery/image/\(escaped(filename))")
         request.httpMethod = "PATCH"
@@ -154,5 +159,29 @@ public extension HTTPBackend {
         var request = self.request("/api/gallery/assets/\(escaped(filename))/\(escaped(assetID))")
         request.timeoutInterval = 300
         return try await bytes(for: request)
+    }
+}
+
+public extension HTTPBackend {
+    func gallerySyncCheckpoint() async throws -> GallerySyncCheckpoint? {
+        do {
+            let (stream, http) = try await relayBytes(request("/api/gallery/sync-checkpoint"))
+            if http.statusCode == 404 || http.statusCode == 405 { return nil }
+            guard http.statusCode == 200 else {
+                throw MoldClientError.http(status: http.statusCode, code: nil, message: nil)
+            }
+            // At least 20,000 maximum-length filenames fit; larger inventories
+            // fall back to ordinary verification rather than failing sync.
+            let ceiling = 16 * 1024 * 1024
+            if http.expectedContentLength > Int64(ceiling) { return nil }
+            let data: Data
+            do { data = try await stream.collected(upTo: ceiling) }
+            catch is ResponseCeiling.Exceeded { return nil }
+            let checkpoint = try MoldJSON.decoder.decode(GallerySyncCheckpoint.self, from: data)
+            return checkpoint.protocolVersion == 1 ? checkpoint : nil
+        } catch let error as MoldClientError {
+            if case let .http(status, _, _) = error, status == 404 || status == 405 { return nil }
+            throw error
+        }
     }
 }

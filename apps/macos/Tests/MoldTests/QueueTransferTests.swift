@@ -43,6 +43,108 @@ struct QueueTransferTests {
         return (hosts, TransferStore(hosts: hosts, queue: queue), source, destination, sourceFake, destFake)
     }
 
+    private func modernPair() async -> (HostStore, TransferStore, MoldHost, MoldHost, FakeBackend, FakeBackend) {
+        let (hosts,transfers,source,destination,sourceFake,destFake) = await pair()
+        let encoded = try! MoldJSON.encoder.encode(sourceFake.capabilityBlock!)
+        var json = try! JSONSerialization.jsonObject(with: encoded) as! [String:Any]
+        var queue = json["queue"] as? [String:Any] ?? [:]; queue["pre_render_transfer"] = true; queue["transfer_identity"] = "src-1"; json["queue"] = queue
+        sourceFake.capabilityBlock = try! MoldJSON.decoder.decode(Capabilities.self,from: JSONSerialization.data(withJSONObject:json))
+        queue["transfer_identity"] = "dst-1"; json["queue"] = queue
+        destFake.capabilityBlock = try! MoldJSON.decoder.decode(Capabilities.self,from:JSONSerialization.data(withJSONObject:json))
+        hosts.capabilities[source.id] = sourceFake.capabilityBlock
+        hosts.capabilities[destination.id] = destFake.capabilityBlock
+        await hosts.refresh(source)
+        await hosts.refresh(destination)
+        sourceFake.sourceReservation = try! MoldJSON.decoder.decode(QueueTransferReservation.self, from: Data(#"{"transfer_id":"11111111-1111-4111-8111-111111111111","destination_transfer_identity":"dst-1"}"#.utf8))
+        return (hosts,transfers,source,destination,sourceFake,destFake)
+    }
+    @Test func modernTransferReservesExportsAndSealsBeforeAdmission() async {
+        let (_,transfers,source,destination,sourceFake,destFake)=await modernPair()
+        let id="11111111-1111-4111-8111-111111111111"
+        let entry=FakeFixtures.queueEntry("job-1",state:"paused",batchId:"b1",clientBatchId:"cb1")
+        let encoded=try! MoldJSON.encoder.encode(entry)
+        sourceFake.queueJobDetails[entry.id]=try! MoldJSON.decoder.decode(QueueJobDetail.self,from:Data(("{\"job\":"+String(data:encoded,encoding:.utf8)!+"}").utf8))
+        sourceFake.exportBodies[entry.id]=Data("{}".utf8)
+        destFake.plantedErrors["batchStatusByClientId"] = MoldClientError.http(status:404,code:nil,message:nil)
+        destFake.admitAnswer=landedBatch(instanceId:"dst-1",clientBatchId:id)
+        _=await transfers.transfer(entry,from:source.id,to:destination.id)
+        let stages=sourceFake.calls.filter { ["reserveTransfer","exportHeldJob","sealTransfer","completeTransfer"].contains($0) }
+        #expect(stages == ["reserveTransfer","exportHeldJob","sealTransfer","completeTransfer"])
+        #expect(destFake.transferAdmissions.first?.clientBatchId == id)
+    }
+    @Test func modernTransferDoesNotAdmitWhenSealFails() async {
+        let (_,transfers,source,destination,sourceFake,destFake)=await modernPair()
+        let entry=FakeFixtures.queueEntry("job-1",state:"held",batchId:"b1",clientBatchId:"cb1")
+        sourceFake.queueJobDetails[entry.id]=heldDetail(jobId:entry.id)
+        sourceFake.exportBodies[entry.id]=Data("{}".utf8)
+        destFake.plantedErrors["batchStatusByClientId"] = MoldClientError.http(status:404,code:nil,message:nil)
+        sourceFake.plantedErrors["sealTransfer"] = MoldClientError.http(status:409,code:nil,message:nil)
+        _=await transfers.transfer(entry,from:source.id,to:destination.id)
+        #expect(!destFake.calls.contains("admitTransfer"))
+        #expect(sourceFake.completedTransfers.isEmpty)
+    }
+
+    @Test func modernDefiniteRefusalRestoresOnlyWithDestinationTombstone() async {
+        let (_,transfers,source,destination,sourceFake,destFake)=await modernPair()
+        let entry=FakeFixtures.queueEntry("job-1",state:"held",batchId:"b1",clientBatchId:"cb1")
+        sourceFake.queueJobDetails[entry.id]=heldDetail(jobId:entry.id)
+        sourceFake.exportBodies[entry.id]=Data("{}".utf8)
+        destFake.plantedErrors["batchStatusByClientId"] = MoldClientError.http(status:404,code:nil,message:nil)
+        destFake.plantedErrors["admitTransfer"] = MoldClientError.http(status:422,code:nil,message:nil)
+        destFake.transferAbortAnswer=try! MoldJSON.decoder.decode(QueueTransferAbortResult.self,from:Data(#"{"transfer_id":"11111111-1111-4111-8111-111111111111","destination_transfer_identity":"dst-1","abort_receipt":"22222222-2222-4222-8222-222222222222"}"#.utf8))
+        _=await transfers.transfer(entry,from:source.id,to:destination.id)
+        #expect(destFake.calls.contains("abortDestinationTransfer"))
+        #expect(sourceFake.releasedReservationRequests.first?.abortReceipt == "22222222-2222-4222-8222-222222222222")
+        #expect(sourceFake.completedTransfers.isEmpty)
+    }
+    @Test func modernLostAbortResponseKeepsOriginalReserved() async {
+        let (_,transfers,source,destination,sourceFake,destFake)=await modernPair()
+        let entry=FakeFixtures.queueEntry("job-1",state:"held",batchId:"b1",clientBatchId:"cb1")
+        sourceFake.queueJobDetails[entry.id]=heldDetail(jobId:entry.id)
+        sourceFake.exportBodies[entry.id]=Data("{}".utf8)
+        destFake.plantedErrors["batchStatusByClientId"] = MoldClientError.http(status:404,code:nil,message:nil)
+        destFake.plantedErrors["admitTransfer"] = MoldClientError.http(status:422,code:nil,message:nil)
+        destFake.plantedErrors["abortDestinationTransfer"] = URLError(.timedOut)
+        _=await transfers.transfer(entry,from:source.id,to:destination.id)
+        #expect(sourceFake.releasedReservationRequests.isEmpty)
+        #expect(sourceFake.completedTransfers.isEmpty)
+    }
+
+    @Test func modernAcceptedFailedDestinationRestoresOriginal() async {
+        let (_,transfers,source,destination,sourceFake,destFake)=await modernPair()
+        let id="11111111-1111-4111-8111-111111111111"
+        let entry=FakeFixtures.queueEntry("job-1",state:"held",batchId:"b1",clientBatchId:"cb1")
+        sourceFake.queueJobDetails[entry.id]=heldDetail(jobId:entry.id)
+        destFake.batchStatusByClientId[id]=landedBatch(instanceId:"dst-1",clientBatchId:id,states:[.failed])
+        destFake.transferAbortAnswer=try! MoldJSON.decoder.decode(QueueTransferAbortResult.self,from:Data(#"{"transfer_id":"11111111-1111-4111-8111-111111111111","destination_transfer_identity":"dst-1","abort_receipt":"22222222-2222-4222-8222-222222222222"}"#.utf8))
+        _=await transfers.transfer(entry,from:source.id,to:destination.id)
+        #expect(sourceFake.releasedReservationRequests.count == 1)
+        #expect(sourceFake.completedTransfers.isEmpty)
+        #expect(!destFake.calls.contains("admitTransfer"))
+    }
+
+    @Test func modernDestinationRestartReconcilesSameDurableIdentity() async {
+        let (hosts,transfers,source,destination,sourceFake,destFake)=await modernPair()
+        let id="11111111-1111-4111-8111-111111111111"
+        var json=try! JSONSerialization.jsonObject(with:MoldJSON.encoder.encode(destFake.capabilityBlock!)) as! [String:Any]
+        var queue=json["queue"] as! [String:Any];queue["transfer_identity"]="stable-destination";json["queue"]=queue
+        destFake.capabilityBlock=try! MoldJSON.decoder.decode(Capabilities.self,from:JSONSerialization.data(withJSONObject:json))
+        destFake.serverStatus=FakeFixtures.serverStatus(instanceId:"dst-after-restart")
+        await hosts.refresh(destination);hosts.capabilities[destination.id]=destFake.capabilityBlock
+        sourceFake.sourceReservation=try! MoldJSON.decoder.decode(QueueTransferReservation.self,from:Data(#"{"transfer_id":"11111111-1111-4111-8111-111111111111","destination_transfer_identity":"stable-destination"}"#.utf8))
+        let entry=FakeFixtures.queueEntry("job-1",state:"held",batchId:"b1",clientBatchId:"cb1")
+        sourceFake.queueJobDetails[entry.id]=heldDetail(jobId:entry.id)
+        destFake.batchStatusByClientId[id]=landedBatch(instanceId:"dst-after-restart",clientBatchId:id)
+        _=await transfers.transfer(entry,from:source.id,to:destination.id)
+        #expect(sourceFake.completedTransfers.first?.destinationTransferIdentity == "stable-destination")
+        #expect(!destFake.calls.contains("admitTransfer"))
+        queue["transfer_identity"]="replacement-owner";json["queue"]=queue
+        hosts.capabilities[destination.id]=try! MoldJSON.decoder.decode(Capabilities.self,from:JSONSerialization.data(withJSONObject:json))
+        let refused=await transfers.transfer(entry,from:source.id,to:destination.id)
+        if case .refused? = refused {} else { Issue.record("Replaced destination owner must be refused") }
+        #expect(sourceFake.completedTransfers.count == 1)
+    }
+
     private func heldDetail(jobId: String, batchId: String = "b1", clientBatchId: String = "cb1") -> QueueJobDetail {
         let entry = FakeFixtures.queueEntry(jobId, state: "held", batchId: batchId, clientBatchId: clientBatchId)
         let entryJSON = String(data: try! MoldJSON.encoder.encode(entry), encoding: .utf8)!

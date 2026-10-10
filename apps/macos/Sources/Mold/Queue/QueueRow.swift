@@ -23,6 +23,8 @@ struct QueueRow: View {
     var moveUp: () -> Void = {}
     var moveDown: () -> Void = {}
     var inspect: (() -> Void)? = nil
+    var moveToDestinations: [TransferStore.TransferDestination] = []
+    var moveTo: (MoldHost.ID) -> Void = { _ in }
     let act: (Action) -> Void
 
     var body: some View {
@@ -57,6 +59,7 @@ struct QueueRow: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Details for \(entry.modelHeadline)")
             .disabled(inspect == nil)
+            MoveToMenu(destinations: moveToDestinations, send: moveTo)
             buttons
         }
         .padding(.vertical, 3)

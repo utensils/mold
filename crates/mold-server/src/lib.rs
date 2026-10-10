@@ -17,6 +17,7 @@ pub mod gallery_authority;
 mod gallery_media_transfer;
 mod gallery_source_media;
 mod gallery_source_thumbnail;
+mod gallery_sync;
 mod generation_assets;
 #[allow(dead_code)]
 mod h3_admission;
@@ -84,6 +85,7 @@ mod queue_media_lifecycle;
 pub mod queue_media_runtime;
 mod queue_retention;
 mod queue_transfer;
+mod queue_transfer_reservation;
 mod routes_mesh_workflows;
 // This dependency-free policy seam lands default-dark. The concrete
 // schema/store adapter activates it atomically with queue-media admission.

@@ -42,9 +42,20 @@ public protocol MoldQueueBackend: Sendable {
     /// Cancels the held source row, and ONLY after the destination accepted
     /// (`routes.rs:7584-7599`).
     func completeTransfer(_ authority: QueueAuthority) async throws
+    func transferReservation(id: String) async throws -> QueueTransferReservation?
+    func reserveTransfer(_ request: QueueTransferReservationRequest) async throws
+    func abortDestinationTransfer(_ request: QueueTransferAbortRequest) async throws -> QueueTransferAbortResult
+    func sealTransfer(_ request: QueueTransferReservationRequest) async throws
+    func releaseTransfer(_ request: QueueTransferReservationRequest) async throws
 }
 
 public extension MoldQueueBackend {
+    func abortDestinationTransfer(_ request: QueueTransferAbortRequest) async throws -> QueueTransferAbortResult { throw MoldClientError.malformedResponse }
+    func transferReservation(id: String) async throws -> QueueTransferReservation? { throw MoldClientError.malformedResponse }
+    func reserveTransfer(_ request: QueueTransferReservationRequest) async throws { throw MoldClientError.malformedResponse }
+    func sealTransfer(_ request: QueueTransferReservationRequest) async throws { throw MoldClientError.malformedResponse }
+    func releaseTransfer(_ request: QueueTransferReservationRequest) async throws { throw MoldClientError.malformedResponse }
+
     func queueInputs(id: String) async throws -> [QueueInput] {
         [QueueInput(label: "Source", preview: true)]
     }

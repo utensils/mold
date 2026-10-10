@@ -68,6 +68,9 @@ enum PreferencesReset {
     /// would desynchronise its scheduler from what it believes it agreed with
     /// the user (review F5#6).
     static let kept: Set<String> = [
+        // Library Settings owns this control; preserve the active scheduler's
+        // interval along with its persisted choice during a General reset.
+        "library.syncIntervalMinutes.v1",
         // Sync Details owns an explicit Reset Acknowledgments control.
         "library.acknowledgedSyncIssues.v1",
         "appearance",
@@ -93,6 +96,10 @@ enum PreferencesReset {
         "videoPlaybackAutoplay",
         "videoPlaybackRepeat",
     ]
+
+    /// Per-copy recovery receipts have dynamically derived suffixes. They are
+    /// transfer bookkeeping, and clearing them would discard resume evidence.
+    static let keptPrefixes: Set<String> = ["librarySyncCompletedCopyV1."]
 
     static func reset(in defaults: UserDefaults) {
         for key in keys { defaults.removeObject(forKey: key) }

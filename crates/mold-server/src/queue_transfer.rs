@@ -13,7 +13,9 @@ pub(crate) fn export_request(
     db: Option<&mold_db::MetadataDb>,
 ) -> anyhow::Result<Vec<u8>> {
     let row = journal.row(id)?.context("held job no longer exists")?;
-    if row.state != QueueRowState::Held {
+    if row.state != QueueRowState::Held
+        && !(row.state == QueueRowState::Paused && journal.transfer_reserved(id)?)
+    {
         bail!("Only a held job can be sent to another machine");
     }
     let mut request = ZeroizingGenerateRequest::from_owned(
@@ -56,6 +58,20 @@ pub(crate) fn export_request(
     // Serialize while the zeroizing request and all authenticated staging
     // holds are alive. The response is explicitly no-store at the HTTP seam.
     Ok(serde_json::to_vec(&*request)?)
+}
+
+pub(crate) fn validate_portability(journal: &QueueJournal, id: &str) -> anyhow::Result<()> {
+    let row = journal.row(id)?.context("Job no longer exists")?;
+    let request = ZeroizingGenerateRequest::from_owned(serde_json::from_str::<GenerateRequest>(
+        &row.request_json,
+    )?);
+    if request.lora.is_some() || request.loras.as_ref().is_some_and(|rows| !rows.is_empty()) {
+        bail!("This job uses a machine-local LoRA and cannot be moved. Reuse its settings on the destination.");
+    }
+    if request.hdr_exr_dir.is_some() || request.mesh_workflow.is_some() {
+        bail!("This job belongs to a machine-local workflow and cannot be moved independently.");
+    }
+    Ok(())
 }
 
 fn portable_request(request: &mut GenerateRequest) -> anyhow::Result<()> {

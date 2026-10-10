@@ -855,6 +855,117 @@ impl QueueJournal {
         self.max_replay_seen
     }
 
+    pub(crate) fn transfer_identity(&self) -> Option<String> {
+        self.owner_uuid().map(|owner| {
+            format!(
+                "{:x}",
+                Sha256::digest(format!("mold.queue-transfer.owner.v1:{owner}").as_bytes())
+            )
+        })
+    }
+
+    pub(crate) fn transfer_reservation(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<(String, String)>> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(None);
+        };
+        mold_db::queue_transfer::get(db, owner, id)
+    }
+
+    pub(crate) fn any_transfer_reserved(&self) -> anyhow::Result<bool> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(false);
+        };
+        mold_db::queue_transfer::any(db, owner)
+    }
+
+    pub(crate) fn transfer_reserved(&self, id: &str) -> anyhow::Result<bool> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(false);
+        };
+        mold_db::queue_transfer::contains(db, owner, id)
+    }
+
+    pub(crate) fn reserve_transfer(
+        &self,
+        id: &str,
+        transfer: &str,
+        destination: &str,
+    ) -> anyhow::Result<mold_db::queue_transfer::ReserveOutcome> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(mold_db::queue_transfer::ReserveOutcome::NotOwned);
+        };
+        let result =
+            mold_db::queue_transfer::reserve(db, owner, id, transfer, destination, now_ms())?;
+        if result == mold_db::queue_transfer::ReserveOutcome::Reserved {
+            self.publish_state_committed(id);
+        }
+        Ok(result)
+    }
+
+    pub(crate) fn seal_transfer(
+        &self,
+        id: &str,
+        transfer: &str,
+        destination: &str,
+    ) -> anyhow::Result<bool> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(false);
+        };
+        mold_db::queue_transfer::seal(db, owner, id, transfer, destination)
+    }
+
+    pub(crate) fn abort_destination_transfer(
+        &self,
+        transfer: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            anyhow::bail!("Durable queue unavailable")
+        };
+        mold_db::queue_transfer::abort_destination(
+            db,
+            owner,
+            transfer,
+            &uuid::Uuid::new_v4().to_string(),
+        )
+    }
+    pub(crate) fn release_aborted_transfer(
+        &self,
+        job: &str,
+        transfer: &str,
+        destination: &str,
+    ) -> anyhow::Result<bool> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(false);
+        };
+        let released = mold_db::queue_transfer::release_aborted(
+            db,
+            owner,
+            job,
+            transfer,
+            destination,
+            now_ms(),
+        )?;
+        if released {
+            self.publish_state_committed(job);
+        }
+        Ok(released)
+    }
+
+    pub(crate) fn release_transfer(&self, id: &str, transfer: &str) -> anyhow::Result<bool> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(false);
+        };
+        let released = mold_db::queue_transfer::release(db, owner, id, transfer, now_ms())?;
+        if released {
+            self.publish_state_committed(id);
+            self.wake_feeder();
+        }
+        Ok(released)
+    }
+
     fn db(&self) -> Option<&MetadataDb> {
         self.db.as_ref().as_ref()
     }
@@ -2827,6 +2938,22 @@ mod tests {
     /// reclaim ITS OWN identity, not merely one nobody is holding — otherwise
     /// it replays a peer's retained jobs under its own GPUs and configuration
     /// while its own rows sit unreplayed under another id.
+    #[test]
+    fn transfer_identity_survives_process_restart_but_not_queue_owner_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let before = QueueJournal::new(db.clone(), Some(root.path()), "process-a");
+        let identity = before.transfer_identity().unwrap();
+        assert_eq!(identity.len(), 64);
+        assert_ne!(Some(identity.as_str()), before.owner_uuid());
+        drop(before);
+        let after = QueueJournal::new(db.clone(), Some(root.path()), "process-b");
+        assert_eq!(after.transfer_identity(), Some(identity.clone()));
+        let replacement = QueueJournal::new(db, Some(other.path()), "process-c");
+        assert_ne!(replacement.transfer_identity(), Some(identity));
+    }
+
     #[test]
     fn a_restart_reclaims_its_own_identity_not_whichever_is_unlocked() {
         let home = tempfile::tempdir().unwrap();

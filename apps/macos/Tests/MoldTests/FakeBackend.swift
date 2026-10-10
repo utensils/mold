@@ -90,6 +90,10 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     nonisolated(unsafe) var retainedTransferOfferResponder: (@MainActor (String) async throws -> RetainedSourceMedia.TransferOffer)?
     nonisolated(unsafe) var retainedTransfers: [(String, RetainedSourceMedia.Transfer)] = []
     nonisolated(unsafe) var retainedInventoryResponder: (@MainActor (String) async throws -> RetainedSourceMedia.Inventory)?
+    nonisolated(unsafe) var galleryPrintResponder: (@MainActor (String) async throws -> GalleryPrint?)?
+    nonisolated(unsafe) var galleryETags: [String?] = []
+    nonisolated(unsafe) var conditionalGallery = false
+    nonisolated(unsafe) var syncCheckpoint: [String: String]?
     let noRetainedMedia: Bool
     /// Every filename an inventory was asked for, in call order -- which is
     /// how a test pins that EVERY known copy of a print was probed.
@@ -773,6 +777,10 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     nonisolated(unsafe) var queueYields = false
 
     nonisolated(unsafe) var queueThumbnailBytes: Data?
+    func queueInputs(id: String) async throws -> [QueueInput] {
+        try record("queueInputs")
+        return [QueueInput(label: "Source", preview: true)]
+    }
     nonisolated(unsafe) var queueThumbnailPending = false
     nonisolated(unsafe) var queueThumbnailReturned = false
     func queueInputThumbnail(id: String) async throws -> Data {
@@ -834,6 +842,15 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         guard !batchListings.isEmpty else { throw notPlanted() }
         return batchListings.removeFirst()
     }
+    nonisolated(unsafe) var sourceReservation: QueueTransferReservation?
+    nonisolated(unsafe) var releasedReservationRequests: [QueueTransferReservationRequest] = []
+    nonisolated(unsafe) var transferAbortAnswer: QueueTransferAbortResult?
+    func transferReservation(id: String) async throws -> QueueTransferReservation? { try record("transferReservation"); return sourceReservation }
+    func reserveTransfer(_ request: QueueTransferReservationRequest) async throws { try record("reserveTransfer") }
+    func sealTransfer(_ request: QueueTransferReservationRequest) async throws { try record("sealTransfer") }
+    func releaseTransfer(_ request: QueueTransferReservationRequest) async throws { try record("releaseTransfer"); releasedReservationRequests.append(request) }
+    func abortDestinationTransfer(_ request: QueueTransferAbortRequest) async throws -> QueueTransferAbortResult { try record("abortDestinationTransfer"); guard let transferAbortAnswer else { throw notPlanted() }; return transferAbortAnswer }
+
     func exportHeldJob(_ authority: QueueAuthority) async throws -> Data {
         try record("exportHeldJob")
         guard let body = exportBodies[authority.jobId] else { throw notPlanted() }
@@ -934,8 +951,10 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     // MARK: - Gallery
 
     func gallery(etag: String?) async throws -> Fetched<[GalleryPrint]> {
+        galleryETags.append(etag)
         try record("gallery")
         await pause("gallery")
+        if conditionalGallery, etag == "fake-etag" { return .notModified }
         return .fresh(prints, etag: "fake-etag")
     }
     func trashedPrints(etag: String?) async throws -> Fetched<[GalleryPrint]> {

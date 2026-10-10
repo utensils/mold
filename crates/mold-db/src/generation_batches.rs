@@ -205,6 +205,14 @@ pub fn insert_or_get(
     children: &[(GenerationBatchChildRow, GenerationQueueRow)],
 ) -> Result<(GenerationBatchDetail, bool)> {
     db.transact_immediate(|conn| {
+        anyhow::ensure!(
+            !crate::queue_transfer::admission_aborted(
+                conn,
+                &batch.owner_uuid,
+                &batch.client_batch_id
+            )?,
+            "Transfer admission was durably aborted"
+        );
         if let Some(existing) =
             get_by_client_on_conn(conn, &batch.owner_uuid, &batch.client_batch_id)?
         {
@@ -314,6 +322,14 @@ pub fn insert_or_get_with_media(
     );
 
     db.transact_immediate(|conn| {
+        anyhow::ensure!(
+            !crate::queue_transfer::admission_aborted(
+                conn,
+                &batch.owner_uuid,
+                &batch.client_batch_id
+            )?,
+            "Transfer admission was durably aborted"
+        );
         if let Some(existing) =
             get_by_client_on_conn(conn, &batch.owner_uuid, &batch.client_batch_id)?
         {
@@ -872,6 +888,9 @@ pub fn retry_held_owned(
     now_ms: i64,
 ) -> Result<OwnedRetry> {
     db.transact_immediate(|conn| {
+        if crate::queue_transfer::contains_on_conn(conn, &authority.job_id)? {
+            return Ok(OwnedRetry::NotRetryable);
+        }
         if authority.instance_id != serving_instance_id {
             return Ok(OwnedRetry::AuthorityMismatch);
         }
@@ -1060,6 +1079,9 @@ pub fn cancel_all_queued(
         bail!("bulk queue cancellation requires a cancelled terminal outcome");
     }
     db.transact_immediate(|conn| {
+        let reserved: bool = conn.query_row("SELECT EXISTS (SELECT 1 FROM generation_queue_transfers WHERE owner_uuid=?1)", params![owner_uuid], |row|row.get(0))?;
+        if reserved { bail!("resolve reserved queue transfers before bulk cancellation"); }
+
         let inconsistent_child: Option<(String, String)> = conn
             .query_row(
                 "SELECT q.id, child.state

@@ -1,5 +1,5 @@
 import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import ResultCanvas from "./ResultCanvas.vue";
 import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
 import ProgressRing from "@ui/components/ProgressRing.vue";
@@ -471,4 +471,30 @@ describe("ResultCanvas alpha bed", () => {
       "ms-alpha-bed",
     );
   });
+});
+
+it("reads successfully displayed results only when visible and fences stale ready events", async () => {
+  const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+  const wrapper = mount(ResultCanvas, {
+    props: { mode: "result", resultSrc: "https://fixture.test/result.png" },
+  });
+  try {
+    const image = wrapper.get("[data-test='canvas-image']");
+    Object.defineProperty(image.element, "currentSrc", {
+      configurable: true,
+      value: "https://fixture.test/result.png",
+    });
+    await image.trigger("load");
+    expect(wrapper.emitted("viewed")).toBeUndefined();
+    hidden.mockReturnValue(false);
+    document.dispatchEvent(new Event("visibilitychange"));
+    expect(wrapper.emitted("viewed")).toHaveLength(1);
+    await wrapper.setProps({ resultSrc: "https://fixture.test/other.png" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    await image.trigger("load");
+    expect(wrapper.emitted("viewed")).toHaveLength(1);
+  } finally {
+    wrapper.unmount();
+    hidden.mockRestore();
+  }
 });

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { startLibraryUnreadObserver } from "./stores/libraryUnread";
 import { originApiTarget } from "./lib/originAuth";
 
 import HeldQueueTransferDialog from "@studio/components/HeldQueueTransferDialog.vue";
@@ -34,6 +35,8 @@ import {
 } from "./composables/useResources";
 
 const route = useRoute();
+const stopLibraryUnreadObserver = startLibraryUnreadObserver();
+onBeforeUnmount(stopLibraryUnreadObserver);
 
 // Singleton — mounted once, survives navigation.
 const downloads = useDownloads();
@@ -68,6 +71,15 @@ const queueTransfer = provideHeldQueueTransfer(
               ready: host.status === "ready" && !host.stale,
               gpuCount: host.routingLoad?.gpuCount,
               queueDepth: host.queueDepth,
+              transferIdentity:
+                routing.capabilitiesByHost.value[host.id]?.queue
+                  ?.transfer_identity,
+              preRenderTransfer:
+                routing.capabilitiesByHost.value[host.id]?.queue
+                  ?.pre_render_transfer === true,
+              generates:
+                !!routing.capabilitiesByHost.value[host.id]?.queue
+                  ?.heterogeneous_batch_max_outputs,
             },
           ]
         : [],

@@ -262,14 +262,22 @@ async function copyDetail(): Promise<void> {
       <div class="qed__actions">
         <button
           v-if="
-            model.held && transferHostId && transfer?.canSend(transferHostId)
+            transferHostId &&
+            transfer?.canSendState(
+              transferHostId,
+              model.running
+                ? 'running'
+                : model.held
+                  ? 'held'
+                  : model.stateCode.toLowerCase(),
+            )
           "
           type="button"
           data-test="queue-detail-transfer"
           :disabled="retrying || cancelling"
           @click="transfer.open(transferHostId, model.jobId)"
         >
-          Send to another machine…
+          Move to…
         </button>
         <button
           type="button"

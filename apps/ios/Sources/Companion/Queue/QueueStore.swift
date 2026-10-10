@@ -250,10 +250,18 @@ final class QueueStore {
         return true
     }
 
+    func beginTransfer(_ entry: QueueEntry, on id: MoldHost.ID) -> Bool {
+        guard !isActing(entry, on: id) else { return false }
+        acting.insert("\(id)|\(entry.id)")
+        return true
+    }
+    func endTransfer(_ entry: QueueEntry, on id: MoldHost.ID) { acting.remove("\(id)|\(entry.id)") }
+
     func canTransfer(_ entry: QueueEntry, on id: MoldHost.ID) -> Bool {
-        guard let row = actionable(entry, on: id), row.state == .held,
+        guard let row = actionable(entry, on: id),
+              QueueTransferEligibility.allows(row.state, reservedProtocol: hosts.capabilities[id]?.queue?.preRenderTransfer == true),
               let instance = hosts.instanceID(of: id) else { return false }
-        return row.authority(instanceId: instance) != nil
+        return row.transferAuthority(instanceId: instance, reservedProtocol: hosts.capabilities[id]?.queue?.preRenderTransfer == true) != nil
     }
 
     func canReorder(on id: MoldHost.ID) -> Bool {

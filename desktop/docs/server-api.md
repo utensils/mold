@@ -384,3 +384,20 @@ Current servers enforce `DELETE /api/queue/:id?only_held=true` atomically and
 refuse a job that has left Held. Older servers may ignore the query; update them
 for this safeguard. Clients must never widen a held-only cancellation intent
 after a failure or state change.
+
+### Library mirror checkpoints
+
+Authenticated `GET /api/gallery/sync-checkpoint` returns `protocol_version: 1`, `instance_id` and opaque filename-keyed `revisions`. Tokens cover committed archive metadata, unchanged regular-file facts and retained-member manifests. Missing or corrupt evidence omits a token. Clients skip only with matching source/destination tokens and route/instance/output evidence. This is O(N) metadata work, not a constant-time change feed. Unsupported or responses exceeding the client’s 16 MiB limit fall back to ordinary retained-input verification. Listings separately support conditional ETags.
+
+### Pre-render queue transfer recovery
+
+Servers advertising `queue.pre_render_transfer` allow queued, paused, and held source jobs to move until authoritative worker dispatch (`running`, shown as Rendering). Clients require the capability on both source and destination for the modern protocol; older source servers keep the existing Held-only path.
+
+- `GET /api/queue/:id/transfer/reservation` returns a saved transfer ID and stable destination queue identity, or null.
+- `POST /api/queue/:id/transfer/reserve` atomically reserves the original against dispatch using current queue authority plus `transfer_id` and `destination_transfer_identity`.
+- `POST /api/queue/:id/transfer/seal` must succeed before destination admission.
+- Existing portable export, destination `/api/generation-batches/transfer` admission, lookup by client batch ID, and source completion remain the data path. The reserved transfer ID is the destination client batch ID.
+- `POST /api/generation-transfers/abort` takes `transfer_id` and `destination_transfer_identity`. A durable abort receipt prevents any late admission for that identity; a null receipt means admission already won and the client must reconcile its accepted batch.
+- `POST /api/queue/:id/transfer/release` restores the source only before sealing, or with a matching destination abort receipt after sealing.
+
+Reservations and abort tombstones survive restarts. An ambiguous response never permits blindly resuming the source. Reserved originals reject conflicting Resume, Retry, Cancel, and bulk queue mutations. Receipt forwarding uses the authenticated client's existing authority; it is not independent server-to-server proof. No inference or generation is needed to test the protocol.

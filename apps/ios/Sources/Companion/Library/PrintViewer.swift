@@ -108,12 +108,6 @@ struct PrintViewer: View {
                     .onTapGesture { actions.status = nil }
             }
         }
-        .onChange(of: current ?? start, initial: true) { _, id in
-            if !trashed {
-                router.libraryVisit?.markViewed(id.filename)
-                library.markViewed(id)
-            }
-        }
         .onChange(of: ObjectIdentifier(projection)) { _, _ in
             // The print on screen went away (deleted, moved): back to the grid.
             let now = current ?? start

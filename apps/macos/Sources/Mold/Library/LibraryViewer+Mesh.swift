@@ -35,7 +35,8 @@ extension LibraryViewer {
             // A mesh print reuses like any other -- geometry only, but the
             // octree, the threshold and the source picture are all recorded.
             canReuse: actions.reuse != nil,
-            perform: perform)
+            perform: perform,
+            onReady: { markMediaDisplayed() })
         .padding(24)
     }
 

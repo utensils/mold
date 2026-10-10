@@ -3,6 +3,8 @@ import Foundation
 /// The gallery: listing, mutating, trashing, exporting and playing prints.
 public protocol MoldGalleryBackend: Sendable {
     /// Pass the previous `etag` to let the host answer `.notModified`.
+    func galleryPrint(_ filename: String) async throws -> GalleryPrint?
+    func gallerySyncCheckpoint() async throws -> GallerySyncCheckpoint?
     func gallery(etag: String?) async throws -> Fetched<[GalleryPrint]>
     func trashedPrints(etag: String?) async throws -> Fetched<[GalleryPrint]>
     func patch(_ filename: String, with patch: GalleryPatch) async throws
@@ -39,7 +41,23 @@ public protocol MoldGalleryBackend: Sendable {
     func playableURL(for filename: String, trashed: Bool) async throws -> URL
 }
 
+public struct GallerySyncCheckpoint: Codable, Sendable {
+    public let protocolVersion: Int
+    public let instanceId: String
+    public let revisions: [String: String]
+    public init(protocolVersion: Int = 1, instanceId: String, revisions: [String: String]) {
+        self.protocolVersion = protocolVersion; self.instanceId = instanceId; self.revisions = revisions
+    }
+}
+
 public extension MoldGalleryBackend {
+    func galleryPrint(_ filename: String) async throws -> GalleryPrint? {
+        guard case let .fresh(prints, _) = try await gallery(etag: nil) else { throw MoldClientError.malformedResponse }
+        return prints.first { $0.filename == filename }
+    }
+
+    func gallerySyncCheckpoint() async throws -> GallerySyncCheckpoint? { nil }
+
     func deleteTrashed(_ filenames: [String]) async throws {
         throw MoldClientError.http(status: 409, code: "GALLERY_TRASH_DELETE_UNSUPPORTED", message: "Update this machine before permanently deleting selected trash.")
     }

@@ -2184,6 +2184,23 @@ impl MoldClient {
             .await?)
     }
 
+    pub(crate) async fn queue_transfer_json(
+        &self,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<serde_json::Value> {
+        let url = format!("{}{}", self.base_url, path);
+        let request = match body {
+            Some(body) => self.client.post(url).json(body),
+            None => self.client.get(url),
+        };
+        let response = error_for_status_with_body(request.send().await?).await?;
+        if response.status() == reqwest::StatusCode::NO_CONTENT {
+            return Ok(serde_json::Value::Null);
+        }
+        Ok(response.json().await?)
+    }
+
     /// Export original settings and media from one held durable child.
     pub async fn export_held_queue_job(
         &self,
@@ -3953,7 +3970,7 @@ pub fn normalize_host(input: &str) -> String {
     }
 }
 
-fn encode_path_segment(raw: &str) -> String {
+pub(crate) fn encode_path_segment(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     for byte in raw.bytes() {
         match byte {

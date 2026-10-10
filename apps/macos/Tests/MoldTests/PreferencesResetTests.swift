@@ -23,13 +23,28 @@ struct PreferencesResetTests {
         let written = try Self.persistedKeys()
         #expect(written.count > 20, "the scan found almost nothing -- it has stopped working")
 
-        let named = Set(PreferencesReset.keys).union(PreferencesReset.kept)
+        let named = Set(PreferencesReset.keys).union(PreferencesReset.kept).union(PreferencesReset.keptPrefixes)
         #expect(written.subtracting(named).sorted() == [],
                 "a key nothing has decided about: add it to keys or to kept")
         #expect(named.subtracting(written).sorted() == [],
                 "a key nothing writes any more")
         #expect(Set(PreferencesReset.keys).intersection(PreferencesReset.kept) == [])
         #expect(PreferencesReset.keys.count == Set(PreferencesReset.keys).count)
+    }
+
+    @Test func generalResetPreservesLibraryIntervalAndCopyRecovery() {
+        let name = "io.utensils.mold.native.tests.sync-reset.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        let session = LibrarySyncSession(defaults: defaults)
+        session.intervalMinutes = 60
+        let receiptKey = "librarySyncCompletedCopyV1.fixture"
+        let receipt = Data("acknowledged-copy".utf8)
+        defaults.set(receipt, forKey: receiptKey)
+        PreferencesReset.reset(in: defaults)
+        #expect(session.intervalMinutes == 60)
+        #expect(LibrarySyncSession(defaults: defaults).intervalMinutes == 60)
+        #expect(defaults.data(forKey: receiptKey) == receipt)
     }
 
     /// **Fails today**: `libraryScope`, `libraryEdge`, `generateMachine` and
@@ -73,6 +88,21 @@ struct PreferencesResetTests {
                 } else if let name = reference.name,
                           let resolved = constants[name] ?? globalConstants[name] {
                     keys.insert(resolved)
+                } else if let expression = reference.name,
+                          expression.contains(" + "),
+                          let prefixName = expression.components(separatedBy: " + ").first,
+                          let prefix = constants[prefixName] ?? globalConstants[prefixName],
+                          PreferencesReset.keptPrefixes.contains(prefix) {
+                    // Inventory explicitly documented recovery key families,
+                    // without permitting arbitrary unresolved key expressions.
+                    keys.insert(prefix)
+                } else if reference.name == "key",
+                          let prefix = constants["completedPrefix"],
+                          PreferencesReset.keptPrefixes.contains(prefix),
+                          text.contains("where key.hasPrefix(completedPrefix)") {
+                    // The receipt-compaction loop removes only this explicitly
+                    // inventoried recovery family after consolidating it.
+                    keys.insert(prefix)
                 } else {
                     Issue.record("\(file.lastPathComponent): unresolved defaults key \(reference)")
                 }

@@ -119,7 +119,7 @@ extension RootView {
         } label: {
             Label { Text(destination.title) } icon: { Image(systemName: destination.symbol) }
         }
-        .badge(destination == .queue ? queue.badge : 0)
+        .badge(destination == .queue ? queue.badge : destination == .library ? library.unreadCount : 0)
         .defaultVisibility(destination.showsInTabBar ? .visible : .hidden, for: .tabBar)
     }
 

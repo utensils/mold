@@ -1,3 +1,4 @@
+import { nextTick } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
@@ -1223,11 +1224,12 @@ describe("LibraryView header + NEW badges", () => {
     }
   });
 
-  it("badges prints unseen since the last visit, then marks them seen", async () => {
+  it("keeps persisted unread labels until the selected media loads", async () => {
     const { wrapper, gallery } = await mountView(undefined, (g) => {
       // A prior visit that had only seen second.png.
-      g.libraryVisited = true;
-      g.seenFilenames = new Set(["second.png"]);
+      g.unreadMedia.observe([], ["local"]);
+      g.observeUnreadMedia();
+      g.markViewed(g.merged.find((entry) => entry.item.filename === "second.png")!);
     });
 
     const tiles = wrapper.findAll("button").filter((b) => b.text().includes("· seed "));
@@ -1236,16 +1238,18 @@ describe("LibraryView header + NEW badges", () => {
     expect(fresh!.find('[data-test="new-badge"]').exists()).toBe(true);
     expect(stale!.find('[data-test="new-badge"]').exists()).toBe(false);
 
-    // Opening the Library marks everything currently shown as seen.
-    expect(gallery.seenFilenames.has("first.png")).toBe(true);
-    expect(gallery.seenFilenames.has("second.png")).toBe(true);
+    expect(gallery.newCount).toBe(1);
+    gallery.markViewed(gallery.merged.find((entry) => entry.item.filename === "first.png")!);
+    await nextTick();
+    expect(gallery.newCount).toBe(0);
+    expect(fresh!.find('[data-test="new-badge"]').exists()).toBe(false);
     wrapper.unmount();
   });
 
   it("shows nothing as new on the very first visit (baseline only)", async () => {
     const { wrapper, gallery } = await mountView();
     expect(wrapper.findAll('[data-test="new-badge"]')).toHaveLength(0);
-    expect(gallery.libraryVisited).toBe(true);
+    expect(gallery.newCount).toBe(0);
     wrapper.unmount();
   });
 
@@ -1485,6 +1489,7 @@ describe("Library bulk local saving", () => {
     expect(nativeSave.mirror.mock.calls[0]![2]).toEqual(remote.metadata);
     expect(nativeSave.mirror.mock.calls[0]![3]).toBe(remote.timestamp);
     expect(refresh).toHaveBeenCalledWith("local");
+    expect(useToastStore().items.at(-1)?.message).toBe("Processed successfully 1 of 2 prints");
     expect(wrapper.get("[data-test='bulk-save-locally']").attributes("disabled")).toBeUndefined();
     wrapper.unmount();
   });

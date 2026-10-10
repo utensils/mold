@@ -539,6 +539,9 @@ pub fn held_count(db: &MetadataDb, owner_uuid: &str) -> Result<u64> {
 /// and silently dropping the child would report the print as never admitted.
 pub fn purge_held(db: &MetadataDb, owner_uuid: &str, id: &str, now_ms: i64) -> Result<bool> {
     db.transact_immediate(|conn| {
+        if crate::queue_transfer::contains_on_conn(conn, id)? {
+            return Ok(false);
+        }
         let held_reason: Option<Option<String>> = conn
             .query_row(
                 "SELECT held_reason FROM generation_queue
@@ -1443,6 +1446,9 @@ pub fn set_owned_job_paused(
     now_ms: i64,
 ) -> Result<OwnedJobPauseOutcome> {
     db.transact_immediate(|conn| {
+        if crate::queue_transfer::contains_on_conn(conn, job_id)? {
+            return Ok(OwnedJobPauseOutcome::NotEligible);
+        }
         let state = conn
             .query_row(
                 "SELECT state FROM generation_queue WHERE id = ?1 AND owner_uuid = ?2",

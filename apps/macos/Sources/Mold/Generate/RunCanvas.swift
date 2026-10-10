@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import MoldClient
 import SwiftUI
 
@@ -19,6 +20,9 @@ struct RunCanvas: View {
     /// extension methods, and `private` does not cross files for the same
     /// type.
     @Environment(HostStore.self) var hosts
+    @Environment(LibraryStore.self) var library
+    @Environment(\.scenePhase) var scenePhase
+    @State var displayedResultID: PrintID?
     /// The machine the finished batch ran on, never the pane's current one.
     var host: MoldHost? { state.finishedHost.flatMap(hosts.host) }
     @State private var preview: NSImage?
@@ -57,7 +61,23 @@ struct RunCanvas: View {
         // of one after a batch of four could restore a stale index 2 with
         // nothing at position 2 to show.
         .onChange(of: state.isBusy) { _, busy in if busy { selected = 0 } }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { readDisplayedResult() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in readDisplayedResult() }
         .task(id: resultFilename) { await loadResult() }
+    }
+
+    func markResultDisplayed(_ id: PrintID) {
+        guard id.host == host?.id, id.filename == resultFilename else { return }
+        displayedResultID = id
+        readDisplayedResult()
+    }
+
+    func readDisplayedResult() {
+        guard scenePhase == .active, NSApp.isActive, let id = displayedResultID,
+              id.host == host?.id, id.filename == resultFilename else { return }
+        library.markViewed(id)
     }
 
     @ViewBuilder private var idle: some View {

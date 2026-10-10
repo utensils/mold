@@ -10,27 +10,19 @@ import MoldClient
 @MainActor
 @Observable
 final class LibraryStore {
-    var newMedia = LibraryNewMedia()
     var unreadMedia: LibraryUnreadLedger
     let readDefaults: UserDefaults
     var unreadCount: Int { unreadMedia.count }
     @ObservationIgnored var unreadCountChanged: ((Int) -> Void)?
 
     func markViewed(_ id: PrintID) {
-        guard let tile = tile(containing: id) else { return }
-        unreadMedia.view(tile)
+        if let tile = tile(containing: id) { unreadMedia.view(tile) }
+        else { unreadMedia.view(id) }
         unreadMedia.save(to: readDefaults)
         unreadCountChanged?(unreadCount)
     }
 
-    func markLibrarySeen() {
-        guard !perHost.isEmpty else { return }
-        newMedia.markSeen(items.map { $0.print.filename })
-        let previous = unreadMedia
-        unreadMedia.markSeen(items)
-        if unreadMedia != previous { unreadMedia.save(to: readDefaults) }
-        if unreadMedia.count != previous.count { unreadCountChanged?(unreadCount) }
-    }
+
 
     /// The one object that knows which machines exist and how to reach them.
     let hosts: HostStore
@@ -49,6 +41,7 @@ final class LibraryStore {
 
     var perHost: [MoldHost.ID: [LibraryEntry]] = [:]
     var trashPerHost: [MoldHost.ID: [LibraryEntry]] = [:]
+    var syncListings: [String: SyncListingSnapshot] = [:]
     var etags: [MoldHost.ID: String] = [:]
     var trashEtags: [MoldHost.ID: String] = [:]
 
@@ -86,6 +79,7 @@ final class LibraryStore {
     var bulkTargets: Set<PrintID> = []
 
     var localSaveRunning = false
+    var localSaveSuppressImports = false
     var localSaveProgress: String?
     var localSaveTask: Task<Void, Never>?
     var localSaveStopRequested = false

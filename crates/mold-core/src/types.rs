@@ -11759,6 +11759,12 @@ pub struct QueueCapabilities {
     /// Server supports per-row pause/resume without changing the global gate.
     #[serde(default)]
     pub can_pause_job: bool,
+    /// Source reservations exclude worker dispatch and survive restart.
+    #[serde(default)]
+    pub pre_render_transfer: bool,
+    /// Opaque durable destination identity for transfer reconciliation across restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_identity: Option<String>,
     pub can_cancel_all: bool,
     #[serde(default)]
     pub can_reorder: bool,

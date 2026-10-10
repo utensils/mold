@@ -931,7 +931,7 @@ pub enum QueueAction {
         #[arg(long, conflicts_with = "job_ids")]
         held: bool,
     },
-    /// Send a held job to another running Mold server, preserving its request
+    /// Move a waiting, paused, or held job to another running Mold server, preserving its request
     Send {
         #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         job_id: String,

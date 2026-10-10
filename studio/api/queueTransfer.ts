@@ -19,6 +19,9 @@ export interface QueueTransferHost {
   instanceId: string;
   target: ApiTarget;
   ready: boolean;
+  preRenderTransfer?: boolean | undefined;
+  transferIdentity?: string | undefined;
+  generates?: boolean | undefined;
   gpuCount?: number | undefined;
   queueDepth?: number | null | undefined;
 }
@@ -77,25 +80,106 @@ export async function sendHeldQueueJob(options: {
       "A machine's identity changed. Refresh the machines and try again.",
     );
   }
-  const clientId = await queueTransferId(source, jobId, destination);
+  if (
+    source.preRenderTransfer === true &&
+    destination.preRenderTransfer !== true
+  ) {
+    throw new Error(
+      "Update the destination server before moving waiting jobs; it must support safe transfer recovery.",
+    );
+  }
+  if (
+    source.transferIdentity &&
+    source.transferIdentity === destination.transferIdentity
+  )
+    throw new Error(
+      "Choose another connected machine; these addresses share the same queue owner.",
+    );
+  if (
+    source.preRenderTransfer === true &&
+    !destination.transferIdentity?.trim()
+  )
+    throw new Error(
+      "Update or refresh the destination before moving jobs; its durable transfer identity is unavailable.",
+    );
+  const destinationBinding =
+    source.preRenderTransfer === true
+      ? destination.transferIdentity!
+      : destination.instanceId;
+  destination.transferIdentity ?? destination.instanceId;
+  let clientId = await queueTransferId(source, jobId, destination);
+  if (source.preRenderTransfer === true) {
+    const prior = await apiJsonTo<{
+      transfer_id?: string;
+      destination_transfer_identity?: string;
+    } | null>(
+      source.target,
+      `/api/queue/${encodeURIComponent(jobId)}/transfer/reservation`,
+    );
+    if (prior?.transfer_id) {
+      if (prior.destination_transfer_identity !== destinationBinding) {
+        throw new Error(
+          "The original is reserved for another machine. Retry that destination to reconcile acceptance before moving it elsewhere.",
+        );
+      }
+      clientId = prior.transfer_id;
+    } else {
+      clientId = crypto.randomUUID();
+    }
+  }
   options.onProgress?.(`Checking ${destination.label}…`);
   let lookup = await lookupGenerationBatchByClientId(
     destination.target,
     clientId,
   );
   let authority: Record<string, string> | null = null;
+  let reserved = false;
+  const reservation = () => ({
+    ...authority,
+    transfer_id: clientId,
+    destination_transfer_identity: destinationBinding,
+  });
+  const releaseReservation = async (abortReceipt?: string) => {
+    if (!reserved && !abortReceipt) return;
+    await apiFetchTo(
+      source.target,
+      `/api/queue/${encodeURIComponent(jobId)}/transfer/release`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...reservation(),
+          ...(abortReceipt ? { abort_receipt: abortReceipt } : {}),
+        }),
+      },
+    );
+  };
   try {
     const { job } = await getQueueJob(source.target, jobId);
-    if (job.state !== "held" || !job.batch_id || !job.client_batch_id) {
+    if (
+      !(
+        job.state === "held" ||
+        (source.preRenderTransfer === true &&
+          ["queued", "paused"].includes(job.state))
+      ) ||
+      (source.preRenderTransfer !== true &&
+        (!job.batch_id || !job.client_batch_id))
+    ) {
       throw new Error(
-        "This job is no longer held. Refresh the queue before sending it.",
+        "This job is already rendering or is no longer movable. Refresh the queue before sending it.",
       );
     }
     authority = {
       instance_id: source.instanceId,
       job_id: jobId,
-      batch_id: job.batch_id,
-      client_batch_id: job.client_batch_id,
+      batch_id: job.batch_id ?? "",
+      client_batch_id: job.client_batch_id ?? "",
+      ...(source.preRenderTransfer === true
+        ? {
+            transfer_id: clientId,
+            destination_transfer_identity: destinationBinding,
+          }
+        : {}),
     };
   } catch (error) {
     if (lookup.kind !== "found") throw error;
@@ -106,26 +190,64 @@ export async function sendHeldQueueJob(options: {
   if (lookup.kind === "found") {
     batch = lookup.batch;
   } else {
+    if (source.preRenderTransfer === true) {
+      if (!authority)
+        throw new Error("Source authority is unavailable. Refresh and retry.");
+      options.onProgress?.("Reserving the original on its machine…");
+      await apiJsonTo(
+        source.target,
+        `/api/queue/${encodeURIComponent(jobId)}/transfer/reserve`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(reservation()),
+        },
+      );
+      reserved = true;
+      authority.transfer_id = clientId;
+      authority.destination_transfer_identity = destinationBinding;
+    }
     options.onProgress?.("Reading original settings and reference media…");
-    const request = await apiJsonTo<ReferenceUploadRequest>(
-      source.target,
-      `/api/queue/${encodeURIComponent(jobId)}/transfer`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(authority),
-      },
-    );
-    const capabilities = await apiJsonTo<{
-      reference_uploads?: ReferenceUploadCapabilities;
-    }>(destination.target, "/api/capabilities");
-    options.onProgress?.(`Sending to ${destination.label}…`);
-    const upload = await prepareReferenceUploadBatch({
-      target: destination.target,
-      expectedInstanceId: destination.instanceId,
-      capabilities: capabilities.reference_uploads,
-      requests: [request],
-    });
+    let upload: Awaited<ReturnType<typeof prepareReferenceUploadBatch>>;
+    try {
+      const request = await apiJsonTo<ReferenceUploadRequest>(
+        source.target,
+        `/api/queue/${encodeURIComponent(jobId)}/transfer`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(authority),
+        },
+      );
+      const capabilities = await apiJsonTo<{
+        reference_uploads?: ReferenceUploadCapabilities;
+      }>(destination.target, "/api/capabilities");
+      options.onProgress?.(`Sending to ${destination.label}…`);
+      upload = await prepareReferenceUploadBatch({
+        target: destination.target,
+        expectedInstanceId: destination.instanceId,
+        capabilities: capabilities.reference_uploads,
+        requests: [request],
+      });
+    } catch (error) {
+      await releaseReservation();
+      throw error;
+    }
+    if (reserved) {
+      await apiJsonTo(
+        source.target,
+        `/api/queue/${encodeURIComponent(jobId)}/transfer/seal`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...authority,
+            transfer_id: clientId,
+            destination_transfer_identity: destinationBinding,
+          }),
+        },
+      );
+    }
     try {
       batch = await admitGenerationBatch(
         destination.target,
@@ -138,9 +260,46 @@ export async function sendHeldQueueJob(options: {
         destination.instanceId,
       );
     } catch (error) {
-      if (isDefiniteGenerationAdmissionRejection(error)) {
-        await upload.release();
-        throw error;
+      if (reserved || isDefiniteGenerationAdmissionRejection(error)) {
+        if (reserved) {
+          const aborted = await apiJsonTo<{
+            transfer_id: string;
+            destination_transfer_identity: string;
+            abort_receipt?: string | null;
+          }>(destination.target, "/api/generation-transfers/abort", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              transfer_id: clientId,
+              destination_transfer_identity: destinationBinding,
+            }),
+          });
+          if (
+            aborted.transfer_id !== clientId ||
+            aborted.destination_transfer_identity !== destinationBinding
+          )
+            throw new Error(
+              "Destination identity changed. Retry the same destination to reconcile acceptance.",
+            );
+          if (aborted.abort_receipt) {
+            await upload.release();
+            await releaseReservation(aborted.abort_receipt);
+            throw error;
+          }
+          lookup = await lookupGenerationBatchByClientId(
+            destination.target,
+            clientId,
+          );
+          if (lookup.kind === "found") {
+            batch = lookup.batch;
+          } else
+            throw new Error(
+              "Destination acceptance is not confirmed. Retry Move to the same destination; the original remains reserved.",
+            );
+        } else {
+          await upload.release();
+          throw error;
+        }
       }
       lookup = await lookupGenerationBatchByClientId(
         destination.target,
@@ -148,7 +307,7 @@ export async function sendHeldQueueJob(options: {
       );
       if (lookup.kind !== "found") {
         throw new Error(
-          `Acceptance by ${destination.label} is not confirmed. The original remains held. Retry this same destination to check safely.`,
+          `Acceptance by ${destination.label} is not confirmed. The original is retained. Retry this same destination to check safely.`,
         );
       }
       batch = lookup.batch;
@@ -161,19 +320,45 @@ export async function sendHeldQueueJob(options: {
     batch.children.length !== 1
   ) {
     throw new Error(
-      "The destination returned an unexpected job identity. The original remains held.",
+      "The destination returned an unexpected job identity. The original is retained.",
     );
   }
   if (
     batch.children[0]!.state === "failed" ||
     batch.children[0]!.state === "cancelled"
   ) {
+    if (source.preRenderTransfer === true && authority) {
+      const aborted = await apiJsonTo<{
+        transfer_id: string;
+        destination_transfer_identity: string;
+        abort_receipt?: string | null;
+      }>(destination.target, "/api/generation-transfers/abort", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          transfer_id: clientId,
+          destination_transfer_identity: destinationBinding,
+        }),
+      });
+      if (
+        aborted.transfer_id !== clientId ||
+        aborted.destination_transfer_identity !== destinationBinding ||
+        !aborted.abort_receipt
+      )
+        throw new Error(
+          "Destination terminal failure could not be reconciled. Retry the same destination; original remains reserved.",
+        );
+      await releaseReservation(aborted.abort_receipt);
+      throw new Error(
+        `The destination job ${batch.children[0]!.state}. The original was restored; choose another machine or retry.`,
+      );
+    }
     throw new Error(
-      `The destination job ${batch.children[0]!.state}. The original remains held; choose another machine or inspect the destination.`,
+      `The destination job ${batch.children[0]!.state}. The original is retained; choose another machine or inspect the destination.`,
     );
   }
   if (authority) {
-    options.onProgress?.("Removing the held original…");
+    options.onProgress?.("Removing the original…");
     try {
       await apiFetchTo(
         source.target,

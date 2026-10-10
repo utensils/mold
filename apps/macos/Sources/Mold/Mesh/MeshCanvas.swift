@@ -26,6 +26,7 @@ struct MeshCanvas: View {
     /// Only the Library's viewer knows the print behind the mesh.
     var canReuse = false
     let perform: (MeshViewAction) -> Void
+    var onReady: (() -> Void)? = nil
 
     /// Not `private`: the controls live in `+Controls` for size, and `private`
     /// does not cross files for the same type.
@@ -105,6 +106,7 @@ struct MeshCanvas: View {
             let payload = try await Task.detached(priority: .userInitiated) {
                 try MeshPayload.load(bytes)
             }.value
+            try Task.checkCancellation()
             let renderer = try self.renderer ?? MeshRenderer(pixelFormat: .bgra8Unorm,
                                                              depthFormat: .depth32Float)
             guard let built = MeshScene(payload, device: renderer.device) else {
@@ -112,6 +114,7 @@ struct MeshCanvas: View {
             }
             self.renderer = renderer
             scene = built
+            onReady?()
         } catch is CancellationError {
             // A new print replaced this one; its own load reports for itself.
         } catch let failure as MeshViewFailure {

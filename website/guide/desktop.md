@@ -886,3 +886,13 @@ Copying media between hosts preserves its collection organization. Removing a
 copy from a machine leaves the copies on other machines intact.
 
 Queue menus and touch swipe controls follow the owning machine’s current state and capabilities. Held jobs offer supported Retry or Download and Retry, transfer and Cancel; they do not offer Pause. On current Mold servers, Held cancellation retains its held-only safeguard through interrupted requests and app restarts. Offline, stopping, settled or currently updating rows retain inspection without unsupported mutation actions. Job Details distinguishes Stopping, completed, failed, cancelled and unknown states instead of labeling them Queued.
+
+## Local viewing history
+
+Library New badges and unread counts are saved on each client independently. Media discovered after the initial machine baseline stays new until that client successfully displays it in the viewer. Opening Library, filters, refreshes and neighboring preloads do not clear it. Merged copies count once; hidden collections and Trash do not count. Existing read history is preserved on upgrade. Native icon badges follow the same history, with the existing permission or preference controls. Browser, desktop and mobile-shell histories are separate. Storage errors are visible and preserve the previous saved history.
+
+### Move queued work to another machine
+
+When another connected machine can generate, **Move to…** is available on queued, paused, and held jobs until the source machine begins rendering. The prompt, seed, settings, and retained reference media move together. The destination must accept the job before the original is removed. Older servers support Held-only moves. Jobs that depend on machine-local LoRAs or workflows are refused without moving them.
+
+If a connection is interrupted during a move, retry the same destination so Mold can check whether it already accepted the job. The source remains reserved while that result is unknown, preventing duplicate rendering. A confirmed destination rejection releases the original only after the destination records that this transfer cannot be admitted later.

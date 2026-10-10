@@ -82,7 +82,7 @@ struct QueueSourceLayoutTests {
         #expect(initial >= loaded, "A native List may cache the initial row height; loading must not grow it")
     }
     @Test(arguments: [true, false])
-    func nativeListContainsLoadedRowsAndCompactsMissingSources(hasSource: Bool) async throws {
+    func nativeListKeepsRowHeightWhenSourcesFinishLoading(hasSource: Bool) async throws {
         let host = MoldHost(name: "fixture", baseURL: URL(string: "http://fixture")!)
         let backend = FakeBackend(host: host)
         backend.queueThumbnailPending = true
@@ -123,8 +123,11 @@ struct QueueSourceLayoutTests {
         }.padding(.vertical, 3)).fittingSize.height
         await settle {
             let height = table.rect(ofRow: 1).height
-            return hasSource ? (height >= source && self.hasSourcePixels(in: view)) : height < initial
+            return hasSource ? (height >= source && self.hasSourcePixels(in: view)) : backend.queueThumbnailReturned
         }
+        // Allow the native table to process the completion publication.
+        try await Task.sleep(for: .milliseconds(100))
+        view.layoutSubtreeIfNeeded()
         let first = table.rect(ofRow: 1)
         let second = table.rect(ofRow: 2)
         #expect(first.maxY <= second.minY)
@@ -134,7 +137,7 @@ struct QueueSourceLayoutTests {
             #expect(first.height >= source, "Image and its caption must fit inside the native table row")
             #expect(first.height == initial)
         } else {
-            #expect(first.height < initial, "A missing source must return to the compact text-only row")
+            #expect(first.height == initial, "Resolving a missing source must not shrink rows and move the scroll position")
             let caption = NSHostingView(rootView: VStack(alignment: .leading, spacing: 2) {
                 Text("MiniMax H3 FL2VA")
                 Text("First caption line\nSecond caption line").font(.caption)

@@ -12,14 +12,14 @@ beside the Tauri iPhone app (`apps/mobile`), not instead of it.
 
 ## What it does
 
-| Area              | What                                                                                                                                                                                                                                    |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Machines          | Fleet cards, Nearby (Bonjour), add by pairing QR, pasted link or address; keys in the Keychain                                                                                                                                          |
-| Generate          | Stills, clips and 3-D objects with each model's own controls; picture wells from Photos, Camera, Files, Library or Share                                                                                                                |
+| Area              | What                                                                                                                                                                                                                         |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Machines          | Fleet cards, Nearby (Bonjour), add by pairing QR, pasted link or address; keys in the Keychain                                                                                                                               |
+| Generate          | Stills, clips and 3-D objects with each model's own controls; picture wells from Photos, Camera, Files, Library or Share                                                                                                     |
 | Library           | Every machine's prints as one grid, browsable offline (saved listings, thumbnails and opened prints, within Settings' storage limit); five pinchable tile sizes; favourites, tags, collections, Trash; video and 3-D viewers |
-| Queue             | Every machine's work; held jobs in words with Download and Retry, Retry and Move to…; reorder, pause, empty                                                                                                                             |
-| Models            | Installed per machine, Discover, downloads, licences                                                                                                                                                                                    |
-| Away from the app | Completion/failure notifications, background refresh, widgets, Share extension                                                                                                                                                          |
+| Queue             | Every machine's work; held jobs in words with Download and Retry, Retry and Move to…; reorder, pause, empty                                                                                                                  |
+| Models            | Installed per machine, Discover, downloads, licences                                                                                                                                                                         |
+| Away from the app | Completion/failure notifications, background refresh, widgets, Share extension                                                                                                                                               |
 
 A render notification opens its finished print when the app is in the background
 or closed. Notification activation and its system completion callback run on the
@@ -306,7 +306,7 @@ Local validation and qualification limits: [native acceptance record](../../docs
 
 Queue rows show the owning machine’s sealed conditioning images across models. Job Details shows every ordered reference separately with its role, including identity photos, named views, masks, control images and boundary frames. Audio/video references are listed by kind; unavailable previews are disclosed. Inputs remain separate from live denoise previews and are fetched through authenticated routes, including work submitted from another device. Older servers retain their singular source preview.
 
-Native Library marks media added since the previous Library visit with a session-only New badge. Opening a picture, video or 3-D print removes its badge immediately during that visit; prepared neighboring pages and long-press previews do not count as viewing. The first visit still establishes a baseline, and returning for the next visit clears the remaining badges. Before the Library is opened, the iOS Home Screen and macOS Dock icons count new gallery media, once per merged print, excluding hidden collections and Trash. Opening Library clears that count using the existing seen behavior. Icon counts are saved locally across launches; paired machines establish an initial baseline. iOS updates while active and during opportunistic background refresh, subject to notification badge permission; the server has no push. iOS keeps playback badges on thumbnails and machine information in image details.
+Library New badges and unread counts are saved on each client independently. Newly discovered media stays new until that client displays it in the viewer; opening Library, changing filters, refreshing, and preparing neighboring pages do not clear it. Counts and badges deduplicate merged copies and exclude hidden collections and Trash. Existing read status is preserved during upgrade, and a newly connected machine establishes a historical baseline; subsequent arrivals require individual viewing. Native iOS also badges its Images navigation. Native app-icon counts follow the same local history, subject to the existing badge preference or permission. iOS refreshes while active and opportunistically in the background; the server has no push.
 
 On iOS, Use These Settings replaces all active and parked attachments with the selected print’s media. Retained archives restore from the owning machine or another available copy; unavailable conditioning blocks Generate until restored, reattached or explicitly removed. Retry retained media after reconnecting. Late replies cannot replace a newer reuse or revive a source added and removed during restoration.
 
@@ -350,6 +350,11 @@ Queue cards keep Cancel, Retry and Pause/Resume in native swipe actions and Job 
 
 Reordering and Empty Queue reserve the jobs they affect until the machine listing refreshes. Pending row actions cannot overlap those operations; offline machines and changed job or machine identities refuse stale requests.
 
+### Move queued work to another machine
+
+When another connected machine can generate, **Move to…** is available on queued, paused, and held jobs until the source machine begins rendering. The prompt, seed, settings, and retained reference media move together. The destination must accept the job before the original is removed. Older servers support Held-only moves. Jobs that depend on machine-local LoRAs or workflows are refused without moving them.
+
+If a connection is interrupted during a move, retry the same destination so Mold can check whether it already accepted the job. The source remains reserved while that result is unknown, preventing duplicate rendering. A confirmed destination rejection releases the original only after the destination records that this transfer cannot be admitted later.
 
 ### Continuous Library rows
 

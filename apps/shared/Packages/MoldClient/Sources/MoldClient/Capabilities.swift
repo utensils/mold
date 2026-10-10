@@ -51,6 +51,8 @@ public struct TrashCapabilities: Codable, Hashable, Sendable {
 public struct QueueCapabilities: Codable, Hashable, Sendable {
     public let canPause: Bool?
     public let canPauseJob: Bool?
+    public let preRenderTransfer: Bool?
+    public let transferIdentity: String?
     public let canCancelAll: Bool?
     public let canReorder: Bool?
     public let stableDevicePins: Bool?

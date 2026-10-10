@@ -258,6 +258,8 @@ export interface ServerCapabilities {
     request_placement_preview?: boolean;
   } | null;
   queue?: {
+    pre_render_transfer?: boolean;
+    transfer_identity?: string;
     can_pause?: boolean;
     can_pause_job?: boolean;
     can_cancel_all?: boolean;

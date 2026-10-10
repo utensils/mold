@@ -64,7 +64,7 @@ async function send() {
           <h2>Send to another machine</h2>
           <p v-if="!done">
             Keep the same prompt, seed, settings, and reference media. The
-            destination queues the job; the held original is removed after
+            destination queues the job; the original is removed after
             acceptance.
           </p>
           <label v-if="!done"

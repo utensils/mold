@@ -70,7 +70,7 @@ function mountLightbox(
 ) {
   return mount(Lightbox, {
     props: { item: selectedItem, index: 0, count: 3, video, ...props },
-    global: { stubs: { AuthedMedia: { template: "<div />" } } },
+    global: { stubs: { AuthedMedia: { name: "AuthedMedia", template: "<div />" } } },
   });
 }
 
@@ -627,7 +627,7 @@ describe("Lightbox overlay stacking", () => {
         trashed: true,
         organization: organizationFor(now),
       },
-      global: { stubs: { AuthedMedia: { template: "<div />" } } },
+      global: { stubs: { AuthedMedia: { name: "AuthedMedia", template: "<div />" } } },
       attachTo: document.body,
     });
     // The grid's own Escape handler lives on the window; the confirm above the
@@ -667,7 +667,7 @@ describe("Lightbox overlay stacking", () => {
         trashed: true,
         organization: organizationFor(now),
       },
-      global: { stubs: { AuthedMedia: { template: "<div />" } } },
+      global: { stubs: { AuthedMedia: { name: "AuthedMedia", template: "<div />" } } },
       attachTo: document.body,
     });
     expect(overlayDepth()).toBe(before + 1);
@@ -680,7 +680,7 @@ describe("Lightbox overlay stacking", () => {
   it("with no question open, Escape reaches the grid so the lightbox can close", async () => {
     const wrapper = mount(Lightbox, {
       props: { item, index: 0, count: 3, video: false },
-      global: { stubs: { AuthedMedia: { template: "<div />" } } },
+      global: { stubs: { AuthedMedia: { name: "AuthedMedia", template: "<div />" } } },
       attachTo: document.body,
     });
     const heard: string[] = [];
@@ -787,5 +787,25 @@ describe("Lightbox alpha bed", () => {
     const plain = opaque.get("[data-test='lightbox-still']");
     expect(plain.attributes("data-alpha")).toBe("false");
     expect(plain.classes()).toContain("!object-contain");
+  });
+});
+
+describe("viewed visibility boundary", () => {
+  it("defers successful media until foreground and fences a changed print", async () => {
+    const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+    const wrapper = mountLightbox();
+    try {
+      wrapper.findComponent({ name: "AuthedMedia" }).vm.$emit("ready");
+      expect(wrapper.emitted("viewed")).toBeUndefined();
+      hidden.mockReturnValue(false);
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(wrapper.emitted("viewed")).toHaveLength(1);
+      await wrapper.setProps({ item: { ...item, filename: "next.png" } });
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(wrapper.emitted("viewed")).toHaveLength(1);
+    } finally {
+      wrapper.unmount();
+      hidden.mockRestore();
+    }
   });
 });

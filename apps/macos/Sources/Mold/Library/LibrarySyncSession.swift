@@ -10,13 +10,27 @@ final class LibrarySyncSession {
     private var task: Task<Void, Never>?
     private var generation = UUID()
     private let defaults: UserDefaults
-    private let interval: TimeInterval
+    private var interval: TimeInterval
+    private var waitTask: Task<Void, Never>?
+    private static let intervalKey = "library.syncIntervalMinutes.v1"
+    var intervalMinutes: Int {
+        get { Int((interval / 60).rounded()) }
+        set {
+            interval = Double(min(1440, max(1, newValue))) * 60
+            defaults.set(intervalMinutes, forKey: Self.intervalKey)
+            if nextRun != nil {
+                nextRun = Date().addingTimeInterval(interval)
+                waitTask?.cancel()
+            }
+        }
+    }
     private var acknowledged: Set<String>
     private static let issueKey = "library.acknowledgedSyncIssues.v1"
 
-    init(defaults: UserDefaults = AppStorageSuite.defaults, interval: TimeInterval = 300) {
+    init(defaults: UserDefaults = AppStorageSuite.defaults, interval: TimeInterval? = nil) {
         self.defaults = defaults
-        self.interval = interval
+        let persisted = defaults.object(forKey: Self.intervalKey) as? Int ?? 5
+        self.interval = interval ?? Double(min(1440, max(1, persisted))) * 60
         acknowledged = Set(defaults.stringArray(forKey: Self.issueKey) ?? [])
     }
 
@@ -34,8 +48,15 @@ final class LibrarySyncSession {
                 }
                 guard let interval = self?.interval, self?.isEnabled == true, self?.generation == current else { break }
                 self?.nextRun = Date().addingTimeInterval(interval)
-                do { try await Task.sleep(for: .seconds(interval)) }
-                catch { break }
+                repeat {
+                    guard let self, let deadline = self.nextRun else { break }
+                    let wait = Task<Void, Never> { do { try await Task.sleep(for: .seconds(max(0, deadline.timeIntervalSinceNow))) } catch {} }
+                    self.waitTask = wait
+                    await wait.value
+                    guard self.generation == current else { return }
+                    self.waitTask = nil
+                } while !Task.isCancelled && self?.isEnabled == true && (self?.nextRun?.timeIntervalSinceNow ?? 0) > 0
+                guard self?.generation == current else { return }
                 self?.nextRun = nil
             }
             if self?.generation == current {
@@ -48,6 +69,7 @@ final class LibrarySyncSession {
     func stop(in library: LibraryStore) {
         isEnabled = false
         nextRun = nil
+        waitTask?.cancel()
         if library.localSaveRunning { library.localSaveStopRequested = true }
         else { task?.cancel(); task = nil }
     }

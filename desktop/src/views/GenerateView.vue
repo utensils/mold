@@ -1764,8 +1764,35 @@ watch(
     viewerMeshStats.value = null;
   },
 );
+let displayedResultKey = "";
+function currentResultKey(): string {
+  const current = job.value;
+  return current?.status === "complete" && current.result?.filename
+    ? `${current.hostId ?? "local"}|${current.result.filename}|${current.resultUrl ?? resultMeshSrc.value}`
+    : "";
+}
+function readDisplayedResult(): void {
+  if (document.hidden || !displayedResultKey || displayedResultKey !== currentResultKey()) return;
+  const current = job.value;
+  const entry = current ? canvasPrintEntry(current) : null;
+  if (entry) hostGallery.markViewed(entry);
+}
+function markDisplayedResult(event?: Event): void {
+  const current = job.value;
+  if (!currentResultKey() || !current) return;
+  if (event) {
+    const media = event.currentTarget as HTMLImageElement | HTMLMediaElement;
+    if (!current.resultUrl || media.currentSrc !== new URL(current.resultUrl, location.href).href)
+      return;
+  }
+  displayedResultKey = currentResultKey();
+  readDisplayedResult();
+}
+onMounted(() => document.addEventListener("visibilitychange", readDisplayedResult));
+onBeforeUnmount(() => document.removeEventListener("visibilitychange", readDisplayedResult));
 function onResultMeshReady(stats: ViewerMeshStats): void {
   viewerMeshStats.value = stats;
+  markDisplayedResult();
 }
 
 /** Inline completion bytes as a Blob, so both deliveries reach the one rule. */
@@ -4594,7 +4621,12 @@ onBeforeUnmount(() => {
                     alt="Waveform of the generated audio"
                     class="min-h-0 w-full flex-1 object-contain"
                   />
-                  <audio class="w-full shrink-0" controls :src="job.resultUrl" />
+                  <audio
+                    class="w-full shrink-0"
+                    controls
+                    :src="job.resultUrl"
+                    @loadeddata="markDisplayedResult"
+                  />
                 </div>
                 <video
                   v-else-if="job?.resultUrl && job.result?.video_frames"
@@ -4602,6 +4634,7 @@ onBeforeUnmount(() => {
                   :muted="videoPlayback.muted"
                   :volume="videoPlayback.volume"
                   @volumechange="videoPlayback.syncFromPlayer"
+                  @loadeddata="markDisplayedResult"
                   class="absolute inset-0 h-full w-full object-contain"
                   autoplay
                   loop
@@ -4611,6 +4644,7 @@ onBeforeUnmount(() => {
                 <img
                   v-else-if="job?.resultUrl"
                   :src="job.resultUrl"
+                  @load="markDisplayedResult"
                   alt=""
                   class="absolute inset-0 h-full w-full object-contain transition-opacity duration-500"
                 />

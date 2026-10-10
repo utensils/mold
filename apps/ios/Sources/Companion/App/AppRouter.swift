@@ -8,12 +8,7 @@ import Observation
 final class AppRouter {
     let presentationID = UUID()
     var licenseDetailContext: (host: UUID, job: String)?
-    var libraryVisit: LibraryNewMedia.Visit?
-    var selection: TabSelection = .go(.generate) {
-        didSet {
-            if !isInLibrary { libraryVisit = nil }
-        }
-    }
+    var selection: TabSelection = .go(.generate)
     var isInLibrary: Bool {
         switch selection {
         case .go(.library), .search, .shelf: true
