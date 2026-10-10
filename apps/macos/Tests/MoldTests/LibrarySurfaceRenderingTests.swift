@@ -66,6 +66,13 @@ import Testing
         emptyLibrary.localSaveFailures = ["Legacy fixture.mov: Original input is unavailable on the source machine."]
         emptyLibrary.localSaveIssueKeys = ["fixture": "fixture-unchanged-issue"]
         try await capture(LibrarySyncReportSheet().environment(emptyLibrary), name: "mac-library-sync-issue-acknowledgment", height: 500)
+        emptyLibrary.localSaveFailures = []
+        emptyLibrary.localSaveNotices = ["Fixture source · legacy.mov: Original inputs are unavailable; the finished file is saved."]
+        emptyLibrary.localSaveIssueKeys = [emptyLibrary.localSaveNotices[0]: "fixture-legacy-source-version"]
+        emptyLibrary.localSaveReport = "Copied 1 print." + LibraryStore.legacyInputNotice(count: 1)
+        try await capture(LibrarySyncReportSheet().environment(emptyLibrary), name: "mac-library-sync-legacy-only", height: 500)
+        emptyLibrary.syncIssueAcknowledgment = true
+        try await capture(LibraryActivityStatus().environment(emptyLibrary), name: "mac-library-sync-acknowledged-banner", height: 180)
         #expect(!emptyLibrary.localSaveAlertPresented, "A successful sync does not demand acknowledgment")
         #expect(session.isEnabled)
         session.stop(in: emptyLibrary)

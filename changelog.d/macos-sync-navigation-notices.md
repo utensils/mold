@@ -1,0 +1,2 @@
+- **Restore macOS sidebar navigation.** Generate, Queue, Models and Machines remain selectable alongside queue badges.
+- **Remember source sync notices.** Sync Details offers “Never show me this again for these sources.” for unchanged source issues, including unavailable legacy inputs; acknowledged notices leave the banner while full details remain accessible.

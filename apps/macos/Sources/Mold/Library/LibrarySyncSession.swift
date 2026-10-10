@@ -31,7 +31,10 @@ final class LibrarySyncSession {
         self.defaults = defaults
         let persisted = defaults.object(forKey: Self.intervalKey) as? Int ?? 5
         self.interval = interval ?? Double(min(1440, max(1, persisted))) * 60
-        acknowledged = Set(defaults.stringArray(forKey: Self.issueKey) ?? [])
+        // Older releases persisted multiple source hashes as one colon-joined
+        // token. Expand those receipts without forgetting acknowledged sources.
+        acknowledged = Set((defaults.stringArray(forKey: Self.issueKey) ?? [])
+            .flatMap { $0.split(separator: ":").map(String.init) })
     }
 
     func start(in library: LibraryStore) {
@@ -96,15 +99,47 @@ final class LibrarySyncSession {
 
 @MainActor
 extension LibraryStore {
+    static func legacyInputNotice(count: Int) -> String {
+        guard count > 0 else { return "" }
+        return count == 1
+            ? " Original inputs are unavailable on the source machine for 1 legacy print; its finished file is saved."
+            : " Original inputs are unavailable on the source machine for \(count) legacy prints; their finished files are saved."
+    }
+
+    func isUnacknowledgedSyncIssue(_ message: String) -> Bool {
+        guard let keys = localSaveIssueKeys[message] else { return true }
+        return syncSession.hasNewIssues(keys.split(separator: ":").map(String.init))
+    }
+
+    var syncHasUnacknowledgedIssues: Bool {
+        (localSaveFailures + localSaveNotices).contains(where: isUnacknowledgedSyncIssue)
+    }
+
+    /// Keep the complete report for Details; suppress only exact acknowledged
+    /// source notices in the recurring status. Connectivity failures lack keys.
+    var syncBannerReport: String {
+        var report = localSaveReport
+        if !localSaveNotices.isEmpty {
+            report = report.replacingOccurrences(of: Self.legacyInputNotice(count: localSaveNotices.count),
+                with: Self.legacyInputNotice(count: localSaveNotices.filter(isUnacknowledgedSyncIssue).count))
+        }
+        if !localSaveFailures.isEmpty {
+            let count = localSaveFailures.filter(isUnacknowledgedSyncIssue).count
+            report = report.replacingOccurrences(of: " \(localSaveFailures.count) issues need attention.",
+                with: count == 0 ? "" : " \(count) issues need attention.")
+        }
+        return report
+    }
+
     /// The report control reflects saved state, including when reopened after
     /// an acknowledged issue recurs. New eligible issues leave it unchecked.
     var syncIssueAcknowledgment: Bool {
         get {
-            let keys = Array(localSaveIssueKeys.values)
+            let keys = localSaveIssueKeys.values.flatMap { $0.split(separator: ":").map(String.init) }
             return !keys.isEmpty && !syncSession.hasNewIssues(keys)
         }
         set {
-            let keys = Array(localSaveIssueKeys.values)
+            let keys = localSaveIssueKeys.values.flatMap { $0.split(separator: ":").map(String.init) }
             if newValue { syncSession.acknowledge(keys) }
             else { syncSession.unacknowledge(keys) }
         }

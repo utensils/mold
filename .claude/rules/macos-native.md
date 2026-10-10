@@ -91,6 +91,13 @@ recreate destination trash or a recorded copy intentionally removed from the
 local listing. Explicit Save remains deliberate recovery. Copy hidden collection
 attributes for existing and empty replicas as well as newly filed outputs.
 
+Sidebar destination tags wrap badges so native List selection receives SidebarRow,
+not the ForEach destination ID. Verify rendered top-level navigation from Library.
+
+Legacy missing-input notices participate in per-source/version acknowledgment,
+including successful copies. The checkbox reads "Never show me this again for these sources."
+Acknowledgment removes repeated source notices from the banner, preserving full Details.
+
 The Sync report acknowledgment checkbox binds directly to eligible issue keys and the persisted session ledger; reopening, Reset, and new keys must update its visible state without a separate sheet-local toggle state.
 
 Sync Details dismisses both its request and native presentation on Done/Escape;

@@ -828,8 +828,10 @@ for this app session. The Library status shows completion, issues and the next
 run. During a transfer, one progress banner replaces the recurring-sync countdown,
 with a single **Stop Sync** control. **Stop Sync** ends repeats and lets active transfers settle. Successful runs
 need no confirmation. **Details** keeps the full report available. **Done**, Return, and Escape dismiss
-the report; a successful report shows only Copy Details and Done. Its checkbox
-acknowledges unchanged per-media issues, while changed issues and connection or
+the report. **Never show me this again for these sources.** acknowledges unchanged
+source issues, including legacy prints with unavailable original inputs. These notices
+leave the banner but remain available in Details. Reports without source notices or
+issues show only Copy Details and Done. Changed issues and connection or
 authentication failures still appear. **Reset Acknowledgments** restores those
 notifications. The checkbox reflects saved choices when Details reopens, and new issues leave it unchecked. Sync continues retrying acknowledged media.
 

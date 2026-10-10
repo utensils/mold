@@ -212,7 +212,7 @@ struct LibraryLocalSaveTests {
         source.retainedInventories[print.filename] = .init(availability: .unavailableLegacy, members: [])
         let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? target : source }
         hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
-        let library = LibraryStore(hosts: hosts)
+        let library = LibraryStore(hosts: hosts, syncSession: LibrarySyncSession(defaults: UserDefaults(suiteName: UUID().uuidString)!))
         await library.saveLocally([LibraryEntry(host: remote, print: print)])
         #expect(target.importedNames == [print.filename])
         #expect(target.importedMedia == [Data([1, 2, 3])])
@@ -220,6 +220,11 @@ struct LibraryLocalSaveTests {
         #expect(library.localSaveFailures.isEmpty)
         #expect(library.localSaveReport.contains("Copied 1 print"))
         #expect(library.localSaveReport.contains("Original inputs are unavailable on the source machine for 1 legacy print; its finished file is saved."))
+        #expect(library.localSaveNotices.count == 1)
+        #expect(library.localSaveIssueKeys[library.localSaveNotices[0]] != nil)
+        library.syncIssueAcknowledgment = true
+        #expect(!library.syncBannerReport.contains("Original inputs are unavailable"))
+        #expect(library.localSaveReport.contains("Original inputs are unavailable"))
         #expect(!library.localSaveReport.contains("not copied"))
         #expect(!library.localSaveReport.contains("issues need attention"))
     }
