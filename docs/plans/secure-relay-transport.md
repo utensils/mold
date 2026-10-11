@@ -232,10 +232,18 @@ Record p50/p95 latency, first-byte and media throughput, cloud invocation/byte
 costs and resource ceilings. Simulator evidence and physical-device evidence
 are separate. Passing unit tests alone does not prove deployed parity.
 
+All Mold AWS assets stay inside the Terraform `mold-relay` module. Every
+taggable resource, including CloudFormation children, carries `Project=mold`,
+`Service=mold-relay`, `Environment`, `ManagedBy`, and `BillingGroup`. Verify
+these tags on live resources and activate their AWS cost allocation keys.
+Document untaggable children and shared Route53 billing separately rather than
+claiming tags can divide a shared resource's bill. CLI clients and headless
+hosts are explicit release gates alongside browser, Tauri and native apps.
+
 ## Sources and reference boundaries
 
 - Current source: `crates/mold-server/src/auth.rs`, `connections.rs`,
-  `crates/mold-relay/src/aws.rs`, `relay/aws/frontend.mjs`, `router-core.mjs`,
+  `crates/mold-relay/src/secure.rs`, `relay/aws/frontend.mjs`, `secure-router.mjs`,
   shared Rust/Swift/TypeScript transports and `scripts/relay/diagnose.py`.
 - Zephra inspected at `daefdc067c6903c0f3c184354c76544ee8bb1734`:
   `Relay/link/README.md` describes opaque routing and distinct guests;

@@ -13,7 +13,7 @@ if ! command -v wasm-bindgen >/dev/null || [[ "$(wasm-bindgen --version)" != "wa
   exit 1
 fi
 export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS='--cfg getrandom_backend="wasm_js"'
-cargo +stable build --locked -p mold-ai-secure --features wasm --target wasm32-unknown-unknown --release
+cargo +"${MOLD_WASM_TOOLCHAIN:-stable}" build --locked -p mold-ai-secure --features wasm --target wasm32-unknown-unknown --release
 wasm-bindgen "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/mold_secure.wasm" \
   --target web --out-dir studio/api/generated/secure --out-name mold_secure
 if [[ "${1:-}" == "--check" ]]; then

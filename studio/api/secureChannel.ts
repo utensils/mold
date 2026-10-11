@@ -1,5 +1,6 @@
 import { SecureMux } from "./secureMux";
 import { PacketReader, SecureWire, framePacket } from "./secureWire";
+import { CipherObjectCarrier, objectPolicy } from "./secureObjects";
 import {
   Identity,
   Session,
@@ -32,6 +33,8 @@ export class SecureChannel {
   private admitted: { sid: string; rid: string } | null = null;
   private accepted: { sid: string; rid: string } | null = null;
   private started = false;
+  private objectOrigin: string | null = null;
+  private objects: CipherObjectCarrier | null = null;
 
   static async connect(options: {
     host: SecureHostIdentity;
@@ -40,6 +43,8 @@ export class SecureChannel {
     invite?: { certificate: SecureInvite; identity: Identity };
     websocket?: string;
     signal?: AbortSignal;
+    /** Independent operator configuration for isolated tests; never discovery data. */
+    trustedObjectOrigin?: string;
   }): Promise<SecureChannel> {
     await loadSecureCrypto();
     checkHost(options.host);
@@ -70,6 +75,7 @@ export class SecureChannel {
       grant?: SecureGrant;
       invite?: { certificate: SecureInvite; identity: Identity };
       websocket?: string;
+      trustedObjectOrigin?: string;
     },
   ) {
     const endpoint = options.websocket ?? options.host.websocket_url;
@@ -125,6 +131,7 @@ export class SecureChannel {
           namespace: options.host.namespace,
           hostKey: options.host.host_key,
           role: options.invite ? "invite" : "device",
+          ...(!options.invite ? { objects: 1 } : {}),
         });
       } catch {
         this.close(new Error("Could not contact the secure proxy."));
@@ -174,6 +181,11 @@ export class SecureChannel {
     )
       throw new Error("Secure connection is not accepting data.");
     this.socket.send(JSON.stringify(frame));
+    if (frame.a === "data" && typeof frame.seq === "number")
+      this.wire?.markSent(
+        frame.seq,
+        frame.o ? (frame.o as { count: number }).count : 1,
+      );
   }
 
   private receive(frame: Record<string, unknown>): void {
@@ -222,6 +234,10 @@ export class SecureChannel {
         if (!this.challenged || this.admitted)
           throw new Error("Unexpected secure admission.");
         this.admitted = { sid: frame.sid, rid: frame.rid };
+        if (!this.options.invite)
+          this.objectOrigin =
+            objectPolicy(frame.objects, this.options.trustedObjectOrigin)
+              ?.origin ?? null;
       } else {
         if (
           this.accepted &&
@@ -239,7 +255,17 @@ export class SecureChannel {
         "This host is unavailable or this device is no longer paired. Check the host and retry.",
       );
     if (!this.wire) throw new Error("Data arrived before secure admission.");
-    this.wire.receive(frame);
+    if (this.objects) {
+      void this.objects
+        .receive(frame)
+        .catch((error) =>
+          this.close(
+            error instanceof Error
+              ? error
+              : new Error("Encrypted transfer failed."),
+          ),
+        );
+    } else this.wire.receive(frame);
   }
 
   private start(): void {
@@ -303,10 +329,20 @@ export class SecureChannel {
     this.wire = new SecureWire(
       sid,
       rid,
-      (frame) => this.send(frame),
+      (frame) => (this.objects ? this.objects.send(frame) : this.send(frame)),
       (bytes) => packets.push(bytes),
       (error) => this.close(error),
+      this.objectOrigin ? { deferSend: true, gapTimeoutMs: 90000 } : {},
     );
+    if (this.objectOrigin) {
+      this.objects = new CipherObjectCarrier(
+        { namespace: host.namespace, sid, rid, origin: this.objectOrigin },
+        (frame) => this.send(frame),
+        (frame) => this.wire!.receive(frame),
+        () => this.wire!.receiveNext,
+        (error) => this.close(error),
+      );
+    }
     void this.wire
       .write(framePacket(this.session.handshakeWrite()))
       .catch(() => this.close());
@@ -319,6 +355,7 @@ export class SecureChannel {
     clearInterval(this.heartbeat);
     this.rejectReady(error);
     this.mux.close(error);
+    this.objects?.close();
     this.wire?.close(error);
     this.session?.close();
     this.session?.free();

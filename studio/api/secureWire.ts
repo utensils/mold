@@ -36,7 +36,7 @@ export class SecureWire {
   private seen = new Map<number, string>();
   private pending = new Map<
     number,
-    { frame: WireFrame; time: number; retries: number }
+    { frame: WireFrame; time: number; retries: number; sent: boolean }
   >();
   private wake: Array<{ resolve: () => void; reject: (error: Error) => void }> =
     [];
@@ -51,6 +51,10 @@ export class SecureWire {
     private readonly send: (frame: WireFrame) => void,
     private readonly consume: (bytes: Uint8Array) => void,
     private readonly failed: (error: Error) => void = () => {},
+    private readonly options: {
+      deferSend?: boolean;
+      gapTimeoutMs?: number;
+    } = {},
   ) {
     this.timer = setInterval(() => this.retry(), 1000);
   }
@@ -83,6 +87,7 @@ export class SecureWire {
           frame,
           time: Date.now(),
           retries: 0,
+          sent: !this.options.deferSend,
         });
         this.send(frame);
       }
@@ -93,6 +98,21 @@ export class SecureWire {
       );
     });
     return operation;
+  }
+
+  get receiveNext(): number {
+    return this.next;
+  }
+
+  /** Allocation/PUT preparation has its own bound and consumes no ACK retries. */
+  markSent(sequence: number, count = 1): void {
+    for (let n = sequence; n < sequence + count; n++) {
+      const pending = this.pending.get(n);
+      if (pending) {
+        pending.sent = true;
+        pending.time = Date.now();
+      }
+    }
   }
 
   receive(value: unknown): void {
@@ -180,10 +200,13 @@ export class SecureWire {
 
   private retry(): void {
     try {
-      if (this.gapSince !== null && Date.now() - this.gapSince >= 30000)
+      if (
+        this.gapSince !== null &&
+        Date.now() - this.gapSince >= (this.options.gapTimeoutMs ?? 30000)
+      )
         throw new Error("A relay frame did not arrive.");
       for (const value of this.pending.values()) {
-        if (Date.now() - value.time < 10000) continue;
+        if (!value.sent || Date.now() - value.time < 10000) continue;
         if (value.retries++ >= 3)
           throw new Error("Relay acknowledgement timed out.");
         value.time = Date.now();

@@ -6,3 +6,7 @@
 - **Reliable network recovery.** Bound discovery and connection attempts, close
   stale or revoked sessions, preserve streaming and Range requests, and show
   readable offline and retry messages in the iPhone library.
+- **Lower-cost bulk transport.** Move large encrypted transfers through private,
+  session-scoped bucket objects with checksum verification and acknowledgement
+  cleanup. Lambda authorizes and routes small messages; encryption keys stay on
+  the host and client. Verified HTTPS pairing links cover Android and both iOS apps.

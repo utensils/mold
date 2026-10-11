@@ -26,9 +26,13 @@
       "mobile": [
         {
           "scheme": [
-            "mold"
+            "https"
           ],
-          "appLink": false
+          "host": "utensils.io",
+          "pathPrefix": [
+            "/mold/pair"
+          ],
+          "appLink": true
         }
       ]
     }

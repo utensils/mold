@@ -4,6 +4,10 @@ on:
     paths:
       - "relay/aws/**"
       - "crates/mold-secure/**"
+      - "crates/mold-secure-client/**"
+      - "crates/mold-relay/**"
+      - "studio/api/**"
+      - "scripts/build-secure-wasm.sh"
       - "Cargo.toml"
       - "Cargo.lock"
       - "scripts/relay/**"
@@ -16,6 +20,10 @@ on:
     paths:
       - "relay/aws/**"
       - "crates/mold-secure/**"
+      - "crates/mold-secure-client/**"
+      - "crates/mold-relay/**"
+      - "studio/api/**"
+      - "scripts/build-secure-wasm.sh"
       - "Cargo.toml"
       - "Cargo.lock"
       - "scripts/relay/**"
@@ -57,3 +65,30 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Exercise owner ACL, reparse refusal, atomic identity and private client state
         run: cargo test --locked -p mold-ai-secure identity_file
+  secure-protocol:
+    name: Secure transport protocol
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: secure-transport
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+      - run: bun install --frozen-lockfile
+      - name: Protocol, identity, streaming, cancellation and hostile-peer regressions
+        run: cargo +1.98.0 test --locked -p mold-ai-secure -p mold-ai-secure-client -p mold-ai-relay --all-targets --features mold-ai-relay/cli
+      - name: Install exact browser generator
+        run: cargo +1.98.0 install wasm-bindgen-cli --version 0.2.118 --locked
+      - name: Verify the browser uses this exact shared protocol
+        env:
+          MOLD_WASM_TOOLCHAIN: 1.98.0
+        run: bash scripts/build-secure-wasm.sh --check
+      - name: Browser cryptography, multiplexing, storage and media regressions
+        run: bunx vitest run --config studio/vitest.config.ts studio/api/secureCrypto.test.ts studio/api/secureMux.test.ts studio/api/secureWire.test.ts studio/api/secureObjects.test.ts studio/api/secureStore.test.ts studio/api/secureMediaWorker.test.ts studio/api/relayTransport.test.ts studio/api/connectionRoutes.test.ts studio/api/pairing.test.ts

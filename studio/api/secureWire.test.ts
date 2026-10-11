@@ -3,6 +3,23 @@ import { SecureWire, PacketReader, type WireFrame } from "./secureWire";
 
 afterEach(() => vi.useRealTimers());
 describe("opaque relay byte delivery", () => {
+  it("starts retry budgets when ciphertext is transmitted, after bounded object preparation", async () => {
+    vi.useFakeTimers();
+    const send = vi.fn();
+    const failed = vi.fn();
+    const wire = new SecureWire("sid", "rid", send, () => {}, failed, {
+      deferSend: true,
+      gapTimeoutMs: 90000,
+    });
+    await wire.write(new Uint8Array([1]));
+    await vi.advanceTimersByTimeAsync(45000);
+    expect(failed).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledTimes(1);
+    wire.markSent(0, 1);
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(send).toHaveBeenCalledTimes(2);
+    wire.close();
+  });
   it("discards delayed duplicates beyond the bounded history without decrypting again", () => {
     const consume = vi.fn();
     const send = vi.fn();

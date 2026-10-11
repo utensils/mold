@@ -192,14 +192,15 @@ export function parseMobilePairingPayload(raw: string): MobilePairingPayload {
     payload.type !== "mold.mobile-pairing" ||
     payload.version !== 2 ||
     typeof payload.base_url !== "string" ||
-    !/^https?:\/\//i.test(payload.base_url) ||
+    !validPairingAddress(payload.base_url, false) ||
     !/^[0-9a-f]{32}$/.test(payload.namespace ?? "") ||
     !/^[0-9a-f]{64}$/.test(payload.host_key ?? "") ||
     !/^[0-9a-f]{64}$/.test(payload.host_noise_key ?? "") ||
     !/^[0-9a-f]{128}$/.test(payload.host_binding_signature ?? "") ||
     !/^[0-9a-f]{64}$/.test(payload.invite_seed ?? "") ||
     (payload.websocket_url !== null &&
-      typeof payload.websocket_url !== "string") ||
+      (typeof payload.websocket_url !== "string" ||
+        !validPairingAddress(payload.websocket_url, true))) ||
     !payload.invite ||
     !/^[0-9a-f]{32}$/.test(payload.invite.id) ||
     !/^[0-9a-f]{64}$/.test(payload.invite.signingKey) ||
@@ -216,4 +217,23 @@ export function parseMobilePairingPayload(raw: string): MobilePairingPayload {
   if (payload.endpoints !== undefined)
     payload.endpoints = parseConnectionEndpoints(payload.endpoints);
   return payload as MobilePairingPayload;
+}
+
+function validPairingAddress(value: string, websocket: boolean): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      value === value.trim() &&
+      !/[\r\n\t]/.test(value) &&
+      !url.username &&
+      !url.password &&
+      !url.search &&
+      !url.hash &&
+      (websocket
+        ? url.protocol === "wss:"
+        : ["http:", "https:"].includes(url.protocol) && url.pathname === "/")
+    );
+  } catch {
+    return false;
+  }
 }

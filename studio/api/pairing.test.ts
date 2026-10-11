@@ -15,6 +15,30 @@ const payload = {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("parseMobilePairingPayload", () => {
+  it("rejects credentials and request paths in advertised API origins", () => {
+    for (const base_url of [
+      "https://user:secret@host.test",
+      "https://host.test/api/status",
+      "https://host.test?key=secret",
+      "https://host.test#secret",
+    ]) {
+      expect(() =>
+        parseMobilePairingPayload(JSON.stringify({ ...payload, base_url })),
+      ).toThrow(/pairing code/);
+    }
+    for (const websocket_url of [
+      "https://host.test/ws",
+      "wss://user:secret@host.test/ws",
+      "wss://host.test/ws?key=secret",
+      "wss://host.test/ws#fragment",
+    ]) {
+      expect(() =>
+        parseMobilePairingPayload(
+          JSON.stringify({ ...payload, websocket_url }),
+        ),
+      ).toThrow(/pairing code/);
+    }
+  });
   it("accepts the versioned one-time pairing envelope", () => {
     expect(parseMobilePairingPayload(JSON.stringify(payload))).toMatchObject({
       base_url: "http://studio.local:7680",
