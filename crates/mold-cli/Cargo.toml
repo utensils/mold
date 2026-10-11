@@ -49,7 +49,8 @@ metrics = ["mold-server/metrics"]
 mdns = ["mold-server/mdns"]
 
 [dependencies]
-mold-relay = { path = "../mold-relay", package = "mold-ai-relay", version = "0.34.0" }
+mold-ai-secure-client = { path = "../mold-secure-client" }
+mold-relay = { path = "../mold-relay", package = "mold-ai-relay", version = "0.34.0", features = ["cli"] }
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.34.0" }
 mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version = "0.34.0" }
 mold-db = { path = "../mold-db", package = "mold-ai-db", version = "0.34.0" }

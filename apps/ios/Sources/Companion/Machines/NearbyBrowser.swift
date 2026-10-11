@@ -66,6 +66,7 @@ final class NearbyBrowser {
     func stop() {
         browser?.cancel()
         browser = nil
+        machines = []
     }
 
     nonisolated private static func machine(from result: NWBrowser.Result) -> Machine? {
@@ -77,27 +78,13 @@ final class NearbyBrowser {
 
     /// Turns a found service into an address `HostAddress` accepts, by
     /// opening (and at once closing) a connection to it.
-    func address(of machine: Machine) async throws -> String {
-        try await withCheckedThrowingContinuation { continuation in
-            let connection = NWConnection(to: machine.endpoint, using: .tcp)
-            let once = Once()
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    if case let .hostPort(host, port)? = connection.currentPath?.remoteEndpoint {
-                        once.run { continuation.resume(returning: Self.address(host: host, port: port)) }
-                    } else {
-                        once.run { continuation.resume(throwing: URLError(.cannotFindHost)) }
-                    }
-                    connection.cancel()
-                case let .failed(error), let .waiting(error):
-                    once.run { continuation.resume(throwing: error) }
-                    connection.cancel()
-                default:
-                    break
-                }
-            }
-            connection.start(queue: .main)
+    func address(of machine: Machine, timeout: Duration = .seconds(5)) async throws -> String {
+        let resolution = NearbyAddressResolution(endpoint: machine.endpoint)
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await resolution.address(timeout: timeout)
+        } onCancel: {
+            Task { @MainActor in resolution.cancel() }
         }
     }
 
@@ -106,17 +93,5 @@ final class NearbyBrowser {
         if let scope = text.firstIndex(of: "%") { text = String(text[..<scope]) }
         if text.contains(":") { text = "[\(text)]" }
         return "http://\(text):\(port.rawValue)"
-    }
-}
-
-/// Resumes a continuation exactly once, whichever state arrives first.
-private nonisolated final class Once: @unchecked Sendable {
-    private var done = false
-    private let lock = NSLock()
-    func run(_ body: () -> Void) {
-        lock.lock(); defer { lock.unlock() }
-        guard !done else { return }
-        done = true
-        body()
     }
 }

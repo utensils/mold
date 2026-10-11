@@ -1,139 +1,102 @@
-# Managed phone pairing gateway
+# Encrypted managed host routing
 
-Managed enrollment adds isolated root HTTPS origins to the existing singleton
-relay. The singleton keeps its existing operator host token and unscoped
-connection, grant and media records. A managed host uses a random 128-bit host
-identity and a separate 256-bit owner token; DynamoDB stores only its SHA-256
-verifier. TLS terminates at AWS. The connector still forwards only to the
-loopback engine after its existing anonymous-authentication probe.
+Protocol 3 is a hard cutover. Cloud HTTP application/media/upload endpoints and
+legacy WebSocket upgrades return 426. Cloud routes bounded opaque ciphertext;
+Noise and host-owned device authorization protect application traffic. See
+[SECURE-PROTOCOL.md](SECURE-PROTOCOL.md) for exact canonical bytes and envelope limits.
 
-## Required deployment
+## Deployment and owner registration
 
-This change does **not** deploy DNS, certificates or infrastructure. Before
-native one-click pairing is usable, configure the URandom Terraform deployment:
+URandom Terraform owns Lambda, API Gateway, DynamoDB, DNS/TLS and least-privilege
+roles. Mold owns runtime ZIPs through `scripts/relay/deploy.py`. The frontend has
+log permission only and returns public metadata or redirects to independently
+trusted HTTPS Studio. There is no SSM bearer, plaintext API bridge, content S3
+permission, staged transfer or cloud-served executable shell.
 
-- Wildcard DNS and a TLS certificate for `*.mold-link.urandom.io`, in addition
-  to the existing central `mold-link.urandom.io` origin. Route every managed
-  hostname to the same Regional REST streaming frontend and preserve the
-  original hostname in API Gateway's trusted `requestContext.domainName`.
-  Verify that value in an integration test; a mapping that replaces it with
-  the underlying AWS hostname will fail closed. Do not copy caller `Host`,
-  `Forwarded` or `X-Forwarded-For` into trusted request context.
-- Set `MANAGED_HOST_DOMAIN=mold-link.urandom.io` and
-  `PUBLIC_ORIGIN=https://mold-link.urandom.io` on both frontend and router
-  Lambdas. Set the existing `WS_ENDPOINT` to the deployed verified `wss://`
-  endpoint on both Lambdas. All three variables are required; incomplete
-  configuration disables enrollment. HTTPS origins must have no path,
-  credentials, port, query or fragment. The WSS endpoint may have its stage
-  path, but no credentials, port, query or fragment.
-- Keep existing DynamoDB table access, TTL (`expiresAt`), bridge-token SSM
-  permissions, private S3 bucket, staged-prefix lifecycle cleanup, streaming
-  Lambda timeouts and global reserved concurrency/invocation limits. Managed
-  roster and tenant records use the same table; no plaintext owner secret or
-  new IAM public access is needed. Upload admission remains a global 64-grant
-  bound across managed hosts and the singleton.
-- Bundle/deploy the existing router and frontend entrypoints using
-  `scripts/relay/deploy.py`; the bundler includes `managed.mjs` automatically.
-  Tokens never belong in Terraform state, deployment logs, URLs or arguments.
+A host's namespace derives from its persistent Ed25519 public identity. Operator
+IAM must register that public key and an explicit stable owner/principal ID:
 
-A gateway accepts at most **32 simultaneous capacity leases**. New anonymous
-registrations receive only a two-minute provisional slot and owner identity.
-An authenticated host WebSocket `hello` establishes the owner identity for
-30 days and changes its capacity lease to 90 seconds. Host heartbeats refresh
-that live capacity lease; frontend traffic and HTTP owner renewal cannot extend
-it. Disconnected or unused slots are reclaimed synchronously on admission.
+```sh
+python3 scripts/relay/deploy.py provision --host-key <host-public-ed25519-hex> --principal <owner-id>
+```
 
-Owner verifier records are separate from the bounded capacity roster. A saved
-owner can reconnect with the same host ID and token during its 30-day identity
-lease, even after its previous capacity slot expired. Reconnect bypasses new
-registration quotas and reacquires a free slot; it still fails transiently if
-32 other hosts are active. HTTP renewal returns a valid owner's existing expiry
-without extending it. A working connector refreshes its identity lease at most
-once per day. This prevents a disconnected owner from keeping an identity alive
-using only renewal requests. Previously inline owner records migrate without
-changing IDs or secrets; old 30-day idle reservations are reclaimed.
+The `v3-registration#namespace` row has no TTL and can be written only by operator
+IAM. A self-signed unknown host cannot allocate a live slot. Cloud enrollment is
+public discovery, never authority. Repeated matching provisioning is idempotent;
+reassignment is refused. `--disable` fences active traffic/heartbeats. Registration
+does not grant API access: only the host can issue and revoke paired device grants.
 
-New registrations are limited to five per trusted source IP per hour **and** an
-atomic global token bucket: burst eight, replenished at one admission per
-30 seconds. Failed admission does not reset the refill clock. The global bucket
-bounds distributed anonymous creation to approximately 86,408 new identities
-per 30-day window. Source-IP verifiers are hashed and held in the same CAS roster,
-with at most 1,024 entries and one-hour expiry. DynamoDB TTL is asynchronous
-physical cleanup only; lease validity is checked synchronously. Revocation
-leaves a TTL tombstone so migration or a concurrent heartbeat cannot restore the
-owner. The active roster never exceeds 32; identity storage has a bounded
-creation rate and TTL validity, **not** an absolute all-time row-count bound for
-owners that continue reconnecting and proving liveness.
+## Headless host and clients
 
-This mitigation prevents anonymous idle registrations from occupying every
-capacity slot for 30 days. It does not make a finite anonymous service immune
-to denial of service: an attacker maintaining 32 authenticated live WebSockets
-can still exhaust capacity, and a distributed attacker can consume the new
-registration budget. Accounts or proof of work could raise the attack cost, but
-would add onboarding requirements and do not guarantee availability. Retain
-global infrastructure limits and monitor admission pressure before scaling the
-service. The singleton retains its separate 32 live frontend slots; each managed
-host retains the same bounded stream-membership leases and existing global
-deployment limits.
+Start an authenticated Mold server. It alone creates owner-private
+`$MOLD_HOME/secure/host.identity`; the connector reads that exact identity and
+refuses missing, corrupt, permissive, linked or reparse-point files. POSIX and
+Windows use the shared native private-file implementation. Never copy private
+host identity into a client or into deployment metadata.
 
-## Client contract
+The host connector uses the advertised WSS URL and a numeric authenticated
+loopback target. The standalone `mold-relay` and `mold relay` expose the same
+connection commands. Host settings must advertise the secure WebSocket URL so
+remote pairing can find the gateway.
 
-Central-origin `POST /_mold/relay/enroll` has no body or Mold API key requirement.
-It returns HTTP 201:
+Create an invitation on the owner machine:
+
+```sh
+mold pairing create --output /private/path/invitation.json
+```
+
+This calls local `POST /api/pairing/sessions` with operator authentication from
+`MOLD_API_KEY` or its private-file form. Output is private, short lived and one use.
+Transfer it by a trusted channel or use its QR; never publish the invitation seed.
+On the client:
+
+```sh
+mold pair --invite-file /private/path/invitation.json --name workstation
+```
+
+Device Noise verifies the QR host pin before the claim. The claim proof binds
+invitation, handshake and device public keys. The response issues a distinct
+API credential and host-signed device grant only inside Noise. The client stores
+private identity and grant securely, reconnects as that device and renews before
+expiry. Revoking that device removes its local authority and closes its active
+operations within the one-second policy update interval.
+
+## Public metadata
+
+`GET /_mold/relay/info` and `POST /_mold/relay/enroll` return HTTP 200 with only:
 
 ```json
 {
-  "host_id": "32 lowercase hexadecimal characters",
-  "token": "43 base64url characters representing 32 random bytes",
-  "public_url": "https://<host_id>.mold-link.urandom.io",
-  "relay_url": "wss://<deployed-websocket-endpoint>/<stage>",
-  "expires_at": 1790000000
+  "protocol": 3,
+  "websocket_url": "wss://<gateway>.execute-api.<region>.amazonaws.com/production",
+  "host_domain": "mold-link.urandom.io",
+  "studio_url": "https://utensils.io/mold/studio/"
 }
 ```
 
-Persist the owner token in the platform secret store and retain the host ID and
-origin across restarts. Authenticated `POST /_mold/relay/enroll/<host_id>` renews
-and returns HTTP 200 with the same schema and owner token, the existing identity expiry and the
-configured endpoints. Only a working host connector extends identity retention;
-an idle HTTP renewal cannot extend either a provisional or live capacity lease. The submitted token is returned unchanged after verifier
-validation, and is never persisted as plaintext. `DELETE` on that route with
-`Authorization: Bearer <owner-token>` returns HTTP 204 and revokes the lease.
-The initial `expires_at` is only two minutes; after host `hello`, subsequent
-renewal responses reflect its established 30-day identity lease. An expired
-owner identity must enroll again. The enrollment endpoints work only
-on the configured central origin, never a tenant origin.
+Metadata is not a trust anchor and contains no owner/device credential. The host
+binding comes from trusted pairing. Send no bearer headers or credentials in
+WebSocket URLs. Signed challenge admission is described in the protocol document.
 
-The host WSS handshake sends:
+## Bounds and recovery
 
-```text
-x-mold-relay-role: host
-x-mold-relay-host: <host_id>
-Authorization: Bearer <owner-token>
-```
+There are at most 32 live hosts, 32 peers per host and two invitation peers per
+host. Unauthenticated pending upgrades are bounded per trusted socket source
+and globally. Leases are checked synchronously; DynamoDB TTL is only cleanup.
+Host reconnect advances its session and closes old peers. Capacity release is
+fenced to the owning connection, so a delayed old disconnect cannot free a new
+host's reservation.
 
-Frontend bridges use `x-mold-relay-role: frontend`, the same namespace header
-and the existing internal bridge bearer. Omit the namespace header for the
-legacy singleton. Namespace is persisted on the authenticated connection;
-subsequent messages and disconnects use that stored namespace. A frame cannot
-select another tenant. Unknown, malformed, revoked or expired tenant origins
-and host handshakes fail closed. Viewer headers never select a namespace.
+GetConnection confirms PostToConnection 410 before eviction. A verified live
+socket receives one retry of exactly the same ciphertext frame; clients reorder
+and deduplicate before decryption. Reconnect creates a new Noise channel and
+never replays uncertain mutations. Data/ACK buffers and multiplex stream credit
+remain bounded; Range/HEAD, uploads, SSE and streaming responses share the same
+secure transport.
 
-Upload grants, media polling and staging jobs are tenant-bound in DynamoDB.
-Managed S3 uploads are `uploads/<host_id>/<uuid>`; responses are
-`_mold/objects/<host_id>/<uuid>`. Legacy prefixes remain unchanged. Signed object
-URLs remain private bearer capabilities limited to the configured bucket;
-frontend signing verifies the requested tenant prefix. Neither an identical
-engine API key nor an identical epoch permits transfer-grant reuse across hosts.
-Workers verify their saved job's tenant, credential and epoch before forwarding.
-Application mutations are never replayed after uncertain delivery.
-
-## Verification
-
-Run `node --test relay/aws/test/*.test.mjs` with the package dependencies
-installed. The suite covers concurrent atomic capacity, source and global
-quotas, idle lease reclamation, live promotion and heartbeat expiry, stable-owner
-reconnect, owner renew/delete, legacy identity migration, trusted hostname selection,
-managed/legacy coexistence, cross-tenant credentials and frames, revoked
-sessions, upload grants, media polling and worker dispatch. These are local
-contract tests; production wildcard DNS, certificate routing, trusted context
-and an actual outbound connector must be verified after infrastructure deploy.
+Run local contracts with `node --test relay/aws/test/*.test.mjs`, the Rust secure
+transport suites and private-file tests. Windows ACL/reparse tests must execute
+on Windows CI; cross-compilation alone is insufficient. Production proof includes
+live AWS routing, all client surfaces, revocation, failure recovery and bulk
+transfer/cost measurements. Old plaintext temporary S3 objects must be verified
+expired/removed before claiming complete E2EE cutover.

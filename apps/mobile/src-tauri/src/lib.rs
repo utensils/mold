@@ -2,6 +2,9 @@
 //! logic use the shared Vue wire types while the phone connects only to remote
 //! Mold servers.
 
+#[path = "../../../shared/secure_media_bridge.rs"]
+mod secure_media_bridge;
+use tauri::Manager;
 mod appearance;
 mod background_task;
 mod context_menu;
@@ -34,6 +37,7 @@ pub fn run() {
     install_network_crypto_provider();
 
     let builder = tauri::Builder::default()
+        .manage(secure_media_bridge::MediaBridges::default())
         .manage(background_task::MobileBackgroundTaskState::default())
         .plugin(tauri_plugin_deep_link::init());
     #[cfg(target_os = "android")]
@@ -49,7 +53,12 @@ pub fn run() {
             }
             Ok(())
         })
+        .on_window_event(|window,event| { if matches!(event,tauri::WindowEvent::Destroyed) {window.state::<secure_media_bridge::MediaBridges>().close_window(window.label());} })
         .invoke_handler(tauri::generate_handler![
+            secure_media_bridge::secure_media_open,
+            secure_media_bridge::secure_media_close,
+            secure_media_bridge::secure_host_register,
+            secure_media_bridge::secure_host_forget,
             appearance::set_mobile_appearance,
             background_task::begin_mobile_background_task,
             background_task::end_mobile_background_task,

@@ -1,3 +1,6 @@
+import { installSecureNative } from "../lib/secureNative";
+import { configureSecureMediaWorker } from "@studio/api/secureMedia";
+configureSecureMediaWorker(`${import.meta.env.BASE_URL}secure-media-sw.js`);
 import { createApp } from "vue";
 import { createPinia } from "pinia";
 import App from "./MobileApp.vue";
@@ -15,4 +18,10 @@ installSystemThemeSync(() => {
   const { theme, matchSystem } = loadMobileSettings();
   return { theme, matchSystem };
 });
-createApp(App).use(createPinia()).mount("#app");
+void installSecureNative()
+  .catch(() => {
+    // The normal pairing UI reports unreadable or expired identities by name.
+  })
+  .finally(() => {
+    createApp(App).use(createPinia()).mount("#app");
+  });

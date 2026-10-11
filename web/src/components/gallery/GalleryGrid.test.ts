@@ -1,5 +1,5 @@
 import { mount } from "@vue/test-utils";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import GalleryGrid from "./GalleryGrid.vue";
 import type { GalleryImage } from "../../types";
 
@@ -255,13 +255,24 @@ describe("GalleryGrid multi-host thumbnails", () => {
         { id: "studio-7680", name: "studio", url: "http://studio:7680" },
       ]),
     );
+    const fetch = vi.fn(async (_input: RequestInfo | URL) => new Response(new Blob(["tile"])));
+    vi.stubGlobal("fetch", fetch);
+    const create = vi
+      .spyOn(URL, "createObjectURL")
+      .mockReturnValue("blob:secure-thumbnail");
     const remote = { ...image, hostId: "studio-7680", hostLabel: "studio" };
     const w = mount(GalleryGrid, {
       props: { entries: [remote], loading: false },
     });
     await new Promise((r) => setTimeout(r, 0));
     const src = w.find("img").attributes("src") ?? "";
-    expect(src).toContain("http://studio:7680/api/gallery/thumbnail/");
+    expect(src).toBe("blob:secure-thumbnail");
+    expect(String(fetch.mock.calls[0]?.[0])).toContain(
+      "http://studio:7680/api/gallery/thumbnail/",
+    );
+    create.mockRestore();
+    vi.unstubAllGlobals();
+    w.unmount();
   });
 
   it("selects only the collided print that belongs to the selected host", async () => {

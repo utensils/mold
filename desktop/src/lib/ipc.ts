@@ -1,3 +1,4 @@
+import { relayFetch } from "@studio/api/relayTransport";
 import {
   captureMirrorOrganization,
   applyMirrorOrganization,
@@ -228,16 +229,34 @@ export const ipc = {
     if (!inTauri()) return Promise.resolve([]);
     return invoke<SavedHost[]>("forget_remote_host", { id });
   },
-  testRemoteHost(url: string, apiKey: string | null): Promise<HostTest> {
-    if (!inTauri())
-      return Promise.resolve({
+  async testRemoteHost(url: string, apiKey: string | null): Promise<HostTest> {
+    try {
+      const response = await relayFetch(`${url.replace(/\/$/, "")}/api/status`, {
+        headers: apiKey ? { "x-api-key": apiKey } : {},
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!response.ok) throw new Error(`This machine returned ${response.status}.`);
+      const value = (await response.json()) as {
+        version?: string;
+        instance_id?: string;
+        hostname?: string;
+      };
+      return {
         ok: true,
-        version: null,
+        version: value.version ?? null,
+        instanceId: value.instance_id ?? null,
+        hostname: value.hostname ?? null,
         error: null,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        version: null,
         instanceId: null,
         hostname: null,
-      });
-    return invoke<HostTest>("test_remote_host", { url, apiKey });
+        error: error instanceof Error ? error.message : "This machine is unavailable.",
+      };
+    }
   },
   /** Browse the LAN for advertised mold servers; empty in a plain browser. */
   discoverServers(timeoutMs?: number): Promise<DiscoveredHost[]> {

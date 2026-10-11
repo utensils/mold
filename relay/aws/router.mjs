@@ -4,17 +4,13 @@ import {
   DeleteConnectionCommand,
   GetConnectionCommand,
 } from "@aws-sdk/client-apigatewaymanagementapi";
-import { store, parameter } from "./aws-store.mjs";
-import { createRouter } from "./router-core.mjs";
+import { store } from "./aws-store.mjs";
+import { createSecureRouter } from "./secure-router.mjs";
 const api = new ApiGatewayManagementApiClient({
   endpoint: process.env.MANAGEMENT_ENDPOINT,
 });
-export const handler = createRouter({
+export const handler = createSecureRouter({
   store,
-  tokens: async () => ({
-    host: await parameter(process.env.HOST_TOKEN_PARAMETER),
-    frontend: await parameter(process.env.BRIDGE_TOKEN_PARAMETER),
-  }),
   post: async (id, frame) => {
     await api.send(
       new PostToConnectionCommand({

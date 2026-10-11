@@ -519,6 +519,17 @@ ALTER TABLE collections ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;
 
 /// Ordered list of schema migrations. Version numbers must be strictly
 /// increasing — [`apply_pending`] validates this at startup.
+const V40_SECURE_DEVICES: &str = r#"
+CREATE TABLE secure_devices (
+    client_id TEXT PRIMARY KEY REFERENCES paired_clients(id) ON DELETE CASCADE,
+    grant_id TEXT NOT NULL UNIQUE CHECK(length(grant_id)=32),
+    signing_key TEXT NOT NULL CHECK(length(signing_key)=64),
+    noise_key TEXT NOT NULL CHECK(length(noise_key)=64),
+    expires_at INTEGER NOT NULL CHECK(expires_at>0),
+    epoch INTEGER NOT NULL CHECK(epoch>=0)
+);
+"#;
+
 pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -676,6 +687,7 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 39,
         kind: MigrationKind::Sql(V39_QUEUE_TRANSFERS),
     },
+    Migration {version:40,kind:MigrationKind::Sql(V40_SECURE_DEVICES)},
 ];
 
 /// The gallery listing is `WHERE output_dir = ? ORDER BY
@@ -935,7 +947,7 @@ DELETE FROM settings WHERE key LIKE 'tui.%';
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 39;
+pub const SCHEMA_VERSION: i64 = 40;
 
 /// Downloadable files that belong to one gallery print. The generation row
 /// remains the lifecycle authority, so permanent deletion cascades while
@@ -1766,7 +1778,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 39);
+        assert_eq!(SCHEMA_VERSION, 40);
         assert!(table_exists(&conn, "device_preferences"));
         assert!(table_exists(&conn, "mesh_workflow_jobs"));
         assert!(table_exists(&conn, "mesh_workflow_stages"));
@@ -1922,7 +1934,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 39);
+        assert_eq!(SCHEMA_VERSION, 40);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -2059,7 +2071,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 39);
+        assert_eq!(SCHEMA_VERSION, 40);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -2395,7 +2407,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 39);
+        assert_eq!(SCHEMA_VERSION, 40);
     }
 
     #[test]

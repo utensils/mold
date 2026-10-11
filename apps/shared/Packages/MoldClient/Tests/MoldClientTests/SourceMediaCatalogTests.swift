@@ -44,7 +44,7 @@ extension SourceMediaCatalogTests {
         let host = MoldHost(name: "Fixture", baseURL: URL(string: "http://fixture")!)
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [SourceInventoryStub.self]
-        let backend = HTTPBackend(host: host, session: URLSession(configuration: configuration))
+        let backend = HTTPBackend.testing(host: host, session: URLSession(configuration: configuration))
         let owner = PrintFixtures.entry("owner.png", host: host.id)
         let catalog = SourceMediaCatalog()
         await catalog.load(owners: [owner], backend: { _ in backend }, route: { _ in host }, instance: { _ in "original" })

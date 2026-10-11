@@ -17,9 +17,12 @@ public struct MoldHost: Identifiable, Hashable, Codable, Sendable {
     public var connectionInstanceID: String?
     /// Original user-approved origin, retained when the active route roams.
     public var connectionOriginalURL: URL?
+    /// Pinned host keys and a host-signed grant. Absent legacy remote hosts must pair again.
+    public var secure: SecureHost?
 
     public init(id: UUID = UUID(), name: String, baseURL: URL, apiKey: String? = nil,
-                connectionEndpoints: [ConnectionEndpoint]? = nil, connectionInstanceID: String? = nil, connectionOriginalURL: URL? = nil) {
+                connectionEndpoints: [ConnectionEndpoint]? = nil, connectionInstanceID: String? = nil, connectionOriginalURL: URL? = nil,
+                secure: SecureHost? = nil) {
         self.id = id
         self.name = name
         self.baseURL = baseURL
@@ -27,6 +30,7 @@ public struct MoldHost: Identifiable, Hashable, Codable, Sendable {
         self.connectionEndpoints = connectionEndpoints
         self.connectionInstanceID = connectionInstanceID
         self.connectionOriginalURL = connectionOriginalURL
+        self.secure = secure
     }
 }
 

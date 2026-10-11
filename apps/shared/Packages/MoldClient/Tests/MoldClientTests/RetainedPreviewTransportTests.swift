@@ -21,7 +21,7 @@ struct RetainedPreviewTransportTests {
     func bothPreviewRoutesRefuseOversizedResponses(member: String) async throws {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [RetainedPreviewStub.self]
-        let backend = HTTPBackend(host: .init(name: "Fixture", baseURL: URL(string: "http://fixture")!),
+        let backend = HTTPBackend.testing(host: .init(name: "Fixture", baseURL: URL(string: "http://fixture")!),
             session: URLSession(configuration: config))
         for thumbnail in [true, false] {
             do {

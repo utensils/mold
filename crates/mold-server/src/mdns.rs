@@ -356,6 +356,14 @@ pub fn register(bind: &str, port: u16, txt: Vec<(String, String)>) -> Result<Mdn
     if let Err(e) = daemon.disable_interface(vec![IfKind::LoopbackV4, IfKind::LoopbackV6]) {
         tracing::warn!(error = %e, "mDNS: could not disable loopback interfaces");
     }
+    // A wildcard socket serves only its actual IP family. Advertising the
+    // other family can strand clients that prefer an unreachable AAAA record.
+    if let Ok(address) = bind.parse::<IpAddr>() {
+        daemon.disable_interface(match address {
+            IpAddr::V4(_) => IfKind::IPv6,
+            IpAddr::V6(_) => IfKind::IPv4,
+        }).context("could not constrain mDNS to the listener address family")?;
+    }
 
     let raw_host = hostname::get()
         .ok()

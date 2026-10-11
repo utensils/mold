@@ -12,9 +12,9 @@ private final class ReferenceUploadStub: StubTransport {
     nonisolated(unsafe) static var refuseAdmission = false
     nonisolated(unsafe) static var holdUpload = false
     nonisolated(unsafe) static var capsData = Data()
-    nonisolated(unsafe) static var metadataDigest = RelayTransport.sha256(Data([1, 2, 3]))
+    nonisolated(unsafe) static var metadataDigest = TransportDigest.sha256(Data([1, 2, 3]))
     override class func response(for path: String) -> (status: Int, body: Data)? {
-        let digest = RelayTransport.sha256(Data([1, 2, 3]))
+        let digest = TransportDigest.sha256(Data([1, 2, 3]))
         switch path {
         case "/api/capabilities": return (200, capsData)
         case "/api/status": return (200, Data(#"{"version":"test","busy":false,"instance_id":"instance","uptime_secs":1}"#.utf8))
@@ -45,9 +45,9 @@ private final class ReferenceUploadStub: StubTransport {
 struct ReferenceUploadTransportTests {
     func fixture() throws -> (HTTPBackend, GenerateRequest, ReferenceUploadCapabilities) {
         ReferenceUploadStub.requests = []; ReferenceUploadStub.sessionInstance = "instance"
-        ReferenceUploadStub.completed = true; ReferenceUploadStub.sessionCount = 0; ReferenceUploadStub.refuseAdmission = false; ReferenceUploadStub.holdUpload = false; ReferenceUploadStub.metadataDigest = RelayTransport.sha256(Data([1, 2, 3]))
+        ReferenceUploadStub.completed = true; ReferenceUploadStub.sessionCount = 0; ReferenceUploadStub.refuseAdmission = false; ReferenceUploadStub.holdUpload = false; ReferenceUploadStub.metadataDigest = TransportDigest.sha256(Data([1, 2, 3]))
         let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [ReferenceUploadStub.self]
-        let backend = HTTPBackend(host: MoldHost(name: "test", baseURL: URL(string: "http://upload-test.local")!, apiKey: "key"), session: URLSession(configuration: config))
+        let backend = HTTPBackend.testing(host: MoldHost(name: "test", baseURL: URL(string: "http://upload-test.local")!, apiKey: "key"), session: URLSession(configuration: config))
         var request = GenerateRequest(prompt: "scene", model: "minimax-h3-ref2va:official-bf16", width: 1280, height: 720, steps: 30, guidance: 1)
         request.references = [.init(kind: "image", media: .init(authority: "inline", data: "AQID"), mimeType: "image/png", provenance: .init(name: "sample.png"), width: 1, height: 1)]
         let caps = try MoldJSON.decoder.decode(ReferenceUploadCapabilities.self, from: Data(#"{"available":true,"protocol_version":2,"requires_api_key":true,"session_path":"/api/reference-sessions","upload_path":"/api/reference-upload","session_handle_header":"x-reference-session","upload_handle_header":"x-reference-upload","max_file_bytes":1024,"max_session_bytes":2048,"max_active_sessions":2,"session_ttl_ms":3600000}"#.utf8))

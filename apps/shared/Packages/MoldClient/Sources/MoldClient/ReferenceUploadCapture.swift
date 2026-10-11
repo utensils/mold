@@ -41,7 +41,7 @@ struct ReferenceUploadCapture {
                     throw ReferenceUploadPolicy.refusal("REFERENCE_UPLOAD_TOO_LARGE", "References exceed the host upload limit.")
                 }
                 sessionBytes += decoded.count
-                let digest = RelayTransport.sha256(decoded)
+                let digest = TransportDigest.sha256(decoded)
                 if let declared = original.provenance?.sha256,
                    declared.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != digest {
                     throw ReferenceUploadPolicy.refusal("REFERENCE_UPLOAD_DIGEST_MISMATCH", "Reference media does not match its digest.")

@@ -124,20 +124,27 @@ struct NearbyRow: View {
             }
             Spacer(minLength: 8)
             if resolving { ProgressView() } else {
-                Button("Add") { Task { await add() } }
+                Button("Add") { resolving = true }
                     .buttonStyle(.bordered)
                     .accessibilityLabel("Add \(machine.name)")
             }
         }
         .padding(.horizontal, done == nil ? 16 : 0)
+        .task(id: resolving) {
+            guard resolving else { return }
+            await add()
+        }
     }
 
     private func add() async {
-        resolving = true
+        problem = nil
         defer { resolving = false }
         do {
             let address = try await nearby.address(of: machine)
+            guard !Task.isCancelled else { return }
             router.addMachine(.init(name: machine.name, address: address))
+        } catch is CancellationError {
+            return
         } catch {
             problem = String(localized: "\(machine.name) stopped answering before it could be added.")
         }

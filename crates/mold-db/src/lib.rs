@@ -24,6 +24,7 @@ pub mod migrations;
 mod model_prefs;
 pub mod organization;
 pub mod paired_clients;
+pub mod secure_devices;
 mod path;
 pub mod persist;
 mod prompt_history;

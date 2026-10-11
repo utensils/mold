@@ -87,6 +87,7 @@ async fn generate_with_runpod_transport(
 }
 use crate::theme;
 use crate::AlreadyReported;
+use mold_secure_client::RequestBuilderExt;
 
 // ── Local state persistence ────────────────────────────────────────────
 
@@ -1628,6 +1629,10 @@ pub async fn run_connect(pod_id: String, check: bool) -> Result<()> {
         }
     }
     let proxy = format!("https://{pod_id}-7680.proxy.runpod.net");
+    require_paired_pod(&proxy)?;
+    if check {
+        wait_for_mold(&proxy, 15).await?;
+    }
     println!("export MOLD_HOST={proxy}");
     eprintln!("{} gallery: {}", theme::prefix_hint(), proxy.cyan());
     Ok(())
@@ -1684,6 +1689,8 @@ pub struct RunOptions {
 /// `mold runpod run "<prompt>"` — end-to-end: reuse warm pod or create one,
 /// generate, save to local repo, park (or delete with --keep).
 pub async fn run_run(opts: RunOptions) -> Result<()> {
+    let existing=load_state().last_pod_id.context("Create and pair a RunPod host first: run mold runpod create, create a secure invitation through its trusted RunPod console, then mold pair --invite-file <private-file>. Automatic unpaired remote generation is disabled")?;
+    require_paired_pod(&format!("https://{existing}-7680.proxy.runpod.net"))?;
     let mut config = Config::load_or_default();
     let effective_model = require_run_model_activation(&mut config, &opts).await?;
 
@@ -2112,29 +2119,10 @@ async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -
                     );
                     delete_tracked_pod(client, &id).await?;
                 } else {
-                    // REST v1 can leave `runtime` / `machine.gpu_display_name`
-                    // unpopulated on fully-booted pods (same reason we had
-                    // to rework `wait_for_schedule`). Don't use those as a
-                    // usability test — instead probe the proxy directly.
-                    // If the proxy answers at all, the pod is scheduled
-                    // and routable, which is all we need.
-                    let proxy_url = format!("https://{id}-7680.proxy.runpod.net/api/status");
-                    let http = reqwest::Client::builder()
-                        .timeout(std::time::Duration::from_secs(5))
-                        .build()
-                        .unwrap_or_default();
-                    if http.get(&proxy_url).send().await.is_ok() {
-                        return Ok(pod);
-                    }
-                    // Running according to RunPod but the proxy isn't
-                    // answering — treat as stale, kill it to avoid leaked
-                    // billing.
-                    eprintln!(
-                        "{} stale pod {} (not reachable via proxy) — deleting",
-                        theme::icon_warn(),
-                        id
-                    );
-                    delete_tracked_pod(client, &id).await?;
+                    // Provider RUNNING confirms the resource exists. Application
+                    // readiness is checked through its pinned secure pairing below;
+                    // a private API refusing a proxy probe is not a stale paid pod.
+                    return Ok(pod);
                 }
             }
             Ok(_) => {
@@ -2381,7 +2369,12 @@ async fn wait_for_schedule(client: &RunPodClient, pod_id: &str, timeout_secs: u6
     }
 }
 
+fn require_paired_pod(origin: &str) -> Result<()> {
+    mold_secure_client::load_pairing(origin).with_context(||format!("Pair this RunPod host before using it: on the host's trusted console configure Remote Access, run mold pairing create --output <private-file>, transfer the invitation privately, then run mold pair --invite-file <private-file>. Set the host MOLD_PUBLIC_URL to {origin}; provider status alone does not establish a secure Mold connection"))?;
+    Ok(())
+}
 async fn wait_for_mold(mold_host: &str, timeout_secs: u64) -> Result<()> {
+    require_paired_pod(mold_host)?;
     use std::time::{Duration, Instant};
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -2403,7 +2396,7 @@ async fn wait_for_mold(mold_host: &str, timeout_secs: u64) -> Result<()> {
         // a `version` field. Before the mold process is up, the RunPod
         // Cloudflare proxy returns an empty 404 or 502. We need to see the
         // actual mold server response, not the proxy's.
-        let progress = match http.get(&status_url).send().await {
+        let progress = match http.get(&status_url).secure_send().await {
             Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
                 Ok(v) if v.get("version").is_some() => {
                     pb.finish_and_clear();

@@ -1,0 +1,4 @@
+module CMoldSecure {
+    header "mold_secure.h"
+    export *
+}

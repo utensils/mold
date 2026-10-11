@@ -87,6 +87,7 @@ extension HostStore {
     }
 
     func remove(_ host: MoldHost) {
+        Task { await HTTPBackend.disconnect(host: host.id) }
         hosts.removeAll { $0.id == host.id }
         forget(host.id)
         // A removed default cannot outlive its machine in the preferences.

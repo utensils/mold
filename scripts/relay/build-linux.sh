@@ -13,7 +13,7 @@ docker run --rm --platform linux/amd64 \
     cp -a /src/Cargo.toml /src/Cargo.lock /tmp/
     cp -a /src/crates /tmp/
     cd /tmp
-    CARGO_TARGET_DIR=/out/target cargo build --locked --release -p mold-ai-relay --bin mold-relay --target x86_64-unknown-linux-musl
+    CARGO_TARGET_DIR=/out/target cargo build --locked --release -p mold-ai-relay --features cli --bin mold-relay --target x86_64-unknown-linux-musl
     install -m 755 /out/target/x86_64-unknown-linux-musl/release/mold-relay /out/mold-relay
     sha256sum /out/mold-relay > /out/mold-relay.sha256
   '

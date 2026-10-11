@@ -14,9 +14,12 @@ let package = Package(
         .library(name: "MoldClientTesting", targets: ["MoldClientTesting"]),
     ],
     targets: [
+        .binaryTarget(name: "MoldSecure", path: "build/MoldSecure.xcframework"),
         .target(
             name: "MoldClient",
-            swiftSettings: [.swiftLanguageMode(.v6)]
+            dependencies: ["MoldSecure"],
+            swiftSettings: [.swiftLanguageMode(.v6)],
+            linkerSettings: [.linkedLibrary("iconv")]
         ),
         .target(
             name: "MoldClientTesting",

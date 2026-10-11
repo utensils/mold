@@ -8152,6 +8152,7 @@ mod tests {
     fn authless_app(state: AppState) -> axum::Router {
         app_with_state(state)
             .layer(axum::middleware::from_fn(crate::auth::require_api_key))
+            .layer(crate::auth::test_loopback_peer())
             .layer(axum::middleware::from_fn_with_state(
                 None,
                 crate::auth::inject_auth_state,
@@ -8163,6 +8164,7 @@ mod tests {
         let keys = std::collections::HashSet::from(["test-key".to_string()]);
         app_with_state(state)
             .layer(axum::middleware::from_fn(crate::auth::require_api_key))
+            .layer(crate::auth::test_loopback_peer())
             .layer(axum::middleware::from_fn_with_state(
                 Some(std::sync::Arc::new(crate::auth::ApiKeySet::new(keys))),
                 crate::auth::inject_auth_state,
@@ -16450,6 +16452,7 @@ mod tests {
     fn app_with_auth(auth_state: crate::auth::AuthState) -> axum::Router {
         let app = app_empty();
         app.layer(axum::middleware::from_fn(crate::auth::require_api_key))
+            .layer(crate::auth::test_loopback_peer())
             .layer(axum::middleware::from_fn_with_state(
                 auth_state,
                 crate::auth::inject_auth_state,
@@ -16695,6 +16698,7 @@ mod tests {
         let auth = Some(key_set.clone());
         let app = create_router(state)
             .layer(axum::middleware::from_fn(crate::auth::require_api_key))
+            .layer(crate::auth::test_loopback_peer())
             .layer(axum::middleware::from_fn_with_state(
                 auth,
                 crate::auth::inject_auth_state,
@@ -18915,6 +18919,7 @@ mod tests {
         let auth = Some(std::sync::Arc::new(crate::auth::ApiKeySet::new(keys)));
         let app = create_router(state)
             .layer(axum::middleware::from_fn(crate::auth::require_api_key))
+            .layer(crate::auth::test_loopback_peer())
             .layer(axum::middleware::from_fn_with_state(
                 auth,
                 crate::auth::inject_auth_state,

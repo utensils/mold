@@ -107,8 +107,7 @@ struct HostStoreTests {
 
     @Test func pairingAddsTheMachineWithTheClaimedKey() async throws {
         let (hosts, credentials, _) = store()
-        let payload = try MobilePairingPayload.parse(
-            "mold://pair?version=1&base_url=http%3A%2F%2Fbox%3A7680&token=t&expires_at=4000000000&instance_id=inst-1&name=box")
+        let payload = try SecurePairingFixture.payload()
         var sent: (String, String)?
         let host = try await hosts.pair(payload, claim: { _, name, kind in
             sent = (name, kind)
@@ -122,9 +121,8 @@ struct HostStoreTests {
 
     @Test func pairingAMachineAlreadyListedReplacesItsKeyInsteadOfAddingARow() async throws {
         let (hosts, credentials, _) = store()
-        let existing = try hosts.add(name: "workstation", address: "box", apiKey: "old", makeDefault: false)
-        let payload = try MobilePairingPayload.parse(
-            "mold://pair?version=1&base_url=http%3A%2F%2Fbox%3A7680&token=t&expires_at=4000000000&instance_id=inst-1&name=box")
+        let existing = try hosts.add(name: "workstation", address: "studio.local", apiKey: "old", makeDefault: false)
+        let payload = try SecurePairingFixture.payload()
         try await hosts.pair(payload, claim: { _, _, _ in
             try MoldJSON.decoder.decode(PairingClaim.self, from: Data(
                 #"{"api_key":"new","instance_id":"inst-1","hostname":"box"}"#.utf8))

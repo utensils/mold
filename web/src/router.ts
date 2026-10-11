@@ -1,6 +1,7 @@
 import {
   createRouter,
   createWebHistory,
+  createWebHashHistory,
   type RouteRecordRaw,
 } from "vue-router";
 import QueuePage from "./pages/QueuePage.vue";
@@ -30,6 +31,9 @@ export const routes: RouteRecordRaw[] = [
 ];
 
 export const router = createRouter({
-  history: createWebHistory(),
+  history:
+    import.meta.env.VITE_STANDALONE_STUDIO === "1"
+      ? createWebHashHistory(import.meta.env.BASE_URL)
+      : createWebHistory(import.meta.env.BASE_URL),
   routes,
 });

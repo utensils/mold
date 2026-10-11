@@ -7,7 +7,7 @@ import Testing
 // mixing them up is silent: the host parses a different request than the one
 // the person typed and answers it without complaint.
 
-private let backend = HTTPBackend(
+private let backend = HTTPBackend.testing(
     host: MoldHost(name: "workstation", baseURL: URL(string: "http://workstation:7680")!)
 )
 

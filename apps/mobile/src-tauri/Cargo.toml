@@ -19,6 +19,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+mold-ai-secure-client = { path = "../../../crates/mold-secure-client" }
+tokio = { version = "1", features = ["sync"] }
+uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
@@ -37,7 +40,7 @@ objc2 = "0.6"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSData", "NSError", "NSString", "NSURL"] }
 objc2-photos = { version = "0.3.2", default-features = false, features = ["PHAssetChangeRequest", "PHAssetCreationRequest", "PHChangeRequest", "PHPhotoLibrary", "PhotosTypes", "block2", "dispatch2"] }
 objc2-ui-kit = { version = "0.3.2", default-features = false, features = ["UIAction", "UIActivity", "UIActivityViewController", "UIApplication", "UIInterface", "UIImage", "UIMenu", "UIMenuElement", "UIPasteboard", "UIPopoverPresentationController", "UIPresentationController", "UIResponder", "UIScrollView", "UIView", "UIViewController", "block2", "objc2-core-foundation"] }
-reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 [target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]

@@ -27,6 +27,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 url = "2"
+mold-secure = { path = "../../../../crates/mold-secure", package = "mold-ai-secure" }
 mold-relay = { path = "../../../../crates/mold-relay", package = "mold-ai-relay" }
 mold-core = { path = "../../../../crates/mold-core", package = "mold-ai-core" }
 mold-db = { path = "../../../../crates/mold-db", package = "mold-ai-db" }

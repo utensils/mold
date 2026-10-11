@@ -13,6 +13,20 @@ public struct PairingSession: Codable, Hashable, Sendable {
     public let instanceId: String
     public let hostname: String?
     public let endpoints: [ConnectionEndpoint]?
+    public var hostKey: String?
+    public var hostNoiseKey: String?
+    public var hostBindingSignature: String?
+    public var namespace: String?
+    public var websocketUrl: String?
+    public var inviteSeed: String?
+    public var invite: SecureInvite?
+
+    public var secureInvitation: SecureInvitation? {
+        guard let hostKey, let hostNoiseKey, let hostBindingSignature, let namespace,
+              let websocketUrl, let url = URL(string: websocketUrl), let inviteSeed, let invite else { return nil }
+        return SecureInvitation(binding: .init(signingKey: hostKey, noiseKey: hostNoiseKey, signature: hostBindingSignature),
+                                namespace: namespace, websocketURL: url, seed: inviteSeed, invite: invite)
+    }
 
     public init(
         token: String?, expiresAt: UInt64?, authRequired: Bool, instanceId: String, hostname: String?, endpoints: [ConnectionEndpoint]? = nil

@@ -318,6 +318,9 @@ fn synthetic_workspace(root: &Path) {
         "mold-catalog",
         "mold-db",
         "mold-scheduler",
+        "mold-secure",
+        "mold-secure-client",
+        "mold-relay",
         "mold-candle",
         "mold-inference",
         "mold-server",
@@ -329,7 +332,7 @@ fn synthetic_workspace(root: &Path) {
     }
     fs::write(
         root.join("crates/mold-server/Cargo.toml"),
-        "[package]\nname='fixture'\n[dependencies]\ncore={path='../mold-core'}\ncatalog={path='../mold-catalog'}\ndb={path='../mold-db'}\ninference={path='../mold-inference'}\nscheduler={path='../mold-scheduler'}\n",
+        "[package]\nname='fixture'\n[dependencies]\ncore={path='../mold-core'}\ncatalog={path='../mold-catalog'}\ndb={path='../mold-db'}\ninference={path='../mold-inference'}\nscheduler={path='../mold-scheduler'}\nsecure={path='../mold-secure'}\nsecure_client={path='../mold-secure-client'}\nrelay={path='../mold-relay'}\n",
     )
     .unwrap();
     fs::write(
@@ -389,4 +392,17 @@ fn runtime_identity_rejects_symbolic_link_inputs() {
 
     let error = h3_runtime_code_identity::collect_runtime_inputs(workspace.path()).unwrap_err();
     assert!(error.contains("symbolic link"), "{error}");
+}
+
+#[test]
+fn runtime_identity_covers_secure_transport_authority() {
+    let workspace = tempfile::tempdir().unwrap();
+    synthetic_workspace(workspace.path());
+    let before = workspace_identity(workspace.path());
+    fs::write(
+        workspace.path().join("crates/mold-secure/src/lib.rs"),
+        "pub fn verify_new_authority() {}\n",
+    )
+    .unwrap();
+    assert_ne!(before, workspace_identity(workspace.path()));
 }

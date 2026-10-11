@@ -21,6 +21,19 @@ struct ConnectionSupervisor: ViewModifier {
                     await stores.hosts.refreshPairedRoutes()
                 }
             }
+            .task(id: NearbyRecovery(active: phase == .active, machines: stores.nearby.machines)) {
+                guard phase == .active else { return }
+                await stores.hosts.recoverNearby(stores.nearby.machines, browser: stores.nearby)
+            }
+            .task(id: phase) {
+                guard phase == .active else { return }
+                while !Task.isCancelled {
+                    do { try await Task.sleep(for: .seconds(15)) } catch { return }
+                    await stores.hosts.recoverNearby(stores.nearby.machines, browser: stores.nearby)
+                    guard !Task.isCancelled else { return }
+                    await stores.hosts.refreshUnavailable()
+                }
+            }
             .onChange(of: phase) { _, new in
                 switch new {
                 case .active: Task { await stores.becameActive() }
@@ -35,4 +48,9 @@ extension View {
     func supervisesConnections(_ stores: CompanionStores) -> some View {
         modifier(ConnectionSupervisor(stores: stores))
     }
+}
+
+private struct NearbyRecovery: Hashable {
+    let active: Bool
+    let machines: [NearbyBrowser.Machine]
 }

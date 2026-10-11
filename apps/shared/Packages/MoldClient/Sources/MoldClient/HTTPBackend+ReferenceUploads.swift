@@ -72,11 +72,8 @@ extension HTTPBackend {
     static var referenceUploadNow: Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
     /// Credential-bearing upload routes never follow redirects, even for plain HTTP hosts.
     func referenceUploadBytes(_ original: URLRequest) async throws -> Data {
-        let (prepared, _) = try await relayPrepared(original)
-        let (data, response) = try await session.data(for: prepared, delegate: RelayNoRedirect())
-        guard let http = response as? HTTPURLResponse else { throw MoldClientError.malformedResponse }
-        let (resolved, answer) = try await relayObject(data, response: http, original: original)
-        try HTTPRefusal.check(answer, resolved)
-        return resolved
+        let (data, response) = try await send(original)
+        try HTTPRefusal.check(response, data)
+        return data
     }
 }

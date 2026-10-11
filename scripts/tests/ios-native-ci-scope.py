@@ -69,6 +69,19 @@ class AuditScope(unittest.TestCase):
         self.assertIn('- "Cargo.toml"', push)
         self.assertIn('- "Cargo.toml"', pull_request.split('  workflow_dispatch:', 1)[0])
 
+    def test_encrypted_transport_changes_build_both_apple_clients(self):
+        for workflow_name in ['ios-native.yml', 'macos-native.yml']:
+            workflow = (ROOT / '.github/workflows' / workflow_name).read_text()
+            for pattern in ['crates/mold-secure/**', 'crates/mold-secure-client/**', 'Cargo.lock', 'studio/api/pairing.fixtures.json']:
+                self.assertIn('- "' + pattern + '"', workflow)
+            self.assertIn('uses: dtolnay/rust-toolchain@stable', '\n'.join(line for line in workflow.splitlines() if not line.lstrip().startswith('#')))
+        testflight = (ROOT / '.github/workflows/testflight-ios-native.yml').read_text()
+        self.assertIn('uses: dtolnay/rust-toolchain@stable', testflight)
+        for app in ['ios', 'macos']:
+            makefile = (ROOT / 'apps' / app / 'Makefile').read_text()
+            self.assertIn('gen: secure-framework', makefile)
+            self.assertIn('../shared/build-secure-framework.sh', makefile)
+
     def test_mixed_widget_and_app_changes_require_full_audit(self):
         head = self.change('apps/ios/Sources/Widgets/GenerationLiveActivity.swift',
                            'apps/ios/Sources/App/Library.swift')

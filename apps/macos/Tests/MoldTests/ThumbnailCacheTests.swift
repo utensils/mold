@@ -13,14 +13,14 @@ import Testing
 /// all.
 @MainActor
 struct ThumbnailCacheTests {
-    @Test func HTTPSRelayThumbnailsKeepTheirEncodedRequestTarget() async {
+    @Test func unpairedRemoteThumbnailsNeverSendPlaintextCredentials() async {
         StubProtocol.reset()
         let machine = MoldHost(id: UUID(), name: "relay", baseURL: URL(string: "https://relay.example")!, apiKey: "secret")
         _ = await cache().image(for: entry("a b.png", on: machine), host: machine, size: 256)
-        #expect(StubProtocol.seen.first?.value(forHTTPHeaderField: "x-mold-request-target") == "/api/gallery/thumbnail/a%20b.png?size=256")
+        #expect(StubProtocol.seen.isEmpty)
     }
     private func host(_ name: String, key: String?) -> MoldHost {
-        MoldHost(id: UUID(), name: name, baseURL: URL(string: "http://\(name):7680")!,
+        MoldHost(id: UUID(), name: name, baseURL: URL(string: "http://127.0.0.1:7680")!,
                  apiKey: key)
     }
 
@@ -43,7 +43,7 @@ struct ThumbnailCacheTests {
 
         #expect(StubProtocol.seen.first?.value(forHTTPHeaderField: "X-Api-Key") == "secret")
         #expect(StubProtocol.seen.first?.url?.absoluteString
-            == "http://workstation:7680/api/gallery/thumbnail/robot.png?size=256")
+            == "http://127.0.0.1:7680/api/gallery/thumbnail/robot.png?size=256")
     }
 
     /// A keyless host is open by policy. Sending no key is the correct request

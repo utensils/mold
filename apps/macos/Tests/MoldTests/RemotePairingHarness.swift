@@ -7,13 +7,11 @@ import MoldClient
     let host = MoldHost(id: MoldEngine.localHostID, name: "This Mac",
                         baseURL: URL(string: "http://127.0.0.1:7680")!, apiKey: "operator-test")
     let owner = ManagedRelayEnrollment(hostId: String(repeating: "a", count: 32),
-        token: String(repeating: "x", count: 43),
         publicUrl: URL(string: "https://\(String(repeating: "a", count: 32)).mold-link.urandom.io")!,
-        relayUrl: URL(string: "wss://gateway.example/production")!, expiresAt: 4_102_444_800)
+        relayUrl: URL(string: "wss://gateway.example/production")!)
     lazy var fake: FakeBackend = {
         let fake = FakeBackend(host: host)
-        fake.pairingSessions = [PairingSession(token: "phone-code", expiresAt: 4_102_444_800,
-            authRequired: true, instanceId: "instance", hostname: "This Mac")]
+        fake.pairingSessions = [try! SecurePairingFixture.session()]
         return fake
     }()
     var calls: [String] = []
@@ -48,9 +46,6 @@ import MoldClient
                 calls.append("enroll"); previous = old
                 if holdEnrollment { return await withCheckedContinuation { gate = $0 } }
                 return owner
-            }, revoke: { [self] _ in
-                calls.append("revoke"); cleanupWasCancelled.append(Task.isCancelled)
-                if holdRevocation { await withCheckedContinuation { revocationGate = $0 } }
             },
             start: { [self] _, _ in calls.append("start"); alive = true },
             stop: { [self] in calls.append("stop"); alive = false },

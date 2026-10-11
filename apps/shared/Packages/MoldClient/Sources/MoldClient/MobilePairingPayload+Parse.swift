@@ -4,7 +4,7 @@ import Foundation
 /// (`studio/api/pairing.ts`, both held to `studio/api/pairing.fixtures.json`).
 /// Two forms are accepted -- the JSON payload and a link: the
 /// `https://utensils.io/mold/pair#...` universal link the Mac, desktop and
-/// web produce, or the older `mold://pair?...` -- and
+/// web produce -- and
 /// refused the same two ways: not a pairing code at all, or one this version
 /// cannot use.
 ///
@@ -62,6 +62,12 @@ extension MobilePairingPayload {
         fields["expires_at"] = value("expires_at").map { Double($0) ?? .nan } ?? NSNull()
         fields["instance_id"] = value("instance_id")
         fields["name"] = value("name")
+        for key in ["namespace", "host_key", "host_noise_key", "host_binding_signature", "websocket_url", "invite_seed"] {
+            fields[key] = value(key)
+        }
+        if let raw = value("invite"), let data = raw.data(using: .utf8) {
+            fields["invite"] = try? JSONSerialization.jsonObject(with: data)
+        }
         if let raw = value("endpoints"), let data = raw.data(using: .utf8) {
             guard let list = try? JSONSerialization.jsonObject(with: data) else { throw .unsupported }
             fields["endpoints"] = list
@@ -74,9 +80,6 @@ extension MobilePairingPayload {
     private static func linkQuery(_ url: URLComponents) -> String? {
         guard url.user == nil, url.password == nil else { return nil }
         switch url.scheme?.lowercased() {
-        case "mold":
-            guard url.host?.lowercased() == "pair", url.fragment == nil else { return nil }
-            return url.percentEncodedQuery ?? ""
         case link.scheme:
             let path = url.path.hasSuffix("/") ? String(url.path.dropLast()) : url.path
             // `:443` is the default port and an empty `?` sends nothing:
@@ -92,33 +95,22 @@ extension MobilePairingPayload {
     private static func validated(_ f: [String: Any]) throws(ParseError) -> MobilePairingPayload {
         guard f["type"] as? String == "mold.mobile-pairing",
               let version = f["version"] as? NSNumber, CFGetTypeID(version) != CFBooleanGetTypeID(),
-              version.doubleValue == 1,
+              version.doubleValue == 2,
               let base = f["base_url"] as? String,
               base.range(of: "^https?://", options: [.regularExpression, .caseInsensitive]) != nil,
               let instance = f["instance_id"] as? String,
               let name = f["name"] as? String
         else { throw .unsupported }
 
-        let token: String?
-        switch f["token"] {
-        case nil, is NSNull: token = nil
-        case let value as String: token = value
-        default: throw .unsupported
-        }
-
-        let expiresAt: UInt64?
-        switch f["expires_at"] {
-        case nil, is NSNull: expiresAt = nil
-        // A JSON `true` is an NSNumber too, and `is Bool` says yes to any 0 or
-        // 1 -- only the CoreFoundation type tells a real boolean apart.
-        case let number as NSNumber where CFGetTypeID(number) != CFBooleanGetTypeID():
-            let seconds = number.doubleValue
-            guard seconds.isFinite, seconds >= 0, seconds == seconds.rounded(), seconds < 1.8e19 else {
-                throw .unsupported
-            }
-            expiresAt = UInt64(seconds)
-        default: throw .unsupported
-        }
+        guard let namespace = f["namespace"] as? String, let hostKey = f["host_key"] as? String,
+              let noiseKey = f["host_noise_key"] as? String, let signature = f["host_binding_signature"] as? String,
+              let websocket = f["websocket_url"] as? String, let websocketURL = URL(string: websocket),
+              let seed = f["invite_seed"] as? String, let inviteValue = f["invite"],
+              let inviteData = try? JSONSerialization.data(withJSONObject: inviteValue),
+              let invite = try? MoldJSON.localDecoder.decode(SecureInvite.self, from: inviteData) else { throw .unsupported }
+        let invitation = SecureInvitation(binding: .init(signingKey: hostKey, noiseKey: noiseKey, signature: signature),
+                                          namespace: namespace, websocketURL: websocketURL, seed: seed, invite: invite)
+        guard (try? invitation.validate()) != nil else { throw .unsupported }
         var endpoints: [ConnectionEndpoint]?
         if let value = f["endpoints"] {
             guard let data = try? JSONSerialization.data(withJSONObject: value),
@@ -127,7 +119,7 @@ extension MobilePairingPayload {
             else { throw .unsupported }
             endpoints = decoded
         }
-        return MobilePairingPayload(baseURL: base, token: token, expiresAt: expiresAt,
-                                    instanceId: instance, name: name, endpoints: endpoints)
+        return MobilePairingPayload(baseURL: base, token: nil, expiresAt: invite.expiresAt,
+                                    instanceId: instance, name: name, endpoints: endpoints, secureInvitation: invitation)
     }
 }

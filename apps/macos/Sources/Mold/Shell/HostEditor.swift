@@ -45,6 +45,12 @@ struct HostEditor: View {
     }
 
     var body: some View {
+        if existing?.baseURL.host == "127.0.0.1" || existing?.baseURL.host == "[::1]" {
+            localBody
+        } else { SecureHostEditor(existing: existing) }
+    }
+
+    private var localBody: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(existing == nil ? "Add a Machine" : "Edit Machine")
                 .font(.headline)

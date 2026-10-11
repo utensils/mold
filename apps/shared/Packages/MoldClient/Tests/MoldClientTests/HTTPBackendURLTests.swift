@@ -10,7 +10,7 @@ import Testing
 // prints in it, silently, because the app asks conditionally and a shrug
 // looks the same as "nothing changed".
 
-private let backend = HTTPBackend(
+private let backend = HTTPBackend.testing(
     host: MoldHost(name: "workstation", baseURL: URL(string: "http://workstation:7680")!)
 )
 
@@ -33,7 +33,7 @@ private let backend = HTTPBackend(
 /// A base URL with a path of its own — a host behind a reverse proxy at
 /// `/mold` — keeps it rather than having it replaced.
 @Test func aHostBehindAPrefixKeepsIt() {
-    let proxied = HTTPBackend(
+    let proxied = HTTPBackend.testing(
         host: MoldHost(name: "p", baseURL: URL(string: "http://box/mold")!)
     )
     #expect(proxied.request("/api/status").url?.absoluteString == "http://box/mold/api/status")
@@ -50,7 +50,7 @@ private let backend = HTTPBackend(
 /// The key rides a header, never the URL — a ticket in a query string ends up
 /// in every proxy log between here and the machine.
 @Test func theKeyIsAHeaderNotAQueryParameter() {
-    let keyed = HTTPBackend(
+    let keyed = HTTPBackend.testing(
         host: MoldHost(name: "p", baseURL: URL(string: "http://box:7680")!, apiKey: "secret")
     )
     let request = keyed.request("/api/gallery?view=trash")
@@ -66,7 +66,7 @@ private let backend = HTTPBackend(
 /// Nothing here is sent: the closure is built and never invoked, so what is
 /// under test is whether it COMPILES.
 @Test func aBackendHeldAsTheProtocolReachesEveryRouteTheAppUses() {
-    let backend: any MoldBackend = HTTPBackend(
+    let backend: any MoldBackend = HTTPBackend.testing(
         host: MoldHost(name: "workstation", baseURL: URL(string: "http://workstation:7680")!)
     )
     let _: () async throws -> Void = {

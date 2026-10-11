@@ -40,13 +40,16 @@ XCB = $(XCB_BASE) -destination '$(DEST)'
 require-sim:
 	@[ -n "$(SIM_ID)" ] || { echo "no iOS 26 simulator found -- install an iOS 26 runtime"; exit 1; }
 
-.PHONY: help require-sim gen build archive run test packages-test uitest lint lint-script lint-layers lint-color lint-type lint-widgets lint-a11y lint-size clean
+.PHONY: secure-framework help require-sim gen build archive run test packages-test uitest lint lint-script lint-layers lint-color lint-type lint-widgets lint-a11y lint-size clean
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | \
 	  awk 'BEGIN{FS=":.*?## "}{printf "  \033[1m%-12s\033[0m %s\n", $$1, $$2}'
 
-gen: ## Regenerate MoldCompanion.xcodeproj from project.yml
+secure-framework:
+	@../shared/build-secure-framework.sh
+
+gen: secure-framework ## Regenerate MoldCompanion.xcodeproj from project.yml
 	@command -v $(XCODEGEN) >/dev/null || { echo "xcodegen not found -- run inside 'nix develop'"; exit 1; }
 	@printf 'settings:\n  base:\n    MARKETING_VERSION: "%s"\n' "$(MARKETING_VERSION)" > Version.yml
 	@$(XCODEGEN) generate --spec project.yml --quiet
@@ -66,7 +69,7 @@ test: require-sim gen ## Unit tests on the simulator (the shared packages' own s
 	@$(XCB) test -only-testing:MoldCompanionTests 2>&1 \
 	  | grep -E '✘|recorded an issue|error:|Test run with|TEST (SUCCEEDED|FAILED)' ; exit $${PIPESTATUS[0]}
 
-packages-test: require-sim ## MoldClient, MoldStyle and MoldMesh's own suites on the iOS simulator
+packages-test: require-sim secure-framework ## MoldClient, MoldStyle and MoldMesh's own suites on the iOS simulator
 	@# A package with more than one product (MoldClient + MoldClientTesting)
 	@# keeps its tests on the "-Package" scheme.
 	@for pkg in MoldClient MoldStyle MoldMesh; do \

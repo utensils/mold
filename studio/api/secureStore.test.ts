@@ -1,0 +1,142 @@
+import "fake-indexeddb/auto";
+import { beforeAll, expect, it, vi } from "vitest";
+import { webcrypto } from "node:crypto";
+import type { SecureHostProfile } from "./secureCrypto";
+vi.hoisted(() => vi.resetModules());
+// These tests isolate persistence/concurrency. The real WASM signatures and
+// cross-language vectors are exercised separately in secureCrypto.test.ts.
+vi.mock("./secureCrypto", () => ({
+  loadSecureCrypto: async () => {},
+  checkHost() {},
+  checkGrant() {},
+  Identity: { generate: () => identity(), fromBytes: () => identity() },
+}));
+function identity() {
+  return { toBytes: () => new Uint8Array(64).fill(31), close() {}, free() {} };
+}
+import {
+  saveSecureHost,
+  listSecureHosts,
+  forgetSecureHost,
+  updateSecureHostRoutes,
+  renewSecureHostGrant,
+} from "./secureStore";
+beforeAll(() => vi.stubGlobal("crypto", webcrypto));
+const original = (namespace: string) =>
+  ({
+    namespace,
+    instance_id: "machine",
+    host_key: "pin",
+    host_noise_key: "noise",
+    host_binding_signature: "binding",
+    websocket_url: null,
+    grant: {
+      id: "device",
+      signature: "initial",
+      expiresAt: 4000000000,
+      epoch: 1,
+    },
+    origins: ["https://host.test"],
+    endpoints: [{ url: "https://host.test", kind: "relay" }],
+    apiKey: "private-device-bearer",
+  }) as SecureHostProfile;
+async function stored(key: string): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("mold-secure-v3", 1);
+    request.onsuccess = () => {
+      const read = request.result
+        .transaction("secrets")
+        .objectStore("secrets")
+        .get(key);
+      read.onsuccess = () => {
+        resolve(read.result);
+        request.result.close();
+      };
+      read.onerror = reject;
+    };
+    request.onerror = reject;
+  });
+}
+it("wraps identity and credentials with a nonextractable storage key", async () => {
+  const profile = original("storage");
+  await saveSecureHost(profile);
+  const key = (await stored("wrapping-key")) as CryptoKey;
+  expect(key.extractable).toBe(false);
+  await expect(crypto.subtle.exportKey("raw", key)).rejects.toThrow();
+  const sealed = (await stored("host:storage")) as { cipher: ArrayBuffer };
+  expect(new TextDecoder().decode(sealed.cipher)).not.toContain(profile.apiKey);
+  expect(
+    (await listSecureHosts()).find((value) => value.namespace === "storage"),
+  ).toEqual(profile);
+  await forgetSecureHost("storage");
+});
+it("never revives a forgotten host from delayed discovery or renewal", async () => {
+  const profile = original("forgotten");
+  await saveSecureHost(profile);
+  await forgetSecureHost(profile.namespace);
+  await updateSecureHostRoutes(
+    profile.namespace,
+    profile.grant.signature,
+    [],
+    ["https://old.test"],
+  );
+  expect(
+    await renewSecureHostGrant(profile, {
+      ...profile.grant,
+      signature: "renewed",
+    }),
+  ).toBe(false);
+  expect(
+    (await listSecureHosts()).some(
+      (value) => value.namespace === profile.namespace,
+    ),
+  ).toBe(false);
+});
+it("does not let stale discovery or renewal roll back a replacement pairing", async () => {
+  const profile = original("replacement");
+  await saveSecureHost(profile);
+  const replacement = {
+    ...profile,
+    grant: { ...profile.grant, id: "new-device", signature: "new-grant" },
+    apiKey: "new-bearer",
+  };
+  await saveSecureHost(replacement);
+  await updateSecureHostRoutes(
+    profile.namespace,
+    profile.grant.signature,
+    [],
+    ["https://old.test"],
+  );
+  expect(
+    await renewSecureHostGrant(profile, {
+      ...profile.grant,
+      signature: "renewed-old",
+    }),
+  ).toBe(false);
+  expect(
+    (await listSecureHosts()).find(
+      (value) => value.namespace === profile.namespace,
+    ),
+  ).toEqual(replacement);
+  await forgetSecureHost(profile.namespace);
+});
+it("updates aliases without replacing the live credentials", async () => {
+  const profile = original("aliases");
+  await saveSecureHost(profile);
+  await updateSecureHostRoutes(
+    profile.namespace,
+    profile.grant.signature,
+    [{ url: "http://192.168.1.2:7680", kind: "lan" }],
+    ["https://host.test", "http://192.168.1.2:7680"],
+  );
+  expect(
+    (await listSecureHosts()).find(
+      (value) => value.namespace === profile.namespace,
+    ),
+  ).toMatchObject({
+    apiKey: profile.apiKey,
+    grant: profile.grant,
+    origins: ["https://host.test", "http://192.168.1.2:7680"],
+  });
+  await forgetSecureHost(profile.namespace);
+});

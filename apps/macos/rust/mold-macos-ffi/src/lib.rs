@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 mod relay;
 pub use relay::{
-    mold_relay_is_alive, mold_relay_set_public_origin, mold_relay_start, mold_relay_stop,
+    mold_relay_is_alive, mold_relay_is_ready, mold_secure_host_namespace, mold_relay_set_public_origin, mold_relay_start, mold_relay_stop,
 };
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -710,14 +710,12 @@ mod managed_relay_tests {
     fn embedded_relay_rejects_invalid_configuration() {
         use std::ffi::CString;
         let endpoint = CString::new("wss://relay.example.com/ws").unwrap();
-        let token = CString::new("a".repeat(64)).unwrap();
         let host = CString::new("b".repeat(32)).unwrap();
         let origin = CString::new("https://host.example.com").unwrap();
         unsafe {
             assert_ne!(
                 super::mold_relay_start(
                     endpoint.as_ptr(),
-                    token.as_ptr(),
                     host.as_ptr(),
                     0,
                     origin.as_ptr()
@@ -727,7 +725,6 @@ mod managed_relay_tests {
             assert_ne!(
                 super::mold_relay_start(
                     std::ptr::null(),
-                    token.as_ptr(),
                     host.as_ptr(),
                     7680,
                     origin.as_ptr()

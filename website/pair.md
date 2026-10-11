@@ -1,6 +1,6 @@
 ---
-title: Pair a phone
-description: Open a mold pairing code on a phone.
+title: Pair a device
+description: Pair a Mold app or browser with an end-to-end encrypted host.
 sidebar: false
 aside: false
 outline: false
@@ -10,23 +10,23 @@ outline: false
 import { onMounted, ref } from 'vue'
 
 // The pairing code rides in the fragment (#...), which the browser never
-// sends to this site. It is read here, in the page, and never shown: only
-// the machine's name and address, and a button that hands the code to the
-// Mold app.
+// sends to this site. It is read here, in the page, and never shown: only the machine's name and address and an explicit handoff button.
 const machine = ref('')
 const address = ref('')
 const appLink = ref('')
+const studioLink = ref('')
 
 onMounted(() => {
   const fields = new URLSearchParams(window.location.hash.slice(1))
-  if (fields.get('version') === '1' && /^https?:\/\//i.test(fields.get('base_url') ?? '')) {
+  if (fields.get('version') === '2' && /^https?:\/\//i.test(fields.get('base_url') ?? '')) {
     machine.value = fields.get('name') ?? ''
     try {
       address.value = new URL(fields.get('base_url')).host
     } catch {
       address.value = ''
     }
-    appLink.value = `mold://pair?${fields.toString()}`
+    appLink.value = `https://utensils.io/mold/pair#${fields.toString()}`
+    studioLink.value = `https://utensils.io/mold/studio/#${fields.toString()}`
   }
   // Out of the address bar, history and any screenshot of this page.
   if (window.location.hash) {
@@ -35,12 +35,12 @@ onMounted(() => {
 })
 </script>
 
-# Pair a phone
+# Pair a device
 
 <p v-if="appLink">
   This is a pairing code for <strong>{{ machine || 'a mold machine' }}</strong>
   at <code>{{ address }}</code>.
-  Your phone opened it in the browser because no app that reads it is installed.
+  Open it in an installed Mold app, or pair this browser with the secure Studio.
 </p>
 <p v-else>
   This page is where a mold pairing code opens on a phone without the app.
@@ -56,7 +56,7 @@ tap **Pair**. You can also scan it inside the app: **Machines ▸ Add a Machine�
 
 ## The Mold app on iPhone or Android
 
-The older [Mold app](/guide/iphone) reads the same code.
+The [Mold app](/guide/iphone) reads the same encrypted pairing code. Update all clients before pairing.
 
 <template v-if="appLink">
   <p>
@@ -64,17 +64,17 @@ The older [Mold app](/guide/iphone) reads the same code.
     make to <code>{{ address }}</code>.
   </p>
   <p>
-    <a :href="appLink" class="pair-open">Open in Mold</a>
+    <a :href="studioLink" class="pair-open">Open secure Studio</a>
   </p>
 </template>
 <p v-else>
   In the app, open <strong>Add a machine ▸ Scan pairing code</strong>.
 </p>
 
-## Your code stays on your phone
+## Your code stays on your device
 
 Everything after the `#` in a pairing link stays in your browser: it is never
-sent to this site. For a machine with an API key the code works once and
+sent to this site. Each host-signed invitation works once and
 expires after two minutes; make a new one on your computer (**Pair a Phone…**
 in Mold Studio for Mac, or **Settings ▸ Mobile pairing** in the desktop or web
 app) if it has run out.

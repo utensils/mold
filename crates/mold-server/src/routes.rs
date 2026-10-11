@@ -349,7 +349,6 @@ use crate::queue::clean_error_message;
         gallery_export_options,
         export_gallery_media,
         crate::connections::addresses,
-        crate::connections::probe,
         create_pairing_session,
         claim_pairing_session,
         list_paired_clients,
@@ -520,8 +519,6 @@ use crate::queue::clean_error_message;
         mold_core::DurableMediaStatus,
         crate::connections::ConnectionEndpoint,
         crate::connections::ConnectionAddressResponse,
-        crate::connections::ConnectionProbeRequest,
-        crate::connections::ConnectionProbeResponse,
         PairingSessionResponse,
         PairingClaimRequest,
         PairingClaimResponse,
@@ -883,9 +880,16 @@ pub fn create_router(state: AppState) -> Router {
             "/api/connection-addresses",
             get(crate::connections::addresses),
         )
-        .route("/api/connection-probe", post(crate::connections::probe))
         .route("/api/pairing/sessions", post(create_pairing_session))
         .route("/api/pairing/claim", post(claim_pairing_session))
+        .route(
+            "/api/pairing/secure/check",
+            get(crate::secure_pairing::check),
+        )
+        .route(
+            "/api/pairing/secure/renew",
+            post(crate::secure_pairing::renew),
+        )
         .route("/api/pairing/clients", get(list_paired_clients))
         .route("/api/pairing/clients/:id", delete(revoke_paired_client))
         .route(
@@ -9957,8 +9961,8 @@ pub(crate) struct GalleryExportOptionsResponse {
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub(crate) struct PairingSessionResponse {
     pub(crate) endpoints: Vec<crate::connections::ConnectionEndpoint>,
-    pub(crate) token: Option<String>,
-    pub(crate) expires_at: Option<u64>,
+    #[serde(flatten)]
+    pub(crate) secure: serde_json::Value,
     pub(crate) auth_required: bool,
     pub(crate) instance_id: String,
     pub(crate) hostname: Option<String>,
@@ -9966,13 +9970,15 @@ pub(crate) struct PairingSessionResponse {
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub(crate) struct PairingClaimRequest {
-    pub(crate) token: Option<String>,
+    pub(crate) proof: String,
     pub(crate) client_name: Option<String>,
     pub(crate) client_kind: Option<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub(crate) struct PairingClaimResponse {
+    #[serde(flatten)]
+    pub(crate) secure: serde_json::Value,
     pub(crate) endpoints: Vec<crate::connections::ConnectionEndpoint>,
     pub(crate) api_key: Option<String>,
     pub(crate) instance_id: String,
@@ -10019,48 +10025,57 @@ async fn create_pairing_session(
     auth_state: Option<Extension<crate::auth::AuthState>>,
     authority: Option<Extension<crate::auth::PairingAuthority>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let key_set = auth_state.and_then(|Extension(state)| state);
-    let (token, expires_at, auth_required) = match key_set {
-        Some(key_set) => {
-            let Extension(_) = authority.ok_or_else(|| {
-                ApiError::with_code(
-                    "only an operator API key can start mobile pairing",
-                    "PAIRING_OPERATOR_REQUIRED",
-                    StatusCode::FORBIDDEN,
-                )
-            })?;
-            if !key_set.pairing_available() {
-                return Err(ApiError::with_code(
-                    "paired access is unavailable while the metadata database is disabled",
-                    "PAIRING_UNAVAILABLE",
-                    StatusCode::SERVICE_UNAVAILABLE,
-                ));
-            }
-            let (token, expires_at) = key_set.issue_pairing_token().map_err(|error| {
-                ApiError::internal(format!("failed to create a secure pairing token: {error}"))
-            })?;
-            (Some(token), Some(expires_at), true)
-        }
-        None => (None, None, false),
-    };
+    let key_set = auth_state
+        .and_then(|Extension(state)| state)
+        .ok_or_else(|| {
+            ApiError::with_code(
+                "enable host authentication before pairing",
+                "PAIRING_UNAVAILABLE",
+                StatusCode::SERVICE_UNAVAILABLE,
+            )
+        })?;
+    if authority.is_none() {
+        return Err(ApiError::with_code(
+            "only an operator API key can start pairing",
+            "PAIRING_OPERATOR_REQUIRED",
+            StatusCode::FORBIDDEN,
+        ));
+    }
+    let secure = key_set.secure.as_ref().ok_or_else(|| {
+        ApiError::with_code(
+            "secure pairing is unavailable",
+            "PAIRING_UNAVAILABLE",
+            StatusCode::SERVICE_UNAVAILABLE,
+        )
+    })?;
+    let issued = secure.issue_invite().map_err(|_| {
+        ApiError::with_code(
+            "pairing invitation capacity is unavailable",
+            "PAIRING_UNAVAILABLE",
+            StatusCode::SERVICE_UNAVAILABLE,
+        )
+    })?;
+    let mut fields = secure.public_fields();
+    fields["invite_seed"] = serde_json::json!(issued.invite_seed);
+    fields["invite"] = serde_json::to_value(issued.invite)
+        .map_err(|_| ApiError::internal("failed to encode invitation"))?;
+    fields["websocket_url"] = serde_json::json!(state.connection_addresses.secure_websocket_url());
     let mut headers = HeaderMap::new();
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok((
         headers,
         Json(PairingSessionResponse {
             endpoints: state.connection_addresses.endpoints(),
-            token,
-            expires_at,
-            auth_required,
+            secure: fields,
+            auth_required: true,
             instance_id: (*state.instance_id).clone(),
             hostname: pairing_hostname(),
         }),
     ))
 }
 
-/// Redeem the QR bearer once. This is the sole unauthenticated API route that
-/// can return a durable key; its random token is single-use, short-lived, kept
-/// only as server-side hashes, and the response is explicitly non-cacheable.
+/// Redeem a signed invitation inside its authenticated Noise channel.
+/// The one-use proof binds this device and handshake; no credential travels through the cloud in plaintext.
 #[utoipa::path(
     post,
     path = "/api/pairing/claim",
@@ -10074,50 +10089,39 @@ async fn create_pairing_session(
 async fn claim_pairing_session(
     State(state): State<AppState>,
     auth_state: Option<Extension<crate::auth::AuthState>>,
+    context: Option<Extension<mold_secure::RequestContext>>,
     Json(request): Json<PairingClaimRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let key_set = auth_state.and_then(|Extension(state)| state);
-    let api_key = match key_set {
-        Some(key_set) => {
-            let token = request
-                .token
-                .as_deref()
-                .filter(|token| !token.is_empty())
-                .ok_or_else(|| {
-                    ApiError::with_code(
-                        "pairing token is missing, expired, or already used",
-                        "PAIRING_TOKEN_INVALID",
-                        StatusCode::UNAUTHORIZED,
-                    )
-                })?;
-            Some(
-                key_set
-                    .claim_pairing_token(
-                        token,
-                        request.client_name.as_deref().unwrap_or("Mold mobile"),
-                        request.client_kind.as_deref().unwrap_or("mobile"),
-                    )
-                    .map_err(|error| {
-                        ApiError::internal(format!("failed to create paired access: {error:#}"))
-                    })?
-                    .ok_or_else(|| {
-                        ApiError::with_code(
-                            "pairing token is missing, expired, or already used",
-                            "PAIRING_TOKEN_INVALID",
-                            StatusCode::UNAUTHORIZED,
-                        )
-                    })?,
-            )
-        }
-        None => None,
+    let invalid = || {
+        ApiError::with_code(
+            "encrypted pairing invitation is invalid, expired, or already used",
+            "PAIRING_INVITE_INVALID",
+            StatusCode::UNAUTHORIZED,
+        )
     };
+    let key_set = auth_state
+        .and_then(|Extension(state)| state)
+        .ok_or_else(invalid)?;
+    let Extension(context) = context.ok_or_else(invalid)?;
+    let (api_key, grant) = key_set
+        .claim_secure_pairing(
+            &context,
+            &request.proof,
+            request.client_name.as_deref().unwrap_or("Mold device"),
+            request.client_kind.as_deref().unwrap_or("desktop"),
+        )
+        .map_err(|_| invalid())?;
+    let mut fields = key_set.secure.as_ref().ok_or_else(invalid)?.public_fields();
+    fields["grant"] =
+        serde_json::to_value(grant).map_err(|_| ApiError::internal("failed to encode grant"))?;
     let mut headers = HeaderMap::new();
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok((
         headers,
         Json(PairingClaimResponse {
             endpoints: state.connection_addresses.endpoints(),
-            api_key,
+            api_key: Some(api_key),
+            secure: fields,
             instance_id: (*state.instance_id).clone(),
             hostname: pairing_hostname(),
         }),
@@ -12946,123 +12950,123 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_pairing_handlers_issue_claim_and_reject_replay() {
+    async fn production_secure_pairing_handlers_issue_claim_reject_replay_and_revoke() {
         let mut state = AppState::for_tests();
-        let metadata_db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        state.metadata_db = metadata_db.clone();
-        let key_set = Arc::new(crate::auth::ApiKeySet::new_with_metadata_db(
-            std::collections::HashSet::from(["phone-key".to_string()]),
-            metadata_db,
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        state.metadata_db = db.clone();
+        let mut keys = crate::auth::ApiKeySet::new_with_metadata_db(
+            std::collections::HashSet::from(["operator".into()]),
+            db,
             state.instance_id.as_ref().clone(),
-        ));
-        let auth_state = Some(key_set.clone());
+        );
+        keys.secure = Some(Arc::new(crate::secure_pairing::SecurePairing::new(
+            mold_secure::Identity::generate().unwrap(),
+            Vec::new(),
+        )));
+        let keys = Arc::new(keys);
+        let auth = Some(keys.clone());
         let created = create_pairing_session(
             State(state.clone()),
-            Some(Extension(auth_state.clone())),
+            Some(Extension(auth.clone())),
             Some(Extension(crate::auth::PairingAuthority)),
         )
         .await
         .unwrap()
         .into_response();
-        assert_eq!(created.status(), StatusCode::OK);
-        assert_eq!(
-            created.headers().get(header::CACHE_CONTROL).unwrap(),
-            "no-store"
-        );
+        assert_eq!(created.headers()[header::CACHE_CONTROL], "no-store");
         let created = response_json(created).await;
-        assert_eq!(created["auth_required"], true);
-        assert_eq!(created["endpoints"], serde_json::json!([]));
-        assert_eq!(created["instance_id"], *state.instance_id);
-        let token = created["token"].as_str().unwrap().to_string();
-
-        let claimed = claim_pairing_session(
+        assert_eq!(created["protocol"], 3);
+        assert!(created.get("token").is_none());
+        let invite: mold_secure::Invitation =
+            serde_json::from_value(created["invite"].clone()).unwrap();
+        let device = mold_secure::Identity::generate().unwrap();
+        let mut invitation_secret = [0; 64];
+        invitation_secret[..32].copy_from_slice(
+            &mold_secure::decode_hex::<32>(created["invite_seed"].as_str().unwrap()).unwrap(),
+        );
+        let invitation = mold_secure::Identity::from_bytes(&invitation_secret).unwrap();
+        let context = mold_secure::RequestContext {
+            binding: device.public_binding(),
+            grant: None,
+            invite: Some(invite.clone()),
+            handshake_hash: "08".repeat(32),
+            stream_id: 1,
+            issued_at: 0,
+            request_nonce: "09".repeat(16),
+            signature: String::new(),
+        };
+        let bytes = mold_secure::claim_bytes(
+            created["namespace"].as_str().unwrap(),
+            &invite.id,
+            &[8; 32],
+            &device.signing_public(),
+            &device.noise_public(),
+        )
+        .unwrap();
+        let proof = crate::connections::hex(&invitation.sign(&bytes));
+        let response = claim_pairing_session(
             State(state.clone()),
-            Some(Extension(auth_state.clone())),
+            Some(Extension(auth.clone())),
+            Some(Extension(context.clone())),
             Json(PairingClaimRequest {
-                token: Some(token.clone()),
-                client_name: Some("Test iPhone".into()),
+                proof: proof.clone(),
+                client_name: Some("Test phone".into()),
                 client_kind: Some("iphone".into()),
             }),
         )
         .await
         .unwrap()
         .into_response();
-        assert_eq!(claimed.status(), StatusCode::OK);
-        assert_eq!(
-            claimed.headers().get(header::CACHE_CONTROL).unwrap(),
-            "no-store"
-        );
-        let claimed = response_json(claimed).await;
-        let paired_key = claimed["api_key"].as_str().unwrap().to_string();
-        assert!(paired_key.starts_with("mold_pair_"));
-        assert_ne!(claimed["api_key"], "phone-key");
-        assert_eq!(claimed["instance_id"], *state.instance_id);
-        assert_eq!(claimed["endpoints"], serde_json::json!([]));
-        assert!(key_set.contains(&paired_key));
-
-        let clients = list_paired_clients(
-            Some(Extension(auth_state.clone())),
-            Some(Extension(crate::auth::PairingAuthority)),
-        )
-        .await
-        .unwrap()
-        .0;
-        assert_eq!(clients.clients.len(), 1);
-        assert_eq!(clients.clients[0].name, "Test iPhone");
-        assert_eq!(clients.clients[0].client_kind, "iphone");
-        revoke_paired_client(
-            Path(clients.clients[0].id.clone()),
-            Some(Extension(auth_state.clone())),
-            Some(Extension(crate::auth::PairingAuthority)),
-        )
-        .await
-        .unwrap();
-        assert!(!key_set.contains(&paired_key));
-        assert!(key_set.contains("phone-key"));
-
-        let replay = match claim_pairing_session(
+        let response = response_json(response).await;
+        let api_key = response["api_key"].as_str().unwrap();
+        assert_ne!(api_key, "operator");
+        assert!(keys.contains(api_key));
+        let grant: mold_secure::DeviceGrant =
+            serde_json::from_value(response["grant"].clone()).unwrap();
+        grant
+            .verify(
+                &keys.secure.as_ref().unwrap().identity.signing_public(),
+                &device.public_binding(),
+                1,
+                0,
+            )
+            .unwrap();
+        assert!(claim_pairing_session(
             State(state),
-            Some(Extension(auth_state)),
+            Some(Extension(auth.clone())),
+            Some(Extension(context)),
             Json(PairingClaimRequest {
-                token: Some(token),
+                proof,
                 client_name: None,
-                client_kind: None,
-            }),
+                client_kind: None
+            })
         )
         .await
-        {
-            Ok(_) => panic!("a consumed pairing token must not be accepted twice"),
-            Err(error) => error.into_response(),
-        };
-        assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(response_json(replay).await["code"], "PAIRING_TOKEN_INVALID");
+        .is_err());
+        let client = keys.paired_clients().pop().unwrap();
+        assert!(keys.revoke_paired_client(&client.id).unwrap());
+        assert!(!keys.contains(api_key));
+        assert!(keys.secure.as_ref().unwrap().active_ids().is_empty());
     }
-
     #[tokio::test]
-    async fn production_pairing_handlers_keep_open_hosts_credential_free() {
-        let state = AppState::for_tests();
-        let created = create_pairing_session(State(state.clone()), Some(Extension(None)), None)
-            .await
-            .unwrap()
-            .into_response();
-        let created = response_json(created).await;
-        assert_eq!(created["token"], serde_json::Value::Null);
-        assert_eq!(created["auth_required"], false);
-
-        let claimed = claim_pairing_session(
-            State(state),
+    async fn insecure_pairing_is_unavailable_without_authenticated_host() {
+        assert!(
+            create_pairing_session(State(AppState::for_tests()), Some(Extension(None)), None)
+                .await
+                .is_err()
+        );
+        assert!(claim_pairing_session(
+            State(AppState::for_tests()),
             Some(Extension(None)),
+            None,
             Json(PairingClaimRequest {
-                token: None,
+                proof: String::new(),
                 client_name: None,
-                client_kind: None,
-            }),
+                client_kind: None
+            })
         )
         .await
-        .unwrap()
-        .into_response();
-        let claimed = response_json(claimed).await;
-        assert_eq!(claimed["api_key"], serde_json::Value::Null);
+        .is_err());
     }
 
     #[tokio::test]

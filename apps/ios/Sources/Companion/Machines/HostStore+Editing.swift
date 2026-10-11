@@ -79,6 +79,7 @@ extension HostStore {
     /// Removes a machine and its key. A Default that is removed falls back to
     /// whatever answers, rather than the first row.
     func remove(_ id: MoldHost.ID) {
+        Task { await HTTPBackend.disconnect(host: id) }
         stopWatching(id)
         try? credentials.clearAPIKey(for: id)
         setHosts(hosts.filter { $0.id != id })

@@ -1,3 +1,7 @@
+vi.mock("@studio/api/secureMedia", () => ({
+  secureMediaUrl: vi.fn(async () => null),
+  releaseSecureMediaUrl: vi.fn(),
+}));
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, apiFetch, apiFetchTo, currentTarget } from "../api/client";
 import { inTauri, ipc } from "../ipc";

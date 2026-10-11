@@ -1,3 +1,4 @@
+use mold_secure_client::RequestBuilderExt;
 use super::*;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -39,7 +40,7 @@ async fn require_destination_retention(
         api_key: Some(api_key(local)?.to_string()),
     };
     let response = request(client, &destination, "/api/capabilities")
-        .send()
+        .secure_send()
         .await
         .map_err(|_| "Couldn't check whether the local gallery can retain source media.")?;
     if !response.status().is_success() {
@@ -309,7 +310,7 @@ mod tests {
         let (host, worker) = fake_host(vec![("200 OK", "abcd")]);
         let response = reqwest::Client::new()
             .get(host.base_url)
-            .send()
+            .secure_send()
             .await
             .unwrap();
         assert!(bounded_response(response, 3).await.is_err());
@@ -773,12 +774,12 @@ async fn offer(
     allow_legacy: bool,
 ) -> Result<Option<Offer>, String> {
     let response = request(client, source, &format!("{path}/transfer"))
-        .send()
+        .secure_send()
         .await
         .map_err(|_| "Couldn't reach the retained source-media host.")?;
     if allow_legacy && matches!(response.status().as_u16(), 404 | 405) {
         let inventory = request(client, source, path)
-            .send()
+            .secure_send()
             .await
             .map_err(|_| "Couldn't check whether this print has retained source media.")?;
         if !inventory.status().is_success() {
@@ -978,7 +979,7 @@ async fn mirror_to_local(
         let encoded_member =
             percent_encoding::utf8_percent_encode(member_id, percent_encoding::NON_ALPHANUMERIC);
         let response = request(&client, &source, &format!("{path}/{encoded_member}"))
-            .send()
+            .secure_send()
             .await
             .map_err(|_| "Couldn't download retained source media.")?;
         if !response.status().is_success() {
@@ -1023,7 +1024,7 @@ async fn mirror_to_local(
             "application/vnd.mold.retained-media-transfer",
         )
         .body(reqwest::Body::wrap_stream(stream))
-        .send()
+        .secure_send()
         .await
         .map_err(|_| "Couldn't attach retained source media to the local print.")?;
     if !response.status().is_success() {

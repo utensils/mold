@@ -19,10 +19,6 @@ use tracing::warn;
 const GALLERY_MEDIA_TOKEN_CONTEXT: &[u8] = b"mold-gallery-media-v2\nGET\n";
 pub(crate) const GALLERY_MEDIA_TOKEN_TTL_SECS: u64 = 15 * 60;
 const GALLERY_SIGNING_SECRET_BYTES: usize = 32;
-const PAIRING_TOKEN_BYTES: usize = 32;
-pub(crate) const PAIRING_TOKEN_TTL_SECS: u64 = 2 * 60;
-const MAX_PAIRING_SESSIONS: usize = 32;
-
 type HmacSha256 = Hmac<Sha256>;
 
 /// Shared auth state — `None` means authentication is disabled.
@@ -30,18 +26,13 @@ pub type AuthState = Option<Arc<ApiKeySet>>;
 
 /// Set of valid API keys loaded from `MOLD_API_KEY`.
 pub struct ApiKeySet {
+    pub(crate) secure: Option<Arc<crate::secure_pairing::SecurePairing>>,
+    secure_mutations: Mutex<()>,
     operator_keys: HashSet<String>,
     gallery_signing_secret: [u8; GALLERY_SIGNING_SECRET_BYTES],
-    pairing_sessions: Mutex<HashMap<[u8; 32], PairingSession>>,
     paired_clients: Mutex<HashMap<[u8; 32], PairedClientAccess>>,
     metadata_db: Arc<Option<mold_db::MetadataDb>>,
     server_instance_id: Arc<String>,
-}
-
-struct PairingSession {
-    expires_at: u64,
-    /// Ephemeral digest for credential-free route proofs; never persisted.
-    connection_secret_hash: [u8; 32],
 }
 
 #[derive(Clone)]
@@ -74,9 +65,10 @@ impl ApiKeySet {
         getrandom::fill(&mut gallery_signing_secret)?;
         let paired_clients = load_paired_clients(&metadata_db, &server_instance_id);
         Ok(Self {
+            secure: None,
+            secure_mutations: Mutex::new(()),
             operator_keys: keys,
             gallery_signing_secret,
-            pairing_sessions: Mutex::new(HashMap::new()),
             paired_clients: Mutex::new(paired_clients),
             metadata_db,
             server_instance_id,
@@ -89,9 +81,10 @@ impl ApiKeySet {
         gallery_signing_secret: [u8; GALLERY_SIGNING_SECRET_BYTES],
     ) -> Self {
         Self {
+            secure: None,
+            secure_mutations: Mutex::new(()),
             operator_keys: keys,
             gallery_signing_secret,
-            pairing_sessions: Mutex::new(HashMap::new()),
             paired_clients: Mutex::new(HashMap::new()),
             metadata_db: Arc::new(None),
             server_instance_id: Arc::new(String::new()),
@@ -109,59 +102,6 @@ impl ApiKeySet {
 
     pub fn contains(&self, candidate: &str) -> bool {
         self.authenticate(candidate).is_some()
-    }
-
-    pub(crate) fn connection_proof(
-        &self,
-        kind: &str,
-        tag: &str,
-        nonce: &str,
-        instance: &str,
-    ) -> Option<String> {
-        if !crate::connections::lower_hex(tag, 16) || !crate::connections::lower_hex(nonce, 64) {
-            return None;
-        }
-        let mut matched: Option<[u8; 32]> = None;
-        let mut ambiguous = false;
-        let mut consider = |hash: [u8; 32]| {
-            let prefix = crate::connections::hex(&hash[..8]);
-            if bool::from(prefix.as_bytes().ct_eq(tag.as_bytes())) {
-                if matched.is_some_and(|old| old != hash) {
-                    ambiguous = true;
-                }
-                matched = Some(hash);
-            }
-        };
-        match kind {
-            "api" => {
-                // Arbitrary operator strings have no trustworthy entropy evidence.
-                // Only server-minted random paired grants may expose a hash tag.
-                let clients = self
-                    .paired_clients
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
-                for hash in clients.keys() {
-                    consider(*hash);
-                }
-            }
-            "pairing" => {
-                let sessions = self
-                    .pairing_sessions
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
-                for session in sessions
-                    .values()
-                    .filter(|s| s.expires_at > unix_timestamp())
-                {
-                    consider(session.connection_secret_hash);
-                }
-            }
-            _ => return None,
-        }
-        if ambiguous {
-            return None;
-        }
-        Some(connection_proof_mac(&matched?, kind, nonce, instance))
     }
 
     fn authenticate(&self, candidate: &str) -> Option<AuthenticationKind> {
@@ -259,98 +199,6 @@ impl ApiKeySet {
         )
     }
 
-    /// Create a one-time, short-lived handoff authorizing a new paired grant.
-    /// Only the HMAC of the random token is retained; the bearer value exists
-    /// solely in the no-store response and QR code.
-    pub(crate) fn issue_pairing_token(&self) -> Result<(String, u64), getrandom::Error> {
-        let mut token_bytes = [0_u8; PAIRING_TOKEN_BYTES];
-        getrandom::fill(&mut token_bytes)?;
-        let token = URL_SAFE_NO_PAD.encode(token_bytes);
-        let token_hash = self.pairing_token_hash(&token);
-        let now = unix_timestamp();
-        let expires_at = now.saturating_add(PAIRING_TOKEN_TTL_SECS);
-        let mut sessions = self
-            .pairing_sessions
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        sessions.retain(|_, session| session.expires_at > now);
-        if sessions.len() >= MAX_PAIRING_SESSIONS {
-            if let Some(oldest) = sessions
-                .iter()
-                .min_by_key(|(_, session)| session.expires_at)
-                .map(|(hash, _)| *hash)
-            {
-                sessions.remove(&oldest);
-            }
-        }
-        sessions.insert(
-            token_hash,
-            PairingSession {
-                expires_at,
-                connection_secret_hash: Sha256::digest(token.as_bytes()).into(),
-            },
-        );
-        Ok((token, expires_at))
-    }
-
-    /// Consume a pairing token exactly once and mint a distinct durable grant.
-    /// The operator credential that opened Settings is never copied to the
-    /// paired client, so this grant can be revoked independently.
-    pub(crate) fn claim_pairing_token(
-        &self,
-        token: &str,
-        client_name: &str,
-        client_kind: &str,
-    ) -> anyhow::Result<Option<String>> {
-        let token_hash = self.pairing_token_hash(token);
-        let now = unix_timestamp();
-        let mut sessions = self
-            .pairing_sessions
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        sessions.retain(|_, session| session.expires_at > now);
-        let session = sessions
-            .remove(&token_hash)
-            .filter(|session| session.expires_at > now);
-        drop(sessions);
-        if session.is_none() {
-            return Ok(None);
-        }
-        let Some(db) = self.metadata_db.as_ref() else {
-            anyhow::bail!("paired access requires the Mold metadata database");
-        };
-
-        let mut key_bytes = [0_u8; 32];
-        getrandom::fill(&mut key_bytes)?;
-        let credential = format!("mold_pair_{}", URL_SAFE_NO_PAD.encode(key_bytes));
-        let credential_hash: [u8; 32] = Sha256::digest(credential.as_bytes()).into();
-        let id = format!("pair_{}", URL_SAFE_NO_PAD.encode(&credential_hash[..12]));
-        let created_at_ms = unix_timestamp_ms();
-        let access = PairedClientAccess {
-            id: id.clone(),
-            name: normalized_client_name(client_name),
-            client_kind: normalized_client_kind(client_kind),
-            created_at_ms,
-            last_used_at_ms: None,
-        };
-        mold_db::paired_clients::PairedClients::new(db).insert(
-            &mold_db::paired_clients::PairedClient {
-                id,
-                server_instance_id: self.server_instance_id.as_ref().clone(),
-                name: access.name.clone(),
-                client_kind: access.client_kind.clone(),
-                credential_hash,
-                created_at_ms,
-                last_used_at_ms: None,
-            },
-        )?;
-        self.paired_clients
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(credential_hash, access);
-        Ok(Some(credential))
-    }
-
     pub(crate) fn pairing_available(&self) -> bool {
         self.metadata_db.is_some()
     }
@@ -378,9 +226,16 @@ impl ApiKeySet {
         let Some(db) = self.metadata_db.as_ref() else {
             anyhow::bail!("paired access requires the Mold metadata database");
         };
+        let _mutation = self
+            .secure_mutations
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let revoked =
             mold_db::paired_clients::PairedClients::new(db).revoke(&self.server_instance_id, id)?;
         if revoked {
+            if let Some(secure) = &self.secure {
+                secure.revoke(id);
+            }
             self.paired_clients
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -389,14 +244,122 @@ impl ApiKeySet {
         Ok(revoked)
     }
 
-    fn pairing_token_hash(&self, token: &str) -> [u8; 32] {
-        // Reusing the process-random gallery secret is intentional: the
-        // versioned context below gives pairing an independent HMAC domain.
-        let mut mac = HmacSha256::new_from_slice(&self.gallery_signing_secret)
-            .expect("HMAC-SHA256 accepts keys of any length");
-        mac.update(b"mold-mobile-pairing-v1\n");
-        mac.update(token.as_bytes());
-        mac.finalize().into_bytes().into()
+    pub(crate) fn claim_secure_pairing(
+        &self,
+        context: &mold_secure::RequestContext,
+        proof: &str,
+        client_name: &str,
+        client_kind: &str,
+    ) -> anyhow::Result<(String, mold_secure::DeviceGrant)> {
+        let secure = self
+            .secure
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("secure pairing unavailable"))?;
+        let db = self
+            .metadata_db
+            .as_ref()
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("paired access requires metadata database"))?;
+        let _mutation = self
+            .secure_mutations
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let invite = context
+            .invite
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("pairing invitation required"))?;
+        // Invitations do not reserve device slots. Recheck under the mutation
+        // lock so concurrent claims cannot exceed the connector policy limit.
+        // Leave a waiting invitation usable if capacity is released later.
+        anyhow::ensure!(
+            secure.has_device_capacity(),
+            "paired device capacity reached"
+        );
+        anyhow::ensure!(
+            secure.consume_invite(
+                invite,
+                &context.binding,
+                &mold_secure::decode_hex(&context.handshake_hash)?,
+                proof
+            )?,
+            "pairing invitation already used or proof invalid"
+        );
+        let mut bytes = [0; 32];
+        getrandom::fill(&mut bytes)?;
+        let credential = format!("mold_pair_{}", URL_SAFE_NO_PAD.encode(bytes));
+        let credential_hash: [u8; 32] = Sha256::digest(credential.as_bytes()).into();
+        let id = format!("pair_{}", URL_SAFE_NO_PAD.encode(&credential_hash[..12]));
+        let mut grant_id = [0; 16];
+        getrandom::fill(&mut grant_id)?;
+        let device = mold_db::secure_devices::SecureDevice {
+            client_id: id.clone(),
+            server_instance_id: self.server_instance_id.as_ref().clone(),
+            grant_id: crate::connections::hex(&grant_id),
+            signing_key: context.binding.signing_key.clone(),
+            noise_key: context.binding.noise_key.clone(),
+            credential_hash,
+            expires_at: unix_timestamp() + crate::secure_pairing::GRANT_TTL,
+            epoch: secure.epoch(),
+        };
+        let access = PairedClientAccess {
+            id: id.clone(),
+            name: normalized_client_name(client_name),
+            client_kind: normalized_client_kind(client_kind),
+            created_at_ms: unix_timestamp_ms(),
+            last_used_at_ms: None,
+        };
+        mold_db::secure_devices::SecureDevices::new(db).insert(
+            &mold_db::paired_clients::PairedClient {
+                id,
+                server_instance_id: self.server_instance_id.as_ref().clone(),
+                name: access.name.clone(),
+                client_kind: access.client_kind.clone(),
+                credential_hash,
+                created_at_ms: access.created_at_ms,
+                last_used_at_ms: None,
+            },
+            &device,
+        )?;
+        let certificate = secure.certificate(&device)?;
+        self.paired_clients
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(credential_hash, access);
+        secure.insert_device(device);
+        Ok((credential, certificate))
+    }
+    pub(crate) fn renew_secure_pairing(
+        &self,
+        context: &mold_secure::RequestContext,
+    ) -> anyhow::Result<mold_secure::DeviceGrant> {
+        let secure = self
+            .secure
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("secure pairing unavailable"))?;
+        let db = self
+            .metadata_db
+            .as_ref()
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("paired access requires metadata database"))?;
+        let _mutation = self
+            .secure_mutations
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let mut device = secure
+            .device_for_context(context)
+            .ok_or_else(|| anyhow::anyhow!("paired device revoked"))?;
+        device.expires_at = unix_timestamp() + crate::secure_pairing::GRANT_TTL;
+        anyhow::ensure!(
+            mold_db::secure_devices::SecureDevices::new(db).renew(
+                &self.server_instance_id,
+                &device.grant_id,
+                device.expires_at
+            )?,
+            "paired device revoked"
+        );
+        let certificate = secure.certificate(&device)?;
+        secure.insert_device(device);
+        Ok(certificate)
     }
 
     #[cfg(test)]
@@ -425,9 +388,21 @@ fn load_paired_clients(
     let Some(db) = metadata_db.as_ref() else {
         return HashMap::new();
     };
+    // Protocol-1 tokens have no device key binding and are deliberately retired.
+    let secure = match mold_db::secure_devices::SecureDevices::new(db).list(server_instance_id) {
+        Ok(devices) => devices
+            .into_iter()
+            .map(|d| (d.client_id, d.credential_hash))
+            .collect::<HashSet<_>>(),
+        Err(error) => {
+            warn!(error = %format!("{error:#}"), "failed to load secure paired clients");
+            return HashMap::new();
+        }
+    };
     match mold_db::paired_clients::PairedClients::new(db).list(server_instance_id) {
         Ok(clients) => clients
             .into_iter()
+            .filter(|client| secure.contains(&(client.id.clone(), client.credential_hash)))
             .map(|client| {
                 (
                     client.credential_hash,
@@ -457,11 +432,15 @@ fn normalized_client_name(value: &str) -> String {
     }
 }
 
-fn normalized_client_kind(value: &str) -> String {
+pub(crate) fn normalized_client_kind(value: &str) -> String {
     match value.trim() {
         "iphone" => "iphone",
         "ipad" => "ipad",
         "android" => "android",
+        "browser" => "browser",
+        "web" => "web",
+        "desktop" => "desktop",
+        "cli" => "cli",
         _ => "mobile",
     }
     .to_string()
@@ -536,15 +515,19 @@ pub(crate) fn load_api_keys_with_db(
     }
 
     tracing::info!(num_keys = keys.len(), "API key authentication enabled");
-    let key_set = ApiKeySet::try_new(keys, metadata_db, server_instance_id)
+    let mut key_set = ApiKeySet::try_new(keys, metadata_db, server_instance_id)
         .map_err(|error| anyhow::anyhow!("failed to generate gallery signing secret: {error}"))?;
+    if let Some(db) = key_set.metadata_db.as_ref() {
+        let home = mold_core::Config::mold_dir()
+            .ok_or_else(|| anyhow::anyhow!("secure identity requires MOLD_HOME"))?;
+        let identity = crate::secure_pairing::load_host_identity(&home)?;
+        let devices =
+            mold_db::secure_devices::SecureDevices::new(db).list(&key_set.server_instance_id)?;
+        key_set.secure = Some(Arc::new(crate::secure_pairing::SecurePairing::new(
+            identity, devices,
+        )));
+    }
     Ok(Some(Arc::new(key_set)))
-}
-
-fn connection_proof_mac(hash: &[u8; 32], kind: &str, nonce: &str, instance: &str) -> String {
-    let mut mac = HmacSha256::new_from_slice(hash).expect("SHA256 HMAC key is valid");
-    mac.update(format!("mold-connection-proof-v1\n{kind}\n{nonce}\n{instance}").as_bytes());
-    crate::connections::hex(&mac.finalize().into_bytes())
 }
 
 /// Paths that are exempt from API key authentication.
@@ -553,12 +536,43 @@ const EXEMPT_PATHS: &[&str] = &[
     "/api/docs",
     "/api/openapi.json",
     "/api/pairing/claim",
-    "/api/connection-probe",
 ];
 
 /// Axum middleware that enforces API key authentication.
 pub async fn require_api_key(request: Request, next: Next) -> Response {
     let mut request = request;
+
+    // Only a real loopback socket may carry plaintext API traffic. The secure
+    // WebSocket endpoint is mounted outside this middleware. Fail closed even
+    // with auth disabled or if future service wiring omits peer metadata.
+    let local = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .is_some_and(|peer| peer.0.ip().is_loopback());
+    if !local {
+        if is_browser_bootstrap_read(request.method(), request.uri().path()) {
+            return (
+                StatusCode::SEE_OTHER,
+                [
+                    (
+                        axum::http::header::LOCATION,
+                        "https://utensils.io/mold/studio/",
+                    ),
+                    (axum::http::header::CACHE_CONTROL, "no-store"),
+                ],
+            )
+                .into_response();
+        }
+        return (
+            StatusCode::UPGRADE_REQUIRED,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(AuthError {
+                error: "A secure Mold connection is required".into(),
+                code: "SECURE_CONNECTION_REQUIRED".into(),
+            }),
+        )
+            .into_response();
+    }
 
     // Auth state is stored as an extension by the layer setup in lib.rs.
     let auth_state = request.extensions().get::<AuthState>().cloned();
@@ -567,6 +581,77 @@ pub async fn require_api_key(request: Request, next: Next) -> Response {
         Some(ks) => ks,
         None => return next.run(request).await, // Auth disabled
     };
+
+    let secure_header = request.headers().get("x-mold-secure-peer").cloned();
+    if let Some(value) = secure_header {
+        let peer = request
+            .extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>();
+        if !peer.is_some_and(|peer| peer.0.ip().is_loopback()) {
+            return unauthorized("secure peer proof requires local connector");
+        }
+        let context = value
+            .to_str()
+            .ok()
+            .filter(|s| s.len() <= 4096)
+            .and_then(|s| URL_SAFE_NO_PAD.decode(s).ok())
+            .and_then(|bytes| serde_json::from_slice::<mold_secure::RequestContext>(&bytes).ok());
+        let Some(context) = context else {
+            return unauthorized("invalid secure peer proof");
+        };
+        let Some(secure) = &key_set.secure else {
+            return unauthorized("secure pairing unavailable");
+        };
+        let target = request
+            .uri()
+            .path_and_query()
+            .map(|p| p.as_str())
+            .unwrap_or("/");
+        if secure
+            .verify_request(&context, request.method().as_str(), target)
+            .is_err()
+        {
+            return unauthorized("invalid or revoked secure peer proof");
+        }
+        request.headers_mut().remove("x-mold-secure-peer");
+        request.extensions_mut().insert(context);
+    }
+    if request.uri().path() == "/api/pairing/secure/check" {
+        if request.method() != Method::GET || request.uri().query().is_some() {
+            return unauthorized("invalid secure control route");
+        }
+        let local = request
+            .extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .is_some_and(|peer| peer.0.ip().is_loopback());
+        let context = request
+            .headers()
+            .get("x-mold-secure-control")
+            .and_then(|v| v.to_str().ok())
+            .filter(|s| s.len() <= 1024)
+            .and_then(|s| URL_SAFE_NO_PAD.decode(s).ok())
+            .and_then(|bytes| serde_json::from_slice::<mold_secure::ControlContext>(&bytes).ok());
+        if !local
+            || !context.is_some_and(|c| {
+                key_set
+                    .secure
+                    .as_ref()
+                    .is_some_and(|secure| secure.verify_control(&c).is_ok())
+            })
+        {
+            return unauthorized("invalid secure control proof");
+        }
+        request.headers_mut().remove("x-mold-secure-control");
+        return next.run(request).await;
+    }
+    if request.uri().path() == "/api/pairing/claim"
+        && request
+            .extensions()
+            .get::<mold_secure::RequestContext>()
+            .is_none()
+    {
+        return unauthorized("encrypted pairing connection required");
+    }
 
     // Exempt certain paths (health checks, docs).
     let path = request.uri().path();
@@ -596,6 +681,17 @@ pub async fn require_api_key(request: Request, next: Next) -> Response {
         Some(value) => {
             let candidate = value.to_str().unwrap_or("").to_string();
             if let Some(kind) = key_set.authenticate(&candidate) {
+                if let Some(secure) = &key_set.secure {
+                    let hash: [u8; 32] = Sha256::digest(candidate.as_bytes()).into();
+                    let context = request.extensions().get::<mold_secure::RequestContext>();
+                    // An encrypted device may use only its bound per-device key.
+                    // A copied key cannot escape that binding via direct HTTP.
+                    if context.is_some_and(|ctx| !secure.credential_matches(ctx, &hash))
+                        || (secure.credential_bound(&hash) && context.is_none())
+                    {
+                        return unauthorized("device credential does not match secure peer");
+                    }
+                }
                 let identity = key_set.audit_identity(&candidate);
                 let durable_identity = ApiKeySet::durable_identity(&candidate);
                 request.extensions_mut().insert(ApiKeyAuthenticated {
@@ -781,6 +877,14 @@ fn unauthorized(msg: &str) -> Response {
         code: "UNAUTHORIZED".to_string(),
     };
     (StatusCode::UNAUTHORIZED, Json(body)).into_response()
+}
+
+#[cfg(test)]
+pub(crate) fn test_loopback_peer(
+) -> axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>> {
+    axum::Extension(axum::extract::ConnectInfo(
+        "127.0.0.1:1000".parse().unwrap(),
+    ))
 }
 
 /// Injects the `AuthState` as a request extension so the middleware can access it.
@@ -975,223 +1079,23 @@ mod tests {
     }
 
     #[test]
-    fn connection_proof_never_uses_operator_credentials() {
-        for secret in [
-            "password",
-            "0123456789abcdef".repeat(4).as_str(),
-            "mold_pair_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        ] {
-            let keys = ApiKeySet::new(HashSet::from([secret.to_string()]));
-            let tag = crate::connections::hex(&Sha256::digest(secret.as_bytes())[..8]);
-            assert!(
-                keys.connection_proof("api", &tag, &"a".repeat(64), "machine")
-                    .is_none(),
-                "operator key was eligible for anonymous proof"
-            );
-            assert!(
-                keys.contains(secret),
-                "normal operator authentication must remain available"
-            );
-        }
-    }
-
-    #[test]
-    fn connection_proof_matches_shared_cross_surface_golden_vector() {
-        let hash: [u8; 32] = Sha256::digest(b"test-only-route-secret").into();
-        assert_eq!(crate::connections::hex(&hash[..8]), "e4c8e720b2b762b8");
-        assert_eq!(
-            connection_proof_mac(
-                &hash,
-                "api",
-                &"0123456789abcdef".repeat(4),
-                "fixture-machine"
-            ),
-            "09588691253e789f49c73ec7c6bbe10c6373119985a328df283f2bb610ad6979"
-        );
-    }
-
-    #[test]
-    fn connection_proof_covers_pairing_and_revocation_without_touching() {
-        let ks = ApiKeySet::new_with_metadata_db(
-            HashSet::from(["operator".to_string()]),
-            Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap())),
-            "server-a",
-        );
-        let tag = |secret: &str| {
-            let hash = Sha256::digest(secret.as_bytes());
-            hash[..8]
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-        };
-        let nonce = "01".repeat(32);
-        let verify = |secret: &str, kind: &str, proof: String| {
-            let hash = Sha256::digest(secret.as_bytes());
-            let mut mac = HmacSha256::new_from_slice(&hash).unwrap();
-            mac.update(format!("mold-connection-proof-v1\n{kind}\n{nonce}\nserver-a").as_bytes());
-            let expected: String = mac
-                .finalize()
-                .into_bytes()
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect();
-            assert_eq!(proof, expected);
-        };
-        assert!(ks
-            .connection_proof("api", &tag("operator"), &nonce, "server-a")
-            .is_none());
-        assert!(ks
-            .connection_proof("api", &tag("wrong"), &nonce, "server-a")
-            .is_none());
-        assert!(ks
-            .connection_proof("pairing", &tag("operator"), &nonce, "server-a")
-            .is_none());
-        let (token, _) = ks.issue_pairing_token().unwrap();
-        verify(
-            &token,
-            "pairing",
-            ks.connection_proof("pairing", &tag(&token), &nonce, "server-a")
-                .unwrap(),
-        );
-        let paired = ks
-            .claim_pairing_token(&token, "client", "iphone")
-            .unwrap()
+    fn startup_rejects_legacy_paired_credentials_without_secure_device_binding() {
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        mold_db::paired_clients::PairedClients::new(db.as_ref().as_ref().unwrap())
+            .insert(&mold_db::paired_clients::PairedClient {
+                id: "legacy".into(),
+                server_instance_id: "host".into(),
+                name: "old phone".into(),
+                client_kind: "iphone".into(),
+                credential_hash: Sha256::digest(b"old-key").into(),
+                created_at_ms: 0,
+                last_used_at_ms: None,
+            })
             .unwrap();
-        assert!(ks
-            .connection_proof("pairing", &tag(&token), &nonce, "server-a")
-            .is_none());
-        verify(
-            &paired,
-            "api",
-            ks.connection_proof("api", &tag(&paired), &nonce, "server-a")
-                .unwrap(),
-        );
-        assert_eq!(ks.paired_clients()[0].last_used_at_ms, None);
-        let id = ks.paired_clients()[0].id.clone();
-        ks.revoke_paired_client(&id).unwrap();
-        assert!(ks
-            .connection_proof("api", &tag(&paired), &nonce, "server-a")
-            .is_none());
-        let (expired, _) = ks.issue_pairing_token().unwrap();
-        ks.pairing_sessions
-            .lock()
-            .unwrap()
-            .get_mut(&ks.pairing_token_hash(&expired))
-            .unwrap()
-            .expires_at = 0;
-        assert!(ks
-            .connection_proof("pairing", &tag(&expired), &nonce, "server-a")
-            .is_none());
-    }
-    #[test]
-    fn pairing_token_is_random_url_safe_and_single_use() {
-        let ks = ApiKeySet::new_with_metadata_db(
-            HashSet::from(["phone-key".to_string()]),
-            Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap())),
-            "server-a",
-        );
-        let (token, expires_at) = ks.issue_pairing_token().unwrap();
-
-        assert_eq!(token.len(), 43);
-        assert!(token
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'));
-        assert!(expires_at > unix_timestamp());
-        let paired = ks
-            .claim_pairing_token(&token, "James's iPhone", "iphone")
-            .unwrap()
-            .unwrap();
-        assert!(paired.starts_with("mold_pair_"));
-        assert_ne!(paired, "phone-key");
-        assert!(ks.contains(&paired));
-        assert_eq!(ks.paired_clients()[0].name, "James's iPhone");
-        assert_eq!(
-            ks.claim_pairing_token(&token, "Replay", "iphone").unwrap(),
-            None
-        );
-        assert_eq!(
-            ks.claim_pairing_token("not-the-token", "Unknown", "mobile")
-                .unwrap(),
-            None
-        );
-        let id = ks.paired_clients()[0].id.clone();
-        assert!(ks.revoke_paired_client(&id).unwrap());
-        assert!(!ks.contains(&paired));
-        assert!(ks.contains("phone-key"));
-    }
-
-    #[test]
-    fn pairing_preserves_android_client_identity() {
-        let ks = ApiKeySet::new_with_metadata_db(
-            HashSet::from(["operator-key".to_string()]),
-            Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap())),
-            "server-a",
-        );
-        let (token, _) = ks.issue_pairing_token().unwrap();
-
-        ks.claim_pairing_token(&token, "Mold on Android", "android")
-            .unwrap()
-            .unwrap();
-
-        let client = &ks.paired_clients()[0];
-        assert_eq!(client.name, "Mold on Android");
-        assert_eq!(client.client_kind, "android");
-    }
-
-    #[test]
-    fn paired_credentials_are_scoped_to_one_server_instance() {
-        let metadata_db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        let operators = HashSet::from(["operator-key".to_string()]);
-        let server_a =
-            ApiKeySet::new_with_metadata_db(operators.clone(), metadata_db.clone(), "server-a");
-        let (token, _) = server_a.issue_pairing_token().unwrap();
-        let paired = server_a
-            .claim_pairing_token(&token, "James's iPhone", "iphone")
-            .unwrap()
-            .unwrap();
-
-        let server_b =
-            ApiKeySet::new_with_metadata_db(operators.clone(), metadata_db.clone(), "server-b");
-        let restarted_a =
-            ApiKeySet::new_with_metadata_db(operators, metadata_db.clone(), "server-a");
-        assert!(!server_b.contains(&paired));
-        assert!(restarted_a.contains(&paired));
-
-        let client_id = restarted_a.paired_clients()[0].id.clone();
-        assert!(restarted_a.revoke_paired_client(&client_id).unwrap());
-        let restarted_after_revoke = ApiKeySet::new_with_metadata_db(
-            HashSet::from(["operator-key".to_string()]),
-            metadata_db,
-            "server-a",
-        );
-        assert!(!restarted_after_revoke.contains(&paired));
-    }
-
-    #[test]
-    fn expired_pairing_token_is_rejected_and_removed() {
-        let ks = ApiKeySet::new_with_metadata_db(
-            HashSet::from(["phone-key".to_string()]),
-            Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap())),
-            "server-a",
-        );
-        let (token, _) = ks.issue_pairing_token().unwrap();
-        let token_hash = ks.pairing_token_hash(&token);
-        ks.pairing_sessions
-            .lock()
-            .unwrap()
-            .get_mut(&token_hash)
-            .unwrap()
-            .expires_at = unix_timestamp();
-
-        assert_eq!(
-            ks.claim_pairing_token(&token, "Expired", "mobile").unwrap(),
-            None
-        );
-        assert!(!ks
-            .pairing_sessions
-            .lock()
-            .unwrap()
-            .contains_key(&token_hash));
+        let keys = ApiKeySet::new_with_metadata_db(HashSet::from(["operator".into()]), db, "host");
+        assert!(!keys.contains("old-key"));
+        assert!(keys.paired_clients().is_empty());
+        assert!(keys.contains("operator"));
     }
 
     #[tokio::test]
@@ -1206,6 +1110,7 @@ mod tests {
         let app = axum::Router::new()
             .fallback(|| async { StatusCode::OK })
             .layer(axum::middleware::from_fn(require_api_key))
+            .layer(crate::auth::test_loopback_peer())
             .layer(axum::middleware::from_fn_with_state(
                 auth,
                 inject_auth_state,
@@ -1306,6 +1211,7 @@ mod tests {
                 axum::routing::patch(|| async { axum::http::StatusCode::OK }),
             )
             .layer(axum::middleware::from_fn(require_api_key))
+            .layer(crate::auth::test_loopback_peer())
             .layer(axum::middleware::from_fn_with_state(
                 auth_state,
                 inject_auth_state,
@@ -1331,6 +1237,7 @@ mod tests {
                 axum::routing::post(|| async { StatusCode::OK }),
             )
             .layer(axum::middleware::from_fn(require_api_key))
+            .layer(crate::auth::test_loopback_peer())
             .layer(axum::middleware::from_fn_with_state(
                 auth_state,
                 inject_auth_state,
@@ -1338,7 +1245,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pairing_creation_requires_auth_but_claim_uses_the_one_time_token() {
+    async fn pairing_creation_requires_auth_and_claim_requires_encrypted_connection() {
         let auth = Some(Arc::new(ApiKeySet::new(HashSet::from([
             "correct-key".to_string()
         ]))));
@@ -1371,37 +1278,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(claimed.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn paired_credentials_cannot_mint_more_credentials() {
-        let key_set = Arc::new(ApiKeySet::new_with_metadata_db(
-            HashSet::from(["operator-key".to_string()]),
-            Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap())),
-            "server-a",
-        ));
-        let (token, _) = key_set.issue_pairing_token().unwrap();
-        let paired = key_set
-            .claim_pairing_token(&token, "Mold on iPhone", "iphone")
-            .unwrap()
-            .unwrap();
-        let auth = Some(key_set);
-
-        for peer in ["192.0.2.1:12345", "127.0.0.1:12345", "[::1]:12345"] {
-            let mut request = Request::post("/api/pairing/sessions")
-                .header("x-api-key", &paired)
-                .body(axum::body::Body::empty())
-                .unwrap();
-            request.extensions_mut().insert(axum::extract::ConnectInfo(
-                peer.parse::<std::net::SocketAddr>().unwrap(),
-            ));
-            let denied = pairing_test_app(auth.clone())
-                .oneshot(request)
-                .await
-                .unwrap();
-            assert_eq!(denied.status(), StatusCode::FORBIDDEN, "{peer}");
-        }
+        assert_eq!(claimed.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

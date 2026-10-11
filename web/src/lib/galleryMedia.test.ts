@@ -1,3 +1,7 @@
+vi.mock("@studio/api/secureMedia", () => ({
+  secureMediaUrl: vi.fn(async () => null),
+  releaseSecureMediaUrl: vi.fn(),
+}));
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   MediaUpgradeRequiredError,
@@ -57,9 +61,9 @@ function mockFetch(handler: (url: string, init?: RequestInit) => unknown) {
 }
 
 describe("needsAuthedMedia", () => {
-  it("is false for the keyless origin and keyless remotes, true for keyed hosts", () => {
+  it("requires the transport for every remote host, including paired hosts without a public API key field", () => {
     expect(needsAuthedMedia(origin)).toBe(false);
-    expect(needsAuthedMedia(keylessRemote)).toBe(false);
+    expect(needsAuthedMedia(keylessRemote)).toBe(true);
     expect(needsAuthedMedia(authedRemote)).toBe(true);
   });
 });
@@ -75,11 +79,17 @@ describe("resolveThumbnailSrc", () => {
     expect(src).toBe("/api/gallery/thumbnail/cat.png?size=256&fmt=jpeg");
   });
 
-  it("returns a plain absolute URL for a keyless remote", async () => {
+  it("fetches a paired remote thumbnail through transport even without a public key field", async () => {
+    const calls: string[] = [];
+    mockFetch((url) => {
+      calls.push(url);
+      return { ok: true, blob: async () => new Blob(["tile"]) };
+    });
     const src = await resolveThumbnailSrc(keylessRemote, "cat.png");
-    expect(src).toBe(
+    expect(src).toBe("blob:mock-1");
+    expect(calls).toEqual([
       "http://hal9000:7680/api/gallery/thumbnail/cat.png?size=256&fmt=jpeg",
-    );
+    ]);
   });
 
   it("blob-fetches an authed remote thumbnail with the key and caches it", async () => {

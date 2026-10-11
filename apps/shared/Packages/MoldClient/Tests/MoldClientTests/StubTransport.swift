@@ -45,7 +45,7 @@ extension StubTransport {
     static func backend(apiKey: String? = nil, host: String = "stub") -> HTTPBackend {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [self]
-        return HTTPBackend(
+        return HTTPBackend.testing(
             host: MoldHost(name: host, baseURL: URL(string: "http://\(host):7680")!,
                            apiKey: apiKey),
             session: URLSession(configuration: config))

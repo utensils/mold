@@ -48,54 +48,9 @@ import Testing
     #expect(payload == nil)
 }
 
-/// A keyless host can still pair a phone by address and identity.
-@Test func aKeylessCodeCarriesNoToken() throws {
-    let session = PairingSession(
-        token: nil, expiresAt: nil, authRequired: false, instanceId: "inst-1", hostname: nil)
-    let payload = try #require(MobilePairingPayload(
-        session: session, baseURL: URL(string: "http://box:7680")!, name: "Box"))
-    let url = try #require(payload.url)
-    #expect(payload.token == nil)
-    #expect(url.absoluteString.contains("base_url=http%3A%2F%2Fbox%3A7680"))
-    #expect(!url.absoluteString.contains("token="))
-    #expect(!url.absoluteString.contains("expires_at="))
-}
-
-/// One hand-derived vector against `pairing.ts:47-56`: same field order,
-/// `token`/`expires_at` present only because they are non-nil, no `type` at
-/// all, and a hostname-with-a-space name so the `+` rule bites. Computed
-/// independently with `node -e` against `URLSearchParams` to confirm the
-/// byte-for-byte spelling before pinning it here.
-@Test func aPairingUrlIsByteIdenticalToTheStudios() throws {
-    let session = PairingSession(
-        token: "abc def+ghi:jkl/mno", expiresAt: 1_700_000_000, authRequired: true,
-        instanceId: "inst-1", hostname: nil)
-    let payload = try #require(
-        MobilePairingPayload(
-            session: session, baseURL: URL(string: "https://workstation.tail.ts.net:7680")!,
-            name: "James's Phone"))
-    let url = try #require(payload.url)
-    #expect(
-        url.absoluteString
-            == "https://utensils.io/mold/pair#version=1&base_url=https%3A%2F%2Fworkstation.tail.ts.net%3A7680"
-            + "&token=abc+def%2Bghi%3Ajkl%2Fmno&expires_at=1700000000"
-            + "&instance_id=inst-1&name=James%27s+Phone")
-}
-
-/// A `nil` token or `expires_at` is simply OMITTED, not sent as an empty or
-/// null parameter -- `pairing.ts:50-53`'s own `if` guards.
-@Test func aPairingUrlOmitsAnAbsentTokenAndExpiry() throws {
-    // Only reachable with authRequired == false, since a keyed session
-    // always issues both together -- but the payload type itself makes no
-    // such promise, so the omission is tested independently of that.
-    let session = PairingSession(
-        token: "tok", expiresAt: nil, authRequired: true, instanceId: "inst-1", hostname: nil)
-    let payload = try #require(
-        MobilePairingPayload(
-            session: session, baseURL: URL(string: "http://box:7680")!, name: "Phone"))
-    let url = try #require(payload.url)
-    #expect(!url.absoluteString.contains("expires_at"))
-    #expect(url.absoluteString.contains("token=tok"))
+@Test func oldKeylessSessionCannotMakeAnUnencryptedCode() {
+    let session = PairingSession(token: nil, expiresAt: nil, authRequired: false, instanceId: "old", hostname: nil)
+    #expect(MobilePairingPayload(session: session, baseURL: URL(string: "http://box:7680")!, name: "Box") == nil)
 }
 
 @Test func formEncodingSpellsASpaceAsAPlusAndAColonAsPercent3A() {

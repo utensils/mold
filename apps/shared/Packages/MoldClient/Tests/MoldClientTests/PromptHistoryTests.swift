@@ -33,7 +33,7 @@ private func live() throws -> HistoryListing {
 }
 
 @Test func historySearchEscapesPromptTextAndPreservesHostPrefix() {
-    let backend = HTTPBackend(host: MoldHost(name: "box", baseURL: URL(string: "http://box/mold")!, apiKey: "key"))
+    let backend = HTTPBackend.testing(host: MoldHost(name: "box", baseURL: URL(string: "http://box/mold")!, apiKey: "key"))
     let request = backend.request(backend.historyPath(limit: 50, query: "sea & sky + #1"))
     let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems
     #expect(query?.first { $0.name == "query" }?.value == "sea & sky + #1")

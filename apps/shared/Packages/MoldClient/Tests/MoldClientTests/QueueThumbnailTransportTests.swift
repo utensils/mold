@@ -17,7 +17,7 @@ import Testing
 }
 
 @Test func queuedSourceThumbnailUsesOneEscapedJobComponentAndHostPrefix() {
-    let backend = HTTPBackend(host: MoldHost(name: "box", baseURL: URL(string: "http://box/mold")!, apiKey: "secret"))
+    let backend = HTTPBackend.testing(host: MoldHost(name: "box", baseURL: URL(string: "http://box/mold")!, apiKey: "secret"))
     let request = backend.request(backend.queueInputThumbnailPath("job #1"))
     #expect(request.url?.absoluteString == "http://box/mold/api/queue/job%20%231/input-thumbnail")
     #expect(request.value(forHTTPHeaderField: "X-Api-Key") == "secret")

@@ -39,6 +39,7 @@ public protocol MoldGalleryBackend: Sendable {
     /// a failed ticket means the player would 401, not play silently wrong.
     func playableURL(for filename: String) async throws -> URL
     func playableURL(for filename: String, trashed: Bool) async throws -> URL
+    func playableMedia(for filename: String, trashed: Bool) async throws -> PlayableMedia
 }
 
 public struct GallerySyncCheckpoint: Codable, Sendable {
@@ -51,6 +52,9 @@ public struct GallerySyncCheckpoint: Codable, Sendable {
 }
 
 public extension MoldGalleryBackend {
+    func playableMedia(for filename: String, trashed: Bool) async throws -> PlayableMedia {
+        PlayableMedia(url: try await playableURL(for: filename, trashed: trashed))
+    }
     func galleryPrint(_ filename: String) async throws -> GalleryPrint? {
         guard case let .fresh(prints, _) = try await gallery(etag: nil) else { throw MoldClientError.malformedResponse }
         return prints.first { $0.filename == filename }

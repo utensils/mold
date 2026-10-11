@@ -10,8 +10,13 @@ struct PairingLinkContractTests {
     struct Fixture: Decodable {
         struct Payload: Decodable {
             let baseUrl: String
-            let token: String?
-            let expiresAt: UInt64?
+            let namespace: String
+            let hostKey: String
+            let hostNoiseKey: String
+            let hostBindingSignature: String
+            let websocketUrl: String
+            let inviteSeed: String
+            let invite: SecureInvite
             let instanceId: String
             let name: String
             let endpoints: [ConnectionEndpoint]?
@@ -19,12 +24,13 @@ struct PairingLinkContractTests {
 
         let payload: Payload
         let link: String
-        let legacy: [String]
+        let aliases: [String]
 
         var expected: MobilePairingPayload {
-            MobilePairingPayload(baseURL: payload.baseUrl, token: payload.token,
-                                 expiresAt: payload.expiresAt, instanceId: payload.instanceId,
-                                 name: payload.name, endpoints: payload.endpoints)
+            MobilePairingPayload(baseURL: payload.baseUrl, token: nil,
+                                 expiresAt: payload.invite.expiresAt, instanceId: payload.instanceId,
+                                 name: payload.name, endpoints: payload.endpoints,
+                                 secureInvitation: SecureInvitation(binding: .init(signingKey: payload.hostKey, noiseKey: payload.hostNoiseKey, signature: payload.hostBindingSignature), namespace: payload.namespace, websocketURL: URL(string: payload.websocketUrl)!, seed: payload.inviteSeed, invite: payload.invite))
         }
     }
 
@@ -50,9 +56,9 @@ struct PairingLinkContractTests {
     }
 
     @Test(arguments: fixtures.links.map(\.link))
-    func readsTheLinkAndItsLegacySpellings(_ link: String) throws {
+    func readsTheLinkAndItsSafeAliases(_ link: String) throws {
         let fixture = try #require(Self.fixtures.links.first { $0.link == link })
-        for raw in [fixture.link] + fixture.legacy {
+        for raw in [fixture.link] + fixture.aliases {
             #expect(try MobilePairingPayload.parse(raw) == fixture.expected, "\(raw)")
         }
     }
@@ -64,7 +70,7 @@ struct PairingLinkContractTests {
 
     @Test func aUniversalLinkIsRecognisedForRouting() {
         #expect(MobilePairingPayload.isPairingLink(URL(string: "https://utensils.io/mold/pair#version=1")!))
-        #expect(MobilePairingPayload.isPairingLink(URL(string: "mold://pair?version=1")!))
+        #expect(!MobilePairingPayload.isPairingLink(URL(string: "mold://pair?version=1")!))
         #expect(!MobilePairingPayload.isPairingLink(URL(string: "https://utensils.io/mold/guide/companion")!))
         #expect(!MobilePairingPayload.isPairingLink(URL(string: "moldstudio://queue/1")!))
     }

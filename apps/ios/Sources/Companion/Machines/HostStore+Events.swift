@@ -41,10 +41,12 @@ extension HostStore {
     private func watch(_ host: MoldHost) async {
         var delay: Duration = .seconds(2)
         while !Task.isCancelled {
+            guard let current = self.host(host.id) else { return }
             do {
-                for try await event in backend(for: self.host(host.id) ?? host).events() {
+                for try await event in backend(for: current).events() {
+                    guard !Task.isCancelled, self.host(current.id) == current else { return }
                     delay = .seconds(2)
-                    deliver(event, from: host)
+                    deliver(event, from: current)
                 }
             } catch {
                 // A dropped stream is not yet a down machine; the re-check
@@ -63,6 +65,7 @@ extension HostStore {
     }
 
     private func deliver(_ event: MoldEvent, from host: MoldHost) {
+        guard !Task.isCancelled, self.host(host.id) == host else { return }
         switch event {
         case .deviceStateChanged, .resyncRequired:
             Task { await refreshStatus(host) }
@@ -75,8 +78,11 @@ extension HostStore {
     }
 
     /// Status only: an event is not a reason to re-read capabilities.
-    private func refreshStatus(_ host: MoldHost) async {
-        if case let .up(status) = await check(host) {
+    func refreshStatus(_ host: MoldHost) async {
+        guard !Task.isCancelled, self.host(host.id) == host else { return }
+        let state = await check(host)
+        guard !Task.isCancelled, self.host(host.id) == host else { return }
+        if case let .up(status) = state {
             setReachability(.up(status), for: host.id)
             setLastAnswered(.now, for: host.id)
         }

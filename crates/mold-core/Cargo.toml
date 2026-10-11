@@ -34,6 +34,7 @@ mesh-matting = []
 mesh-delight = ["mesh-matting"]
 
 [dependencies]
+mold-ai-secure-client = { path = "../mold-secure-client" }
 anyhow = "1"
 http = "1"
 http-body-util = "0.1"

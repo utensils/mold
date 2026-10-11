@@ -36,11 +36,8 @@ struct PairingSheet: View {
     /// was being replaced by a request the fixture then refused).
     static func needsFreshCode(session: PairingSession?, sessionHost: MoldHost.ID?, host: MoldHost.ID, now: Date) -> Bool {
         guard let session, sessionHost == host else { return true }
-        // A keyless code has no expiry, and the machine may have gained a
-        // key since it was made: ask again on every opening (it is free).
-        guard session.token != nil else { return true }
-        // No expiry on the wire reads as "still good": the machine set none.
-        guard let expiresAt = session.expiresAt else { return false }
+        guard let invitation = session.secureInvitation else { return true }
+        let expiresAt = invitation.invite.expiresAt
         return Countdown.resolve(expiresAt: expiresAt, now: now) == .expired
     }
 
@@ -139,7 +136,7 @@ struct PairingSheet: View {
         VStack(spacing: 12) {
             // The code is a universal link: the Camera app opens Mold Studio
             // on the phone, which asks before it pairs.
-            Text("Point your iPhone's Camera at this code, or scan it in Mold Studio: Add a Machine ▸ Scan a Pairing Code.")
+            Text("Scan this code on your phone, or copy its link into Add a Machine on another device.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

@@ -51,7 +51,7 @@ final class HostStore {
         hosts = []
         hosts = stored.entries.map { entry in
             MoldHost(id: entry.id, name: entry.name, baseURL: entry.baseURL, apiKey: readKey(entry),
-                     connectionEndpoints: entry.connectionEndpoints, connectionInstanceID: entry.connectionInstanceID, connectionOriginalURL: entry.connectionOriginalURL)
+                     connectionEndpoints: entry.connectionEndpoints, connectionInstanceID: entry.connectionInstanceID, connectionOriginalURL: entry.connectionOriginalURL, secure: entry.secure)
         }
     }
 
@@ -93,7 +93,7 @@ final class HostStore {
     func persist() throws {
         try list.save(HostList(
             entries: hosts.map { .init(id: $0.id, name: $0.name, baseURL: $0.baseURL,
-                                     connectionEndpoints: $0.connectionEndpoints, connectionInstanceID: $0.connectionInstanceID, connectionOriginalURL: $0.connectionOriginalURL) },
+                                     connectionEndpoints: $0.connectionEndpoints, connectionInstanceID: $0.connectionInstanceID, connectionOriginalURL: $0.connectionOriginalURL, secure: $0.secure) },
             defaultID: defaultMachine))
     }
 

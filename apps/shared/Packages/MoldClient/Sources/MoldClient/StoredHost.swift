@@ -17,6 +17,7 @@ public struct StoredHost: Codable, Hashable, Sendable {
     public var connectionEndpoints: [ConnectionEndpoint]?
     public var connectionInstanceID: String?
     public var connectionOriginalURL: URL?
+    public var secure: SecureHost?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -25,23 +26,25 @@ public struct StoredHost: Codable, Hashable, Sendable {
         case connectionEndpoints = "connection_endpoints"
         case connectionInstanceID = "connection_instance_id"
         case connectionOriginalURL = "connection_original_url"
+        case secure
     }
 
-    public init(id: UUID, name: String, baseURL: URL, connectionEndpoints: [ConnectionEndpoint]? = nil, connectionInstanceID: String? = nil, connectionOriginalURL: URL? = nil) {
+    public init(id: UUID, name: String, baseURL: URL, connectionEndpoints: [ConnectionEndpoint]? = nil, connectionInstanceID: String? = nil, connectionOriginalURL: URL? = nil, secure: SecureHost? = nil) {
         self.id = id
         self.name = name
         self.baseURL = baseURL
         self.connectionEndpoints = connectionEndpoints
         self.connectionInstanceID = connectionInstanceID
         self.connectionOriginalURL = connectionOriginalURL
+        self.secure = secure
     }
 
     public init(_ host: MoldHost) {
-        self.init(id: host.id, name: host.name, baseURL: host.baseURL, connectionEndpoints: host.connectionEndpoints, connectionInstanceID: host.connectionInstanceID, connectionOriginalURL: host.connectionOriginalURL)
+        self.init(id: host.id, name: host.name, baseURL: host.baseURL, connectionEndpoints: host.connectionEndpoints, connectionInstanceID: host.connectionInstanceID, connectionOriginalURL: host.connectionOriginalURL, secure: host.secure)
     }
 
     /// Rejoined with the key the secrets file was holding for it.
     public func host(apiKey: String?) -> MoldHost {
-        MoldHost(id: id, name: name, baseURL: baseURL, apiKey: apiKey, connectionEndpoints: connectionEndpoints, connectionInstanceID: connectionInstanceID, connectionOriginalURL: connectionOriginalURL)
+        MoldHost(id: id, name: name, baseURL: baseURL, apiKey: apiKey, connectionEndpoints: connectionEndpoints, connectionInstanceID: connectionInstanceID, connectionOriginalURL: connectionOriginalURL, secure: secure)
     }
 }

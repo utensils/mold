@@ -4,6 +4,8 @@ import { createPinia, type Pinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IDBFactory } from "fake-indexeddb";
 import * as mobileDraftModule from "./mobileComposerDraft";
+import securePairingFixtures from "@studio/api/pairing.fixtures.json";
+import { mobilePairingUrl, type MobilePairingPayload } from "@studio/api/pairing";
 import { createMobileComposerDraft, MOBILE_COMPOSER_DRAFT_KEY } from "./mobileComposerDraft";
 import { clearMemoryDraftsForTest } from "@studio/lib/draftMediaStore";
 import { installMemoryLocalStorage } from "../lib/testSupport/memoryLocalStorage";
@@ -10918,11 +10920,10 @@ describe("MobileApp host and catalog coordination", () => {
 
   function pairingPayload(overrides: Record<string, unknown> = {}): string {
     return JSON.stringify({
+      ...securePairingFixtures.links[0]!.payload,
       type: "mold.mobile-pairing",
-      version: 1,
+      version: 2,
       base_url: "http://pair.local:7680",
-      token: "one-time-token",
-      expires_at: Math.floor(Date.now() / 1000) + 120,
       instance_id: "pair-id",
       name: "Pair Host",
       ...overrides,
@@ -10930,12 +10931,7 @@ describe("MobileApp host and catalog coordination", () => {
   }
 
   function pairingUrl(overrides: Record<string, unknown> = {}): string {
-    const payload = JSON.parse(pairingPayload(overrides)) as Record<string, string>;
-    const url = new URL("mold://pair");
-    for (const [key, value] of Object.entries(payload)) {
-      if (key !== "type" && value !== null) url.searchParams.set(key, String(value));
-    }
-    return url.toString();
+    return mobilePairingUrl(JSON.parse(pairingPayload(overrides)) as MobilePairingPayload);
   }
 
   async function scanFromMachines(): Promise<void> {
@@ -11011,14 +11007,14 @@ describe("MobileApp host and catalog coordination", () => {
       return Promise.resolve(null);
     });
     claimPairingSession.mockResolvedValue({
-      api_key: "paired-key",
+      api_key: null,
       instance_id: "wrong-host",
       hostname: "impostor",
     });
 
     await scanFromMachines();
 
-    expect(claimPairingSession).toHaveBeenCalledWith("http://pair.local:7680", "one-time-token", {
+    expect(claimPairingSession).toHaveBeenCalledWith(expect.objectContaining({ version: 2, base_url: "http://pair.local:7680", host_key: securePairingFixtures.links[0]!.payload.host_key }), {
       name: "Mold on Android",
       kind: "android",
     });
@@ -11144,7 +11140,7 @@ describe("MobileApp host and catalog coordination", () => {
 
   it("rejects expired pairing codes before contacting the host", async () => {
     scanPairingQr.mockResolvedValue({
-      content: pairingPayload({ expires_at: Math.floor(Date.now() / 1000) - 1 }),
+      content: pairingPayload({ invite: { ...securePairingFixtures.links[0]!.payload.invite, expiresAt: Math.floor(Date.now() / 1000) - 1 } }),
     });
 
     await scanFromMachines();
@@ -11154,17 +11150,25 @@ describe("MobileApp host and catalog coordination", () => {
     expect(invoke).not.toHaveBeenCalledWith("keychain_set_api_key", expect.anything());
   });
 
+  it("refuses legacy pairing codes before contacting the host", async () => {
+    scanPairingQr.mockResolvedValue({ content: pairingPayload({ version: 1 }) });
+    await scanFromMachines();
+    expect(claimPairingSession).not.toHaveBeenCalled();
+    expect(wrapper?.get(".error-text").text()).toContain("pairing code");
+    expect(invoke).not.toHaveBeenCalledWith("keychain_set_api_key", expect.anything());
+  });
+
   it("rejects a pairing claim from a different server identity", async () => {
     scanPairingQr.mockResolvedValue({ content: pairingPayload() });
     claimPairingSession.mockResolvedValue({
-      api_key: "paired-key",
+      api_key: null,
       instance_id: "wrong-host",
       hostname: "impostor",
     });
 
     await scanFromMachines();
 
-    expect(claimPairingSession).toHaveBeenCalledWith("http://pair.local:7680", "one-time-token", {
+    expect(claimPairingSession).toHaveBeenCalledWith(expect.objectContaining({ version: 2, base_url: "http://pair.local:7680", host_key: securePairingFixtures.links[0]!.payload.host_key }), {
       name: "Mold on iPhone",
       kind: "iphone",
     });
@@ -11172,10 +11176,10 @@ describe("MobileApp host and catalog coordination", () => {
     expect(invoke).not.toHaveBeenCalledWith("keychain_set_api_key", expect.anything());
   });
 
-  it("stores a verified pairing key through the existing Keychain host path", async () => {
+  it("stores paired host metadata while the secure adapter owns its credentials", async () => {
     scanPairingQr.mockResolvedValue({ content: pairingPayload() });
     claimPairingSession.mockResolvedValue({
-      api_key: "paired-key",
+      api_key: null,
       instance_id: "pair-id",
       hostname: "pair-host",
     });
@@ -11192,11 +11196,12 @@ describe("MobileApp host and catalog coordination", () => {
 
     await scanFromMachines();
     await vi.waitFor(() =>
-      expect(invoke).toHaveBeenCalledWith("keychain_set_api_key", {
-        hostId: "pair-local-7680",
-        apiKey: "paired-key",
-      }),
+      expect(JSON.parse(localStorage.getItem("mold.mobile.hosts.v1") ?? "[]")).toContainEqual(
+        expect.objectContaining({ id: "pair-local-7680", instanceId: "pair-id" }),
+      ),
     );
+    expect(invoke).not.toHaveBeenCalledWith("keychain_set_api_key", expect.objectContaining({ hostId: "pair-local-7680" }));
+    expect(localStorage.getItem("mold.mobile.hosts.v1")).not.toContain("invite_seed");
 
     const saved = JSON.parse(localStorage.getItem("mold.mobile.hosts.v1") ?? "[]");
     expect(saved).toContainEqual(
@@ -11218,7 +11223,7 @@ describe("MobileApp host and catalog coordination", () => {
       return Promise.resolve(null);
     });
     claimPairingSession.mockResolvedValue({
-      api_key: "paired-key",
+      api_key: null,
       instance_id: "pair-id",
       hostname: "pair-host",
     });
@@ -11235,11 +11240,12 @@ describe("MobileApp host and catalog coordination", () => {
 
     await scanFromMachines();
     await vi.waitFor(() =>
-      expect(invoke).toHaveBeenCalledWith("keychain_set_api_key", {
-        hostId: "pair-local-7680",
-        apiKey: "paired-key",
-      }),
+      expect(JSON.parse(localStorage.getItem("mold.mobile.hosts.v1") ?? "[]")).toContainEqual(
+        expect.objectContaining({ id: "pair-local-7680", instanceId: "pair-id" }),
+      ),
     );
+    expect(invoke).not.toHaveBeenCalledWith("keychain_set_api_key", expect.objectContaining({ hostId: "pair-local-7680" }));
+    expect(localStorage.getItem("mold.mobile.hosts.v1")).not.toContain("invite_seed");
 
     expect(wrapper?.find("[data-test='mobile-pair-scanner']").exists()).toBe(false);
     expect(wrapper?.find(".error-text").exists()).toBe(false);
@@ -11428,14 +11434,14 @@ describe("MobileApp host and catalog coordination", () => {
     expect(await styleOptionIds()).toContain(pulledModel.name);
   });
 
-  it("claims a cold-launch iOS Camera pairing link through the existing Keychain path", async () => {
+  it("claims a cold-launch iOS Camera secure pairing link without copying credentials", async () => {
     Object.defineProperty(window, "__TAURI_INTERNALS__", {
       value: {},
       configurable: true,
     });
     getCurrentDeepLinks.mockResolvedValue([pairingUrl()]);
     claimPairingSession.mockResolvedValue({
-      api_key: "paired-key",
+      api_key: null,
       instance_id: "pair-id",
       hostname: "pair-host",
     });
@@ -11452,14 +11458,15 @@ describe("MobileApp host and catalog coordination", () => {
 
     wrapper = mountMobileApp();
     await vi.waitFor(() =>
-      expect(invoke).toHaveBeenCalledWith("keychain_set_api_key", {
-        hostId: "pair-local-7680",
-        apiKey: "paired-key",
-      }),
+      expect(JSON.parse(localStorage.getItem("mold.mobile.hosts.v1") ?? "[]")).toContainEqual(
+        expect.objectContaining({ id: "pair-local-7680", instanceId: "pair-id" }),
+      ),
     );
+    expect(invoke).not.toHaveBeenCalledWith("keychain_set_api_key", expect.objectContaining({ hostId: "pair-local-7680" }));
+    expect(localStorage.getItem("mold.mobile.hosts.v1")).not.toContain("invite_seed");
 
     expect(onOpenDeepLinks).toHaveBeenCalledOnce();
-    expect(claimPairingSession).toHaveBeenCalledWith("http://pair.local:7680", "one-time-token", {
+    expect(claimPairingSession).toHaveBeenCalledWith(expect.objectContaining({ version: 2, base_url: "http://pair.local:7680", host_key: securePairingFixtures.links[0]!.payload.host_key }), {
       name: "Mold on iPhone",
       kind: "iphone",
     });

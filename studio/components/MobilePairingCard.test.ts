@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
+import fixtures from "../api/pairing.fixtures.json";
 import MobilePairingCard from "./MobilePairingCard.vue";
 
 const qrPayloads: string[] = [];
@@ -23,8 +24,11 @@ describe("MobilePairingCard", () => {
       async () =>
         new Response(
           JSON.stringify({
-            token: "one-time-token",
-            expires_at: Math.floor(Date.now() / 1000) + 120,
+            ...fixtures.links[0]!.payload,
+            invite: {
+              ...fixtures.links[0]!.payload.invite,
+              expiresAt: Math.floor(Date.now() / 1000) + 120,
+            },
             auth_required: true,
             instance_id: "server-id",
             hostname: "studio-mac",
@@ -65,7 +69,8 @@ describe("MobilePairingCard", () => {
       Object.fromEntries(new URLSearchParams(qrUrl.hash.slice(1))),
     ).toMatchObject({
       base_url: "http://studio-mac.local:7680",
-      token: "one-time-token",
+      invite_seed: fixtures.links[0]!.payload.invite_seed,
+      version: "2",
       instance_id: "server-id",
     });
     expect(wrapper.get("img").attributes("src")).toBe(

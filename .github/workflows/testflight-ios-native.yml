@@ -78,6 +78,7 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha || github.ref }}
           fetch-depth: 0
 
+      - uses: dtolnay/rust-toolchain@stable
       - name: Install xcodegen
         run: brew install xcodegen
 

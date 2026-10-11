@@ -99,61 +99,32 @@ auto` to preserve useful alpha and remove opaque backgrounds, `on` to
 
 {{prompt_routes}}
 
-## Optional remote HTTPS relay
+## Encrypted remote connections
 
 ```bash
-mold relay connect --transport aws --relay-url wss://API.execute-api.REGION.amazonaws.com/production --target 127.0.0.1:7680
+mold relay connect --relay-url wss://API.execute-api.REGION.amazonaws.com/production --target 127.0.0.1:7680
+mold pairing create --output "$MOLD_HOME/secure/invitation.json"
+mold pair --invite-file /private/invitation.json --name "My client"
 ```
 
-This opens an outbound tunnel for an authenticated server. The enrollment token is
-read from an owner-only `MOLD_RELAY_TOKEN_FILE`; clients use the normal HTTPS
-`MOLD_HOST` and their Mold API key/pairing credential, never that token.
-The production gateway uses API Gateway, Lambda, DynamoDB and private S3.
-Large bodies/media use single-use staged transfers. Generation uses durable queue
-recovery and requires saved output; `--no-save` is refused before admission.
-For a direct local-development gateway:
+Start an authenticated host first. Its owner-only secure identity stays on the
+host; authorize its public signing key through the relay operator's IAM
+provisioning command. Configure MOLD_PUBLIC_URL and MOLD_SECURE_WEBSOCKET_URL
+on headless hosts; mold serve then owns its outbound connector. The separate
+relay connect command reads the identity, never an old relay token.
+The operator creates a one-use, two-minute invitation using MOLD_API_KEY (or
+@owner-only-key-file). Transfer the invitation privately. Each paired client
+stores its own key and revocable grant. MOLD_HOST selects a paired origin.
 
-```bash
-mold relay serve
-```
-
-Legacy gateway access publishes one explicitly enrolled machine. Managed
-enrollment isolates machines behind dedicated HTTPS root origins. Native macOS
-Settings ▸ Remote Access ▸ **Pair your phone** prepares This Mac’s outbound
-connector and verifies its managed proxy route before displaying a QR; gateway
-configuration and wildcard DNS/TLS deployment must be in place first. The engine
-stays authenticated on loopback. Stop Remote Access withdraws the route.
-Phone clients prefer advertised LAN, then Tailscale, then HTTPS proxy routes
-after credential-free instance proof; never invent routes a listener cannot serve.
-The proxy can see credentials/media; do not claim end-to-end encryption or a
-cloud GPU fallback.
-Use `MOLD_RELAY_DIAGNOSTICS=1` for safe connection/reconnect categories.
-See the deployment guide for safe TLS, streaming and metrics routing.
-
-Automatic roaming requires a server-minted paired credential. Operator API keys
-remain tied to the explicitly saved address; pair once to enable route learning.
-Probes expose a stable digest tag, so arbitrary operator keys never participate
-in anonymous route proofs. Plain HTTP still requires a trusted network.
-
-Gallery GUI exports on native iOS, Tauri and web support an optional GIF extra
-boundary pause through `pause_ms`; inspect the holding host's
-`/api/gallery/export-options` `gif_pause` advertisement first. Zero adds no
-pause while preserving FPS. This is an export API/GUI control, not a generation
-setting or a new CLI flag. Non-GIF requests omit it.
-
-API-only deployments: the bootstrap `web_ui_enabled` setting defaults to true.
-Run `mold config set web_ui_enabled false` and restart the server, or use
-`MOLD_WEB_UI_ENABLED=false`. NixOS exposes `services.mold.webUi.enable = false;`.
-Only browser pages and SPA assets are disabled (404); all API routes remain,
-including `/api/docs`, media, queue and generation. `MOLD_WEB_DIR` does not enable
-a disabled interface. Queue source previews keep their media across unchanged
-polls; Create's Recent excludes hidden collection members just like the Library.
-
-### Native authoring and GUI inputs
-
-Native iOS Generate is a stable composer; inspect live rendering in Queue and results in Library. Library **Use as Source** keeps prompt/model choices, and its source picker searches all hosts with a machine filter. Mac Queue rows open job details; Discover starts with manifest models. Native Settings offers video autoplay/repeat; Mac GIF export includes playback/repeat/pause controls. GUI still-input imports fit oversized images while preserving orientation and alpha; original exports and retained source/mask pairs remain authoritative. These GUI conveniences do not change CLI/API admission limits or explicit fixed seeds.
-
-Queue GUI rows and Job Details show ordered, role-labeled sealed input images for every model. `/api/queue/{id}/inputs` lists path-free descriptors (`index`, `label`, `preview`); `/api/queue/{id}/input-thumbnail?index=N` reads that exact sealed member. Omit the index for the legacy scalar source image. Audio/video inputs are disclosed without a still preview. These private authenticated routes never resolve provenance filenames. Older servers retain the singular source-image fallback.
+All remote API traffic, uploads, progress and media use pinned Noise XX over
+LAN or the Lambda WebSocket relay. The cloud sees metadata and ciphertext, not
+API credentials or media. Old proxy credentials cannot be upgraded implicitly;
+upgrade and pair every client again. Plain HTTP is only a private loopback
+engine interface. Do not use raw remote curl or fall back to a cloud-provided
+host key. Uploads are bounded to 64 MiB; responses stream with backpressure.
+Interrupted mutations are never automatically replayed. Native Remote Access
+opens the encrypted LAN listener and outbound connector; stopping it closes
+active sessions. HTTPS browsers may require WSS because of mixed-content rules.
 
 ## Error diagnostics
 

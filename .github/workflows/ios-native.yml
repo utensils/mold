@@ -13,6 +13,12 @@ on:
     paths:
       - "apps/ios/**"
       - "apps/shared/**"
+      - "crates/mold-secure/**"
+      - "crates/mold-secure-client/**"
+      - "crates/mold-relay/**"
+      - "crates/mold-server/src/secure_pairing/**"
+      - "Cargo.lock"
+      - "studio/api/pairing.fixtures.json"
       - ".github/workflows/ios-native.yml"
       - ".github/workflows/testflight-ios-native.yml"
       - "scripts/tests/ios-uitest-runner.sh"
@@ -28,6 +34,12 @@ on:
     paths:
       - "apps/ios/**"
       - "apps/shared/**"
+      - "crates/mold-secure/**"
+      - "crates/mold-secure-client/**"
+      - "crates/mold-relay/**"
+      - "crates/mold-server/src/secure_pairing/**"
+      - "Cargo.lock"
+      - "studio/api/pairing.fixtures.json"
       - ".github/workflows/ios-native.yml"
       - ".github/workflows/testflight-ios-native.yml"
       - "scripts/tests/ios-uitest-runner.sh"
@@ -130,6 +142,7 @@ jobs:
           echo "iOS SDK: $(xcrun --show-sdk-version --sdk iphonesimulator)"
           echo "simulator: $(scripts/pick-simulator.sh)"
 
+      - uses: dtolnay/rust-toolchain@stable
       - name: Install xcodegen
         run: brew install xcodegen
 

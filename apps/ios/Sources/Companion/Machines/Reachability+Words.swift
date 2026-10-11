@@ -55,7 +55,8 @@ extension HostStore {
     /// fleet identity it announced when it has one (the same box at a second
     /// address is still the same box), else by name.
     func knows(_ found: NearbyBrowser.Machine) -> Bool {
-        if let instance = found.instanceID {
+        if let instance = found.instanceID, !instance.isEmpty {
+            if hosts.contains(where: { $0.connectionInstanceID == instance }) { return true }
             let known = reachability.values.compactMap { state -> String? in
                 if case let .up(status) = state { return status.instanceId }
                 return nil
@@ -70,7 +71,7 @@ extension HostStore {
     func silence(of host: MoldHost) -> String? {
         guard case let .down(reason) = reachability(of: host) else { return nil }
         guard let last = lastAnswered[host.id] else { return reason }
-        return String(localized: "Not answering since \(last.formatted(date: .omitted, time: .shortened)) — it may be asleep or off the network.")
+        return String(localized: "Not answering since \(last.formatted(date: .omitted, time: .shortened)). \(reason)")
     }
 }
 

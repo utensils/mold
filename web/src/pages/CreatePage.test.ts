@@ -1,3 +1,13 @@
+import { secureMediaUrl } from "@studio/api/secureMedia";
+vi.mock("@studio/api/secureMedia", () => ({
+  secureMediaUrl: vi.fn(),
+  releaseSecureMediaUrl: vi.fn(),
+}));
+beforeEach(() => {
+  vi.mocked(secureMediaUrl).mockImplementation(async (input) =>
+    input.startsWith("http://studio:7680") ? "blob:secure-fixture" : null,
+  );
+});
 import * as licenseAcceptanceModule from "@studio/composables/useLicenseAcceptance";
 import { domCanvasOps } from "@studio/lib/sourceFitCanvas";
 import { setOriginApiKey } from "../lib/originAuth";
@@ -1760,18 +1770,14 @@ describe("CreatePage layout and behavior", () => {
     ];
     const originalFetch = globalThis.fetch;
     const signals: AbortSignal[] = [];
-    globalThis.fetch = vi.fn(
-      (_input: RequestInfo | URL, init?: RequestInit) => {
-        signals.push(init?.signal as AbortSignal);
-        return new Promise<Response>((_resolve, reject) => {
-          init?.signal?.addEventListener(
-            "abort",
-            () => reject(init.signal?.reason),
-            { once: true },
-          );
-        });
-      },
-    );
+    vi.mocked(secureMediaUrl).mockImplementation((_input, _headers, signal) => {
+      signals.push(signal!);
+      return new Promise((_resolve, reject) =>
+        signal?.addEventListener("abort", () => reject(signal.reason), {
+          once: true,
+        }),
+      );
+    });
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     try {
       await flushPromises();
@@ -1801,7 +1807,7 @@ describe("CreatePage layout and behavior", () => {
     }
   });
 
-  it("streams a settled print from a keyed machine through the media ticket", async () => {
+  it("streams a settled remote print through the encrypted media capability", async () => {
     // The same door the Lightbox uses: an <img>/<video> cannot send the key,
     // so a keyed machine issues a short-lived ticket and the clip can
     // Range-stream instead of being buffered whole into memory.
@@ -1827,15 +1833,14 @@ describe("CreatePage layout and behavior", () => {
       const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
       await flushPromises();
       const canvas = wrapper.getComponent({ name: "ResultCanvas" });
-      expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
-        "http://studio:7680/api/gallery/media-token",
+      expect(secureMediaUrl).toHaveBeenCalledWith(
+        expect.stringContaining("http://studio:7680/api/gallery/image/"),
+        expect.anything(),
+        expect.any(AbortSignal),
       );
       const src = String(canvas.props("resultSrc"));
-      expect(src.startsWith("http://studio:7680/api/gallery/image/")).toBe(
-        true,
-      );
-      expect(src).toContain("media_token=t1");
-      expect(src).toContain("expires=1700000000");
+      expect(src).toBe("blob:secure-fixture");
+      expect(fetchMock).not.toHaveBeenCalled();
       expect(src).not.toContain("sk-studio");
     } finally {
       globalThis.fetch = originalFetch;
@@ -5101,7 +5106,7 @@ describe("CreatePage host routing", () => {
 
     // Unknown is never "missing": the route the generation earned is kept.
     expect(expandTargetOfCall(0)).toEqual({
-      baseUrl: "http://localhost:3000",
+      baseUrl: "http://127.0.0.1:3000",
     });
   });
 

@@ -81,6 +81,8 @@ nvml = ["dep:nvml-wrapper"]
 test-support = []
 
 [dependencies]
+mold-relay = { path = "../mold-relay", package = "mold-ai-relay", default-features = false }
+mold-secure = { path = "../mold-secure", package = "mold-ai-secure" }
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.34.0" }
 mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version = "0.34.0" }
 mold-db = { path = "../mold-db", package = "mold-ai-db", version = "0.34.0" }
@@ -89,6 +91,8 @@ mold-scheduler = { path = "../mold-scheduler", package = "mold-ai-scheduler", ve
 anyhow = "1"
 libc = "0.2"
 axum = "0.7"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 tokio = { version = "1", features = ["full"] }
@@ -141,6 +145,7 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [dev-dependencies]
+reqwest = { version = "0.12", default-features = false }
 # The mDNS browse receiver is `flume::Receiver` through mdns-sd's re-export;
 # the bounded-shutdown tests build a channel of the same 0.12 line so the two
 # `Receiver` types unify. `default-features = false` mirrors how mdns-sd

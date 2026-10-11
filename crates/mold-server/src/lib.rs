@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod secure_pairing;
 pub mod batch_transaction;
 pub mod catalog_api;
 pub mod catalog_credentials;
@@ -7,6 +8,7 @@ pub mod chain_job_runner;
 pub mod chain_limits;
 mod chain_source_media;
 mod connections;
+mod lan_access;
 pub use connections::ConnectionAddresses;
 mod cuda_peak;
 pub(crate) mod dir_sync;
@@ -1261,6 +1263,8 @@ async fn run_server_inner(
     // router below — surfaced in the mDNS TXT `auth` flag.
     #[cfg(feature = "mdns")]
     let mdns_auth_required = auth_state.is_some();
+    let secure_authority = auth_state.as_ref().and_then(|keys| keys.secure.clone());
+    state.connection_addresses.set_secure_policy(secure_authority.as_ref().map(|secure| secure.watch_policy()));
     let rl_config = rate_limit::load_rate_limit_config()?;
 
     let cors = build_cors_layer()?;
@@ -1503,6 +1507,53 @@ async fn run_server_inner(
         Err(_) => anyhow::bail!("MOLD_PUBLIC_URL must be valid UTF-8"),
     };
     connection_addresses.configure(listener.local_addr()?, public_url.as_deref())?;
+    let secure_websocket = match std::env::var("MOLD_SECURE_WEBSOCKET_URL") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(_) => anyhow::bail!("MOLD_SECURE_WEBSOCKET_URL must be valid UTF-8"),
+    };
+    if secure_websocket.is_some() && secure_authority.is_none() {
+        anyhow::bail!("MOLD_SECURE_WEBSOCKET_URL requires an authenticated host (MOLD_API_KEY)");
+    }
+    if secure_websocket.is_some() { connection_addresses.set_secure_websocket_url(secure_websocket.as_deref())?; }
+
+    #[cfg(feature = "mdns")]
+    let lan_txt = mdns::build_txt_records(
+        mold_core::build_info::VERSION,
+        mold_core::build_info::GIT_SHA,
+        mdns_auth_required,
+        &mdns_gpu_summary,
+        queue_size,
+        &mdns_instance_id,
+    );
+    #[cfg(not(feature = "mdns"))]
+    let lan_txt = Vec::new();
+    let bound = listener.local_addr()?;
+    let private_backend = if !bound.ip().is_loopback() && !bound.ip().is_unspecified() {
+        Some(lan_access::PrivateBackend::start(app.clone()).await?)
+    } else { None };
+    let internal_target = private_backend.as_ref().map(|backend| backend.address).unwrap_or_else(|| {
+        SocketAddr::new(if bound.is_ipv4() { std::net::Ipv4Addr::LOCALHOST.into() } else { std::net::Ipv6Addr::LOCALHOST.into() }, bound.port())
+    });
+    let lan_access = lan_access::start(
+        secure_authority.clone().filter(|_| bound.ip().is_loopback()), internal_target,
+        connection_addresses.clone(), lan_txt,
+    );
+    let outbound_cancel = scheduler_shutdown.child_token();
+    let outbound_connector = secure_websocket.zip(secure_authority.clone()).map(|(endpoint, secure)| {
+        let cancel = outbound_cancel.clone();
+        tokio::spawn(async move {
+            let config = mold_relay::secure::HostConfig { identity: secure.identity.clone(), target: internal_target, policy: secure.watch_policy() };
+            if let Err(error) = mold_relay::secure::connect(&endpoint, config, cancel, false).await {
+                tracing::error!(%error, "secure relay connector stopped");
+            }
+        })
+    });
+    // Explicit headless LAN binds expose the same encrypted endpoint. The API
+    // middleware rejects non-loopback HTTP, including operator credentials.
+    let app = if let Some(secure) = secure_authority {
+        app.merge(lan_access::secure_router(secure, internal_target, scheduler_shutdown.child_token()))
+    } else { app };
 
     // ── mDNS/DNS-SD advertising ─────────────────────────────────────────────
     // Advertise this server as `_mold._tcp.local.` so desktop clients and
@@ -1511,8 +1562,10 @@ async fn run_server_inner(
     // MOLD_MDNS env toggle. The guard unregisters on the shutdown path below.
     #[cfg(feature = "mdns")]
     let mdns_guard = {
-        let bound_port = listener.local_addr()?.port();
-        if mdns::enabled_from_env() && mdns::is_advertisable(bind, bound_port) {
+        let bound = listener.local_addr()?;
+        let bound_port = bound.port();
+        let actual_bind = bound.ip().to_string();
+        if mdns::enabled_from_env() && mdns::is_advertisable(&actual_bind, bound_port) {
             let txt = mdns::build_txt_records(
                 mold_core::build_info::VERSION,
                 mold_core::build_info::GIT_SHA,
@@ -1521,7 +1574,7 @@ async fn run_server_inner(
                 queue_size,
                 &mdns_instance_id,
             );
-            match mdns::register(bind, bound_port, txt) {
+            match mdns::register(&actual_bind, bound_port, txt) {
                 Ok(guard) => Some(guard),
                 Err(e) => {
                     tracing::warn!(error = %format!("{e:#}"), "mDNS advertising disabled");
@@ -1604,6 +1657,11 @@ async fn run_server_inner(
     // driver's `wait_for_work` arm returns, then abort the JoinHandle to ensure
     // the task is cleaned up on the same shutdown path as the HTTP server.
     // Matches the aggregator handle pattern from commit 5e43886.
+    outbound_cancel.cancel();
+    if let Some(task) = outbound_connector { let _ = task.await; }
+    connection_addresses.set_secure_policy(None);
+    lan_access.shutdown().await;
+    if let Some(backend) = private_backend { backend.shutdown().await; }
     tracing::debug!(step = "mdns-advertise", "awaiting shutdown step");
     #[cfg(feature = "mdns")]
     if let Some(guard) = mdns_guard {
@@ -2371,6 +2429,7 @@ mod tests {
                 patch(|| async { axum::http::StatusCode::OK }),
             )
             .layer(axum::middleware::from_fn(require_api_key))
+            .layer(crate::auth::test_loopback_peer())
             .layer(axum::middleware::from_fn_with_state(
                 auth_state,
                 inject_auth_state,

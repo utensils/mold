@@ -3,7 +3,7 @@ import MoldClient
 import UIKit
 
 /// Redeems a scanned, pasted or opened pairing code
-/// (`https://utensils.io/mold/pair#...`, or the older `mold://pair?...`).
+/// (`https://utensils.io/mold/pair#...`, version 2 only).
 typealias PairingClaimer = (MobilePairingPayload, _ clientName: String, _ clientKind: String) async throws -> PairingClaim
 
 extension HostStore {
@@ -28,6 +28,7 @@ extension HostStore {
 
     private func rememberRoutes(_ answer: PairingClaim, payload: MobilePairingPayload, host: MoldHost) -> MoldHost {
         var updated = host
+        updated.secure = answer.secure
         updated.connectionOriginalURL = URL(string: payload.baseURL)
         updated.connectionEndpoints = ConnectionRoutes.sanitized(answer.endpoints ?? payload.endpoints ?? [])
         updated.connectionInstanceID = answer.instanceId

@@ -30,12 +30,7 @@ import {
   reconcileCollectionVisibility,
 } from "@studio/lib/collectionVisibility";
 import { restoreRetainedDraftMedia } from "@studio/lib/retainedDraftMedia";
-import {
-  connectionHealth,
-  selectConnectionRoute,
-  rememberConnectionRoutes,
-  forgetConnectionRoutes,
-} from "@studio/api/connectionRoutes";
+import { connectionHealth, forgetConnectionRoutes } from "@studio/api/connectionRoutes";
 import HeldQueueTransferDialog from "@studio/components/HeldQueueTransferDialog.vue";
 import QueueMoveToControl from "@studio/components/QueueMoveToControl.vue";
 import { provideHeldQueueTransfer } from "@studio/composables/useHeldQueueTransfer";
@@ -4933,26 +4928,17 @@ async function pairFromCode(code: () => Promise<string>): Promise<void> {
   hostError.value = "";
   try {
     const payload = parseMobilePairingPayload(await code());
-    if (payload.expires_at !== null && payload.expires_at <= Math.floor(Date.now() / 1000)) {
+    if (payload.invite.expiresAt <= Math.floor(Date.now() / 1000)) {
       throw new Error("That pairing code expired. Create a new one in the host's Settings.");
     }
-    const baseUrl =
-      payload.endpoints?.length && payload.token
-        ? await selectConnectionRoute({
-            endpoints: payload.endpoints,
-            expectedInstanceId: payload.instance_id,
-            secret: payload.token,
-            kind: "pairing",
-            secureContext: false,
-          })
-        : normalizeRemoteAddress(payload.base_url);
+    const baseUrl = normalizeRemoteAddress(payload.base_url);
     const iPad =
       /iPad/i.test(navigator.userAgent) ||
       (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
     const client: PairingClientIdentity = androidNativeRuntime
       ? { name: "Mold on Android", kind: "android" }
       : { name: iPad ? "Mold on iPad" : "Mold on iPhone", kind: iPad ? "ipad" : "iphone" };
-    const claim = await claimPairingSession(baseUrl, payload.token, client);
+    const claim = await claimPairingSession(payload, client);
     if (claim.instance_id !== payload.instance_id) {
       throw new Error("The pairing code was redeemed by a different Mold host.");
     }
@@ -4967,13 +4953,6 @@ async function pairFromCode(code: () => Promise<string>): Promise<void> {
       // Fence discovery started by connectHost before approving the QR origin.
       forgetConnectionRoutes(paired.id);
       try {
-        rememberConnectionRoutes(
-          paired.id,
-          claim.instance_id,
-          claim.api_key,
-          claim.endpoints ?? payload.endpoints,
-          normalizeRemoteAddress(payload.base_url),
-        );
       } catch {
         // Optional route metadata cannot undo an already redeemed pairing.
       }
@@ -5043,7 +5022,14 @@ async function cancelPairingScan(): Promise<void> {
 }
 
 async function openPairingUrls(urls: string[]): Promise<void> {
-  const pairingUrl = urls.find((url) => url.startsWith("mold://pair?"));
+  const pairingUrl = urls.find((url) => {
+    try {
+      parseMobilePairingPayload(url);
+      return true;
+    } catch {
+      return false;
+    }
+  });
   if (pairingUrl) await pairFromCode(() => Promise.resolve(pairingUrl));
 }
 

@@ -2,7 +2,7 @@
 
 `mold runpod` manages RunPod cloud GPU pods end-to-end from the same binary
 you use for local generation. Create a pod, connect to it, hand off logs to the
-RunPod console, track spend, and (with `mold runpod run`) create-generate-save
+RunPod console, track spend, and (with `mold runpod run`) manage already-paired generation
 in a single command.
 
 Compared to the [Docker & RunPod](./docker) guide (which shows the manual
@@ -29,59 +29,35 @@ mold runpod doctor
 `mold runpod doctor` checks the key, the REST endpoint, and your RunPod
 balance + spend rate.
 
-## The killer feature: `mold runpod run`
+## Pair before generation
 
-Generate an image on a fresh or reused pod with one command:
+RunPod's provider API remains available for creating, listing and managing paid
+resources. Provider status does not establish a trusted Mold connection. Create
+a host explicitly, then use its trusted RunPod console to configure an
+authenticated upgraded server and the [encrypted relay](/deployment/relay).
+Set that host's `MOLD_PUBLIC_URL` to its RunPod proxy origin so the CLI can
+associate the saved pairing with the tracked pod.
+
+On the host, run `mold pairing create --output /private/invitation.json`. Transfer
+the short-lived invitation privately and run
+`mold pair --invite-file /private/invitation.json` on your client. Then:
 
 ```bash
+mold runpod connect <pod-id> --check
 mold runpod run "a cinematic low-angle of a tiny steel robot"
 ```
 
-What this does:
+`runpod run` requires an existing paired tracked pod before it starts paid
+provisioning. It streams generation and media through the encrypted client;
+`connect --check` verifies application readiness through that same connection.
+Changing the host creates a new trust decision and requires a new invitation.
+A running pod is not deleted just because it refuses an old plaintext proxy
+probe. The provider's web console remains the supported logs and owner-control
+surface; raw public HTTP and browser media URLs are no longer an API transport.
 
-1. If a warm pod exists (created by a prior `run`), reuses it.
-2. Otherwise creates a new pod with smart defaults:
-   - picks the cheapest GPU with High or Medium stock that clears the
-     model's estimated VRAM need (see
-     [Smart defaults](#smart-defaults-explained)),
-   - selects the matching `ghcr.io/utensils/mold` image tag,
-   - retries across datacenters if scheduling stalls.
-3. Waits for the mold server inside the pod to be reachable, streaming a
-   readiness progress bar.
-4. Durably admits the request through `/api/generation-batches`, polls its
-   exact client id to completion, and downloads the gallery result. Rather
-   than holding an SSE connection open through the proxy, the durable
-   observer polls each running child's progress snapshot, so per-step
-   denoise and model-pull lines are still shown.
-5. Saves the output to `./mold-outputs/runpod-<pod-id>-<timestamp>.png`
-   (directory auto-created, `.gitignore`'d by default).
-6. Prints the proxy URL so you can open the pod's
-   [web gallery](#web-gallery) and browse past generations in a browser.
-7. Leaves the pod **warm** for reuse on the next `run`. Pass `--keep` to
-   leave it running explicitly, or set `runpod.auto_teardown = true` in
-   config to delete after each generation.
-
-## Web gallery
-
-Every `ghcr.io/utensils/mold` image ships the Vue 3 Mold Studio SPA at
-`/opt/mold/web`, and the server exposes it as the root route. Opening the
-pod's proxy URL in a browser lands on the Create workspace; the gallery is
-the Library workspace at `/library`, which gives you:
-
-- Feed / grid toggle over the server's `output` directory.
-- Real thumbnails for PNG, JPEG, GIF, APNG, WebP, and **MP4** (first frame).
-- Full `OutputMetadata` per item (prompt, seed, model, steps, LoRA stack).
-- Mobile-friendly swipe-through detail viewer, keyboard nav on desktop.
-
-```bash
-# Print the browsable URL for an existing pod
-mold runpod connect <pod-id>
-# → export MOLD_HOST=https://<pod-id>-7680.proxy.runpod.net
-# → gallery: https://<pod-id>-7680.proxy.runpod.net/library
-```
-
-The delete button is always available. Pair `MOLD_API_KEY` with the pod
-if you don't want the endpoint open to the public proxy.
+The encrypted Studio supports Library browsing, thumbnails, video Range reads,
+exports and progress. Open the trusted Studio and pair the host. API keys from
+the old proxy cannot be silently migrated into a secure host identity.
 
 ### Common flags
 

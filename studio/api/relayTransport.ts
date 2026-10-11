@@ -1,400 +1,273 @@
-import { sha256 } from "@noble/hashes/sha2.js";
-/** The Lambda facade preserves HTTP; only bulk bodies and object responses need adaptation. */
-const TransportURL = URL;
-const threshold = 2 * 1024 * 1024;
-interface RelayInfo {
-  protocol: number;
-  upload_threshold: number;
-  max_body_bytes: number;
-  object_origin?: string;
+import { SecureChannel } from "./secureChannel";
+import {
+  deviceIdentity,
+  secureHostForOrigin,
+  renewSecureHostGrant,
+} from "./secureStore";
+import {
+  checkGrant,
+  type SecureHostProfile,
+  type SecureGrant,
+} from "./secureCrypto";
+
+type RequestAdapter = (
+  input: RequestInfo | URL,
+  init?: RequestInit,
+) => Promise<Response>;
+interface ChannelEntry {
+  promise: Promise<SecureChannel>;
+  controller: AbortController;
+  waiters: number;
+  channel?: SecureChannel;
+  authority: string;
 }
-const infoCache = new Map<string, Promise<RelayInfo | null>>();
+const channels = new Map<string, ChannelEntry>();
+let defaultOrigin: (() => string | null) | undefined;
+let injectedAdapter: RequestAdapter | undefined;
+
+/** Shell-independent injection for platform adapters and deterministic tests. */
+export function configureSecureRequestAdapter(adapter?: RequestAdapter): void {
+  injectedAdapter = adapter;
+}
+/** The independently hosted Studio maps its relative API calls to its selected paired host. */
+export function configureSecureOrigin(provider: () => string | null): void {
+  defaultOrigin = provider;
+}
 export function clearRelayInfoCache(): void {
-  infoCache.clear();
+  for (const entry of channels.values()) entry.controller.abort();
+  channels.clear();
 }
-function s3Identity(url: URL): string | null {
-  if (
-    url.protocol !== "https:" ||
-    (url.port && url.port !== "443") ||
-    url.username ||
-    url.password ||
-    url.href.includes("#")
-  )
-    return null;
-  const match =
-    /^mold-relay-(\d{12})-([a-z]{2}(?:-gov)?-[a-z]+-\d)\.s3\.(?:dualstack\.)?([a-z]{2}(?:-gov)?-[a-z]+-\d)\.amazonaws\.com$/.exec(
-      url.hostname,
-    );
-  return match && match[2] === match[3] ? `${match[1]}:${match[2]}` : null;
+export function isLoopbackOrigin(url: URL): boolean {
+  return url.hostname === "127.0.0.1" || url.hostname === "[::1]";
 }
-function validatedObjectOrigin(value: string): URL {
-  const origin = new TransportURL(value);
-  if (!s3Identity(origin) || origin.pathname !== "/" || origin.search)
-    throw new Error("The relay returned an unsafe object origin.");
-  return origin;
-}
-export function validateRelayObjectUrl(
-  value: string,
-  origin: string,
-  objectOrigin?: string,
-): string {
-  const url = new TransportURL(value);
-  if (
-    url.protocol !== "https:" ||
-    url.username ||
-    url.password ||
-    url.href.includes("#") ||
-    !url.pathname.startsWith("/_mold/objects/")
-  )
-    throw new Error("The relay returned an unsafe object URL.");
-  if (url.origin !== origin) {
-    if (
-      !objectOrigin ||
-      !s3Identity(url) ||
-      s3Identity(url) !== s3Identity(validatedObjectOrigin(objectOrigin))
-    )
-      throw new Error("The relay returned an unsafe object URL.");
-    const one = (key: string) =>
-      url.searchParams.getAll(key).length === 1
-        ? url.searchParams.get(key)
-        : null;
-    const expires = one("X-Amz-Expires");
-    if (
-      one("X-Amz-Algorithm") !== "AWS4-HMAC-SHA256" ||
-      !/^[a-fA-F0-9]{64}$/.test(one("X-Amz-Signature") ?? "") ||
-      !/^\d+$/.test(expires ?? "") ||
-      Number(expires) < 1 ||
-      Number(expires) > 900
-    )
-      throw new Error("The relay returned an unsigned or invalid object URL.");
-  }
-  return url.href;
-}
-export async function resolveRelayObjectUrl(
-  value: string,
-  origin: string,
-  signal: AbortSignal | null = null,
-): Promise<string> {
-  if (new TransportURL(value).origin === origin)
-    return validateRelayObjectUrl(value, origin);
-  if (!s3Identity(new TransportURL(value)))
-    throw new Error("The relay returned an unsafe object URL.");
-  const info = await relayInfo(origin, signal);
-  return validateRelayObjectUrl(value, origin, info?.object_origin);
-}
-async function digest(bytes: ArrayBuffer): Promise<string> {
-  return Array.from(
-    globalThis.crypto?.subtle
-      ? new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))
-      : sha256(new Uint8Array(bytes)),
-    (b) => b.toString(16).padStart(2, "0"),
-  ).join("");
-}
-function requestHeaders(headers: Headers): Record<string, string> {
-  const excluded = new Set([
-    "authorization",
-    "x-api-key",
-    "cookie",
-    "host",
-    "content-length",
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-    "x-amz-content-sha256",
-    "x-mold-request-target",
-    ...(headers.get("connection") ?? "")
-      .split(",")
-      .map((name) => name.trim().toLowerCase()),
-  ]);
-  return Object.fromEntries(
-    [...headers.entries()].filter(
-      ([name]) =>
-        !excluded.has(name) &&
-        !name.startsWith("x-mold-viewer-") &&
-        !name.startsWith("x-mold-relay-"),
-    ),
+export function secureRequestUrl(input: RequestInfo | URL): URL {
+  const url = new URL(
+    input instanceof Request ? input.url : String(input),
+    typeof location === "undefined" ? undefined : location.href,
   );
-}
-async function boundedDiscoveryText(response: Response): Promise<string> {
-  const limit = 65536;
-  if (Number(response.headers.get("content-length")) > limit) {
-    await response.body?.cancel();
-    throw new Error("Relay discovery response exceeds 64 KiB.");
+  if (
+    defaultOrigin &&
+    typeof location !== "undefined" &&
+    url.origin === location.origin &&
+    url.pathname.startsWith("/api/")
+  ) {
+    const target = defaultOrigin();
+    if (!target) throw new Error("Pair a machine to use Mold Studio.");
+    return new URL(url.pathname + url.search, target);
   }
-  if (!response.body) return "";
-  const reader = response.body.getReader();
-  const bytes = new Uint8Array(limit);
-  let size = 0;
-  try {
-    while (true) {
-      const part = await reader.read();
-      if (part.done) break;
-      if (size + part.value.byteLength > limit) {
-        await reader.cancel();
-        throw new Error("Relay discovery response exceeds 64 KiB.");
-      }
-      bytes.set(part.value, size);
-      size += part.value.byteLength;
-    }
-    return new TextDecoder().decode(bytes.subarray(0, size));
-  } finally {
-    reader.releaseLock();
-  }
+  return url;
 }
-async function relayInfo(
+export function secureWebsocketFor(
+  profile: SecureHostProfile,
   origin: string,
-  signal: AbortSignal | null = null,
-  originalHeaders?: Headers,
-): Promise<RelayInfo | null> {
-  let pending = infoCache.get(origin);
-  if (!pending) {
-    const credentials = new Headers();
-    for (const name of ["x-api-key", "authorization"]) {
-      const value = originalHeaders?.get(name);
-      if (value) credentials.set(name, value);
-    }
-    pending = globalThis
-      .fetch(`${origin}/_mold/relay/info`, {
-        headers: credentials,
-        redirect: "error",
-        credentials: "omit",
-        signal: AbortSignal.timeout(10_000),
-      })
-      .then(async (response) => {
-        if (response.status === 404) {
-          await response.body?.cancel();
-          return null;
-        }
-        if (!response.ok) {
-          await response.body?.cancel();
-          throw new Error(`Relay discovery failed: ${response.status}`);
-        }
-        const text = await boundedDiscoveryText(response);
-        if (
-          response.status === 200 &&
-          response.headers
-            .get("content-type")
-            ?.split(";")[0]
-            ?.trim()
-            .toLowerCase() === "text/html" &&
-          !response.headers.has("x-mold-relay-protocol") &&
-          ((text.includes("<title>mold — studio</title>") &&
-            text.includes('<div id="app"></div>')) ||
-            (text.includes("<title>mold</title>") &&
-              text.includes("<h1>mold is running</h1>") &&
-              text.includes(
-                "This binary was built without the web gallery UI bundled.",
-              )))
-        )
-          return null;
-        const info = JSON.parse(text) as RelayInfo;
-        if (
-          info.protocol !== 2 ||
-          !Number.isSafeInteger(info.upload_threshold) ||
-          info.upload_threshold <= 0 ||
-          !Number.isSafeInteger(info.max_body_bytes) ||
-          info.max_body_bytes > 67108864 ||
-          info.max_body_bytes < info.upload_threshold
-        )
-          throw new Error("The relay returned invalid upload limits.");
-        if (info.object_origin !== undefined)
-          validatedObjectOrigin(info.object_origin);
-        return info;
-      });
-    infoCache.set(origin, pending);
-    void pending.catch(() => {
-      if (infoCache.get(origin) === pending) infoCache.delete(origin);
-    });
+): string | undefined {
+  const url = new URL(origin);
+  if (
+    profile.endpoints.find((endpoint) => endpoint.url === origin)?.kind !==
+      "relay" &&
+    url.protocol === "http:"
+  ) {
+    url.protocol = "ws:";
+    url.pathname = "/_mold/secure";
+    return url.href;
   }
-  if (!signal) return pending;
+  if (
+    profile.endpoints.find((endpoint) => endpoint.url === origin)?.kind !==
+      "relay" ||
+    !profile.websocket_url
+  ) {
+    url.protocol = "wss:";
+    url.pathname = "/_mold/secure";
+    return url.href;
+  }
+  return undefined;
+}
+async function channelFor(
+  profile: SecureHostProfile,
+  origin: string,
+  signal: AbortSignal,
+): Promise<SecureChannel> {
   signal.throwIfAborted();
+  const key = `${profile.namespace}|${origin}`;
+  // Renewal preserves authority; a replacement grant or host pin does not.
+  const authority = JSON.stringify([
+    profile.host_key,
+    profile.host_noise_key,
+    profile.host_binding_signature,
+    profile.websocket_url,
+    profile.grant.id,
+    profile.grant.epoch,
+    profile.apiKey,
+  ]);
+  let entry = channels.get(key);
+  if (entry && entry.authority !== authority) {
+    entry.controller.abort();
+    channels.delete(key);
+    entry = undefined;
+  }
+  if (entry?.channel?.closed) {
+    channels.delete(key);
+    entry = undefined;
+  }
+  if (!entry) {
+    const controller = new AbortController();
+    const created: ChannelEntry = {
+      promise: Promise.resolve(null as unknown as SecureChannel),
+      controller,
+      waiters: 0,
+      authority,
+    };
+    created.promise = (async () => {
+      const identity = await deviceIdentity();
+      try {
+        controller.signal.throwIfAborted();
+        const websocket = secureWebsocketFor(profile, origin);
+        const channel = await SecureChannel.connect({
+          host: profile,
+          identity,
+          grant: profile.grant,
+          signal: controller.signal,
+          ...(websocket ? { websocket } : {}),
+        });
+        controller.signal.addEventListener("abort", () => channel.close(), {
+          once: true,
+        });
+        if (controller.signal.aborted) {
+          channel.close();
+          controller.signal.throwIfAborted();
+        }
+        try {
+          if (profile.grant.expiresAt - Date.now() / 1000 < 7 * 86400) {
+            const response = await channel.fetch(
+              new Request(new URL("/api/pairing/secure/renew", origin), {
+                method: "POST",
+                headers: { "x-api-key": profile.apiKey },
+                signal: controller.signal,
+              }),
+            );
+            if (
+              !response.ok ||
+              Number(response.headers.get("content-length")) > 4096
+            )
+              throw new Error(
+                "This pairing could not be renewed. Pair again from the host.",
+              );
+            const reader = response.body?.getReader();
+            let text = "";
+            if (!reader) throw new Error("Missing renewal response.");
+            try {
+              for (;;) {
+                const part = await reader.read();
+                if (part.done) break;
+                text += new TextDecoder().decode(part.value);
+                if (text.length > 4096)
+                  throw new Error("Invalid renewal response.");
+              }
+            } finally {
+              await reader.cancel();
+            }
+            const { grant } = JSON.parse(text) as { grant: SecureGrant };
+            checkGrant(profile, identity, grant);
+            if (
+              grant.id !== profile.grant.id ||
+              grant.epoch !== profile.grant.epoch
+            )
+              throw new Error("Pairing authority changed during renewal.");
+            if (!(await renewSecureHostGrant(profile, grant)))
+              throw new Error(
+                "This pairing changed while reconnecting. Connect again.",
+              );
+            profile.grant = grant;
+          }
+          return channel;
+        } catch (error) {
+          channel.close();
+          throw error;
+        }
+      } finally {
+        identity.close();
+        identity.free();
+      }
+    })();
+    channels.set(key, created);
+    void created.promise.then(
+      (channel) => {
+        created.channel = channel;
+        if (controller.signal.aborted) channel.close();
+      },
+      () => {
+        if (channels.get(key) === created) channels.delete(key);
+      },
+    );
+    entry = created;
+  }
+  const owner = entry;
+  owner.waiters += 1;
   return new Promise((resolve, reject) => {
-    const abort = () => reject(signal.reason);
+    let finished = false;
+    const done = () => {
+      if (finished) return false;
+      finished = true;
+      signal.removeEventListener("abort", abort);
+      owner.waiters -= 1;
+      if (!owner.waiters && !owner.channel) {
+        owner.controller.abort();
+        if (channels.get(key) === owner) channels.delete(key);
+      }
+      return true;
+    };
+    const abort = () => {
+      if (done()) reject(signal.reason);
+    };
     signal.addEventListener("abort", abort, { once: true });
-    pending!
-      .then(resolve, reject)
-      .finally(() => signal.removeEventListener("abort", abort));
+    owner.promise.then(
+      (channel) => {
+        if (done()) resolve(channel);
+      },
+      (error) => {
+        if (done()) reject(error);
+      },
+    );
+    if (signal.aborted) abort();
   });
 }
-async function control(
-  origin: string,
-  path: string,
-  body: unknown,
-  headers: Headers,
-  signal: AbortSignal | null = null,
-): Promise<Response> {
-  const serialized = JSON.stringify(body);
-  const controlHeaders = new Headers({ "content-type": "application/json" });
-  const key = headers.get("x-api-key");
-  if (key) controlHeaders.set("x-api-key", key);
-  controlHeaders.set(
-    "x-amz-content-sha256",
-    await digest(new TextEncoder().encode(serialized).buffer),
-  );
-  return globalThis.fetch(`${origin}${path}`, {
-    method: "POST",
-    headers: controlHeaders,
-    body: serialized,
-    redirect: "error",
-    signal,
-  });
-}
-/** Explicit adapter, never a global fetch patch. Credentials never follow redirects or object URLs. */
+
+/** Every remote Mold request is encrypted. Loopback is the embedded engine boundary. */
 export async function relayFetch(
   input: RequestInfo | URL,
   init?: RequestInit,
 ): Promise<Response> {
-  const url = new TransportURL(
-    input instanceof Request ? input.url : String(input),
-    typeof window === "undefined" ? undefined : window.location.origin,
-  );
-  const headers = new Headers(
-    init?.headers ?? (input instanceof Request ? input.headers : undefined),
-  );
-  const method = (
-    init?.method ?? (input instanceof Request ? input.method : "GET")
-  ).toUpperCase();
-  const signal =
-    init?.signal ?? (input instanceof Request ? input.signal : null);
-  let response: Response;
-  const mutation = ["POST", "PUT", "PATCH", "DELETE"].includes(method);
-  const apiRequest =
-    url.protocol === "https:" && url.pathname.startsWith("/api/");
-  if (apiRequest)
-    headers.set("x-mold-request-target", url.pathname + url.search);
-  if (
-    url.protocol === "https:" &&
-    (url.pathname.startsWith("/api/") ||
-      url.pathname.startsWith("/_mold/relay/")) &&
-    mutation
-  ) {
-    const request = new Request(
-      input instanceof Request ? input.clone() : url.href,
-      {
-        ...init,
-        method,
-        headers,
-      } as RequestInit,
+  if (injectedAdapter) return injectedAdapter(input, init);
+  const url = secureRequestUrl(input);
+  const api = url.pathname.startsWith("/api/") || url.pathname === "/health";
+  if (!api) return globalThis.fetch(input, init);
+  const profile = await secureHostForOrigin(url.origin);
+  if (!profile && isLoopbackOrigin(url))
+    return globalThis.fetch(
+      input instanceof Request ? new Request(url, input) : url,
+      init,
     );
-    const bytes = await request.arrayBuffer();
-    const hash = await digest(bytes);
-    headers.set("x-amz-content-sha256", hash);
-    if (!headers.has("content-type") && request.headers.has("content-type"))
-      headers.set("content-type", request.headers.get("content-type")!);
-    const info =
-      bytes.byteLength > threshold
-        ? await relayInfo(url.origin, signal, headers)
-        : null;
-    if (info && bytes.byteLength > info.upload_threshold) {
-      if (bytes.byteLength > info.max_body_bytes)
-        throw new Error("This relay accepts request bodies up to 64 MiB.");
-      const grantResponse = await control(
-        url.origin,
-        "/_mold/relay/uploads",
-        {
-          method,
-          path: url.pathname + url.search,
-          headers: requestHeaders(headers),
-          size: bytes.byteLength,
-          sha256: hash,
-        },
-        headers,
-        signal,
-      );
-      if (!grantResponse.ok) return grantResponse;
-      const grant = (await grantResponse.json()) as {
-        id: string;
-        url: string;
-        headers: Record<string, string>;
-        expires_at: number;
-      };
-      const upload = new TransportURL(grant.url);
-      const uploadHeaders = new Headers(grant.headers);
-      if (
-        !grant.id ||
-        upload.protocol !== "https:" ||
-        upload.username ||
-        upload.password ||
-        !s3Identity(upload) ||
-        !info.object_origin ||
-        s3Identity(upload) !==
-          s3Identity(validatedObjectOrigin(info.object_origin)) ||
-        uploadHeaders.has("x-api-key") ||
-        uploadHeaders.has("authorization") ||
-        [...uploadHeaders.keys()].some((name) => name.startsWith("x-mold-")) ||
-        !Number.isSafeInteger(grant.expires_at) ||
-        grant.expires_at <= Date.now() / 1000
-      )
-        throw new Error("The relay returned an unsafe upload grant.");
-      const uploaded = await globalThis.fetch(upload.href, {
-        method: "PUT",
-        headers: uploadHeaders,
-        body: bytes,
-        redirect: "error",
-        credentials: "omit",
-        signal,
-      });
-      if (!uploaded.ok)
-        throw new Error(`Relay upload failed: ${uploaded.status}`);
-      response = await control(
-        url.origin,
-        "/_mold/relay/request",
-        { id: grant.id },
-        headers,
-        signal,
-      );
-    } else
-      response = await globalThis.fetch(input, {
-        ...init,
-        method,
-        headers,
-        body: init?.body ?? (input instanceof Request ? bytes : null),
-        ...(headers.has("x-api-key") ? { redirect: "error" as const } : {}),
-      });
-  } else {
-    const outgoingInit = apiRequest
-      ? {
-          ...init,
-          headers,
-          ...(headers.has("x-api-key") ? { redirect: "error" as const } : {}),
-        }
-      : headers.has("x-api-key")
-        ? { ...init, redirect: "error" }
-        : init;
-    response = outgoingInit
-      ? await globalThis.fetch(input, outgoingInit as RequestInit)
-      : await globalThis.fetch(input);
-  }
-  if (response.headers?.get("x-mold-relay-object") !== "1") return response;
-  const object = (await response.json()) as {
-    url: string;
-    status: number;
-    headers: Record<string, string>;
-  };
-  const location = await resolveRelayObjectUrl(object.url, url.origin, signal);
-  if (
-    !Number.isInteger(object.status) ||
-    object.status < 200 ||
-    object.status > 599
-  )
-    throw new Error("The relay returned an invalid object response.");
-  const downloaded = await globalThis.fetch(location, {
-    redirect: "error",
-    credentials: "omit",
-    method: method === "HEAD" ? "HEAD" : "GET",
-    signal,
-  });
-  if (!downloaded.ok)
-    throw new Error(`Relay object download failed: ${downloaded.status}`);
-  return new Response(
-    method === "HEAD" || [204, 205, 304].includes(object.status)
-      ? null
-      : downloaded.body,
-    { status: object.status, headers: object.headers },
+  if (!profile)
+    throw new Error(
+      "This machine needs secure pairing. Create a new pairing code in its settings.",
+    );
+  const request = new Request(input instanceof Request ? input : url, init);
+  const headers = new Headers(request.headers);
+  headers.set("x-api-key", profile.apiKey);
+  headers.delete("authorization");
+  headers.delete("cookie");
+  headers.delete("x-mold-secure-peer");
+  const encrypted = new Request(url, {
+    method: request.method,
+    headers,
+    body: request.body,
+    signal: request.signal,
+    ...(request.body ? { duplex: "half" } : {}),
+  } as RequestInit);
+  return (await channelFor(profile, url.origin, request.signal)).fetch(
+    encrypted,
   );
 }
+
+if (typeof window !== "undefined")
+  window.addEventListener("mold:secure-pairings-changed", clearRelayInfoCache);

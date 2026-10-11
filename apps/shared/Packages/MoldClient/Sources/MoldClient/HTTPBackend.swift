@@ -7,10 +7,18 @@ import Foundation
 public struct HTTPBackend: MoldBackend {
     public let host: MoldHost
     let session: URLSession
+    let injectedTransport: (any MoldHTTPTransport)?
 
     public init(host: MoldHost, session: URLSession = APISession.api) {
         self.host = host
         self.session = session
+        injectedTransport = nil
+    }
+
+    public init(host: MoldHost, transport: any MoldHTTPTransport) {
+        self.host = host
+        session = APISession.api
+        injectedTransport = transport
     }
 
     public func status() async throws -> ServerStatus {

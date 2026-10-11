@@ -4,9 +4,7 @@ import {
   PutItemCommand,
   DeleteItemCommand,
 } from "@aws-sdk/client-dynamodb";
-import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
-const dynamo = new DynamoDBClient({}),
-  ssm = new SSMClient({});
+const dynamo = new DynamoDBClient({});
 export const store = {
   async get(id) {
     const r = await dynamo.send(
@@ -81,15 +79,3 @@ export const store = {
     );
   },
 };
-const cache = new Map();
-export async function parameter(name) {
-  const old = cache.get(name);
-  if (old && old.until > Date.now()) return old.value;
-  const r = await ssm.send(
-    new GetParameterCommand({ Name: name, WithDecryption: true }),
-  );
-  const value = r.Parameter?.Value;
-  if (!value) throw new Error("Missing relay configuration");
-  cache.set(name, { value, until: Date.now() + 30000 });
-  return value;
-}

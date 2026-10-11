@@ -230,7 +230,7 @@ do not replace its answer with a blanket system-RAM threshold.
 ```bash
 mold server status
 mold server status --host gpu-host
-MOLD_HOST=http://gpu-host:7680 mold server status
+MOLD_HOST=https://PAIRED_HOST_ORIGIN mold server status
 mold run --local flux2-klein:q8 "A graphite sketch of a lighthouse"
 ```
 
@@ -730,40 +730,32 @@ does not prevent that retry; unrelated errors propagate. `MOLD_VAE_TILED`
 controls this Metal recovery path. Bounded Candle convolution workspaces replace
 the old proactive span cap. CPU/CUDA Z-Image decode policy is unchanged.
 
-## Optional remote HTTPS relay
+## Encrypted remote connections
 
 ```bash
-mold relay connect --transport aws --relay-url wss://API.execute-api.REGION.amazonaws.com/production --target 127.0.0.1:7680
+mold relay connect --relay-url wss://API.execute-api.REGION.amazonaws.com/production --target 127.0.0.1:7680
+mold pairing create --output "$MOLD_HOME/secure/invitation.json"
+mold pair --invite-file /private/invitation.json --name "My client"
 ```
 
-This opens an outbound tunnel for an authenticated server. The enrollment token is
-read from an owner-only `MOLD_RELAY_TOKEN_FILE`; clients use the normal HTTPS
-`MOLD_HOST` and their Mold API key/pairing credential, never that token.
-The production gateway uses API Gateway, Lambda, DynamoDB and private S3.
-Large bodies/media use single-use staged transfers. Generation uses durable queue
-recovery and requires saved output; `--no-save` is refused before admission.
-For a direct local-development gateway:
+Start an authenticated host first. Its owner-only secure identity stays on the
+host; authorize its public signing key through the relay operator's IAM
+provisioning command. Configure MOLD_PUBLIC_URL and MOLD_SECURE_WEBSOCKET_URL
+on headless hosts; mold serve then owns its outbound connector. The separate
+relay connect command reads the identity, never an old relay token.
+The operator creates a one-use, two-minute invitation using MOLD_API_KEY (or
+@owner-only-key-file). Transfer the invitation privately. Each paired client
+stores its own key and revocable grant. MOLD_HOST selects a paired origin.
 
-```bash
-mold relay serve
-```
-
-One gateway publishes one machine. The proxy can see credentials/media; do not
-claim end-to-end encryption, automatic GUI hosting or a cloud GPU fallback.
-Use `MOLD_RELAY_DIAGNOSTICS=1` for safe connection/reconnect categories.
-See the deployment guide for safe TLS, streaming and metrics routing.
-
-Native macOS **Settings ▸ Remote Access**, beside Machines, shows the
-connection address, learned LAN/Tailscale/relay routes, an inline pairing QR
-and paired-device controls. An existing pairing learns routes from a reachable
-authenticated server and keeps one machine and key when the connection changes.
-Configure `MOLD_PUBLIC_URL` on the server to advertise its public HTTPS relay
-origin. The private built-in This Mac engine remains private.
-
-Automatic roaming requires a server-minted paired credential. Operator API keys
-remain tied to the explicitly saved address; pair once to enable route learning.
-Probes expose a stable digest tag, so arbitrary operator keys never participate
-in anonymous route proofs. Plain HTTP still requires a trusted network.
+All remote API traffic, uploads, progress and media use pinned Noise XX over
+LAN or the Lambda WebSocket relay. The cloud sees metadata and ciphertext, not
+API credentials or media. Old proxy credentials cannot be upgraded implicitly;
+upgrade and pair every client again. Plain HTTP is only a private loopback
+engine interface. Do not use raw remote curl or fall back to a cloud-provided
+host key. Uploads are bounded to 64 MiB; responses stream with backpressure.
+Interrupted mutations are never automatically replayed. Native Remote Access
+opens the encrypted LAN listener and outbound connector; stopping it closes
+active sessions. HTTPS browsers may require WSS because of mixed-content rules.
 
 Native iOS Queue cards open full job details on tap. Per-job Pause/Resume and
 held Retry follow server capabilities and current state. Generate's Prompt

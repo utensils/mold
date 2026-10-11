@@ -157,7 +157,7 @@ private func collection(_ name: String, slug: String, count: Int,
 /// renames the wrong tag, or a route that does not exist.
 @Test(arguments: ["#blue", "half/half", "two words", "café"])
 func aTagGoesIntoAPathAsItself(tag: String) {
-    let backend = HTTPBackend(host: MoldHost(name: "t", baseURL: URL(string: "http://t:7680")!))
+    let backend = HTTPBackend.testing(host: MoldHost(name: "t", baseURL: URL(string: "http://t:7680")!))
     let escaped = backend.escaped(tag)
     #expect(!escaped.contains("/"))
     #expect(!escaped.contains("#"))

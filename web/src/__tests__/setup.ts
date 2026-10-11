@@ -1,3 +1,13 @@
+import { configureSecureRequestAdapter } from "@studio/api/relayTransport";
+import { beforeEach } from "vitest";
+beforeEach(() =>
+  configureSecureRequestAdapter((input, init) =>
+    init === undefined
+      ? globalThis.fetch(input)
+      : globalThis.fetch(input, init),
+  ),
+);
+
 // happy-dom v20 ships a file-backed localStorage that requires a CLI flag
 // (`--localstorage-file`) to initialize. Under vitest we just want an
 // in-memory store, so we replace the global with a minimal shim that

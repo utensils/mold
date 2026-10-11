@@ -1,6 +1,9 @@
 ---
 paths:
   - "crates/mold-relay/**"
+  - "crates/mold-secure/**"
+  - "crates/mold-secure-client/**"
+  - "crates/mold-server/src/secure_pairing/**"
   - "scripts/relay/**"
   - "relay/aws/**"
   - "apps/macos/Sources/Mold/Settings/Remote*.swift"
@@ -9,89 +12,85 @@ paths:
   - "apps/macos/rust/mold-macos-ffi/**"
 ---
 
-# Optional remote relay
+# Secure remote and LAN transport
 
-The relay is a GPU-independent Rust transport. `mold relay` forwards to this
-crate; standalone `mold-relay` is the host connector artifact.
-AWS production uses Regional REST streaming, frontend/router Lambda, API Gateway
-WebSockets, DynamoDB epoch/admission leases and private S3 staged objects.
-The direct Rust gateway remains a local development option. Preserve HTTP byte stream
-semantics (SSE, Range/HEAD, uploads, keepalive and directional EOF), bounded
-admission/backpressure, one-use session-owned stream IDs and cancellation.
-Never replay mutations after reconnect. Bound stream inactivity using application
-bytes in either direction; WebSocket heartbeats never extend the deadline.
-The direct transport defaults to 3,600 seconds. AWS sessions are bounded by
-Lambda duration; reopen SSE read streams and reconcile, never replay mutations.
-Generation admits once through the durable queue and reconstructs saved results
-with journaled response headers; reject no-save before admission.
-Frames use v2 sequence/ACK credit windows, bounded gap/retry and epoch fencing.
-Request EOF is logical: never half-close TCP before the host writes its response.
-Stage requests above 2 MiB, verify complete size/hash before forwarding, and consume
-grants once. Select finite-response staging before writing viewer headers.
-Signed S3 URLs are pinned to the Mold bucket/account/region and reserved prefix;
-never forward Mold credentials or follow redirects when using those URLs.
-Namespaced object paths remain under `/_mold/objects/<host_id>/`; decoded dot
-segments must be rejected before fetching, including percent-encoded traversal.
+Protocol 3 is a hard cutover. Cloud and non-loopback LAN access use authenticated
+end-to-end encrypted WebSockets. Legacy cloud HTTP APIs, media, uploads and
+version 2 upgrades return 426; there is no compatibility switch. Plain HTTP API
+access remains only on the actual numeric loopback socket for the local engine
+and connector. Host/Forwarded headers never establish local authority.
 
-Tokens are separate from Mold API keys, owner-only file/env inputs, never URLs
-or argument values or logs. Verify WSS except explicit localhost development.
-Only numeric loopback targets are legal. Probe anonymous `/api/status` on the exact TCP connection to be forwarded;
-consume its bounded Content-Length-framed 401 response and require keepalive
-before forwarding. Reject redirects, close responses and ambiguous framing. Never inject an operator key or publish an auth-disabled host.
+AWS production stays on Lambda, API Gateway WebSockets and DynamoDB admission
+leases. The frontend returns public discovery metadata, a redirect to the
+independently deployed trusted Studio, or 426. It never proxies plaintext content,
+serves executable client code, receives an API bearer, or stages content in S3.
+AWS resources belong to URandom Terraform; runtime artifacts belong to Mold.
+Never place credentials in Terraform state, command arguments, URLs or logs.
 
-TLS terminates at the trusted cloud proxy; do not claim E2E encryption. Legacy
-gateway access exposes one explicitly hosted server. Managed enrollment adds
-isolated host namespaces with dedicated HTTPS root origins; never put host IDs
-in path prefixes or permit connection frames/grants/jobs to cross namespaces.
-Public proxy must block metrics, remove spoofed forwarding headers, use
-HTTP/1.1 upstream and disable response buffering. AWS resources belong to
-URandom Terraform; code/deployment artifacts belong to Mold. Never put tokens
-in Terraform state/user-data or SSM command logs.
+The canonical wire contract is `relay/aws/SECURE-PROTOCOL.md`. Use the shared
+`mold-secure` implementation and cross-language fixtures: standard
+Noise_XX_25519_ChaChaPoly_SHA256, distinct Ed25519 admission and X25519 Noise keys,
+and host-signed bindings. Host namespace is the first 16 bytes of SHA256(host
+Ed25519 public key). First trust comes from QR/fingerprint approval, never cloud
+metadata or a silently accepted replacement key. Canonical signatures use exact
+domain-separated binary bytes; never sign a JSON serialization.
 
-Native macOS Settings ▸ Remote Access keeps its existing grouped Form and
-places **Pair your phone** in the first section. Saved machines reuse
-PairingStore/PairingSheet. This Mac prepares managed remote access on that
-explicit click through RemotePairingStore: keep the authenticated numeric
-loopback listener, persist owner enrollment in SecretStore, start the embedded
-outbound connector, publish its validated HTTPS origin, and verify a fresh
-instance-bound pairing proof through that origin before displaying the QR.
-Repeated clicks share preparation; errors/retry remain in the sheet, and stale
-host sessions are cleared. Closing the sheet does not disable remote access.
-Stop Remote Access cancels the connector and withdraws its advertised origin;
-quit/engine death also stop it. Reuse saved enrollment when opted in on restart.
-Never advertise LAN/Tailscale interfaces a loopback listener does not serve.
+The server alone creates `$MOLD_HOME/secure/host.identity` (64 bytes). Connector
+and clients use shared private-file helpers: owner-only POSIX permissions or a
+protected current-user-only Windows DACL, bounded reads, no symlinks/reparse
+points or extra hard links. A corrupt, permissive or missing connector identity
+fails closed; never replace the server pin on an error. Keep key buffers zeroized.
 
-Managed enrollment uses POST `/_mold/relay/enroll` at the trusted configured
-origin (`https://mold-link.urandom.io` for the native app). It is disabled unless
-the gateway has a trusted enrollment base origin, wildcard host domain and
-verified WSS endpoint. The bundled native app requires
-`MANAGED_HOST_DOMAIN=mold-link.urandom.io`, matching its trusted enrollment host.
-Production wildcard DNS/TLS and runtime/config deployment
-are prerequisites, never inferred from a successful app build. Host IDs are
-random 128-bit lowercase hex; owner tokens are separate random 256-bit bearers
-stored as SHA-256 verifiers by the gateway. Capacity, leases and source quotas
-are bounded. Provisional capacity lasts two minutes; host hello/heartbeat
-maintains 90-second live slots separately from 30-day established owner identity.
-HTTP renewal cannot retain idle slots; reconnect preserves a valid owner ID.
-New identities have a global burst-eight/one-per-30-seconds admission budget.
-Renew/delete require that namespace's owner token. Never trust
-X-Forwarded-For for source quotas. Host, stream, transfer and media-job authority
-must remain scoped to the enrolled namespace. Preserve legacy connector access.
+Pairing QR v2 carries the host key binding, namespace, endpoints, WebSocket URL,
+a short-lived invitation certificate and its private invitation seed. The seed
+never leaves clients/host except inside the trusted QR. Cloud verifies signed
+one-use admission, but only the host may consume the invitation and issue a
+device grant. The claim proof binds invitation ID, Noise handshake hash and both
+device public keys inside Noise. A distinct per-device API key is returned only
+inside that encrypted channel and is bound to the device/grant in the local DB.
+Operators' API keys are never injected into tunnels.
 
-Connection advertisements come from the actual bound listener and its interfaces,
-plus explicit `MOLD_PUBLIC_URL`; never request Host/Forwarded headers. Routes are
-bounded, exact credential-free origins. Existing clients learn only through an
-already authenticated origin; alternative routes require the instance-bound,
-nonce- and kind-bound credential-free proof. This detects accidental address
-reuse, not HTTP forwarding MITM. Keyless and legacy servers retain the original
-route. Saved route metadata must preserve host UUID and secret-store identity,
-respect edits/removal/rekey, and never replay uncertain mutations.
+The connector signs fresh local request context covering the authenticated peer,
+certificate, handshake hash, stream ID, method/path and nonce. Server middleware
+accepts this header only from an actual loopback peer, verifies/replay-checks it,
+and requires the matching device credential. Invited peers can only POST the
+pairing claim. Live device certificates renew inside Noise; revocation removes
+both the credential and grant, and closes active channels within the 1-second
+policy polling interval. Cloud epoch updates revoke all certificates; individual
+device revocation must not unintentionally revoke other devices.
 
-Anonymous API route proofs accept only server-minted random paired grants;
-arbitrary operator API keys remain explicit-address only and receive empty
-authenticated route catalogs. Gate clients before computing/sending a hash tag,
-including cached catalogs. Pairing-token proofs remain bounded to active minted
-tokens; probes never consume or extend them. A hash tag is stable and would
-permit offline guessing of weak secrets; never opt arbitrary operator strings
-in based on length or apparent randomness. Normal operator authentication is
-unchanged. Plain HTTP still trusts the network.
+Preserve HTTP semantics: SSE, Range/HEAD, uploads, streaming response bodies and
+request cancellation. Request bodies are bounded to 64 MiB. Encrypted application
+records multiplex at most 32 streams with fair credit. Application paths, headers,
+status, stream IDs, content and logical EOF/cancellation stay inside Noise. Outer
+version 3 frames expose only routing IDs and bounded reliable sequence/ACK data.
+Reorder and deduplicate ciphertext before decrypting; retransmit identical bytes
+at the same sequence, never encrypt new bytes with a reused nonce. Request EOF
+is logical, not a TCP half-close. Heartbeats do not count as application progress.
+A reconnect starts a fresh Noise session; never replay uncertain mutations.
+
+Cloud host admission additionally requires an enabled operator-provisioned public
+key/principal registration. Runtime IAM may read but never write registration
+rows; public enrollment is metadata-only. Admission has bounded pending source/global slots and per-host/device limits.
+API Gateway socket source IP is trusted; X-Forwarded-For is not. DynamoDB TTL is
+cleanup, never permission. Every frame checks namespace, current host session,
+lease, epoch and membership. A PostToConnection 410 must be confirmed by
+GetConnection before evicting a peer; retry a live peer once with exact bytes.
+Diagnostics report scoped aggregate reasons and fleet metrics without raw logs,
+message bodies, keys or credentials.
+
+Route selection favors verified LAN, then Tailscale, then cloud. Start lower
+priority probes after bounded delays; the first valid best-priority route wins
+without waiting for same-priority peers. Cancel losers and fence stale completions
+after route replacement/removal. Advertise only interfaces the actual secure
+listener serves. Validate bounded credential-free origins and preserve saved host
+identity across route changes; encrypted host pins establish authority on every
+route, independent of IP or DNS reuse.
+
+Native macOS Settings ▸ Remote Access keeps its grouped Form and **Pair your
+phone** first. Repeated pairing clicks share preparation and errors remain in the
+sheet. Closing the sheet does not stop remote access. Explicit stop, quit or
+engine death cancels the connector and withdraws its advertisement. LAN listener
+lifetime follows local secure access and must not depend on cloud availability.
+Production DNS/TLS, runtime/config deployment and cross-surface tests are separate
+proof obligations; a successful app build does not establish live relay health.

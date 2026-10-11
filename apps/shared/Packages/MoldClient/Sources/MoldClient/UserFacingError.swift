@@ -58,6 +58,9 @@ public enum UserFacingError {
     public static func message(_ diagnostic: String) -> String {
         let raw = diagnostic.trimmingCharacters(in: .whitespacesAndNewlines)
         let lower = raw.lowercased()
+        if lower.contains("relay gateway unavailable") || lower.contains("relay host unavailable") {
+            return "The remote connection is temporarily unavailable."
+        }
         if lower.contains("cuda"), lower.contains("restart") || lower.contains("quarantined") { return "The graphics device needs to recover. Restart Mold on that machine before trying again." }
         if let summary = legacyMemorySummary(lower) { return summary }
         if lower.contains("cuda"), lower.contains("cooldown") { return "The machine is recovering from a memory failure. Wait for the cooldown or try a smaller output size." }

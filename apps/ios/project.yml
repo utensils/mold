@@ -111,6 +111,9 @@ targets:
     platform: iOS
     sources:
       - path: Tests/CompanionTests
+      - path: ../shared/Testing
+      - path: ../../studio/api/pairing.fixtures.json
+        buildPhase: resources
     dependencies:
       - target: MoldCompanion
       - package: MoldClient

@@ -1,6 +1,9 @@
 use clap::Parser;
 #[derive(Parser)]
-#[command(name = "mold-relay", about = "Optional outbound HTTPS access relay")]
+#[command(
+    name = "mold-relay",
+    about = "End-to-end encrypted outbound Mold host connector"
+)]
 struct Cli {
     #[command(subcommand)]
     command: mold_relay::RelayAction,

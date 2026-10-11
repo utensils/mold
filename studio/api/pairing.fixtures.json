@@ -1,51 +1,81 @@
 {
-  "comment": "Pairing-code contract shared by studio/api/pairing.ts and MoldClient's MobilePairingPayload (Swift). `links` are what a producer prints for `payload`, byte for byte; `legacy` also parse to it; everything in `rejected` is refused. The payload rides in the fragment, which a browser never sends to utensils.io.",
+  "comment": "Version 2 shared Swift/TypeScript pairing contract. Fixed test identities only; never production keys. Private invitation seed travels in fragment only. All version 1 pairings are refused.",
   "links": [
     {
       "payload": {
         "base_url": "http://studio.local:7680",
-        "token": "one-time",
-        "expires_at": 4000000000,
         "instance_id": "inst-1",
-        "name": "Studio Mac"
+        "name": "Studio Mac",
+        "namespace": "34750f98bd59fcfc946da45aaabe933b",
+        "host_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "host_noise_key": "a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209",
+        "host_binding_signature": "9e599b8745a0e7e45ac91edc93b3eac9bbee97c5684822c64c60ba5c28b2c52f5432e4355049f533aae766cb0edc2e6e9958144d2f364b4998dc1f8c7587420e",
+        "websocket_url": "wss://relay.example/ws",
+        "invite_seed": "0303030303030303030303030303030303030303030303030303030303030303",
+        "invite": {
+          "id": "06060606060606060606060606060606",
+          "signingKey": "ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1",
+          "expiresAt": 4000000000,
+          "epoch": 0,
+          "signature": "13212a15a7c75715b098b7985ebf9ab074779392297c7a858c6ec83e20acdb3b8ddc382d60c8959020c5e179290b88fc6a71333758ec4551e54dabc77ec2a307"
+        }
       },
-      "link": "https://utensils.io/mold/pair#version=1&base_url=http%3A%2F%2Fstudio.local%3A7680&token=one-time&expires_at=4000000000&instance_id=inst-1&name=Studio+Mac",
-      "legacy": [
-        "mold://pair?version=1&base_url=http%3A%2F%2Fstudio.local%3A7680&token=one-time&expires_at=4000000000&instance_id=inst-1&name=Studio+Mac",
-        "https://utensils.io/mold/pair/#version=1&base_url=http%3A%2F%2Fstudio.local%3A7680&token=one-time&expires_at=4000000000&instance_id=inst-1&name=Studio%20Mac",
-        "https://utensils.io:443/mold/pair#version=1&base_url=http%3A%2F%2Fstudio.local%3A7680&token=one-time&expires_at=4000000000&instance_id=inst-1&name=Studio+Mac",
-        "https://utensils.io/mold/pair?#version=1&base_url=http%3A%2F%2Fstudio.local%3A7680&token=one-time&expires_at=4000000000&instance_id=inst-1&name=Studio+Mac"
+      "link": "https://utensils.io/mold/pair#version=2&base_url=http%3A%2F%2Fstudio.local%3A7680&instance_id=inst-1&name=Studio+Mac&namespace=34750f98bd59fcfc946da45aaabe933b&host_key=8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c&host_noise_key=a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209&host_binding_signature=9e599b8745a0e7e45ac91edc93b3eac9bbee97c5684822c64c60ba5c28b2c52f5432e4355049f533aae766cb0edc2e6e9958144d2f364b4998dc1f8c7587420e&websocket_url=wss%3A%2F%2Frelay.example%2Fws&invite_seed=0303030303030303030303030303030303030303030303030303030303030303&invite=%7B%22id%22%3A%2206060606060606060606060606060606%22%2C%22signingKey%22%3A%22ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1%22%2C%22expiresAt%22%3A4000000000%2C%22epoch%22%3A0%2C%22signature%22%3A%2213212a15a7c75715b098b7985ebf9ab074779392297c7a858c6ec83e20acdb3b8ddc382d60c8959020c5e179290b88fc6a71333758ec4551e54dabc77ec2a307%22%7D",
+      "aliases": [
+        "https://utensils.io/mold/pair/#version=2&base_url=http%3A%2F%2Fstudio.local%3A7680&instance_id=inst-1&name=Studio+Mac&namespace=34750f98bd59fcfc946da45aaabe933b&host_key=8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c&host_noise_key=a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209&host_binding_signature=9e599b8745a0e7e45ac91edc93b3eac9bbee97c5684822c64c60ba5c28b2c52f5432e4355049f533aae766cb0edc2e6e9958144d2f364b4998dc1f8c7587420e&websocket_url=wss%3A%2F%2Frelay.example%2Fws&invite_seed=0303030303030303030303030303030303030303030303030303030303030303&invite=%7B%22id%22%3A%2206060606060606060606060606060606%22%2C%22signingKey%22%3A%22ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1%22%2C%22expiresAt%22%3A4000000000%2C%22epoch%22%3A0%2C%22signature%22%3A%2213212a15a7c75715b098b7985ebf9ab074779392297c7a858c6ec83e20acdb3b8ddc382d60c8959020c5e179290b88fc6a71333758ec4551e54dabc77ec2a307%22%7D"
       ]
     },
     {
       "payload": {
         "base_url": "https://workstation.tail.ts.net:7680",
-        "token": null,
-        "expires_at": null,
         "instance_id": "a7f3",
-        "name": "workstation"
+        "name": "workstation",
+        "namespace": "34750f98bd59fcfc946da45aaabe933b",
+        "host_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "host_noise_key": "a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209",
+        "host_binding_signature": "9e599b8745a0e7e45ac91edc93b3eac9bbee97c5684822c64c60ba5c28b2c52f5432e4355049f533aae766cb0edc2e6e9958144d2f364b4998dc1f8c7587420e",
+        "websocket_url": "wss://relay.example/ws",
+        "invite_seed": "0303030303030303030303030303030303030303030303030303030303030303",
+        "invite": {
+          "id": "06060606060606060606060606060606",
+          "signingKey": "ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1",
+          "expiresAt": 4000000000,
+          "epoch": 0,
+          "signature": "13212a15a7c75715b098b7985ebf9ab074779392297c7a858c6ec83e20acdb3b8ddc382d60c8959020c5e179290b88fc6a71333758ec4551e54dabc77ec2a307"
+        }
       },
-      "link": "https://utensils.io/mold/pair#version=1&base_url=https%3A%2F%2Fworkstation.tail.ts.net%3A7680&instance_id=a7f3&name=workstation",
-      "legacy": [
-        "mold://pair?version=1&base_url=https%3A%2F%2Fworkstation.tail.ts.net%3A7680&instance_id=a7f3&name=workstation"
+      "link": "https://utensils.io/mold/pair#version=2&base_url=https%3A%2F%2Fworkstation.tail.ts.net%3A7680&instance_id=a7f3&name=workstation&namespace=34750f98bd59fcfc946da45aaabe933b&host_key=8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c&host_noise_key=a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209&host_binding_signature=9e599b8745a0e7e45ac91edc93b3eac9bbee97c5684822c64c60ba5c28b2c52f5432e4355049f533aae766cb0edc2e6e9958144d2f364b4998dc1f8c7587420e&websocket_url=wss%3A%2F%2Frelay.example%2Fws&invite_seed=0303030303030303030303030303030303030303030303030303030303030303&invite=%7B%22id%22%3A%2206060606060606060606060606060606%22%2C%22signingKey%22%3A%22ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1%22%2C%22expiresAt%22%3A4000000000%2C%22epoch%22%3A0%2C%22signature%22%3A%2213212a15a7c75715b098b7985ebf9ab074779392297c7a858c6ec83e20acdb3b8ddc382d60c8959020c5e179290b88fc6a71333758ec4551e54dabc77ec2a307%22%7D",
+      "aliases": [
+        "https://utensils.io/mold/pair/#version=2&base_url=https%3A%2F%2Fworkstation.tail.ts.net%3A7680&instance_id=a7f3&name=workstation&namespace=34750f98bd59fcfc946da45aaabe933b&host_key=8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c&host_noise_key=a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209&host_binding_signature=9e599b8745a0e7e45ac91edc93b3eac9bbee97c5684822c64c60ba5c28b2c52f5432e4355049f533aae766cb0edc2e6e9958144d2f364b4998dc1f8c7587420e&websocket_url=wss%3A%2F%2Frelay.example%2Fws&invite_seed=0303030303030303030303030303030303030303030303030303030303030303&invite=%7B%22id%22%3A%2206060606060606060606060606060606%22%2C%22signingKey%22%3A%22ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1%22%2C%22expiresAt%22%3A4000000000%2C%22epoch%22%3A0%2C%22signature%22%3A%2213212a15a7c75715b098b7985ebf9ab074779392297c7a858c6ec83e20acdb3b8ddc382d60c8959020c5e179290b88fc6a71333758ec4551e54dabc77ec2a307%22%7D"
       ]
     },
     {
       "payload": {
         "base_url": "http://192.168.1.20:7680",
-        "token": "t+k/=",
-        "expires_at": 4000000000,
         "instance_id": "inst-2",
-        "name": "Caf\u00e9 \u2615 box"
+        "name": "Café ☕ box",
+        "namespace": "34750f98bd59fcfc946da45aaabe933b",
+        "host_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "host_noise_key": "a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209",
+        "host_binding_signature": "9e599b8745a0e7e45ac91edc93b3eac9bbee97c5684822c64c60ba5c28b2c52f5432e4355049f533aae766cb0edc2e6e9958144d2f364b4998dc1f8c7587420e",
+        "websocket_url": "wss://relay.example/ws",
+        "invite_seed": "0303030303030303030303030303030303030303030303030303030303030303",
+        "invite": {
+          "id": "06060606060606060606060606060606",
+          "signingKey": "ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1",
+          "expiresAt": 4000000000,
+          "epoch": 0,
+          "signature": "13212a15a7c75715b098b7985ebf9ab074779392297c7a858c6ec83e20acdb3b8ddc382d60c8959020c5e179290b88fc6a71333758ec4551e54dabc77ec2a307"
+        }
       },
-      "link": "https://utensils.io/mold/pair#version=1&base_url=http%3A%2F%2F192.168.1.20%3A7680&token=t%2Bk%2F%3D&expires_at=4000000000&instance_id=inst-2&name=Caf%C3%A9+%E2%98%95+box",
-      "legacy": []
+      "link": "https://utensils.io/mold/pair#version=2&base_url=http%3A%2F%2F192.168.1.20%3A7680&instance_id=inst-2&name=Caf%C3%A9+%E2%98%95+box&namespace=34750f98bd59fcfc946da45aaabe933b&host_key=8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c&host_noise_key=a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209&host_binding_signature=9e599b8745a0e7e45ac91edc93b3eac9bbee97c5684822c64c60ba5c28b2c52f5432e4355049f533aae766cb0edc2e6e9958144d2f364b4998dc1f8c7587420e&websocket_url=wss%3A%2F%2Frelay.example%2Fws&invite_seed=0303030303030303030303030303030303030303030303030303030303030303&invite=%7B%22id%22%3A%2206060606060606060606060606060606%22%2C%22signingKey%22%3A%22ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1%22%2C%22expiresAt%22%3A4000000000%2C%22epoch%22%3A0%2C%22signature%22%3A%2213212a15a7c75715b098b7985ebf9ab074779392297c7a858c6ec83e20acdb3b8ddc382d60c8959020c5e179290b88fc6a71333758ec4551e54dabc77ec2a307%22%7D",
+      "aliases": [
+        "https://utensils.io/mold/pair/#version=2&base_url=http%3A%2F%2F192.168.1.20%3A7680&instance_id=inst-2&name=Caf%C3%A9+%E2%98%95+box&namespace=34750f98bd59fcfc946da45aaabe933b&host_key=8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c&host_noise_key=a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209&host_binding_signature=9e599b8745a0e7e45ac91edc93b3eac9bbee97c5684822c64c60ba5c28b2c52f5432e4355049f533aae766cb0edc2e6e9958144d2f364b4998dc1f8c7587420e&websocket_url=wss%3A%2F%2Frelay.example%2Fws&invite_seed=0303030303030303030303030303030303030303030303030303030303030303&invite=%7B%22id%22%3A%2206060606060606060606060606060606%22%2C%22signingKey%22%3A%22ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1%22%2C%22expiresAt%22%3A4000000000%2C%22epoch%22%3A0%2C%22signature%22%3A%2213212a15a7c75715b098b7985ebf9ab074779392297c7a858c6ec83e20acdb3b8ddc382d60c8959020c5e179290b88fc6a71333758ec4551e54dabc77ec2a307%22%7D"
+      ]
     },
     {
       "payload": {
         "base_url": "https://relay.example",
-        "token": "one-time",
-        "expires_at": 4000000000,
         "instance_id": "inst-roaming",
         "name": "Roaming Studio",
         "endpoints": [
@@ -57,10 +87,25 @@
             "url": "https://relay.example",
             "kind": "relay"
           }
-        ]
+        ],
+        "namespace": "34750f98bd59fcfc946da45aaabe933b",
+        "host_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "host_noise_key": "a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209",
+        "host_binding_signature": "9e599b8745a0e7e45ac91edc93b3eac9bbee97c5684822c64c60ba5c28b2c52f5432e4355049f533aae766cb0edc2e6e9958144d2f364b4998dc1f8c7587420e",
+        "websocket_url": "wss://relay.example/ws",
+        "invite_seed": "0303030303030303030303030303030303030303030303030303030303030303",
+        "invite": {
+          "id": "06060606060606060606060606060606",
+          "signingKey": "ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1",
+          "expiresAt": 4000000000,
+          "epoch": 0,
+          "signature": "13212a15a7c75715b098b7985ebf9ab074779392297c7a858c6ec83e20acdb3b8ddc382d60c8959020c5e179290b88fc6a71333758ec4551e54dabc77ec2a307"
+        }
       },
-      "link": "https://utensils.io/mold/pair#version=1&base_url=https%3A%2F%2Frelay.example&token=one-time&expires_at=4000000000&instance_id=inst-roaming&name=Roaming+Studio&endpoints=%5B%7B%22kind%22%3A%22lan%22%2C%22url%22%3A%22http%3A%2F%2F192.168.1.20%3A7680%22%7D%2C%7B%22kind%22%3A%22relay%22%2C%22url%22%3A%22https%3A%2F%2Frelay.example%22%7D%5D",
-      "legacy": []
+      "link": "https://utensils.io/mold/pair#version=2&base_url=https%3A%2F%2Frelay.example&instance_id=inst-roaming&name=Roaming+Studio&namespace=34750f98bd59fcfc946da45aaabe933b&host_key=8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c&host_noise_key=a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209&host_binding_signature=9e599b8745a0e7e45ac91edc93b3eac9bbee97c5684822c64c60ba5c28b2c52f5432e4355049f533aae766cb0edc2e6e9958144d2f364b4998dc1f8c7587420e&websocket_url=wss%3A%2F%2Frelay.example%2Fws&invite_seed=0303030303030303030303030303030303030303030303030303030303030303&invite=%7B%22id%22%3A%2206060606060606060606060606060606%22%2C%22signingKey%22%3A%22ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1%22%2C%22expiresAt%22%3A4000000000%2C%22epoch%22%3A0%2C%22signature%22%3A%2213212a15a7c75715b098b7985ebf9ab074779392297c7a858c6ec83e20acdb3b8ddc382d60c8959020c5e179290b88fc6a71333758ec4551e54dabc77ec2a307%22%7D&endpoints=%5B%7B%22kind%22%3A%22lan%22%2C%22url%22%3A%22http%3A%2F%2F192.168.1.20%3A7680%22%7D%2C%7B%22kind%22%3A%22relay%22%2C%22url%22%3A%22https%3A%2F%2Frelay.example%22%7D%5D",
+      "aliases": [
+        "https://utensils.io/mold/pair/#version=2&base_url=https%3A%2F%2Frelay.example&instance_id=inst-roaming&name=Roaming+Studio&namespace=34750f98bd59fcfc946da45aaabe933b&host_key=8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c&host_noise_key=a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209&host_binding_signature=9e599b8745a0e7e45ac91edc93b3eac9bbee97c5684822c64c60ba5c28b2c52f5432e4355049f533aae766cb0edc2e6e9958144d2f364b4998dc1f8c7587420e&websocket_url=wss%3A%2F%2Frelay.example%2Fws&invite_seed=0303030303030303030303030303030303030303030303030303030303030303&invite=%7B%22id%22%3A%2206060606060606060606060606060606%22%2C%22signingKey%22%3A%22ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1%22%2C%22expiresAt%22%3A4000000000%2C%22epoch%22%3A0%2C%22signature%22%3A%2213212a15a7c75715b098b7985ebf9ab074779392297c7a858c6ec83e20acdb3b8ddc382d60c8959020c5e179290b88fc6a71333758ec4551e54dabc77ec2a307%22%7D&endpoints=%5B%7B%22kind%22%3A%22lan%22%2C%22url%22%3A%22http%3A%2F%2F192.168.1.20%3A7680%22%7D%2C%7B%22kind%22%3A%22relay%22%2C%22url%22%3A%22https%3A%2F%2Frelay.example%22%7D%5D"
+      ]
     }
   ],
   "rejected": [
@@ -75,6 +120,15 @@
     "https://utensils.io/mold/pair#version=1&base_url=ftp%3A%2F%2Fbox&instance_id=i&name=b",
     "mold://pair#version=1&base_url=http%3A%2F%2Fbox&instance_id=i&name=b",
     "mold://other?version=1&base_url=http%3A%2F%2Fbox&instance_id=i&name=b",
-    "hello"
+    "hello",
+    "https://utensils.io/mold/pair#version=1&base_url=http%3A%2F%2Fstudio.local%3A7680&token=one-time&expires_at=4000000000&instance_id=inst-1&name=Studio+Mac",
+    "https://utensils.io/mold/pair#version=1&base_url=https%3A%2F%2Fworkstation.tail.ts.net%3A7680&instance_id=a7f3&name=workstation",
+    "https://utensils.io/mold/pair#version=1&base_url=http%3A%2F%2F192.168.1.20%3A7680&token=t%2Bk%2F%3D&expires_at=4000000000&instance_id=inst-2&name=Caf%C3%A9+%E2%98%95+box",
+    "https://utensils.io/mold/pair#version=1&base_url=https%3A%2F%2Frelay.example&token=one-time&expires_at=4000000000&instance_id=inst-roaming&name=Roaming+Studio&endpoints=%5B%7B%22kind%22%3A%22lan%22%2C%22url%22%3A%22http%3A%2F%2F192.168.1.20%3A7680%22%7D%2C%7B%22kind%22%3A%22relay%22%2C%22url%22%3A%22https%3A%2F%2Frelay.example%22%7D%5D",
+    "mold://pair?version=1&base_url=http%3A%2F%2Fstudio.local%3A7680&token=one-time&expires_at=4000000000&instance_id=inst-1&name=Studio+Mac",
+    "https://utensils.io/mold/pair/#version=1&base_url=http%3A%2F%2Fstudio.local%3A7680&token=one-time&expires_at=4000000000&instance_id=inst-1&name=Studio%20Mac",
+    "https://utensils.io:443/mold/pair#version=1&base_url=http%3A%2F%2Fstudio.local%3A7680&token=one-time&expires_at=4000000000&instance_id=inst-1&name=Studio+Mac",
+    "https://utensils.io/mold/pair?#version=1&base_url=http%3A%2F%2Fstudio.local%3A7680&token=one-time&expires_at=4000000000&instance_id=inst-1&name=Studio+Mac",
+    "mold://pair?version=1&base_url=https%3A%2F%2Fworkstation.tail.ts.net%3A7680&instance_id=a7f3&name=workstation"
   ]
 }

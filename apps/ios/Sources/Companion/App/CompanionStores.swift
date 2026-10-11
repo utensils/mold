@@ -25,6 +25,7 @@ final class CompanionStores {
     @ObservationIgnored private(set) var isForeground = false
     let nearby: NearbyBrowser
     let claimPairing: PairingClaimer
+    @ObservationIgnored private var connectionShutdown: Task<Void, Never>?
 
     init(list: HostListFile = .shared,
          credentials: any CredentialStore = KeychainCredentialStore(),
@@ -68,6 +69,11 @@ final class CompanionStores {
     /// The foreground: reconcile everything, then keep it live.
     func becameActive() async {
         isForeground = true
+        await connectionShutdown?.value
+        connectionShutdown = nil
+        if hosts.hosts.contains(where: { $0.secure != nil }) {
+            nearby.start()
+        }
         // The saved library first: the grid is there before any machine
         // answers, and stays there if none does.
         notifier.iconBadge.update(library.unreadCount, allowPrompt: true)
@@ -112,6 +118,10 @@ final class CompanionStores {
         scheduleRefresh()
         Task { await widgets.refresh() }
         nearby.stop()
+        let ids = hosts.hosts.map(\.id)
+        connectionShutdown = Task {
+            for id in ids { await HTTPBackend.disconnect(host: id) }
+        }
     }
 
     private func pauseStreams() {

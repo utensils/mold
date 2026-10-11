@@ -38,7 +38,7 @@ extension SourceMediaFileTests {
     @Test func originalHTTPStreamsToPrivateFileAndRejectsDeclaredOversize() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [SourceOriginalProtocol.self]
-        let backend = HTTPBackend(host: MoldHost(name: "Fixture", baseURL: URL(string: "http://fixture")!),
+        let backend = HTTPBackend.testing(host: MoldHost(name: "Fixture", baseURL: URL(string: "http://fixture")!),
                                   session: URLSession(configuration: configuration))
         let member = RetainedSourceMedia.Member(memberId: "m", role: "audio_file", displayName: "audio.wav", sizeBytes: 3)
         let file = try await backend.retainedSourceMediaFile(for: "owner.png", member: member)

@@ -161,6 +161,43 @@ final class LibraryLongPressTests: XCTestCase {
         try verifyOfflineLibrary(app, names: ["Toolbar Contrast Fixture"], identities: [identity], stage: "Single offline Library AX5")
     }
 
+    @MainActor func testRelayFailureMessageUsesReadableWidthAndRecovers() async throws {
+        try await verifyRelayFailure(size: "UICTContentSizeCategoryL")
+    }
+
+    @MainActor func testRelayFailureMessageAtLargestText() async throws {
+        try await verifyRelayFailure(size: "UICTContentSizeCategoryAccessibilityXXXL")
+    }
+
+    @MainActor private func verifyRelayFailure(size: String) async throws {
+        continueAfterFailure = false
+        let machine = try FixtureMachine(galleryPrints: 6)
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        defer { app.terminate(); machine.stop() }
+        cleanUpFixture(machine, port: port, app: app)
+        app.launchArguments = ["-UIPreferredContentSizeCategoryName", size]
+        app.launch(); try assertEmptyMachines(app)
+        pair(port, in: app, name: "halcyon")
+        XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
+        XCTAssertTrue(fixturePrint(in: app).waitForExistence(timeout: 10))
+        machine.setGalleryUnavailable(true)
+        app.swipeDown()
+        try await Task.sleep(for: .seconds(1))
+        app.buttons["offline-library-status"].tap()
+        let message = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "remote connection is temporarily unavailable")).firstMatch
+        XCTAssertTrue(message.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(app.staticTexts["All machines connected"].exists)
+        XCTAssertGreaterThan(message.frame.width, app.frame.width * 0.45, "A message must use the available row width")
+        XCTAssertFalse(message.label.contains("reconcile mutations"))
+        attach(app, name: "Readable relay failure \(size)")
+        machine.setGalleryUnavailable(false)
+        app.buttons["offline-library-retry"].tap()
+        XCTAssertTrue(message.waitForNonExistence(timeout: 10), "A successful Retry must clear the previous listing failure")
+        attach(app, name: "Recovered relay listing clears stale failure \(size)")
+        XCTAssertTrue(machine.generationRequests.isEmpty)
+    }
+
     @MainActor func testFourOfflineLibrariesKeepPrintsReachableAtEveryTextSize() async throws {
         continueAfterFailure = false
         let machines = try (0..<4).map { _ in try FixtureMachine(galleryPrints: 6) }

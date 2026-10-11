@@ -19,13 +19,22 @@ extension PairingTests {
     }
 
     /// A keyless machine's code is its address alone -- still a code.
-    @Test func aKeylessSessionShowsAnAddressOnlyCode() throws {
+    @Test func keylessAddressOnlySessionsCannotBypassEncryptedPairing() throws {
         let session = PairingSession(
             token: nil, expiresAt: nil, authRequired: false, instanceId: "inst-1", hostname: "hal9000")
         let state = PairingSheet.resolve(
             session, baseURL: URL(string: "http://hal9000:7680")!, name: "hal9000")
-        guard case let .code(payload) = state else { Issue.record("expected a code, got \(state)"); return }
-        #expect(payload.token == nil)
+        #expect(state == .noCode)
+    }
+
+    @Test func secureInvitationsRenderAndReuseWithoutReminting() throws {
+        let session = try SecurePairingFixture.session()
+        let host = machine()
+        guard case let .code(payload) = PairingSheet.resolve(session, baseURL: host.baseURL, name: host.name) else {
+            Issue.record("Expected secure pairing code"); return
+        }
+        #expect(payload.secureInvitation == session.secureInvitation)
+        #expect(!PairingSheet.needsFreshCode(session: session, sessionHost: host.id, host: host.id, now: .now))
     }
 
     /// The Mac could not start a code (a paired key, the database off, the
@@ -84,7 +93,7 @@ extension PairingTests {
         let dead = PairingSession(
             token: "t", expiresAt: 1_699_999_990, authRequired: true, instanceId: "i", hostname: "workstation")
 
-        #expect(!PairingSheet.needsFreshCode(session: live, sessionHost: workstation.id, host: workstation.id, now: now))
+        #expect(PairingSheet.needsFreshCode(session: live, sessionHost: workstation.id, host: workstation.id, now: now))
         #expect(PairingSheet.needsFreshCode(session: live, sessionHost: other.id, host: workstation.id, now: now))
         #expect(PairingSheet.needsFreshCode(session: dead, sessionHost: workstation.id, host: workstation.id, now: now))
         #expect(PairingSheet.needsFreshCode(session: nil, sessionHost: nil, host: workstation.id, now: now))

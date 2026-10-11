@@ -1,4 +1,5 @@
 import { beforeEach, vi } from "vitest";
+import { configureSecureRequestAdapter } from "./api/relayTransport";
 
 /*
  * No test reaches the network.
@@ -24,6 +25,13 @@ import { beforeEach, vi } from "vitest";
  * runner, which also collects `../studio/**` and `../ui/**`.
  */
 beforeEach(() => {
+  // Component/API contract tests inject a deterministic transport. Dedicated
+  // secure transport tests explicitly remove this adapter and exercise E2EE.
+  configureSecureRequestAdapter((input, init) =>
+    init === undefined
+      ? globalThis.fetch(input)
+      : globalThis.fetch(input, init),
+  );
   // Node 25 exposes an unavailable localStorage getter; tests use the DOM store.
   const data = new Map<string, string>();
   vi.stubGlobal(
