@@ -10,3 +10,6 @@
   session-scoped bucket objects with checksum verification and acknowledgement
   cleanup. Lambda authorizes and routes small messages; encryption keys stay on
   the host and client. Verified HTTPS pairing links cover Android and both iOS apps.
+- **Complete pairing removal.** Forgetting a machine clears its encrypted pairing
+  and native media credentials before removing its saved entry, with retryable
+  errors if secure storage is unavailable.

@@ -17,27 +17,60 @@ let profiles: Promise<SecureHostProfile[]> | undefined;
 let platformRegister:
   | ((profile: SecureHostProfile, identity: Identity) => Promise<void>)
   | undefined;
+let platformForget: ((profile: SecureHostProfile) => Promise<void>) | undefined;
+const platformTasks = new Map<string, Promise<void>>();
+function serializePlatform(
+  namespace: string,
+  operation: () => Promise<void>,
+): Promise<void> {
+  const task = (platformTasks.get(namespace) ?? Promise.resolve())
+    .catch(() => {})
+    .then(operation);
+  platformTasks.set(namespace, task);
+  const finished = () => {
+    if (platformTasks.get(namespace) === task) platformTasks.delete(namespace);
+  };
+  void task.then(finished, finished);
+  return task;
+}
 const registered = new Map<string, string>();
 export function configureSecurePlatform(
   register: typeof platformRegister,
+  forget?: typeof platformForget,
 ): void {
   platformRegister = register;
+  platformForget = forget;
   registered.clear();
 }
 async function registerPlatform(profile: SecureHostProfile): Promise<void> {
   if (
     !platformRegister ||
-    registered.get(profile.namespace) === profile.grant.signature
+    registered.get(profile.namespace) === JSON.stringify(profile)
   )
     return;
-  const identity = await deviceIdentity();
-  try {
-    await platformRegister(profile, identity);
-    registered.set(profile.namespace, profile.grant.signature);
-  } finally {
-    identity.close();
-    identity.free();
-  }
+  await serializePlatform(profile.namespace, async () => {
+    const sealed = await get<Sealed>(`host:${profile.namespace}`);
+    if (!sealed || !platformRegister) return;
+    const plain = await open(`host:${profile.namespace}`, sealed);
+    let current: SecureHostProfile;
+    try {
+      current = JSON.parse(
+        new TextDecoder().decode(plain),
+      ) as SecureHostProfile;
+    } finally {
+      plain.fill(0);
+    }
+    // A queued registration cannot recreate a forgotten or replaced grant.
+    if (JSON.stringify(current) !== JSON.stringify(profile)) return;
+    const identity = await deviceIdentity();
+    try {
+      await platformRegister(profile, identity);
+      registered.set(profile.namespace, JSON.stringify(profile));
+    } finally {
+      identity.close();
+      identity.free();
+    }
+  });
 }
 function changed(): void {
   profiles = undefined;
@@ -261,26 +294,43 @@ export async function secureHostForOrigin(
 }
 
 export async function forgetSecureHost(namespace: string): Promise<void> {
-  const removed = (await listSecureHosts()).find(
-    (profile) => profile.namespace === namespace,
-  );
-  const database = await db();
-  await new Promise<void>((resolve, reject) => {
-    const transaction = database.transaction("secrets", "readwrite");
-    transaction.objectStore("secrets").delete(`host:${namespace}`);
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = transaction.onabort = () =>
-      reject(new Error("Could not remove secure pairing."));
-  });
-  if (removed && typeof window !== "undefined")
-    window.dispatchEvent(
-      new CustomEvent("mold:secure-host-forgotten", {
-        detail: { origins: removed.origins },
-      }),
+  await serializePlatform(namespace, async () => {
+    const removed = (await listSecureHosts()).find(
+      (profile) => profile.namespace === namespace,
     );
-  registered.delete(namespace);
-  changed();
-  updates?.postMessage("removed");
+    if (removed) await platformForget?.(removed);
+    const database = await db();
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction("secrets", "readwrite");
+      transaction.objectStore("secrets").delete(`host:${namespace}`);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = transaction.onabort = () =>
+        reject(new Error("Could not remove secure pairing."));
+    });
+    if (removed && typeof window !== "undefined")
+      window.dispatchEvent(
+        new CustomEvent("mold:secure-host-forgotten", {
+          detail: { origins: removed.origins },
+        }),
+      );
+    registered.delete(namespace);
+    changed();
+    updates?.postMessage("removed");
+  });
+}
+
+/** Forget every route for this pinned installation, including a changed LAN address. */
+export async function forgetSecureHostForMachine(
+  origin: string,
+  instanceId?: string | null,
+): Promise<void> {
+  for (const profile of await listSecureHosts()) {
+    if (
+      profile.origins.includes(origin.replace(/\/$/, "")) ||
+      (instanceId && profile.instance_id === instanceId)
+    )
+      await forgetSecureHost(profile.namespace);
+  }
 }
 
 /** Discovery may update aliases, never revive a deleted pairing or roll back its authority. */

@@ -1,3 +1,4 @@
+import { forgetSecureHostForMachine } from "@studio/api/secureStore";
 import { standaloneStudio, studioPrimary } from "./secureStudio";
 import { forgetConnectionRoutes } from "@studio/api/connectionRoutes";
 import { originApiKey } from "./originAuth";
@@ -435,9 +436,11 @@ export function updateHost(
 }
 
 /** Remove a stored host. The immutable primary is never removed. */
-export function removeHost(id: string): void {
-  forgetConnectionRoutes(id);
+export async function removeHost(id: string): Promise<void> {
   if (id === ORIGIN_HOST_ID) return;
+  const host = listStoredHosts().find((entry) => entry.id === id);
+  if (host) await forgetSecureHostForMachine(host.url, host.instanceId);
+  forgetConnectionRoutes(id);
   writeStoredHosts(listStoredHosts().filter((h) => h.id !== id));
 }
 

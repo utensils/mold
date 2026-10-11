@@ -33,10 +33,15 @@ function nativeHost(profile: SecureHostProfile, identity: Identity, origin: stri
 /** IPC receives private state only inside this trusted packaged WebView process. */
 export async function installSecureNative(): Promise<void> {
   if (!isTauri()) return;
-  configureSecurePlatform(async (profile, identity) => {
-    for (const origin of profile.origins)
-      await invoke("secure_host_register", { host: nativeHost(profile, identity, origin) });
-  });
+  configureSecurePlatform(
+    async (profile, identity) => {
+      for (const origin of profile.origins)
+        await invoke("secure_host_register", { host: nativeHost(profile, identity, origin) });
+    },
+    async (profile) => {
+      await invoke("secure_host_forget", { namespace: profile.namespace });
+    },
+  );
   const media = new Map<string, string>();
   configureSecureMediaAdapter({
     async open(url) {
@@ -62,10 +67,6 @@ export async function installSecureNative(): Promise<void> {
         void invoke("secure_media_close", { id });
       }
     },
-  });
-  window.addEventListener("mold:secure-host-forgotten", (event) => {
-    for (const origin of (event as CustomEvent<{ origins: string[] }>).detail.origins)
-      void invoke("secure_host_forget", { origin });
   });
   for (const profile of await listSecureHosts()) await secureHostForOrigin(profile.origins[0]!);
 }

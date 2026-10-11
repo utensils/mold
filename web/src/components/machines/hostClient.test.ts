@@ -606,6 +606,6 @@ it("roams a pinned machine without duplicating its remembered entry", async () =
   } finally {
     profile.mockRestore();
     forgetConnectionRoutes(host.id);
-    removeHost(host.id);
+    await removeHost(host.id);
   }
 });

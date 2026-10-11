@@ -15,6 +15,8 @@ function identity() {
   return { toBytes: () => new Uint8Array(64).fill(31), close() {}, free() {} };
 }
 import {
+  configureSecurePlatform,
+  secureHostForOrigin,
   saveSecureHost,
   listSecureHosts,
   forgetSecureHost,
@@ -139,4 +141,75 @@ it("updates aliases without replacing the live credentials", async () => {
     origins: ["https://host.test", "http://192.168.1.2:7680"],
   });
   await forgetSecureHost(profile.namespace);
+});
+
+it("waits for native credential removal and keeps a failed removal retryable", async () => {
+  const profile = original("native-forget");
+  const remove = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("native key store unavailable"))
+    .mockResolvedValue(undefined);
+  configureSecurePlatform(vi.fn(), remove);
+  try {
+    await saveSecureHost(profile);
+    await expect(forgetSecureHost(profile.namespace)).rejects.toThrow(
+      "native key store unavailable",
+    );
+    expect(
+      (await listSecureHosts()).some((p) => p.namespace === profile.namespace),
+    ).toBe(true);
+    await forgetSecureHost(profile.namespace);
+    expect(remove).toHaveBeenCalledTimes(2);
+    expect(
+      (await listSecureHosts()).some((p) => p.namespace === profile.namespace),
+    ).toBe(false);
+  } finally {
+    configureSecurePlatform(undefined);
+  }
+});
+it("serializes forgetting after in-flight native registration without recreating credentials", async () => {
+  const profile = original("native-race");
+  let finish!: () => void;
+  const registered = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const register = vi.fn(() => registered);
+  const remove = vi.fn();
+  configureSecurePlatform(register, remove);
+  try {
+    const saving = saveSecureHost(profile);
+    await vi.waitFor(() => expect(register).toHaveBeenCalledOnce());
+    const forgetting = forgetSecureHost(profile.namespace);
+    await Promise.resolve();
+    expect(remove).not.toHaveBeenCalled();
+    finish();
+    await Promise.all([saving, forgetting]);
+    expect(remove).toHaveBeenCalledExactlyOnceWith(profile);
+    expect(await secureHostForOrigin(profile.origins[0]!)).toBeNull();
+  } finally {
+    configureSecurePlatform(undefined);
+  }
+});
+
+it("registers changed native routes even when the device grant is unchanged", async () => {
+  const profile = original("native-aliases");
+  const register = vi.fn();
+  configureSecurePlatform(register);
+  try {
+    await saveSecureHost(profile);
+    expect(register).toHaveBeenCalledOnce();
+    const origin = "http://192.168.1.23:7680";
+    await updateSecureHostRoutes(
+      profile.namespace,
+      profile.grant.signature,
+      [{ url: origin, kind: "lan" }],
+      [origin],
+    );
+    await secureHostForOrigin(origin);
+    expect(register).toHaveBeenCalledTimes(2);
+    expect(register.mock.calls[1]?.[0].origins).toEqual([origin]);
+    await forgetSecureHost(profile.namespace);
+  } finally {
+    configureSecurePlatform(undefined);
+  }
 });

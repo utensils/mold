@@ -356,7 +356,7 @@ describe("evictHostMedia", () => {
       await new Promise((r) => setTimeout(r, 0));
       expect(stored.size).toBe(1);
 
-      removeHost(added.id);
+      await removeHost(added.id);
       await new Promise((r) => setTimeout(r, 0));
       expect(stored.size).toBe(0);
     } finally {

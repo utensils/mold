@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ORIGIN_HOST_ID,
   HOSTS_STORAGE_KEY,
@@ -19,8 +19,14 @@ import {
   updateHost,
 } from "./hostRegistry";
 
+const { forgetSecureHostForMachine } = vi.hoisted(() => ({
+  forgetSecureHostForMachine: vi.fn(),
+}));
+vi.mock("@studio/api/secureStore", () => ({ forgetSecureHostForMachine }));
+
 beforeEach(() => {
   localStorage.clear();
+  forgetSecureHostForMachine.mockReset().mockResolvedValue(undefined);
 });
 
 describe("normalizeHostAddress", () => {
@@ -143,9 +149,13 @@ describe("CRUD", () => {
     expect(listStoredHosts()[0]?.name).toBe("Bench");
   });
 
-  it("removes a stored host", () => {
+  it("removes a stored host and its secure pairing", async () => {
     const entry = addHost({ url: "box.local", name: "Box" });
-    removeHost(entry.id);
+    await removeHost(entry.id);
+    expect(forgetSecureHostForMachine).toHaveBeenCalledWith(
+      entry.url,
+      entry.instanceId,
+    );
     expect(listStoredHosts()).toHaveLength(0);
   });
 
@@ -302,4 +312,16 @@ describe("generation target", () => {
     setGenerateTargetId("192-168-1-20-7680");
     expect(getGenerateTargetId()).toBe("192-168-1-20-7680");
   });
+});
+
+it("keeps a forgotten host visible for retry when encrypted credential deletion fails", async () => {
+  const entry = addHost({
+    url: "https://secure-host.test",
+    name: "Secure host",
+  });
+  forgetSecureHostForMachine.mockRejectedValueOnce(
+    new Error("key store unavailable"),
+  );
+  await expect(removeHost(entry.id)).rejects.toThrow("key store unavailable");
+  expect(listStoredHosts()).toContainEqual(entry);
 });
