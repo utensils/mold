@@ -393,6 +393,13 @@ pub(crate) trait H3Fl2VaBackend {
         super::sampler::H3_VIDEO_SHIFT
     }
 
+    /// Audio shift the sigma grid is built with. Only a reviewed distilled
+    /// tier moves it (DMAD 2, PDMD 2-step 6); every other backend keeps the
+    /// family constant.
+    fn sampler_audio_shift(&self) -> f32 {
+        super::sampler::H3_AUDIO_SHIFT
+    }
+
     fn encode_text(
         &mut self,
         prompt: &str,
@@ -777,12 +784,15 @@ pub(crate) fn execute_staged(
     validate_packed_rows(&video_rows, &audio_rows, &text.states, &packed)?;
 
     let sampler_kind = backend.sampler_kind();
-    let schedule = H3DualSchedule::new_for_sampler_with_video_shift(
+    let schedule = H3DualSchedule::new_for_sampler_with_shifts(
         prepared.grid_points,
         sampler_kind,
         backend.sampler_video_shift(),
+        backend.sampler_audio_shift(),
     )?;
-    let mut sampler = H3DualSampler::new(sampler_kind);
+    // The request seed also keys the per-step re-noise stream an LCM tier
+    // consumes; deterministic integrators never read it.
+    let mut sampler = H3DualSampler::with_noise_seed(sampler_kind, prepared.seed);
     let counts = schedule.counts();
     control.checkpoint(H3PipelineEvent {
         phase: H3PipelinePhase::Denoise,

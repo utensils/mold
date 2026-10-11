@@ -1794,6 +1794,9 @@ pub(crate) fn bind_h3_factory_authority(
             // The server-side contract-only authority never carries a Turbo
             // adapter; the private admission path owns that selection.
             turbo_adapter: None,
+            // Nor a distilled base tier's own sampling contract; that, too, is
+            // selected where the private admission path opens the artifact.
+            base_sampler: None,
         },
         _ => {
             return Err(H3AdmissionError::InvalidCheckpointFacts(
