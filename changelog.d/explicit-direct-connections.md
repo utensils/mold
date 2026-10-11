@@ -1,0 +1,1 @@
+- **Keep unrelated connections active.** Discovery and renewal in another Studio tab no longer close encrypted connections, and replacing or forgetting one machine leaves other machines' live requests running.

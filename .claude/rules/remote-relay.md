@@ -129,3 +129,9 @@ An owner-only intent file fences identity-file crash recovery. Exact replay
 verifies the committed bootstrap identity without restoring revoked clients or
 overwriting renewed grants. Never replace an existing volume's identity or log
 the bootstrap envelope. Reuse its original paired profile on volume resume.
+
+Browser pairing-change notifications carry the exact namespace and whether
+credential authority changed. Route discovery and certificate renewal must not
+close established encrypted channels. Removal/replacement closes only that
+namespace's sessions, including pending connects; unrelated hosts and their live
+SSE/uploads remain active. Keep cross-tab cache invalidation equally scoped.

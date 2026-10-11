@@ -354,3 +354,33 @@ it("invalidates another tab's removed authority without invalidating renewals or
     await forgetSecureHost(kept.namespace);
   }
 });
+
+it("publishes namespace and authority on local and cross-tab notifications", async () => {
+  const changes: unknown[] = [];
+  const receive = (event: Event) => changes.push((event as CustomEvent).detail);
+  window.addEventListener("mold:secure-pairings-changed", receive);
+  const profile = original("scoped-notifications");
+  const other = new BroadcastChannel("mold-secure-v3");
+  try {
+    await saveSecureHost(profile);
+    expect(changes).toContainEqual({
+      namespace: profile.namespace,
+      authority: "replaced",
+    });
+    other.postMessage({ namespace: profile.namespace, authority: "unchanged" });
+    await vi.waitFor(() =>
+      expect(changes).toContainEqual({
+        namespace: profile.namespace,
+        authority: "unchanged",
+      }),
+    );
+    await forgetSecureHost(profile.namespace);
+    expect(changes).toContainEqual({
+      namespace: profile.namespace,
+      authority: "removed",
+    });
+  } finally {
+    other.close();
+    window.removeEventListener("mold:secure-pairings-changed", receive);
+  }
+});

@@ -269,3 +269,57 @@ describe("E2EE-only remote requests", () => {
     expect(mocks.connect).toHaveBeenCalledOnce();
   });
 });
+
+describe("pairing-change channel isolation", () => {
+  function profile(namespace: string) {
+    return {
+      namespace,
+      origins: [`https://${namespace}.example`],
+      endpoints: [],
+      grant: { id: namespace, expiresAt: 4000000000, epoch: 0 },
+      apiKey: `${namespace}-credential`,
+    };
+  }
+  async function connections() {
+    const closeA = vi.fn();
+    const closeB = vi.fn();
+    mocks.lookup.mockImplementation(async (origin: string) =>
+      profile(new URL(origin).hostname.split(".")[0]!),
+    );
+    mocks.connect.mockImplementation(async ({ host }) => ({
+      closed: false,
+      close: host.namespace === "a" ? closeA : closeB,
+      fetch: async () => new Response("ok"),
+    }));
+    await relayFetch("https://a.example/api/status");
+    await relayFetch("https://b.example/api/status");
+    return { closeA, closeB };
+  }
+  it("keeps established channels alive for route updates and certificate renewal", async () => {
+    const { closeA, closeB } = await connections();
+    window.dispatchEvent(
+      new CustomEvent("mold:secure-pairings-changed", {
+        detail: { namespace: "a", authority: "unchanged" },
+      }),
+    );
+    expect(closeA).not.toHaveBeenCalled();
+    expect(closeB).not.toHaveBeenCalled();
+    await relayFetch("https://a.example/api/status");
+    expect(mocks.connect).toHaveBeenCalledTimes(2);
+  });
+  it.each(["removed", "replaced"])(
+    "closes only the affected namespace when authority is %s",
+    async (authority) => {
+      const { closeA, closeB } = await connections();
+      window.dispatchEvent(
+        new CustomEvent("mold:secure-pairings-changed", {
+          detail: { namespace: "a", authority },
+        }),
+      );
+      expect(closeA).toHaveBeenCalledOnce();
+      expect(closeB).not.toHaveBeenCalled();
+      await relayFetch("https://b.example/api/status");
+      expect(mocks.connect).toHaveBeenCalledTimes(2);
+    },
+  );
+});
