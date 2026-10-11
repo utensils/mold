@@ -25,7 +25,12 @@ const workspaceNodeModules = new URL("../node_modules", import.meta.url)
 
 export default defineConfig({
   base: process.env.VITE_STANDALONE_STUDIO === "1" ? "/mold/studio/" : "/",
-  plugins: [vue(), tailwindcss(), devServerUrlPlugin("Mold web"), secureMediaPlugin()],
+  plugins: [
+    vue(),
+    tailwindcss(),
+    devServerUrlPlugin("Mold web"),
+    secureMediaPlugin(),
+  ],
   resolve: {
     alias: {
       "@ui": uiDir,

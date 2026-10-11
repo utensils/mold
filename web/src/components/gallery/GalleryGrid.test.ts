@@ -255,7 +255,9 @@ describe("GalleryGrid multi-host thumbnails", () => {
         { id: "studio-7680", name: "studio", url: "http://studio:7680" },
       ]),
     );
-    const fetch = vi.fn(async (_input: RequestInfo | URL) => new Response(new Blob(["tile"])));
+    const fetch = vi.fn(
+      async (_input: RequestInfo | URL) => new Response(new Blob(["tile"])),
+    );
     vi.stubGlobal("fetch", fetch);
     const create = vi
       .spyOn(URL, "createObjectURL")
