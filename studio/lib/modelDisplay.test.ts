@@ -102,6 +102,11 @@ describe("modelDisplayName", () => {
     ).toBe("MiniMax H3 Ref2VA Turbo 4-step (rank 21)");
     expect(
       modelDisplayName({
+        name: "minimax-h3-fl2va:fasth3-v2-int8",
+      }),
+    ).toBe("MiniMax H3 FL2VA FastH3 V2 8-step (FastVideo)");
+    expect(
+      modelDisplayName({
         name: "minimax-h3-fl2va:comfy-pruned-int8-dmad-4step",
       }),
     ).toBe("MiniMax H3 FL2VA DMAD 4-step (rank-reduced)");

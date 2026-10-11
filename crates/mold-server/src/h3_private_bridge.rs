@@ -1042,9 +1042,11 @@ fn reviewed_h3_private_generation_profile_for(
     // that core does not — a stored record on an undistilled tag — authors
     // its own sentence beside the pin, because the inherited floor note would
     // tell a user to pick a step count on a control that has no range.
-    let turbo_tier = mold_core::minimax_h3::turbo_tier_for_model(model);
-    let fixed_steps = private_record_runtime || turbo_tier.is_some();
-    if private_record_runtime && turbo_tier.is_none() {
+    // Distilled — a Turbo adapter or a distilled base tier (FastH3 V2) — is
+    // one authority, `fixed_steps_for_model`, never "has a Turbo tier".
+    let distilled_steps = mold_core::minimax_h3::fixed_steps_for_model(model);
+    let fixed_steps = private_record_runtime || distilled_steps.is_some();
+    if private_record_runtime && distilled_steps.is_none() {
         recipe.steps.note = Some(format!(
             "Fixed by this build's stored qualification record: {steps} terminal-inclusive sampler grid points."
         ));
@@ -2607,6 +2609,27 @@ mod presentation_tests {
                 .expect("a Turbo tier explains itself");
             assert!(note.starts_with("Fixed by the "), "{}: {note}", tier.model);
             assert_ne!(Some(note), expected.as_deref(), "{}", tier.model);
+        }
+
+        // A distilled BASE tier (FastH3 V2) pins its own count too — the
+        // fixedness is "distilled", never "has a Turbo adapter".
+        for tier in mold_core::minimax_h3::REVIEWED_DISTILLED_BASE_TIERS {
+            let (fixed, _, _) =
+                super::reviewed_h3_private_generation_profile_for(tier.model, tier.steps)
+                    .expect("the distilled base row resolves");
+            let fixed_recipe = fixed.default_recipe().expect("one reviewed recipe");
+            assert_eq!(fixed_recipe.steps.default, tier.steps, "{}", tier.model);
+            assert_eq!(fixed_recipe.steps.min, tier.steps, "{}", tier.model);
+            assert_eq!(fixed_recipe.steps.max, tier.steps, "{}", tier.model);
+            assert_eq!(fixed_recipe.steps.recommended, vec![tier.steps]);
+            assert_eq!(
+                fixed_recipe.steps.mode,
+                mold_core::generation_profile::ControlMode::Fixed,
+                "{}",
+                tier.model
+            );
+            let note = fixed_recipe.steps.note.as_deref().unwrap_or_default();
+            assert!(note.contains("distilled tier"), "{}: {note}", tier.model);
         }
     }
 

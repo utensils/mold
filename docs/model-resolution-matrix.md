@@ -2165,7 +2165,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 Schema 1 · hash `38eb0c95a6b02291a04f18989194de8f5edc4eb896bf7d1d6b5eaf376bdbc7ba` · default recipe `default`
 
-Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21`.
+Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21`, `minimax-h3-fl2va:fasth3-v2-int8`.
 
 #### Default (`default`)
 

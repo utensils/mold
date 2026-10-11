@@ -71,3 +71,42 @@ Hydrated request indices take precedence over the projection, never concatenate;
 preserve duplicates and invalid indices for core validation, and fail closed
 if a scrubbed row's authenticated count disagrees with the projected vector.
 Ref2VA rejects projected FL2VA endpoints as it rejects hydrated endpoints.
+
+**FastH3 V2 is a distilled BASE tier, not a Turbo tag (#1812).**
+`minimax-h3-fl2va:fasth3-v2-int8` (`REVIEWED_DISTILLED_BASE_TIERS`,
+`mold_core::minimax_h3`) is the FL2VA compact stack with ONE substitution: the
+Transformer row names FastVideo's full-weight DMD-distilled INT8 ConvRot DiT
+(`FastVideo/FastVideo-FastH3-Comfy@ec1e3aa3`, 22,128,378,696 bytes). The rest
+of the manifest is `compact_shared_files(Fl2va)` byte for byte (shared
+conditioner/VAE/config dedupe); the transformer is model-specific storage under
+the tag's own directory (`storage_identity` is the tag itself), and
+`manifest_contract` reports FastVideo as the source repo while the layout stays
+`ComfyPrunedInt8ConvrotNvfp4Awq` and the implementation reference Comfy-Org's.
+`base_compact_model` answers `FL2VA_COMFY`: the tag executes the FL2VA engine
+PARTITION (Qwen support, VAEs, conditioner cache key, factory canonical model
+all shared), and `H3CompactTransformerSelection` is what reads the substituted
+file from the tag's own manifest row. The artifact
+(`H3ComfyPublishedArtifact::FastH3V2Fl2VaPrunedInt8ConvRot`) is authenticated
+whole but differs from Comfy-Org's in three ways the loader owns: 50
+`to_gate_compress` VSA gates (1.928 GB) are authenticated and NEVER loaded
+(dense attention does not read them, `comfy/ldm/minimax/model.py:169-172`),
+the token refiner is INT8 ConvRot rather than BF16, and `__metadata__` is
+`{format: pt}` (accepted for this artifact only). Its sampling contract is
+FastVideo's own (`FastVideo-FastH3-8-Step-V2-NVFP4-Comfy@994a40be`
+README:25-26): `res_multistep` + simple at `MiniMaxH3SigmaShift` 10 video / 3
+audio, cfg 1 = guidance 0, FIXED at 9 terminal-inclusive grid points. It
+reaches the runtime as `H3FactoryBaseSamplerOverride::for_distilled_base_tier`
+— kind, grid points and both shifts READ from the tier row, all four in the
+frozen identity — set by `private_h3_base_sampler_for_route` only when the
+admitted transformer selection is not the task base (and refused otherwise),
+refused alongside a Turbo adapter, re-proved at reopen, and paired strictly by
+`media_model_matches_h3_authority` (a FastH3 tag requires exactly its tier's
+override; every other tag requires none, with no capture-scope exception).
+"Fixed steps" is ONE authority, `fixed_steps_for_model` (a Turbo tier's
+count, else a distilled base tier's, else `None`): `steps_floor_for_model`,
+both generation-profile builders (fixed control, neutral "Fixed by the 8-step
+distilled tier" note), the bridge row, the CLI default, and the private
+envelope (`validate_for_task_with_distillation`, the prepared-attempt grid
+check in `h3_factory`) all read it, never "has a Turbo tier". Text-only T2VA
+is its trained operating point; first/last frames use the ordinary FL2VA
+boundary contract.

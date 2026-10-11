@@ -2786,6 +2786,39 @@ mod tests {
             605_254_808
         );
         assert!(curated.total_file_bytes().unwrap() > 42_470_585_471);
+
+        // FastH3 V2 (#1812): the FL2VA compact stack with FastVideo's
+        // distilled DiT substituted. Only the transformer bytes move; the
+        // shared conditioner and VAEs charge exactly the base stack's.
+        let fasth3 =
+            H3ArtifactInventory::pending_from_manifest(minimax_h3::FL2VA_FASTH3_V2_INT8).unwrap();
+        assert_eq!(fasth3.model, minimax_h3::FL2VA_FASTH3_V2_INT8);
+        assert_eq!(
+            fasth3.source_revision,
+            minimax_h3::FASTVIDEO_FASTH3_REVISION
+        );
+        assert_eq!(
+            fasth3
+                .role_bytes(|role| matches!(role, H3ArtifactRole::TransformerShard(_)))
+                .unwrap(),
+            22_128_378_696
+        );
+        for role in [
+            (|role: &H3ArtifactRole| matches!(role, H3ArtifactRole::QwenShard(_)))
+                as fn(&H3ArtifactRole) -> bool,
+            |role| matches!(role, H3ArtifactRole::VideoVaeShard(_)),
+            |role| matches!(role, H3ArtifactRole::AudioVae),
+            |role| matches!(role, H3ArtifactRole::TurboLoraAdapter),
+        ] {
+            assert_eq!(
+                fasth3.role_bytes(|candidate| role(candidate)).unwrap(),
+                curated.role_bytes(|candidate| role(candidate)).unwrap()
+            );
+        }
+        assert_eq!(
+            fasth3.total_file_bytes().unwrap(),
+            curated.total_file_bytes().unwrap() - 20_970_379_616 + 22_128_378_696
+        );
     }
 
     /// hal9000, 2026-08-27 (#1439): the Ref2VA print's 32.78 GB host charge

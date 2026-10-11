@@ -2204,6 +2204,17 @@ fn fixed_turbo_steps_note(tier: &crate::minimax_h3::TurboManifestTier) -> String
     )
 }
 
+/// The sentence explaining a distilled BASE tier's fixed step count. Neutral
+/// wording: the schedule belongs to a full-weight distilled transformer, not
+/// to a Turbo adapter, and is counted terminal-inclusive like one.
+fn fixed_distilled_base_steps_note(tier: &crate::minimax_h3::DistilledBaseManifestTier) -> String {
+    let intervals = tier.steps.saturating_sub(1);
+    let points = tier.steps;
+    format!(
+        "Fixed by the {intervals}-step distilled tier: {points} terminal-inclusive sampler grid points ({intervals} denoise intervals)."
+    )
+}
+
 /// The sentence explaining an UNDISTILLED H3 tag's step FLOOR.
 ///
 /// The control is adjustable, so nothing here is about a pin: it is about a
@@ -2301,7 +2312,11 @@ fn recipe(
     // a qualification pin: its schedule has exactly that many grid points, so
     // it stays a fixed control. The base compact tag takes a range.
     let h3_compact_turbo = crate::minimax_h3::turbo_tier_for_model(input.model);
-    let h3_compact_turbo_steps = h3_compact_turbo.map(|tier| tier.steps);
+    // A distilled BASE tier (FastH3 V2) is fixed for the same reason: its
+    // full-weight distillation has exactly that schedule length. The one
+    // authority for "is this H3 step control fixed" is `fixed_steps_for_model`.
+    let h3_distilled_base = crate::minimax_h3::distilled_base_tier_for_model(input.model);
+    let h3_compact_turbo_steps = crate::minimax_h3::fixed_steps_for_model(input.model);
     let h3_compact_steps = h3_compact_turbo_steps.unwrap_or(crate::minimax_h3::COMFY_DEFAULT_STEPS);
     let audio_only = pipeline == Some(Ltx2PipelineMode::T2a);
     // A mesh recipe is canvasless for the same reason an audio-only one is:
@@ -2691,6 +2706,7 @@ fn recipe(
                 .map(fixed_dmd_steps_note)
                 .or_else(|| qwen21_turbo.map(fixed_qwen21_turbo_steps_note))
                 .or_else(|| h3_compact_turbo.map(fixed_turbo_steps_note))
+                .or_else(|| h3_distilled_base.map(fixed_distilled_base_steps_note))
                 .or_else(|| (family == "minimax-h3").then(base_compact_steps_note)),
         },
         guidance: FloatControl {
@@ -5504,11 +5520,14 @@ mod tests {
             (crate::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_R21, 5),
             (crate::minimax_h3::FL2VA_COMFY_TURBO_8STEP_R21, 9),
             (crate::minimax_h3::REF2VA_COMFY_TURBO_4STEP_R21, 5),
+            (crate::minimax_h3::FL2VA_FASTH3_V2_INT8, 9),
             (crate::minimax_h3::FL2VA_COMFY_DMAD_4STEP, 5),
             (crate::minimax_h3::FL2VA_COMFY_PDMD_2STEP, 3),
             (crate::minimax_h3::FL2VA_COMFY_PDMD_4STEP, 5),
         ] {
-            let turbo = crate::minimax_h3::turbo_tier_for_model(model).is_some();
+            // Fixed for every DISTILLED identity — a Turbo adapter or a
+            // distilled base tier — never only for a Turbo tag.
+            let turbo = crate::minimax_h3::fixed_steps_for_model(model).is_some();
             let mut h3_input = input(model, "minimax-h3");
             h3_input.default_width = 768;
             h3_input.default_height = 768;
@@ -5894,6 +5913,29 @@ mod tests {
             let note = steps.note.as_deref().expect("a Turbo tier explains itself");
             assert!(note.starts_with("Fixed by the "), "{}: {note}", tier.model);
             assert_ne!(note, base_compact_steps_note(), "{}", tier.model);
+        }
+    }
+
+    /// A distilled BASE tier (FastH3 V2) is as fixed as a Turbo tag, and its
+    /// sentence names its own schedule without calling it a Turbo adapter.
+    #[test]
+    fn distilled_base_tier_steps_are_fixed_and_explain_themselves() {
+        for tier in crate::minimax_h3::REVIEWED_DISTILLED_BASE_TIERS {
+            let profile = resolve_generation_profile(input(tier.model, "minimax-h3"));
+            let steps = &profile.default_recipe().unwrap().steps;
+            assert_eq!(steps.mode, ControlMode::Fixed, "{}", tier.model);
+            assert_eq!(steps.default, tier.steps, "{}", tier.model);
+            assert_eq!(steps.min, tier.steps, "{}", tier.model);
+            assert_eq!(steps.max, tier.steps, "{}", tier.model);
+            assert_eq!(steps.recommended, vec![tier.steps], "{}", tier.model);
+            assert_eq!(
+                steps.note.as_deref(),
+                Some(
+                    "Fixed by the 8-step distilled tier: 9 terminal-inclusive sampler grid points (8 denoise intervals)."
+                ),
+                "{}",
+                tier.model
+            );
         }
     }
 

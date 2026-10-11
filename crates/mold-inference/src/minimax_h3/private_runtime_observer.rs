@@ -710,10 +710,10 @@ fn observation_zero_fields(encoded: &serde_json::Value, text_only: bool) -> Vec<
         .into_iter()
         .flat_map(|object| object.iter())
         .filter(|(key, _)| {
-            !matches!(
+            !(matches!(
                 key.as_str(),
                 "schema" | "vae_construction_device_workspace_bytes"
-            ) && !(text_only && key.as_str() == "condition_vae_workspace_device_bytes")
+            ) || (text_only && key.as_str() == "condition_vae_workspace_device_bytes"))
         })
         .filter(|(_, value)| value.as_u64() == Some(0))
         .map(|(key, _)| key.as_str())

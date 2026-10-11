@@ -3,7 +3,7 @@
 MiniMax H3 is an audio-video generation family from
 [MiniMax](https://huggingface.co/MiniMaxAI/MiniMax-H3). Mold can discover,
 download, verify, repair, inventory, and remove two task partitions across
-twelve compact Comfy tags, plus two official BF16 qualification references. The
+the compact tags listed below, plus two official BF16 qualification references. The
 files are downloaded directly from their pinned Hugging Face repositories;
 Mold does not bundle or mirror the weights.
 
@@ -123,6 +123,7 @@ throughput claim.
 | `minimax-h3-fl2va:comfy-pruned-int8-dmad-4step`            | FL2VA + reviewed DMAD 4-step distill LoRA, rank-reduced (5 steps) |  42.849 GB | CUDA/Metal generation; boundary frames    |
 | `minimax-h3-fl2va:comfy-pruned-int8-pdmd-2step`            | FL2VA + reviewed PDMD 2-step distill LoRA, rank-reduced (3 steps) |  42.863 GB | CUDA/Metal generation; boundary frames    |
 | `minimax-h3-fl2va:comfy-pruned-int8-pdmd-4step`            | FL2VA + reviewed PDMD 4-step distill LoRA, rank-reduced (5 steps) |  43.041 GB | CUDA/Metal generation; boundary frames    |
+| `minimax-h3-fl2va:fasth3-v2-int8`                          | FL2VA on FastVideo's FastH3 V2 distilled DiT (9 steps)            |  43.640 GB | CUDA/Metal generation; boundary frames    |
 | `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`          | Ref2VA + reviewed Turbo 4-step LoRA (5 steps)                     |  44.438 GB | CUDA/Metal generation; reference profile  |
 | `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21`      | Ref2VA + reviewed Turbo 4-step LoRA, rank 21 (5 steps)            |  42.809 GB | CUDA/Metal generation; reference profile  |
 | `minimax-h3-ref2va:comfy-pruned-int8`                      | Reference media to video with audio                               |  42.482 GB | CUDA/Metal generation; ordered references |
@@ -199,6 +200,7 @@ mold pull minimax-h3-fl2va:comfy-pruned-int8-pdmd-2step
 mold pull minimax-h3-fl2va:comfy-pruned-int8-pdmd-4step
 mold pull minimax-h3-ref2va:comfy-pruned-int8
 mold pull minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21
+mold pull minimax-h3-fl2va:fasth3-v2-int8
 ```
 
 The files are revision-pinned and SHA-256 verified before Mold marks the model
@@ -315,6 +317,59 @@ capture-scope UAT override honored only by `h3-private-uat` builds; ordinary
 builds refuse a set pair rather than letting two selection authorities
 disagree.
 
+## FastH3 V2 distilled base tier
+
+`minimax-h3-fl2va:fasth3-v2-int8` (**FastH3 V2 8-step (FastVideo)**) is a
+distilled _base_ tier, not a LoRA. FastVideo's FastH3 V2 is a full-weight DMD
+distillation of MiniMax H3, pruned from the text-to-audio-video partition into
+the same curve-AdaLN INT8 ConvRot layout as Comfy-Org's FL2VA transformer. The
+tag is the complete FL2VA compact stack with ONE substitution: the transformer
+file. The Qwen3-VL conditioner, both VAEs, the tokenizer, and every config are
+byte-identical to the base stack and share its on-disk copy.
+
+It runs FastVideo's own operating point for this checkpoint, from the
+[FastVideo-FastH3-8-Step-V2-NVFP4-Comfy](https://huggingface.co/FastVideo/FastVideo-FastH3-8-Step-V2-NVFP4-Comfy/tree/994a40beb8c8f15739e4f0fad96aec101bb7123c)
+README ("keep the template's sampler settings"), with no configuration:
+
+- 8 steps of `res_multistep` on the `simple` schedule: exactly **9
+  terminal-inclusive sampler grid points** (8 denoise intervals). The Steps
+  control is fixed and explains itself ("Fixed by the 8-step distilled tier:
+  9 terminal-inclusive sampler grid points (8 denoise intervals).").
+- `MiniMaxH3SigmaShift` **10 for video and 3 for audio** (the base tier uses
+  12/3)
+- cfg 1 upstream, which is Mold's guidance 0 (H3 has no classifier-free
+  branch)
+
+Text-only (T2VA, no frame attached) is FastH3's trained operating point, and
+first-frame, last-frame, and first+last-frame requests use the same FL2VA
+boundary-frame contract as every other FL2VA tag:
+
+```bash
+mold run minimax-h3-fl2va:fasth3-v2-int8 \
+  "a fishing boat crosses a stormy harbor at dawn, gulls calling" --seed 7
+```
+
+The transformer is pinned at
+[`FastVideo/FastVideo-FastH3-Comfy`](https://huggingface.co/FastVideo/FastVideo-FastH3-Comfy/tree/ec1e3aa374a91c57b0b94a1623b7e657c0498cf2)
+revision `ec1e3aa374a91c57b0b94a1623b7e657c0498cf2`,
+`diffusion_models/fastvideo_fasth3_8step_v2_pruned_int8_convrot.safetensors`,
+22,128,378,696 bytes, SHA-256
+`0922785978dc9bfe1adf27d8b291b0ca763f9f165f882e6cb297c72fbb6deda8`, plus its
+exact header and tensor inventory. It is stored under the tag's own model
+directory, never over the Comfy-Org transformer, so a machine that already has
+any compact FL2VA tag installed downloads only those 22.128 GB. The MiniMax H3
+Community License governs these weights like every other H3 artifact.
+
+The file carries two things Comfy-Org's does not. Its 50 video-sparse-attention
+gates (`to_gate_compress`, 1.928 GB) are authenticated with the rest of the
+file and never loaded, because Mold runs dense attention and ComfyUI's dense
+forward does not read them either. Its token refiner is INT8 ConvRot rather
+than BF16 (0.771 GB instead of 1.541 GB). So although the file is 1.158 GB
+larger, the weights Mold loads are about 0.77 GB smaller than the base
+transformer's, and there is no resident adapter as on a Turbo tag. Device
+memory is admitted with the same per-request estimate as every other compact
+FL2VA tag; the qualification record holds measured times and VRAM.
+
 ## Download size and sources
 
 Each compact variant has the same component graph except for its task-specific
@@ -324,12 +379,14 @@ transformer:
 | ------------------------------------------------------ | -----------------: | ------------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Task transformer (INT8 ConvRot)                        |     20,970,379,616 |     20.970 GB | [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3/tree/eb8a16107c595128b3a578f82d2ce2f75920c355)                                           |
 | Task transformer (pruned NVFP4)                        |     12,528,636,865 |     12.529 GB | [`Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot`](https://huggingface.co/Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot/tree/908eccad7e68751190d04c171956f163bfeed741) |
+| Task transformer (FastH3 V2 distilled INT8 ConvRot)    |     22,128,378,696 |     22.128 GB | [`FastVideo/FastVideo-FastH3-Comfy`](https://huggingface.co/FastVideo/FastVideo-FastH3-Comfy/tree/ec1e3aa374a91c57b0b94a1623b7e657c0498cf2)                   |
 | Qwen3-VL NVFP4-AWQ text encoder                        |     15,687,142,551 |     15.687 GB | `Comfy-Org/MiniMax-H3`                                                                                                                                        |
 | FP16 video VAE                                         |      5,207,808,496 |      5.208 GB | `Comfy-Org/MiniMax-H3`                                                                                                                                        |
 | FP32 audio VAE                                         |        605,254,808 |      0.605 GB | `Comfy-Org/MiniMax-H3`                                                                                                                                        |
 | Tokenizer, processor, scheduler, and component configs |         11,504,847 |      0.012 GB | [`MiniMaxAI/MiniMax-H3`](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/bfc8ed0353f5a9733be73e6b2c98ec0948195b86)                                           |
 | **One complete INT8 variant**                          | **42,482,090,318** | **42.482 GB** | Both pinned repositories                                                                                                                                      |
 | **One complete NVFP4 variant**                         | **34,040,347,567** | **34.040 GB** | All three pinned repositories                                                                                                                                 |
+| **One complete FastH3 V2 variant**                     | **43,640,089,398** | **43.640 GB** | FastVideo plus both pinned repositories                                                                                                                       |
 
 A Turbo tag adds one adapter to this graph:
 [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3/tree/dc559027db79c174125df4d827db55cd11178860)
@@ -419,7 +476,9 @@ The current compact implementation supports this request profile:
   (9 for `-turbo-8step`, `-turbo-8step-768p`, and `-turbo-8step-r21`, 5 for
   `-turbo-4step-768p`, `-turbo-4step-768p-v1.1`, `-turbo-4step-768p-r21`,
   `-dmad-4step`, and `-pdmd-4step`, 3 for `-pdmd-2step`), because that count
-  is the distilled adapter's own schedule length
+  is the distilled adapter's own schedule length; the FastH3 V2 distilled base
+  tier (`fasth3-v2-int8`) likewise requires exactly 9, its own distilled
+  schedule
 - zero, one, or two boundary images on every FL2VA tag, base and Turbo:
   text-only (T2VA — no frame, the prompt builds the whole clip), first frame,
   last frame, or both. Endpoint order is first then last, and each image

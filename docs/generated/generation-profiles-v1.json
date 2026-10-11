@@ -26875,6 +26875,11 @@
           "model": "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21",
           "family": "minimax-h3",
           "hidden": false
+        },
+        {
+          "model": "minimax-h3-fl2va:fasth3-v2-int8",
+          "family": "minimax-h3",
+          "hidden": false
         }
       ],
       "profile": {
