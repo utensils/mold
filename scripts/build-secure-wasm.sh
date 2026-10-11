@@ -12,8 +12,28 @@ if ! command -v wasm-bindgen >/dev/null || [[ "$(wasm-bindgen --version)" != "wa
   echo "Install the locked generator: cargo +stable install wasm-bindgen-cli --version $version --locked" >&2
   exit 1
 fi
-export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS='--cfg getrandom_backend="wasm_js"'
-cargo +"${MOLD_WASM_TOOLCHAIN:-stable}" build --locked -p mold-ai-secure --features wasm --target wasm32-unknown-unknown --release
+# Panic locations and generated Rust paths otherwise encode the builder's
+# checkout, registry and installed rust-src paths into the shipped WASM.
+# Keep byte verification portable between macOS development and Linux CI.
+# Keep the default aligned with the secure-protocol CI compiler.
+wasm_toolchain="${MOLD_WASM_TOOLCHAIN:-1.98.0}"
+if [[ "$(rustc +"$wasm_toolchain" --version)" != "rustc 1.98.0 "* ]]; then
+  echo "Browser crypto requires Rust 1.98.0, matching secure-protocol CI." >&2
+  exit 1
+fi
+wasm_sysroot=$(rustc +"$wasm_toolchain" --print sysroot)
+wasm_rust_revision=$(rustc +"$wasm_toolchain" -vV | sed -n 's/^commit-hash: //p')
+wasm_flags=(
+  --cfg 'getrandom_backend="wasm_js"'
+  "--remap-path-prefix=$PWD=/mold"
+  "--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+  "--remap-path-prefix=$wasm_sysroot/lib/rustlib/src/rust=/rustc/$wasm_rust_revision"
+)
+# The encoded form preserves paths containing spaces and takes precedence over
+# ambient target flags without depending on the caller's shell quoting.
+printf -v CARGO_ENCODED_RUSTFLAGS '%s\x1f' "${wasm_flags[@]}"
+export CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS%$'\x1f'}"
+cargo +"$wasm_toolchain" build --locked -p mold-ai-secure --features wasm --target wasm32-unknown-unknown --release
 wasm-bindgen "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/mold_secure.wasm" \
   --target web --out-dir studio/api/generated/secure --out-name mold_secure
 if [[ "${1:-}" == "--check" ]]; then
