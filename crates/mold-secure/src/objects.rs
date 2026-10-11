@@ -5,8 +5,8 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const MAX_OBJECT_BYTES: usize = 262144;
-pub const MAX_OBJECT_FRAMES: usize = 16;
+pub const MAX_OBJECT_BYTES: usize = 1048576;
+pub const MAX_OBJECT_FRAMES: usize = 64;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CiphertextObject {

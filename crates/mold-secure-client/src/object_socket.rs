@@ -27,6 +27,16 @@ const FLUSH: Duration = Duration::from_millis(32);
 const MIN_OBJECT_BYTES: usize = 65536;
 const ALLOCATION_TIMEOUT: Duration = Duration::from_secs(5);
 const OBJECT_IO_TIMEOUT: Duration = Duration::from_secs(20);
+const OBJECT_BUDGET: usize = 1048576;
+fn object_budget_fits(existing: impl IntoIterator<Item = usize>, incoming: usize) -> bool {
+    let mut total = incoming;
+    let mut count = 0;
+    for bytes in existing {
+        total = total.saturating_add(bytes);
+        count += 1;
+    }
+    count < 4 && total <= OBJECT_BUDGET
+}
 type Peer = (String, String);
 
 #[derive(Clone, Default)]
@@ -68,7 +78,10 @@ impl DeliveryTracker {
         if !state.objects.contains(&peer) {
             return;
         }
-        let count = value["o"]["count"].as_u64().unwrap_or(1).min(16);
+        let count = value["o"]["count"]
+            .as_u64()
+            .unwrap_or(1)
+            .min(MAX_OBJECT_FRAMES as u64);
         let sent = state.sent.entry(peer).or_default();
         for n in seq..seq.saturating_add(count) {
             sent.insert(n, ());
@@ -260,8 +273,8 @@ fn object_url(
 fn supports_objects(value: &Value, trusted: &str) -> bool {
     value["version"] == 1
         && value["origin"] == trusted
-        && value["maxBytes"] == 262144
-        && value["maxCount"] == 16
+        && value["maxBytes"] == MAX_OBJECT_BYTES as u64
+        && value["maxCount"] == MAX_OBJECT_FRAMES as u64
         && value["maxInFlightBytes"] == 1048576
         && value["maxInFlightObjects"] == 4
 }
@@ -566,12 +579,14 @@ async fn publish_batch(
     let live = allocations
         .values()
         .filter(|a| peer(&a.request).as_ref() == Some(&p))
-        .count()
-        + uploaded
-            .values()
-            .filter(|o| o.sid == p.0 && o.rid == p.1)
-            .count();
-    if live >= 4 || abandoned_count >= 128 {
+        .map(|a| a.body.len())
+        .chain(
+            uploaded
+                .values()
+                .filter(|o| o.sid == p.0 && o.rid == p.1)
+                .map(|o| o.o.bytes as usize),
+        );
+    if !object_budget_fits(live, body.len()) || abandoned_count >= 128 {
         for frame in batch.frames {
             send(socket, serde_json::to_value(frame)?, delivery).await?;
         }
@@ -835,7 +850,7 @@ async fn run(
                 if new && (size >= 4096 || staged.contains_key(&p)) {
                     if staged.get(&p).is_some_and(|s| {
                         s.frames.last().and_then(|f| f.seq) != seq.checked_sub(1)
-                            || s.frames.len() >= 16
+                            || s.frames.len() >= MAX_OBJECT_FRAMES
                             || s.bytes + size > MAX_OBJECT_BYTES
                     }) {
                         let batch = staged.remove(&p).unwrap();
@@ -1161,6 +1176,14 @@ async fn run(
 mod tests {
     use super::*;
     #[test]
+    fn large_objects_keep_the_same_total_peer_byte_budget() {
+        assert!(object_budget_fits([], OBJECT_BUDGET));
+        assert!(!object_budget_fits([OBJECT_BUDGET], 1));
+        assert!(object_budget_fits([524288], 524288));
+        assert!(!object_budget_fits([524288], 524289));
+        assert!(!object_budget_fits([1, 1, 1, 1], 1));
+    }
+    #[test]
     fn object_address_is_exactly_bound_to_trusted_origin_peer_and_direction() {
         let ns = "11".repeat(16);
         let id = "22".repeat(16);
@@ -1183,7 +1206,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
             let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
-            socket.send(Message::Text(json!({"a":"ready","v":3,"sid":"s","rid":"r","objects":{"version":1,"origin":PRODUCTION_ORIGIN,"maxBytes":262144,"maxCount":16,"maxInFlightBytes":1048576,"maxInFlightObjects":4}}).to_string().into())).await.unwrap();
+            socket.send(Message::Text(json!({"a":"ready","v":3,"sid":"s","rid":"r","objects":{"version":1,"origin":PRODUCTION_ORIGIN,"maxBytes":1048576,"maxCount":64,"maxInFlightBytes":1048576,"maxInFlightObjects":4}}).to_string().into())).await.unwrap();
             let Message::Text(text) = socket.next().await.unwrap().unwrap() else {
                 panic!()
             };
@@ -1235,7 +1258,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (raw, _) = listener.accept().await.unwrap();
             let mut socket = tokio_tungstenite::accept_async(raw).await.unwrap();
-            let policy = json!({"version":1,"origin":PRODUCTION_ORIGIN,"maxBytes":262144,"maxCount":16,"maxInFlightBytes":1048576,"maxInFlightObjects":4});
+            let policy = json!({"version":1,"origin":PRODUCTION_ORIGIN,"maxBytes":1048576,"maxCount":64,"maxInFlightBytes":1048576,"maxInFlightObjects":4});
             for frame in [
                 json!({"a":"ready","v":3,"sid":"s","role":"host","objects":policy}),
                 json!({"a":"open","v":3,"sid":"s","rid":"r1","objects":policy}),
