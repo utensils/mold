@@ -51,6 +51,9 @@ struct FromShareCard: View {
                     if let problem { Text(problem).foregroundStyle(.secondaryText) }
                 }
             }
+            InputMediaViewButton(title: "shared picture", identity: item.id,
+                load: { try await InputMediaPreview.file(url: ShareInbox.url(of: item)) },
+                isCurrent: { items.contains { $0.id == item.id } && FileManager.default.fileExists(atPath: ShareInbox.url(of: item).path) })
             let layout = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8)) : AnyLayout(HStackLayout(spacing: 8))
             layout {
                 ForEach(order(item.use), id: \.self) { use in

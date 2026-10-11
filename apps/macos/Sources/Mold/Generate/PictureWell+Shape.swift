@@ -14,7 +14,7 @@ extension PictureWell {
     @ViewBuilder var clickable: some View {
         if let actionTitle {
             Menu {
-                RowActionMenu(actions: rows, perform: route)
+                RowActionMenu(actions: GenerateMenus.inspectable(rows, hasOriginal: picture != nil || originalLoader != nil), perform: route)
             } label: {
                 Label(actionTitle, systemImage: "plus")
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -23,7 +23,7 @@ extension PictureWell {
             .menuStyle(.button)
         } else if opensOnClick {
             Menu {
-                RowActionMenu(actions: rows, perform: route)
+                RowActionMenu(actions: GenerateMenus.inspectable(rows, hasOriginal: picture != nil || originalLoader != nil), perform: route)
             } label: {
                 fill
             }

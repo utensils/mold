@@ -182,3 +182,13 @@ snapshot even when Generate is no longer mounted.
 **Encrypted remote access.** Remote host additions claim a version 2 pairing link and persist public pins/grants separately from SecretStore credentials. The shared MoldClient transport and media loader are mandatory for all remote requests. Only numeric loopback reaches the embedded API directly. Remote Access opt-in opens the secure LAN WebSocket listener and a Lambda connector using the server’s existing owner-only `secure/host.identity`; discovery is public metadata, not owner enrollment. Publish the validated WSS endpoint into ConnectionAddresses before producing a QR. Stop closes cloud and LAN channels. Never expose the operator bearer, retain old cloud owner tokens, restore plaintext remote fallback or replay lost mutations. Native builds automatically build the GPU-free Rust XCFramework, including remote-only builds. Tests must use an isolated app bundle ID while an installed host is running.
 
 Source reuse stays discoverable in inspector cards and original viewers through the same declared button/context action list. A native chooser offers only connected, installed, runtime-ready compatible recipes; explicitly adopt the selected recipe once, without reconciling through the default. Revalidate source access before changing the draft, and dismiss original details on successful staging.
+
+**Input inspection.** Populated PictureWell and MediaWell offer a separate View
+control; PictureWell adds View Original to its declared menu. View never imports,
+fits, reorders, acknowledges unread prints or changes the draft. Authoring sources
+prefer sourceImageOriginal. Typed retained references resolve the exact ordered
+member after fresh inventory verification. Queue inspection uses the explicit-index
+input-original route and says submitted input: sealed bytes can already be fitted.
+InputMediaViewer owns private files/players only while selected; cancellation,
+replacement and route/instance changes revoke inspection. Native image decoding
+preserves pixel geometry within the 32-Mi-pixel decoded safety limit.

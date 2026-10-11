@@ -15,6 +15,15 @@ private extension [GenerateMenus.Row] {
 
 @MainActor
 struct GenerateMenusTests {
+    @Test func populatedPictureInspectionPrecedesAcquisitionAndNeverRemoves() {
+        let doors = GenerateMenus.referenceAdd(canPaste: false)
+        #expect(GenerateMenus.inspectable(doors, hasOriginal: false) == doors)
+        let rows = GenerateMenus.inspectable(doors, hasOriginal: true)
+        #expect(rows.first?.kind == .viewInput)
+        #expect(rows.first?.isDestructive == false)
+        #expect(rows.dropFirst().map(\.kind) == doors.map(\.kind))
+    }
+
     // MARK: - The house rules
 
     @Test func destructiveItemsAlwaysComeLastBehindADivider() {
@@ -137,10 +146,13 @@ struct GenerateMenusTests {
             for also in [false, true] {
                 offered.formUnion(
                     GenerateMenus.result(canUseAsSource: yes, canAddReference: also).kinds)
-                offered.formUnion(GenerateMenus.controlWell(hasPicture: yes, canPaste: also).kinds)
+                offered.formUnion(GenerateMenus.inspectable(
+                    GenerateMenus.controlWell(hasPicture: yes, canPaste: also),
+                    hasOriginal: yes).kinds)
                 for mask in [false, true] {
-                    offered.formUnion(GenerateMenus.sourceWell(
-                        hasPicture: yes, canEditMask: mask, canPaste: also).kinds)
+                    offered.formUnion(GenerateMenus.inspectable(
+                        GenerateMenus.sourceWell(hasPicture: yes, canEditMask: mask, canPaste: also),
+                        hasOriginal: yes).kinds)
                 }
             }
             offered.formUnion(GenerateMenus.referenceAdd(canPaste: yes).kinds)

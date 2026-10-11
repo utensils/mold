@@ -20,6 +20,7 @@ public protocol MoldGalleryBackend: Sendable {
     func importPrint(_ item: GalleryImport, as filename: String) async throws -> String
     /// The stored bytes. A trashed print lives behind the trash view, exactly
     /// as the listing does.
+    func mediaPreviewFile(_ filename: String, trashed: Bool) async throws -> SourceMediaFile
     func media(_ filename: String, trashed: Bool) async throws -> Data
     /// Downloaded into a caller-owned temporary file, for large Library mirrors.
     func mediaFile(_ filename: String, trashed: Bool) async throws -> URL
@@ -54,6 +55,9 @@ public struct GallerySyncCheckpoint: Codable, Sendable {
 public extension MoldGalleryBackend {
     func playableMedia(for filename: String, trashed: Bool) async throws -> PlayableMedia {
         PlayableMedia(url: try await playableURL(for: filename, trashed: trashed))
+    }
+    func mediaPreviewFile(_ filename: String, trashed: Bool) async throws -> SourceMediaFile {
+        try await InputMediaPreview.file(bytes: media(filename, trashed: trashed))
     }
     func galleryPrint(_ filename: String) async throws -> GalleryPrint? {
         guard case let .fresh(prints, _) = try await gallery(etag: nil) else { throw MoldClientError.malformedResponse }

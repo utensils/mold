@@ -47,6 +47,13 @@ struct QueueDetailSheet: View {
                         ForEach(inputs) { preview in
                             VStack(alignment: .leading, spacing: 6) {
                                 Text(preview.input.label).font(.headline)
+                                InputMediaViewButton(title: preview.input.label, identity: "\(String(describing: hosts.host(host.id)))|\(hosts.instanceID(of: host.id) ?? "unknown")|\(entry.id)|\(preview.input.index ?? -1)", load: {
+                                    guard let index = preview.input.index, let route = hosts.host(host.id), current != nil else { throw MoldClientError.malformedResponse }
+                                    let instance = hosts.instanceID(of: host.id)
+                                    let file = try await hosts.backend(for: route).queueInputOriginal(id: entry.id, index: index)
+                                    guard hosts.host(host.id) == route, hosts.instanceID(of: host.id) == instance, current != nil else { throw CancellationError() }
+                                    return file
+                                }, isCurrent: { current != nil })
                                 if let bytes = preview.bytes, let image = UIImage(data: bytes) {
                                     Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 320)
                                         .accessibilityLabel(preview.input.label)

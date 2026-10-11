@@ -286,3 +286,12 @@ The image Library picker keeps machine filters in a full-width ordinary content 
 `SourceMediaDisplay` and `SourceMediaLoading` in Foundation-only MoldClient own shared filtering, preferred-copy selection, inventory/original publication checks and stale-error suppression. Both apps supply current route, instance, revision and access checks; keep platform image/player/navigation presentation local. Never publish a revoked or cancelled read, including its error. Library new/unread behavior uses `LibraryUnreadLedger`; active video geometry uses `VideoViewport`.
 
 **Encrypted transport.** All remote HTTP, SSE, uploads, thumbnails and media use the shared Rust `mold-secure` C ABI and the pull-driven Swift WebSocket/HTTP adapter. Only an unpaired numeric loopback host may use direct HTTP for the embedded engine. Never restore relay v2, HTTP/S3 staging, media bearer URLs or mutation replay. AVPlayer uses `PlayableMedia` and its HEAD/Range resource loader. Private installation identity lives in the app Keychain (Mac: owner-only SecretStore), never preferences. Public pins and host-signed grants persist with the host; renew grants only through the authenticated channel. Bonjour identity remains a hint. `make gen`/archive builds the ignored XCFramework from source for all Apple targets, and secure-crate/lockfile changes trigger Apple builds. Protocol authority: `relay/aws/SECURE-PROTOCOL.md`.
+
+**Input inspection.** The shared Well has a separate accessible View control;
+typed references, masks, queue input details, Library picker tiles and From Share
+use the same read-only InputMediaViewer. Viewing never attaches, consumes a share,
+fits, reorders or acknowledges a Library print. Prefer authoring original bytes;
+retained descriptors require their exact verified ordered member. Queue views
+inspect full-sized submitted pixels, which may already be fitted. Private files
+and players belong only to the selected presentation and are released/revoked on
+close, cancellation, attachment replacement and machine authority changes.

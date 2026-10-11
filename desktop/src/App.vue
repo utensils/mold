@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import OriginalMediaHost from "@studio/components/OriginalMediaHost.vue";
 import HeldQueueTransferDialog from "@studio/components/HeldQueueTransferDialog.vue";
 import { provideHeldQueueTransfer } from "@studio/composables/useHeldQueueTransfer";
 
@@ -469,6 +470,7 @@ onUnmounted(() => {
 
 <template>
   <div class="relative flex h-full flex-col overflow-clip bg-bg">
+    <OriginalMediaHost />
     <HeldQueueTransferDialog :controller="queueTransfer" />
     <TitleBar />
     <UpdateBanner />

@@ -1,3 +1,4 @@
+import { originalMediaBlob } from "@studio/api/originalMedia";
 import { relayFetch as fetch } from "@studio/api/relayTransport";
 import { blobToBase64 } from "@studio/lib/base64";
 import { apiFetch, apiFetchTo } from "../api/client";
@@ -23,12 +24,16 @@ export interface GalleryMediaAuthority {
 export async function readGalleryMediaBlob(
   entry: MergedPrint,
   gallery: GalleryMediaAuthority,
+  signal?: AbortSignal,
 ): Promise<Blob> {
+  if (signal && entry.sourceKey !== "local" && !gallery.targetOf(entry.sourceKey))
+    throw new Error("The original machine is no longer available.");
   let response: Response;
   if (gallery.mediaSourceOf(entry.sourceKey) === "local") {
     // A trashed row's bytes live in `.trash/` — resolve there so a newer
     // same-name live file can never shadow the print being read.
-    response = await fetch(localMediaPath(entry.item.filename, entry.item.trashed_at != null));
+    const path = localMediaPath(entry.item.filename, entry.item.trashed_at != null);
+    response = await (signal ? fetch(path, { signal }) : fetch(path));
   } else {
     const path = mediaPath(entry.item.filename);
     const target = gallery.targetOf(entry.sourceKey);
@@ -37,7 +42,7 @@ export async function readGalleryMediaBlob(
     // with every held-open generation/download stream to that host, so a
     // plain fetch to a busy host can queue behind them indefinitely. A
     // refused native read (unreachable, over the cap) falls back to HTTP.
-    if (target && inTauri()) {
+    if (target && inTauri() && !signal) {
       try {
         const bytes = await ipc.fetchGalleryMedia(target, entry.item.filename);
         if (bytes) {
@@ -47,12 +52,18 @@ export async function readGalleryMediaBlob(
         // Fall through to the webview's authenticated HTTP route.
       }
     }
-    response = await (target ? apiFetchTo(target, path) : apiFetch(path));
+    response = await (target
+      ? signal
+        ? apiFetchTo(target, path, { signal })
+        : apiFetchTo(target, path)
+      : signal
+        ? apiFetch(path, { signal })
+        : apiFetch(path));
   }
   if (!response.ok) {
     throw new Error(`Could not read ${entry.item.filename} (HTTP ${response.status})`);
   }
-  return response.blob();
+  return signal ? originalMediaBlob(response) : response.blob();
 }
 
 export async function readGalleryMediaBase64(

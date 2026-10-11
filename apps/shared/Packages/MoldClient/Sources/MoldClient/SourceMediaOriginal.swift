@@ -5,6 +5,13 @@ import ImageIO
 /// On-demand inspection of authenticated originals, never a catalog-wide probe.
 /// Retain the caller-owned file for playback; this result creates no copy or cache.
 public enum SourceMediaOriginal {
+    /// Limit decoded geometry to 32 Mi pixels (about 128 MiB at 8-bit RGBA).
+    /// Decoder overhead, higher-depth formats and transient buffers add memory.
+    public static let decodedPixelLimit = 32 * 1_024 * 1_024
+    public static func checkDecodedDimensions(width: Double, height: Double) throws {
+        guard width > 0, height > 0, width <= 65_536, height <= 65_536,
+              width * height <= Double(decodedPixelLimit) else { throw InspectionError.imageTooLarge }
+    }
     public enum Kind: String, Sendable { case image, video, audio }
     public struct Inspection: Sendable {
         public let kind: Kind
@@ -16,7 +23,7 @@ public enum SourceMediaOriginal {
         public var errorDescription: String? {
             switch self {
             case .unsupported: "This original uses an unsupported or damaged media format. Try another retained copy."
-            case .imageTooLarge: "This image exceeds the viewer's safe dimension limit. You can still reuse the original."
+            case .imageTooLarge: "This image exceeds the viewer’s 32 Mi-pixel image limit. You can still reuse the original."
             case .timedOut: "Inspecting this original took too long. Try again or choose another retained copy."
             }
         }
@@ -33,6 +40,7 @@ public enum SourceMediaOriginal {
                     let image = try await SourceMediaOriginalImage.decode(file)
                     return Inspection(kind: .image, url: file.url, image: image)
                 } catch is CancellationError { throw CancellationError() }
+                catch let error as InspectionError { throw error }
                 catch { throw InspectionError.unsupported }
             }
             let playbackURL = try playableURL(file)
@@ -99,10 +107,8 @@ public enum SourceMediaOriginal {
               let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue,
               let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue,
               width > 0, height > 0 else { throw InspectionError.unsupported }
-        // Check encoded geometry before asking ImageIO for a 4096-edge thumbnail.
-        guard width <= 65_536, height <= 65_536, width * height <= 100_000_000 else {
-            throw InspectionError.imageTooLarge
-        }
+        // Check geometry before asking ImageIO to decode full-resolution pixels.
+        try checkDecodedDimensions(width: width, height: height)
         return true
     }
 

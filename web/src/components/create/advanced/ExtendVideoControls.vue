@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import OriginalMediaButton from "@studio/components/OriginalMediaButton.vue";
 /*
  * "Continue a video" — the extend field of the Advanced drawer's Video
  * section.
@@ -116,6 +117,11 @@ const extendSummary = computed(() => {
       <span class="extend__source-name">{{
         modelValue.extendVideo.filename
       }}</span>
+      <OriginalMediaButton
+        :data="modelValue.extendVideo.base64"
+        :mime-type="modelValue.extendVideo.mime || 'video/mp4'"
+        :label="modelValue.extendVideo.filename"
+      />
       <button
         type="button"
         class="extend__remove"

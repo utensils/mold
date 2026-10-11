@@ -31,6 +31,8 @@ machine status, and live generation progress in one native window._
 
 ## Original source media
 
+Use **View** (native apps) or **View original** (web, desktop and mobile) beside an attached input to inspect it without replacing or removing it. References, source/target pictures, boundary frames, masks, control and identity pictures, and attached video/audio have separate viewing actions. Image previews fit the whole picture. Use **Actual size** on desktop and web, or pinch to zoom in the native iOS app, for close inspection. **Done** or Escape returns to the attachment or picker. Picker previews do not select or attach the picture. Queue viewing actions show the full submitted media, which may already have been fitted to the generation canvas; older machines without the original-input endpoint report it unavailable.
+
 Open a print's details to see the original inputs retained by its machine. Image
 inputs have thumbnails and role labels; audio, video and other files have named
 tiles. **Use as source** attaches an individual input to a new creation using the

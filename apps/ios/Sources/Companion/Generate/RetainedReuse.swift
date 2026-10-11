@@ -142,6 +142,16 @@ final class RetainedReuse {
         return authority
     }
 
+    func originalFile(reference: GenerationReference, index: Int, references: [GenerationReference]) async throws -> SourceMediaFile {
+        guard let authority = snapshot(), let hosts else { throw MoldClientError.malformedResponse }
+        let fence = version
+        let file = try await InputMediaPreview.retainedFile(reference: reference, index: index,
+            references: references, original: originalReferences, members: authority.members,
+            filename: authority.filename, backend: hosts.backend(for: authority.route))
+        guard version == fence, originIsCurrent(authority, hosts: hosts) else { throw CancellationError() }
+        return file
+    }
+
     func canHydrateReferences(_ references: [GenerationReference]) -> Bool {
         guard !probing, let authority = snapshot() else { return false }
         return RetainedReferenceGuard.canHydrate(references: references, original: originalReferences,

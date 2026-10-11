@@ -20,6 +20,10 @@ For user setup and workflows, see the
 reference for the native shell, development commands, and TestFlight release
 path.
 
+## Inspecting inputs
+
+Use **View** (native apps) or **View original** (web, desktop and mobile) beside an attached input to inspect it without replacing or removing it. References, source/target pictures, boundary frames, masks, control and identity pictures, and attached video/audio have separate viewing actions. Image previews fit the whole picture. Use **Actual size** on desktop and web, or pinch to zoom in the native iOS app, for close inspection. **Done** or Escape returns to the attachment or picker. Picker previews do not select or attach the picture. Queue viewing actions show the full submitted media, which may already have been fitted to the generation canvas; older machines without the original-input endpoint report it unavailable.
+
 ## Architecture
 
 - Native shell: `apps/mobile/src-tauri`

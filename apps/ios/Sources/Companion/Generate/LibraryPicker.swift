@@ -67,6 +67,7 @@ struct LibraryPicker: View {
             ScrollView {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: tile), spacing: 3)], spacing: 3) {
                     ForEach(stills) { entry in
+                        VStack {
                         Button { choose(entry) } label: {
                             Color.clear.aspectRatio(1, contentMode: .fit)
                                 .overlay { PrintThumbnail(entry: entry, points: tile * 1.5) }
@@ -75,6 +76,17 @@ struct LibraryPicker: View {
                         .buttonStyle(.plain)
                         .disabled(choosing)
                         .accessibilityLabel(entry.spokenDescription(showsHost: true))
+                        let source = entry.presented(onAnyOf: Set(hosts.upHosts.map(\.id))) ?? entry
+                        let authority = hosts.host(source.hostID).map { InputMediaPreviewAuthority(host: $0, instance: hosts.instanceID(of: source.hostID)) }
+                        InputMediaViewButton(title: source.print.displayName, identity: "\(source.id)|\(String(describing: authority))", load: {
+                            guard let authority, authority.isCurrent(host: hosts.host(source.hostID), instance: hosts.instanceID(of: source.hostID)) else { throw CancellationError() }
+                            let route = authority.host
+                            let file = try await hosts.backend(for: route).mediaPreviewFile(source.print.filename, trashed: false)
+                            guard authority.isCurrent(host: hosts.host(source.hostID), instance: hosts.instanceID(of: source.hostID)),
+                                  stills.contains(where: { $0.id == entry.id }) else { throw CancellationError() }
+                            return file
+                        }, isCurrent: { stills.contains(where: { $0.id == entry.id }) && authority?.isCurrent(host: hosts.host(source.hostID), instance: hosts.instanceID(of: source.hostID)) == true })
+                        }
                     }
                 }
             }

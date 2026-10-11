@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import OriginalMediaButton from "@studio/components/OriginalMediaButton.vue";
 /*
  * Source-image picker (spec §05 overlays, §06 Create). Upload from disk or
  * reuse a gallery print.
@@ -235,6 +236,15 @@ function onDragLeave(event: DragEvent) {
   dragging.value = false;
 }
 
+async function inspectGallery(
+  item: HostGalleryImage,
+  signal: AbortSignal,
+): Promise<Blob> {
+  const host = getHost(item.hostId);
+  if (!host) throw new Error("This machine is no longer connected.");
+  return fetchGalleryBlob(host, item.filename, signal);
+}
+
 async function pickFromGallery(item: HostGalleryImage) {
   if (props.multiple) {
     const key = `${item.hostId}:${item.filename}`;
@@ -418,6 +428,11 @@ async function emitGallerySelection(items: HostGalleryImage[]) {
                   }}
                 </span>
               </button>
+              <OriginalMediaButton
+                :label="item.filename"
+                :authority="`${item.hostId}:${item.filename}:${getHost(item.hostId)?.url}:${getHost(item.hostId)?.apiKey}:${getHost(item.hostId)?.instanceId}:${open}`"
+                :load="(signal) => inspectGallery(item, signal)"
+              />
             </li>
           </ul>
           <div

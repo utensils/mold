@@ -12,6 +12,10 @@ struct Well: View {
     @State private var loadTask: Task<Void, Never>?
     let title: String
     let image: String?
+    var original: String?
+    var originalIdentity: String?
+    var originalLoader: (() async throws -> SourceMediaFile)?
+    var originalIsCurrent: () -> Bool = { true }
     let side: CGFloat
     let accepting: Set<String>
     var number: Int?
@@ -47,6 +51,14 @@ struct Well: View {
             }
             .accessibilityLabel(image == nil ? String(localized: "\(title), empty")
                 : number.map { String(localized: "Reference \($0), \(title)") } ?? title)
+            if let encoded = original ?? image {
+                InputMediaViewButton(title: title, identity: originalIdentity ?? encoded, load: {
+                    if let originalLoader { return try await originalLoader() }
+                    return try await InputMediaPreview.file(base64: encoded)
+                }, isCurrent: { originalIsCurrent() && (original ?? image) == encoded })
+            } else if let originalLoader {
+                InputMediaViewButton(title: title, identity: originalIdentity ?? title, load: originalLoader, isCurrent: originalIsCurrent)
+            }
             Text(title).font(.caption).foregroundStyle(.secondaryText)
                 .multilineTextAlignment(.center).frame(width: side)
                 .fixedSize(horizontal: false, vertical: true)

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import OriginalMediaHost from "@studio/components/OriginalMediaHost.vue";
 import { useMobileKeyboardViewport } from "./useMobileKeyboardViewport";
 import { SourceCanvasController } from "@studio/lib/sourceCanvasController";
 import { queueModelDownloadAvailability } from "@studio/lib/queueModelDownload";
@@ -1509,6 +1510,7 @@ const sourceGalleryHosts = computed(() =>
     id: host.id,
     label: host.name,
     target: mobileHostTarget(host),
+    instanceId: host.instanceId,
   })),
 );
 const autoRoutingAvailable = computed(() => mobileAutoRoutingAvailable(connectedHosts.value));
@@ -12412,6 +12414,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
     }"
     :data-mobile-platform="androidNativeRuntime ? 'android' : 'ios'"
   >
+    <OriginalMediaHost />
     <HeldQueueTransferDialog :controller="queueTransfer" />
     <section
       v-if="pairingScannerOpen"

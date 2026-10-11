@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import OriginalMediaButton from "./OriginalMediaButton.vue";
 import { computed, ref, watch } from "vue";
 import { minimaxH3PickedMediaReference as referenceDraft } from "../lib/minimaxH3PickedMedia";
 import {
@@ -328,6 +329,18 @@ function imagePreview(
           role="group"
           :aria-label="`Reference ${index + 1} controls`"
         >
+          <OriginalMediaButton
+            v-if="draft.reference.media.authority === 'inline'"
+            :data="draft.reference.media.data"
+            :mime-type="
+              draft.reference.kind === 'audio'
+                ? 'audio/wav'
+                : draft.reference.kind === 'video'
+                  ? 'video/mp4'
+                  : draft.reference.mime_type
+            "
+            :label="minimaxH3ReferenceName(draft.reference, index)"
+          />
           <label
             v-if="minimaxH3ReferenceNeedsMedia(draft)"
             class="h3-authoring__reattach"

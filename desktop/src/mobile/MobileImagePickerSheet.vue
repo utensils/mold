@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { originalMediaBlob } from "@studio/api/originalMedia";
+import OriginalMediaButton from "@studio/components/OriginalMediaButton.vue";
 import { inputImageBase64, inputImageFacts } from "@studio/lib/inputImage";
 import { useSheetDismiss } from "./useSheetDismiss";
 import { computed, onBeforeUnmount, ref, toRef, watch } from "vue";
@@ -19,6 +21,7 @@ export interface MobileGallerySource {
   id: string;
   label: string;
   target: ApiTarget;
+  instanceId?: string | null | undefined;
 }
 
 interface MobileGalleryEntry {
@@ -79,7 +82,7 @@ const sourceSignature = computed(() =>
   sources.value
     .map(
       (source) =>
-        `${source.id}\u0000${source.label}\u0000${source.target.baseUrl}\u0000${source.target.apiKey ?? ""}`,
+        `${source.id}\u0000${source.label}\u0000${source.target.baseUrl}\u0000${source.target.apiKey ?? ""}:${source.instanceId ?? ""}`,
     )
     .join("\u0001"),
 );
@@ -383,44 +386,58 @@ const { dragging, panelStyle, backdropStyle, beginDismiss, moveDismiss, finishDi
         <p v-else-if="!sources.length">Connect a machine first.</p>
         <p v-else-if="!stillEntries.length && !error">No PNG or JPEG prints yet.</p>
         <div v-else class="mobile-image-picker-grid">
-          <button
-            v-for="entry in stillEntries"
-            :key="`${entry.source.id}:${entry.image.filename}`"
-            type="button"
-            :aria-label="`Use ${entry.image.filename} from ${entry.source.label}`"
-            :disabled="picking"
-            :aria-pressed="multiple ? galleryEntrySelected(entry) : undefined"
-            :class="{ 'is-selected': galleryEntrySelected(entry) }"
-            data-test="mobile-image-picker-gallery-item"
-            @click="chooseGallery(entry)"
-          >
-            <AuthedMedia
-              :path="galleryMediaPath(entry.image.filename, 'host', true)"
-              :target="entry.source.target"
-              :cache-key="entry.source.id"
-              :alt="entry.image.filename"
+          <div v-for="entry in stillEntries" :key="`${entry.source.id}:${entry.image.filename}`">
+            <button
+              type="button"
+              :aria-label="`Use ${entry.image.filename} from ${entry.source.label}`"
+              :disabled="picking"
+              :aria-pressed="multiple ? galleryEntrySelected(entry) : undefined"
+              :class="{ 'is-selected': galleryEntrySelected(entry) }"
+              data-test="mobile-image-picker-gallery-item"
+              @click="chooseGallery(entry)"
+            >
+              <AuthedMedia
+                :path="galleryMediaPath(entry.image.filename, 'host', true)"
+                :target="entry.source.target"
+                :cache-key="entry.source.id"
+                :alt="entry.image.filename"
+              />
+              <span
+                v-if="showHostLabels"
+                class="mobile-image-picker-host"
+                data-test="mobile-image-picker-host"
+              >
+                {{ entry.source.label }}
+              </span>
+              <span
+                v-if="multiple && galleryEntrySelected(entry)"
+                class="mobile-image-picker-order"
+                aria-hidden="true"
+              >
+                {{
+                  selectedGallery.findIndex(
+                    (selected) =>
+                      selected.source.id === entry.source.id &&
+                      selected.image.filename === entry.image.filename,
+                  ) + 1
+                }}
+              </span>
+            </button>
+            <OriginalMediaButton
+              :label="entry.image.filename"
+              :authority="`${entry.source.id}:${entry.image.filename}:${entry.source.target.baseUrl}:${entry.source.target.apiKey}:${entry.source.instanceId}:${open}`"
+              :load="
+                async (signal) =>
+                  originalMediaBlob(
+                    await apiFetchTo(
+                      entry.source.target,
+                      galleryMediaPath(entry.image.filename, 'host'),
+                      { signal },
+                    ),
+                  )
+              "
             />
-            <span
-              v-if="showHostLabels"
-              class="mobile-image-picker-host"
-              data-test="mobile-image-picker-host"
-            >
-              {{ entry.source.label }}
-            </span>
-            <span
-              v-if="multiple && galleryEntrySelected(entry)"
-              class="mobile-image-picker-order"
-              aria-hidden="true"
-            >
-              {{
-                selectedGallery.findIndex(
-                  (selected) =>
-                    selected.source.id === entry.source.id &&
-                    selected.image.filename === entry.image.filename,
-                ) + 1
-              }}
-            </span>
-          </button>
+          </div>
         </div>
         <div
           v-if="multiple && selectedGallery.length"
