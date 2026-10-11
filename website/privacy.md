@@ -1,6 +1,6 @@
 # Privacy Policy
 
-**Effective September 27, 2026**
+**Effective October 11, 2026**
 
 This policy describes how the open-source Mold project handles information on its public website and in
 the Mold apps that link to it: the mobile app for iPhone, iPad, and Android,
@@ -10,36 +10,21 @@ servers that you choose and control. The Mold project does not operate a
 central account service, hosted generation service, advertising network, or
 analytics service for these apps.
 
-## Website analytics
+## Website privacy
 
-The public website at [utensils.io/mold](https://utensils.io/mold/) loads
-Google Analytics automatically on documentation pages, without a consent popup.
-The standalone pairing page (`/mold/pair/`) and secure Studio (`/mold/studio/`)
-load no analytics or third-party scripts. Pairing links keep their one-time
-invitation in the URL fragment, clear it from browser history on arrival, and
-pass it to Studio only when you choose to continue.
+The public website at [utensils.io/mold](https://utensils.io/mold/), including
+its documentation, pairing page, and secure Studio, loads no third-party
+analytics or advertising scripts. This applies to every Mold page because
+pages on the same browser origin share access to Studio's local storage.
 
-Google Analytics measures page visits, traffic sources, scrolls,
-outbound link clicks, and file-download clicks, along with browser/device
-information and approximate geographic information derived from your connection.
-It uses cookies scoped to this website to distinguish visits. We use these
-reports to understand which documentation is useful and how visitors find Mold.
-We disable Google signals and advertising personalization, do not enable form or
-site-search measurement, and remove query strings and fragments from the page
-URLs and referrers we explicitly send. Outbound and download measurements may
-include the destination link URL.
+Pairing links keep their one-time invitation in the URL fragment, clear it
+from browser history on arrival, and pass it to Studio only when you choose
+to continue. The pairing page does not make network requests with the invitation.
 
-Google processes this website analytics data under
-[Google's privacy policy](https://policies.google.com/privacy). See also
-[how Google uses information from sites that use its services](https://policies.google.com/technologies/partner-sites).
-You can block Google Analytics with your browser's tracking protection or
-[Google's Analytics opt-out browser add-on](https://tools.google.com/dlpage/gaoptout).
-You can remove existing cookies through your browser's site-data settings;
-removing cookies does not erase analytics data already collected.
-
-This website analytics integration does not collect Mold prompts, generated
-media, server API keys, or usage of the CLI, desktop, mobile, or self-hosted
-Studio apps.
+Earlier versions of the documentation loaded Google Analytics. That integration
+has been removed. You can remove its existing cookies through your browser's
+site-data settings; this does not erase previously collected analytics data,
+which remains subject to [Google's privacy policy](https://policies.google.com/privacy).
 
 ## Information the apps store on your device
 

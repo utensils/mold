@@ -2,31 +2,19 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, existsSync } from 'node:fs'
 import { runInNewContext } from 'node:vm'
-import { createAnalytics } from '../.vitepress/theme/analytics.mjs'
-
-test('pairing and Studio never initialize third-party analytics', () => {
-  for (const path of [
-    '/mold/pair',
-    '/mold/pair/',
-    '/mold/pair.html',
-    '/mold/studio/',
-    '/mold/studio/index.html',
-  ]) {
-    const win = {
-      location: new URL(`https://utensils.io${path}#invite_seed=secret`),
-      document: {
-        referrer: '',
-        createElement() {
-          throw Error('third-party script created')
-        },
-      },
-      dataLayer: [],
-    }
-    const analytics = createAnalytics(win)
-    analytics.start()
-    analytics.pageView()
-    assert.deepEqual(win.dataLayer, [])
-  }
+test('every Mold document excludes third-party analytics from the shared key-storage origin', () => {
+  const theme = readFileSync(
+    new URL('../.vitepress/theme/index.ts', import.meta.url),
+    'utf8'
+  )
+  assert.doesNotMatch(
+    theme,
+    /createAnalytics|analytics\.mjs|gtag|googletagmanager/
+  )
+  assert.equal(
+    existsSync(new URL('../.vitepress/theme/analytics.mjs', import.meta.url)),
+    false
+  )
 })
 
 test('pairing is a static CSP-protected document outside the VitePress app', () => {
@@ -113,7 +101,7 @@ test('pairing handoff clears history before parsing, retains secret only in memo
   )
 })
 
-test('navigation from an analytics-loaded docs app forces a fresh security document', async () => {
+test('navigation from the docs app forces a fresh security document', async () => {
   const { leaveDocsForSecurePage } =
     await import('../.vitepress/theme/secure-pages.mjs')
   const navigation = []

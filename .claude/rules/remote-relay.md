@@ -102,4 +102,7 @@ and checked by the website build. It must remain outside VitePress, without
 analytics or third-party code, with its restrictive CSP and no-referrer policy.
 The one-time invitation is cleared from history and kept in memory, never an
 HTML attribute. Documentation navigation into pairing or Studio must load a new
-document so documentation analytics scripts cannot remain in the security page.
+document. No Mold documentation page may load third-party scripts: all pages on
+the utensils.io origin share access to Studio key storage, so path exclusions do
+not isolate keys. The website build scans generated HTML/JS for retired tracking
+loaders as well as checking the standalone pairing artifact.
