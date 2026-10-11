@@ -284,63 +284,11 @@ pub struct ModelManifest {
 }
 
 impl ModelManifest {
-    /// Short presentation alias for every curated checkpoint. The manifest's
-    /// authored title retains version/task/precision, while the trade-off
-    /// remains in `description`. Never use this label as a request or file id.
+    /// Short presentation alias for every curated checkpoint — title, then
+    /// variant — from `model_presentation`, the one authority on how a model
+    /// is named. Never use this label as a request or file id.
     pub fn display_name(&self) -> String {
-        if self.family == crate::minimax_h3::FAMILY {
-            use crate::minimax_h3::{Layout, Task};
-            let task = match crate::minimax_h3::task_for_model(&self.name) {
-                Some(Task::Fl2va) => "FL2VA",
-                Some(Task::Ref2va) => "Ref2VA",
-                None => return self.name.clone(),
-            };
-            let variant = crate::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS
-                .iter()
-                .find(|tier| tier.model == self.name)
-                .map(|tier| tier.display_label)
-                .or_else(|| {
-                    crate::minimax_h3::distilled_base_tier_for_model(&self.name)
-                        .map(|tier| tier.display_label)
-                })
-                .unwrap_or_else(|| match crate::minimax_h3::layout_for_model(&self.name) {
-                    Some(Layout::OfficialBf16) => "BF16",
-                    Some(Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq) => "NVFP4",
-                    _ => "",
-                });
-            return format!("MiniMax H3 {task} {variant}").trim().to_string();
-        }
-        let title = self
-            .description
-            .split_once(" — ")
-            .map_or(self.description.as_str(), |(title, _)| title)
-            .trim();
-        let title = title
-            .split_once(" + Viggle")
-            .map_or(title, |(title, _)| title);
-        let title = title
-            .split_once(" transformer (")
-            .map_or(title, |(title, _)| title);
-        let mut title = title
-            .replace("Flux.2", "FLUX.2")
-            .replace("[dev]", "Dev")
-            .replace(" dev ", " Dev ")
-            .replace(" distilled ", " Distilled ")
-            .replace("Qwen-Image-", "Qwen Image ")
-            .replace("Qwen-Image", "Qwen Image")
-            .replace(" GGUF", "");
-        if self.name.starts_with("qwen-image-2.1-turbo:") {
-            title.push_str(" Turbo 6-step");
-        }
-        if self.name.ends_with(":bf16-conv") {
-            title.push_str(" Conv VAE");
-        }
-        if self.name == "qwen-image-lightning:fp8" {
-            title.push_str(" 4-step");
-        } else if self.name == "qwen-image-lightning:fp8-8step" {
-            title.push_str(" 8-step");
-        }
-        title
+        crate::model_presentation::presentation(self).display_name()
     }
 
     /// Size of the model-specific files in bytes.
@@ -9913,11 +9861,11 @@ mod tests {
     fn h3_queue_titles_share_short_curated_names() {
         assert_eq!(
             model_display_name(crate::minimax_h3::FL2VA_COMFY).as_deref(),
-            Some("MiniMax H3 FL2VA")
+            Some("MiniMax H3 Frames")
         );
         assert_eq!(
             model_display_name(crate::minimax_h3::REF2VA_COMFY).as_deref(),
-            Some("MiniMax H3 Ref2VA")
+            Some("MiniMax H3 References")
         );
         for tier in crate::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS {
             let title = model_display_name(tier.model).unwrap();
@@ -9926,7 +9874,7 @@ mod tests {
         }
         assert_eq!(
             model_display_name(crate::minimax_h3::FL2VA_FASTH3_V2_INT8).as_deref(),
-            Some("MiniMax H3 FL2VA FastH3 V2 8-step (FastVideo)")
+            Some("MiniMax H3 Frames FastH3 V2 8-step (FastVideo)")
         );
         assert_eq!(model_display_name("hf:someone/custom-title"), None);
     }

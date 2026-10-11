@@ -795,7 +795,8 @@ fn build_fl2va_capability(models_root: &std::path::Path) -> Option<mold_core::Mi
                 .flatten();
             Some(mold_core::MiniMaxH3TurboVariantCapability {
                 model: tier.model.into(),
-                display_name: format!("MiniMax H3 FL2VA {}", tier.display_label),
+                display_name: mold_core::manifest::model_display_name(tier.model)
+                    .unwrap_or_else(|| tier.model.to_string()),
                 tier: tier.display_label.into(),
                 adapter_size_bytes: tier.adapter_size_bytes,
                 installed,
@@ -832,7 +833,10 @@ fn build_fl2va_capability(models_root: &std::path::Path) -> Option<mold_core::Mi
         partitions: vec![mold_core::MiniMaxH3PartitionCapability {
             task: "fl2va".into(),
             model: mold_core::minimax_h3::FL2VA_COMFY.into(),
-            display_name: "MiniMax H3 FL2VA".into(),
+            display_name: mold_core::manifest::model_display_name(
+                mold_core::minimax_h3::FL2VA_COMFY,
+            )
+            .unwrap_or_else(|| mold_core::minimax_h3::FL2VA_COMFY.to_string()),
             runtime_available: true,
             tier: "Compact 24 GiB GPU memory".into(),
             component_ids,

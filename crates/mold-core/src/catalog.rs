@@ -272,6 +272,7 @@ pub fn build_model_catalog(
         let h3_runtime = crate::minimax_h3::is_family(&manifest.family)
             .then(|| crate::minimax_h3::model_runtime_availability(&manifest.name));
 
+        let presentation = crate::model_presentation::presentation(manifest);
         models.push(ModelInfoExtended {
             downloaded,
             supports_duration_prediction: None,
@@ -347,7 +348,11 @@ pub fn build_model_catalog(
             },
             disk_usage_bytes,
             remaining_download_bytes: Some(remaining_download_bytes),
-            display_name: Some(manifest.display_name()),
+            display_name: Some(presentation.display_name()),
+            title: Some(presentation.title.clone()),
+            variant: presentation.variant.clone(),
+            summary: presentation.summary.clone(),
+            family_label: presentation.family_label.clone(),
             kind: None,
             modality: None,
             nsfw: None,
@@ -539,6 +544,10 @@ pub fn build_model_catalog(
             disk_usage_bytes: Some(disk_usage_bytes),
             remaining_download_bytes: None,
             display_name: None,
+            title: None,
+            variant: None,
+            summary: None,
+            family_label: None,
             kind: None,
             modality: None,
             nsfw: None,
@@ -625,18 +634,15 @@ mod tests {
             ("flux2-dev:bf16", "FLUX.2 Dev BF16"),
             (
                 "qwen-image-lightning:fp8",
-                "Qwen Image 2512 Lightning FP8 4-step",
+                "Qwen Image 2512 Lightning 4-step FP8",
             ),
             (
                 "qwen-image-lightning:fp8-8step",
-                "Qwen Image 2512 Lightning FP8 8-step",
+                "Qwen Image 2512 Lightning 8-step FP8",
             ),
             ("qwen-image-2.1:q8", "Qwen Image 2.1 Q8_0"),
-            (
-                "qwen-image-2.1-turbo:q8",
-                "Qwen Image 2.1 Q8_0 Turbo 6-step",
-            ),
-            ("ltx-2.5-22b-dev:bf16-conv", "LTX-2.5 22B Dev BF16 Conv VAE"),
+            ("qwen-image-2.1-turbo:q8", "Qwen Image 2.1 Turbo Q8_0"),
+            ("ltx-2.5-22b-dev:bf16-conv", "LTX-2.5 22B Dev Conv VAE BF16"),
         ] {
             assert_eq!(
                 crate::manifest::model_display_name(id).as_deref(),
@@ -1547,6 +1553,10 @@ mod tests {
                 disk_usage_bytes: None,
                 remaining_download_bytes: None,
                 display_name: None,
+                title: None,
+                variant: None,
+                summary: None,
+                family_label: None,
                 kind: None,
                 modality: None,
                 nsfw: None,

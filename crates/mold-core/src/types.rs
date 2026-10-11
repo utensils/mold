@@ -4015,6 +4015,20 @@ pub struct ModelInfoExtended {
     /// on older servers/custom models. Every API call still uses `name`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// How a curated checkpoint is named, from `model_presentation` — the one
+    /// authority every client reads instead of carrying its own name tables:
+    /// `title` is the model without precision ("FLUX.1 Dev"), `variant` what
+    /// tells siblings apart ("Q4", "Turbo 4-step 768p"), `summary` one line on
+    /// why to pick it, `family_label` its section. Absent on catalog installs
+    /// (their provider title is `display_name`) and on older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family_label: Option<String>,
     /// Catalog classification for installed models. Absent for older servers
     /// and manifest rows whose family is sufficient for client-side inference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -9075,32 +9089,32 @@ mod tests {
             .or_else(|| env!("CARGO_MANIFEST_DIR").strip_suffix("crates/mold-core"))
             .unwrap_or(env!("CARGO_MANIFEST_DIR"));
 
-        for path in ["web/src/types.ts", "desktop/src/lib/api/types.ts"] {
-            let full_path = format!("{workspace}/{path}");
-            let source = std::fs::read_to_string(&full_path)
-                .unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
-            let union = source
-                .split_once("export type Ltx2PipelineMode =")
-                .unwrap_or_else(|| panic!("{path} must declare `export type Ltx2PipelineMode`"))
-                .1
-                .split_once(';')
-                .unwrap_or_else(|| panic!("{path} Ltx2PipelineMode union must end in `;`"))
-                .0;
+        // Both apps re-export the one shared declaration (#1862).
+        let path = "studio/lib/api/serverTypes.ts";
+        let full_path = format!("{workspace}/{path}");
+        let source = std::fs::read_to_string(&full_path)
+            .unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+        let union = source
+            .split_once("export type Ltx2PipelineMode =")
+            .unwrap_or_else(|| panic!("{path} must declare `export type Ltx2PipelineMode`"))
+            .1
+            .split_once(';')
+            .unwrap_or_else(|| panic!("{path} Ltx2PipelineMode union must end in `;`"))
+            .0;
 
-            let members: Vec<&str> = union
-                .split('|')
-                .map(str::trim)
-                .filter(|member| !member.is_empty())
-                .map(|member| member.trim_matches('"'))
-                .collect();
-            let expected: Vec<&str> = Ltx2PipelineMode::ALL.iter().map(|m| m.as_str()).collect();
+        let members: Vec<&str> = union
+            .split('|')
+            .map(str::trim)
+            .filter(|member| !member.is_empty())
+            .map(|member| member.trim_matches('"'))
+            .collect();
+        let expected: Vec<&str> = Ltx2PipelineMode::ALL.iter().map(|m| m.as_str()).collect();
 
-            assert_eq!(
-                members, expected,
-                "{path} Ltx2PipelineMode union must match mold-core's wire strings exactly; \
-                 a mismatched member makes every request using it fail with 422"
-            );
-        }
+        assert_eq!(
+            members, expected,
+            "{path} Ltx2PipelineMode union must match mold-core's wire strings exactly; \
+             a mismatched member makes every request using it fail with 422"
+        );
     }
 
     #[test]
