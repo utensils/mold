@@ -416,3 +416,5 @@ invalidation. Unrelated print updates do not restart the selected original.
 Unchanged rows remain visible during refresh; refused inventories revoke open
 source access. Legacy originals with unknown metadata are identified from their
 contents only when opened, with bounded decoding and cancellable playback inspection.
+
+Camera-scanned Regular pairing codes show the connection mode and direct machine address before Pair claims them. Secure remains the default connection choice.

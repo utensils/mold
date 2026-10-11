@@ -11,6 +11,18 @@ import Testing
 struct PairingLinkTests {
     var link: URL { try! SecurePairingFixture.payload().url! }
 
+
+    @Test func aRegularCameraScanAsksBeforeClaiming() throws {
+        let raw = "https://utensils.io/mold/pair#version=2&mode=regular&base_url=http%3A%2F%2Frender.example%3A7680&instance_id=regular-1&name=Headless+server&pairing_token=" + String(repeating: "07", count: 32) + "&expires_at=4000000000"
+        let payload = try MobilePairingPayload.parse(raw)
+        #expect(PairingScanView.Phase.afterScan(payload) == .confirming(payload))
+    }
+
+    @Test func aSecureCameraScanRetainsItsClaimFlow() throws {
+        let payload = try SecurePairingFixture.payload()
+        #expect(PairingScanView.Phase.afterScan(payload) == .pairing(payload.name))
+    }
+
     @Test func aUniversalLinkAsksBeforePairing() {
         let router = AppRouter()
         router.open(url: link)
