@@ -149,7 +149,8 @@ machines in one window.
 </div>
 
 **[All downloads](/download)**, including iPhone, iPad, Android, the CLI and
-nightly builds · **[Which Mac app?](/download#mac)**
+nightly builds · **[Which Mac app?](/download#mac)** ·
+**[Windows CLI instructions](/guide/installation#windows-cli)**
 
 ## Quick Example
 
