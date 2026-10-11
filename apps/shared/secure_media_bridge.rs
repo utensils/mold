@@ -156,7 +156,9 @@ pub fn secure_host_forget(
     namespace: String,
 ) -> Result<(), String> {
     caller_origin(&window)?;
-    if let Some(hook) = window.try_state::<SecureForgetHook>() { (hook.0)(&window, &namespace)?; }
+    if let Some(hook) = window.try_state::<SecureForgetHook>() {
+        (hook.0)(&window, &namespace)?;
+    }
     let mut inner = state.inner.lock().unwrap_or_else(|e| e.into_inner());
     *inner
         .namespace_epochs
