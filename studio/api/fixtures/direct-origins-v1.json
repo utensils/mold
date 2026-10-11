@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "accepted": [
+    {
+      "input": "https://HOST.example:443/",
+      "origin": "https://host.example"
+    },
+    {
+      "input": "http://203.0.113.7:7680",
+      "origin": "http://203.0.113.7:7680"
+    },
+    {
+      "input": "http://192.168.1.4:7680",
+      "origin": "http://192.168.1.4:7680"
+    },
+    {
+      "input": "http://halcyon.local:7680",
+      "origin": "http://halcyon.local:7680"
+    },
+    {
+      "input": "http://[::1]:7680",
+      "origin": "http://[::1]:7680"
+    },
+    {
+      "input": "https://not-mold-link.urandom.io",
+      "origin": "https://not-mold-link.urandom.io"
+    },
+    {
+      "input": "https://mold-link.urandom.io.example",
+      "origin": "https://mold-link.urandom.io.example"
+    }
+  ],
+  "rejected": [
+    "https://mold-link.urandom.io",
+    "https://host.mold-link.urandom.io",
+    "https://HOST.MOLD-LINK.URANDOM.IO./",
+    "https://user@example.com",
+    "https://user:password@example.com",
+    "https://example.com/api",
+    "https://example.com/?key=secret",
+    "https://example.com/#secret",
+    "ws://example.com",
+    "file:///tmp/host",
+    "https://example.com/?",
+    "https://example.com/#",
+    "https://example.com:0",
+    " https://example.com",
+    "https://exam\nple.com",
+    "example.com:7680"
+  ]
+}

@@ -695,7 +695,20 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 41,
         kind: MigrationKind::Sql("CREATE TABLE secure_bootstrap(singleton INTEGER PRIMARY KEY CHECK(singleton=1),bootstrap_id TEXT NOT NULL,digest TEXT NOT NULL,server_instance_id TEXT NOT NULL);"),
     },
+    Migration { version: 42, kind: MigrationKind::Sql(V42_REGULAR_CLIENTS) },
 ];
+
+const V42_REGULAR_CLIENTS: &str = "
+CREATE TABLE IF NOT EXISTS regular_clients (
+    client_id TEXT PRIMARY KEY REFERENCES paired_clients(id) ON DELETE CASCADE
+);
+CREATE TRIGGER regular_client_cannot_be_secure BEFORE INSERT ON regular_clients
+WHEN EXISTS(SELECT 1 FROM secure_devices WHERE client_id=NEW.client_id)
+BEGIN SELECT RAISE(ABORT, 'client already has secure authority'); END;
+CREATE TRIGGER secure_client_cannot_be_regular BEFORE INSERT ON secure_devices
+WHEN EXISTS(SELECT 1 FROM regular_clients WHERE client_id=NEW.client_id)
+BEGIN SELECT RAISE(ABORT, 'client already has regular authority'); END;
+";
 
 /// The gallery listing is `WHERE output_dir = ? ORDER BY
 /// COALESCE(file_mtime_ms, created_at_ms) DESC`; without an index matching
@@ -954,7 +967,7 @@ DELETE FROM settings WHERE key LIKE 'tui.%';
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 41;
+pub const SCHEMA_VERSION: i64 = 42;
 
 /// Downloadable files that belong to one gallery print. The generation row
 /// remains the lifecycle authority, so permanent deletion cascades while
@@ -1381,6 +1394,13 @@ pub fn apply_pending(conn: &mut Connection) -> Result<i64> {
                 current + 1
             );
         }
+        // Preserve only provably pre-secure credentials. Record their mode in
+        // the same transaction that first introduces secure authority, so a
+        // crash/restart between v40 and v42 cannot lose provenance. Existing
+        // v40+ databases never infer Regular mode from a missing binding.
+        if current == 39 && m.version == 40 {
+            tx.execute_batch("CREATE TABLE regular_clients(client_id TEXT PRIMARY KEY REFERENCES paired_clients(id) ON DELETE CASCADE); INSERT INTO regular_clients SELECT id FROM paired_clients;")?;
+        }
         match &m.kind {
             MigrationKind::Sql(sql) => tx
                 .execute_batch(sql)
@@ -1407,6 +1427,81 @@ pub(crate) fn current_version(conn: &Connection) -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regular_mode_migration_preserves_legacy_direct_without_downgrading_secure() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+        for migration in MIGRATIONS.iter().filter(|m| m.version <= 41) {
+            let tx = conn.transaction().unwrap();
+            match migration.kind {
+                MigrationKind::Sql(sql) => tx.execute_batch(sql).unwrap(),
+                MigrationKind::Rust(f) => f(&tx).unwrap(),
+            }
+            tx.pragma_update(None, "user_version", migration.version)
+                .unwrap();
+            tx.commit().unwrap();
+        }
+        for id in ["legacy", "secure"] {
+            conn.execute("INSERT INTO paired_clients(id,server_instance_id,name,client_kind,credential_hash,created_at_ms) VALUES(?1,'host','test','cli',?2,1)", rusqlite::params![id, vec![if id == "legacy" { 1_u8 } else { 2 }; 32]]).unwrap();
+        }
+        conn.execute("INSERT INTO secure_devices(client_id,grant_id,signing_key,noise_key,expires_at,epoch) VALUES('secure',?1,?2,?3,1,0)", rusqlite::params!["ab".repeat(16),"cd".repeat(32),"ef".repeat(32)]).unwrap();
+        apply_pending(&mut conn).unwrap();
+        fn ids(conn: &Connection) -> Vec<String> {
+            conn.prepare("SELECT client_id FROM regular_clients ORDER BY client_id")
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        }
+        assert!(
+            ids(&conn).is_empty(),
+            "unbound secure-era rows have no proven regular provenance"
+        );
+        conn.execute("DELETE FROM secure_devices WHERE client_id='secure'", [])
+            .unwrap();
+        apply_pending(&mut conn).unwrap();
+        assert!(
+            ids(&conn).is_empty(),
+            "losing a secure binding must never convert its credential"
+        );
+        conn.execute("DELETE FROM paired_clients WHERE id='legacy'", [])
+            .unwrap();
+        assert!(ids(&conn).is_empty());
+    }
+
+    #[test]
+    fn regular_mode_migration_preserves_only_pre_secure_direct_authority() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+        for migration in MIGRATIONS.iter().filter(|m| m.version <= 39) {
+            let tx = conn.transaction().unwrap();
+            match migration.kind {
+                MigrationKind::Sql(sql) => tx.execute_batch(sql).unwrap(),
+                MigrationKind::Rust(f) => f(&tx).unwrap(),
+            }
+            tx.pragma_update(None, "user_version", migration.version)
+                .unwrap();
+            tx.commit().unwrap();
+        }
+        conn.execute("INSERT INTO paired_clients(id,server_instance_id,name,client_kind,credential_hash,created_at_ms) VALUES('legacy','host','test','cli',?1,1)", rusqlite::params![vec![1_u8;32]]).unwrap();
+        apply_pending(&mut conn).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT client_id FROM regular_clients", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "legacy"
+        );
+        conn.execute("DELETE FROM paired_clients WHERE id='legacy'", [])
+            .unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM regular_clients", [], |r| r
+                .get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+    }
 
     static MIGRATION_BUSY_SIGNAL: (std::sync::Mutex<bool>, std::sync::Condvar) =
         (std::sync::Mutex::new(false), std::sync::Condvar::new());
@@ -1785,7 +1880,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 41);
+        assert_eq!(SCHEMA_VERSION, 42);
         assert!(table_exists(&conn, "device_preferences"));
         assert!(table_exists(&conn, "mesh_workflow_jobs"));
         assert!(table_exists(&conn, "mesh_workflow_stages"));
@@ -1941,7 +2036,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 41);
+        assert_eq!(SCHEMA_VERSION, 42);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -2078,7 +2173,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 41);
+        assert_eq!(SCHEMA_VERSION, 42);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -2417,7 +2512,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 41);
+        assert_eq!(SCHEMA_VERSION, 42);
     }
 
     #[test]
