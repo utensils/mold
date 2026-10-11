@@ -1,3 +1,6 @@
+mod bootstrap;
+pub use bootstrap::*;
+pub use mold_secure::Binding;
 mod http;
 pub use http::*;
 
