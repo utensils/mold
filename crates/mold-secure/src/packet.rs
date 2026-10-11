@@ -4,7 +4,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, VecDeque};
-pub const WIRE_WINDOW: u64 = 16;
+pub const WIRE_WINDOW: u64 = 64;
 const WINDOW: u64 = WIRE_WINDOW;
 const CHUNK: usize = 16384;
 const RETRY: u64 = 10_000;
@@ -115,12 +115,22 @@ impl ReliableChannel {
         let mut framed = Vec::with_capacity(packet.len() + 4);
         framed.extend_from_slice(&(packet.len() as u32).to_be_bytes());
         framed.extend_from_slice(packet);
-        if self.queued.len() + self.pending.len() + framed.len().div_ceil(CHUNK)
-            > WINDOW as usize * 2 + 5
-        {
+        let available = self
+            .queued
+            .back()
+            .map(|chunk| CHUNK - chunk.len())
+            .unwrap_or(0);
+        let additional = framed.len().saturating_sub(available).div_ceil(CHUNK);
+        if self.queued.len() + self.pending.len() + additional > WINDOW as usize * 2 + 5 {
             return Err(Error::Limit);
         }
-        self.queued.extend(framed.chunks(CHUNK).map(<[u8]>::to_vec));
+        let mut copied = 0;
+        if let Some(last) = self.queued.back_mut() {
+            copied = available.min(framed.len());
+            last.extend_from_slice(&framed[..copied]);
+        }
+        self.queued
+            .extend(framed[copied..].chunks(CHUNK).map(<[u8]>::to_vec));
         Ok(())
     }
     pub fn outgoing(&mut self, now: u64) -> Result<Vec<WireFrame>> {

@@ -61,6 +61,7 @@ fn bootstrap_rejects_forged_binding_and_remote_cleartext_origin() {
     let mut binding = Identity::from_bytes(&[48; 64]).unwrap().public_binding();
     binding.signature = "00".repeat(64);
     assert!(prepare_bootstrap_for_binding("Desktop", "desktop", &binding).is_err());
+    assert!(prepare_bootstrap("   ", "cli").is_err());
     let prepared = prepare_bootstrap("CLI", "cli").unwrap();
     for origin in [
         "http://untrusted.example",

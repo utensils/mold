@@ -147,7 +147,7 @@ pub fn prepare_bootstrap_for_binding(
     device: &Binding,
 ) -> Result<PreparedBootstrap> {
     device.bytes()?;
-    if name.is_empty()
+    if name.trim().is_empty()
         || name.len() > 128
         || name.chars().any(char::is_control)
         || !matches!(kind, "cli" | "desktop" | "ios" | "android" | "browser")

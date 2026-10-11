@@ -5,7 +5,7 @@ pub const MAX_PLAINTEXT: usize = MAX_CIPHERTEXT - 16;
 /// Leaves room for record header, AEAD tag, and packet prefix in one outer frame.
 pub const DATA_CHUNK: usize = 16320;
 pub const MAX_DATA_CHUNK: usize = 16384;
-pub const STREAM_WINDOW: u32 = 256 * 1024;
+pub const STREAM_WINDOW: u32 = 1024 * 1024;
 pub const CREDIT_BATCH: u32 = STREAM_WINDOW / 2;
 /// Tracks advertised receive capacity independently from consumed but not yet
 /// advertised bytes. Credit is returned in half-window batches, so a progressing
@@ -48,8 +48,8 @@ pub const MAX_UPLOAD: u64 = 64 * 1024 * 1024;
 mod flow_tests {
     use super::*;
     #[test]
-    fn sustained_stream_window_accepts_bounded_256k_credit() {
-        assert_eq!(STREAM_WINDOW, 256 * 1024);
+    fn sustained_stream_window_accepts_bounded_one_mib_credit() {
+        assert_eq!(STREAM_WINDOW, 1024 * 1024);
         assert!(Record::Credit {
             stream_id: 1,
             bytes: 128 * 1024
@@ -60,7 +60,7 @@ mod flow_tests {
     #[test]
     fn credit_batch_requires_consumption_and_replenishes_before_stall() {
         let mut credit = ReceiveCredit::default();
-        for _ in 0..7 {
+        for _ in 0..(CREDIT_BATCH / 16384 - 1) {
             credit.receive(16384).unwrap();
             assert_eq!(credit.consume(16384).unwrap(), None);
         }

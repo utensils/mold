@@ -8,7 +8,7 @@ use std::{
 use tauri::Manager;
 struct Entry {
     owner: String,
-    origin: String,
+    namespace: String,
     _bridge: MediaBridge,
     _permit: tokio::sync::OwnedSemaphorePermit,
 }
@@ -16,6 +16,7 @@ struct Entry {
 struct Inner {
     entries: BTreeMap<String, Entry>,
     epochs: BTreeMap<String, u64>,
+    namespace_epochs: BTreeMap<(String, String), u64>,
 }
 pub struct MediaBridges {
     inner: Mutex<Inner>,
@@ -34,6 +35,9 @@ impl MediaBridges {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         *inner.epochs.entry(owner.to_string()).or_default() += 1;
         inner.entries.retain(|_, entry| entry.owner != owner);
+        inner
+            .namespace_epochs
+            .retain(|(entry_owner, _), _| entry_owner != owner);
         drop(inner);
         mold_secure_client::forget_ephemeral(owner, None);
     }
@@ -83,8 +87,14 @@ pub async fn secure_media_open(
             return Err("The media window closed".into());
         }
         let epoch = *inner.epochs.entry(owner.clone()).or_default();
-        mold_secure_client::register_ephemeral(&owner, host.clone()).map_err(|e| e.to_string())?;
-        epoch
+        if !mold_secure_client::has_ephemeral_authority(&owner, &host) {
+            return Err("This host pairing was removed or replaced".into());
+        }
+        let namespace_epoch = *inner
+            .namespace_epochs
+            .entry((owner.clone(), host.namespace.clone()))
+            .or_default();
+        (epoch, namespace_epoch)
     };
     let client = SecureClient::new(host.clone()).map_err(|e| e.to_string())?;
     let bridge = MediaBridge::start(client, host.origin.clone(), origin, vec![path.clone()])
@@ -96,7 +106,12 @@ pub async fn secure_media_open(
         .to_string();
     let id = uuid::Uuid::new_v4().simple().to_string();
     let mut inner = state.inner.lock().unwrap_or_else(|e| e.into_inner());
-    if inner.epochs.get(&owner) != Some(&epoch)
+    if inner.epochs.get(&owner) != Some(&epoch.0)
+        || inner
+            .namespace_epochs
+            .get(&(owner.clone(), host.namespace.clone()))
+            != Some(&epoch.1)
+        || !mold_secure_client::has_ephemeral_authority(&owner, &host)
         || window.app_handle().get_webview_window(&owner).is_none()
     {
         return Err("The media window closed".into());
@@ -105,7 +120,7 @@ pub async fn secure_media_open(
         id.clone(),
         Entry {
             owner,
-            origin: host.origin.clone(),
+            namespace: host.namespace.clone(),
             _bridge: bridge,
             _permit: permit,
         },
@@ -136,15 +151,18 @@ pub fn secure_host_register(window: tauri::WebviewWindow, host: PairedHost) -> R
 pub fn secure_host_forget(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, MediaBridges>,
-    origin: String,
+    namespace: String,
 ) -> Result<(), String> {
     caller_origin(&window)?;
     let mut inner = state.inner.lock().unwrap_or_else(|e| e.into_inner());
-    *inner.epochs.entry(window.label().to_string()).or_default() += 1;
+    *inner
+        .namespace_epochs
+        .entry((window.label().to_string(), namespace.clone()))
+        .or_default() += 1;
     inner
         .entries
-        .retain(|_, entry| entry.owner != window.label() || entry.origin != origin);
+        .retain(|_, entry| entry.owner != window.label() || entry.namespace != namespace);
     drop(inner);
-    mold_secure_client::forget_ephemeral(window.label(), Some(&origin));
+    mold_secure_client::forget_ephemeral_namespace(window.label(), &namespace);
     Ok(())
 }

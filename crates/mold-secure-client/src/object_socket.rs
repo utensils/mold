@@ -23,7 +23,8 @@ use tokio_util::sync::{CancellationToken, PollSender};
 type RawSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 const PRODUCTION_ORIGIN: &str =
     "https://mold-relay-042506291754-us-west-2.s3.us-west-2.amazonaws.com";
-const FLUSH: Duration = Duration::from_millis(8);
+const FLUSH: Duration = Duration::from_millis(32);
+const MIN_OBJECT_BYTES: usize = 65536;
 const ALLOCATION_TIMEOUT: Duration = Duration::from_secs(5);
 const OBJECT_IO_TIMEOUT: Duration = Duration::from_secs(20);
 type Peer = (String, String);
@@ -72,7 +73,7 @@ impl DeliveryTracker {
         for n in seq..seq.saturating_add(count) {
             sent.insert(n, ());
         }
-        while sent.len() > 32 {
+        while sent.len() > (WIRE_WINDOW * 2) as usize {
             sent.pop_first();
         }
     }
@@ -439,6 +440,62 @@ fn validate_created(
     Ok((reference, url, headers))
 }
 
+async fn publish_batch(
+    socket: &mut RawSocket,
+    batch: Staged,
+    allocations: &mut BTreeMap<String, Allocation>,
+    uploaded: &BTreeMap<(Peer, u64), ObjectFrame>,
+    abandoned_count: usize,
+    delivery: &DeliveryTracker,
+) -> Result<()> {
+    let p = (batch.frames[0].sid.clone(), batch.frames[0].rid.clone());
+    if std::env::var_os("MOLD_SECURE_TRACE_CARRIER").is_some() {
+        eprintln!(
+            "Mold ciphertext batch frames={} bytes={} eligible={}",
+            batch.frames.len(),
+            batch.bytes,
+            batch.bytes >= MIN_OBJECT_BYTES
+        );
+    }
+    if batch.bytes < MIN_OBJECT_BYTES || batch.frames.len() < 2 {
+        for frame in batch.frames {
+            send(socket, serde_json::to_value(frame)?, delivery).await?;
+        }
+        return Ok(());
+    }
+    let body = Arc::new(pack_ciphertext_frames(&batch.frames)?);
+    let live = allocations
+        .values()
+        .filter(|a| peer(&a.request).as_ref() == Some(&p))
+        .count()
+        + uploaded
+            .values()
+            .filter(|o| o.sid == p.0 && o.rid == p.1)
+            .count();
+    if live >= 4 || abandoned_count >= 128 {
+        for frame in batch.frames {
+            send(socket, serde_json::to_value(frame)?, delivery).await?;
+        }
+        return Ok(());
+    }
+    let request_id = uuid::Uuid::new_v4().simple().to_string();
+    let request = json!({"a":"object","v":3,"op":"create","requestId":request_id,"sid":p.0,"rid":p.1,"seq":batch.frames[0].seq,"count":batch.frames.len(),"bytes":body.len(),"sha256":hex::encode(Sha256::digest(body.as_ref()))});
+    send(socket, request.clone(), delivery).await?;
+    allocations.insert(
+        request_id,
+        Allocation {
+            reserved_id: None,
+            frames: batch.frames,
+            body,
+            request,
+            began: Instant::now(),
+            retried: Instant::now(),
+            uploading: false,
+        },
+    );
+    Ok(())
+}
+
 async fn run(
     mut socket: RawSocket,
     namespace: String,
@@ -470,7 +527,7 @@ async fn run(
     let mut newest = BTreeMap::<Peer, u64>::new();
     let mut peer_stops = BTreeMap::<Peer, CancellationToken>::new();
     let (completed, mut completion) = mpsc::channel(128);
-    let mut tick = tokio::time::interval(FLUSH);
+    let mut tick = tokio::time::interval(Duration::from_millis(8));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
@@ -482,47 +539,12 @@ async fn run(
             }
             let flush = staged
                 .iter()
-                .filter(|(_, s)| s.since.elapsed() >= FLUSH || s.bytes >= 131072)
+                .filter(|(_, s)| s.since.elapsed() >= FLUSH)
                 .map(|(p, _)| p.clone())
                 .collect::<Vec<_>>();
             for p in flush {
                 let batch = staged.remove(&p).unwrap();
-                if batch.bytes < 131072 || batch.frames.len() < 2 {
-                    for frame in batch.frames {
-                        send(&mut socket, serde_json::to_value(frame)?, &delivery).await?;
-                    }
-                    continue;
-                }
-                let body = Arc::new(pack_ciphertext_frames(&batch.frames)?);
-                let live = allocations
-                    .values()
-                    .filter(|a| peer(&a.request).as_ref() == Some(&p))
-                    .count()
-                    + uploaded
-                        .values()
-                        .filter(|o| o.sid == p.0 && o.rid == p.1)
-                        .count();
-                if live >= 4 || abandoned.len() >= 128 {
-                    for frame in batch.frames {
-                        send(&mut socket, serde_json::to_value(frame)?, &delivery).await?;
-                    }
-                    continue;
-                }
-                let request_id = uuid::Uuid::new_v4().simple().to_string();
-                let request = json!({"a":"object","v":3,"op":"create","requestId":request_id,"sid":p.0,"rid":p.1,"seq":batch.frames[0].seq,"count":batch.frames.len(),"bytes":body.len(),"sha256":hex::encode(Sha256::digest(body.as_ref()))});
-                send(&mut socket, request.clone(), &delivery).await?;
-                allocations.insert(
-                    request_id,
-                    Allocation {
-                        reserved_id: None,
-                        frames: batch.frames,
-                        body,
-                        request,
-                        began: Instant::now(),
-                        retried: Instant::now(),
-                        uploading: false,
-                    },
-                );
+                publish_batch(&mut socket, batch, &mut allocations, &uploaded, abandoned.len(), &delivery).await?;
             }
             let expired = allocations
                 .iter()
@@ -717,9 +739,8 @@ async fn run(
                             || s.frames.len() >= 16
                             || s.bytes + size > MAX_OBJECT_BYTES
                     }) {
-                        for frame in staged.remove(&p).unwrap().frames {
-                            send(&mut socket, serde_json::to_value(frame)?, &delivery).await?;
-                        }
+                        let batch = staged.remove(&p).unwrap();
+                        publish_batch(&mut socket, batch, &mut allocations, &uploaded, abandoned.len(), &delivery).await?;
                     }
                     let batch = staged.entry(p).or_insert_with(|| Staged {
                         frames: vec![],
@@ -882,6 +903,9 @@ async fn run(
                             continue;
                         }
                     };
+                if std::env::var_os("MOLD_SECURE_TRACE_CARRIER").is_some() {
+                    eprintln!("Mold ciphertext broker elapsed_ms={} bytes={}", allocation.began.elapsed().as_millis(), allocation.body.len());
+                }
                 allocation.reserved_id = Some(reference.o.id.clone());
                 allocation.uploading = true;
                 let body = allocation.body.clone();
@@ -892,7 +916,9 @@ async fn run(
                     .context("unknown object peer")?
                     .child_token();
                 tokio::spawn(async move {
+                    let began = Instant::now();
                     let result = upload(http, url, body, headers, stop).await;
+                    if std::env::var_os("MOLD_SECURE_TRACE_CARRIER").is_some() { eprintln!("Mold ciphertext PUT elapsed_ms={} success={}", began.elapsed().as_millis(), result.is_ok()); }
                     let _ = done
                         .send(Completion::Uploaded {
                             request_id,
@@ -934,7 +960,7 @@ async fn run(
                     if reference.seq + u64::from(reference.o.count) <= next {
                         return Ok(None);
                     }
-                    if reference.seq + u64::from(reference.o.count) > next + 16 {
+                    if reference.seq + u64::from(reference.o.count) > next + WIRE_WINDOW {
                         bail!("object exceeds receive window");
                     }
                     if let Some(old) = downloads.get(&(p.clone(), reference.seq)) {
@@ -976,7 +1002,9 @@ async fn run(
                             .context("unknown object peer")?
                             .child_token();
                         tokio::spawn(async move {
+                            let began = Instant::now();
                             let result = fetch(http, url, reference.clone(), stop).await;
+                            if std::env::var_os("MOLD_SECURE_TRACE_CARRIER").is_some() { eprintln!("Mold ciphertext GET elapsed_ms={} bytes={} success={}", began.elapsed().as_millis(), reference.o.bytes, result.is_ok()); }
                             let _ = done.send(Completion::Fetched { reference, result }).await;
                         });
                     }
@@ -1069,13 +1097,14 @@ mod tests {
         let mut socket = ObjectSocket::new(raw, "11".repeat(16), false);
         socket.next().await.unwrap().unwrap();
         let mut wire = ReliableChannel::new("s".into(), "r".into());
+        let mut frames = vec![];
         for n in 0..16 {
             // HTTP reads contain small tail records; they must not split a
             // consecutive ciphertext batch into expensive inline fragments.
             wire.queue_packet(&vec![42; if n % 2 == 0 { 16320 } else { 256 }])
                 .unwrap();
+            frames.extend(wire.outgoing(0).unwrap());
         }
-        let frames = wire.outgoing(0).unwrap();
         for frame in &frames {
             socket
                 .send(Message::Text(serde_json::to_string(frame).unwrap().into()))

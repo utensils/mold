@@ -76,3 +76,37 @@ fn object_retry_deadline_starts_only_when_ciphertext_is_actually_published() {
     assert!(wire.outgoing(149_999).is_ok());
     assert!(wire.outgoing(150_001).is_err());
 }
+#[test]
+fn adjacent_ciphertext_packets_share_bounded_frames_without_changing_packet_boundaries() {
+    let mut sender = ReliableChannel::new("s".into(), "r".into());
+    let mut receiver = ReliableChannel::new("s".into(), "r".into());
+    for n in 0..16 {
+        sender.queue_packet(&vec![n; 512]).unwrap();
+    }
+    let frames = sender.outgoing(0).unwrap();
+    assert_eq!(frames.len(), 1);
+    let packets = receiver.receive(frames[0].clone(), 0).unwrap();
+    assert_eq!(packets, (0..16).map(|n| vec![n; 512]).collect::<Vec<_>>());
+}
+#[test]
+fn four_ciphertext_objects_can_be_in_flight_with_a_bounded_sixty_four_frame_window() {
+    let mut sender = ReliableChannel::new("s".into(), "r".into());
+    for _ in 0..65 {
+        sender.queue_packet(&vec![42; 16380]).unwrap();
+    }
+    assert_eq!(sender.outgoing(0).unwrap().len(), 64);
+    assert!(sender.outgoing(1).unwrap().is_empty());
+    let mut receiver = ReliableChannel::new("s".into(), "r".into());
+    let excessive = WireFrame {
+        a: "data".into(),
+        v: 3,
+        sid: "s".into(),
+        rid: "r".into(),
+        seq: Some(64),
+        d: Some("AQ==".into()),
+        next: None,
+        credit: None,
+        ack_seq: None,
+    };
+    assert!(receiver.receive(excessive, 0).is_err());
+}

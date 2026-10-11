@@ -112,7 +112,7 @@ impl Drop for Connection {
 }
 struct StreamState {
     head: Option<oneshot::Sender<Result<Headers>>>,
-    body: mpsc::Sender<Result<bytes::Bytes>>,
+    body: crate::BodySender,
     upload_credit: Arc<Semaphore>,
     receive_credit: ReceiveCredit,
     cancel: CancellationToken,
@@ -265,7 +265,7 @@ impl SecureClient {
         }
         .validate()?;
         let (headtx, headrx) = oneshot::channel();
-        let (bodytx, bodyrx) = mpsc::channel(STREAM_WINDOW as usize + 1);
+        let (bodytx, bodyrx) = crate::body_channel();
         let credit = Arc::new(Semaphore::new(STREAM_WINDOW as usize));
         let cancel = connection.cancel.child_token();
         connection

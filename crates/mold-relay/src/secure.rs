@@ -4,10 +4,7 @@ use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use futures_util::StreamExt;
 use http_body_util::{BodyExt, StreamBody};
-use hyper::{
-    body::{Bytes, Frame},
-    Request,
-};
+use hyper::{body::Frame, Request};
 use hyper_util::rt::TokioIo;
 use mold_secure::*;
 use serde::{Deserialize, Serialize};
@@ -170,7 +167,7 @@ pub async fn watch_policy(
     Ok(rx)
 }
 struct Active {
-    body: Option<mpsc::Sender<Vec<u8>>>,
+    body: Option<mold_secure_client::BodySender>,
     remaining: Option<u64>,
     uploaded: u64,
     receive_credit: ReceiveCredit,
@@ -181,6 +178,44 @@ enum Event {
     Record(Record),
     Consumed(u32, u32),
     Finished(u32),
+}
+fn apply_event(
+    event: Event,
+    streams: &mut BTreeMap<u32, Active>,
+    wire: &mut ReliableChannel,
+    session: &mut Session,
+    invitation_finished: &mut bool,
+    role: &str,
+) -> Result<()> {
+    match event {
+        Event::Consumed(id, n) => {
+            if let Some(active) = streams.get_mut(&id) {
+                if let Some(bytes) = active.receive_credit.consume(n)? {
+                    wire.queue_packet(
+                        &session.seal(
+                            &Record::Credit {
+                                stream_id: id,
+                                bytes,
+                            }
+                            .encode()?,
+                        )?,
+                    )?;
+                }
+            }
+        }
+        Event::Record(record) => {
+            wire.queue_packet(&session.seal(&record.encode()?)?)?;
+        }
+        Event::Finished(id) => {
+            if let Some(active) = streams.remove(&id) {
+                active.cancel.cancel();
+            }
+            if role == "invite" {
+                *invitation_finished = true;
+            }
+        }
+    }
+    Ok(())
 }
 /// Drivers must keep both wire queues bounded. Any loss/corruption closes this
 /// whole Noise session; an uncertain mutation is never replayed on reconnect.
@@ -218,7 +253,7 @@ async fn serve_peer_with_delivery(
     let mut wire = ReliableChannel::new(admission.sid.clone(), admission.rid.clone());
     let start = std::time::Instant::now();
     let mut tick = tokio::time::interval(Duration::from_millis(20));
-    let (events, mut incoming) = mpsc::channel::<Event>(8);
+    let (events, mut incoming) = mpsc::channel::<Event>(16);
     let mut streams: BTreeMap<u32, Active> = BTreeMap::new();
     let mut last_stream = 0;
     let mut invitation_finished = false;
@@ -247,6 +282,13 @@ async fn serve_peer_with_delivery(
     let result=async {
  loop {
   let now=start.elapsed().as_millis() as u64;
+  if session.established() {
+   for _ in 0..16 {
+    if !wire.can_queue(){break;}
+    let Ok(event)=incoming.try_recv() else {break;};
+    apply_event(event,&mut streams,&mut wire,&mut session,&mut invitation_finished,&admission.role)?;
+   }
+  }
   if let Some(delivery)=&delivery{delivery.apply(&mut wire,now);}
   for frame in wire.outgoing(now)? {tokio::select!{_ = stop.cancelled()=>return Ok(()),r=output.send(frame)=>{r.context("secure wire closed")?}}}
   if invitation_finished && wire.is_idle(){return Ok(())}
@@ -254,12 +296,7 @@ async fn serve_peer_with_delivery(
    _=stop.cancelled()=>return Ok(()),
    _=tick.tick()=>{if !session.established()&&start.elapsed()>Duration::from_secs(15){bail!("secure handshake timed out")}admission.current(&config)?;},
    r=policy.changed()=>{r.context("secure policy closed")?;admission.current(&config)?;},
-   event=incoming.recv(),if wire.can_queue()=>{match event.context("secure event queue closed")? {
-    Event::Consumed(id,n)=>{if let Some(active)=streams.get_mut(&id){if let Some(bytes)=active.receive_credit.consume(n)?{wire.queue_packet(&session.seal(&Record::Credit{stream_id:id,bytes}.encode()?)?)?;}}},
-    Event::Record(record)=>{wire.queue_packet(&session.seal(&record.encode()?)?)?;},
-    Event::Finished(id)=>{if let Some(active)=streams.remove(&id){active.cancel.cancel();}
-if admission.role=="invite"{invitation_finished=true;}},
-   }},
+   event=incoming.recv(),if wire.can_queue()=>{let event=event.context("secure event queue closed")?;apply_event(event,&mut streams,&mut wire,&mut session,&mut invitation_finished,&admission.role)?},
    frame=input.recv()=>{
     for packet in wire.receive(frame.context("secure wire closed")?,now)? {
      if !session.established(){session.handshake_read(&packet)?;if !session.established(){wire.queue_packet(&session.handshake_write()?)?;}continue}
@@ -271,13 +308,13 @@ if admission.role=="invite"{invitation_finished=true;}},
        if request.path.split('?').next()==Some("/metrics")||request.path.split('?').next() == Some("/api/pairing/secure/check"){bail!("secure private target forbidden")}
        if admission.role=="invite"&&(id!=1||request.method!="POST"||request.path!="/api/pairing/claim"){bail!("invitation permits only pairing")}
        let context=admission.context(session.handshake_hash()?,id,&config.identity,&request)?;
-       let (body,receiver)=mpsc::channel(STREAM_WINDOW as usize);let credit=Arc::new(Semaphore::new(STREAM_WINDOW as usize));let cancel=stop.child_token();
+       let (body,receiver)=mold_secure_client::body_channel();let credit=Arc::new(Semaphore::new(STREAM_WINDOW as usize));let cancel=stop.child_token();
        streams.insert(id,Active{body:Some(body),remaining:request.length,uploaded:0,receive_credit:ReceiveCredit::default(),response_credit:credit.clone(),cancel:cancel.clone()});
        let target=config.target;let events=events.clone();
        tokio::spawn(async move{let result=tokio::select!{_ = cancel.cancelled()=>Ok(()),r=forward(target,id,request,context,receiver,credit,events.clone())=>r};if result.is_err(){let _=events.send(Event::Record(Record::Cancel{stream_id:id,code:"target_failed".into()})).await;}let _=events.send(Event::Finished(id)).await;});
       },
       Record::Data{bytes,..}=>{if let Some(active)=streams.get_mut(&id){let n=bytes.len() as u32;active.receive_credit.receive(n)?;active.uploaded+=u64::from(n);if active.uploaded>MAX_UPLOAD{bail!("upload limit exceeded")}
-if let Some(remaining)=&mut active.remaining{*remaining=remaining.checked_sub(u64::from(n)).context("upload exceeds length")?;}active.body.as_ref().context("upload after end")?.try_send(bytes).context("upload pressure exceeded")?;}else if id>last_stream{bail!("unknown secure stream")}},
+if let Some(remaining)=&mut active.remaining{*remaining=remaining.checked_sub(u64::from(n)).context("upload exceeds length")?;}active.body.as_ref().context("upload after end")?.try_send(Ok(bytes.into())).context("upload pressure exceeded")?;}else if id>last_stream{bail!("unknown secure stream")}},
       Record::End{..}=>{if let Some(active)=streams.get_mut(&id){if active.remaining.is_some_and(|n|n!=0){bail!("truncated upload")}active.body.take();}else if id>last_stream{bail!("unknown secure stream")}},
       Record::Cancel{..}=>{if let Some(active)=streams.remove(&id){active.cancel.cancel();}},
       Record::Credit{bytes,..}=>{if let Some(active)=streams.get(&id){if active.response_credit.available_permits()+bytes as usize>STREAM_WINDOW as usize{bail!("response credit exceeded")}active.response_credit.add_permits(bytes as usize);}},
@@ -327,7 +364,7 @@ async fn forward(
     id: u32,
     open: Open,
     context: RequestContext,
-    body: mpsc::Receiver<Vec<u8>>,
+    body: mold_secure_client::BodyReceiver,
     credit: Arc<Semaphore>,
     events: mpsc::Sender<Event>,
 ) -> Result<()> {
@@ -340,13 +377,16 @@ async fn forward(
     let stream = futures_util::stream::unfold(
         (body, eventbody),
         move |(mut receiver, events)| async move {
-            let data = receiver.recv().await?;
+            let data = match receiver.recv().await? {
+                Ok(bytes) => bytes,
+                Err(error) => return Some((Err(std::io::Error::other(error)), (receiver, events))),
+            };
             let n = data.len() as u32;
             if events.send(Event::Consumed(id, n)).await.is_err() {
                 return None;
             }
             Some((
-                Ok::<_, std::io::Error>(Frame::data(Bytes::from(data))),
+                Ok::<_, std::io::Error>(Frame::data(data)),
                 (receiver, events),
             ))
         },
@@ -557,8 +597,8 @@ async fn lan_session(mut socket: axum::extract::ws::WebSocket, config: HostConfi
     ] {
         socket.send(Message::Text(frame.to_string())).await?;
     }
-    let (input, rx) = mpsc::channel(32);
-    let (tx, mut output) = mpsc::channel(32);
+    let (input, rx) = mpsc::channel((WIRE_WINDOW * 2) as usize);
+    let (tx, mut output) = mpsc::channel((WIRE_WINDOW * 2) as usize);
     let stop = CancellationToken::new();
     let _cancel_on_drop = stop.clone().drop_guard();
     let peerstop = stop.clone();
@@ -753,7 +793,7 @@ async fn cloud_session(
       let admission:PeerAdmission=serde_json::from_value(value.clone())?;if admission.sid!=sid||peers.contains_key(&admission.rid)||peers.len()>=32{bail!("invalid secure peer admission")}let rid=admission.rid.clone();
       if admission.validate(&config).is_err(){socket.send(Message::Text(serde_json::json!({"a":"cancel","v":3,"sid":sid,"rid":rid}).to_string().into())).await?;continue}
       socket.send(Message::Text(serde_json::json!({"a":"accept","v":3,"sid":sid,"rid":rid}).to_string().into())).await?;
-      let (input,rx)=mpsc::channel(32);let (frames,mut wire)=mpsc::channel(32);let cancel=stop.child_token();peers.insert(rid.clone(),(input,cancel.clone()));let outgoing=tx.clone();let peerconfig=config.clone();let sid=sid.clone();let delivery=delivery.clone();
+      let (input,rx)=mpsc::channel((WIRE_WINDOW * 2) as usize);let (frames,mut wire)=mpsc::channel((WIRE_WINDOW * 2) as usize);let cancel=stop.child_token();peers.insert(rid.clone(),(input,cancel.clone()));let outgoing=tx.clone();let peerconfig=config.clone();let sid=sid.clone();let delivery=delivery.clone();
       tokio::spawn(async move{let mut task=tokio::spawn(serve_peer_with_delivery(peerconfig,admission,rx,frames,cancel.clone(),Some(delivery)));loop{tokio::select!{_=cancel.cancelled()=>break,result=&mut task=>{if let Ok(Err(error))=result{eprintln!("Mold secure peer closed ({})",safe_relay_error_category(&error));}break},frame=wire.recv()=>{let Some(frame)=frame else{break};if outgoing.send(serde_json::to_value(frame).unwrap_or_default()).await.is_err(){break}}}}cancel.cancel();task.abort();let _=outgoing.send(serde_json::json!({"a":"cancel","v":3,"sid":sid,"rid":rid})).await;});
 
      },

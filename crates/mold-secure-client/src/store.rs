@@ -100,6 +100,35 @@ pub fn forget_ephemeral(owner: &str, origin: Option<&str>) {
         crate::forget_connection(&origin);
     }
 }
+/// Remove every historical route for one pinned host, including aliases no
+/// longer present in a WebView's current route list.
+pub fn forget_ephemeral_namespace(owner: &str, namespace: &str) {
+    let mut store = ephemeral();
+    let removed: Vec<String> = store
+        .iter()
+        .filter(|((o, _), h)| o == owner && h.namespace == namespace)
+        .map(|((_, origin), _)| origin.clone())
+        .collect();
+    store.retain(|(o, _), h| o != owner || h.namespace != namespace);
+    drop(store);
+    for origin in removed {
+        crate::forget_connection(&origin);
+    }
+}
+/// A media request may use imported authority but cannot import it itself.
+pub fn has_ephemeral_authority(owner: &str, host: &PairedHost) -> bool {
+    ephemeral()
+        .get(&(owner.to_owned(), host.origin.clone()))
+        .is_some_and(|saved| {
+            saved.namespace == host.namespace
+                && saved.host_key == host.host_key
+                && saved.host_noise_key == host.host_noise_key
+                && saved.device_identity == host.device_identity
+                && saved.api_key == host.api_key
+                && saved.grant.signature == host.grant.signature
+        })
+}
+
 fn ephemeral_pairing(origin: &str) -> Option<PairedHost> {
     ephemeral()
         .iter()
@@ -134,4 +163,42 @@ pub fn write_invitation(path: &Path, value: &serde_json::Value) -> Result<()> {
     let bytes = zeroize::Zeroizing::new(serde_json::to_vec(value)?);
     mold_secure::identity_file::write_private_file(path, &bytes, false)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn namespace_forget_removes_old_aliases_without_removing_other_hosts_or_owners() {
+        let owner = uuid::Uuid::new_v4().to_string();
+        let other_owner = uuid::Uuid::new_v4().to_string();
+        let prefix = uuid::Uuid::new_v4().simple().to_string();
+        let prepared = crate::prepare_bootstrap("Native registry test", "desktop").unwrap();
+        let first = prepared
+            .profile(&format!("https://first-{prefix}.invalid"))
+            .unwrap();
+        let second = prepared
+            .profile(&format!("https://second-{prefix}.invalid"))
+            .unwrap();
+        let unrelated = crate::prepare_bootstrap("Other", "desktop")
+            .unwrap()
+            .profile(&format!("https://other-{prefix}.invalid"))
+            .unwrap();
+        register_ephemeral(&owner, first.clone()).unwrap();
+        register_ephemeral(&owner, second.clone()).unwrap();
+        register_ephemeral(&owner, unrelated.clone()).unwrap();
+        register_ephemeral(&other_owner, first.clone()).unwrap();
+        assert!(has_ephemeral_authority(&owner, &first));
+        forget_ephemeral_namespace(&owner, &first.namespace);
+        assert!(!has_ephemeral_authority(&owner, &first));
+        assert!(has_ephemeral_authority(&other_owner, &first));
+        let entries = ephemeral();
+        assert!(!entries.contains_key(&(owner.clone(), first.origin.clone())));
+        assert!(!entries.contains_key(&(owner.clone(), second.origin.clone())));
+        assert!(entries.contains_key(&(owner.clone(), unrelated.origin.clone())));
+        assert!(entries.contains_key(&(other_owner.clone(), first.origin.clone())));
+        drop(entries);
+        forget_ephemeral(&owner, None);
+        forget_ephemeral(&other_owner, None);
+    }
 }
