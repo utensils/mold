@@ -29,6 +29,8 @@ for package in ("mold-web", "mold-desktop-web"):
     fixture = "relay/aws/test/fixtures/admission-v3.json"
     if fixture not in paths:
         sys.exit(f"FAIL: Nix {package} must include {fixture} for frontend type checking")
+    if package == "mold-desktop-web" and "docs/generated/generation-profiles-v1.json" not in paths:
+        sys.exit("FAIL: Nix mold-desktop-web must include the canonical generation profiles fixture")
     for workspace in json.loads((root / "package.json").read_text())["workspaces"]:
         if workspace not in paths and f"{workspace}/package.json" not in paths:
             sys.exit(f"FAIL: Nix {package} must include {workspace}/package.json before bun install")

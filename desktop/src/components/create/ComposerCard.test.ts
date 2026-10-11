@@ -539,10 +539,10 @@ describe("spacious prompt editing", () => {
       }),
     );
     expect(wrapper.emitted("generate")).toBeUndefined();
-    expect(wrapper.vm.isEditingPrompt()).toBe(true);
+    expect(wrapper.vm.isEditingPrompt?.()).toBe(true);
     (document.querySelector('[data-test="prompt-done"]') as HTMLButtonElement).click();
     await wrapper.vm.$nextTick();
-    expect(wrapper.vm.isEditingPrompt()).toBe(false);
+    expect(wrapper.vm.isEditingPrompt?.()).toBe(false);
     expect(form.prompt).toBe("large\nmultiline draft");
     wrapper.unmount();
   });

@@ -689,6 +689,7 @@
                 ./desktop
                 ./web/package.json
                 ./docs/contracts
+                ./docs/generated/generation-profiles-v1.json
                 ./studio
                 ./ui
               ];
