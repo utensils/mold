@@ -55,9 +55,10 @@ struct QueueSourceLayoutTests {
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=")
         let hosts = HostStore(hosts: [host]) { _ in backend }
         hosts.reachability[host.id] = .up(FakeFixtures.serverStatus())
+        let queue = QueueStore(hosts: hosts)
         let row = QueueRow(entry: FakeFixtures.queueEntry("source", state: "queued", model: "MiniMax H3 FL2VA"),
             actions: QueueRowActions(), caption: "First caption line\nSecond caption line", sourceHost: host, act: { _ in })
-            .environment(hosts).frame(width: 600)
+            .environment(hosts).environment(queue).frame(width: 600)
         let view = NSHostingView(rootView: row)
         let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 600, height: 200),
                               styleMask: [.borderless], backing: .buffered, defer: false)
@@ -92,6 +93,7 @@ struct QueueSourceLayoutTests {
         }
         let hosts = HostStore(hosts: [host]) { _ in backend }
         hosts.reachability[host.id] = .up(FakeFixtures.serverStatus())
+        let queue = QueueStore(hosts: hosts)
         let content = List(selection: Binding<String?>.constant(nil)) {
             Section(host.name) {
                 ForEach(0..<2) { index in
@@ -102,7 +104,7 @@ struct QueueSourceLayoutTests {
                 }
                 .onMove { _, _ in }
             }
-        }.listStyle(.inset).environment(hosts).preferredColorScheme(.dark)
+        }.listStyle(.inset).environment(hosts).environment(queue).preferredColorScheme(.dark)
         let view = NSHostingView(rootView: content)
         let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 600, height: 300),
                               styleMask: [.borderless], backing: .buffered, defer: false)

@@ -18,6 +18,8 @@ struct QueueSourceThumbnail: View {
     @State private var retry = 0
     @State private var failed = false
 
+    private enum Action: Hashable { case viewInputs }
+
     private struct RequestIdentity: Equatable {
         let host: MoldHost
         let instance: String
@@ -80,9 +82,8 @@ struct QueueSourceThumbnail: View {
                 .accessibilityHidden(compactCount == 0)
             }
         }
-        .contextMenu {
-            if compactCount > 0 { Button("View inputs") { showingInputs = true } }
-        }
+        .rowActionMenu(compactCount > 0 ? [RowAction(kind: Action.viewInputs, title: "View inputs")] : [],
+                       perform: { _ in showingInputs = true })
         .onTapGesture { if !detailed, compactCount > 0 { showingInputs = true } }
         .sheet(isPresented: $showingInputs) {
             NavigationStack {
