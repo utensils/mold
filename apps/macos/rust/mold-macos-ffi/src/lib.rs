@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 mod relay;
+mod relay_lifetime;
 pub use relay::{
     mold_relay_is_alive, mold_relay_is_ready, mold_secure_host_namespace, mold_relay_set_public_origin, mold_relay_start, mold_relay_stop,
 };

@@ -1,5 +1,7 @@
 //! Cancellable managed outbound connector, independent of the engine runtime.
-use super::{connection_addresses, guarded, str_arg, ALIVE, ENGINE_PORT};
+use super::{
+    connection_addresses, guarded, relay_lifetime::EngineLifetime, str_arg, ALIVE, ENGINE_PORT,
+};
 use std::ffi::c_char;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -8,6 +10,7 @@ use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 struct Connector {
+    generation: u64,
     cancel: CancellationToken,
     thread: std::thread::JoinHandle<()>,
     origin: String,
@@ -17,6 +20,10 @@ struct Connector {
 static CONNECTOR: Mutex<Option<Connector>> = Mutex::new(None);
 // Serialize publication with terminal withdrawal without holding the join mutex.
 static PUBLICATION: Mutex<()> = Mutex::new(());
+static ENGINE_LIFETIME: EngineLifetime = EngineLifetime::new();
+fn engine_matches(generation: u64) -> bool {
+    ENGINE_LIFETIME.matches(generation, ALIVE.load(Ordering::SeqCst))
+}
 
 fn validate_endpoint(endpoint: &str) -> anyhow::Result<()> {
     mold_relay::aws::validate_aws_endpoint(endpoint, false)?;
@@ -67,6 +74,7 @@ pub unsafe extern "C" fn mold_relay_start(
         let Some(origin) = (unsafe { str_arg(public_origin) }) else {
             return 1;
         };
+        let generation = ENGINE_LIFETIME.snapshot();
         if local_port == 0
             || !ALIVE.load(Ordering::SeqCst)
             || ENGINE_PORT.load(Ordering::SeqCst) != local_port
@@ -79,14 +87,25 @@ pub unsafe extern "C" fn mold_relay_start(
         if validate_endpoint(endpoint).is_err() {
             return 1;
         }
-        let Some(root) = mold_core::Config::mold_dir() else { return 1; };
-        let Ok(identity) = mold_relay::read_identity(&root.join("secure/host.identity")) else { return 1; };
-        if mold_secure::namespace(&identity.signing_public()) != host_id { return 1; }
+        let Some(root) = mold_core::Config::mold_dir() else {
+            return 1;
+        };
+        let Ok(identity) = mold_relay::read_identity(&root.join("secure/host.identity")) else {
+            return 1;
+        };
+        if mold_secure::namespace(&identity.signing_public()) != host_id {
+            return 1;
+        }
         let identity = Arc::new(identity);
-        let Some(policy) = connection_addresses().watch_secure_policy() else { return 1; };
+        let Some(policy) = connection_addresses().watch_secure_policy() else {
+            return 1;
+        };
         let Ok(mut slot) = CONNECTOR.lock() else {
             return 1;
         };
+        if !engine_matches(generation) || ENGINE_PORT.load(Ordering::SeqCst) != local_port {
+            return 1;
+        }
         if slot
             .as_ref()
             .is_some_and(|connector| !connector.thread.is_finished())
@@ -119,8 +138,15 @@ pub unsafe extern "C" fn mold_relay_start(
                         let target = ([127, 0, 0, 1], local_port).into();
                         let (status, mut receiver) = tokio::sync::watch::channel(false);
                         let connector = mold_relay::secure::connect_with_status(
-                            &endpoint, mold_relay::secure::HostConfig { identity, target, policy },
-                            thread_cancel.clone(), false, status,
+                            &endpoint,
+                            mold_relay::secure::HostConfig {
+                                identity,
+                                target,
+                                policy,
+                            },
+                            thread_cancel.clone(),
+                            false,
+                            status,
                         );
                         tokio::pin!(connector);
                         let mut watch = tokio::time::interval(Duration::from_millis(250));
@@ -132,7 +158,7 @@ pub unsafe extern "C" fn mold_relay_start(
                                     if changed.is_err() { break; }
                                     thread_ready.store(*receiver.borrow(), Ordering::SeqCst);
                                 },
-                                _ = watch.tick() => if !ALIVE.load(Ordering::SeqCst) { break }
+                                _ = watch.tick() => if !engine_matches(generation) { break }
                             }
                         }
                     });
@@ -147,13 +173,31 @@ pub unsafe extern "C" fn mold_relay_start(
             return 1;
         };
         *slot = Some(Connector {
+            generation,
             cancel,
             thread,
             origin,
             alive,
             ready,
         });
-        if connection_addresses().set_secure_websocket_url(Some(&published_endpoint)).is_err() { return 1; }
+        let _publication = PUBLICATION.lock().unwrap_or_else(|p| p.into_inner());
+        // Engine exit invalidates without waiting for CONNECTOR. A start that
+        // raced exit must cancel before it can republish addresses or LAN access.
+        if !engine_matches(generation) || ENGINE_PORT.load(Ordering::SeqCst) != local_port {
+            if let Some(connector) = slot.as_ref() {
+                connector.cancel.cancel();
+            }
+            return 1;
+        }
+        if connection_addresses()
+            .set_secure_websocket_url(Some(&published_endpoint))
+            .is_err()
+        {
+            if let Some(connector) = slot.as_ref() {
+                connector.cancel.cancel();
+            }
+            return 1;
+        }
         connection_addresses().set_local_network_enabled(true);
         0
     })
@@ -165,7 +209,8 @@ pub extern "C" fn mold_relay_is_alive() -> bool {
         ALIVE.load(Ordering::SeqCst)
             && CONNECTOR.lock().is_ok_and(|slot| {
                 slot.as_ref().is_some_and(|connector| {
-                    connector.alive.load(Ordering::SeqCst)
+                    engine_matches(connector.generation)
+                        && connector.alive.load(Ordering::SeqCst)
                         && !connector.cancel.is_cancelled()
                         && !connector.thread.is_finished()
                 })
@@ -175,9 +220,11 @@ pub extern "C" fn mold_relay_is_alive() -> bool {
 
 #[no_mangle]
 pub extern "C" fn mold_relay_is_ready() -> bool {
-    mold_relay_is_alive() && CONNECTOR.lock().is_ok_and(|slot| {
-        slot.as_ref().is_some_and(|connector| connector.ready.load(Ordering::SeqCst))
-    })
+    mold_relay_is_alive()
+        && CONNECTOR.lock().is_ok_and(|slot| {
+            slot.as_ref()
+                .is_some_and(|connector| connector.ready.load(Ordering::SeqCst))
+        })
 }
 
 /// Copies the public self-certifying namespace, without exposing identity secrets.
@@ -186,11 +233,19 @@ pub extern "C" fn mold_relay_is_ready() -> bool {
 #[no_mangle]
 pub unsafe extern "C" fn mold_secure_host_namespace(output: *mut u8, capacity: usize) -> i32 {
     guarded("secure_host_namespace", 1, || {
-        if output.is_null() || capacity < 32 || !ALIVE.load(Ordering::SeqCst) { return 1; }
-        let Some(root) = mold_core::Config::mold_dir() else { return 1; };
-        let Ok(identity) = mold_relay::read_identity(&root.join("secure/host.identity")) else { return 1; };
+        if output.is_null() || capacity < 32 || !ALIVE.load(Ordering::SeqCst) {
+            return 1;
+        }
+        let Some(root) = mold_core::Config::mold_dir() else {
+            return 1;
+        };
+        let Ok(identity) = mold_relay::read_identity(&root.join("secure/host.identity")) else {
+            return 1;
+        };
         let namespace = mold_secure::namespace(&identity.signing_public());
-        unsafe { std::ptr::copy_nonoverlapping(namespace.as_ptr(), output, 32); }
+        unsafe {
+            std::ptr::copy_nonoverlapping(namespace.as_ptr(), output, 32);
+        }
         0
     })
 }
@@ -230,7 +285,9 @@ fn stop_connector(slot: &mut Option<Connector>, budget: Duration) -> i32 {
 }
 
 pub(super) fn cancel_for_engine_exit() {
-    connection_addresses().set_local_network_enabled(false);
+    // Monotonic withdrawal cannot be missed when ALIVE becomes true again on
+    // a rapid restart, even if another thread currently owns CONNECTOR.
+    ENGINE_LIFETIME.invalidate();
     // Engine exit must never wait behind native stop's join budget.
     if let Ok(slot) = CONNECTOR.try_lock() {
         if let Some(connector) = slot.as_ref() {
@@ -238,6 +295,8 @@ pub(super) fn cancel_for_engine_exit() {
         }
     }
     let _publication = PUBLICATION.lock().unwrap_or_else(|p| p.into_inner());
+    connection_addresses().set_local_network_enabled(false);
+    let _ = connection_addresses().set_secure_websocket_url(None);
     let _ = connection_addresses().set_managed_relay_origin(None);
 }
 
@@ -265,7 +324,7 @@ pub unsafe extern "C" fn mold_relay_set_public_origin(origin: *const c_char) -> 
             return 1;
         };
         let _publication = PUBLICATION.lock().unwrap_or_else(|p| p.into_inner());
-        if !ALIVE.load(Ordering::SeqCst)
+        if !engine_matches(connector.generation)
             || !connector.alive.load(Ordering::SeqCst)
             || connector.cancel.is_cancelled()
             || connector.thread.is_finished()
@@ -297,6 +356,7 @@ mod tests {
             let _ = wait.recv();
         });
         let mut slot = Some(Connector {
+            generation: 0,
             cancel: cancel.clone(),
             thread,
             origin: "https://example.com".into(),
@@ -313,6 +373,7 @@ mod tests {
         assert_eq!(stop_connector(&mut slot, Duration::from_secs(1)), 0);
         assert!(slot.is_none());
         slot = Some(Connector {
+            generation: 0,
             cancel: CancellationToken::new(),
             thread: std::thread::spawn(|| {}),
             origin: "https://example.com".into(),
