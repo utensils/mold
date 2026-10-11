@@ -35,7 +35,7 @@ use windows_sys::Win32::{
         CreateDirectoryW, CreateFileW, GetFileInformationByHandle, MoveFileExW,
         BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY,
         FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, OPEN_EXISTING, READ_CONTROL,
     },
     System::Threading::{GetCurrentProcess, OpenProcessToken},
@@ -181,6 +181,12 @@ pub(super) fn create_file(path: &Path) -> io::Result<File> {
 }
 pub(super) fn open(path: &Path, directory: bool) -> io::Result<File> {
     let rights = READ_CONTROL | FILE_READ_ATTRIBUTES | if directory { 0 } else { GENERIC_READ };
+    // MoveFileEx makes a renamed file visible before closing its DELETE handle.
+    // Sharing delete permits that committed read and atomic state replacement;
+    // it grants no ACL access and still refuses in-place writers. Keep the
+    // containing directory pinned against rename while validating/reading.
+    // https://devblogs.microsoft.com/oldnewthing/20211022-00/?p=105822
+    let sharing = FILE_SHARE_READ | if directory { 0 } else { FILE_SHARE_DELETE };
     let flags = FILE_FLAG_OPEN_REPARSE_POINT
         | if directory {
             FILE_FLAG_BACKUP_SEMANTICS
@@ -191,7 +197,7 @@ pub(super) fn open(path: &Path, directory: bool) -> io::Result<File> {
         CreateFileW(
             wide(path).as_ptr(),
             rights,
-            FILE_SHARE_READ,
+            sharing,
             null(),
             OPEN_EXISTING,
             flags,
@@ -290,4 +296,67 @@ pub(super) fn weaken_for_test(path: &Path) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity_file::{read_private_file, write_private_file};
+    use std::io::Read;
+    use windows_sys::Win32::Storage::FileSystem::{DELETE, FILE_SHARE_WRITE};
+
+    #[test]
+    fn reader_accepts_visible_file_before_atomic_rename_handle_closes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("private/state");
+        write_private_file(&path, b"committed", false).unwrap();
+        // MoveFileEx exposes the destination name before closing its DELETE
+        // handle. Hold that state deterministically instead of racing threads.
+        let handle = unsafe {
+            CreateFileW(
+                wide(&path).as_ptr(),
+                DELETE,
+                FILE_SHARE_READ | FILE_SHARE_DELETE,
+                null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                null_mut(),
+            )
+        };
+        assert_ne!(handle, INVALID_HANDLE_VALUE);
+        let _rename = Handle(handle);
+        assert_eq!(&*read_private_file(&path, 32).unwrap(), b"committed");
+    }
+
+    #[test]
+    fn active_validated_reader_allows_atomic_replace_but_not_in_place_write() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("private/state");
+        write_private_file(&path, b"original", false).unwrap();
+        let mut reader = open(&path, false).unwrap();
+        validate(&reader, false).unwrap();
+        // The read handle still denies in-place modification of its validated
+        // bytes, even though replacement can install another protected file.
+        let writer = unsafe {
+            CreateFileW(
+                wide(&path).as_ptr(),
+                GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                null_mut(),
+            )
+        };
+        if writer != INVALID_HANDLE_VALUE {
+            drop(Handle(writer));
+            panic!("validated reader must refuse in-place writes");
+        }
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(32));
+        write_private_file(&path, b"replacement", true).unwrap();
+        let mut previous = Vec::new();
+        reader.read_to_end(&mut previous).unwrap();
+        assert_eq!(previous, b"original");
+        assert_eq!(&*read_private_file(&path, 32).unwrap(), b"replacement");
+    }
 }

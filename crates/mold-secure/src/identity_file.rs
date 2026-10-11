@@ -310,12 +310,23 @@ mod tests {
     }
     #[test]
     fn concurrent_creation_has_one_pin_and_corruption_never_rekeys() {
+        let rounds = if cfg!(windows) { 16 } else { 1 };
+        for _ in 0..rounds {
+            assert_concurrent_creation_has_one_pin();
+        }
+    }
+    fn assert_concurrent_creation_has_one_pin() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().to_path_buf();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
         let handles = (0..8)
             .map(|_| {
                 let home = home.clone();
-                std::thread::spawn(move || load_or_create_host_identity(&home).unwrap().binding())
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    load_or_create_host_identity(&home).unwrap().binding()
+                })
             })
             .collect::<Vec<_>>();
         let pins = handles
