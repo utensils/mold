@@ -36,6 +36,15 @@ export function useRetainedSourceRestore(options: {
         pending.value = false;
         return;
       }
+      // Nothing retained is not a refusal: the Library door restores an
+      // unpinned print from the local stash and the gallery by name and names
+      // what it cannot find. Blocking here kept Generate disabled after that
+      // fallback had already filled the well.
+      if (intent.inventory.availability !== "available") {
+        error.value = null;
+        pending.value = false;
+        return;
+      }
       if (!loaded) {
         pending.value = true;
         return;

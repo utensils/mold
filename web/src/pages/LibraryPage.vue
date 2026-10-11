@@ -152,11 +152,13 @@ import {
 } from "@studio/lib/galleryPrintIdentity";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import { restoreGenerationSourceMedia } from "@studio/lib/generationSourceMedia";
+import { restoreIdentityPhoto } from "@studio/lib/identityConditioning";
 import {
   retainedSourceMediaDisclosable,
   retainedSourceMediaDisclosure,
   retainedSourceMediaInventory,
   type RetainedSourceMediaAvailability,
+  type RetainedSourceMediaInventory,
 } from "@studio/api/gallerySourceMedia";
 import {
   beginRetainedSourceReuseIntent,
@@ -2102,9 +2104,23 @@ async function restoreLibrarySource(
   };
   const resolvedRetainedInventory = await retainedRead;
   acceptRetainedInventory(resolvedRetainedInventory);
-  // Create owns visible restoration on the destination page; avoid racing
-  // its archive read with an older local-source-only fallback.
-  if (resolvedRetainedInventory?.availability === "available") return;
+  void restoreLibraryIdentity(
+    item,
+    epoch,
+    retainedVersion,
+    resolvedRetainedInventory,
+  );
+  // Create owns visible restoration of what the archive retained; avoid
+  // racing its read with the local-source fallback. An archive that kept
+  // other roles but not the source still falls back for the source.
+  if (
+    resolvedRetainedInventory?.availability === "available" &&
+    resolvedRetainedInventory.members.some(
+      (member) =>
+        member.role === "source_image" || member.role === "stage_source:0",
+    )
+  )
+    return;
   const sha256 = item.metadata.source_image_sha256;
   const stored = await restoreGenerationSourceMedia(sha256).catch(() => null);
   if (stored && stillOwnsEmptySource()) {
@@ -2119,10 +2135,12 @@ async function restoreLibrarySource(
       },
     ];
     await restoreCanvas(stored.base64);
+    // The source is back, so "did not retain … Reattach it" would contradict
+    // the filled well; only a missing key is still worth saying.
     void retainedRead.then((inventory) => {
       acceptRetainedInventory(inventory);
       const disclosure =
-        inventory && disclosable
+        inventory?.availability === "unavailable_auth" && disclosable
           ? retainedSourceMediaDisclosure(inventory.availability)
           : null;
       if (disclosure) toast("error", disclosure);
@@ -2171,6 +2189,51 @@ async function restoreLibrarySource(
       retainedSourceMediaDisclosure(retainedUnavailable)) ||
       "The original source image is unavailable. Reattach it before generating.",
   );
+}
+
+/** The face behind a reused identity print, from this browser's stash, when
+ * the archive did not retain it. Create renders the bytes-less descriptor as
+ * unavailable on a miss, so a miss stays quiet here. */
+async function restoreLibraryIdentity(
+  item: GalleryImage,
+  epoch: number,
+  retainedVersion: number,
+  inventory: RetainedSourceMediaInventory | null,
+): Promise<void> {
+  if (
+    inventory?.availability === "available" &&
+    inventory.members.some(
+      (member) =>
+        member.role === "identity_image" || member.role === "identity_images",
+    )
+  )
+    return;
+  const wanted = form.state.value.identityImage;
+  if (!wanted || wanted.base64) return;
+  const restored = await restoreIdentityPhoto(
+    item.metadata.id_image_sha256,
+  ).catch(() => null);
+  const slot = form.state.value.identityImage;
+  if (
+    !restored ||
+    epoch !== reuseEpoch ||
+    !retainedSourceReuseIsCurrent(retainedVersion) ||
+    !slot ||
+    slot.base64 ||
+    slot.filename !== wanted.filename
+  )
+    return;
+  form.state.value = {
+    ...form.state.value,
+    identityImage: {
+      kind: "upload",
+      filename: restored.filename || slot.filename,
+      base64: restored.base64,
+      width: restored.width ?? null,
+      height: restored.height ?? null,
+      mime: restored.mime ?? null,
+    },
+  };
 }
 
 async function onReuse(item: GalleryImage) {

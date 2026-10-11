@@ -86,3 +86,38 @@ it("clears the pending state when the user abandons a retained restore", async (
   expect(restore.pending.value).toBe(false);
   scope.stop();
 });
+
+it("leaves an unretained print to the Library's stash and gallery fallback", async () => {
+  // A print made before durable retention resolves `unavailable_legacy`. The
+  // Library door restores its source from the local stash or the gallery by
+  // name and names what it cannot find; a blocking error here kept Generate
+  // disabled even after that fallback had filled the well.
+  setRetainedSourceReuseIntent({
+    filename: "old.png",
+    origin: { baseUrl: "http://host", apiKey: null },
+    inventory: { availability: "unavailable_legacy", members: [] },
+    metadata: { source_image_sha256: "a".repeat(64) },
+  });
+  const onError = vi.fn();
+  const scope = effectScope();
+  const restore = scope.run(() =>
+    useRetainedSourceRestore({
+      loaded: ref(true),
+      read: () => ({}),
+      layout: () => ({
+        web: true,
+        boundary: false,
+        sourceMode: "single",
+        h3: false,
+      }),
+      apply: vi.fn(),
+      onError,
+    }),
+  )!;
+  await nextTick();
+  expect(restoreRetainedDraftMedia).not.toHaveBeenCalled();
+  expect(restore.pending.value).toBe(false);
+  expect(restore.error.value).toBeNull();
+  expect(onError).not.toHaveBeenCalled();
+  scope.stop();
+});

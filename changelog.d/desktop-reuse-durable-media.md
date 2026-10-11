@@ -5,3 +5,9 @@
   local stash and gallery-by-name restore. Retained authority is now the first
   answer and that fallback the second, matching the phone app, and Library no
   longer toasts "Reattach it" for a source Create is about to restore.
+- **Web Reuse settings no longer blocks on an unretained print.** An
+  `unavailable` inventory became a blocking "Reattach it before developing"
+  error on Create even after the Library had restored the source from the
+  local stash or gallery; it now defers to that fallback, which also runs for
+  an archive that retained other roles but not the source, and the identity
+  photo is looked back up in the stash as Create's own reuse path already did.
