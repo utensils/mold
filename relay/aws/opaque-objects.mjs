@@ -197,16 +197,27 @@ export function createObjectBroker({
       ...grants,
       expiresAt: member.expiresAt,
     });
-    let saved;
+    let saved,
+      first = false;
     await mutate(c, (old) => {
       const m = old.members[member.id];
       if (!m || m.deleting) return;
+      first = !m.reply;
       saved = m.reply ?? reply;
       return {
         ...old,
         members: { ...old.members, [member.id]: { ...m, reply: saved } },
       };
     });
+    if (first && saved)
+      console.info(
+        "Mold secure relay object allocated",
+        c.namespace,
+        member.id,
+        c.direction,
+        member.bytes,
+        member.count,
+      );
     return saved ?? error(f, "expired");
   }
   async function forward(c, frame) {
@@ -257,6 +268,14 @@ export function createObjectBroker({
             }
           : undefined;
       });
+      console.info(
+        "Mold secure relay object verified",
+        c.namespace,
+        m.id,
+        c.direction,
+        m.bytes,
+        m.count,
+      );
     }
     return { frame: f };
   }
