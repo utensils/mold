@@ -43,12 +43,14 @@ the short-lived invitation privately and run
 `mold pair --invite-file /private/invitation.json` on your client. Then:
 
 ```bash
-mold runpod connect <pod-id> --check
+eval "$(mold runpod connect <pod-id> --check)"
 mold runpod run "a cinematic low-angle of a tiny steel robot"
 ```
 
-`runpod run` requires an existing paired tracked pod before it starts paid
-provisioning. It streams generation and media through the encrypted client;
+`runpod run` requires an existing paired pod selected by `MOLD_HOST` or the
+tracked pod. It checks that exact running pod and refuses GPU, datacenter or
+volume mismatches before creating or deleting any resource. Use explicit
+`create`, then pair and connect, when you want a different host. It streams generation and media through the encrypted client;
 `connect --check` verifies application readiness through that same connection.
 Changing the host creates a new trust decision and requires a new invitation.
 A running pod is not deleted just because it refuses an old plaintext proxy
@@ -63,9 +65,9 @@ the old proxy cannot be silently migrated into a secure host identity.
 
 ```bash
 mold runpod run "a cat" --model flux-dev:q4        # preload a specific model
-mold runpod run "a cat" --gpu 5090                 # force a GPU family
-mold runpod run "a cat" --dc US-IL-1               # pin a datacenter
-mold runpod run "a cat" --network-volume <id>       # persistent /workspace
+mold runpod run "a cat" --gpu 5090                 # require the paired GPU family
+mold runpod run "a cat" --dc US-IL-1               # require the paired datacenter
+mold runpod run "a cat" --network-volume <id>       # require the paired volume
 mold runpod run "a cat" --keep                     # keep the pod running (skips auto-teardown / idle reap)
 mold runpod run "a cat" --steps 28 --seed 42       # forward standard gen flags
 mold runpod run "a cat" --output-dir ./renders     # custom save path
@@ -219,11 +221,10 @@ Both paths use the same API key (`Authorization: Bearer …`).
 
 ## Troubleshooting
 
-**"pod didn't schedule within 90s"**: the datacenter likely has no real
-capacity despite a High/Medium stock signal. `mold runpod run` will
-automatically try the next candidate. If all fail, RunPod is out of
-capacity for that GPU family right now. Retry later, pick a different
-GPU, or fall back to a local GPU host.
+**Pod is not ready or does not match the requested GPU**: `runpod run` refuses
+that host without replacing it or creating another paid pod. Inspect the
+provider console, explicitly create a suitable replacement if needed, then
+pair and connect it before generation.
 
 **"value must be one of …" from `/pods`**: you pinned a datacenter that
 isn't in RunPod's REST enum whitelist. GraphQL exposes datacenters that
@@ -238,6 +239,6 @@ REST API. `mold runpod logs <pod-id>` validates the Pod, prints its state and
 the console URL, then tells you to open that Pod's **Logs** panel. `--follow`
 is retained for compatibility but cannot stream console-only logs.
 
-**Orphaned pods after Ctrl-C**: `mold runpod run` persists `last_pod_id`
-**before** waiting for readiness, so `mold runpod list` always surfaces
-zombie pods. Delete with `mold runpod delete <id>`.
+**Resources after Ctrl-C**: `mold runpod run` uses an already paired pod;
+explicitly created pods remain visible in `mold runpod list`. Delete a pod you
+no longer need with `mold runpod delete <id>`.

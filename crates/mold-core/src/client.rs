@@ -168,9 +168,14 @@ impl MoldClient {
         }
     }
 
-    /// Whether this client actually installed a non-empty API-key header.
+    /// Whether dispatch has an explicit key or a valid paired device credential.
+    /// Paired credentials are inserted only inside the encrypted request.
     pub fn has_api_key(&self) -> bool {
         self.api_key_configured
+            || mold_secure_client::load_pairing(&self.base_url).is_ok_and(|host| {
+                !host.api_key.is_empty()
+                    && reqwest::header::HeaderValue::from_str(&host.api_key).is_ok()
+            })
     }
 
     /// Create a request-bound MiniMax H3 reference upload session.
@@ -3914,6 +3919,53 @@ mod tests {
             !MoldClient::with_api_key("http://localhost:7680", "bad\nkey".to_string())
                 .has_api_key()
         );
+    }
+
+    #[test]
+    fn paired_client_exposes_authenticated_upload_capability_without_legacy_key_env() {
+        use mold_secure::{grant_bytes, namespace, DeviceGrant, Identity};
+        let host = Identity::from_bytes(&[1; 64]).unwrap();
+        let device = Identity::from_bytes(&[2; 64]).unwrap();
+        let binding = host.public_binding();
+        let ns = namespace(&host.signing_public());
+        let mut grant = DeviceGrant {
+            id: "11".repeat(16),
+            expires_at: mold_secure_client::now() + 3600,
+            epoch: 0,
+            signature: String::new(),
+        };
+        grant.signature = hex::encode(
+            host.sign(
+                &grant_bytes(
+                    &ns,
+                    &device.signing_public(),
+                    &device.noise_public(),
+                    &grant.id,
+                    grant.expires_at,
+                    grant.epoch,
+                )
+                .unwrap(),
+            ),
+        );
+        let profile = mold_secure_client::PairedHost {
+            protocol: 3,
+            origin: "https://paired-upload-test.invalid".into(),
+            websocket: "wss://relay.invalid/production".into(),
+            endpoints: vec![],
+            namespace: ns,
+            host_key: binding.signing_key,
+            host_noise_key: binding.noise_key,
+            host_binding_signature: binding.signature,
+            device_identity: hex::encode([2; 64]),
+            api_key: "paired-upload-test".into(),
+            grant,
+        };
+        let origin = profile.origin.clone();
+        mold_secure_client::register_ephemeral("core-upload-test", profile).unwrap();
+        let client = MoldClient::new(&origin);
+        assert!(client.has_api_key());
+        mold_secure_client::forget_ephemeral("core-upload-test", None);
+        assert!(!client.has_api_key());
     }
 
     #[test]

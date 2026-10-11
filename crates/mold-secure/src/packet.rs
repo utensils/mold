@@ -29,7 +29,7 @@ pub struct WireFrame {
 struct Pending {
     frame: WireFrame,
     last: u64,
-    first: u64,
+    first: Option<u64>,
 }
 pub struct ReliableChannel {
     sid: String,
@@ -48,6 +48,8 @@ pub struct ReliableChannel {
     ack_dirty: bool,
     ack_serial: u64,
     gap_since: Option<u64>,
+    deferred: bool,
+    timeout: u64,
 }
 impl ReliableChannel {
     pub fn new(sid: String, rid: String) -> Self {
@@ -68,6 +70,23 @@ impl ReliableChannel {
             ack_dirty: false,
             ack_serial: 0,
             gap_since: None,
+            deferred: false,
+            timeout: 30_000,
+        }
+    }
+    /// Object staging is bounded by its carrier; reliable retry/expiry begins
+    /// only after the carrier confirms the original ciphertext was published.
+    pub fn peer(&self) -> (&str, &str) {
+        (&self.sid, &self.rid)
+    }
+    pub fn defer_transmission(&mut self) {
+        self.deferred = true;
+        self.timeout = 90_000;
+    }
+    pub fn mark_transmitted(&mut self, seq: u64, count: u64, now: u64) {
+        for (_, pending) in self.pending.range_mut(seq..seq.saturating_add(count)) {
+            pending.first.get_or_insert(now);
+            pending.last = now;
         }
     }
     fn frame(&self, a: &str) -> WireFrame {
@@ -107,11 +126,11 @@ impl ReliableChannel {
     pub fn outgoing(&mut self, now: u64) -> Result<Vec<WireFrame>> {
         if self
             .gap_since
-            .is_some_and(|t| now.saturating_sub(t) > 30_000)
-            || self
-                .pending
-                .values()
-                .any(|p| now.saturating_sub(p.first) > 30_000)
+            .is_some_and(|t| now.saturating_sub(t) > self.timeout)
+            || self.pending.values().any(|p| {
+                p.first
+                    .is_some_and(|first| now.saturating_sub(first) > self.timeout)
+            })
         {
             return Err(Error::State);
         }
@@ -126,7 +145,7 @@ impl ReliableChannel {
             self.ack_dirty = false;
         }
         for p in self.pending.values_mut() {
-            if now.saturating_sub(p.last) >= RETRY {
+            if p.first.is_some() && now.saturating_sub(p.last) >= RETRY {
                 p.last = now;
                 frames.push(p.frame.clone());
             }
@@ -148,7 +167,7 @@ impl ReliableChannel {
                 Pending {
                     frame: frame.clone(),
                     last: now,
-                    first: now,
+                    first: (!self.deferred).then_some(now),
                 },
             );
             self.send_next += 1;

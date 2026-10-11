@@ -4,6 +4,7 @@ mod authorization;
 #[cfg(not(target_arch = "wasm32"))]
 mod ffi;
 mod identity;
+mod objects;
 mod packet;
 mod records;
 mod session;
@@ -11,6 +12,7 @@ mod session;
 mod wasm;
 pub use authorization::*;
 pub use identity::*;
+pub use objects::*;
 pub use packet::*;
 pub use records::*;
 pub use session::*;

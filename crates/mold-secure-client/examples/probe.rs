@@ -52,7 +52,17 @@ async fn main() -> anyhow::Result<()> {
     let overall = std::time::Instant::now();
     for (method, path, body) in [
         ("GET", "/api/status", vec![]),
-        ("POST", "/echo", vec![37; 1048576]),
+        (
+            "POST",
+            "/echo",
+            vec![
+                37;
+                std::env::var("MOLD_SECURE_PROBE_UPLOAD_BYTES")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1048576)
+            ],
+        ),
         ("GET", "/range", vec![]),
         ("GET", "/sse", vec![]),
     ] {

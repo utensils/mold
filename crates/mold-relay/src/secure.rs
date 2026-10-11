@@ -187,9 +187,19 @@ enum Event {
 pub async fn serve_peer(
     config: HostConfig,
     admission: PeerAdmission,
+    input: mpsc::Receiver<WireFrame>,
+    output: mpsc::Sender<WireFrame>,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    serve_peer_with_delivery(config, admission, input, output, shutdown, None).await
+}
+async fn serve_peer_with_delivery(
+    config: HostConfig,
+    admission: PeerAdmission,
     mut input: mpsc::Receiver<WireFrame>,
     output: mpsc::Sender<WireFrame>,
     shutdown: CancellationToken,
+    delivery: Option<mold_secure_client::object_socket::DeliveryTracker>,
 ) -> Result<()> {
     admission.validate(&config)?;
     let mut session = Session::new(
@@ -237,6 +247,7 @@ pub async fn serve_peer(
     let result=async {
  loop {
   let now=start.elapsed().as_millis() as u64;
+  if let Some(delivery)=&delivery{delivery.apply(&mut wire,now);}
   for frame in wire.outgoing(now)? {tokio::select!{_ = stop.cancelled()=>return Ok(()),r=output.send(frame)=>{r.context("secure wire closed")?}}}
   if invitation_finished && wire.is_idle(){return Ok(())}
   tokio::select!{
@@ -277,6 +288,12 @@ if let Some(remaining)=&mut active.remaining{*remaining=remaining.checked_sub(u6
   }
  }
  }.await;
+    if let Err(error) = &result {
+        eprintln!(
+            "Mold secure peer ended ({})",
+            safe_relay_error_category(error)
+        );
+    }
     stop.cancel();
     for active in streams.into_values() {
         active.cancel.cancel();
@@ -591,12 +608,64 @@ pub async fn connect_with_status(
         if began.elapsed() > Duration::from_secs(60) {
             delay = Duration::from_millis(250)
         }
-        if result.is_err() {
-            eprintln!("Mold secure relay session interrupted; reconnecting without replay");
+        if let Err(error) = &result {
+            eprintln!(
+                "Mold secure relay session interrupted ({}); reconnecting without replay",
+                safe_relay_error_category(error)
+            );
         }
         tokio::select! {_=shutdown.cancelled()=>return Ok(()),_=tokio::time::sleep(delay)=>{}}
         delay = (delay * 2).min(Duration::from_secs(15));
     }
+}
+fn safe_relay_error_category(error: &anyhow::Error) -> &'static str {
+    // Emit only constants. Transport errors can contain response text or signed
+    // URLs, so formatting the source error itself would expose credentials.
+    for source in error.chain() {
+        for category in [
+            "secure relay heartbeat timed out",
+            "invalid secure peer admission",
+            "wrong secure epoch",
+            "unexpected secure control",
+            "secure writer closed",
+            "secure socket closed",
+            "wrong secure version",
+            "secure policy stopped",
+            "secure host admission failed",
+            "secure stream limit or replay",
+            "upload limit exceeded",
+            "upload exceeds length",
+            "upload after end",
+            "upload pressure exceeded",
+            "truncated upload",
+            "unknown secure stream",
+            "response credit exceeded",
+            "client sent response headers",
+            "secure wire closed",
+        ] {
+            if source.to_string() == category {
+                return category;
+            }
+        }
+        if let Some(error) = source.downcast_ref::<mold_secure::Error>() {
+            return match error {
+                mold_secure::Error::State => "invalid secure state",
+                mold_secure::Error::Limit => "secure protocol limit",
+                mold_secure::Error::Authentication => "secure authentication failure",
+                _ => "invalid secure record",
+            };
+        }
+        if source.is::<tokio::time::error::Elapsed>() {
+            return "socket send timeout";
+        }
+        if source.is::<serde_json::Error>() {
+            return "invalid relay frame";
+        }
+        if source.is::<tokio_tungstenite::tungstenite::Error>() {
+            return "websocket error";
+        }
+    }
+    "transport unavailable"
 }
 async fn cloud_session(
     endpoint: &str,
@@ -606,7 +675,7 @@ async fn cloud_session(
 ) -> Result<()> {
     use futures_util::SinkExt;
     use tokio_tungstenite::tungstenite::Message;
-    let (mut socket, _) = tokio_tungstenite::connect_async_with_config(
+    let (socket, _) = tokio_tungstenite::connect_async_with_config(
         endpoint,
         Some(
             tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
@@ -617,6 +686,8 @@ async fn cloud_session(
     )
     .await?;
     let ns = namespace(&config.identity.signing_public());
+    let mut socket = mold_secure_client::object_socket::ObjectSocket::new(socket, ns.clone(), true);
+    let delivery = socket.delivery_tracker();
     socket.send(Message::Text(serde_json::json!({"a":"hello","v":3,"namespace":ns,"hostKey":hex::encode(config.identity.signing_public()),"role":"host"}).to_string().into())).await?;
     async fn read<S>(socket: &mut S) -> Result<serde_json::Value>
     where
@@ -682,8 +753,8 @@ async fn cloud_session(
       let admission:PeerAdmission=serde_json::from_value(value.clone())?;if admission.sid!=sid||peers.contains_key(&admission.rid)||peers.len()>=32{bail!("invalid secure peer admission")}let rid=admission.rid.clone();
       if admission.validate(&config).is_err(){socket.send(Message::Text(serde_json::json!({"a":"cancel","v":3,"sid":sid,"rid":rid}).to_string().into())).await?;continue}
       socket.send(Message::Text(serde_json::json!({"a":"accept","v":3,"sid":sid,"rid":rid}).to_string().into())).await?;
-      let (input,rx)=mpsc::channel(32);let (frames,mut wire)=mpsc::channel(32);let cancel=stop.child_token();peers.insert(rid.clone(),(input,cancel.clone()));let outgoing=tx.clone();let peerconfig=config.clone();let sid=sid.clone();
-      tokio::spawn(async move{let mut task=tokio::spawn(serve_peer(peerconfig,admission,rx,frames,cancel.clone()));loop{tokio::select!{_=cancel.cancelled()=>break,_=&mut task=>break,frame=wire.recv()=>{let Some(frame)=frame else{break};if outgoing.send(serde_json::to_value(frame).unwrap_or_default()).await.is_err(){break}}}}cancel.cancel();task.abort();let _=outgoing.send(serde_json::json!({"a":"cancel","v":3,"sid":sid,"rid":rid})).await;});
+      let (input,rx)=mpsc::channel(32);let (frames,mut wire)=mpsc::channel(32);let cancel=stop.child_token();peers.insert(rid.clone(),(input,cancel.clone()));let outgoing=tx.clone();let peerconfig=config.clone();let sid=sid.clone();let delivery=delivery.clone();
+      tokio::spawn(async move{let mut task=tokio::spawn(serve_peer_with_delivery(peerconfig,admission,rx,frames,cancel.clone(),Some(delivery)));loop{tokio::select!{_=cancel.cancelled()=>break,result=&mut task=>{if let Ok(Err(error))=result{eprintln!("Mold secure peer closed ({})",safe_relay_error_category(&error));}break},frame=wire.recv()=>{let Some(frame)=frame else{break};if outgoing.send(serde_json::to_value(frame).unwrap_or_default()).await.is_err(){break}}}}cancel.cancel();task.abort();let _=outgoing.send(serde_json::json!({"a":"cancel","v":3,"sid":sid,"rid":rid})).await;});
 
      },
      "data"|"ack"=>{let frame:WireFrame=serde_json::from_value(value)?;if frame.sid!=sid{bail!("wrong secure epoch")}

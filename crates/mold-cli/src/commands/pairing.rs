@@ -3,8 +3,11 @@
 use anyhow::{bail, Context, Result};
 use std::{net::SocketAddr, path::Path};
 
-pub async fn create(target: SocketAddr, output: &Path) -> Result<()> {
+pub async fn create(target: SocketAddr, output: &Path, relay_url: Option<&str>) -> Result<()> {
     mold_relay::validate_target(target)?;
+    if let Some(url) = relay_url {
+        validate_relay_url(url)?;
+    }
     // Check the output destination before consuming a short-lived invitation.
     if output.try_exists()? {
         bail!("invitation output already exists; choose a new private filename")
@@ -47,7 +50,7 @@ pub async fn create(target: SocketAddr, output: &Path) -> Result<()> {
         }
         bytes.extend_from_slice(&chunk);
     }
-    let value = invitation_payload(serde_json::from_slice(&bytes)?)?;
+    let value = invitation_payload(serde_json::from_slice(&bytes)?, relay_url)?;
     mold_secure_client::write_invitation(output, &value)?;
     println!("Pairing invitation saved to {}. It expires in two minutes; transfer it privately and run mold pair --invite-file <file> on the client.",output.display());
     println!(
@@ -56,7 +59,14 @@ pub async fn create(target: SocketAddr, output: &Path) -> Result<()> {
     );
     Ok(())
 }
-fn invitation_payload(mut value: serde_json::Value) -> Result<serde_json::Value> {
+fn invitation_payload(
+    mut value: serde_json::Value,
+    relay_url: Option<&str>,
+) -> Result<serde_json::Value> {
+    if let Some(url) = relay_url {
+        validate_relay_url(url)?;
+        value["websocket_url"] = url.into();
+    }
     if value["protocol"] != 3 {
         bail!("upgrade the host before pairing")
     }
@@ -74,23 +84,56 @@ fn invitation_payload(mut value: serde_json::Value) -> Result<serde_json::Value>
     if !matches!(url.scheme(), "http" | "https") || url.origin().ascii_serialization() != origin {
         bail!("invalid host origin")
     }
+    value
+        .as_object_mut()
+        .context("invalid pairing response")?
+        .remove("protocol");
     value["version"] = 2.into();
     value["type"] = "mold.mobile-pairing".into();
     value["base_url"] = origin.into();
     value["name"] = value["hostname"].clone();
     Ok(value)
 }
+fn validate_relay_url(value: &str) -> Result<()> {
+    let url = reqwest::Url::parse(value)?;
+    if url.scheme() != "wss"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        bail!("relay endpoint must be credential-free WSS without a query or fragment");
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
+    fn standalone_invitation_binds_an_explicit_credential_free_relay_endpoint() {
+        let value = serde_json::json!({"protocol":3,"hostname":"host","endpoints":[{"kind":"relay","url":"https://host.example"}]});
+        let output =
+            invitation_payload(value.clone(), Some("wss://relay.example/production")).unwrap();
+        assert_eq!(output["websocket_url"], "wss://relay.example/production");
+        for bad in [
+            "ws://relay.example",
+            "wss://secret@relay.example",
+            "wss://relay.example?token=secret",
+        ] {
+            assert!(invitation_payload(value.clone(), Some(bad)).is_err());
+        }
+    }
+    #[test]
     fn owner_export_uses_shared_qr_contract_and_never_private_engine_origin() {
         let value = serde_json::json!({"protocol":3,"hostname":"host","endpoints":[{"kind":"lan","url":"http://192.168.1.5:4321"},{"kind":"relay","url":"https://host.example"}],"websocket_url":"wss://relay.example"});
-        let output = invitation_payload(value).unwrap();
+        let output = invitation_payload(value, None).unwrap();
         assert_eq!(output["version"], 2);
+        assert!(output.get("protocol").is_none());
         assert_eq!(output["type"], "mold.mobile-pairing");
         assert_eq!(output["base_url"], "https://host.example");
         assert_eq!(output["name"], "host");
-        assert!(invitation_payload(serde_json::json!({"protocol":3,"endpoints":[]})).is_err());
+        assert!(
+            invitation_payload(serde_json::json!({"protocol":3,"endpoints":[]}), None).is_err()
+        );
     }
 }

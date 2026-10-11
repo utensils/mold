@@ -12,9 +12,9 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
-use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
-type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+type Socket = crate::object_socket::ObjectSocket;
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Endpoint {
     pub url: String,
@@ -193,7 +193,8 @@ impl SecureClient {
         let request = reqwest::Client::new()
             .post(format!("{}/api/pairing/secure/renew", host.origin))
             .build()?;
-        let value = bounded_authority_json(self.send_inner(request).await?.error_for_status()?).await?;
+        let value =
+            bounded_authority_json(self.send_inner(request).await?.error_for_status()?).await?;
         let grant: DeviceGrant = serde_json::from_value(value["grant"].clone())?;
         if grant.id != host.grant.id || grant.epoch != host.grant.epoch {
             bail!("secure grant renewal changed identity")
@@ -472,7 +473,7 @@ async fn admit(
     }
     let identity = Identity::from_bytes(&decode_hex::<64>(&host.device_identity)?)?;
     let url = validate_websocket(&host.websocket)?;
-    let (mut socket, _) = tokio_tungstenite::connect_async_with_config(
+    let (socket, _) = tokio_tungstenite::connect_async_with_config(
         url.as_str(),
         Some(
             tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
@@ -482,6 +483,7 @@ async fn admit(
         false,
     )
     .await?;
+    let mut socket = crate::object_socket::ObjectSocket::new(socket, host.namespace.clone(), false);
     let role = if invite.is_some() { "invite" } else { "device" };
     socket.send(Message::Text(serde_json::json!({"a":"hello","v":3,"role":role,"namespace":host.namespace,"hostKey":host.host_key}).to_string().into())).await?;
     let challenge = read_json(&mut socket).await?;
@@ -599,7 +601,7 @@ async fn drive(
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
     let mut last_heartbeat = std::time::Instant::now();
     let result=async {loop {
-  let now=start.elapsed().as_millis() as u64;for frame in wire.outgoing(now)?{tokio::time::timeout(Duration::from_secs(5),socket.send(Message::Text(serde_json::to_string(&frame)?.into()))).await??;}
+  let now=start.elapsed().as_millis() as u64;socket.delivery_tracker().apply(&mut wire,now);for frame in wire.outgoing(now)?{tokio::time::timeout(Duration::from_secs(5),socket.send(Message::Text(serde_json::to_string(&frame)?.into()))).await??;}
   tokio::select!{
    _=stop.cancelled()=>return Ok(()),
    _=heartbeat.tick()=>{if last_heartbeat.elapsed()>Duration::from_secs(45){bail!("secure peer heartbeat timed out")}tokio::time::timeout(Duration::from_secs(5),socket.send(Message::Text(serde_json::json!({"a":"heartbeat","v":3}).to_string().into()))).await??;},
@@ -753,11 +755,15 @@ async fn bounded_authority_json(mut response: reqwest::Response) -> Result<serde
         }
         let mut bytes = zeroize::Zeroizing::new(Vec::new());
         while let Some(chunk) = response.chunk().await? {
-            if bytes.len() + chunk.len() > LIMIT { bail!("secure authority response too large"); }
+            if bytes.len() + chunk.len() > LIMIT {
+                bail!("secure authority response too large");
+            }
             bytes.extend_from_slice(&chunk);
         }
         serde_json::from_slice(&bytes).context("invalid secure authority response")
-    }).await.context("secure authority response timed out")?
+    })
+    .await
+    .context("secure authority response timed out")?
 }
 
 #[cfg(test)]
@@ -765,9 +771,11 @@ mod bounded_metadata_tests {
     use super::*;
     #[tokio::test]
     async fn authority_response_rejects_unbounded_or_stalled_body() {
-        let response: reqwest::Response = http::Response::new(reqwest::Body::from(vec![b' '; 65537])).into();
+        let response: reqwest::Response =
+            http::Response::new(reqwest::Body::from(vec![b' '; 65537])).into();
         assert!(bounded_authority_json(response).await.is_err());
-        let response: reqwest::Response = http::Response::new(reqwest::Body::from("{\"grant\":1}")).into();
+        let response: reqwest::Response =
+            http::Response::new(reqwest::Body::from("{\"grant\":1}")).into();
         assert_eq!(bounded_authority_json(response).await.unwrap()["grant"], 1);
     }
 }

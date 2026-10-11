@@ -749,11 +749,16 @@ stores its own key and revocable grant. MOLD_HOST selects a paired origin.
 
 All remote API traffic, uploads, progress and media use pinned Noise XX over
 LAN or the Lambda WebSocket relay. The cloud sees metadata and ciphertext, not
-API credentials or media. Old proxy credentials cannot be upgraded implicitly;
+API credentials or media. Bounded S3 objects may carry only the same encrypted
+wire bytes; object keys and cloud URLs never replace host identity verification.
+Old proxy credentials cannot be upgraded implicitly;
 upgrade and pair every client again. Plain HTTP is only a private loopback
 engine interface. Do not use raw remote curl or fall back to a cloud-provided
 host key. Uploads are bounded to 64 MiB; responses stream with backpressure.
-Interrupted mutations are never automatically replayed. Native Remote Access
+Interrupted mutations are never automatically replayed. RunPod generation requires an
+already paired, running pod; explicitly create, pair, and select a replacement
+when its GPU or datacenter differs. Provider readiness alone is not trusted
+Mold readiness. Native Remote Access
 opens the encrypted LAN listener and outbound connector; stopping it closes
 active sessions. HTTPS browsers may require WSS because of mixed-content rules.
 

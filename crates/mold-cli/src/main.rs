@@ -515,13 +515,13 @@ Example:
         #[arg(long)]
         json: bool,
     },
-    /// Generate on a fresh or warm RunPod pod, save to ./mold-outputs/
+    /// Generate on an existing paired RunPod pod, save to ./mold-outputs/
     #[command(after_long_help = "\
 Examples:
   mold runpod run \"a cat on a skateboard\"
   mold runpod run \"a sunset\" --model flux2-klein:q8
   mold runpod run \"a robot\" --keep            # leave pod running after
-  mold runpod run \"a sunset\" --gpu 5090       # force a GPU choice")]
+  mold runpod run \"a sunset\" --gpu 5090       # require the paired GPU")]
     Run {
         /// Text prompt
         prompt: String,
@@ -1640,6 +1640,9 @@ enum PairingAction {
         target: std::net::SocketAddr,
         #[arg(long, value_hint=clap::ValueHint::FilePath)]
         output: std::path::PathBuf,
+        /// Credential-free WSS endpoint for a separately supervised connector.
+        #[arg(long)]
+        relay_url: Option<String>,
     },
 }
 
@@ -2262,7 +2265,8 @@ Examples:
   mold serve --bind 127.0.0.1 --port 9000
   MOLD_PORT=8080 mold serve
 
-Clients connect via MOLD_HOST=http://<addr>:<port>
+Remote clients pair with an invitation from the host, then set MOLD_HOST to
+the paired origin. Plain HTTP is available only on the private loopback engine.
 
 For gated or private Hugging Face repos, export HF_TOKEN in the server
 environment before starting mold serve.")]
@@ -2730,8 +2734,8 @@ Set up once:
   export RUNPOD_API_KEY=<key>                       Or use env var
   mold runpod doctor                                Verify auth
 
-Generate on a fresh pod (the killer feature):
-  mold runpod run \"a cat on a skateboard\"           Creates pod → generates → saves
+Generate on a paired pod selected by MOLD_HOST:
+  mold runpod run \"a cat on a skateboard\"           Uses paired host → generates → saves
   mold runpod run \"a sunset\" --keep                Leave pod up for reuse
 
 Manage pods manually:
@@ -4011,8 +4015,13 @@ async fn run() -> anyhow::Result<()> {
             }
         },
         Commands::Pairing {
-            action: PairingAction::Create { target, output },
-        } => commands::pairing::create(target, &output).await?,
+            action:
+                PairingAction::Create {
+                    target,
+                    output,
+                    relay_url,
+                },
+        } => commands::pairing::create(target, &output, relay_url.as_deref()).await?,
         Commands::Pair { invite_file, name } => {
             let invite = mold_secure_client::read_invitation(&invite_file)?;
             let host = mold_secure_client::pair(invite, &name).await?;

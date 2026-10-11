@@ -138,9 +138,9 @@ async fn api(State(app): State<App>, req: Request) -> Response<Body> {
     }
     match req.uri().path() {
         "/echo" => {
-            let body = to_bytes(req.into_body(), MAX_UPLOAD as usize)
-                .await
-                .unwrap();
+            let Ok(body) = to_bytes(req.into_body(), MAX_UPLOAD as usize).await else {
+                return Response::builder().status(400).body(Body::empty()).unwrap();
+            };
             Response::builder()
                 .header("content-type", "application/octet-stream")
                 .body(Body::from(body))
@@ -265,9 +265,20 @@ async fn main() -> anyhow::Result<()> {
     let host = Arc::new(Identity::from_bytes(&[1; 64])?);
     let device = Identity::from_bytes(&[2; 64])?;
     let grant = grant(&host, &device.public_binding(), "11".repeat(16));
+    let extra_devices = [(4u8, "native"), (5, "browser"), (6, "cli")].map(|(seed, name)| {
+        let device = Identity::from_bytes(&[seed; 64]).unwrap();
+        let certificate = self::grant(
+            &host,
+            &device.public_binding(),
+            format!("{seed:02x}").repeat(16),
+        );
+        (name, device, certificate)
+    });
     let (policy, rx) = tokio::sync::watch::channel(HostPolicy {
         epoch: 0,
-        active: vec![grant.id.clone()],
+        active: std::iter::once(grant.id.clone())
+            .chain(extra_devices.iter().map(|(_, _, grant)| grant.id.clone()))
+            .collect(),
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let target = listener.local_addr()?;
@@ -296,7 +307,10 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     let address = listener.local_addr()?;
-    let fixture = serde_json::json!({"protocol":3,"version":2,"host_key":hex::encode(host.signing_public()),"host_noise_key":hex::encode(host.noise_public()),"host_binding_signature":host.public_binding().signature,"namespace":ns,"websocket":std::env::var("MOLD_SECURE_FIXTURE_RELAY").unwrap_or_else(|_|format!("ws://{address}/_mold/secure")),"origin":format!("http://{address}"),"device_identity":hex::encode(device.to_bytes()),"api_key":"mold_pair_fixture_api_key","grant":grant});
+    let mut fixture = serde_json::json!({"protocol":3,"version":2,"host_key":hex::encode(host.signing_public()),"host_noise_key":hex::encode(host.noise_public()),"host_binding_signature":host.public_binding().signature,"namespace":ns,"websocket":std::env::var("MOLD_SECURE_FIXTURE_RELAY").unwrap_or_else(|_|format!("ws://{address}/_mold/secure")),"origin":format!("http://{address}"),"device_identity":hex::encode(device.to_bytes()),"api_key":"mold_pair_fixture_api_key","grant":grant});
+    if let Ok(origin) = std::env::var("MOLD_SECURE_OBJECT_ORIGIN") {
+        fixture["object_origin"] = origin.into();
+    }
     let invitation = serde_json::json!({"type":"mold.mobile-pairing","name":"Secure Fixture","instance_id":"00000000-0000-0000-0000-000000000001","version":2,"base_url":format!("http://{address}"),"websocket_url":std::env::var("MOLD_SECURE_FIXTURE_RELAY").ok(),"endpoints":[{"url":format!("http://{address}"),"kind":"lan"}],"host_key":hex::encode(host.signing_public()),"host_noise_key":hex::encode(host.noise_public()),"host_binding_signature":host.public_binding().signature,"namespace":ns,"invite_seed":"03".repeat(32),"invite":invite});
     let path = std::env::args_os()
         .nth(1)
@@ -307,6 +321,16 @@ async fn main() -> anyhow::Result<()> {
         serde_json::to_string_pretty(&fixture)?.as_bytes(),
         true,
     )?;
+    for (name, device, certificate) in extra_devices {
+        let mut profile = fixture.clone();
+        profile["device_identity"] = hex::encode(device.to_bytes()).into();
+        profile["grant"] = serde_json::to_value(certificate)?;
+        mold_secure::identity_file::write_private_file(
+            &path.with_file_name(format!("config-{name}.json")),
+            serde_json::to_string_pretty(&profile)?.as_bytes(),
+            true,
+        )?;
+    }
     let invite_path = path.with_file_name("invite.json");
     mold_secure::identity_file::write_private_file(
         &invite_path,

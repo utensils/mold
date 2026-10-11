@@ -3283,12 +3283,14 @@ dependencies = [
  "dirs 6.0.0",
  "fs2",
  "futures-util",
+ "hex",
  "hf-hub",
  "http",
  "http-body-util",
  "image",
  "indicatif 0.17.11",
  "libc",
+ "mold-ai-secure",
  "mold-ai-secure-client",
  "reqwest",
  "rustls 0.23.38",
@@ -3480,6 +3482,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.28.0",
  "tokio-util",
+ "uuid",
  "zeroize",
 ]
 

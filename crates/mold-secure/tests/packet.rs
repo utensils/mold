@@ -63,3 +63,16 @@ fn delayed_duplicates_older_than_history_do_not_reenter_noise_or_close_session()
         .iter()
         .any(|f| f.a == "ack" && f.next == Some(64)));
 }
+#[test]
+fn object_retry_deadline_starts_only_when_ciphertext_is_actually_published() {
+    let mut wire = ReliableChannel::new("s".into(), "r".into());
+    wire.defer_transmission();
+    wire.queue_packet(&[1, 2, 3]).unwrap();
+    let frames = wire.outgoing(0).unwrap();
+    assert!(wire.outgoing(60_000).unwrap().is_empty());
+    wire.mark_transmitted(0, 1, 60_000);
+    assert!(wire.outgoing(69_999).unwrap().is_empty());
+    assert_eq!(wire.outgoing(70_000).unwrap(), frames);
+    assert!(wire.outgoing(149_999).is_ok());
+    assert!(wire.outgoing(150_001).is_err());
+}

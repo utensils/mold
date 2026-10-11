@@ -19,6 +19,7 @@ cli = ["dep:clap"]
 
 [dependencies]
 mold-ai-secure = { path = "../mold-secure" }
+mold-ai-secure-client = { path = "../mold-secure-client" }
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
@@ -42,6 +43,3 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs", "process"] }
-
-[dev-dependencies]
-mold-ai-secure-client = { path = "../mold-secure-client" }

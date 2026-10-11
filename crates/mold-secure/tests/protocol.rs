@@ -133,7 +133,7 @@ fn record_bounds_preserve_raw_bytes_and_refuse_ambiguous_requests() {
     assert!(Record::End { stream_id: 0 }.encode().is_err());
     assert!(Record::Credit {
         stream_id: 1,
-        bytes: 65537
+        bytes: mold_secure::STREAM_WINDOW + 1
     }
     .encode()
     .is_err());

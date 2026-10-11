@@ -57,7 +57,9 @@ mold relay connect --relay-url wss://API.execute-api.REGION.amazonaws.com/produc
 
 The standalone equivalent is `mold-relay connect`; build it with
 `cargo build --release -p mold-ai-relay --features cli`. Use `--identity-file`
-when the connector runs with a different `MOLD_HOME`. Only numeric loopback
+when the connector runs with a different `MOLD_HOME`. Pass the same WSS endpoint
+to `mold pairing create --relay-url WSS_ENDPOINT` when exporting an invitation
+for a separately supervised connector. Only numeric loopback
 HTTP targets are accepted. Before forwarding any request, the connector probes
 and reuses the exact socket to verify that anonymous requests are rejected.
 
@@ -85,7 +87,7 @@ the encrypted connection. No operator key is injected into client requests.
 
 ## Streaming, media and limits
 
-The protocol multiplexes up to 32 HTTP streams per client, with 64 KiB of body
+The protocol multiplexes up to 32 HTTP streams per client, with 256 KiB of body
 credit per stream. Uploads are bounded to 64 MiB per request. Responses stream
 with backpressure and do not have a total media-size ceiling. Range, HEAD,
 conditional media reads, multipart uploads and server-sent progress use the
@@ -103,7 +105,12 @@ protocol; use the official clients or a deliberately scoped local adapter.
 ## Lambda operations and costs
 
 The production relay remains API Gateway WebSocket + short Lambda invocations +
-DynamoDB. It has no always-running gateway and no plaintext S3 transfer path.
+DynamoDB. It has no always-running gateway. Larger groups of existing Noise
+ciphertext can travel through short-lived, quota-bounded S3 objects; the
+application keys remain on the client and host. Small requests and progress
+remain inline on the WebSocket. Object addresses must match an independently
+configured trusted bucket origin, and failed object allocation can fall back
+only to the same original ciphertext. There is no plaintext S3 transfer path.
 HTTP metadata endpoints cannot proxy the Mold API: legacy routes return an
 upgrade-required response. WebSocket messages and acknowledgements incur
 per-message costs, so bulk transfers are not free even though long-running
@@ -115,3 +122,20 @@ for provisioning, bounded diagnostics and deployment validation, and
 for canonical signatures and wire bounds. Diagnostics must not log pairing
 seeds, API keys, decrypted requests or response bodies. TLS and the host key pin
 are separate checks; never replace a pin with a key learned from the relay.
+
+## Developer transport verification
+
+The `secure_fixture` and `probe` examples use synthetic identities and media.
+Never authorize their fixed keys on a production relay. Their optional inputs
+are `MOLD_SECURE_FIXTURE_BIND` (encrypted listener address, default
+`127.0.0.1:0`), `MOLD_SECURE_FIXTURE_MEDIA` (local test MP4 path, default
+`/tmp/mold-secure-uat/fixture.mp4`), and `MOLD_SECURE_FIXTURE_RELAY` (isolated
+staging WSS endpoint; omitted for LAN-only tests). `MOLD_SECURE_PROBE_BYTES`
+selects a bounded download byte count instead of the standard matrix;
+`MOLD_SECURE_PROBE_UPLOAD_BYTES` overrides that matrix's 1 MiB upload size.
+
+Native Rust clients and connectors accept `MOLD_SECURE_OBJECT_ORIGIN` only as
+operator configuration of an independently trusted HTTPS object bucket origin.
+It defaults to the production ciphertext bucket; isolated staging uses its own
+exact origin. A relay advertisement cannot change this trust setting. Keep
+fixture profiles and invitations private even though their data is synthetic.
