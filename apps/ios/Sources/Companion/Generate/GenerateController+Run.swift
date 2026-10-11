@@ -114,7 +114,7 @@ extension GenerateController {
                 if self.activeBatch == nil, self.currentAdmissionID == nil {
                     self.activeBatch = active
                     self.run = .running(accepted, nil)
-                    self.startFollowing(initial: accepted)
+                    self.startFollowing(initial: accepted, acceptingBackend: backend)
                 } else { self.queued.append(active) }
             } catch {
                 guard !Task.isCancelled, let self, self.admissions[token]?.stopped == false else { return }
@@ -220,9 +220,11 @@ extension GenerateController {
         runTask = nil
     }
 
-    private func startFollowing(initial: BatchStatus? = nil) {
-        guard !followingSuspended, let active = activeBatch, let host = hosts.host(active.host) else { return }
-        let backend = hosts.backend(for: host)
+    private func startFollowing(initial: BatchStatus? = nil, acceptingBackend: (any MoldBackend)? = nil) {
+        // Initial progress belongs to the accepting route, even if the user
+        // edited this host's address or key while admission was in flight.
+        guard !followingSuspended, let active = activeBatch,
+              let backend = acceptingBackend ?? hosts.backend(for: active.host) else { return }
         let token = UUID()
         followingID = token
         runTask = Task { [weak self] in

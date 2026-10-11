@@ -88,5 +88,10 @@ their existing policy without changing family-specific allowlists or messages.
   exceptions are documented in the graph; passing it is not proof that every
   exported symbol ships.
 
-Final peer-review results and exact-head CI belong in the PR validation record.
-Passing tests reduce regression risk; they do not establish an absolute guarantee.
+Final independent review found and closed a same-turn media invalidation race,
+a background-admission/late-Stop race, and an initial-follower route-binding
+regression. Each was reproduced before correction; the reviewers checked the
+fixes and reported no remaining actionable introduced defects. The final iOS
+suite passed 248 tests after the last correction. Full review and exact-head CI
+results belong in the PR validation record. Passing tests reduce regression risk;
+they do not establish an absolute guarantee.

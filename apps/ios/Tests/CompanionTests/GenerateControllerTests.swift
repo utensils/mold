@@ -84,6 +84,28 @@ struct GenerateControllerTests {
         generate.suspendFollowing()
     }
 
+    @Test func initialFollowingUsesTheBackendThatAcceptedAfterHostRouteChanges() async throws {
+        let replacement = FakeBackend(), gate = StatusGate()
+        let (generate, accepting) = try await setUp { host, original in
+            host.baseURL.host == "10.0.0.4" ? original : replacement
+        }
+        accepting.stub("submit(_:)") { _ in await gate.pause(); return try Self.batch("accepted", state: "running") }
+        for backend in [accepting, replacement] {
+            backend.stubStream("batchEvents(id:)") { _ -> AsyncThrowingStream<BatchStatus, Error> in AsyncThrowingStream { _ in } }
+        }
+        generate.generate()
+        while await gate.waiting == nil { await Task.yield() }
+        let host = try #require(generate.hosts.hosts.first)
+        try generate.hosts.update(host.id, name: host.name, address: "10.0.0.5", apiKey: "replacement-key")
+        await gate.open()
+        try await waitUntil { accepting.count("batchEvents(id:)") + replacement.count("batchEvents(id:)") == 1 }
+        #expect(accepting.count("batchEvents(id:)") == 1)
+        #expect(replacement.count("batchEvents(id:)") == 0)
+        #expect(replacement.count("batchStatus(id:)") == 0)
+        #expect(generate.activeBatch?.id == "accepted")
+        generate.suspendFollowing()
+    }
+
     @Test(arguments: [false, true])
     func stopBeforeAcceptanceCancelsTheAdmittedBatchWithoutReplacingItsSuccessor(cancelFails: Bool) async throws {
         let (generate, fake) = try await setUp()
@@ -228,7 +250,7 @@ struct GenerateControllerTests {
         return try MoldJSON.decoder.decode(BatchStatus.self, from: Data(json.utf8))
     }
 
-    func setUp() async throws -> (GenerateController, FakeBackend) {
+    func setUp(backendForHost: ((MoldHost, FakeBackend) -> any MoldBackend)? = nil) async throws -> (GenerateController, FakeBackend) {
         let fake = FakeBackend()
         fake.stub("status()", returning: try MoldJSON.decoder.decode(ServerStatus.self, from: Data(
             #"{"version":"0.32.0","busy":false,"uptime_secs":1}"#.utf8)))
@@ -236,7 +258,7 @@ struct GenerateControllerTests {
         fake.stub("models()", returning: [try model()])
         fake.stub("jobPreview(jobId:)") { _ in JobProgress?.none }
         let file = HostListFile(url: FileManager.default.temporaryDirectory.appending(path: "h-\(UUID()).json"))
-        let hosts = HostStore(list: file, credentials: HostStoreTests.MemoryCredentials(), makeBackend: { _ in fake })
+        let hosts = HostStore(list: file, credentials: HostStoreTests.MemoryCredentials(), makeBackend: { backendForHost?($0, fake) ?? fake })
         try hosts.add(name: "workstation", address: "10.0.0.4", apiKey: nil, makeDefault: true)
         await hosts.refreshAll()
         let ledger = PendingLedger(url: FileManager.default.temporaryDirectory.appending(path: "p-\(UUID()).json"))
