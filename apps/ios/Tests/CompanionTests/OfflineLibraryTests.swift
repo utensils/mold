@@ -14,6 +14,54 @@ import UniformTypeIdentifiers
 /// walks the tile sizes.
 @MainActor
 struct OfflineLibraryTests {
+    private actor CancelledThumbnail {
+        var cancellations = 0
+        func load() async throws -> Data {
+            do { try await Task.sleep(for: .seconds(30)); return Data() }
+            catch { cancellations += 1; throw error }
+        }
+    }
+
+    @Test func cancellingEveryCoalescedConsumerCancelsTheDownload() async throws {
+        let fake = FakeBackend()
+        let cancellation = CancelledThumbnail()
+        fake.stub("thumbnail(_:size:trashed:)") { _ in try await cancellation.load() }
+        let hosts = try await hosts(fake, up: true)
+        let loader = ThumbnailLoader(hosts: hosts, directory: temp("cancel-waiters"), limit: .mb250)
+        let entry = LibraryEntry(host: hosts.hosts[0], print: try print("shared.png", version: "v1"))
+        let first = Task { await loader.image(for: entry, pixels: 256) }
+        for _ in 0..<100 where fake.count("thumbnail(_:size:trashed:)") == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        var secondStarted = false
+        let second = Task { secondStarted = true; return await loader.image(for: entry, pixels: 256) }
+        while !secondStarted { await Task.yield() }
+        first.cancel(); second.cancel()
+        for _ in 0..<100 where await cancellation.cancellations == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(await cancellation.cancellations == 1)
+        #expect(fake.count("thumbnail(_:size:trashed:)") == 1)
+        await loader.emptyCaches()
+        #expect(await first.value == nil)
+        #expect(await second.value == nil)
+    }
+
+    @Test func cancellingOneConsumerKeepsTheOtherDownloadAlive() async throws {
+        let fake = FakeBackend(), gate = ThumbnailGate(), bytes = png()
+        fake.stub("thumbnail(_:size:trashed:)") { _ in await gate.pause(); try Task.checkCancellation(); return bytes }
+        let hosts = try await hosts(fake, up: true)
+        let loader = ThumbnailLoader(hosts: hosts, directory: temp("surviving-waiter"), limit: .mb250)
+        let entry = LibraryEntry(host: hosts.hosts[0], print: try print("shared.png", version: "v1"))
+        let first = Task { await loader.image(for: entry, pixels: 256) }
+        while await gate.count() == 0 { await Task.yield() }
+        var secondStarted = false
+        let second = Task { secondStarted = true; return await loader.image(for: entry, pixels: 256) }
+        while !secondStarted { await Task.yield() }
+        first.cancel()
+        await gate.open()
+        #expect(await first.value == nil)
+        #expect(await second.value != nil)
+        #expect(fake.count("thumbnail(_:size:trashed:)") == 1)
+        await loader.emptyCaches()
+    }
+
     private actor ThumbnailGate {
         private var arrivals = 0
         private var waiting: [CheckedContinuation<Void, Never>] = []

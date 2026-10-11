@@ -50,7 +50,8 @@ import Testing
         merged.copies = [copy]
         #expect(LinkedPrint.presentedEntry(in: [merged], id: copy.id)?.hostID == second.id)
         #expect(LinkedPrint.presentedEntry(in: [merged], id: copy.id)?.everyCopy.count == 1)
-        #expect(ResultPager.presentedEntry(in: [merged], host: second.id, filename: print.filename)?.hostID == second.id)
+        #expect(LinkedPrint.presentedEntry(in: [merged], id: copy.id)?.print.filename == print.filename)
+        #expect(LinkedPrint.presentedEntry(in: [merged], id: PrintID(host: UUID(), filename: print.filename)) == nil)
     }
 
     @Test func closingOptionsPreservesPendingDeliveryUntilItsOwnDismissal() async throws {

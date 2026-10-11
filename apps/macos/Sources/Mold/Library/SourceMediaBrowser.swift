@@ -47,14 +47,7 @@ private struct SourceMediaContent: View {
     @State private var limit = 48
     @State private var refreshed = 0
     var body: some View {
-        let term = search.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-        let visible = catalog.sources.compactMap { source -> SourceMediaDisplay? in
-            let usages = source.usages.filter { allowed[$0.owner.id] == $0.authority && kind.includes($0.member) }
-            guard !usages.isEmpty else { return nil }
-            let key = usages.count == source.usages.count ? source.searchKey : usages.map { "\($0.member.sourceLabel) \($0.member.displayName) \($0.owner.print.displayName) \($0.owner.hostName)" }.joined(separator: " ").folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-            guard term.isEmpty || key.contains(term) else { return nil }
-            return SourceMediaDisplay(id: source.id, usages: usages)
-        }
+        let visible = SourceMediaDisplay.filter(catalog.sources, allowed: allowed, kind: kind, search: search)
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 20) {
                 Text("Your original inputs, ready to use again. Identical sources appear once; every use stays linked to its print.")
@@ -117,10 +110,6 @@ private struct SourceBrowserKey: Hashable {
     let retry: Int
     let revision: Int
 }
-struct SourceMediaDisplay: Identifiable {
-    let id: String
-    let usages: [SourceMediaCatalog.Row]
-}
 struct SourceMediaUsageCard: View {
     @Environment(HostStore.self) private var hosts
     let source: SourceMediaDisplay
@@ -128,10 +117,8 @@ struct SourceMediaUsageCard: View {
     var gallery = true
     @State private var showingUses = false
     private var current: SourceMediaCatalog.Row {
-        source.usages.first { $0.member.contentKind == "image" && (hosts.host($0.owner.hostID).map(hosts.isUp) ?? false) }
-            ?? source.usages.first { (hosts.host($0.owner.hostID).map(hosts.isUp) ?? false) }
-            ?? source.usages.first { $0.member.contentKind == "image" }
-            ?? source.usages[0]
+        // Cards are created only for a non-empty filtered group.
+        source.preferredUsage { hosts.host($0).map(hosts.isUp) ?? false }!
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {

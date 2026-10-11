@@ -17,12 +17,6 @@ struct CapsuleTests {
         #expect(PromptTuckLayout.availablePanelHeight(in: 30) == 0)
     }
 
-    @Test func clipKeepsItsPresentationRatio() {
-        #expect(VideoPlaybackLayout.aspectRatio(for: CGSize(width: 960, height: 960)) == 1)
-        #expect(abs(VideoPlaybackLayout.aspectRatio(for: CGSize(width: 1920, height: 1080)) - 16.0 / 9.0) < 0.000_001)
-        #expect(abs(VideoPlaybackLayout.aspectRatio(for: .zero) - 16.0 / 9.0) < 0.000_001)
-    }
-
     @Test func mutePreferenceSurvivesPlaybackInstances() throws {
         let name = "video-playback-\(UUID())"
         let defaults = try #require(UserDefaults(suiteName: name))

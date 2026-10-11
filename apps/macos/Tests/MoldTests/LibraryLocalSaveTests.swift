@@ -7,6 +7,57 @@ import Testing
 
 @MainActor
 struct LibraryLocalSaveTests {
+    @Test func syncStagesKeepReceiptsBeforeOrganizationAndRequireStableFinalEvidence() async throws {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("sync-stage-order-\(UUID().uuidString)")
+        let source = FakeBackend(host: remote, noRetainedMedia: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true)
+        var mutable = GalleryPrint.Mutable(versionedPrint("stage-order.png", prompt: "fox"))
+        mutable.favorite = true
+        let print = mutable.build()
+        source.prints = [print]
+        source.mediaAnswer = Data([1, 2, 3])
+        source.syncCheckpoint = [print.filename: "source-v1"]
+        target.syncCheckpoint = [print.filename: "local-v1"]
+        target.galleryPrintResponder = { _ in
+            if !target.importedNames.isEmpty { target.prints = [print] }
+            return target.prints.first
+        }
+        var changedDuringVerification = false
+        source.retainedTransferOfferResponder = { _ in
+            if target.callCount("gallerySyncCheckpoint") == 2 {
+                changedDuringVerification = true
+                target.syncCheckpoint = [print.filename: "local-v2"]
+            }
+            return .init(archiveIdentitySha256: String(repeating: "a", count: 64), members: [],
+                         outputSha256: "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
+                         outputSizeBytes: 3, metadata: print.metadata)
+        }
+        let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? target : source }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+        await library.syncAllLocally()
+
+        #expect(library.localSaveFailures.isEmpty)
+        #expect(changedDuringVerification)
+        let calls = target.calls
+        let imported = try #require(calls.firstIndex(of: "importPrint"))
+        let receipt = try #require(calls.firstIndex(of: "galleryPrint"))
+        let organized = try #require(calls.firstIndex(of: "mutate"))
+        let checkpoints = calls.indices.filter { calls[$0] == "gallerySyncCheckpoint" }
+        #expect(checkpoints.count == 3)
+        #expect(imported < receipt && receipt < organized)
+        #expect(checkpoints.filter { $0 > organized }.count == 2)
+
+        let probes = source.callCount("retainedMediaTransferOffer")
+        await library.syncAllLocally()
+        #expect(library.localSaveFailures.isEmpty)
+        #expect(target.importedNames.count == 1)
+        // A changed final destination must force verification next time,
+        // even though its copied output and organization already succeeded.
+        #expect(source.callCount("retainedMediaTransferOffer") > probes)
+    }
+
     @Test func cachedCheckpointCannotSkipAfterRouteChangesDuringDestinationProbe() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("checkpoint-route-race")

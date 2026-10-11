@@ -174,3 +174,7 @@ inferred from filename. Detected kinds are ephemeral and bound to exact load key
 Sync comparison/hash/import metadata work stays off-main with chunk cancellation.
 Draft navigation saves asynchronously; app-lifetime termination flushes the latest
 snapshot even when Generate is no longer mounted.
+
+**Shared native read policies.** Use `QueueTransferSource` for move retries: only authoritative 404 plus an existing verified destination means the original is absent. A present job that started rendering is ineligible, not removed; transport/auth/server errors remain errors. Source Media filtering and original/inventory publication fencing belong in MoldClient's `SourceMediaDisplay` and `SourceMediaLoading`, while AppKit playback and presentation remain local. Revoked/cancelled responses and stale errors must not publish. New/unread history uses `LibraryUnreadLedger` and active video layout uses `VideoViewport`.
+
+**Local-sync stages.** Keep source discovery, destination preparation, planning, transfer, organization, final checkpoint verification and reporting as explicit typed stages. Preserve backend call order, durable output receipts before retained-input transfer, route/instance fencing, intentionally removed copies and per-file/per-collection failure exclusions. A stage extraction must retain the LocalSave and SyncSession regression suites, including final-checkpoint ordering.

@@ -41,7 +41,7 @@ struct SourceMediaSection: View {
             }
         }
         .onDisappear { library.openSourceDetails[detailID] = nil }
-        .task(id: SourceLoadKey(authority: authority, retry: retry, revision: library.sourceMediaCatalog.revision)) {
+        .task(id: SourceMediaInventoryKey(authority: authority, retry: retry, revision: library.sourceMediaCatalog.revision)) {
             library.openSourceDetails[detailID] = authority
             await load(force: retry > 0)
             while !Task.isCancelled {
@@ -58,15 +58,12 @@ struct SourceMediaSection: View {
         let revision = library.sourceMediaCatalog.revision
         do {
             if force { await SourceMediaPreview.invalidate(host: entry.hostID, filename: entry.print.filename) }
-            let result = try await library.sourceMediaCatalog.inventory(for: entry, backend: hosts.backend(for: host), route: host,
-                                                                         instance: hosts.instanceIDs[entry.hostID], refresh: force)
-            guard !Task.isCancelled, captured == authority, library.allowsSource(captured, detail: true), revision == library.sourceMediaCatalog.revision else { return }
+            guard let result = try await SourceMediaLoading.inventory(owner: entry, authority: captured,
+                catalog: library.sourceMediaCatalog, backend: hosts.backend(for: host), refresh: force, isCurrent: {
+                    captured == authority && library.allowsSource(captured, detail: true)
+                        && revision == library.sourceMediaCatalog.revision
+                }) else { return }
             inventory = result; loadedAuthority = captured; loadedRevision = revision
         } catch { if !Task.isCancelled { failure = error.localizedDescription } }
     }
-}
-private struct SourceLoadKey: Hashable {
-    let authority: SourceMediaAuthority
-    let retry: Int
-    let revision: Int
 }

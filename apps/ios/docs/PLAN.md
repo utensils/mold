@@ -217,7 +217,7 @@ Review the artifact with James before M1 code lands. Iterating on the mockups is
 - Trailing: a Machine menu (dot plus name; Auto follows the default machine).
 - Kind switch (Still picture / Short clip / 3-D object): a menu on iPhone, segmented on iPad.
 
-**Canvas.** Fills the space. It uses the AlphaBed checkerboard behind transparent prints. When empty it shows guidance.
+**Progress and results.** Generate stays a scrolling composer. Its queue-count link opens Queue for progress; Library displays completed media.
 
 **Composer.** A glass panel attached with `.safeAreaBar(edge: .bottom)`. It contains:
 
@@ -429,7 +429,7 @@ When finished, it shows the thumbnail with "Finished on workstation" and View.
 | Held or failed | warning |
 | Stepper and pinch snaps | selection |
 
-**iPad drag and drop:** drag prints out as `Transferable`; drop onto a well or the canvas; drop onto a sidebar collection to file; drop into Library to import; reorder the Queue.
+**iPad drag and drop:** drag prints out as `Transferable`; drop onto a source well; drop onto a sidebar collection to file; drop into Library to import; reorder the Queue.
 
 **Keyboard shortcuts** (as on the Mac)
 

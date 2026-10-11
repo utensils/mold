@@ -9,6 +9,15 @@ import Testing
 /// a query -- pure, so the sheet's grid needs no store to test.
 @MainActor
 struct LibraryPickerTests {
+    @Test func pickerMenuKeepsPreviewAvailableDuringFetching() {
+        let idle = LibraryPickerSheet.pictureActions(isFetching: false)
+        let busy = LibraryPickerSheet.pictureActions(isFetching: true)
+        #expect(idle.map(\.kind) == [.use, .preview])
+        #expect(idle.allSatisfy { !$0.isDisabled })
+        #expect(busy.first?.isDisabled == true)
+        #expect(busy.last?.isDisabled == false)
+    }
+
     private func host(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }

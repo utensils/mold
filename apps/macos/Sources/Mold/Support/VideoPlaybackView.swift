@@ -2,15 +2,6 @@ import AVKit
 import MoldClient
 import SwiftUI
 
-/// One player for Generate and Library. The video track's presentation size
-/// supplies the ratio; AVKit's SwiftUI view has no useful intrinsic height.
-enum VideoPlaybackLayout {
-    static func aspectRatio(for size: CGSize) -> CGFloat {
-        guard size.width > 0, size.height > 0 else { return 16.0 / 9.0 }
-        return size.width / size.height
-    }
-}
-
 enum VideoPlaybackPreference {
     static let key = "videoPlaybackMuted"
 

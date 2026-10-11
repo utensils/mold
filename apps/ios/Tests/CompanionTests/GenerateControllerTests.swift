@@ -13,6 +13,197 @@ import UIKit
 /// switch adopting its recipe.
 @MainActor
 struct GenerateControllerTests {
+    @Test func nextBatchStatusFailureCanRecoverInTheForeground() async throws {
+        let (generate, fake) = try await setUp()
+        let active = ActiveBatch(id: "next", clientBatchId: "c-next", host: generate.hosts.hosts[0].id,
+                                 prompt: "an owl", startedAt: .now)
+        generate.queued = [active]
+        generate.ledger.add(active)
+        fake.stub("batchStatus(id:)", throwing: URLError(.timedOut))
+        generate.followNext()
+        await generate.runTask?.value
+        #expect(generate.activeBatch == active)
+        #expect(generate.runTask == nil, "a failed read must release its following-task ownership")
+        #expect(generate.ledger.batches == [active])
+        fake.stub("batchStatus(id:)", returning: try Self.batch("next", state: "running"))
+        fake.stubStream("batchEvents(id:)") { _ -> AsyncThrowingStream<BatchStatus, Error> in AsyncThrowingStream { _ in } }
+        generate.resumeFollowing()
+        for _ in 0..<100 where fake.count("batchStatus(id:)") < 2 { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(fake.count("batchStatus(id:)") == 2)
+        #expect(fake.count("submit(_:)") == 0)
+        generate.suspendFollowing()
+    }
+
+    @Test func reconnectRetriesOnlyWhileForeground() async throws {
+        let (generate, fake) = try await setUp()
+        let host = generate.hosts.hosts[0].id
+        let active = ActiveBatch(id: "next", clientBatchId: "c-next", host: host, prompt: "owl", startedAt: .now)
+        generate.activeBatch = active
+        fake.stub("batchStatus(id:)", throwing: URLError(.timedOut))
+        generate.resumeFollowing()
+        await generate.runTask?.value
+        for listener in generate.hosts.listeners { listener(host, .resyncRequired) }
+        await generate.runTask?.value
+        #expect(fake.count("batchStatus(id:)") == 2)
+        generate.suspendFollowing()
+        for listener in generate.hosts.listeners { listener(host, .resyncRequired) }
+        await Task.yield()
+        #expect(fake.count("batchStatus(id:)") == 2)
+        #expect(fake.count("submit(_:)") == 0)
+    }
+
+    private actor StatusGate {
+        var waiting: CheckedContinuation<Void, Never>?
+        func pause() async { await withCheckedContinuation { waiting = $0 } }
+        func open() { waiting?.resume(); waiting = nil }
+    }
+
+    @Test func acceptanceWhileSuspendedRemainsOwnedAndResumesWithoutResubmitting() async throws {
+        let (generate, fake) = try await setUp()
+        let gate = StatusGate()
+        fake.stub("submit(_:)") { _ in await gate.pause(); return try Self.batch("late", state: "running") }
+        fake.stub("batchStatus(id:)", returning: try Self.batch("late", state: "complete"))
+        fake.stubStream("batchEvents(id:)") { _ -> AsyncThrowingStream<BatchStatus, Error> in AsyncThrowingStream { _ in } }
+        generate.generate()
+        while await gate.waiting == nil { await Task.yield() }
+        generate.suspendFollowing()
+        await gate.open()
+        try await waitUntil { !generate.ledger.batches.isEmpty }
+        #expect(generate.activeBatch?.id == "late")
+        if case let .running(status, _) = generate.run { #expect(status.id == "late") }
+        else { Issue.record("Accepted work must leave submitting even while suspended") }
+        #expect(generate.runTask == nil)
+        #expect(fake.count("batchEvents(id:)") == 0)
+        #expect(fake.count("batchStatus(id:)") == 0)
+        generate.resumeFollowing()
+        await generate.runTask?.value
+        #expect(fake.count("batchStatus(id:)") == 1)
+        #expect(fake.count("submit(_:)") == 1)
+        #expect(generate.ledger.batches.isEmpty)
+        if case .finished = generate.run {} else { Issue.record("Foreground must settle the admitted batch") }
+        generate.suspendFollowing()
+    }
+
+    @Test(arguments: [false, true])
+    func stopBeforeAcceptanceCancelsTheAdmittedBatchWithoutReplacingItsSuccessor(cancelFails: Bool) async throws {
+        let (generate, fake) = try await setUp()
+        let gate = StatusGate()
+        fake.stub("submit(_:)") { _ in
+            let first = fake.count("submit(_:)") == 1
+            if first { await gate.pause() }
+            return try Self.batch(first ? "stopped" : "successor", state: "running")
+        }
+        if cancelFails { fake.stub("cancelBatch(id:)", throwing: URLError(.timedOut)) }
+        else { fake.stub("cancelBatch(id:)", returning: ()) }
+        fake.stubStream("batchEvents(id:)") { _ -> AsyncThrowingStream<BatchStatus, Error> in AsyncThrowingStream { _ in } }
+        generate.generate()
+        while await gate.waiting == nil { await Task.yield() }
+        generate.stop()
+        generate.generate()
+        try await waitUntil { generate.activeBatch?.id == "successor" }
+        await gate.open()
+        for _ in 0..<100 where fake.count("cancelBatch(id:)") == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(fake.calls.filter { $0.route == "cancelBatch(id:)" }.compactMap { $0.arguments.first as? String } == ["stopped"])
+        #expect(generate.activeBatch?.id == "successor")
+        #expect(generate.queued.isEmpty)
+        #expect(generate.ledger.batches.contains { $0.id == "stopped" } == cancelFails,
+                "Unconfirmed cancellation stays recoverable in the ledger")
+        #expect(fake.count("batchEvents(id:)") == 1)
+        generate.suspendFollowing()
+    }
+
+    @Test func stopEverythingIncludesEveryPendingAdmission() async throws {
+        let (generate, fake) = try await setUp()
+        let first = StatusGate(), second = StatusGate()
+        fake.stub("submit(_:)") { _ in
+            let id = fake.count("submit(_:)")
+            if id == 1 { await first.pause() } else { await second.pause() }
+            return try Self.batch("pending-\(id)", state: "running")
+        }
+        fake.stub("cancelBatch(id:)", returning: ())
+        fake.stubStream("batchEvents(id:)") { _ -> AsyncThrowingStream<BatchStatus, Error> in AsyncThrowingStream { _ in } }
+        generate.generate()
+        while await first.waiting == nil { await Task.yield() }
+        generate.generate()
+        while await second.waiting == nil { await Task.yield() }
+        generate.stop(everything: true)
+        await first.open(); await second.open()
+        for _ in 0..<100 where fake.count("cancelBatch(id:)") < 2 { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(Set(fake.calls.filter { $0.route == "cancelBatch(id:)" }.compactMap { $0.arguments.first as? String }) == ["pending-1", "pending-2"])
+        #expect(generate.run == .idle)
+        #expect(generate.activeBatch == nil && generate.queued.isEmpty)
+        #expect(generate.ledger.batches.isEmpty)
+        #expect(fake.count("batchEvents(id:)") == 0)
+    }
+
+    @Test func suspendedNextBatchWaitsForForegroundBeforeReading() async throws {
+        let (generate, fake) = try await setUp()
+        let active = ActiveBatch(id: "next", clientBatchId: "c-next", host: generate.hosts.hosts[0].id,
+                                 prompt: "owl", startedAt: .now)
+        generate.queued = [active]
+        generate.ledger.add(active)
+        fake.stub("batchStatus(id:)", returning: try Self.batch("next", state: "complete"))
+        generate.suspendFollowing()
+        generate.followNext()
+        await Task.yield()
+        #expect(generate.activeBatch == active)
+        #expect(generate.runTask == nil)
+        #expect(fake.count("batchStatus(id:)") == 0)
+        generate.resumeFollowing()
+        await generate.runTask?.value
+        #expect(fake.count("batchStatus(id:)") == 1)
+        #expect(generate.ledger.batches.isEmpty)
+    }
+
+    @Test func stopCurrentPreservesAnotherPendingAdmission() async throws {
+        let (generate, fake) = try await setUp()
+        let first = StatusGate(), second = StatusGate()
+        fake.stub("submit(_:)") { _ in
+            let id = fake.count("submit(_:)")
+            if id == 1 { await first.pause() } else { await second.pause() }
+            return try Self.batch("pending-\(id)", state: "running")
+        }
+        fake.stub("cancelBatch(id:)", returning: ())
+        fake.stubStream("batchEvents(id:)") { _ -> AsyncThrowingStream<BatchStatus, Error> in AsyncThrowingStream { _ in } }
+        generate.generate()
+        while await first.waiting == nil { await Task.yield() }
+        generate.generate()
+        while await second.waiting == nil { await Task.yield() }
+        generate.stop()
+        await first.open(); await second.open()
+        try await waitUntil { generate.activeBatch?.id == "pending-2" && fake.count("cancelBatch(id:)") == 1 }
+        #expect(fake.calls.first { $0.route == "cancelBatch(id:)" }?.arguments.first as? String == "pending-1")
+        #expect(generate.queued.isEmpty)
+        #expect(generate.ledger.batches.map(\.id) == ["pending-2"])
+        generate.suspendFollowing()
+    }
+
+    @Test func stoppedStatusReadCannotReplaceTheNextBatch() async throws {
+        let (generate, fake) = try await setUp()
+        let host = generate.hosts.hosts[0].id, gate = StatusGate()
+        let first = ActiveBatch(id: "first", clientBatchId: "c-first", host: host, prompt: "owl", startedAt: .now)
+        let second = ActiveBatch(id: "second", clientBatchId: "c-second", host: host, prompt: "fox", startedAt: .now)
+        generate.activeBatch = first; generate.queued = [second]
+        fake.stub("batchStatus(id:)") { arguments in
+            let id = arguments[0] as! String
+            if id == "first" { await gate.pause() }
+            return try Self.batch(id, state: "running")
+        }
+        fake.stub("cancelBatch(id:)", returning: ())
+        fake.stubStream("batchEvents(id:)") { _ -> AsyncThrowingStream<BatchStatus, Error> in AsyncThrowingStream { _ in } }
+        generate.resumeFollowing()
+        let predecessor = generate.runTask
+        while await gate.waiting == nil { await Task.yield() }
+        generate.stop()
+        for _ in 0..<100 where fake.count("batchStatus(id:)") < 2 { try await Task.sleep(for: .milliseconds(5)) }
+        await gate.open(); await predecessor?.value
+        #expect(generate.activeBatch == second)
+        #expect(generate.runTask != nil, "the predecessor must not clear the successor task")
+        if case let .running(status, _) = generate.run { #expect(status.id == "second") }
+        else { Issue.record("The next batch must remain running") }
+        generate.suspendFollowing()
+    }
+
     func model(_ name: String = "flux-dev:q4") throws -> Model {
         let doc = try JSONSerialization.jsonObject(with: Data(contentsOf: profilesURL())) as! [String: Any]
         let rows = doc["profiles"] as! [[String: Any]]

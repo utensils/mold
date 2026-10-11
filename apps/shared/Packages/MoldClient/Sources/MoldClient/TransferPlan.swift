@@ -47,9 +47,9 @@ public enum TransferPlan {
     public enum Outcome: Hashable, Sendable {
         case identities(sourceChanged: Bool, destinationChanged: Bool)
         /// The destination's answer to "has this transfer already landed",
-        /// and whether the source is STILL a held batch child right now --
-        /// read together, because their combination is the whole fact.
-        case priorAttempt(BatchStatus?, sourceHeld: Bool)
+        /// and the authoritative source lookup. Present but ineligible is
+        /// distinct from a definite absence; neither is a failed read.
+        case priorAttempt(BatchStatus?, source: QueueTransferSource)
         case admitResult(AdmitResult)
         case confirmed(BatchStatus?)
         case completed(removed: Bool)
@@ -74,19 +74,24 @@ public enum TransferPlan {
             }
             return .step(.checkPriorAttempt)
 
-        case let (.checkPriorAttempt, .priorAttempt(.some(batch), sourceHeld)):
+        case let (.checkPriorAttempt, .priorAttempt(.some(batch), source)):
             if let refusal = verify(batch, clientBatchId: clientBatchId, destination: destinationInstance) {
                 return .outcome(refusal)
             }
-            guard sourceHeld else {
+            switch source {
+            case .missing:
                 return .outcome(.sent(
                     sourceRemoved: true,
                     message: "Sent to \(destinationLabel). The original was already removed from \(sourceLabel)'s queue."))
+            case .ineligible:
+                return .outcome(.refused(
+                    "The original is still on \(sourceLabel) but is no longer eligible to move. Refresh both queues before retrying."))
+            case .eligible:
+                return .step(.complete)
             }
-            return .step(.complete)
 
-        case let (.checkPriorAttempt, .priorAttempt(.none, sourceHeld)):
-            guard sourceHeld else {
+        case let (.checkPriorAttempt, .priorAttempt(.none, source)):
+            guard case .eligible = source else {
                 return .outcome(.refused(
                     "This job is no longer held. Refresh the queue before sending it."))
             }

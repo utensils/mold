@@ -41,6 +41,10 @@ final class GenerateController {
     @ObservationIgnored let ledger: PendingLedger
     @ObservationIgnored let drafts: DraftStore
     @ObservationIgnored var runTask: Task<Void, Never>?
+    @ObservationIgnored var followingID: UUID?
+    @ObservationIgnored var followingSuspended = false
+    @ObservationIgnored var admissions: [UUID: PendingAdmission] = [:]
+    @ObservationIgnored var currentAdmissionID: UUID?
     /// Told, synchronously, when a batch reaches its end here -- finished,
     /// failed, or stopped (`.idle`) -- with THAT batch, before the next one
     /// takes the canvas. The Live Activity and notifications hang off it.
@@ -58,6 +62,10 @@ final class GenerateController {
         self.drafts = drafts
         machine = initialMachine ?? MachineChoice.load()
         restoreDraft()
+        hosts.listen { [weak self] id, event in
+            guard let self, !self.followingSuspended, self.activeBatch?.host == id else { return }
+            if case .resyncRequired = event { self.resumeFollowing() }
+        }
     }
 
     // MARK: - What can be chosen

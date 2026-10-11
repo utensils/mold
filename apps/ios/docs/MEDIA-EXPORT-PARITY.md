@@ -7,6 +7,11 @@ from completed validation; unchecked validation items remain incomplete.
 Audited against commit `3ba145d9e` on 2026-10-05. “Tally” and “Towery” are
 interpreted as the Tauri app (desktop and its iPhone shell).
 
+Cleanup note, 2026-10-10: the source inventory below records that audit baseline.
+The unreachable `ResultPager` has since been removed. Current generation exports
+resolve their exact holding copy through `GenerateController.linkedPrint`; its
+host/filename behavior remains covered by `MediaExportTests`.
+
 ## Goal
 
 Give native iOS every applicable media export offered by Tauri, through native
@@ -119,8 +124,9 @@ previous video's machine. Unknown advertised enum choices are skipped safely.
    context capturing host ID, filename, export kind, capabilities and request.
    Library reads use the displayed lead copy. Generation results explicitly
    promote the render's host copy with `LibraryEntry.presented(onAnyOf:)` before
-   opening export; `ResultPager` currently finds a merged row by `everyCopy`
-   membership without promoting it. Capability reads, POST, asset downloads and
+   opening export. The retired `ResultPager` found a merged row by `everyCopy`
+   membership without promoting it; the active controller resolves the exact
+   holding copy through `linkedPrint`. Capability reads, POST, asset downloads and
    reuse keys must all use that captured host plus filename identity. Never use
    the currently selected generation machine or a global capability cache.
    Revalidate the source/host at submit; serialize busy actions. Library tile,
