@@ -341,12 +341,17 @@ export class CipherObjectCarrier {
     this.staged = [];
     this.stagedBytes = 0;
     if (!staged.length) return;
-    if (size < THRESHOLD || this.disabled) {
+    // A complete wire window can need a fifth short batch because packed
+    // chunks include length prefixes. Before publishing an object, retained
+    // ciphertext may go inline without allocating more storage or new nonces.
+    if (
+      size < THRESHOLD ||
+      this.disabled ||
+      new Set(this.batches.values()).size >= 4
+    ) {
       for (const entry of staged) this.emit(entry.frame);
       return;
     }
-    if (new Set(this.batches.values()).size >= 4)
-      throw new Error("Ciphertext object send budget exceeded.");
     const batch: Batch = {
       frames: staged.map((e) => e.frame),
       chunks: staged.map((e) => e.bytes),

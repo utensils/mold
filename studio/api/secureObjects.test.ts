@@ -294,3 +294,36 @@ it("uploads only retained ciphertext, binds broker replies, and retransmits the 
   });
   carrier.close();
 });
+it("keeps the valid tail of a full wire window inline when four objects are reserved", async () => {
+  vi.useFakeTimers();
+  const sent: Record<string, unknown>[] = [];
+  const failed = vi.fn();
+  const carrier = new CipherObjectCarrier(
+    context,
+    (frame) => sent.push(frame),
+    () => {},
+    () => 0,
+    failed,
+  );
+  const frames = Array.from({ length: 64 }, (_, seq) => ({
+    a: "data",
+    v: 3,
+    sid: context.sid,
+    rid: context.rid,
+    seq,
+    d: btoa("x".repeat(16384)),
+  }));
+  try {
+    frames.forEach((frame) => carrier.send(frame));
+    await vi.advanceTimersByTimeAsync(32);
+    await vi.waitFor(() =>
+      expect(sent.filter((frame) => frame.op === "create")).toHaveLength(4),
+    );
+    expect(failed).not.toHaveBeenCalled();
+    expect(sent.filter((frame) => frame.a === "data")).toEqual(
+      frames.slice(60),
+    );
+  } finally {
+    carrier.close();
+  }
+});

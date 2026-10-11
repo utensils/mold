@@ -21,7 +21,7 @@ interface Stream {
   noBody: boolean;
   length: number | null;
   received: number;
-  incoming: Uint8Array[];
+  incoming: Array<{ bytes: Uint8Array; length: number }>;
   receiveCredit: number;
   consumedCredit: number;
   sendCredit: number;
@@ -251,7 +251,25 @@ export class SecureMux {
           if (stream.length !== null && stream.received > stream.length)
             throw new Error("Response exceeds its declared length.");
           stream.receiveCredit -= payload.length;
-          stream.incoming.push(payload);
+          // Bound allocation count as well as bytes. A paused consumer must
+          // not retain a million tiny arrays inside its one-MiB credit window.
+          for (let offset = 0; offset < payload.length;) {
+            let tail = stream.incoming.at(-1);
+            if (!tail || tail.length === 16384) {
+              tail = { bytes: new Uint8Array(16384), length: 0 };
+              stream.incoming.push(tail);
+            }
+            const count = Math.min(
+              16384 - tail.length,
+              payload.length - offset,
+            );
+            tail.bytes.set(
+              payload.subarray(offset, offset + count),
+              tail.length,
+            );
+            tail.length += count;
+            offset += count;
+          }
           this.deliver(id, stream);
           break;
         case 4:
@@ -294,7 +312,8 @@ export class SecureMux {
 
   private deliver(id: number, stream: Stream): void {
     if (stream.pulling && stream.incoming.length) {
-      const bytes = stream.incoming.shift()!;
+      const chunk = stream.incoming.shift()!;
+      const bytes = chunk.bytes.subarray(0, chunk.length);
       stream.pulling = false;
       stream.response!.enqueue(bytes);
       stream.consumedCredit += bytes.length;

@@ -97,6 +97,29 @@ describe("encrypted HTTP stream multiplexing", () => {
     expect(h.mux.activeStreams).toBe(0);
   });
 
+  it("coalesces paused one-byte records into bounded chunks without delaying live events", async () => {
+    const h = harness();
+    const pending = h.mux.fetch(new Request("https://host.example/api/events"));
+    h.receive(2, bytes({ status: 200, headers: [] }));
+    const reader = (await pending).body!.getReader();
+    const live = reader.read();
+    await tick();
+    h.receive(3, new Uint8Array([7]));
+    expect((await live).value).toEqual(new Uint8Array([7]));
+    for (let i = 0; i < 65536; i++) h.receive(3, new Uint8Array([i % 256]));
+    h.receive(4);
+    let total = 0,
+      chunks = 0;
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      chunks++;
+      for (const value of next.value!) expect(value).toBe(total++ % 256);
+    }
+    expect(total).toBe(65536);
+    expect(chunks).toBeLessThanOrEqual(4);
+  });
+
   it("sends uploads in bounded chunks and pauses at the window without replay", async () => {
     const h = harness();
     const pending = h.mux.fetch(
