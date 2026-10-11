@@ -94,8 +94,16 @@ jobs:
       - name: Install exact browser generator
         run: cargo +1.98.0 install wasm-bindgen-cli --version 0.2.118 --locked
       - name: Verify the browser uses this exact shared protocol
+        id: browser-protocol
         env:
           MOLD_WASM_TOOLCHAIN: 1.98.0
         run: bash scripts/build-secure-wasm.sh --check
+      - name: Preserve mismatched browser protocol for diagnosis
+        if: failure() && steps.browser-protocol.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: secure-protocol-reproducibility
+          path: studio/api/generated/secure/
+          retention-days: 3
       - name: Browser cryptography, multiplexing, storage and media regressions
         run: bunx vitest run --config studio/vitest.config.ts studio/api/secureCrypto.test.ts studio/api/secureMux.test.ts studio/api/secureWire.test.ts studio/api/secureChannel.test.ts studio/api/secureObjects.test.ts studio/api/secureStore.test.ts studio/api/secureMediaWorker.test.ts studio/api/relayTransport.test.ts studio/api/connectionRoutes.test.ts studio/api/pairing.test.ts
