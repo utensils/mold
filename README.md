@@ -326,6 +326,8 @@ verified source bytes appear once, with every owning print and input role still
 available. Bounded in-memory previews and incremental inventory loading make
 return visits faster without changing source retention. Older machines that do
 not provide verified content digests keep separate entries.
+Native source viewers identify legacy originals from their contents when opened
+and keep large-library access checks indexed so inspecting a source stays responsive.
 
 Native Mac mirrors accept missing archive-only job IDs and generation durations, a short version matching the same version with a build suffix, and an alpha-channel fact derived from identical output bytes when absent on the source. The same compatibility check compares the gallery listing with its stable source archive, so completion bookkeeping does not falsely report a changed print. When an older archive omits scheduler or transparency settings, the source output is downloaded and its digest verified before its embedded recipe can corroborate those fields. Output bytes and all generation settings must still match; conflicting recorded provenance is refused. Retrying Sync All repairs retained inputs on compatible existing copies without duplicating their outputs.
 

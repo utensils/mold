@@ -17,14 +17,19 @@ struct SourceMediaDetails: View {
     @State private var player: AVPlayer?
     @State private var error: String?
     @State private var pixels: String?
+    @State private var inspectedKind: SourceMediaOriginal.Kind?
+    @State private var inspectedKey: SourceOriginalKey?
     @State private var retry = 0
     @State private var limit = 48
     private var usages: [SourceMediaCatalog.Row] {
-        source.usages.filter { library.allowsSource($0.authority, detail: !gallery) }
+        let access = library.sourceAccess
+        return source.usages.filter { access.allows($0.authority, detail: !gallery) && (!gallery || library.sourceMediaCatalog.contains($0)) }
     }
     private var current: SourceMediaCatalog.Row? { usages.first { $0.id == (selected ?? initial) } }
 
     var body: some View {
+        let usages = usages
+        let current = usages.first { $0.id == (selected ?? initial) }
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
@@ -32,21 +37,21 @@ struct SourceMediaDetails: View {
                         Group {
                             if let image { ZoomingImage(image: image) }
                             else if let player {
-                                if row.member.contentKind == "audio" { SourceAudioPlayback(player: player) }
+                                if (inspectedKind?.rawValue ?? row.member.contentKind) == "audio" { SourceAudioPlayback(player: player) }
                                 else { VideoPlayer(player: player) }
                             }
                             else if let error {
                                 ContentUnavailableView("Original unavailable", systemImage: "exclamationmark.triangle",
                                     description: Text(error))
                             } else { ProgressView("Loading original…") }
-                        }.frame(maxWidth: .infinity).frame(height: row.member.contentKind == "audio" ? nil : 320)
+                        }.frame(maxWidth: .infinity).frame(height: (inspectedKind?.rawValue ?? row.member.contentKind) == "audio" ? nil : 320)
                         if error != nil { Button("Retry original") { retry += 1 } }
                         Text(row.member.displayName).font(.headline).textSelection(.enabled)
-                        Text("\(row.member.contentKind.capitalized) · \(ByteCountFormatter.string(fromByteCount: Int64(row.member.sizeBytes), countStyle: .file))")
+                        Text("\((inspectedKind?.rawValue ?? row.member.contentKind).capitalized) · \(ByteCountFormatter.string(fromByteCount: Int64(row.member.sizeBytes), countStyle: .file))")
                             .font(.subheadline).foregroundStyle(.secondaryText)
                         if let pixels { Text(pixels).font(.caption).foregroundStyle(.secondaryText) }
                         Text("Viewing copy on \(row.owner.hostName)").font(.caption)
-                        SourceMediaCard(owner: row.owner, member: row.member, gallery: gallery, showsPreview: false)
+                        SourceMediaCard(owner: row.owner, member: inspectedKey == loadKey ? (inspectedKind.map { row.member.inspected(as: $0) } ?? row.member) : row.member, gallery: gallery, showsPreview: false)
                     } else {
                         ContentUnavailableView("Source no longer available", systemImage: "lock",
                             description: Text("The selected print or machine changed. Close this view and choose an available source."))
@@ -82,14 +87,13 @@ struct SourceMediaDetails: View {
         .onDisappear(perform: clear)
     }
     private var loadKey: SourceOriginalKey {
-        .init(row: current, revision: library.sourceMediaCatalog.revision, retry: retry)
+        .init(row: current, revision: current.map { library.sourceMediaCatalog.contentRevision(for: $0.owner.id) } ?? 0, retry: retry)
     }
-    private func clear() { player?.pause(); player?.replaceCurrentItem(with: nil); player = nil; image = nil; file = nil; pixels = nil }
+    private func clear() { player?.pause(); player?.replaceCurrentItem(with: nil); player = nil; image = nil; file = nil; pixels = nil; inspectedKind = nil; inspectedKey = nil }
     private func load() async {
         clear(); error = nil
-        guard let row = current, let route = hosts.host(row.owner.hostID),
-              ["image", "video", "audio"].contains(row.member.contentKind) else {
-            error = "This source type has no native viewer."; return
+        guard let row = current, let route = hosts.host(row.owner.hostID) else {
+            error = "This source is no longer available on its machine."; return
         }
         let instance = hosts.instanceID(of: row.owner.hostID)
         let key = loadKey
@@ -98,14 +102,15 @@ struct SourceMediaDetails: View {
             guard !Task.isCancelled, key == loadKey, current?.authority == row.authority,
                   hosts.host(row.owner.hostID) == route, hosts.instanceID(of: row.owner.hostID) == instance,
                   library.allowsSource(row.authority, detail: !gallery) else { return }
-            if row.member.contentKind == "image" {
-                let decoded = try await SourceMediaOriginalImage.decode(original)
-                guard !Task.isCancelled, key == loadKey, current?.authority == row.authority,
-                      hosts.host(row.owner.hostID) == route, hosts.instanceID(of: row.owner.hostID) == instance,
-                      library.allowsSource(row.authority, detail: !gallery) else { return }
+            let inspected = try await SourceMediaOriginal.inspect(original)
+            guard !Task.isCancelled, key == loadKey, current?.authority == row.authority,
+                  hosts.host(row.owner.hostID) == route, hosts.instanceID(of: row.owner.hostID) == instance,
+                  library.allowsSource(row.authority, detail: !gallery) else { return }
+            inspectedKind = inspected.kind; inspectedKey = key
+            if let decoded = inspected.image {
                 image = UIImage(cgImage: decoded.image)
                 pixels = decoded.dimensions
-            } else { file = original; player = AVPlayer(url: original.url) }
+            } else { file = original; player = AVPlayer(url: inspected.url) }
         } catch { if !Task.isCancelled { self.error = error.localizedDescription } }
     }
 }

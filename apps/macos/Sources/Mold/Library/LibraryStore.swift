@@ -11,6 +11,8 @@ import MoldClient
 @Observable
 final class LibraryStore {
     let sourceMediaCatalog = SourceMediaCatalog()
+    @ObservationIgnored let sourceAccessIndex = SourceMediaAccessIndex()
+    var sourceAccessRevision = 0
     var openSourceDetails: [UUID: SourceMediaAuthority] = [:]
     var unreadMedia: LibraryUnreadLedger
     let readDefaults: UserDefaults
@@ -30,7 +32,7 @@ final class LibraryStore {
     let hosts: HostStore
 
     /// `internal(set)`, like `trashed`: `rebuild()` lives in `+Rows`.
-    internal(set) var items: [LibraryEntry] = []
+    internal(set) var items: [LibraryEntry] = [] { didSet { sourceAccessRevision &+= 1 } }
     /// A count, not a flag: two overlapping refreshes (a manual ⌘R while an
     /// automatic one is still in flight, say) used to have the first one's
     /// `defer` turn this off while the second was still running.
@@ -39,7 +41,7 @@ final class LibraryStore {
 
     /// Set from here and from `+Mutations`'s `refreshTrash()`; `private(set)`
     /// does not cross that file boundary.
-    internal(set) var trashed: [LibraryEntry] = []
+    internal(set) var trashed: [LibraryEntry] = [] { didSet { sourceAccessRevision &+= 1 } }
 
     var perHost: [MoldHost.ID: [LibraryEntry]] = [:]
     var trashPerHost: [MoldHost.ID: [LibraryEntry]] = [:]
@@ -50,7 +52,7 @@ final class LibraryStore {
     /// Collections as each MACHINE holds them. A collection's id is that
     /// machine's, so these are never merged in storage -- only when they are
     /// read, by `CollectionShelf.merge`.
-    var collectionsPerHost: [MoldHost.ID: [Collection]] = [:]
+    var collectionsPerHost: [MoldHost.ID: [Collection]] = [:] { didSet { sourceAccessRevision &+= 1 } }
     var collectionInventoryAvailable: Set<MoldHost.ID> = []
     let collectionVisibility = CollectionVisibilityLedger.load(from: AppStorageSuite.defaults, key: "library.collectionVisibility")
     var reconcilingCollectionVisibility = false

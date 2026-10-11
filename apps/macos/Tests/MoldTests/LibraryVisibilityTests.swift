@@ -55,3 +55,24 @@ extension LibraryVisibilityTests {
         #expect(!library.allowsSource(authority, detail: true))
     }
 }
+
+extension LibraryVisibilityTests {
+    @Test func sourceAccessReusesIndexAndInvalidatesSameCountChanges() {
+        let host = MoldHost(name: "Fixture", baseURL: URL(string: "http://fixture")!)
+        let hosts = HostStore(hosts: [host]) { FakeBackend(host: $0) }
+        let library = LibraryStore(hosts: hosts)
+        let first = LibraryEntry(host: host, print: FakeFixtures.print("first.png"))
+        let second = LibraryEntry(host: host, print: FakeFixtures.print("second.png"))
+        library.items = [first]
+        let authority = SourceMediaAuthority(owner: first, route: host, instance: nil)
+        for _ in 0..<100 { #expect(library.allowsSource(authority)) }
+        #expect(library.sourceAccessIndex.derivations == 1)
+        library.items = [second]
+        #expect(!library.allowsSource(authority))
+        #expect(library.sourceAccessIndex.derivations == 2)
+        library.items = [first]
+        library.collectionsPerHost = [host.id: [Collection(id: "private", name: "Private", slug: "private", hidden: true)]]
+        _ = library.sourceAccess
+        #expect(library.sourceAccessIndex.derivations == 3)
+    }
+}

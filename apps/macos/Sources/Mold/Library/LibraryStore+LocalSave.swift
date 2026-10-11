@@ -217,22 +217,6 @@ private func sameDescriptor(_ source: GalleryPrint, _ local: GalleryPrint) -> Bo
         && (source.metadataSynthetic ?? false) == (local.metadataSynthetic ?? false)
 }
 
-private func filesEqual(_ first: URL, _ second: URL) throws -> Bool {
-    let manager = FileManager.default
-    let firstSize = try manager.attributesOfItem(atPath: first.path)[.size] as? NSNumber
-    let secondSize = try manager.attributesOfItem(atPath: second.path)[.size] as? NSNumber
-    guard firstSize == secondSize else { return false }
-    let left = try FileHandle(forReadingFrom: first)
-    let right = try FileHandle(forReadingFrom: second)
-    defer { try? left.close(); try? right.close() }
-    while true {
-        let a = try left.read(upToCount: 1_024 * 1_024) ?? Data()
-        let b = try right.read(upToCount: 1_024 * 1_024) ?? Data()
-        guard a == b else { return false }
-        if a.isEmpty { return true }
-    }
-}
-
 private func boundedMirrorName(_ filename: String, marker: String) -> String {
     let url = URL(fileURLWithPath: filename)
     var stem = url.deletingPathExtension().lastPathComponent
@@ -243,14 +227,8 @@ private func boundedMirrorName(_ filename: String, marker: String) -> String {
     return stem + suffix
 }
 
-private func collisionName(for target: MirrorTarget, file: URL) throws -> String {
-    let handle = try FileHandle(forReadingFrom: file)
-    defer { try? handle.close() }
-    var digest = SHA256()
-    while let chunk = try handle.read(upToCount: 1_024 * 1_024), !chunk.isEmpty {
-        digest.update(data: chunk)
-    }
-    let hash = digest.finalize().map { String(format: "%02x", $0) }.joined()
+private func collisionName(for target: MirrorTarget, file: URL) async throws -> String {
+    let hash = try await LibraryMirrorFiles.sha256(file)
     return boundedMirrorName(target.print.filename,
                              marker: "\(target.hostID.uuidString.lowercased())-\(hash)")
 }
@@ -281,33 +259,36 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
         defer { try? FileManager.default.removeItem(at: file) }
         if occupied {
             let existing = try await destination.mediaFile(requestedName, trashed: false)
+            defer { try? FileManager.default.removeItem(at: existing) }
             let equal: Bool
             if let local = knownPrints[requestedName], sameDescriptor(target.print, local) {
-                equal = try filesEqual(file, existing)
+                equal = try await LibraryMirrorFiles.equal(file, existing)
             } else {
                 equal = false
             }
-            try? FileManager.default.removeItem(at: existing)
             if equal {
+                guard await target.isCurrent() else { throw MoldClientError.unreachable("The machine route changed. Refresh the Library before copying.") }
                 let sourceMedia = try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
                     from: target.source, to: destination, as: requestedName, expectedSourceArchiveIdentity: sourceIdentity, downloadedOutput: file)
                 return MirrorResult(filename: requestedName, alreadyLocal: true, error: nil, sourceMedia: sourceMedia)
             }
         }
-        let filename = occupied ? try collisionName(for: target, file: file) : requestedName
+        let filename = occupied ? try await collisionName(for: target, file: file) : requestedName
         if occupied, let local = knownPrints[filename] {
             let existing = try await destination.mediaFile(filename, trashed: false)
+            defer { try? FileManager.default.removeItem(at: existing) }
             let equal = sameDescriptor(target.print, local)
-                ? try filesEqual(file, existing) : false
-            try? FileManager.default.removeItem(at: existing)
+                ? try await LibraryMirrorFiles.equal(file, existing) : false
             if equal {
+                guard await target.isCurrent() else { throw MoldClientError.unreachable("The machine route changed. Refresh the Library before copying.") }
                 let sourceMedia = try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
                     from: target.source, to: destination, as: filename, expectedSourceArchiveIdentity: sourceIdentity, downloadedOutput: file)
                 return MirrorResult(filename: filename, alreadyLocal: true, error: nil, sourceMedia: sourceMedia)
             }
         }
         guard await target.isCurrent() else { throw MoldClientError.unreachable("The machine route changed. Refresh the Library before copying.") }
-        let item = try GalleryImport(mirroring: target.print, fileAt: file)
+        let item = try await LibraryMirrorFiles.importDescriptor(for: target.print, file: file)
+        guard await target.isCurrent() else { throw MoldClientError.unreachable("The machine route changed. Refresh the Library before copying.") }
         let sourceKey = LocalSyncRecord.key(hostID: target.hostID,
                                             filename: target.print.filename)
         await pending?.mark(sourceKey, filename: filename)

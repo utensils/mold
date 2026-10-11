@@ -23,8 +23,8 @@ struct PersistedDraft: ViewModifier {
             // window's content on Cmd-Q, so the last word of a prompt typed
             // and immediately quit on was lost inside the 400 ms debounce.
             // `willTerminate` is the one that always arrives; `onDisappear`
-            // stays for the ordinary case of the pane going away.
-            .onDisappear { drafts.flush(descriptor, inputs: inputs) }
+            // saves asynchronously when the pane goes away during navigation.
+            .onDisappear { drafts.saveOnNavigation(descriptor, inputs: inputs) }
             .onReceive(NotificationCenter.default.publisher(
                 for: NSApplication.willTerminateNotification)) { _ in
                 drafts.flush(descriptor, inputs: inputs)

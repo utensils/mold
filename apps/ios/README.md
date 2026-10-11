@@ -106,6 +106,7 @@ Xcode must be installed and selected; the devshell provides XcodeGen and Python.
 | `make lint`               | Architecture lints (shared ones via `../shared/scripts/swift-lint.sh`)                                                                                                                                                                                                   |
 
 UI tests make one complete pass, then retry only identified failed methods once
+
 <!-- Temporary owner-directed build-first delivery, 2026-10-06: hosted
 accessibility matrix disabled; local tests remain available and CI compiles the
 native app/shared packages for Simulator instead of running test/lint lanes. -->
@@ -406,3 +407,9 @@ Held jobs with a server-verified missing model component (including a missing ad
 Active model downloads and repairs keep model names and IDs full width, with progress and a compact **Cancel** control underneath. The control remains labeled **Cancel Download** for VoiceOver and retains a 44-point touch target. Accessibility text sizes stack progress text and actions.
 
 Source Media offers media-type and machine filters alongside search. Open a source to inspect its original image, video or audio, file details, and every visible use (including multiple roles and keyframe positions in the same print). Choose an exact copy for reuse or open an owning print to manage retention. Native viewers stream only the selected original into a private temporary file, delete it on dismissal, and bound image decoding; originals larger than 128 MiB are not previewed. No originals are downloaded just by scrolling. Inventory discovery starts with four owners per machine, then batches up to 100 with two concurrent requests; fresh repeated visits make no new inventory requests.
+
+Native source details use an indexed visibility projection and owner-specific
+invalidation. Unrelated print updates do not restart the selected original.
+Unchanged rows remain visible during refresh; refused inventories revoke open
+source access. Legacy originals with unknown metadata are identified from their
+contents only when opened, with bounded decoding and cancellable playback inspection.

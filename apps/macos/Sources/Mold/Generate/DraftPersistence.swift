@@ -1,3 +1,5 @@
+import AppKit
+import Combine
 import MoldClient
 import SwiftUI
 
@@ -13,6 +15,8 @@ final class DraftPersistence {
     private let store: DraftStore
     private let delay: Duration
     private var task: Task<Void, Never>?
+    @ObservationIgnored private var termination: AnyCancellable?
+    @ObservationIgnored private var pending: (descriptor: DraftDescriptor, inputs: DraftInputSnapshot?)?
     /// Whether a restore has already been attempted. A second one would
     /// overwrite whatever has been typed since the first.
     private(set) var hasRestored = false
@@ -26,15 +30,36 @@ final class DraftPersistence {
     private(set) var recoveryRefusal: String?
     private var failedInputDigest: String?
 
-    init(store: DraftStore = DraftStore(), delay: Duration = .milliseconds(400)) {
+    init(store: DraftStore = DraftStore(), delay: Duration = .milliseconds(400), notifications: NotificationCenter = .default) {
         self.store = store
         self.delay = delay
+        // AppStores owns this object after Generate disappears. Delivery is
+        // synchronous: a queued Task would not run before process termination.
+        termination = notifications.publisher(for: NSApplication.willTerminateNotification)
+            .sink { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, let pending = self.pending else { return }
+                    self.flush(pending.descriptor, inputs: pending.inputs)
+                }
+            }
     }
 
     /// Schedules a write. A newer change supersedes an older one outright --
     /// the file only ever needs to hold the LATEST draft, so a queue of
     /// snapshots would be work nobody reads.
     func schedule(_ descriptor: DraftDescriptor, inputs: DraftInputSnapshot? = nil) {
+        enqueue(descriptor, inputs: inputs, after: delay)
+    }
+
+    /// Leaving Generate must not wait for an in-progress input encoding/write.
+    /// Save immediately in the background; the app-owned persistence object
+    /// outlives the pane. Final application termination still calls flush.
+    func saveOnNavigation(_ descriptor: DraftDescriptor, inputs: DraftInputSnapshot? = nil) {
+        enqueue(descriptor, inputs: inputs, after: .zero)
+    }
+
+    private func enqueue(_ descriptor: DraftDescriptor, inputs: DraftInputSnapshot?, after delay: Duration) {
+        pending = (descriptor, inputs)
         task?.cancel()
         let revision = store.reserveWrite()
         let (descriptor, inputs) = preservingUnreadableInputs(descriptor, inputs: inputs)
@@ -77,6 +102,9 @@ final class DraftPersistence {
     /// Writes the pending change NOW, for a quit that will not wait for a
     /// debounce. Synchronous on purpose: there is no later.
     func flush(_ descriptor: DraftDescriptor, inputs: DraftInputSnapshot? = nil) {
+        // The live pane may supply a newer edit before its onChange fires.
+        // Whichever termination observer runs last must retain that snapshot.
+        pending = (descriptor, inputs)
         task?.cancel()
         task = nil
         let (descriptor, inputs) = preservingUnreadableInputs(descriptor, inputs: inputs)
