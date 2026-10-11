@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createObjectBroker } from "../opaque-objects.mjs";
+import { createObjectBroker, objectEnvelope } from "../opaque-objects.mjs";
 import { encodeDocument, decodeDocument } from "../store-codec.mjs";
 function fixture(compressed = false) {
   const rows = new Map(),
@@ -101,6 +101,57 @@ test("compressed quota CAS keeps concurrent grants bounded and exact on retry", 
       assert.deepEqual(await f.broker.command(f.ctx, requests[i]), replies[i]);
   }
   assert.ok([...f.rows.values()].every((row) => row.codec.S === "deflate-v1"));
+});
+test("one MiB objects fit sixty-four frames without expanding the aggregate reservation budget", async () => {
+  const f = fixture(true);
+  assert.equal(f.broker.policy.maxBytes, 1048576);
+  assert.equal(f.broker.policy.maxCount, 64);
+  assert.equal(f.broker.policy.maxInFlightBytes, 1048576);
+  assert.equal(f.broker.policy.maxInFlightObjects, 4);
+  const request = { ...f.create(), count: 64, bytes: 1048576 };
+  const reply = await f.broker.command(f.ctx, request);
+  assert.equal(reply.op, "created");
+  assert.deepEqual(await f.broker.command(f.ctx, request), reply);
+  assert.equal((await f.broker.command(f.ctx, f.create(64))).code, "capacity");
+  const frame = {
+    a: "data",
+    v: 3,
+    sid: f.ctx.sid,
+    rid: f.ctx.rid,
+    seq: 0,
+    o: {
+      id: reply.id,
+      bytes: request.bytes,
+      count: 64,
+      sha256: request.sha256,
+      url: reply.getUrl,
+    },
+  };
+  assert.ok(objectEnvelope(frame));
+  assert.equal(
+    objectEnvelope({ ...frame, o: { ...frame.o, bytes: 1048577 } }),
+    undefined,
+  );
+  assert.equal(
+    objectEnvelope({ ...frame, o: { ...frame.o, count: 65 } }),
+    undefined,
+  );
+  assert.equal(
+    await f.broker.command(f.ctx, {
+      ...f.create(64),
+      count: 64,
+      bytes: 1048577,
+    }),
+    undefined,
+  );
+  assert.equal(
+    await f.broker.command(f.ctx, {
+      ...f.create(64),
+      count: 65,
+      bytes: 1048576,
+    }),
+    undefined,
+  );
 });
 test("allocation retries are idempotent and changes conflict; parallel allocations respect quota", async () => {
   const f = fixture();

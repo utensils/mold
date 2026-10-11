@@ -3,8 +3,8 @@ import { hex, integer } from "./secure-admission.mjs";
 
 export const OBJECT_LIMITS = Object.freeze({
   version: 1,
-  maxBytes: 262144,
-  maxCount: 16,
+  maxBytes: 1048576,
+  maxCount: 64,
   maxInFlightBytes: 1048576,
   maxInFlightObjects: 4,
 });
@@ -18,11 +18,11 @@ const validSize = (f) =>
   integer(f.seq) &&
   integer(f.count) &&
   f.count >= 1 &&
-  f.count <= 16 &&
+  f.count <= OBJECT_LIMITS.maxCount &&
   Number.isSafeInteger(f.seq + f.count) &&
   integer(f.bytes) &&
   f.bytes >= f.count * 5 &&
-  f.bytes <= Math.min(262144, f.count * 16388) &&
+  f.bytes <= Math.min(OBJECT_LIMITS.maxBytes, f.count * 16388) &&
   hex(f.sha256, 32);
 export function objectEnvelope(frame) {
   const o = frame?.o;

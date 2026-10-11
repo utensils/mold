@@ -104,6 +104,30 @@ count); its latency benefit and admission implications need separate review.
 
 ## Earlier baselines and limits
 
+After deploying bounded quota compression (router
+`7NuM/cdc7x3Ntp3hbROcXHuhAmjlOfqHqE7ByGDpsgc=`), the optimized Rust build verified
+20,971,520 bytes from `21:11:08.837090Z` to `21:11:41.242210Z`. Application time
+was 32.387 seconds (0.618 MiB/s), CPU time 0.41 seconds and maximum RSS
+21,823,488 bytes. Objects still had the 256 KiB / 16-frame limit. This indicates
+that cloud coordination latency, rather than debug crypto CPU, remains the
+sustained throughput limit.
+
+The exact log interval contained 80 host objects, 19,728,069 ciphertext bytes,
+1,220 represented frames, 524 Lambda invocations and 70.895 billed seconds;
+duration p50 was 108.49 ms and p95 326.39 ms, with no diagnostic errors. The
+`21:11:00Z`–`21:12:00Z` minute contained 825 API messages, 2,856 read units,
+1,705 write units, zero errors/throttles and peak Lambda concurrency 16. Four of
+those read units came from the operator's bounded row-size audit; idle-host and
+minute-margin caveats still apply. Using the same rates and inferred S3 lifecycle
+counts gives **$0.003453 for 20 MiB, or $0.17678/GiB**, before the same additional
+costs listed above. This comparison includes both the compact storage change and
+the optimized client/host build, so it does not attribute every saving to compression.
+
+The actual live two-member quota row measured 8,832 JSON bytes versus 2,958 stored
+bytes (66.5% smaller). Unlike the synthetic estimate, real concurrent Lambda
+workers may use different signing-session credentials, reducing cross-URL
+compression. Exact capabilities and conditional-write authority were preserved.
+
 The initial inline-only 3 MiB sample took 13.847 seconds (0.217 MiB/s), with
 830 Lambda REPORTs and 48.004 billed seconds. Increasing flow-control windows
 alone did not solve bulk cost. Short object samples varied substantially with

@@ -26,7 +26,7 @@ invites never receive object capability. Host senders must gate each rid on
 its `open` policy. Peers without mutual support stay inline.
 
 The negotiated optional `objects` field advertises availability:
-`{version:1,origin,maxBytes:262144,maxCount:16,maxInFlightBytes:1048576,maxInFlightObjects:4}`.
+`{version:1,origin,maxBytes:1048576,maxCount:64,maxInFlightBytes:1048576,maxInFlightObjects:4}`.
 It must match the independently configured origin and these version-1 limits.
 Absent, unknown or mismatched policy disables object allocation. It never adds
 a trusted origin. Direct LAN peers do not advertise this field.
@@ -120,8 +120,8 @@ new session; uncertain mutations are never automatically replayed.
 
 An object is a concatenation of **original consecutive reliable data frames**:
 `u32BE(chunk length) || raw ciphertext chunk`, repeated `count` times. Each raw
-chunk is 1..16384 bytes; count is 1..16, and total object bytes including all
-four-byte lengths are 5..262144. A full 16 x 16384-byte bundle exceeds that total
+chunk is 1..16384 bytes; count is 1..64, and total object bytes including all
+four-byte lengths are 5..1048576. A full 64 x 16384-byte bundle exceeds that total
 bound and must be split. No trailing bytes, zero-length chunks or padding exist.
 The reliable window is 64 original sequences, not 64 objects.
 
@@ -167,7 +167,7 @@ require a complete bounded fetch/verification before accepting their new tail.
 
 The broker tracks at most four live allocations / 1 MiB for each
 namespace+sid+rid+direction. Limits apply across retries and parallel Lambdas.
-Each admitted peer has at most 16 unacknowledged original sequence slots. Hosts
+Each admitted peer has at most 64 unacknowledged original sequence slots. Hosts
 are capped at 32 namespaces and 32 peers each; invite peers cannot allocate.
 Expired reservations do not create authorization. Cleanup replaces payloads only
 under `ciphertext/v3/`; old plaintext prefixes have no runtime IAM access.
@@ -229,7 +229,11 @@ format migration, not an older wire-protocol admission path. Grant responses
 round-trip exactly, so retries do not mint different URLs or capabilities.
 
 The reliable wire window is 64 original frames (ACK credit 0–64), allowing up to
-four 16-frame ciphertext objects in flight without exceeding the existing
-four-object / 1 MiB reservation limit per peer and direction. Each HTTP stream
-has 1 MiB of body credit; consumers replenish at 512 KiB. Object size and frame
-count limits remain 256 KiB and 16 respectively.
+up to four ciphertext objects in flight within the same aggregate 1 MiB
+reservation limit per peer and direction. One object may carry up to 1 MiB and
+64 original frames; a full 64-frame bundle must shorten at least one chunk to
+leave room for its length prefixes. A 63-full-frame bundle fits. A 1 MiB object
+uses the entire byte reservation, so a second object must wait for cleanup even
+though the object-count cap is four. Each HTTP stream still has 1 MiB of body
+credit; consumers replenish at 512 KiB. Neither the reliable window nor the
+per-peer byte budget grows with the larger object.
