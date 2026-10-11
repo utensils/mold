@@ -45,6 +45,10 @@ export function studioPrimary(): StudioPrimary | null {
 export function suspendStudioPrimary(): void {
   primary = null;
 }
+/** A different hosted primary must never inherit the previous App's runtime. */
+export function reloadStudioDocument(): void {
+  window.location.reload();
+}
 export function setStudioPrimary(host: StudioPrimary | null): void {
   const next = host
     ? Object.freeze({

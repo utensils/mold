@@ -17,6 +17,11 @@ const mocks = vi.hoisted(() => ({
   configure: vi.fn(),
   claim: vi.fn(),
   parse: vi.fn(),
+  reload: vi.fn(),
+}));
+vi.mock("./lib/secureStudio", async (original) => ({
+  ...(await original<typeof import("./lib/secureStudio")>()),
+  reloadStudioDocument: mocks.reload,
 }));
 vi.mock("@studio/api/relayTransport", async (original) => ({
   ...(await original<typeof import("@studio/api/relayTransport")>()),
@@ -73,7 +78,7 @@ function hosts() {
   setStudioPrimary(first);
   return { first, second };
 }
-it("switches selected hosts through the gate without forgetting either pairing", async () => {
+it("switches through a fresh gate without forgetting either pairing", async () => {
   const { second } = hosts();
   const wrapper = mount(OriginAccess);
   await flushPromises();
@@ -81,11 +86,17 @@ it("switches selected hosts through the gate without forgetting either pairing",
   expect(studioPrimary()).toBeNull();
   expect(wrapper.find('[data-test="studio"]').exists()).toBe(false);
   expect(wrapper.findAll("option")).toHaveLength(2);
-  await wrapper.get("select").setValue(second.id);
-  await wrapper.get("form").trigger("submit");
+  expect(mocks.reload).toHaveBeenCalledTimes(1);
+  wrapper.unmount();
+  const nextDocument = mount(OriginAccess);
+  await flushPromises();
+  expect(nextDocument.find('[data-test="studio"]').exists()).toBe(false);
+  await nextDocument.get("select").setValue(second.id);
+  await nextDocument.get("form").trigger("submit");
   await flushPromises();
   expect(studioPrimary()?.id).toBe(second.id);
-  expect(wrapper.find('[data-test="studio"]').exists()).toBe(true);
+  expect(nextDocument.find('[data-test="studio"]').exists()).toBe(true);
+  expect(mocks.reload).toHaveBeenCalledTimes(1);
   expect(mocks.forget).not.toHaveBeenCalled();
   expect(listStoredHosts()).toHaveLength(2);
 });
@@ -98,7 +109,11 @@ it("returns to the gate after successful selected Forget and can choose another 
   expect(wrapper.find('[data-test="studio"]').exists()).toBe(false);
   expect(studioPrimary()).toBeNull();
   expect(wrapper.get("select").element.value).toBe(second.id);
-  await wrapper.get("form").trigger("submit");
+  expect(mocks.reload).toHaveBeenCalledTimes(1);
+  wrapper.unmount();
+  const nextDocument = mount(OriginAccess);
+  await flushPromises();
+  await nextDocument.get("form").trigger("submit");
   await flushPromises();
   expect(studioPrimary()?.id).toBe(second.id);
 });
@@ -126,6 +141,7 @@ it("suspends the current tab before accepting another tab's changed selection", 
   expect(wrapper.find('[data-test="studio"]').exists()).toBe(false);
   expect(studioPrimary()).toBeNull();
   expect(mocks.clear).toHaveBeenCalled();
+  expect(mocks.reload).toHaveBeenCalledTimes(1);
 });
 
 it("does not remount or restore a forgotten primary after a late status response", async () => {
@@ -157,14 +173,18 @@ it("can pair a fresh invitation after forgetting the last selected machine", asy
   await flushPromises();
   await removeHost("origin");
   await flushPromises();
+  expect(mocks.reload).toHaveBeenCalledTimes(1);
+  wrapper.unmount();
+  const nextDocument = mount(OriginAccess);
+  await flushPromises();
   mocks.parse.mockReturnValue({ base_url: "https://new.invalid", name: "New" });
   mocks.claim.mockResolvedValue({ instance_id: "new-id" });
-  await wrapper.get("textarea").setValue("fresh invitation");
-  await wrapper.get("form").trigger("submit");
+  await nextDocument.get("textarea").setValue("fresh invitation");
+  await nextDocument.get("form").trigger("submit");
   await flushPromises();
   expect(studioPrimary()?.url).toBe("https://new.invalid");
-  expect(wrapper.find('[data-test="studio"]').exists()).toBe(true);
-  expect(wrapper.find("textarea").exists()).toBe(false);
+  expect(nextDocument.find('[data-test="studio"]').exists()).toBe(true);
+  expect(nextDocument.find("textarea").exists()).toBe(false);
 });
 it("keeps verified same-machine route learning connected but suspends explicit route edits", async () => {
   const { first } = hosts();
@@ -226,4 +246,49 @@ it("never selects a late invitation claim after another tab changes selection", 
   expect(studioPrimary()).toBeNull();
   expect(wrapper.find('[data-test="studio"]').exists()).toBe(false);
   expect(mocks.fetch).not.toHaveBeenCalled();
+});
+
+it("requires a fresh document after switching so old model and download actions cannot mount on B", async () => {
+  const { second } = hosts();
+  const wrapper = mount(OriginAccess);
+  await flushPromises();
+  expect(mocks.reload).not.toHaveBeenCalled();
+  await wrapper.get('[data-test="studio"] button').trigger("click");
+  expect(mocks.reload).toHaveBeenCalledTimes(1);
+  expect(studioPrimary()).toBeNull();
+  const before = mocks.fetch.mock.calls.length;
+  await wrapper.get("select").setValue(second.id);
+  await wrapper.get("form").trigger("submit");
+  await flushPromises();
+  expect(wrapper.find('[data-test="studio"]').exists()).toBe(false);
+  expect(studioPrimary()).toBeNull();
+  expect(mocks.fetch).toHaveBeenCalledTimes(before);
+  window.dispatchEvent(
+    new StorageEvent("storage", { key: "mold.web.primary.v3" }),
+  );
+  expect(mocks.reload).toHaveBeenCalledTimes(1);
+});
+
+it("reloads only after a selected Forget succeeds", async () => {
+  hosts();
+  const wrapper = mount(OriginAccess);
+  await flushPromises();
+  mocks.forget.mockRejectedValueOnce(new Error("storage refused"));
+  await expect(removeHost("origin")).rejects.toThrow("storage refused");
+  expect(mocks.reload).not.toHaveBeenCalled();
+  await removeHost("origin");
+  await flushPromises();
+  expect(mocks.reload).toHaveBeenCalledTimes(1);
+  expect(wrapper.find('[data-test="studio"]').exists()).toBe(false);
+});
+
+it("keeps the fresh hosted document at the gate when only remembered machines exist", async () => {
+  hosts();
+  setStudioPrimary(null);
+  const wrapper = mount(OriginAccess);
+  await flushPromises();
+  expect(wrapper.find('[data-test="studio"]').exists()).toBe(false);
+  expect(mocks.fetch).not.toHaveBeenCalled();
+  expect(mocks.reload).not.toHaveBeenCalled();
+  expect(wrapper.findAll("option")).toHaveLength(2);
 });

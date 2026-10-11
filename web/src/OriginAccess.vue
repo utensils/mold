@@ -14,6 +14,7 @@ import {
   studioPrimary,
   setStudioPrimary,
   suspendStudioPrimary,
+  reloadStudioDocument,
   STUDIO_PRIMARY_CHANGED,
   STUDIO_PRIMARY_KEY,
   type StudioPrimary,
@@ -44,6 +45,10 @@ const error = ref("");
 let attempt = 0;
 let controller: AbortController | undefined;
 let committingSelection = false;
+// App owns module singletons (models, downloads, Pinia stores). Once mounted,
+// another primary needs a new document, not only a new Vue component tree.
+let mountedStudio = false;
+const reloading = ref(false);
 const routeKey = (host: StudioPrimary | null) =>
   host
     ? `${host.url}
@@ -74,6 +79,10 @@ function suspendSelection() {
   acceptedRoute = "";
   refreshRemembered();
   error.value = "";
+  if (hosted && mountedStudio && !reloading.value) {
+    reloading.value = true;
+    reloadStudioDocument();
+  }
 }
 function selectionChanged() {
   if (!committingSelection && routeKey(studioPrimary()) !== acceptedRoute)
@@ -85,6 +94,7 @@ function storageChanged(event: StorageEvent) {
   else if (event.key === "mold.web.hosts.v1") refreshRemembered();
 }
 async function connect() {
+  if (reloading.value) return;
   const currentAttempt = ++attempt;
   controller?.abort();
   controller = new AbortController();
@@ -141,6 +151,7 @@ async function connect() {
     }
     if (candidate) setOriginApiKey(candidate);
     key.value = "";
+    mountedStudio = true;
     ready.value = true;
   } catch (failure) {
     if (currentAttempt !== attempt) return;
@@ -175,7 +186,9 @@ onMounted(() => {
     window.addEventListener("storage", storageChanged);
     window.addEventListener(HOSTS_CHANGED_EVENT, refreshRemembered);
   }
-  void connect();
+  // Switch/Forget intentionally clears selection. Remembered alternatives
+  // are choices at the gate, not permission to silently pick the first one.
+  if (!hosted || studioPrimary() || invitation.value.trim()) void connect();
 });
 onBeforeUnmount(() => {
   attempt += 1;
@@ -204,7 +217,7 @@ onBeforeUnmount(() => {
           v-if="remembered.length"
           id="saved-machine"
           v-model="selected"
-          :disabled="busy"
+          :disabled="busy || reloading"
         >
           <option v-for="host in remembered" :key="host.id" :value="host.id">
             {{ host.name }}
@@ -216,7 +229,7 @@ onBeforeUnmount(() => {
           v-model="invitation"
           autocomplete="off"
           spellcheck="false"
-          :disabled="busy"
+          :disabled="busy || reloading"
           rows="3"
           placeholder="Paste the link from Remote Access on your machine"
         />
@@ -240,19 +253,21 @@ onBeforeUnmount(() => {
         type="password"
         autocomplete="off"
         spellcheck="false"
-        :disabled="busy"
+        :disabled="busy || reloading"
       />
       <p v-if="error" role="alert">{{ error }}</p>
       <p v-if="requiresKey">Your key stays in this tab's browser session.</p>
-      <button type="submit" :disabled="busy">
+      <button type="submit" :disabled="busy || reloading">
         {{
-          busy
-            ? "Connecting…"
-            : hosted
-              ? "Connect securely"
-              : requiresKey
-                ? "Connect"
-                : "Try again"
+          reloading
+            ? "Reloading Studio…"
+            : busy
+              ? "Connecting…"
+              : hosted
+                ? "Connect securely"
+                : requiresKey
+                  ? "Connect"
+                  : "Try again"
         }}
       </button>
     </form>

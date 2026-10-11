@@ -1,6 +1,7 @@
 import { isLoopbackOrigin, secureRequestUrl } from "@studio/api/relayTransport";
 import { originalMediaBlob } from "@studio/api/originalMedia";
 import { originAuthenticatedFetch as fetch } from "./originAuth";
+import { studioPrimary } from "./secureStudio";
 import { secureMediaUrl, releaseSecureMediaUrl } from "@studio/api/secureMedia";
 /*
  * Multi-host gallery media (Task #22). `<img>`/`<video>` elements cannot send
@@ -67,6 +68,17 @@ function persistentStore(): PersistentThumbnailStore | null {
 
 const keyOf = (hostId: string, path: string) => `${hostId}|${path}`;
 
+/** `origin` is only a UI alias in hosted Studio. Persist exact machine
+ * authority and retain the saved ID prefix so Forget evicts its tiles. */
+function thumbnailHostKey(host: HostEntry): string {
+  const primary = host.id === ORIGIN_HOST_ID ? studioPrimary() : null;
+  const id =
+    primary?.url === host.url && primary.instanceId === host.instanceId
+      ? primary.id
+      : host.id;
+  return `${id}|${encodeURIComponent(host.url || window.location.origin)}|${encodeURIComponent(host.instanceId ?? "")}`;
+}
+
 /**
  * The tile path. `?v=` carries the content version so a rewritten print is a
  * different URL to the browser's own HTTP cache (keyless hosts load this
@@ -124,12 +136,13 @@ async function fetchAuthedObjectUrl(
   signal?: AbortSignal,
   persistentKey?: string,
   tier: 256 | 512 = 256,
+  isCurrent: () => boolean = () => true,
 ): Promise<{ url: string; bytes: number }> {
   const store = persistentKey ? persistentStore() : null;
   if (store && persistentKey) {
     const stored = await store.get(persistentKey);
     if (stored) {
-      if (signal?.aborted)
+      if (signal?.aborted || !isCurrent())
         throw new DOMException("Thumbnail cancelled", "AbortError");
       return { url: URL.createObjectURL(stored), bytes: stored.size };
     }
@@ -140,7 +153,7 @@ async function fetchAuthedObjectUrl(
   });
   if (!res.ok) throw new Error(`GET ${path} failed: ${res.status}`);
   const blob = await res.blob();
-  if (signal?.aborted)
+  if (signal?.aborted || !isCurrent())
     throw new DOMException("Thumbnail cancelled", "AbortError");
   // An older server ignores `?size=512` and answers its 256 px PNG without
   // the rendition header. Persisting that under the 512 key would pin the
@@ -200,7 +213,8 @@ export function resolveThumbnailSrc(
   if (!needsAuthedMedia(host)) {
     return Promise.resolve(`${hostMediaBase(host)}${path}`);
   }
-  const key = keyOf(host.id, path);
+  const hostKey = thumbnailHostKey(host);
+  const key = keyOf(hostKey, path);
   let cached = cache.get(key);
   if (!cached) {
     const entry: CachedThumbnail = {
@@ -212,7 +226,7 @@ export function resolveThumbnailSrc(
     // pin stale bytes across reloads forever.
     const tier = thumbnailTier();
     const persistentKey = options.mediaVersion
-      ? persistentThumbnailKey(host.id, filename, options.mediaVersion, tier)
+      ? persistentThumbnailKey(hostKey, filename, options.mediaVersion, tier)
       : undefined;
     entry.url = fetchAuthedObjectUrl(
       host,
@@ -220,6 +234,7 @@ export function resolveThumbnailSrc(
       options.signal,
       persistentKey,
       tier,
+      () => cache.get(key) === entry,
     ).then(({ url, bytes }) => {
       if (cache.get(key) !== entry) {
         entry.settled = true;

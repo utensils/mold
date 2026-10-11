@@ -181,3 +181,12 @@ must remove secure authority by URL/instance even after registry-ID coalescing,
 and only clear selected metadata after secure removal succeeds. Keep attempt
 fences around asynchronous pairing/status work; start the status deadline after
 pairing so interactive local-network permission has its full pairing deadline.
+
+Hosted primary changes after App has mounted require a fresh document, not just
+an App remount: module-level Models/Downloads and Pinia state can retain old
+machine rows with origin-relative actions. Clear transport and the accepted
+snapshot before one guarded reload; refuse same-document reconnect while it is
+pending. A fresh document with remembered pairings but no accepted primary stays
+at the chooser. Thumbnail memory and persistent keys include captured machine
+URL and instance plus the saved ID used for Forget eviction; a late response
+after eviction must not repopulate that cache.

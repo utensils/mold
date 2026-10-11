@@ -12,8 +12,11 @@ for retry. Choose another saved machine or paste a fresh invitation to reconnect
 The numeric loopback engine entry remains fixed in locally served Studio.
 
 Each hosted tab keeps its accepted machine fixed while Studio is mounted. A
-selection change in another tab returns it to the connection screen instead of
-silently sending operations to a different machine.
+selection change reloads the document before another machine can use the workspace,
+so cached model details and download actions cannot follow the new selection.
+Switch and Forget leave remembered alternatives at the connection screen until
+you choose one. Thumbnails are cached by the concrete machine URL and instance,
+including across reloads; forgetting that machine evicts its cached tiles.
 
 ## Inspecting inputs
 

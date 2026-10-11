@@ -23,8 +23,10 @@ In hosted browser Studio, **Settings → Machines → Switch machine** opens the
 connection screen while retaining saved pairings. The selected machine's menu
 and detail page offer **Disconnect** and **Forget** too. Forget removes the local
 pairing and returns to that screen; if removal fails, retry remains available.
-Choose another saved machine or paste a fresh pairing link. Another browser tab
-changing its selected machine also returns this tab to the connection screen.
+Choose another saved machine or paste a fresh pairing link. Selection changes,
+including changes from another tab, reload the workspace before another machine
+can use it. This clears old model and download state while keeping durable jobs
+bound to the machine that accepted them.
 
 Native clients prefer an advertised LAN address and retain the same pinned
 identity when moving to the relay. An HTTPS browser may need the WSS relay
