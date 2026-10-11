@@ -43,7 +43,7 @@ protected current-user-only Windows DACL, bounded reads, no symlinks/reparse
 points or extra hard links. A corrupt, permissive or missing connector identity
 fails closed; never replace the server pin on an error. Keep key buffers zeroized.
 
-Pairing QR v2 carries the host key binding, namespace, endpoints, WebSocket URL,
+Pairing QR v2 carries the host key binding, namespace, endpoints, optional cloud WebSocket URL,
 a short-lived invitation certificate and its private invitation seed. The seed
 never leaves clients/host except inside the trusted QR. Cloud verifies signed
 one-use admission, but only the host may consume the invitation and issue a
@@ -96,3 +96,10 @@ engine death cancels the connector and withdraws its advertisement. LAN listener
 lifetime follows local secure access and must not depend on cloud availability.
 Production DNS/TLS, runtime/config deployment and cross-surface tests are separate
 proof obligations; a successful app build does not establish live relay health.
+
+The public pairing handoff is `website/public/pair/index.html`, copied verbatim
+and checked by the website build. It must remain outside VitePress, without
+analytics or third-party code, with its restrictive CSP and no-referrer policy.
+The one-time invitation is cleared from history and kept in memory, never an
+HTML attribute. Documentation navigation into pairing or Studio must load a new
+document so documentation analytics scripts cannot remain in the security page.

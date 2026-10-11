@@ -81,7 +81,7 @@ struct SecureSocketIntegrationTests {
             #expect(response.statusCode == 200)
             #expect(!(try await status.collected(upTo: 65_536)).isEmpty)
             request.url = fixture.origin.appending(path: "echo"); request.httpMethod = "POST"
-            let payload = Data((0..<(1024 * 1024 + 13)).map { UInt8(truncatingIfNeeded: $0) })
+            let payload = Data((0..<(3 * 1024 * 1024 + 13)).map { UInt8(truncatingIfNeeded: $0) })
             let (echo, echoResponse) = try await transport.response(for: request, body: .data(payload))
             #expect(echoResponse.statusCode == 200)
             #expect(try await echo.collected(upTo: payload.count + 1) == payload)
@@ -95,6 +95,15 @@ struct SecureSocketIntegrationTests {
             #expect(eventResponse.statusCode == 200)
             let text = String(decoding: try await events.collected(upTo: 65_536), as: UTF8.self)
             #expect(text.components(separatedBy: "data:").count == 5)
+            if fixture.objectOrigin != nil, fixture.websocket.scheme == "wss" {
+                let sent = await socket.objectSentBytes, inlineSent = await socket.inlineSentBytes
+                let received = await socket.objectReceivedBytes, inlineReceived = await socket.inlineReceivedBytes
+                let sendFraction = Double(sent) / Double(max(1, sent + inlineSent))
+                let receiveFraction = Double(received) / Double(max(1, received + inlineReceived))
+                print("Native ciphertext object fractions: upload=\(sendFraction), download=\(receiveFraction)")
+                #expect(sendFraction >= 0.8, "Bulk uploads must actually use the low-cost carrier")
+                #expect(receiveFraction >= 0.8, "Bulk downloads must actually use the low-cost carrier")
+            }
             await transport.close()
         } catch { await transport.close(); throw error }
     }
@@ -108,7 +117,8 @@ struct SecureSocketIntegrationTests {
         let origin = try #require(URL(string: payload.baseURL))
         var endpoint = URLComponents(url: origin, resolvingAgainstBaseURL: false)!
         endpoint.scheme = "ws"; endpoint.path = "/_mold/secure"
-        let connection = try await SecureWebSocketConnection.connectInvitation(invitation, identity: identity, endpoint: endpoint.url!)
+        let (connection, selectedOrigin) = try await HTTPBackend.pairingConnection(invitation, identity: identity, payload: payload, base: origin)
+        #expect(HostAddress.sameOrigin(selectedOrigin, origin))
         let claim = try await HTTPBackend.claimPairing(payload, invitation: invitation, identity: identity, connection: connection,
             origin: origin, clientName: "Swift secure fixture", clientKind: "macos")
         let host = try #require(claim.secure)

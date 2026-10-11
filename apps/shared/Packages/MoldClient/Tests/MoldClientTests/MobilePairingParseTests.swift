@@ -48,4 +48,25 @@ struct MobilePairingParseTests {
         parts.percentEncodedFragment = fields.map { FormURLEncoded.encode($0.0) + "=" + FormURLEncoded.encode($0.1) }.joined(separator: "&")
         #expect(throws: MobilePairingPayload.ParseError.unsupported) { try MobilePairingPayload.parse(parts.url!.absoluteString) }
     }
+
+    @Test func localInvitationNeedsNoCloudAccountOrWebSocketURL() throws {
+        let link = try #require(PairingLinkContractTests.fixtures.links.first).link
+        var parts = URLComponents(string: link)!
+        var fields = FormURLEncoded.decode(parts.percentEncodedFragment!)
+        fields.removeAll { $0.0 == "websocket_url" }
+        parts.percentEncodedFragment = FormURLEncoded.queryString(fields)
+        let payload = try MobilePairingPayload.parse(parts.url!.absoluteString)
+        #expect(try MobilePairingPayload.parse(#require(payload.url).absoluteString) == payload)
+        #expect(payload.secureInvitation?.websocketURL == nil)
+        var json = Dictionary(uniqueKeysWithValues: fields.map { ($0.0, $0.1 as Any) })
+        json["type"] = "mold.mobile-pairing"; json["version"] = 2; json["websocket_url"] = NSNull()
+        for key in ["invite", "endpoints"] {
+            if let value = json[key] as? String { json[key] = try JSONSerialization.jsonObject(with: Data(value.utf8)) }
+        }
+        #expect(try MobilePairingPayload.parse(String(decoding: JSONSerialization.data(withJSONObject: json), as: UTF8.self)) == payload)
+        json["websocket_url"] = 123
+        #expect(throws: MobilePairingPayload.ParseError.unsupported) {
+            try MobilePairingPayload.parse(String(decoding: JSONSerialization.data(withJSONObject: json), as: UTF8.self))
+        }
+    }
 }

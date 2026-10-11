@@ -4,9 +4,9 @@ import Foundation
 public struct SecureHost: Codable, Hashable, Sendable {
     public let binding: SecureBinding
     public let namespace: String
-    public let websocketURL: URL
+    public let websocketURL: URL?
     public let grant: SecureDeviceGrant
-    public init(binding: SecureBinding, namespace: String, websocketURL: URL, grant: SecureDeviceGrant) {
+    public init(binding: SecureBinding, namespace: String, websocketURL: URL?, grant: SecureDeviceGrant) {
         self.binding = binding; self.namespace = namespace; self.websocketURL = websocketURL; self.grant = grant
     }
 }

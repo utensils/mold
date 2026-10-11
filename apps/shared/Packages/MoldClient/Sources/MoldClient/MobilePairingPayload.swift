@@ -67,7 +67,7 @@ public struct MobilePairingPayload: Hashable, Sendable {
         pairs.append(("host_key", secure.binding.signingKey))
         pairs.append(("host_noise_key", secure.binding.noiseKey))
         pairs.append(("host_binding_signature", secure.binding.signature))
-        pairs.append(("websocket_url", secure.websocketURL.absoluteString))
+        if let url = secure.websocketURL { pairs.append(("websocket_url", url.absoluteString)) }
         pairs.append(("invite_seed", secure.seed))
         let invite = secure.invite
         let certificate = "{\"id\":\"\(invite.id)\",\"signingKey\":\"\(invite.signingKey)\",\"expiresAt\":\(invite.expiresAt),\"epoch\":\(invite.epoch),\"signature\":\"\(invite.signature)\"}"

@@ -10,7 +10,7 @@ enum SecurePairingFixture {
                                      instanceId: payload.instanceId, hostname: payload.name)
         session.hostKey = secure.binding.signingKey; session.hostNoiseKey = secure.binding.noiseKey
         session.hostBindingSignature = secure.binding.signature; session.namespace = secure.namespace
-        session.websocketUrl = secure.websocketURL.absoluteString; session.inviteSeed = secure.seed; session.invite = secure.invite
+        session.websocketUrl = secure.websocketURL?.absoluteString; session.inviteSeed = secure.seed; session.invite = secure.invite
         return session
     }
     static func payload() throws -> MobilePairingPayload {

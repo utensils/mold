@@ -3,6 +3,17 @@ import Foundation
 private enum ObjectBrokerFailure: Error { case disabled }
 
 extension SecureWebSocketConnection {
+    func shouldStagePacket(bulk: Bool) -> Bool {
+        objectPolicy != nil && !objectAllocationDisabled && (bulk || !stagedFrames.isEmpty)
+    }
+
+    /// True means the complete range was already consumed and only an ACK is due.
+    func objectDownloadFailed(_ error: any Error, end: UInt64) async -> Bool {
+        guard !Task.isCancelled else { return false }
+        if end <= window.next { return true }
+        await fail(error)
+        return false
+    }
     func scheduleObjectFlush() {
         if objectSends.count < 4, stagedFrames.count == 16 {
             flushObjects()
@@ -56,6 +67,7 @@ extension SecureWebSocketConnection {
                     pending[seq]?.bytes = envelope; pending[seq]?.sent = .now; pending[seq]?.expiresAt = grant.expiresAt
                 }
                 try await socket.send(.string(String(decoding: envelope, as: UTF8.self)))
+                objectSentBytes += frames.reduce(0) { $0 + $1.bytes.count }
             } catch { if !Task.isCancelled { await fail(error) } }
         }
     }
@@ -66,6 +78,7 @@ extension SecureWebSocketConnection {
             guard let pending = pending[frame.sequence] else { continue }
             self.pending[frame.sequence]?.sent = .now
             try await socket.send(.string(String(decoding: pending.bytes, as: UTF8.self)))
+            inlineSentBytes += frame.bytes.count
         }
     }
 
@@ -146,6 +159,7 @@ extension SecureWebSocketConnection {
                 request.httpShouldHandleCookies = false
                 let (body, response) = try await objectSession.bytes(for: request)
                 defer { body.task.cancel() }
+                if end <= window.next { try await acknowledge(force: true); return }
                 guard let response = response as? HTTPURLResponse, response.statusCode == 200,
                       response.expectedContentLength < 0 || response.expectedContentLength == object.bytes else { throw SecureConnectionError.protocolViolation }
                 var bytes = Data(); bytes.reserveCapacity(object.bytes)
@@ -156,12 +170,18 @@ extension SecureWebSocketConnection {
                 guard bytes.count == object.bytes else { throw SecureConnectionError.protocolViolation }
                 let chunks = try SecureCipherObject.unpack(bytes, count: object.count, checksum: object.checksum)
                 if let failure { throw failure }
-                for (offset, chunk) in chunks.enumerated() { _ = try window.insert(sequence: sequence + UInt64(offset), data: chunk) }
+                for (offset, chunk) in chunks.enumerated() {
+                    if try !window.insert(sequence: sequence + UInt64(offset), data: chunk) { objectReceivedBytes += chunk.count }
+                }
                 packetBytes.append(window.drain(capacity: max(0, 131_078 - packetBytes.count)))
                 if let reader = packetReader, let packet = try takePacket() { packetReader = nil; reader.resume(returning: packet) }
                 if window.hasGap { if gapSince == nil { gapSince = .now } } else { gapSince = nil }
                 try await acknowledge()
-            } catch { if !Task.isCancelled { await fail(error) } }
+            } catch {
+                if await objectDownloadFailed(error, end: end) {
+                    do { try await acknowledge(force: true) } catch { await fail(error) }
+                }
+            }
         }
         objectFetches[sequence] = ObjectFetch(reference: object, task: task)
         return false

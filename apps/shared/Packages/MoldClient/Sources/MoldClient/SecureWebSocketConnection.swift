@@ -24,6 +24,8 @@ actor SecureWebSocketConnection: SecureRecordConnection {
     var completedObjectRequests: [String] = []
     var ackTask: Task<Void, Never>?
     var lastSentAcknowledgement: Data?
+    // Session-local aggregate counters contain no request, credential or content.
+    var inlineSentBytes = 0, objectSentBytes = 0, inlineReceivedBytes = 0, objectReceivedBytes = 0
     var noise: SecureNoiseSession?
     var sid = "", rid = ""
     var failure: (any Error)?
@@ -45,7 +47,8 @@ actor SecureWebSocketConnection: SecureRecordConnection {
         self.host = host; self.identity = identity
         self.invitation = invitation
         self.trustedObjectOrigin = trustedObjectOrigin
-        var parts = URLComponents(url: endpoint ?? host.websocketURL, resolvingAgainstBaseURL: false)
+        guard let selected = endpoint ?? host.websocketURL else { throw URLError(.cannotFindHost) }
+        var parts = URLComponents(url: selected, resolvingAgainstBaseURL: false)
         guard parts?.user == nil, parts?.password == nil, parts?.fragment == nil,
               parts?.scheme == "wss" || (endpoint != nil && parts?.scheme == "ws") else { throw SecureConnectionError.authenticationFailed }
         let query = (parts?.queryItems ?? []).filter { $0.name != "v" } + [URLQueryItem(name: "v", value: "3")]
@@ -170,7 +173,8 @@ actor SecureWebSocketConnection: SecureRecordConnection {
         do {
             while !sendQueue.isEmpty {
                 let packet = sendQueue.removeFirst(); sending = packet
-                if !packet.bulk || objectPolicy == nil || objectAllocationDisabled {
+                let stagePacket = shouldStagePacket(bulk: packet.bulk)
+                if !stagePacket {
                     while !stagedFrames.isEmpty {
                         flushObjects()
                         if !stagedFrames.isEmpty { try await withCheckedThrowingContinuation { writer = $0 } }
@@ -184,7 +188,7 @@ actor SecureWebSocketConnection: SecureRecordConnection {
                     }
                     if let failure { throw failure }
                     let payload = packet.bytes.subdata(in: offset..<min(offset + 16_384, packet.bytes.count))
-                    if packet.bulk, objectPolicy != nil, !objectAllocationDisabled {
+                    if stagePacket {
                         while !SecureCipherObject.canAppend(stagedFrames.map(\.bytes), payload) {
                             flushObjects()
                             if !stagedFrames.isEmpty { try await withCheckedThrowingContinuation { writer = $0 } }
@@ -196,13 +200,14 @@ actor SecureWebSocketConnection: SecureRecordConnection {
                     let sequence = outgoing
                     pending[sequence] = PendingFrame(bytes: bytes, sent: .now, tries: 0)
                     outgoing += 1; remoteCredit -= 1
-                    if packet.bulk, objectPolicy != nil, !objectAllocationDisabled {
+                    if stagePacket {
                         pending[sequence]?.sent = nil
                         stagedFrames.append((sequence, payload))
                         scheduleObjectFlush()
                     } else {
                         flushObjects()
                         try await socket.send(.string(String(decoding: bytes, as: UTF8.self)))
+                        inlineSentBytes += payload.count
                     }
                 }
                 if let failure { throw failure }
@@ -257,6 +262,7 @@ actor SecureWebSocketConnection: SecureRecordConnection {
             guard let encoded = frame["d"] as? String,
                   let bytes = Data(base64Encoded: encoded), bytes.base64EncodedString() == encoded else { throw SecureConnectionError.protocolViolation }
             let duplicate = try window.insert(sequence: seq, data: bytes)
+            if !duplicate { inlineReceivedBytes += bytes.count }
             packetBytes.append(window.drain(capacity: max(0, 131_078 - packetBytes.count)))
             if let reader = packetReader, let packet = try takePacket() {
                 packetReader = nil; reader.resume(returning: packet)

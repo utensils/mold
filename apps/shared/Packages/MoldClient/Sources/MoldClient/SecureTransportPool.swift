@@ -49,7 +49,7 @@ actor SecureTransportPool {
         var endpoints = ConnectionRoutes.sanitized(host.connectionEndpoints ?? [])
         let original = host.connectionOriginalURL ?? host.baseURL
         if !endpoints.contains(where: { $0.url == original.absoluteString }) {
-            endpoints.append(ConnectionEndpoint(url: original.absoluteString, kind: .relay))
+            endpoints.append(ConnectionEndpoint(url: original.absoluteString, kind: Self.kind(original, host: host)))
         }
         guard !endpoints.isEmpty else { throw SecureConnectionError.pairingRequired }
         let candidates = endpoints
@@ -116,10 +116,13 @@ actor SecureTransportPool {
         switch kind { case .lan: 0; case .tailscale: 1; case .relay: 2 }
     }
     static func kind(_ url: URL, host: MoldHost) -> ConnectionEndpoint.Kind {
-        host.connectionEndpoints?.first(where: { URL(string: $0.url).map { HostAddress.sameOrigin($0, url) } == true })?.kind ?? .relay
+        host.connectionEndpoints?.first(where: { URL(string: $0.url).map { HostAddress.sameOrigin($0, url) } == true })?.kind ?? (host.secure?.websocketURL == nil ? .lan : .relay)
     }
     static func socketURL(for origin: URL, kind: ConnectionEndpoint.Kind, secure: SecureHost) throws -> URL {
-        if kind == .relay { return secure.websocketURL }
+        if kind == .relay {
+            guard let url = secure.websocketURL else { throw URLError(.cannotFindHost) }
+            return url
+        }
         guard var parts = URLComponents(url: origin, resolvingAgainstBaseURL: false),
               parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil,
               ["http", "https"].contains(parts.scheme ?? "") else { throw SecureConnectionError.protocolViolation }

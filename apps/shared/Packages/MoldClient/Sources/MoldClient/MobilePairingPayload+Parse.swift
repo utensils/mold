@@ -108,10 +108,14 @@ extension MobilePairingPayload {
 
         guard let namespace = f["namespace"] as? String, let hostKey = f["host_key"] as? String,
               let noiseKey = f["host_noise_key"] as? String, let signature = f["host_binding_signature"] as? String,
-              let websocket = f["websocket_url"] as? String, let websocketURL = URL(string: websocket),
               let seed = f["invite_seed"] as? String, let inviteValue = f["invite"],
               let inviteData = try? JSONSerialization.data(withJSONObject: inviteValue),
               let invite = try? MoldJSON.localDecoder.decode(SecureInvite.self, from: inviteData) else { throw .unsupported }
+        let websocketURL: URL?
+        if let value = f["websocket_url"], !(value is NSNull) {
+            guard let raw = value as? String, let url = URL(string: raw) else { throw .unsupported }
+            websocketURL = url
+        } else { websocketURL = nil }
         let invitation = SecureInvitation(binding: .init(signingKey: hostKey, noiseKey: noiseKey, signature: signature),
                                           namespace: namespace, websocketURL: websocketURL, seed: seed, invite: invite)
         guard (try? invitation.validate()) != nil else { throw .unsupported }

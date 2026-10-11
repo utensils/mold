@@ -23,7 +23,9 @@ public struct PairingSession: Codable, Hashable, Sendable {
 
     public var secureInvitation: SecureInvitation? {
         guard let hostKey, let hostNoiseKey, let hostBindingSignature, let namespace,
-              let websocketUrl, let url = URL(string: websocketUrl), let inviteSeed, let invite else { return nil }
+              let inviteSeed, let invite else { return nil }
+        let url = websocketUrl.flatMap(URL.init(string:))
+        if websocketUrl != nil && url == nil { return nil }
         return SecureInvitation(binding: .init(signingKey: hostKey, noiseKey: hostNoiseKey, signature: hostBindingSignature),
                                 namespace: namespace, websocketURL: url, seed: inviteSeed, invite: invite)
     }

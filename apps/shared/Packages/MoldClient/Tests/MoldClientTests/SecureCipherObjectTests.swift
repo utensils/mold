@@ -81,9 +81,47 @@ struct SecureCipherObjectTests {
         await connection.checkDuplicateDisabledReply()
         await connection.close()
     }
+
+    @Test func shortCiphertextTailsStayInAnExistingBulkBatch() async throws {
+        let connection = try makeConnection()
+        await connection.checkShortTailBatching()
+        await connection.close()
+    }
+
+    @Test func aRetiredObjectDownloadFailureDoesNotInterruptTheChannel() async throws {
+        let connection = try makeConnection()
+        await connection.checkRetiredDownloadFailure()
+        await connection.close()
+    }
+
+    private func makeConnection() throws -> SecureWebSocketConnection {
+        let host = SecureHost(binding: .init(signingKey: "", noiseKey: "", signature: ""), namespace: String(repeating: "a", count: 32),
+            websocketURL: URL(string: "wss://fixture.invalid")!, grant: .init(id: "", expiresAt: 0, epoch: 0, signature: ""))
+        return try SecureWebSocketConnection(host: host, identity: SecureIdentity())
+    }
 }
 
 private extension SecureWebSocketConnection {
+    func checkShortTailBatching() {
+        objectPolicy = SecureObjectPolicy(origin: SecureObjectPolicy.productionOrigin)
+        #expect(!shouldStagePacket(bulk: false), "Initial handshakes and small controls stay inline")
+        stagedFrames = (0..<4).map { (UInt64($0), Data(repeating: 1, count: 16_349)) }
+        #expect(shouldStagePacket(bulk: false), "A 64KiB body-read tail must not flush its bulk prefix inline")
+        objectAllocationDisabled = true
+        #expect(!shouldStagePacket(bulk: true))
+        stagedFrames.removeAll()
+    }
+
+    func checkRetiredDownloadFailure() async {
+        objectPolicy = SecureObjectPolicy(origin: SecureObjectPolicy.productionOrigin)
+        _ = try! window.insert(sequence: 0, data: Data([1])); _ = window.drain(capacity: 1)
+        #expect(await objectDownloadFailed(SecureConnectionError.protocolViolation, end: 1))
+        #expect(failure == nil)
+        ackTask?.cancel(); ackTask = nil
+        #expect(!(await objectDownloadFailed(SecureConnectionError.protocolViolation, end: 2)))
+        #expect(failure != nil, "A partially missing object must still fail closed")
+    }
+
     func checkDuplicateDisabledReply() async {
         do {
             let _: SecureObjectGrant = try await withCheckedThrowingContinuation { continuation in

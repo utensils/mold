@@ -7,11 +7,8 @@ enum SecureAdmission {
     }
     static func validate(host: SecureHost, device: SecureBinding, now: UInt64 = UInt64(Date().timeIntervalSince1970)) throws {
         try SecureCrypto.verify(host.binding)
-        guard try namespace(host.binding) == host.namespace, host.grant.expiresAt > now,
-              host.websocketURL.scheme == "wss", host.websocketURL.user == nil, host.websocketURL.password == nil,
-              host.websocketURL.fragment == nil, host.websocketURL.query == nil,
-              host.websocketURL.host?.isEmpty == false, host.websocketURL.absoluteString.utf8.count <= 2048,
-              host.websocketURL.port.map({ (1...65535).contains($0) }) ?? true else { throw SecureConnectionError.authenticationFailed }
+        try validateCloudURL(host.websocketURL)
+        guard try namespace(host.binding) == host.namespace, host.grant.expiresAt > now else { throw SecureConnectionError.authenticationFailed }
         var bytes = Data("MOLD3-GRANT\0".utf8)
         bytes.append(try SecureHex.decode(host.namespace, count: 16))
         bytes.append(try SecureHex.decode(device.signingKey, count: 32))
@@ -19,6 +16,13 @@ enum SecureAdmission {
         bytes.append(try SecureHex.decode(host.grant.id, count: 16))
         bytes.append(SecureHex.u64(host.grant.expiresAt)); bytes.append(SecureHex.u64(host.grant.epoch))
         try SecureCrypto.verify(key: host.binding.signingKey, message: bytes, signature: host.grant.signature)
+    }
+    static func validateCloudURL(_ url: URL?) throws {
+        guard let url else { return }
+        guard url.scheme == "wss", url.user == nil, url.password == nil,
+              url.fragment == nil, url.query == nil, url.host?.isEmpty == false,
+              url.absoluteString.utf8.count <= 2048,
+              url.port.map({ (1...65535).contains($0) }) ?? true else { throw SecureConnectionError.authenticationFailed }
     }
     static func join(namespace: String, role: UInt8, connectionID: String, nonce: String, device: SecureBinding, expiresAt: UInt64) throws -> Data {
         guard (1...3).contains(role), !connectionID.isEmpty, connectionID.utf8.count <= 128,

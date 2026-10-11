@@ -72,11 +72,15 @@ extension HTTPBackend {
         } catch { await transport.close(); throw error }
     }
 
-    private static func pairingConnection(_ invitation: SecureInvitation, identity: SecureIdentity,
+    static func pairingConnection(_ invitation: SecureInvitation, identity: SecureIdentity,
                                           payload: MobilePairingPayload, base: URL) async throws -> (SecureWebSocketConnection, URL) {
         // A one-use invitation is not raced across cloud joins. Direct candidates get
         // bounded attempts first; only the selected channel ever submits the claim.
-        for endpoint in ConnectionRoutes.sanitized(payload.endpoints ?? []) where endpoint.kind != .relay {
+        var candidates = ConnectionRoutes.sanitized(payload.endpoints ?? [])
+        if invitation.websocketURL == nil, !candidates.contains(where: { URL(string: $0.url).map { HostAddress.sameOrigin($0, base) } == true }) {
+            candidates.append(ConnectionEndpoint(url: base.absoluteString, kind: .lan))
+        }
+        for endpoint in candidates where endpoint.kind != .relay {
             try Task.checkCancellation()
             guard let origin = URL(string: endpoint.url), var parts = URLComponents(url: origin, resolvingAgainstBaseURL: false) else { continue }
             parts.scheme = parts.scheme == "https" ? "wss" : "ws"; parts.path = "/_mold/secure"
