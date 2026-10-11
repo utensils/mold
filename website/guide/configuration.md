@@ -161,6 +161,10 @@ Environment variables take precedence over config file values.
 
 ### Core
 
+The Docker entrypoint also accepts `MOLD_BIND` (default `0.0.0.0`). Lambda Labs
+uses `127.0.0.1` with host networking for private SSH forwarding. The normal CLI
+equivalent is `mold serve --bind <address>`.
+
 | Variable                          | Default                                | Description                                                                                                                                                                                                                                                                                                                                                                          |
 | --------------------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `MOLD_HOME`                       | `~/.mold`                              | Base directory for config and cache                                                                                                                                                                                                                                                                                                                                                  |

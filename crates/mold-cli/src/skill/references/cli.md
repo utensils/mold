@@ -747,7 +747,7 @@ The operator creates a one-use, two-minute invitation using MOLD_API_KEY (or
 @owner-only-key-file). Transfer the invitation privately. Each paired client
 stores its own key and revocable grant. MOLD_HOST selects a paired origin.
 
-All remote API traffic, uploads, progress and media use pinned Noise XX over
+Direct and relay API traffic, uploads, progress and media use pinned Noise XX over
 LAN or the Lambda WebSocket relay. The cloud sees metadata and ciphertext, not
 API credentials or media. Bounded S3 objects may carry only the same encrypted
 wire bytes; object keys and cloud URLs never replace host identity verification.
@@ -763,6 +763,10 @@ require pairing before replacement. An explicit MOLD_HOST selects that exact
 paired pod; provider readiness alone is not trusted Mold readiness. Native Remote Access
 opens the encrypted LAN listener and outbound connector; stopping it closes
 active sessions. HTTPS browsers may require WSS because of mixed-content rules.
+Lambda Labs deployment uses its existing verified SSH tunnel for end-to-end
+encryption. Its Docker container uses host networking and MOLD_BIND=127.0.0.1,
+so the tunneled engine interface remains actual loopback. Docker startup never
+copies API keys, bootstrap identities or provider tokens into SSH environment files.
 
 Native iOS Queue cards open full job details on tap. Per-job Pause/Resume and
 held Retry follow server capabilities and current state. Generate's Prompt

@@ -292,11 +292,11 @@ runpodctl pod create \
 Token appears in shell history, `runpodctl pod get` output, and the console env
 panel. Fine for personal throwaway pods, not for shared or audited access.
 
-::: tip SSH sessions auto-inherit the token
-`docker/start.sh` copies env vars matching `MOLD_*`, `HF_*`, `CUDA*`, and
-`LD_LIBRARY*` into `/etc/rp_environment`, which bash SSH sessions source on
-login. Once the token is in the pod environment, `huggingface-cli` and `curl`
-inside an SSH session pick it up without re-exporting.
+::: tip SSH environment
+`docker/start.sh` copies only non-secret directory, port, bind, logging, CUDA
+and library settings into owner-only `/etc/rp_environment`. It never copies
+API keys, identity bootstrap envelopes or provider tokens. Supply a token
+explicitly in an owner-controlled SSH session when another tool needs it.
 :::
 
 ### Recommended GPUs
