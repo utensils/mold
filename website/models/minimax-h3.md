@@ -359,6 +359,10 @@ exact header and tensor inventory. It is stored under the tag's own model
 directory, never over the Comfy-Org transformer, so a machine that already has
 any compact FL2VA tag installed downloads only those 22.128 GB. The MiniMax H3
 Community License governs these weights like every other H3 artifact.
+An installed FastH3 model advertises its own runtime recipe, including optional
+boundary frames, fixed nine sampler grid points, and zero guidance. Its
+installation check uses its substituted transformer and the shared components;
+it does not require the ordinary FL2VA transformer as well.
 
 The file carries two things Comfy-Org's does not. Its 50 video-sparse-attention
 gates (`to_gate_compress`, 1.928 GB) are authenticated with the rest of the

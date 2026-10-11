@@ -1233,6 +1233,57 @@ pub(crate) fn authenticated_h3_private_model_rows(
     rows
 }
 
+/// Full-weight distilled checkpoints are independent installs, not Turbo
+/// adapters. Publish their runtime metadata only after checking their OWN
+/// complete manifest; the ordinary base DiT need not be installed at all.
+/// Called only after the route authenticates the public runtime capability.
+#[cfg(feature = "h3")]
+pub(crate) fn installed_h3_distilled_base_model_rows(
+    models_root: &std::path::Path,
+) -> Vec<mold_core::ModelInfoExtended> {
+    use mold_core::manifest::{find_manifest, storage_path};
+    mold_core::minimax_h3::REVIEWED_DISTILLED_BASE_TIERS
+        .iter()
+        .filter(|tier| tier.task == mold_core::minimax_h3::Task::Fl2va)
+        .filter_map(|tier| {
+            let manifest = find_manifest(tier.model)?;
+            let disk_usage_bytes = manifest.files.iter().try_fold(0u64, |total, file| {
+                let metadata = models_root
+                    .join(storage_path(manifest, file))
+                    .symlink_metadata()
+                    .ok()?;
+                if !metadata.file_type().is_file()
+                    || metadata.file_type().is_symlink()
+                    || metadata.len() != file.size_bytes
+                {
+                    return None;
+                }
+                total.checked_add(file.size_bytes)
+            })?;
+            let profile = reviewed_h3_private_generation_profile_for(tier.model, tier.steps)?;
+            let request = mold_core::MiniMaxH3RequestCapability {
+                width: mold_core::minimax_h3::DEFAULT_WIDTH,
+                height: mold_core::minimax_h3::DEFAULT_HEIGHT,
+                frames: mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES,
+                fps: mold_core::minimax_h3::FIXED_FPS,
+                steps: tier.steps,
+                batch_size: 1,
+                output_format: "mp4".into(),
+                required_endpoint: "first".into(),
+                generation_profile_sha256: profile.0.profile_hash.clone(),
+            };
+            h3_model_row(
+                tier.model,
+                &format!("MiniMax H3 FL2VA {}", tier.display_label),
+                &manifest.description,
+                &request,
+                disk_usage_bytes,
+                profile,
+            )
+        })
+        .collect()
+}
+
 /// One executable compact-FL2VA `/api/models` row. Shared by the base
 /// partition and its reviewed Turbo variants so the two can never advertise
 /// diverging envelope shapes.
@@ -1245,6 +1296,11 @@ fn h3_model_row(
     disk_usage_bytes: u64,
     (generation_profile, alignment, pixels): (mold_core::GenerationProfileSet, u32, u64),
 ) -> Option<mold_core::ModelInfoExtended> {
+    let manifest = mold_core::manifest::find_manifest(model)?;
+    let transformer = manifest
+        .files
+        .iter()
+        .find(|file| file.component == mold_core::manifest::ModelComponent::Transformer)?;
     Some(mold_core::ModelInfoExtended {
         // The bridge only ever re-publishes a reviewed, executable partition.
         runtime_available: Some(true),
@@ -1257,7 +1313,7 @@ fn h3_model_row(
             last_used: None,
             // The row remains the sole executable recipe, while its acquisition
             // provenance is the same pinned Hugging Face repo as the manifest.
-            hf_repo: mold_core::minimax_h3::COMFY_REPO.into(),
+            hf_repo: transformer.hf_repo.clone(),
         },
         defaults: mold_core::ModelDefaults {
             default_steps: request.steps,
@@ -3174,6 +3230,83 @@ mod tests {
         private_file(
             &models.join(mold_core::manifest::storage_path(manifest, adapter)),
             adapter.size_bytes,
+        );
+    }
+
+    #[cfg(feature = "h3")]
+    #[test]
+    fn installed_distilled_base_catalog_row_uses_its_own_checkpoint() {
+        use mold_core::manifest::{find_manifest, storage_path, ModelComponent};
+        use mold_core::minimax_h3::{FL2VA_COMFY, FL2VA_FASTH3_V2_INT8};
+        let root = tempfile::tempdir().unwrap();
+        let models = root.path().join("models");
+        let manifest = find_manifest(FL2VA_FASTH3_V2_INT8).unwrap();
+        for file in &manifest.files {
+            private_file(&models.join(storage_path(manifest, file)), file.size_bytes);
+        }
+        let base = find_manifest(FL2VA_COMFY).unwrap();
+        let base_transformer = base
+            .files
+            .iter()
+            .find(|file| file.component == ModelComponent::Transformer)
+            .unwrap();
+        assert!(!models.join(storage_path(base, base_transformer)).exists());
+        let capability = super::build_fl2va_capability(&models).unwrap();
+        // Exercise the same row integration used by /api/models: a missing
+        // ordinary base checkpoint must not hide an installed distilled base.
+        let rows = crate::routes::authenticated_private_h3_model_rows(&capability, &models);
+        let row = rows
+            .iter()
+            .find(|row| row.info.name == FL2VA_FASTH3_V2_INT8)
+            .expect("installed FastH3 must have an executable catalog row");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(row.info.hf_repo, "FastVideo/FastVideo-FastH3-Comfy");
+        assert_eq!(
+            row.source_image,
+            Some(mold_core::SourceImageCapability::Optional)
+        );
+        assert_eq!(row.defaults.default_steps, 9);
+        assert_eq!(
+            row.disk_usage_bytes,
+            Some(manifest.files.iter().map(|file| file.size_bytes).sum())
+        );
+        let guidance = row.guidance_capabilities.as_ref().unwrap();
+        assert!(!guidance.adjustable);
+        assert!(!guidance.supports_negative_prompt);
+        assert_eq!(guidance.fixed_scale, Some(0.0));
+        let recipe = row
+            .generation_profile
+            .as_ref()
+            .unwrap()
+            .default_recipe()
+            .unwrap();
+        assert_eq!(recipe.capabilities.source_image, row.source_image);
+        assert_eq!((recipe.steps.min, recipe.steps.max), (9, 9));
+        let mut unavailable = capability.clone();
+        unavailable.runtime_available = false;
+        assert!(
+            crate::routes::authenticated_private_h3_model_rows(&unavailable, &models).is_empty()
+        );
+        let transformer = manifest
+            .files
+            .iter()
+            .find(|file| file.component == ModelComponent::Transformer)
+            .unwrap();
+        let path = models.join(storage_path(manifest, transformer));
+        fs::remove_file(&path).unwrap();
+        assert!(
+            crate::routes::authenticated_private_h3_model_rows(&capability, &models).is_empty()
+        );
+        private_file(&path, transformer.size_bytes - 1);
+        assert!(
+            crate::routes::authenticated_private_h3_model_rows(&capability, &models).is_empty()
+        );
+        fs::remove_file(&path).unwrap();
+        let elsewhere = root.path().join("symlink-target");
+        private_file(&elsewhere, transformer.size_bytes);
+        std::os::unix::fs::symlink(&elsewhere, &path).unwrap();
+        assert!(
+            crate::routes::authenticated_private_h3_model_rows(&capability, &models).is_empty()
         );
     }
 

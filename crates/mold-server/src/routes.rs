@@ -5033,17 +5033,21 @@ async fn list_models(
     let api_key_auth_enabled = auth_state
         .as_ref()
         .is_some_and(|Extension(state)| state.is_some());
-    let private_capability = {
+    let (private_capability, models_root) = {
         let config = state.config.read().await;
-        advertised_private_h3_capability(
-            api_key_auth_enabled,
-            &config.resolved_models_dir(),
-            &current_device_state(&state),
+        let models_root = config.resolved_models_dir();
+        (
+            advertised_private_h3_capability(
+                api_key_auth_enabled,
+                &models_root,
+                &current_device_state(&state),
+            ),
+            models_root,
         )
     };
     for row in private_capability
         .as_ref()
-        .map(authenticated_private_h3_model_rows)
+        .map(|capability| authenticated_private_h3_model_rows(capability, &models_root))
         .unwrap_or_default()
     {
         models.retain(|entry| entry.info.name != row.info.name);
@@ -8658,15 +8662,27 @@ fn advertised_private_h3_capability(
 }
 
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
-fn authenticated_private_h3_model_rows(
+pub(crate) fn authenticated_private_h3_model_rows(
     capability: &mold_core::MiniMaxH3Capability,
+    _models_root: &std::path::Path,
 ) -> Vec<mold_core::ModelInfoExtended> {
-    crate::h3_private_bridge::authenticated_h3_private_model_rows(capability)
+    if !capability.runtime_available {
+        return Vec::new();
+    }
+    let rows = crate::h3_private_bridge::authenticated_h3_private_model_rows(capability);
+    #[cfg(feature = "h3")]
+    let rows = {
+        let mut rows = rows;
+        rows.extend(crate::h3_private_bridge::installed_h3_distilled_base_model_rows(_models_root));
+        rows
+    };
+    rows
 }
 
 #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
-fn authenticated_private_h3_model_rows(
+pub(crate) fn authenticated_private_h3_model_rows(
     _capability: &mold_core::MiniMaxH3Capability,
+    _models_root: &std::path::Path,
 ) -> Vec<mold_core::ModelInfoExtended> {
     Vec::new()
 }
