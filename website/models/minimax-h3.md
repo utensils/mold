@@ -493,6 +493,9 @@ The current compact implementation supports this request profile:
   mold run minimax-h3-fl2va:comfy-pruned-int8-turbo-8step "a lighthouse keeper climbs the spiral stairs at dusk, wind howling" --seed 7
   ```
 
+- web, desktop, mobile, and native apps follow the selected machine’s recipe
+  for whether a start frame is optional or required. A saved draft from an older
+  machine cannot override a newer recipe’s text-only support.
 - queued jobs retain exact first/last endpoint roles through durable storage
   and server restart; the same queue behavior applies to FL2VA Turbo tiers
 - MP4 output with synchronized generated audio

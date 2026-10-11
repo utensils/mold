@@ -18,6 +18,8 @@ import { useToastStore } from "../stores/toasts";
 import { useUiStore } from "../stores/ui";
 import type { ModelEntry, OutputMetadata } from "../lib/api/types";
 import ComposerCard from "../components/create/ComposerCard.vue";
+import generationProfiles from "../../../docs/generated/generation-profiles-v1.json";
+import type { GenerationProfileSet } from "@studio/lib/generationProfile";
 
 vi.mock("vue-router", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
@@ -209,6 +211,45 @@ describe("GenerateView source-conditioning gating (#772, #779)", () => {
     expect(wrapper.getComponent(ComposerCard).props("disabledReason")).toBe(
       "This reviewed MiniMax H3 runtime requires a first frame.",
     );
+  });
+
+  it("uses the current optional H3 recipe instead of legacy required flags", async () => {
+    const name = "minimax-h3-fl2va:comfy-pruned-int8-dmad-4step";
+    const generated = generationProfiles.profiles.find((entry) =>
+      entry.models.some((row) => row.model === name),
+    )!.profile as GenerationProfileSet;
+    const profile = {
+      ...generated,
+      recipes: generated.recipes.map((recipe) => ({
+        ...recipe,
+        capabilities: { ...recipe.capabilities, source_image: "optional" as const },
+      })),
+    };
+    const model = {
+      ...wanModel(name, "required"),
+      family: "minimax-h3",
+      default_width: 1344,
+      default_height: 768,
+      default_steps: 5,
+      default_frames: 124,
+      default_fps: 24,
+      generation_profile: profile,
+    } as ModelEntry;
+    useModelStore().all = [model];
+    useHostModelsStore().byHost.local = { entries: [model], fetchedAt: Date.now(), error: null };
+    const wrapper = mount(GenerateView, { shallow: true, attachTo: document.body });
+    await flushPromises();
+    const form = useGenerateFormStore().form;
+    form.model = name;
+    form.family = "minimax-h3";
+    form.prompt = "A lighthouse in a storm";
+    form.sourceImageCapability = "required";
+    form.width = 1344;
+    form.height = 768;
+    form.steps = 5;
+    form.frames = 124;
+    await flushPromises();
+    expect(wrapper.getComponent(ComposerCard).props("disabledReason") ?? "").toBe("");
   });
 
   it("blocks an end-frame-only draft until a first frame joins it", async () => {

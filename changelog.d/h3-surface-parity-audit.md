@@ -1,0 +1,1 @@
+- **H3 text-only authoring.** Web and Tauri clients honor the selected machine’s optional-source recipe over stale model or draft hints, so upgraded FL2VA models can generate without a start frame. Added cross-surface regression coverage for FastH3 V2 and the DMAD/PDMD tiers.
