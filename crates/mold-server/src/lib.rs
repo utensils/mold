@@ -352,6 +352,19 @@ pub async fn run_server(
     gpu_selection: GpuSelection,
     queue_size: usize,
 ) -> Result<()> {
+    run_server_with_bootstrap(bind, port, models_dir, gpu_selection, queue_size, None).await
+}
+
+/// Start an owner-provisioned empty server. The CLI captures the secret
+/// bootstrap before starting runtime threads; it is never an HTTP argument.
+pub async fn run_server_with_bootstrap(
+    bind: &str,
+    port: u16,
+    models_dir: PathBuf,
+    gpu_selection: GpuSelection,
+    queue_size: usize,
+    bootstrap: Option<secure_pairing::bootstrap::BootstrapInput>,
+) -> Result<()> {
     run_server_inner(
         bind,
         port,
@@ -360,6 +373,7 @@ pub async fn run_server(
         queue_size,
         None,
         None,
+        bootstrap,
     )
     .await
 }
@@ -410,10 +424,12 @@ pub async fn run_server_with_listener_and_addresses(
         queue_size,
         Some(listener),
         connection_addresses,
+        None,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_server_inner(
     bind: &str,
     port: u16,
@@ -422,6 +438,7 @@ async fn run_server_inner(
     queue_size: usize,
     reserved_listener: Option<TcpListener>,
     connection_addresses: Option<std::sync::Arc<ConnectionAddresses>>,
+    bootstrap: Option<secure_pairing::bootstrap::BootstrapInput>,
 ) -> Result<()> {
     // Re-arm SIG_IGN for SIGPIPE. The CLI resets it to SIG_DFL in main() for
     // clean piping of short-lived commands, but for this long-running server
@@ -493,7 +510,26 @@ async fn run_server_inner(
     // queue journal can use it: the identity is `(data dir, port)`-scoped, which
     // is exactly the evidence a restarting server needs to recognise its own
     // retained queue among a peer's.
+    if let Some(bootstrap) = bootstrap {
+        anyhow::ensure!(
+            auth::load_operator_keys()?.is_some(),
+            "secure bootstrap requires operator authentication"
+        );
+        let db = metadata_db
+            .as_ref()
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("secure bootstrap requires persistent metadata"))?;
+        let home = Config::mold_dir()
+            .ok_or_else(|| anyhow::anyhow!("secure bootstrap requires MOLD_HOME"))?;
+        bootstrap.apply(&home, db, port, &config.effective_output_dir())?;
+    }
     let instance_id = instance::resolve_instance_id(metadata_db.as_ref().as_ref(), port);
+    // Establish identity and paired credentials before any worker or
+    // reconciliation task can start. Failed bootstrap/auth leaves no listener.
+    let auth_state = auth::load_api_keys_with_db(
+        metadata_db.clone(),
+        std::sync::Arc::new(instance_id.clone()),
+    )?;
     // Built before any GPU owner thread exists: a worker that quarantines
     // itself must be able to raise the retention fence, and that is the one
     // restart mold performs on its own behalf.
@@ -1256,9 +1292,7 @@ async fn run_server_inner(
         }
     }
 
-    // Load optional auth and rate-limit configuration from env vars.
-    let auth_state =
-        auth::load_api_keys_with_db(state.metadata_db.clone(), state.instance_id.clone())?;
+    // Load rate limits; auth was established before starting workers.
     // Capture whether auth is required before `auth_state` is moved into the
     // router below — surfaced in the mDNS TXT `auth` flag.
     #[cfg(feature = "mdns")]

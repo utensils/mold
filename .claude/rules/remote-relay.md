@@ -106,3 +106,13 @@ document. No Mold documentation page may load third-party scripts: all pages on
 the utensils.io origin share access to Studio key storage, so path exclusions do
 not isolate keys. The website build scans generated HTML/JS for retired tracking
 loaders as well as checking the standalone pairing artifact.
+
+Owner-controlled provider creation may pass `MOLD_SECURE_BOOTSTRAP` only in the
+authenticated provider control-plane request. The CLI consumes and removes it
+before starting runtime threads. It requires operator authentication and an
+empty authority/media store; signed host/device binding, a 30-day-or-shorter
+grant, API credential hash and instance UUID are imported in one DB transaction.
+An owner-only intent file fences identity-file crash recovery. Exact replay
+verifies the committed bootstrap identity without restoring revoked clients or
+overwriting renewed grants. Never replace an existing volume's identity or log
+the bootstrap envelope. Reuse its original paired profile on volume resume.

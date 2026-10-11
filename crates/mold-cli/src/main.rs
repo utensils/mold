@@ -3084,8 +3084,21 @@ fn apply_spatial_tile_override(value: Option<&str>) {
     unsafe { std::env::set_var("MOLD_LTX2_SPATIAL_TILE", value) };
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // SAFETY: synchronous process entry, before runtime/ctrl-C worker threads.
+    let bootstrap = unsafe {
+        mold_server::secure_pairing::bootstrap::BootstrapInput::take_environment_before_threads()
+    };
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to create async runtime")
+        .block_on(async_main(bootstrap));
+}
+
+async fn async_main(
+    bootstrap: anyhow::Result<Option<mold_server::secure_pairing::bootstrap::BootstrapInput>>,
+) {
     // Keep positive compile-time exclusion provenance in every published CLI
     // artifact even after LTO and stripping. Release verification rejects a
     // missing marker as well as either compiled FlashAttention feature.
@@ -3140,7 +3153,10 @@ async fn main() {
     })
     .ok();
 
-    let outcome = run().await;
+    let outcome = match bootstrap {
+        Ok(bootstrap) => run(bootstrap).await,
+        Err(error) => Err(error),
+    };
     // Every exit this process controls goes through here. A forced-local
     // `mold run` publishes through the same gallery archive authority a server
     // does and takes the same writer lease, and a lease file that outlives its
@@ -3224,10 +3240,16 @@ async fn main() {
     }
 }
 
-async fn run() -> anyhow::Result<()> {
+async fn run(
+    bootstrap: Option<mold_server::secure_pairing::bootstrap::BootstrapInput>,
+) -> anyhow::Result<()> {
     // Parse CLI first so we can set the log level based on the subcommand.
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
     let cli = Cli::parse();
+    anyhow::ensure!(
+        bootstrap.is_none() || matches!(&cli.command, Commands::Serve { .. }),
+        "secure bootstrap is accepted only by mold serve"
+    );
 
     // Skill management is self-contained and must keep working even when a
     // configured external MOLD_HOME is offline or the inference stack cannot
@@ -3694,8 +3716,16 @@ async fn run() -> anyhow::Result<()> {
                 unsafe { std::env::set_var("MOLD_MDNS", "0") };
             }
 
-            commands::serve::run(port, &bind, models_dir, gpus, queue_size, discord_enabled)
-                .await?;
+            commands::serve::run(
+                port,
+                &bind,
+                models_dir,
+                gpus,
+                queue_size,
+                discord_enabled,
+                bootstrap,
+            )
+            .await?;
         }
         Commands::Mcp { host } => {
             commands::mcp::run(host).await?;

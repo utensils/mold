@@ -488,6 +488,29 @@ pub(crate) fn load_api_keys_with_db(
     metadata_db: Arc<Option<mold_db::MetadataDb>>,
     server_instance_id: Arc<String>,
 ) -> anyhow::Result<AuthState> {
+    let Some(keys) = load_operator_keys()? else {
+        return Ok(None);
+    };
+
+    tracing::info!(num_keys = keys.len(), "API key authentication enabled");
+    let mut key_set = ApiKeySet::try_new(keys, metadata_db, server_instance_id)
+        .map_err(|error| anyhow::anyhow!("failed to generate gallery signing secret: {error}"))?;
+    if let Some(db) = key_set.metadata_db.as_ref() {
+        let home = mold_core::Config::mold_dir()
+            .ok_or_else(|| anyhow::anyhow!("secure identity requires MOLD_HOME"))?;
+        let identity = crate::secure_pairing::load_host_identity(&home)?;
+        let devices =
+            mold_db::secure_devices::SecureDevices::new(db).list(&key_set.server_instance_id)?;
+        key_set.secure = Some(Arc::new(crate::secure_pairing::SecurePairing::new(
+            identity, devices,
+        )));
+    }
+    Ok(Some(Arc::new(key_set)))
+}
+
+// Parse operator configuration without creating a host identity. Bootstrap must
+// validate this boundary before importing its first paired client.
+pub(crate) fn load_operator_keys() -> anyhow::Result<Option<HashSet<String>>> {
     let raw = match std::env::var("MOLD_API_KEY") {
         Ok(v) if !v.is_empty() => v,
         _ => return Ok(None),
@@ -510,24 +533,7 @@ pub(crate) fn load_api_keys_with_db(
             .collect::<HashSet<_>>()
     };
 
-    if keys.is_empty() {
-        return Ok(None);
-    }
-
-    tracing::info!(num_keys = keys.len(), "API key authentication enabled");
-    let mut key_set = ApiKeySet::try_new(keys, metadata_db, server_instance_id)
-        .map_err(|error| anyhow::anyhow!("failed to generate gallery signing secret: {error}"))?;
-    if let Some(db) = key_set.metadata_db.as_ref() {
-        let home = mold_core::Config::mold_dir()
-            .ok_or_else(|| anyhow::anyhow!("secure identity requires MOLD_HOME"))?;
-        let identity = crate::secure_pairing::load_host_identity(&home)?;
-        let devices =
-            mold_db::secure_devices::SecureDevices::new(db).list(&key_set.server_instance_id)?;
-        key_set.secure = Some(Arc::new(crate::secure_pairing::SecurePairing::new(
-            identity, devices,
-        )));
-    }
-    Ok(Some(Arc::new(key_set)))
+    Ok((!keys.is_empty()).then_some(keys))
 }
 
 /// Paths that are exempt from API key authentication.

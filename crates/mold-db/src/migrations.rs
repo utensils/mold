@@ -691,6 +691,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 40,
         kind: MigrationKind::Sql(V40_SECURE_DEVICES),
     },
+    Migration {
+        version: 41,
+        kind: MigrationKind::Sql("CREATE TABLE secure_bootstrap(singleton INTEGER PRIMARY KEY CHECK(singleton=1),bootstrap_id TEXT NOT NULL,digest TEXT NOT NULL,server_instance_id TEXT NOT NULL);"),
+    },
 ];
 
 /// The gallery listing is `WHERE output_dir = ? ORDER BY
@@ -950,7 +954,7 @@ DELETE FROM settings WHERE key LIKE 'tui.%';
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 40;
+pub const SCHEMA_VERSION: i64 = 41;
 
 /// Downloadable files that belong to one gallery print. The generation row
 /// remains the lifecycle authority, so permanent deletion cascades while
@@ -1781,7 +1785,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 40);
+        assert_eq!(SCHEMA_VERSION, 41);
         assert!(table_exists(&conn, "device_preferences"));
         assert!(table_exists(&conn, "mesh_workflow_jobs"));
         assert!(table_exists(&conn, "mesh_workflow_stages"));
@@ -1937,7 +1941,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 40);
+        assert_eq!(SCHEMA_VERSION, 41);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -2074,7 +2078,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 40);
+        assert_eq!(SCHEMA_VERSION, 41);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -2331,25 +2335,28 @@ mod tests {
     #[test]
     fn v38_renames_tui_last_model_and_drops_every_other_tui_row() {
         let mut conn = Connection::open_in_memory().unwrap();
-        // Seed at v37 so v38 runs over rows that already exist.
+        // Build the actual older schema; never downgrade user_version on a
+        // newer DB, which collides as later migrations add tables.
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= 37)
         {
             let tx = conn.transaction().unwrap();
-            tx.execute_batch(V1_INITIAL_SCHEMA).unwrap();
-            tx.execute_batch(V3_SETTINGS_TABLE).unwrap();
+            match migration.kind {
+                MigrationKind::Sql(sql) => tx.execute_batch(sql).unwrap(),
+                MigrationKind::Rust(function) => function(&tx).unwrap(),
+            }
+            tx.pragma_update(None, "user_version", migration.version)
+                .unwrap();
             tx.commit().unwrap();
         }
-        // Reach the profile-scoped settings shape first, then seed.
-        apply_pending(&mut conn).unwrap();
         conn.execute_batch(
             "DELETE FROM settings;
              INSERT INTO settings (profile, key, value, value_type, updated_at_ms) VALUES
                ('default', 'tui.last_model', 'flux-dev:q4', 'string', 1),
                ('work', 'tui.last_model', 'sdxl', 'string', 1),
                ('default', 'tui.theme', 'dark', 'string', 1),
-               ('default', 'tui.host_key.plato', 'k', 'string', 1);
-             DROP TABLE generation_queue_transfers;
-             DROP TABLE generation_transfer_aborts;
-             PRAGMA user_version = 37;",
+               ('default', 'tui.host_key.plato', 'k', 'string', 1);",
         )
         .unwrap();
 
@@ -2410,7 +2417,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 40);
+        assert_eq!(SCHEMA_VERSION, 41);
     }
 
     #[test]

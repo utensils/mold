@@ -1,4 +1,5 @@
 //! Host-owned E2EE pairing and device authorization. Cloud admission is not API authority.
+pub mod bootstrap;
 mod identity;
 use anyhow::{ensure, Result};
 pub use identity::load_host_identity;

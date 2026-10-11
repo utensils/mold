@@ -32,6 +32,7 @@ mod reconcile;
 mod record;
 pub mod scan;
 mod scheduler_estimates;
+pub mod secure_bootstrap;
 pub mod secure_devices;
 pub mod settings;
 pub mod trash;

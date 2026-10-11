@@ -85,9 +85,26 @@ pinned encrypted transport automatically. Pairing state lives in
 Expired/revoked grants require pairing again; active clients renew grants over
 the encrypted connection. No operator key is injected into client requests.
 
+## Provider-created hosts
+
+The CLI and desktop provider flow can provision a new empty host automatically.
+The owner-authenticated provider API carries `MOLD_SECURE_BOOTSTRAP`, a private
+one-time envelope containing the host identity and a signed grant for the
+creating client, plus a separate operator credential. This is trusted host
+provisioning; the provider runs the GPU host and must be trusted with its keys.
+Neither discovery nor the Lambda relay can create this authorization.
+
+The server removes the envelope from its process environment before starting
+runtime threads. It accepts an initial import only when the host identity,
+authority database and media store are empty. A restart with the identical
+bootstrap verifies the original identity without restoring revoked grants or
+overwriting renewals. Resume an existing network volume with its original
+paired profile; a newly generated bootstrap cannot overwrite that volume.
+Keep provider credentials, bootstrap envelopes and client recovery files private.
+
 ## Streaming, media and limits
 
-The protocol multiplexes up to 32 HTTP streams per client, with 256 KiB of body
+The protocol multiplexes up to 32 HTTP streams per client, with 1 MiB of body
 credit per stream. Uploads are bounded to 64 MiB per request. Responses stream
 with backpressure and do not have a total media-size ceiling. Range, HEAD,
 conditional media reads, multipart uploads and server-sent progress use the
@@ -133,6 +150,9 @@ are `MOLD_SECURE_FIXTURE_BIND` (encrypted listener address, default
 staging WSS endpoint; omitted for LAN-only tests). `MOLD_SECURE_PROBE_BYTES`
 selects a bounded download byte count instead of the standard matrix;
 `MOLD_SECURE_PROBE_UPLOAD_BYTES` overrides that matrix's 1 MiB upload size.
+`MOLD_SECURE_TRACE_CARRIER=1` prints bounded batch sizes and broker/PUT/GET
+timings for transport diagnosis; it never prints signed object URLs, ciphertext,
+credentials, host keys, or application paths. Leave it unset during normal use.
 
 Native Rust clients and connectors accept `MOLD_SECURE_OBJECT_ORIGIN` only as
 operator configuration of an independently trusted HTTPS object bucket origin.
