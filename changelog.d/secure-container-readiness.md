@@ -7,4 +7,4 @@
 
 - **Reliable native Mac packaging.** Builds isolate Swift package checkouts from stale runner caches so signed distributions can resolve Sparkle and the encrypted transport framework reliably.
 
-- **Manage hosted Studio pairings.** Switch, disconnect, or forget the selected machine without losing recoverability when storage fails. Changes in another browser tab cannot silently retarget the mounted workspace. Generation jobs retain their owning machine across selection changes and reconnects, and ambiguous recovered jobs cannot act on another machine.
+- **Manage hosted Studio pairings.** Switch, disconnect, or forget the selected machine without losing recoverability when storage fails. Changes in another browser tab cannot silently retarget the mounted workspace. Generation jobs retain their owning machine across selection changes and reconnects, and ambiguous recovered jobs cannot act on another machine. Switching starts a fresh workspace so cached model and download actions cannot cross machines. Thumbnail caches distinguish routes and instances and respect Forget during in-flight reads.
