@@ -26,20 +26,6 @@ struct ConnectionRoutesTests {
         #expect(ConnectionRoutes.sanitized([ConnectionEndpoint(url: url, kind: .relay)]).isEmpty)
     }
 
-    @Test func proofIsBoundToKindNonceAndIdentity() {
-        let nonce = String(repeating: "a", count: 64)
-        let proof = ConnectionRoutes.proof(secret: "mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG", kind: "api", nonce: nonce, instanceID: "machine")
-        #expect(ConnectionRoutes.verifies(proof, secret: "mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG", kind: "api", nonce: nonce, instanceID: "machine"))
-        #expect(!ConnectionRoutes.verifies(proof, secret: "mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG", kind: "pairing", nonce: nonce, instanceID: "machine"))
-        #expect(!ConnectionRoutes.verifies(proof, secret: "mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG", kind: "api", nonce: nonce, instanceID: "wrong"))
-    }
-    @Test func proofMatchesTheSharedProtocolVector() {
-        let nonce = String(repeating: "0123456789abcdef", count: 4)
-        #expect(ConnectionRoutes.tag("test-only-route-secret") == "e4c8e720b2b762b8")
-        #expect(ConnectionRoutes.proof(secret: "test-only-route-secret", kind: "api", nonce: nonce, instanceID: "fixture-machine")
-            == "09588691253e789f49c73ec7c6bbe10c6373119985a328df283f2bb610ad6979")
-    }
-
     @Test func savedHostRetainsRoutesWithoutCredentials() throws {
         let host = MoldHost(name: "Machine", baseURL: URL(string: "http://192.168.1.2:7680")!, apiKey: "secret",
                             connectionEndpoints: [ConnectionEndpoint(url: "https://relay.example", kind: .relay)],
@@ -52,149 +38,37 @@ struct ConnectionRoutesTests {
     }
 }
 
-@Suite(.serialized)
-struct ConnectionProbeTests {
-    private func session() -> URLSession {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [ConnectionProbeProtocol.self]
-        configuration.httpAdditionalHeaders = ["X-Api-Key": "must-not-leak"]
-        return URLSession(configuration: configuration)
+struct SecureRouteRaceTests {
+    @Test func fastLANSkipsCloudAndCancelsSameTierHang() async throws {
+        let calls = RouteCalls()
+        let endpoints: [ConnectionEndpoint] = [.init(url: "fast", kind: .lan), .init(url: "hung", kind: .lan), .init(url: "cloud", kind: .relay)]
+        let (index, _) = try await ConnectionRoutes.select(endpoints, connect: { endpoint in
+            await calls.record(endpoint.url)
+            if endpoint.url == "hung" { try await Task.sleep(for: .seconds(30)) }
+            return endpoint.url
+        }, close: { _ in })
+        #expect(index == 0)
+        #expect(!(await calls.values).contains("cloud"))
     }
-
-    @Test func productionProbeConfigurationIsBoundedAndCredentialFree() {
-        let source = session()
-        defer { source.invalidateAndCancel() }
-        let configuration = ConnectionRoutes.probeConfiguration(from: source)
-        #expect(configuration.timeoutIntervalForResource == 2)
-        #expect(configuration.httpAdditionalHeaders == nil)
-        #expect(configuration.httpCookieStorage == nil)
-        #expect(configuration.urlCredentialStorage == nil)
-        #expect(configuration.urlCache == nil)
-        // Sanitization must not mutate the caller's session configuration.
-        #expect(source.configuration.httpAdditionalHeaders?["X-Api-Key"] as? String == "must-not-leak")
-        let body = Data("fixture".utf8)
-        let request = ConnectionRoutes.probeRequest(base: URL(string: "https://deadline.example")!, body: body)
-        #expect(request.timeoutInterval == 2)
-        #expect(request.url?.path == "/api/connection-probe")
-        #expect(request.httpMethod == "POST")
-        #expect(!request.httpShouldHandleCookies)
-        #expect(request.value(forHTTPHeaderField: "X-Api-Key") == nil)
-        #expect(request.httpBody == body)
+    @Test func slowerLANStillBeatsReadyCloud() async throws {
+        let calls = RouteCalls()
+        let endpoints: [ConnectionEndpoint] = [.init(url: "lan", kind: .lan), .init(url: "cloud", kind: .relay)]
+        let (index, _) = try await ConnectionRoutes.select(endpoints, connect: { endpoint in
+            if endpoint.kind == .lan { try await Task.sleep(for: .milliseconds(400)) }
+            return endpoint.url
+        }, close: { await calls.record($0) })
+        #expect(index == 0)
+        #expect(await calls.values == ["cloud"])
     }
-
-    @Test func operatorKeysNeverProbeLearnedAddresses() async {
-        await #expect(throws: MoldClientError.self) {
-            _ = try await ConnectionRoutes.select(endpoints: [ConnectionEndpoint(url: "https://relay.example", kind: .relay)],
-                                                  secret: "password", kind: "api", instanceID: "machine", session: session(), probeTimeout: 30)
-        }
-    }
-
-    @Test func failedLANFallsBackToRelayWithoutForwardingCredentials() async throws {
-        ConnectionProbeProtocol.failLAN = true
-        ConnectionProbeProtocol.badProof = false
-        let url = try await ConnectionRoutes.select(endpoints: [
-            ConnectionEndpoint(url: "http://192.168.1.2:7680", kind: .lan),
-            ConnectionEndpoint(url: "https://relay.example", kind: .relay)],
-            secret: "mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG", kind: "api", instanceID: "machine", session: session(), probeTimeout: 30)
-        #expect(url.absoluteString == "https://relay.example")
-    }
-
-    @Test func returningToLANOverridesCachedRelay() async throws {
-        ConnectionProbeProtocol.failLAN = true
-        ConnectionProbeProtocol.failTailscale = true
-        ConnectionProbeProtocol.badProof = false
-        defer { ConnectionProbeProtocol.failTailscale = false }
-        let relay = "https://return-to-lan.example"
-        #expect(try await selectPairingRoute(relay: relay).absoluteString == relay)
-        ConnectionProbeProtocol.failLAN = false
-        #expect(try await selectPairingRoute(relay: relay).absoluteString == "http://192.168.1.2:7680")
-    }
-
-    @Test func pairingPrefersLANWhenAllAdvertisedRoutesAnswer() async throws {
-        ConnectionProbeProtocol.failLAN = false
-        ConnectionProbeProtocol.failTailscale = false
-        ConnectionProbeProtocol.badProof = false
-        let route = try await selectPairingRoute(relay: "https://lan-preferred.example")
-        #expect(route.absoluteString == "http://192.168.1.2:7680")
-    }
-
-    @Test func pairingUsesTailscaleWhenLANIsUnavailable() async throws {
-        ConnectionProbeProtocol.failLAN = true
-        ConnectionProbeProtocol.failTailscale = false
-        ConnectionProbeProtocol.badProof = false
-        let route = try await selectPairingRoute(relay: "https://tailscale-preferred.example")
-        #expect(route.absoluteString == "http://100.64.1.2:7680")
-    }
-
-    @Test func pairingUsesProxyWhenBothDirectRoutesAreUnavailable() async throws {
-        ConnectionProbeProtocol.failLAN = true
-        ConnectionProbeProtocol.failTailscale = true
-        ConnectionProbeProtocol.badProof = false
-        defer { ConnectionProbeProtocol.failTailscale = false }
-        let route = try await selectPairingRoute(relay: "https://proxy-fallback.example")
-        #expect(route.absoluteString == "https://proxy-fallback.example")
-    }
-
-    private func selectPairingRoute(relay: String) async throws -> URL {
-        // Deliberately advertise proxy first: selection must use route kind,
-        // not QR payload order. Each test gets a separate route-memory key.
-        try await ConnectionRoutes.select(endpoints: [
-            ConnectionEndpoint(url: relay, kind: .relay),
-            ConnectionEndpoint(url: "http://100.64.1.2:7680", kind: .tailscale),
-            ConnectionEndpoint(url: "http://192.168.1.2:7680", kind: .lan)],
-            secret: "mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG",
-            kind: "pairing", instanceID: "machine", session: session(), probeTimeout: 30)
-    }
-
-    @Test func directRouteWinsAndWrongProofIsNeverAccepted() async throws {
-        ConnectionProbeProtocol.failLAN = false
-        ConnectionProbeProtocol.badProof = false
-        let routes = [ConnectionEndpoint(url: "https://relay.example", kind: .relay),
-                      ConnectionEndpoint(url: "http://192.168.1.2:7680", kind: .lan)]
-        let url = try await ConnectionRoutes.select(endpoints: routes, secret: "mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG", kind: "api",
-                                                     instanceID: "machine", session: session(), probeTimeout: 30)
-        #expect(url.host == "192.168.1.2")
-        ConnectionProbeProtocol.badProof = true
-        await #expect(throws: (any Error).self) {
-            _ = try await ConnectionRoutes.select(endpoints: routes, secret: "mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG", kind: "api",
-                                                   instanceID: "machine", session: session(), probeTimeout: 30)
-        }
+    @Test func unreachableLANFallsBackWithoutReplayingARequest() async throws {
+        let (index, _) = try await ConnectionRoutes.select([.init(url: "lan", kind: .lan), .init(url: "cloud", kind: .relay)], connect: { endpoint in
+            if endpoint.kind == .lan { throw URLError(.cannotConnectToHost) }
+            return endpoint.url
+        }, close: { _ in })
+        #expect(index == 1)
     }
 }
-
-private final class ConnectionProbeProtocol: URLProtocol {
-    nonisolated(unsafe) static var failLAN = false
-    nonisolated(unsafe) static var failTailscale = false
-    nonisolated(unsafe) static var badProof = false
-    override class func canInit(with request: URLRequest) -> Bool { true }
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-    override func stopLoading() {}
-    override func startLoading() {
-        #expect(request.timeoutInterval == 30)
-        #expect(request.value(forHTTPHeaderField: "X-Api-Key") == nil)
-        #expect(request.value(forHTTPHeaderField: "Cookie") == nil)
-        #expect(request.url?.path == "/api/connection-probe")
-        if (Self.failLAN && request.url?.host == "192.168.1.2")
-            || (Self.failTailscale && request.url?.host == "100.64.1.2") {
-            client?.urlProtocol(self, didFailWithError: URLError(.cannotConnectToHost))
-            return
-        }
-        let data = request.httpBody ?? request.httpBodyStream.map { stream in
-            stream.open(); defer { stream.close() }
-            var bytes = [UInt8](repeating: 0, count: 1024)
-            let count = stream.read(&bytes, maxLength: bytes.count)
-            return Data(bytes.prefix(max(0, count)))
-        } ?? Data()
-        let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: String] ?? [:]
-        #expect(body["key_tag"] == ConnectionRoutes.tag("mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"))
-        #expect(!String(decoding: data, as: UTF8.self).contains("mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"))
-        let proof = Self.badProof ? "wrong" : ConnectionRoutes.proof(secret: "mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG", kind: body["kind"] ?? "",
-                                                                       nonce: body["nonce"] ?? "", instanceID: "machine")
-        let answer = try! JSONSerialization.data(withJSONObject: ["instance_id": "machine", "proof": proof, "version": 1])
-        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
-                                       headerFields: ["Content-Type": "application/json"])!
-        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: answer)
-        client?.urlProtocolDidFinishLoading(self)
-    }
+private actor RouteCalls {
+    var values: [String] = []
+    func record(_ value: String) { values.append(value) }
 }

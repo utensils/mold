@@ -5,6 +5,11 @@ on:
     branches: [main]
     paths:
       - "website/**"
+      - "web/**"
+      - "studio/**"
+      - "ui/**"
+      - "package.json"
+      - "bun.lock"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -42,6 +47,12 @@ jobs:
       - name: Build docs
         working-directory: website
         run: bun run build
+
+      - name: Build independently distributed secure Studio
+        run: |
+          bun install --frozen-lockfile
+          VITE_STANDALONE_STUDIO=1 bun run build:web
+          cp -R web/dist website/.vitepress/dist/studio
 
       - uses: actions/configure-pages@v4
 

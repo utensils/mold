@@ -13,6 +13,15 @@ private actor PreviewCounter {
         return Data(repeating: 1, count: 4)
     }
 }
+private actor PreviewGate {
+    var requests = 0
+    var waiting: CheckedContinuation<Data, Never>?
+    func load() async -> Data {
+        requests += 1
+        return await withCheckedContinuation { waiting = $0 }
+    }
+    func release() { waiting?.resume(returning: Data(repeating: 1, count: 4)); waiting = nil }
+}
 struct BoundedAsyncCacheTests {
     @Test func coalescesCapsEvictsAndInvalidates() async {
         let cache = BoundedAsyncCache<String, Data>(maximumCost: 8, concurrency: 2, cost: { $0.count })
@@ -33,14 +42,16 @@ struct BoundedAsyncCacheTests {
     }
     @Test func oneCancelledSubscriberDoesNotCancelAnother() async {
         let cache = BoundedAsyncCache<String, Data>(maximumCost: 8, concurrency: 1, cost: { $0.count })
-        let counter = PreviewCounter()
-        let first = Task { await cache.value(for: "same") { try await counter.load() } }
-        let second = Task { await cache.value(for: "same") { try await counter.load() } }
-        try? await Task.sleep(for: .milliseconds(5))
+        let gate = PreviewGate()
+        let first = Task { await cache.value(for: "same") { await gate.load() } }
+        let second = Task { await cache.value(for: "same") { await gate.load() } }
+        while await cache.subscriberCount < 2 { await Task.yield() }
+        while await gate.requests < 1 { await Task.yield() }
         first.cancel()
         #expect(await first.value == nil)
+        await gate.release()
         #expect(await second.value?.count == 4)
-        #expect(await counter.requests == 1)
+        #expect(await gate.requests == 1)
     }
 }
 

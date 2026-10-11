@@ -16,7 +16,7 @@ enum MachineCardActions {
     static let open = "Open"
     static let copyAddress = "Copy Address"
     /// The same words as the machine page's own button (`PairingSection`).
-    static let pairPhone = "Pair a Phone…"
+    static let pairPhone = "Pair a Device…"
     static let edit = "Edit…"
     /// The ellipsis is the promise the dialog keeps: this asks first, and says
     /// that the machine's key goes with it (`MachineRemoval.swift`).

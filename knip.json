@@ -32,6 +32,8 @@
     "studio": {
       "entry": [
         "index.ts",
+        "api/secureMedia.ts",
+        "vite/secureMedia.ts",
         "components/HeldQueueTransferDialog.vue",
         "components/QueueMoveToControl.vue",
         "components/SourceMediaPanel.vue",

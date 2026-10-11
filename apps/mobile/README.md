@@ -712,40 +712,38 @@ WebView local storage contains non-secret mobile state:
   timestamp baseline migrated into individual viewing history
 - `mold.mobile.libraryUnread.v1` — compact client-local individual viewing and Library visit history
 
-Per-host API keys live in the iOS Keychain under
-`com.utensils.mold.remote-api-key`. Android encrypts them with a non-exportable
-AES-GCM key under `com.utensils.mold.remote-api-key.v1` in Android Keystore; only
-ciphertext is stored in private preferences. Never move keys into local storage,
-query parameters, logs, generated project files, or plain Android
-SharedPreferences.
+Remote pairing uses protocol 3 with a version 2 HTTPS invitation. The host
+creates a short-lived, single-use signed invitation through authenticated
+`POST /api/pairing/sessions`. A pinned Noise session claims it using
+`POST /api/pairing/secure/claim` inside the encrypted channel. Each client gets
+its own identity, signed grant and scoped credential; the relay and object
+bucket never receive the credential or plaintext application data.
 
-Mobile pairing uses authenticated `POST /api/pairing/sessions` and the
-one-time-token `POST /api/pairing/claim`. The claim route is intentionally the
-only unauthenticated credential handoff: tokens are 256-bit random values,
-stored server-side only as an HMAC, capped, single-use, and expire after two
-minutes. Both responses are `no-store`; the QR must never contain the durable
-API key. Pairing QR codes are universal links
-(`https://utensils.io/mold/pair#...`, the code in the fragment, which never
-reaches the web server) claimed by Mold Studio Companion; on a phone without it
-the Camera opens the utensils.io page, whose **Open in Mold** button hands the
-code to this app as `mold://pair?...`. The in-app scanner reads both forms.
-Cold-launch and already-open `mold://pair` links share the same claim,
-instance-verification, and Keychain path as Mold's in-app scanner. Android's in-app scanner releases CameraX before resolving the
-scanned payload, then completes that same claim, verification, secure storage,
-and host-selection path.
+QR codes use `https://utensils.io/mold/pair#...`. Private invitation material
+stays in the fragment, which is never sent to the website. Verified Android App
+Links and iOS Universal Links register the HTTPS address; the native Companion
+and Tauri iOS bundle IDs are both associated. Camera, pasted links, cold-launch
+and already-open links use the same validation, encrypted claim and instance
+verification path. The Android scanner releases CameraX before claiming. Old
+custom-scheme links and version 1 invitations are rejected; pair again after
+the cutover.
 
-An authenticated claim receives a distinct `mold_pair_...` credential, not the
-host's operator key. The host stores only its digest in `mold.db`; web and
-desktop Settings list grants with `GET /api/pairing/clients` and revoke one
-with `DELETE /api/pairing/clients/:id`. Paired credentials can use normal APIs
-but cannot create or manage other grants. When host authentication is disabled,
-pairing remains credential-free and there is no grant to revoke.
+The shared secure store wraps device identity and host credentials with an
+AES-GCM nonextractable storage key. Tauri registers validated profiles in the
+native transport's bounded process memory. Host cards persist public names and
+addresses only. Never place credentials in localStorage, URLs, logs or generated
+project files. Settings lists devices with `GET /api/pairing/clients` and revokes
+one with `DELETE /api/pairing/clients/:id`; a paired client cannot manage other
+grants. Remote access requires authenticated secure pairing. Secure transport hooks
+are installed before the interface mounts; saved credentials warm in the background
+so an operating-system storage prompt cannot prevent the app from appearing. Each
+secure operation still awaits and validates its own pairing profile.
 
-Authenticated gallery media uses `POST /api/gallery/media-token` to exchange
-the normal `X-Api-Key` request for a short-lived, read-only URL scoped to one
-`/api/gallery/image/:filename` path. This allows native video Range requests and
-seeking without exposing the long-lived API key. Keep the image-only fallback
-for older hosts, but never buffer a whole video as that fallback.
+Gallery media uses the native secure media bridge: a short-lived loopback
+capability forwards GET, HEAD and Range through the same encrypted transport.
+Video plays and seeks without buffering the whole file. Large encrypted frames
+may use bounded private S3 objects; small messages and events stay on the
+WebSocket. Verified LAN routing bypasses the relay when reachable.
 
 ## Local development
 
@@ -978,20 +976,18 @@ thumbnail window. Native and physical-device acceptance remain tracked in
 [issue #1628](https://github.com/utensils/mold/issues/1628). Scene authoring is
 intentionally absent.
 
-## Optional remote HTTPS access
+## Remote access
 
-An authenticated machine can run `mold relay connect --transport aws` to expose its normal API
-through a trusted HTTPS gateway. Add that HTTPS address through the existing
-Machines flow or pair using a QR whose reachable URL is the public address.
-Normal API-key storage, instance identity, device revocation and signed gallery
-media tickets still apply; the relay enrollment token is only for the host.
-The gateway can see credentials and media and publishes one machine per process.
+Pair from the host's version 2 invitation to pin its signing and Noise keys. LAN,
+Tailscale, and Lambda routes carry the same authenticated encrypted channel; the
+relay and its private bulk-object bucket see ciphertext, not API keys or media.
+Nearby candidates must prove the paired host identity before replacing a relay route.
 See [the relay guide](https://utensils.io/mold/deployment/relay).
 
-Hosting requires an explicitly running authenticated `mold serve` and connector.
-Native macOS This Mac remains private; the GUI does not automatically open a
-tunnel. Offline/sleeping hosts remain unavailable, and interrupted requests
-are never replayed by the relay.
+The host must be running with Remote Access enabled. In native macOS, Pair a Device
+starts the encrypted LAN listener and managed relay; Stop Remote Access closes both.
+Headless hosts use the secure connector described in the relay guide. Offline or
+sleeping hosts remain unavailable, and interrupted mutations are never replayed.
 
 ### GIF export timing parity
 

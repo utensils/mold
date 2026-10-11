@@ -435,7 +435,7 @@ describe("MachinesView overview", () => {
     expect(discovered.find("[data-test='discovered-add']").exists()).toBe(true);
   });
 
-  it("prompts for a key before connecting an authenticated discovered host", async () => {
+  it("requires secure pairing before connecting a discovered host", async () => {
     discoverServers.mockResolvedValue([
       {
         name: "locked-7680",
@@ -451,16 +451,10 @@ describe("MachinesView overview", () => {
 
     await wrapper.get("[data-test='discovered-add']").trigger("click");
     await flushPromises();
-    expect(wrapper.get("[data-test='connect-discovered-selected']").text()).toContain(
-      "locked-7680",
-    );
-    expect(wrapper.find("[data-test='connect-key']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='connect-error']").exists()).toBe(false);
-
-    await wrapper.get("[data-test='connect-key']").setValue("peer-secret");
-    await wrapper.get("[data-test='connect-continue']").trigger("click");
-    await flushPromises();
-    expect(testRemoteHost).toHaveBeenCalledWith("http://192.168.1.30:7680", "peer-secret");
+    expect(wrapper.text()).toContain("locked-7680 is nearby");
+    expect(wrapper.find("#secure-pairing-link").exists()).toBe(true);
+    expect(wrapper.find("[data-test='connect-key']").exists()).toBe(false);
+    expect(testRemoteHost).not.toHaveBeenCalled();
   });
 
   it("hides the app's own embedded server from On your network but keeps standalone same-machine servers", async () => {
@@ -511,16 +505,16 @@ describe("MachinesView overview", () => {
 
   it("opens the connect-a-machine dialog from the palette's ?connect=1 and cleans the address", async () => {
     const wrapper = await mountView(undefined, "/machines?connect=1");
-    expect(wrapper.find("[data-test='connect-address']").exists()).toBe(true);
+    expect(wrapper.find("#secure-pairing-link").exists()).toBe(true);
     expect(router.currentRoute.value.query.connect).toBeUndefined();
   });
 
   it("opens the connect-a-machine modal from Add machine", async () => {
     const wrapper = await mountView();
-    expect(wrapper.find("[data-test='connect-address']").exists()).toBe(false);
+    expect(wrapper.find("#secure-pairing-link").exists()).toBe(false);
     await wrapper.get("[data-test='add-machine']").trigger("click");
     await flushPromises();
-    expect(wrapper.find("[data-test='connect-address']").exists()).toBe(true);
+    expect(wrapper.find("#secure-pairing-link").exists()).toBe(true);
   });
 
   it("connecting a discovered box finds a stored key under its instance-id twin's slug", async () => {

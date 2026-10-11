@@ -1,3 +1,13 @@
+import { secureMediaUrl } from "@studio/api/secureMedia";
+vi.mock("@studio/api/secureMedia", () => ({
+  secureMediaUrl: vi.fn(),
+  releaseSecureMediaUrl: vi.fn(),
+}));
+beforeEach(() => {
+  vi.mocked(secureMediaUrl).mockImplementation(async (input) =>
+    input.startsWith("http://studio:7680") ? "blob:secure-fixture" : null,
+  );
+});
 // Retained source transport is verified by its shared component/API suites.
 vi.mock("@studio/components/SourceMediaPanel.vue", () => ({
   default: { template: "<section />" },
@@ -538,31 +548,21 @@ describe("Lightbox multi-host media", () => {
     );
   });
 
-  it("streams a keyed remote print through a media-token ticket", async () => {
-    mockFetch((url) => {
-      expect(url).toBe("http://studio:7680/api/gallery/media-token");
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
-          token: "tkt",
-          expires_at: 1900,
-          auth_required: true,
-        }),
-      };
+  it("streams a remote print through the encrypted media capability", async () => {
+    mockFetch(() => {
+      throw new Error("Media uses the secure capability adapter.");
     });
     const wrapper = mountWide({
       item: { ...item, hostId: "studio-7680", hostLabel: "studio" },
     });
     await flushPromises();
-
     const src = wrapper.find("img").attributes("src") ?? "";
-    const url = new URL(src);
-    expect(url.origin + url.pathname).toBe(
+    expect(src).toBe("blob:secure-fixture");
+    expect(secureMediaUrl).toHaveBeenCalledWith(
       "http://studio:7680/api/gallery/image/print.png",
+      expect.anything(),
+      expect.any(AbortSignal),
     );
-    expect(url.searchParams.get("media_token")).toBe("tkt");
-    // The durable key never rides in a URL.
     expect(src).not.toContain("studio-secret-key");
   });
 
@@ -596,7 +596,10 @@ describe("Lightbox multi-host media", () => {
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
-  it("shows the can't-stream state for video on a ticket-less host", async () => {
+  it("shows the can't-stream state when the secure media connection fails", async () => {
+    vi.mocked(secureMediaUrl).mockRejectedValueOnce(
+      new Error("Secure media unavailable"),
+    );
     mockFetch((url) => {
       if (url.endsWith("/media-token")) return { ok: false, status: 404 };
       throw new Error("must not buffer a whole video");

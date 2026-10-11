@@ -4,11 +4,18 @@ import {
 } from "./connectionRoutes";
 import type { ApiTarget } from "./client";
 import { apiFetchTo, apiJsonTo } from "./client";
+import type {
+  SecureGrant,
+  SecureHostIdentity,
+  SecureInvite,
+} from "./secureCrypto";
+import { claimSecurePairing } from "./securePairing";
 
-export interface PairingSession {
+export interface PairingSession extends SecureHostIdentity {
   endpoints?: ConnectionEndpoint[];
-  token: string | null;
-  expires_at: number | null;
+  protocol: 3;
+  invite_seed: string;
+  invite: SecureInvite;
   auth_required: boolean;
   instance_id: string;
   hostname: string | null;
@@ -19,11 +26,12 @@ export interface PairingClaim {
   api_key: string | null;
   instance_id: string;
   hostname: string | null;
+  grant: SecureGrant;
 }
 
 export interface PairingClientIdentity {
   name: string;
-  kind: "iphone" | "ipad" | "android" | "mobile";
+  kind: "iphone" | "ipad" | "android" | "mobile" | "browser" | "desktop";
 }
 
 export interface PairedClient {
@@ -40,13 +48,13 @@ export interface PairedClientsResponse {
   clients: PairedClient[];
 }
 
-export interface MobilePairingPayload {
+export interface MobilePairingPayload extends SecureHostIdentity {
   endpoints?: ConnectionEndpoint[];
   type: "mold.mobile-pairing";
-  version: 1;
+  version: 2;
   base_url: string;
-  token: string | null;
-  expires_at: number | null;
+  invite_seed: string;
+  invite: SecureInvite;
   instance_id: string;
   name: string;
 }
@@ -63,11 +71,15 @@ export function mobilePairingUrl(payload: MobilePairingPayload): string {
   const fields = new URLSearchParams();
   fields.set("version", String(payload.version));
   fields.set("base_url", payload.base_url);
-  if (payload.token !== null) fields.set("token", payload.token);
-  if (payload.expires_at !== null)
-    fields.set("expires_at", String(payload.expires_at));
   fields.set("instance_id", payload.instance_id);
   fields.set("name", payload.name);
+  fields.set("namespace", payload.namespace);
+  fields.set("host_key", payload.host_key);
+  fields.set("host_noise_key", payload.host_noise_key);
+  fields.set("host_binding_signature", payload.host_binding_signature);
+  if (payload.websocket_url) fields.set("websocket_url", payload.websocket_url);
+  fields.set("invite_seed", payload.invite_seed);
+  fields.set("invite", JSON.stringify(payload.invite));
   if (payload.endpoints?.length)
     fields.set(
       "endpoints",
@@ -83,14 +95,11 @@ export function mobilePairingUrl(payload: MobilePairingPayload): string {
 
 /**
  * The form-encoded fields of a pairing link: the fragment of
- * `https://utensils.io/mold/pair#…`, or the query of the older
- * `mold://pair?…` (which the Tauri app still opens). `null` for anything else.
+ * `https://utensils.io/mold/pair#…`. Private invitation material must stay in
+ * the fragment, which is never transmitted to the website server.
  */
 function pairingLinkFields(url: URL): URLSearchParams | null {
   if (url.username || url.password) return null;
-  if (url.protocol === "mold:") {
-    return url.hostname === "pair" && !url.hash ? url.searchParams : null;
-  }
   const link = new URL(MOBILE_PAIRING_LINK);
   if (
     url.protocol === link.protocol &&
@@ -113,23 +122,10 @@ export function createPairingSession(
 }
 
 export function claimPairingSession(
-  baseUrl: string,
-  token: string | null,
+  payload: MobilePairingPayload,
   client: PairingClientIdentity = { name: "Mold mobile", kind: "mobile" },
 ): Promise<PairingClaim> {
-  return apiJsonTo<PairingClaim>(
-    { baseUrl, apiKey: null },
-    "/api/pairing/claim",
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        token,
-        client_name: client.name,
-        client_kind: client.kind,
-      }),
-    },
-  );
+  return claimSecurePairing(payload, client);
 }
 
 export function listPairedClients(
@@ -168,13 +164,17 @@ export function parseMobilePairingPayload(raw: string): MobilePairingPayload {
     try {
       const fields = pairingLinkFields(new URL(raw.trim()));
       if (!fields) throw new Error();
-      const expiresAt = fields.get("expires_at");
       value = {
         type: "mold.mobile-pairing",
         version: Number(fields.get("version")),
         base_url: fields.get("base_url"),
-        token: fields.get("token"),
-        expires_at: expiresAt === null ? null : Number(expiresAt),
+        namespace: fields.get("namespace"),
+        host_key: fields.get("host_key"),
+        host_noise_key: fields.get("host_noise_key"),
+        host_binding_signature: fields.get("host_binding_signature"),
+        websocket_url: fields.get("websocket_url"),
+        invite_seed: fields.get("invite_seed"),
+        invite: fields.has("invite") ? JSON.parse(fields.get("invite")!) : null,
         instance_id: fields.get("instance_id"),
         name: fields.get("name"),
         ...(fields.has("endpoints")
@@ -190,13 +190,25 @@ export function parseMobilePairingPayload(raw: string): MobilePairingPayload {
   const payload = value as Partial<MobilePairingPayload>;
   if (
     payload.type !== "mold.mobile-pairing" ||
-    payload.version !== 1 ||
+    payload.version !== 2 ||
     typeof payload.base_url !== "string" ||
-    !/^https?:\/\//i.test(payload.base_url) ||
-    (payload.token !== null && typeof payload.token !== "string") ||
-    (payload.expires_at !== null &&
-      (typeof payload.expires_at !== "number" ||
-        !Number.isFinite(payload.expires_at))) ||
+    !validPairingAddress(payload.base_url, false) ||
+    !/^[0-9a-f]{32}$/.test(payload.namespace ?? "") ||
+    !/^[0-9a-f]{64}$/.test(payload.host_key ?? "") ||
+    !/^[0-9a-f]{64}$/.test(payload.host_noise_key ?? "") ||
+    !/^[0-9a-f]{128}$/.test(payload.host_binding_signature ?? "") ||
+    !/^[0-9a-f]{64}$/.test(payload.invite_seed ?? "") ||
+    (payload.websocket_url !== null &&
+      (typeof payload.websocket_url !== "string" ||
+        !validPairingAddress(payload.websocket_url, true))) ||
+    !payload.invite ||
+    !/^[0-9a-f]{32}$/.test(payload.invite.id) ||
+    !/^[0-9a-f]{64}$/.test(payload.invite.signingKey) ||
+    !/^[0-9a-f]{128}$/.test(payload.invite.signature) ||
+    !Number.isSafeInteger(payload.invite.expiresAt) ||
+    payload.invite.expiresAt <= 0 ||
+    !Number.isSafeInteger(payload.invite.epoch) ||
+    payload.invite.epoch < 0 ||
     typeof payload.instance_id !== "string" ||
     typeof payload.name !== "string"
   ) {
@@ -205,4 +217,23 @@ export function parseMobilePairingPayload(raw: string): MobilePairingPayload {
   if (payload.endpoints !== undefined)
     payload.endpoints = parseConnectionEndpoints(payload.endpoints);
   return payload as MobilePairingPayload;
+}
+
+function validPairingAddress(value: string, websocket: boolean): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      value === value.trim() &&
+      !/[\r\n\t]/.test(value) &&
+      !url.username &&
+      !url.password &&
+      !url.search &&
+      !url.hash &&
+      (websocket
+        ? url.protocol === "wss:"
+        : ["http:", "https:"].includes(url.protocol) && url.pathname === "/")
+    );
+  } catch {
+    return false;
+  }
 }

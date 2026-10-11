@@ -26,6 +26,20 @@ eval "$(mold lambda tunnel)"
 open http://127.0.0.1:7680
 ```
 
+The container uses host networking with `MOLD_BIND=127.0.0.1`, so SSH forwarding
+arrives at the engine as an actual loopback connection. Traffic between machines
+is encrypted by SSH with its existing host-key verification; no public plaintext
+API or cloud HTTP proxy is enabled. RunPod containers retain their default bind
+address and accept encrypted protocol 3 WebSockets through their provider proxy.
+
+For an existing instance, explicitly running `mold lambda deploy` upgrades the
+previous Mold-generated Docker service to this loopback layout and restarts it
+with the current image reference. The CLI verifies the exact managed unit,
+preserves its volume mount, and checks both the original and replacement bytes
+before installation over SSH. Custom service units require an operator upgrade;
+the CLI does not overwrite them. Schedule this first upgrade while the engine is
+idle. Later reuse leaves the updated service running.
+
 ## Discovery
 
 ```bash

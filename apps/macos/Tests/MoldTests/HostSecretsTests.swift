@@ -18,7 +18,9 @@ struct HostSecretsTests {
     }
 
     private func host(_ name: String, apiKey: String? = nil) -> MoldHost {
-        MoldHost(name: name, baseURL: URL(string: "http://\(name):7680")!, apiKey: apiKey)
+        // Only an embedded numeric loopback host retains the former local key
+        // migration. Remote credentials require a protocol 3 pairing.
+        MoldHost(name: name, baseURL: URL(string: "http://127.0.0.1:7680")!, apiKey: apiKey)
     }
 
     // MARK: - 05-H5
@@ -77,6 +79,19 @@ struct HostSecretsTests {
                         into deletions: Deletions = Deletions()) -> LegacyKeychain.Source {
         LegacyKeychain.Source(read: { items[$0] ?? .absent },
                               delete: { deletions.ids.insert($0) })
+    }
+
+    @Test func obsoleteRemoteKeychainItemsAreDiscardedWithoutReadingOrMigratingThem() {
+        let remote = StoredHost(MoldHost(name: "Old remote", baseURL: URL(string: "https://relay.example")!))
+        let local = StoredHost(host("This Mac"))
+        let deleted = Deletions()
+        let source = LegacyKeychain.Source(read: { _ in Issue.record("Old remote key must not be read"); return .unreadable },
+                                          delete: { deleted.ids.insert($0) })
+        LegacyKeychain.discardObsolete([remote, local], from: source, isFresh: false)
+        #expect(deleted.ids == [remote.id])
+        deleted.ids.removeAll()
+        LegacyKeychain.discardObsolete([remote], from: source, isFresh: true)
+        #expect(deleted.ids.isEmpty)
     }
 
     /// Every migration test below is an ORDINARY launch. The test scheme sets

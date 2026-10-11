@@ -4,9 +4,8 @@ import {
   PutItemCommand,
   DeleteItemCommand,
 } from "@aws-sdk/client-dynamodb";
-import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
-const dynamo = new DynamoDBClient({}),
-  ssm = new SSMClient({});
+import { encodeDocument, decodeDocument } from "./store-codec.mjs";
+const dynamo = new DynamoDBClient({});
 export const store = {
   async get(id) {
     const r = await dynamo.send(
@@ -18,7 +17,7 @@ export const store = {
     );
     return r.Item
       ? {
-          ...JSON.parse(r.Item.document.S),
+          ...decodeDocument(id, r.Item),
           revision: Number(r.Item.revision?.N ?? 0),
         }
       : undefined;
@@ -30,7 +29,7 @@ export const store = {
           TableName: process.env.TABLE_NAME,
           Item: {
             id: { S: id },
-            document: { S: JSON.stringify(value) },
+            ...encodeDocument(id, value),
             revision: { N: String(revision + 1) },
             expiresAt: {
               N: String(
@@ -63,7 +62,7 @@ export const store = {
         TableName: process.env.TABLE_NAME,
         Item: {
           id: { S: id },
-          document: { S: JSON.stringify(value) },
+          ...encodeDocument(id, value),
           revision: { N: "1" },
           expiresAt: {
             N: String(value.expiresAt ?? Math.floor(Date.now() / 1000) + 3600),
@@ -81,15 +80,3 @@ export const store = {
     );
   },
 };
-const cache = new Map();
-export async function parameter(name) {
-  const old = cache.get(name);
-  if (old && old.until > Date.now()) return old.value;
-  const r = await ssm.send(
-    new GetParameterCommand({ Name: name, WithDecryption: true }),
-  );
-  const value = r.Parameter?.Value;
-  if (!value) throw new Error("Missing relay configuration");
-  cache.set(name, { value, until: Date.now() + 30000 });
-  return value;
-}

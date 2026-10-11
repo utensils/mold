@@ -24,3 +24,9 @@ import Testing
     #expect(UserFacingError.localMessage("No space left on device") == "This device is out of storage. Free some disk space and try again.")
     #expect(UserFacingError.localMessage(String(repeating: "trace", count: 60)) == "That action failed. Check the app’s logs for details.")
 }
+
+@Test func unavailableRelayExplainsTheConnectionWithoutMutationInstructions() {
+    #expect(UserFacingError.http(status: 502, code: nil,
+                                diagnostic: "relay gateway unavailable; reconcile mutations before retrying")
+        == "The remote connection is temporarily unavailable.")
+}

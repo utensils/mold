@@ -12,9 +12,13 @@ import Testing
 struct HostStoreTests {
     final class MemoryCredentials: CredentialStore, @unchecked Sendable {
         var keys: [UUID: String] = [:]
+        var refusesDeletion = false
         func apiKey(for host: UUID) throws -> String? { keys[host] }
         func setAPIKey(_ key: String, for host: UUID) throws { keys[host] = key.isEmpty ? nil : key }
-        func clearAPIKey(for host: UUID) throws { keys[host] = nil }
+        func clearAPIKey(for host: UUID) throws {
+            if refusesDeletion { throw CocoaError(.fileWriteNoPermission) }
+            keys[host] = nil
+        }
     }
 
     private func store(_ fake: FakeBackend = FakeBackend()) -> (HostStore, MemoryCredentials, HostListFile) {
@@ -28,6 +32,20 @@ struct HostStoreTests {
         let json = #"{"version":"0.32.0","busy":false,"uptime_secs":5,"instance_id":"\#(instance)","#
             + #""gpus":[{"ordinal":0,"name":"NVIDIA L40S"},{"ordinal":1,"name":"NVIDIA L40S"}]}"#
         return try MoldJSON.decoder.decode(ServerStatus.self, from: Data(json.utf8))
+    }
+
+    @Test func loadingAnOldRemoteMachineErasesItsBearerAndKeepsItsIdentity() throws {
+        let (_, credentials, file) = store()
+        let id = UUID(), origin = URL(string: "https://old-relay.example")!
+        credentials.keys[id] = "retired-bearer"
+        try file.save(HostList(entries: [.init(id: id, name: "halcyon", baseURL: origin)], defaultID: id))
+        let loaded = HostStore(list: file, credentials: credentials, makeBackend: { _ in FakeBackend() })
+        #expect(loaded.hosts.first?.id == id)
+        #expect(loaded.hosts.first?.name == "halcyon")
+        #expect(loaded.hosts.first?.baseURL == origin)
+        #expect(loaded.hosts.first?.apiKey == nil)
+        #expect(credentials.keys[id] == nil)
+        #expect(loaded.defaultMachine == id)
     }
 
     @Test func addingSavesTheListWithoutTheKeyAndTheKeyToTheKeychain() throws {
@@ -56,6 +74,18 @@ struct HostStoreTests {
         #expect(hosts.hosts.isEmpty)
         #expect(credentials.keys[host.id] == nil)
         #expect(hosts.defaultMachine == nil)
+    }
+
+    @Test func failingToRemoveCredentialsKeepsTheMachineAndReportsTheFailure() throws {
+        let (hosts, credentials, file) = store()
+        let host = try hosts.add(name: "Studio", address: "10.0.0.4", apiKey: "k", makeDefault: true)
+        credentials.refusesDeletion = true
+        hosts.remove(host.id)
+        #expect(hosts.hosts.map(\.id) == [host.id])
+        #expect(file.load().entries.map(\.id) == [host.id])
+        #expect(credentials.keys[host.id] == "k")
+        #expect(hosts.defaultMachine == host.id)
+        #expect(hosts.failures.count == 1)
     }
 
     @Test func aMachineThatAnswersIsUpAndCountsItsModels() async throws {
@@ -107,8 +137,7 @@ struct HostStoreTests {
 
     @Test func pairingAddsTheMachineWithTheClaimedKey() async throws {
         let (hosts, credentials, _) = store()
-        let payload = try MobilePairingPayload.parse(
-            "mold://pair?version=1&base_url=http%3A%2F%2Fbox%3A7680&token=t&expires_at=4000000000&instance_id=inst-1&name=box")
+        let payload = try SecurePairingFixture.payload()
         var sent: (String, String)?
         let host = try await hosts.pair(payload, claim: { _, name, kind in
             sent = (name, kind)
@@ -122,9 +151,8 @@ struct HostStoreTests {
 
     @Test func pairingAMachineAlreadyListedReplacesItsKeyInsteadOfAddingARow() async throws {
         let (hosts, credentials, _) = store()
-        let existing = try hosts.add(name: "workstation", address: "box", apiKey: "old", makeDefault: false)
-        let payload = try MobilePairingPayload.parse(
-            "mold://pair?version=1&base_url=http%3A%2F%2Fbox%3A7680&token=t&expires_at=4000000000&instance_id=inst-1&name=box")
+        let existing = try hosts.add(name: "workstation", address: "studio.local", apiKey: "old", makeDefault: false)
+        let payload = try SecurePairingFixture.payload()
         try await hosts.pair(payload, claim: { _, _, _ in
             try MoldJSON.decoder.decode(PairingClaim.self, from: Data(
                 #"{"api_key":"new","instance_id":"inst-1","hostname":"box"}"#.utf8))

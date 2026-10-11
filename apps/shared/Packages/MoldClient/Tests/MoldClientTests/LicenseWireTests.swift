@@ -70,7 +70,7 @@ private final class LicenseStubURLProtocol: URLProtocol {
 private func stubbedBackend() -> HTTPBackend {
     let config = URLSessionConfiguration.ephemeral
     config.protocolClasses = [LicenseStubURLProtocol.self]
-    return HTTPBackend(
+    return HTTPBackend.testing(
         host: MoldHost(name: "stub", baseURL: URL(string: "http://stub:7680")!),
         session: URLSession(configuration: config))
 }

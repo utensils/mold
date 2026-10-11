@@ -178,7 +178,7 @@ final class LibraryStore {
         defer { if changed && epoch == cacheEpoch { saveSnapshot(host.id) } }
         do {
             let gallery = try await client.gallery(etag: etags[host.id])
-            guard epoch == cacheEpoch else { return }
+            guard epoch == cacheEpoch, hosts.host(host.id) == host, !Task.isCancelled else { return }
             switch gallery {
             case let .fresh(prints, etag):
                 live[host.id] = prints
@@ -189,7 +189,7 @@ final class LibraryStore {
             }
             if hosts.capabilities[host.id]?.trashEnabled == true {
                 let trash = try await client.trashedPrints(etag: trashEtags[host.id])
-                guard epoch == cacheEpoch else { return }
+                guard epoch == cacheEpoch, hosts.host(host.id) == host, !Task.isCancelled else { return }
                 switch trash {
                 case let .fresh(prints, etag):
                     trashed[host.id] = prints
@@ -207,10 +207,12 @@ final class LibraryStore {
                 collectionInventoryAvailable.insert(host.id)
                 if fresh != collections[host.id] { collections[host.id] = fresh; changed = true }
             }
+            hosts.clearFailures(for: host.id, doing: String(localized: "list its prints"))
         } catch is CancellationError {
             // Foreground navigation and coalesced gallery events can end a
             // refresh after prints loaded. Cancellation is not a host failure.
         } catch {
+            guard epoch == cacheEpoch, hosts.host(host.id) == host, !Task.isCancelled else { return }
             collectionInventoryAvailable.remove(host.id)
             hosts.report(host, doing: String(localized: "list its prints"), error)
         }

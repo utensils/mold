@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type MobilePairingPayload,
-  claimPairingSession,
   mobilePairingUrl,
   parseMobilePairingPayload,
 } from "./pairing";
@@ -9,21 +8,41 @@ import fixtures from "./pairing.fixtures.json";
 
 const payload = {
   type: "mold.mobile-pairing" as const,
-  version: 1 as const,
-  base_url: "http://studio.local:7680",
-  token: "one-time",
-  expires_at: 1_900_000_000,
-  instance_id: "server-id",
-  name: "Studio Mac",
-};
+  version: 2 as const,
+  ...fixtures.links[0]!.payload,
+} as MobilePairingPayload;
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("parseMobilePairingPayload", () => {
+  it("rejects credentials and request paths in advertised API origins", () => {
+    for (const base_url of [
+      "https://user:secret@host.test",
+      "https://host.test/api/status",
+      "https://host.test?key=secret",
+      "https://host.test#secret",
+    ]) {
+      expect(() =>
+        parseMobilePairingPayload(JSON.stringify({ ...payload, base_url })),
+      ).toThrow(/pairing code/);
+    }
+    for (const websocket_url of [
+      "https://host.test/ws",
+      "wss://user:secret@host.test/ws",
+      "wss://host.test/ws?key=secret",
+      "wss://host.test/ws#fragment",
+    ]) {
+      expect(() =>
+        parseMobilePairingPayload(
+          JSON.stringify({ ...payload, websocket_url }),
+        ),
+      ).toThrow(/pairing code/);
+    }
+  });
   it("accepts the versioned one-time pairing envelope", () => {
     expect(parseMobilePairingPayload(JSON.stringify(payload))).toMatchObject({
       base_url: "http://studio.local:7680",
-      token: "one-time",
+      host_key: payload.host_key,
     });
   });
 
@@ -35,14 +54,10 @@ describe("parseMobilePairingPayload", () => {
     expect(parseMobilePairingPayload(url)).toEqual(payload);
   });
 
-  it("preserves credential-free pairing in an app-opening URL", () => {
-    const url = mobilePairingUrl({ ...payload, token: null, expires_at: null });
-
-    expect(parseMobilePairingPayload(url)).toEqual({
-      ...payload,
-      token: null,
-      expires_at: null,
-    });
+  it("refuses old pairings instead of silently downgrading", () => {
+    expect(() =>
+      parseMobilePairingPayload(JSON.stringify({ ...payload, version: 1 })),
+    ).toThrow("not a supported Mold pairing code");
   });
 
   it("rejects foreign, malformed, and non-http codes", () => {
@@ -72,7 +87,7 @@ describe("the shared pairing-link contract (pairing.fixtures.json)", () => {
   ): MobilePairingPayload =>
     ({
       type: "mold.mobile-pairing" as const,
-      version: 1 as const,
+      version: 2 as const,
       ...p,
     }) as MobilePairingPayload;
 
@@ -80,43 +95,18 @@ describe("the shared pairing-link contract (pairing.fixtures.json)", () => {
     expect(mobilePairingUrl(envelope(fixture.payload))).toBe(fixture.link);
   });
 
-  it.each(fixtures.links)("reads $link and its legacy spellings", (fixture) => {
-    for (const raw of [fixture.link, ...fixture.legacy]) {
-      expect(parseMobilePairingPayload(raw)).toEqual(envelope(fixture.payload));
-    }
-  });
+  it.each(fixtures.links)(
+    "reads $link and its equivalent fragment spellings",
+    (fixture) => {
+      for (const raw of [fixture.link, ...fixture.aliases]) {
+        expect(parseMobilePairingPayload(raw)).toEqual(
+          envelope(fixture.payload),
+        );
+      }
+    },
+  );
 
   it.each(fixtures.rejected)("refuses %s", (raw) => {
     expect(() => parseMobilePairingPayload(raw)).toThrow(/pairing code/);
-  });
-});
-
-describe("claimPairingSession", () => {
-  it("identifies the client without putting its new credential in the request", async () => {
-    const fetch = vi.fn(
-      async () =>
-        new Response(
-          JSON.stringify({
-            api_key: "mold_pair_secret",
-            instance_id: "host-id",
-            hostname: "studio",
-          }),
-          { headers: { "content-type": "application/json" } },
-        ),
-    );
-    vi.stubGlobal("fetch", fetch);
-
-    await claimPairingSession("http://studio:7680", "one-use", {
-      name: "Mold on iPhone",
-      kind: "iphone",
-    });
-
-    const [, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
-    expect(JSON.parse(String(init.body))).toEqual({
-      token: "one-use",
-      client_name: "Mold on iPhone",
-      client_kind: "iphone",
-    });
-    expect(String(init.body)).not.toContain("mold_pair_secret");
   });
 });

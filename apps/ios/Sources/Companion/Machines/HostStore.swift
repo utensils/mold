@@ -51,12 +51,17 @@ final class HostStore {
         hosts = []
         hosts = stored.entries.map { entry in
             MoldHost(id: entry.id, name: entry.name, baseURL: entry.baseURL, apiKey: readKey(entry),
-                     connectionEndpoints: entry.connectionEndpoints, connectionInstanceID: entry.connectionInstanceID, connectionOriginalURL: entry.connectionOriginalURL)
+                     connectionEndpoints: entry.connectionEndpoints, connectionInstanceID: entry.connectionInstanceID, connectionOriginalURL: entry.connectionOriginalURL, secure: entry.secure)
         }
     }
 
     private func readKey(_ entry: HostList.Entry) -> String? {
         do {
+            let host = MoldHost(id: entry.id, name: entry.name, baseURL: entry.baseURL, secure: entry.secure)
+            if host.requiresSecurePairing {
+                try credentials.clearAPIKey(for: entry.id)
+                return nil
+            }
             return try credentials.apiKey(for: entry.id)
         } catch {
             // A locked Keychain is not "no key": say so, and keep the machine.
@@ -93,7 +98,7 @@ final class HostStore {
     func persist() throws {
         try list.save(HostList(
             entries: hosts.map { .init(id: $0.id, name: $0.name, baseURL: $0.baseURL,
-                                     connectionEndpoints: $0.connectionEndpoints, connectionInstanceID: $0.connectionInstanceID, connectionOriginalURL: $0.connectionOriginalURL) },
+                                     connectionEndpoints: $0.connectionEndpoints, connectionInstanceID: $0.connectionInstanceID, connectionOriginalURL: $0.connectionOriginalURL, secure: $0.secure) },
             defaultID: defaultMachine))
     }
 

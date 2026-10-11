@@ -38,7 +38,7 @@ extension SourceMediaFileTests {
     @Test func originalHTTPStreamsToPrivateFileAndRejectsDeclaredOversize() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [SourceOriginalProtocol.self]
-        let backend = HTTPBackend(host: MoldHost(name: "Fixture", baseURL: URL(string: "http://fixture")!),
+        let backend = HTTPBackend.testing(host: MoldHost(name: "Fixture", baseURL: URL(string: "http://fixture")!),
                                   session: URLSession(configuration: configuration))
         let member = RetainedSourceMedia.Member(memberId: "m", role: "audio_file", displayName: "audio.wav", sizeBytes: 3)
         let file = try await backend.retainedSourceMediaFile(for: "owner.png", member: member)
@@ -62,7 +62,7 @@ extension SourceMediaFileTests {
     @Test func queueOriginalUsesBoundedPrivateStreamingAndRequiresIndex() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [SourceOriginalProtocol.self]
-        let backend = HTTPBackend(host: MoldHost(name: "Fixture", baseURL: URL(string: "http://fixture/prefix")!),
+        let backend = HTTPBackend.testing(host: MoldHost(name: "Fixture", baseURL: URL(string: "http://fixture/prefix")!),
                                   session: URLSession(configuration: configuration))
         let file = try await backend.queueInputOriginal(id: "job #1", index: 2)
         #expect(try Data(contentsOf: file.url) == Data([1, 2, 3]))

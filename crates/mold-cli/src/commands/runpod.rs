@@ -3,8 +3,10 @@
 //! Wraps `mold_core::runpod::RunPodClient` so users can manage cloud GPU pods
 //! end-to-end from the mold CLI: list/create/stop/delete pods, hand logs off
 //! to RunPod's console,
-//! check spend, and (via `run`) generate images on a freshly-provisioned pod
-//! with one command.
+//! check spend, and generate images on an explicitly selected, paired pod.
+
+#[path = "runpod_security.rs"]
+mod security;
 
 use anyhow::{bail, Context, Result};
 use clap_complete::engine::CompletionCandidate;
@@ -87,6 +89,7 @@ async fn generate_with_runpod_transport(
 }
 use crate::theme;
 use crate::AlreadyReported;
+use mold_secure_client::RequestBuilderExt;
 
 // ── Local state persistence ────────────────────────────────────────────
 
@@ -278,7 +281,15 @@ fn network_volume_placement(
     fallback_workspace_gb: u32,
 ) -> (Option<String>, String, u32) {
     match volume {
-        Some(volume) => (Some(volume.data_center_id.clone()), "SECURE".to_string(), 0),
+        Some(volume) => (
+            authoritative_datacenter(
+                None,
+                fallback_datacenter.as_deref(),
+                Some(&volume.data_center_id),
+            ),
+            "SECURE".to_string(),
+            0,
+        ),
         None => (
             fallback_datacenter,
             fallback_cloud.to_string(),
@@ -660,6 +671,7 @@ pub async fn run_network_volume_create(
             data_center_id: datacenter.into(),
         })
         .await?;
+    security::mark_fresh_volume(&volume.id)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&volume)?);
     } else {
@@ -1220,7 +1232,7 @@ async fn resolve_datacenter(
     //      datacenter-scoped — RunPod will reject the pod if we try to
     //      mount one from a different region.
     //   4. Otherwise leave `dataCenterIds` unset and let RunPod pick.
-    //      Retry logic in `ensure_pod` handles DC fallback if the
+    //      Explicit `runpod create --dc` selects another DC if the
     //      scheduler can't place the pod.
     if let Some(dc) = opts.datacenter.clone() {
         return Ok(Some(dc));
@@ -1352,7 +1364,7 @@ pub async fn run_create(opts: CreateOptions) -> Result<()> {
             return Err(AlreadyReported.into());
         }
     };
-    let req = build_create_request(&opts, &client, &config).await?;
+    let mut req = build_create_request(&opts, &client, &config).await?;
     if !opts.dry_run {
         enforce_cost_alert(&client, &config).await?;
     }
@@ -1372,7 +1384,7 @@ pub async fn run_create(opts: CreateOptions) -> Result<()> {
         print_create_plan(&req);
     }
 
-    let pod = match with_spinner("creating pod…", client.create_pod(&req)).await {
+    let pod = match with_spinner("creating pod…", security::create(&client, &mut req)).await {
         Ok(p) => p,
         Err(e) => {
             explain_runpod_error(&e);
@@ -1607,10 +1619,6 @@ fn tracked_pod_is_absent(error: &anyhow::Error) -> bool {
     )
 }
 
-fn pod_is_scheduled(pod: &Pod) -> bool {
-    pod.uptime_seconds > 0 || pod.gpu_name().is_some_and(|name| !name.is_empty())
-}
-
 /// `mold runpod connect <pod-id>` — print an `export MOLD_HOST=…` snippet.
 pub async fn run_connect(pod_id: String, check: bool) -> Result<()> {
     if check {
@@ -1628,6 +1636,14 @@ pub async fn run_connect(pod_id: String, check: bool) -> Result<()> {
         }
     }
     let proxy = format!("https://{pod_id}-7680.proxy.runpod.net");
+    require_paired_pod(&proxy)?;
+    if let Ok(client) = build_client() {
+        let pod = client.get_pod(&pod_id).await?;
+        security::remember_volume(&pod)?;
+    }
+    if check {
+        wait_for_mold(&proxy, 15).await?;
+    }
     println!("export MOLD_HOST={proxy}");
     eprintln!("{} gallery: {}", theme::prefix_hint(), proxy.cyan());
     Ok(())
@@ -1681,13 +1697,11 @@ pub struct RunOptions {
     pub no_save: bool,
 }
 
-/// `mold runpod run "<prompt>"` — end-to-end: reuse warm pod or create one,
+/// `mold runpod run "<prompt>"` — securely provision or reuse the selected pod,
 /// generate, save to local repo, park (or delete with --keep).
 pub async fn run_run(opts: RunOptions) -> Result<()> {
     let mut config = Config::load_or_default();
     let effective_model = require_run_model_activation(&mut config, &opts).await?;
-
-    reap_idle_warm_pod_if_needed().await;
     let client = match build_client() {
         Ok(c) => c,
         Err(e) => {
@@ -1717,8 +1731,7 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
         }
     }
 
-    // Pick or create a pod.
-    let pod = ensure_pod(&client, &config, &opts).await?;
+    let pod = ensure_run_pod(&client, &config, &opts).await?;
     println!(
         "{} using pod {} on {}",
         theme::icon_ok(),
@@ -2042,346 +2055,184 @@ pub async fn reap_idle_warm_pod_if_needed() -> bool {
     }
 }
 
-/// Outcome of racing `wait_for_schedule` against Ctrl-C.
-enum WaitOutcome {
-    Scheduled(Box<Pod>),
-    Cancelled,
-    Failed(anyhow::Error),
+fn paired_runpod_id(origin: Option<&str>, tracked: Option<&str>) -> Result<String> {
+    if let Some(origin) = origin {
+        let url =
+            reqwest::Url::parse(origin).context("MOLD_HOST must name the paired RunPod origin")?;
+        if url.scheme() != "https"
+            || url.origin().ascii_serialization() != origin.trim_end_matches('/')
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            bail!("MOLD_HOST must be the HTTPS origin printed by mold runpod connect");
+        }
+        let id = url
+            .host_str()
+            .and_then(|h| h.strip_suffix("-7680.proxy.runpod.net"))
+            .filter(|id| {
+                !id.is_empty()
+                    && id.len() <= 128
+                    && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            })
+            .context("MOLD_HOST is not a RunPod host; use mold runpod connect after pairing")?;
+        return Ok(id.into());
+    }
+    tracked
+        .map(str::to_owned)
+        .context("No selected RunPod host")
 }
 
-async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -> Result<Pod> {
-    // Abort before any billable action if session spend exceeds the guard.
+async fn ensure_run_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -> Result<Pod> {
     enforce_cost_alert(client, config).await?;
-    // 1. Warm pod? Only reuse if actually scheduled on a machine. If a
-    //    previous run saved a pod id that never scheduled (e.g. Ctrl-C
-    //    during wait) delete it before we create a new one — otherwise it
-    //    keeps billing as an orphan.
-    let state = load_state();
-    if let Some(id) = state.last_pod_id.clone() {
-        match client.get_pod(&id).await {
-            Ok(pod) if pod.desired_status == "RUNNING" => {
-                // Respect explicit overrides before reuse. If the user
-                // passed --gpu or --dc (or pinned one via config), the
-                // warm pod has to match, otherwise a fresh provision is
-                // strictly what was asked for.
-                let warm_gpu = pod
-                    .gpu_name()
-                    .map(str::to_owned)
-                    .or_else(|| state.last_pod_gpu.clone())
-                    .unwrap_or_default();
-                let warm_dc = pod.datacenter_id().unwrap_or_default();
-                let want_gpu = opts
-                    .create
-                    .gpu
-                    .clone()
-                    .or_else(|| config.runpod.default_gpu.clone());
-                let want_volume = opts
-                    .create
-                    .network_volume_id
-                    .clone()
-                    .or_else(|| config.runpod.default_network_volume_id.clone());
-                let want_dc = warm_datacenter_requirement(
-                    opts.create.datacenter.as_deref(),
-                    config.runpod.default_datacenter.as_deref(),
-                    want_volume.as_deref(),
-                );
-                let gpu_mismatch = want_gpu
-                    .as_deref()
-                    .map(normalize_gpu_id)
-                    .map(|want| {
-                        let warm_id = normalize_gpu_id(&warm_gpu);
-                        !warm_id.is_empty()
-                            && !warm_id.eq_ignore_ascii_case(&want)
-                            && !warm_gpu.eq_ignore_ascii_case(want.as_str())
-                    })
-                    .unwrap_or(false);
-                let dc_mismatch = want_dc
-                    .as_deref()
-                    .map(|want| !warm_dc.is_empty() && !warm_dc.eq_ignore_ascii_case(want))
-                    .unwrap_or(false);
-                let volume_mismatch = network_volume_selection_mismatch(
-                    pod.attached_network_volume_id(),
-                    want_volume.as_deref(),
-                );
-                if gpu_mismatch || dc_mismatch || volume_mismatch {
-                    eprintln!(
-                        "{} warm pod {} does not match the requested GPU, datacenter, or network volume — \
-                         deleting warm pod and provisioning fresh",
-                        theme::icon_warn(),
-                        id,
-                    );
-                    delete_tracked_pod(client, &id).await?;
-                } else {
-                    // REST v1 can leave `runtime` / `machine.gpu_display_name`
-                    // unpopulated on fully-booted pods (same reason we had
-                    // to rework `wait_for_schedule`). Don't use those as a
-                    // usability test — instead probe the proxy directly.
-                    // If the proxy answers at all, the pod is scheduled
-                    // and routable, which is all we need.
-                    let proxy_url = format!("https://{id}-7680.proxy.runpod.net/api/status");
-                    let http = reqwest::Client::builder()
-                        .timeout(std::time::Duration::from_secs(5))
-                        .build()
-                        .unwrap_or_default();
-                    if http.get(&proxy_url).send().await.is_ok() {
-                        return Ok(pod);
-                    }
-                    // Running according to RunPod but the proxy isn't
-                    // answering — treat as stale, kill it to avoid leaked
-                    // billing.
-                    eprintln!(
-                        "{} stale pod {} (not reachable via proxy) — deleting",
-                        theme::icon_warn(),
-                        id
-                    );
-                    delete_tracked_pod(client, &id).await?;
-                }
-            }
-            Ok(_) => {
-                // Non-RUNNING state (STOPPED, EXITED, TERMINATED…) — kill
-                // it and clear state.
-                delete_tracked_pod(client, &id).await?;
-            }
-            Err(error) if tracked_pod_is_absent(&error) => {
-                let mut state = load_state();
-                state.last_pod_id = None;
-                state.last_pod_created_at = None;
-                state.last_pod_last_used_at = None;
-                state.last_pod_gpu = None;
-                state.last_pod_cost_per_hr = None;
-                save_state(&state)?;
-            }
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("check tracked warm pod {id}; refusing to provision a replacement")
-                });
-            }
-        }
+    if let Ok(origin) = std::env::var("MOLD_HOST") {
+        let selected = paired_runpod_id(Some(&origin), None)?;
+        require_paired_pod(&origin)?;
+        return ensure_paired_pod(client, config, opts, &selected).await;
     }
-    // 2. Create new with scheduling guard + DC fallback.
-    let mut create_opts = opts.create.clone();
-    if create_opts.model.is_none() {
-        create_opts.model = opts.model.clone();
-    }
-    let mut base_req = build_create_request(&create_opts, client, config).await?;
-
-    // Candidate DC list strategy:
-    //   1. If user pinned --dc, use only that.
-    //   2. Otherwise, prepend "" (let RunPod pick any schedulable DC).
-    //   3. Then append DCs sorted by stock so we have a fallback chain.
-    //
-    // The "any DC" attempt is critical because:
-    //   - RunPod's REST /pods enum only accepts a specific subset of DCs even
-    //     though GraphQL exposes more. Pinning a DC that isn't in the REST
-    //     enum yields a 400 schema error.
-    //   - GraphQL stockStatus is a rough indicator and doesn't always match
-    //     what the scheduler can actually place. Letting RunPod pick is the
-    //     most reliable first attempt.
-    let mut candidates: Vec<String> = Vec::new();
-    // Any DC baked into the request by `build_create_request` (e.g. from
-    // an attached network volume) is authoritative — we MUST pin to it
-    // or the pod create will fail with a volume/DC mismatch.
-    let volume_pinned_dc: Option<String> = base_req
-        .data_center_ids
-        .as_ref()
-        .and_then(|v| v.first().cloned());
-    if let Some(dc) = authoritative_datacenter(
-        create_opts.datacenter.as_deref(),
-        config.runpod.default_datacenter.as_deref(),
-        volume_pinned_dc.as_deref(),
-    ) {
-        candidates.push(dc);
-    } else {
-        // Try "any DC" first.
-        candidates.push(String::new());
-        // Then add DCs sorted by stock for this GPU, highest → lowest.
-        let gpu_display = friendly_gpu_name(&base_req.gpu_type_ids[0]);
-        if let Ok(dcs) = client.datacenters().await {
-            let mut ranked: Vec<(String, u8)> = dcs
-                .into_iter()
-                .filter_map(|dc| {
-                    let stock = dc
-                        .gpu_availability
-                        .iter()
-                        .find(|g| g.display_name.eq_ignore_ascii_case(&gpu_display))
-                        .and_then(|g| g.stock_status.clone())
-                        .unwrap_or_default();
-                    let rank = match stock.as_str() {
-                        "High" => 3,
-                        "Medium" => 2,
-                        "Low" => 1,
-                        _ => 0,
-                    };
-                    if rank > 0 {
-                        Some((dc.id, rank))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            ranked.sort_by_key(|entry| std::cmp::Reverse(entry.1));
-            for (id, _) in ranked {
-                if !candidates.contains(&id) {
-                    candidates.push(id);
-                }
-            }
-        }
-    }
-    print_create_plan(&base_req);
-    let mut last_err: Option<anyhow::Error> = None;
-    for (idx, dc) in candidates.iter().enumerate() {
-        if !dc.is_empty() {
-            base_req.data_center_ids = Some(vec![dc.clone()]);
-        } else {
-            base_req.data_center_ids = None;
-        }
-        let label = if dc.is_empty() { "any DC" } else { dc };
-        println!(
-            "{} attempt {}/{} — {}",
-            theme::icon_info(),
-            idx + 1,
-            candidates.len(),
-            label.bold()
-        );
-        let pod = match with_spinner(
-            &format!("creating pod in {label}…"),
-            client.create_pod(&base_req),
-        )
-        .await
-        {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("{} create failed: {e}", theme::icon_warn());
-                last_err = Some(e);
-                continue;
-            }
-        };
-
-        // Persist *before* waiting so Ctrl-C during wait doesn't orphan the pod.
+    if let Some(pod) = security::recover(client).await? {
         let mut state = load_state();
         state.last_pod_id = Some(pod.id.clone());
         state.last_pod_created_at = Some(now_epoch());
         state.last_pod_last_used_at = Some(now_epoch());
-        state.last_pod_gpu = base_req.gpu_type_ids.first().cloned();
+        state.last_pod_gpu = pod.gpu_name().map(str::to_owned);
         state.last_pod_cost_per_hr = Some(pod.cost_per_hr);
-        let _ = save_state(&state);
-        let _ = append_history(&HistoryEntry {
-            pod_id: pod.id.clone(),
-            created_at: now_epoch(),
-            deleted_at: None,
-            cost_per_hr: pod.cost_per_hr,
-            gpu: friendly_gpu_name(&base_req.gpu_type_ids[0]),
-            model: opts.model.clone(),
-            prompt: Some(opts.prompt.clone()),
-        });
-
-        let outcome = tokio::select! {
-            biased;
-            _ = tokio::signal::ctrl_c() => WaitOutcome::Cancelled,
-            res = wait_for_schedule(client, &pod.id, 90) => match res {
-                Ok(scheduled) => WaitOutcome::Scheduled(Box::new(scheduled)),
-                Err(e) => WaitOutcome::Failed(e),
-            },
-        };
-        match outcome {
-            WaitOutcome::Scheduled(scheduled) => {
-                println!(
-                    "{} scheduled on {} ({})",
-                    theme::icon_ok(),
-                    scheduled.gpu_name().unwrap_or_default(),
-                    scheduled.datacenter_id().unwrap_or_default(),
-                );
-                return Ok(*scheduled);
-            }
-            WaitOutcome::Cancelled => {
-                eprintln!(
-                    "\n{} cancelled — deleting {} to stop billing",
-                    theme::icon_warn(),
-                    pod.id
-                );
-                delete_tracked_pod(client, &pod.id).await?;
-                bail!("interrupted by user");
-            }
-            WaitOutcome::Failed(e) => {
-                eprintln!(
-                    "{} {} didn't schedule — deleting and trying next",
-                    theme::icon_warn(),
-                    pod.id
-                );
-                delete_tracked_pod(client, &pod.id).await?;
-                last_err = Some(e);
-            }
-        }
+        save_state(&state)?;
+        return Ok(pod);
     }
-    Err(last_err.unwrap_or_else(|| {
-        anyhow::anyhow!("no datacenters with schedulable capacity — try explicit --dc or --gpu")
-    }))
-}
-
-/// Poll the pod until it's actually scheduled on a machine. Because RunPod
-/// REST v1 doesn't reliably populate `runtime` / `machine.gpuDisplayName`
-/// (we've seen `status=RUNNING uptime=0` persist on a fully booted pod),
-/// we treat any of these as "scheduled":
-///   * `uptime_seconds > 0`
-///   * `machine` identifies an allocated GPU via `gpuDisplayName` or `gpuTypeId`
-///   * the public proxy `https://<id>-7680.proxy.runpod.net/api/status`
-///     responds at all (DNS + edge routing only land once scheduled)
-async fn wait_for_schedule(client: &RunPodClient, pod_id: &str, timeout_secs: u64) -> Result<Pod> {
-    use std::time::{Duration, Instant};
-    let pb = indicatif::ProgressBar::new_spinner();
-    pb.set_style(
-        indicatif::ProgressStyle::with_template(&format!(
-            "{{spinner:.{}}} waiting for machine assignment… {{elapsed_precise}} {{msg}}",
-            theme::SPINNER_STYLE
-        ))
-        .unwrap(),
-    );
-    pb.enable_steady_tick(Duration::from_millis(100));
-    let probe_url = format!("https://{pod_id}-7680.proxy.runpod.net/api/status");
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap_or_default();
-    let start = Instant::now();
-    loop {
-        // Racing both signals makes us robust to either source going silent.
-        let (rest, proxy) = tokio::join!(client.get_pod(pod_id), http.get(&probe_url).send(),);
-        let proxy_reached = proxy.is_ok();
-        match rest {
+    let state = load_state();
+    let mut replace = None;
+    if let Some(id) = &state.last_pod_id {
+        match client.get_pod(id).await {
             Ok(pod) => {
-                let rest_scheduled = pod_is_scheduled(&pod);
-                if rest_scheduled || proxy_reached {
-                    pb.finish_and_clear();
-                    return Ok(pod);
-                }
-                pb.set_message(format!(
-                    "status={} uptime={}s",
-                    pod.desired_status, pod.uptime_seconds
-                ));
-            }
-            Err(e) => {
-                if proxy_reached {
-                    // Proxy can see it — trust that.
-                    pb.finish_and_clear();
-                    if let Ok(pod) = client.get_pod(pod_id).await {
+                require_paired_pod(&format!("https://{id}-7680.proxy.runpod.net"))?;
+                security::remember_volume(&pod)?;
+                if pod_matches(&pod, config, opts) {
+                    if pod.desired_status == "RUNNING" {
                         return Ok(pod);
                     }
+                    if pod.desired_status == "STOPPED" || pod.desired_status == "EXITED" {
+                        client.start_pod(id).await?;
+                        return client.get_pod(id).await;
+                    }
                 }
-                pb.set_message(format!("probe error: {e}"));
+                replace = Some(id.clone());
+            }
+            Err(error) if tracked_pod_is_absent(&error) => {}
+            Err(error) => {
+                return Err(error)
+                    .context("Could not verify tracked pod; refusing a paid replacement")
             }
         }
-        if start.elapsed().as_secs() > timeout_secs {
-            pb.finish_and_clear();
-            bail!(
-                "pod {pod_id} did not schedule on a machine within {timeout_secs}s \
-                 (RunPod DC likely has no real capacity despite stock signal)"
-            );
-        }
-        tokio::time::sleep(Duration::from_secs(5)).await;
     }
+    let mut create = opts.create.clone();
+    if create.model.is_none() {
+        create.model = opts.model.clone();
+    }
+    let mut request = build_create_request(&create, client, config).await?;
+    security::preflight(&request)?;
+    if let Some(id) = replace {
+        delete_tracked_pod(client, &id).await?;
+    }
+    print_create_plan(&request);
+    let pod = security::create(client, &mut request).await?;
+    let mut state = load_state();
+    state.last_pod_id = Some(pod.id.clone());
+    state.last_pod_created_at = Some(now_epoch());
+    state.last_pod_last_used_at = Some(now_epoch());
+    state.last_pod_gpu = request.gpu_type_ids.first().cloned();
+    state.last_pod_cost_per_hr = Some(pod.cost_per_hr);
+    save_state(&state)?;
+    append_history(&HistoryEntry {
+        pod_id: pod.id.clone(),
+        created_at: now_epoch(),
+        deleted_at: None,
+        cost_per_hr: pod.cost_per_hr,
+        gpu: pod.gpu_name().unwrap_or_default().to_owned(),
+        model: opts.model.clone(),
+        prompt: Some(opts.prompt.clone()),
+    })?;
+    Ok(pod)
 }
 
+fn pod_matches(pod: &Pod, config: &Config, opts: &RunOptions) -> bool {
+    let gpu = opts
+        .create
+        .gpu
+        .as_deref()
+        .or(config.runpod.default_gpu.as_deref());
+    let volume = opts
+        .create
+        .network_volume_id
+        .as_deref()
+        .or(config.runpod.default_network_volume_id.as_deref());
+    let dc = warm_datacenter_requirement(
+        opts.create.datacenter.as_deref(),
+        config.runpod.default_datacenter.as_deref(),
+        volume,
+    );
+    !gpu.is_some_and(|want| {
+        pod.gpu_name().is_none_or(|actual| {
+            !normalize_gpu_id(actual).eq_ignore_ascii_case(&normalize_gpu_id(want))
+        })
+    }) && !dc.as_deref().is_some_and(|want| {
+        pod.datacenter_id()
+            .is_none_or(|actual| !actual.eq_ignore_ascii_case(want))
+    }) && !network_volume_selection_mismatch(pod.attached_network_volume_id(), volume)
+}
+
+async fn ensure_paired_pod(
+    client: &RunPodClient,
+    config: &Config,
+    opts: &RunOptions,
+    id: &str,
+) -> Result<Pod> {
+    enforce_cost_alert(client, config).await?;
+    let pod = client
+        .get_pod(id)
+        .await
+        .context("Read paired RunPod host; refusing to create or replace a paid resource")?;
+    if pod.id != id || pod.desired_status != "RUNNING" {
+        bail!("The paired RunPod host is not running. Resume that exact host through the provider, or explicitly create and pair a new host before running; no resource was created or deleted");
+    }
+    let want_gpu = opts
+        .create
+        .gpu
+        .as_deref()
+        .or(config.runpod.default_gpu.as_deref());
+    let want_volume = opts
+        .create
+        .network_volume_id
+        .as_deref()
+        .or(config.runpod.default_network_volume_id.as_deref());
+    let want_dc = warm_datacenter_requirement(
+        opts.create.datacenter.as_deref(),
+        config.runpod.default_datacenter.as_deref(),
+        want_volume,
+    );
+    let gpu_mismatch = want_gpu.is_some_and(|want| {
+        pod.gpu_name().is_none_or(|actual| {
+            !normalize_gpu_id(actual).eq_ignore_ascii_case(&normalize_gpu_id(want))
+        })
+    });
+    let dc_mismatch = want_dc.as_deref().is_some_and(|want| {
+        pod.datacenter_id()
+            .is_none_or(|actual| !actual.eq_ignore_ascii_case(want))
+    });
+    let volume_mismatch = want_volume.is_some_and(|want| {
+        network_volume_selection_mismatch(pod.attached_network_volume_id(), Some(want))
+    });
+    if gpu_mismatch || dc_mismatch || volume_mismatch {
+        bail!("The paired RunPod host does not match the requested GPU, datacenter, or volume. Select the matching paired host, or explicitly create and pair a replacement first; no resource was created or deleted");
+    }
+    Ok(pod)
+}
+
+fn require_paired_pod(origin: &str) -> Result<()> {
+    mold_secure_client::load_pairing(origin).with_context(||format!("Pair this RunPod host before using it: on the host's trusted console configure Remote Access, run mold pairing create --output <private-file>, transfer the invitation privately, then run mold pair --invite-file <private-file>. Set the host MOLD_PUBLIC_URL to {origin}; provider status alone does not establish a secure Mold connection"))?;
+    Ok(())
+}
 async fn wait_for_mold(mold_host: &str, timeout_secs: u64) -> Result<()> {
+    require_paired_pod(mold_host)?;
     use std::time::{Duration, Instant};
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -2403,7 +2254,7 @@ async fn wait_for_mold(mold_host: &str, timeout_secs: u64) -> Result<()> {
         // a `version` field. Before the mold process is up, the RunPod
         // Cloudflare proxy returns an empty 404 or 502. We need to see the
         // actual mold server response, not the proxy's.
-        let progress = match http.get(&status_url).send().await {
+        let progress = match http.get(&status_url).secure_send().await {
             Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
                 Ok(v) if v.get("version").is_some() => {
                     pb.finish_and_clear();
@@ -3162,19 +3013,6 @@ mod tests {
     }
 
     #[test]
-    fn machine_gpu_type_id_is_an_allocation_signal() {
-        let pod: Pod = serde_json::from_value(serde_json::json!({
-            "id": "pod-live-shape",
-            "desiredStatus": "RUNNING",
-            "uptimeSeconds": 0,
-            "machine": { "gpuTypeId": "NVIDIA GeForce RTX 4090" }
-        }))
-        .unwrap();
-
-        assert!(pod_is_scheduled(&pod));
-    }
-
-    #[test]
     fn pod_detail_shows_top_level_gpu_without_machine() {
         let pod: Pod = serde_json::from_value(serde_json::json!({
             "id": "pod-top-level-gpu",
@@ -3220,6 +3058,60 @@ mod tests {
         assert!(!finalized.load(Ordering::SeqCst));
         assert!(error.to_string().contains("remains tracked"));
         assert!(error.to_string().contains("may still be billing"));
+    }
+
+    #[test]
+    fn paired_runpod_selection_rejects_replacement_and_untrusted_origin() {
+        assert_eq!(
+            paired_runpod_id(Some("https://abc123-7680.proxy.runpod.net"), None).unwrap(),
+            "abc123"
+        );
+        for origin in [
+            "http://abc123-7680.proxy.runpod.net",
+            "https://abc123-7680.proxy.runpod.net.attacker.invalid",
+            "https://key@abc123-7680.proxy.runpod.net",
+            "https://abc123-7680.proxy.runpod.net/api/status",
+        ] {
+            assert!(paired_runpod_id(Some(origin), Some("old")).is_err());
+        }
+        assert!(paired_runpod_id(None, None).is_err());
+        assert_eq!(
+            paired_runpod_id(None, Some("existing")).unwrap(),
+            "existing"
+        );
+    }
+
+    #[tokio::test]
+    async fn mismatched_paired_runpod_never_creates_deletes_or_resumes_a_paid_resource() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"selected","desiredStatus":"RUNNING","gpu":{"displayName":"NVIDIA GeForce RTX 4090"}}))).expect(1).mount(&server).await;
+        let client = RunPodClient::new(server.uri(), "fixture-provider-key");
+        let mut config = Config::default();
+        config.runpod.cost_alert_usd = 0.0;
+        let mut create = policy_create_options(None);
+        create.gpu = Some("NVIDIA H100 NVL".into());
+        let options = RunOptions {
+            prompt: "fixture".into(),
+            model: None,
+            output_dir: std::env::temp_dir(),
+            keep: true,
+            seed: None,
+            steps: None,
+            width: None,
+            height: None,
+            create,
+            wait_ready_timeout_secs: 1,
+            no_save: false,
+        };
+        let error = ensure_paired_pod(&client, &config, &options, "selected")
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("no resource was created or deleted"));
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method.as_str(), "GET");
     }
 
     #[test]
@@ -3370,16 +3262,6 @@ mod tests {
         if let Some(v) = prev {
             std::env::set_var("HF_TOKEN", v);
         }
-    }
-
-    #[test]
-    fn wait_outcome_variants_are_exhaustive() {
-        // Compile-time sanity: enum must cover Scheduled / Cancelled / Failed.
-        let _ = |o: WaitOutcome| match o {
-            WaitOutcome::Scheduled(_) => {}
-            WaitOutcome::Cancelled => {}
-            WaitOutcome::Failed(_) => {}
-        };
     }
 
     #[test]

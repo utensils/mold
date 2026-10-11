@@ -18,7 +18,7 @@ struct LibrarySyncCheckpointTransportTests {
     @Test func oversizedCheckpointFallsBackToOrdinaryVerification() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [SyncCheckpointStub.self]
-        let backend = HTTPBackend(host: .init(name: "Fixture", baseURL: URL(string: "http://fixture")!), session: URLSession(configuration: configuration))
+        let backend = HTTPBackend.testing(host: .init(name: "Fixture", baseURL: URL(string: "http://fixture")!), session: URLSession(configuration: configuration))
         #expect(try await backend.gallerySyncCheckpoint() == nil)
     }
 }

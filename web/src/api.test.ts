@@ -143,9 +143,7 @@ describe("queue api", () => {
     );
     const headers = new Headers(fetchMock.mock.calls[0]?.[1]?.headers);
     expect(headers.get("x-api-key")).toBe("secret");
-    expect(headers.get("x-mold-request-target")).toBe(
-      "/api/queue?limit=11&cursor=opaque%2F%2B+token%3D",
-    );
+    expect(headers.has("x-mold-request-target")).toBe(false);
     expect(listing.page?.next_cursor).toBe("next-page");
   });
 

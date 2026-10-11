@@ -12,7 +12,7 @@ public extension HTTPBackend {
     func queueInputOriginal(id: String, index: Int) async throws -> SourceMediaFile {
         guard index >= 0 else { throw MoldClientError.malformedResponse }
         let member = RetainedSourceMedia.Member(memberId: "queue-input", role: "input", displayName: "Input", sizeBytes: 0)
-        return try await sourceMediaFile(at: "/api/queue/\(escaped(id))/input-original?index=\(index)", member: member)
+        return try await sourceMediaFile(at: "/api/queue/\(escaped(id))/input-original?index=\(RouteEscaping.escapedQueryValue(String(index)))", member: member)
     }
 
     func queueInputs(id: String) async throws -> [QueueInput] {

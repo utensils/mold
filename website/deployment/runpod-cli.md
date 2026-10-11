@@ -2,7 +2,7 @@
 
 `mold runpod` manages RunPod cloud GPU pods end-to-end from the same binary
 you use for local generation. Create a pod, connect to it, hand off logs to the
-RunPod console, track spend, and (with `mold runpod run`) create-generate-save
+RunPod console, track spend, and (with `mold runpod run`) securely provision generation
 in a single command.
 
 Compared to the [Docker & RunPod](./docker) guide (which shows the manual
@@ -29,67 +29,55 @@ mold runpod doctor
 `mold runpod doctor` checks the key, the REST endpoint, and your RunPod
 balance + spend rate.
 
-## The killer feature: `mold runpod run`
+## Secure provisioning and pairing
 
-Generate an image on a fresh or reused pod with one command:
+`mold runpod create` and `mold runpod run` prepare the host identity and client
+permission locally before the owner-authenticated RunPod create request. The
+current Mold container imports this one-time bootstrap into an empty store.
+The client keeps the public host pins and its own credential; API calls, progress
+and media then use Noise over the provider's WSS proxy. The provider API remains
+an owner-control surface and does not become a source of trusted host keys.
+Use an image containing this secure bootstrap version; an older/custom image
+cannot satisfy the pinned connection.
+
+A private recovery journal is saved before paid creation. If the provider reply
+is lost, a retry reconciles the exact generated pod name through the owner API;
+it never repeats an uncertain paid POST. Keep that journal when inspecting an
+uncertain outcome in the RunPod console.
+
+A fresh network volume created by Mold can receive its first bootstrap. A known
+paired volume retains its existing identity and permission when moved to a new
+pod. For an existing volume with no saved association, pair its current host
+first and run `mold runpod connect <pod-id>` to record the association before
+replacement. Unknown populated volumes refuse automatic provisioning before a
+paid request. Starting a stopped pod preserves its identity and pairing.
+
+To add another client or upgrade a legacy host, use its trusted owner console:
+run `mold pairing create --output /private/invitation.json`, transfer the
+short-lived invitation privately, and run `mold pair --invite-file
+/private/invitation.json` on the client. Then:
 
 ```bash
+eval "$(mold runpod connect <pod-id> --check)"
 mold runpod run "a cinematic low-angle of a tiny steel robot"
 ```
 
-What this does:
-
-1. If a warm pod exists (created by a prior `run`), reuses it.
-2. Otherwise creates a new pod with smart defaults:
-   - picks the cheapest GPU with High or Medium stock that clears the
-     model's estimated VRAM need (see
-     [Smart defaults](#smart-defaults-explained)),
-   - selects the matching `ghcr.io/utensils/mold` image tag,
-   - retries across datacenters if scheduling stalls.
-3. Waits for the mold server inside the pod to be reachable, streaming a
-   readiness progress bar.
-4. Durably admits the request through `/api/generation-batches`, polls its
-   exact client id to completion, and downloads the gallery result. Rather
-   than holding an SSE connection open through the proxy, the durable
-   observer polls each running child's progress snapshot, so per-step
-   denoise and model-pull lines are still shown.
-5. Saves the output to `./mold-outputs/runpod-<pod-id>-<timestamp>.png`
-   (directory auto-created, `.gitignore`'d by default).
-6. Prints the proxy URL so you can open the pod's
-   [web gallery](#web-gallery) and browse past generations in a browser.
-7. Leaves the pod **warm** for reuse on the next `run`. Pass `--keep` to
-   leave it running explicitly, or set `runpod.auto_teardown = true` in
-   config to delete after each generation.
-
-## Web gallery
-
-Every `ghcr.io/utensils/mold` image ships the Vue 3 Mold Studio SPA at
-`/opt/mold/web`, and the server exposes it as the root route. Opening the
-pod's proxy URL in a browser lands on the Create workspace; the gallery is
-the Library workspace at `/library`, which gives you:
-
-- Feed / grid toggle over the server's `output` directory.
-- Real thumbnails for PNG, JPEG, GIF, APNG, WebP, and **MP4** (first frame).
-- Full `OutputMetadata` per item (prompt, seed, model, steps, LoRA stack).
-- Mobile-friendly swipe-through detail viewer, keyboard nav on desktop.
-
-```bash
-# Print the browsable URL for an existing pod
-mold runpod connect <pod-id>
-# → export MOLD_HOST=https://<pod-id>-7680.proxy.runpod.net
-# → gallery: https://<pod-id>-7680.proxy.runpod.net/library
-```
-
-The delete button is always available. Pair `MOLD_API_KEY` with the pod
-if you don't want the endpoint open to the public proxy.
+An explicit `MOLD_HOST` selects that exact paired pod and refuses mismatched
+GPU/datacenter/volume settings. Without that override, `run` reuses or resumes
+the matching tracked pod, or securely provisions its requested replacement.
+`connect --check` verifies application readiness through the pinned encrypted
+connection. Provider RUNNING status alone does not establish Mold readiness.
+The encrypted Studio supports Library browsing, thumbnails, video Range reads,
+exports and progress. Pair the Studio separately; old proxy API keys cannot
+silently become host identities. Raw public HTTP is no longer an API transport.
 
 ### Common flags
 
 ```bash
 mold runpod run "a cat" --model flux-dev:q4        # preload a specific model
-mold runpod run "a cat" --gpu 5090                 # force a GPU family
-mold runpod run "a cat" --dc US-IL-1               # pin a datacenter
-mold runpod run "a cat" --network-volume <id>       # persistent /workspace
+mold runpod run "a cat" --gpu 5090                 # require the paired GPU family
+mold runpod run "a cat" --dc US-IL-1               # require the paired datacenter
+mold runpod run "a cat" --network-volume <id>       # require the paired volume
 mold runpod run "a cat" --keep                     # keep the pod running (skips auto-teardown / idle reap)
 mold runpod run "a cat" --steps 28 --seed 42       # forward standard gen flags
 mold runpod run "a cat" --output-dir ./renders     # custom save path
@@ -243,11 +231,10 @@ Both paths use the same API key (`Authorization: Bearer …`).
 
 ## Troubleshooting
 
-**"pod didn't schedule within 90s"**: the datacenter likely has no real
-capacity despite a High/Medium stock signal. `mold runpod run` will
-automatically try the next candidate. If all fail, RunPod is out of
-capacity for that GPU family right now. Retry later, pick a different
-GPU, or fall back to a local GPU host.
+**Pod is not ready or does not match the requested GPU**: an explicit `MOLD_HOST`
+selects only that paired resource. Unset it to allow the tracked-pod provisioning
+workflow. Inspect the provider console if a bootstrap or secure readiness check
+fails; a paid pod is not deleted merely because an old plaintext probe fails.
 
 **"value must be one of …" from `/pods`**: you pinned a datacenter that
 isn't in RunPod's REST enum whitelist. GraphQL exposes datacenters that
@@ -262,6 +249,7 @@ REST API. `mold runpod logs <pod-id>` validates the Pod, prints its state and
 the console URL, then tells you to open that Pod's **Logs** panel. `--follow`
 is retained for compatibility but cannot stream console-only logs.
 
-**Orphaned pods after Ctrl-C**: `mold runpod run` persists `last_pod_id`
-**before** waiting for readiness, so `mold runpod list` always surfaces
-zombie pods. Delete with `mold runpod delete <id>`.
+**Resources after Ctrl-C**: the private pending journal and tracked pod ID retain
+recovery information. Inspect `mold runpod list` and delete a pod you no longer
+need with `mold runpod delete <id>`. An uncertain create is reconciled before any
+new paid request.

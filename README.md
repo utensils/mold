@@ -266,17 +266,18 @@ mold run "a cat" --preview
 Run the engine where the GPU lives and connect from another machine:
 
 ```bash
-mold serve                                      # GPU machine
-MOLD_HOST=http://gpu-server:7680 mold run "a cat"  # laptop
+mold serve  # authenticated GPU host; enable Remote Access or configure its relay
+mold pairing create --output "$MOLD_HOME/secure/invitation.json"  # on the host
+mold pair --invite-file /private/invitation.json  # on the client
+MOLD_HOST=https://PAIRED_HOST_ORIGIN mold run "a cat"
 ```
 
-For access outside your network without opening the GPU host's inbound ports,
-use the optional [HTTPS reverse relay](https://utensils.io/mold/deployment/relay).
-Run `mold relay connect --transport aws` beside an authenticated server; every client uses the
-resulting HTTPS machine address with its existing API key or pairing flow.
-The trusted Lambda gateway can see traffic and publishes one machine per address.
-Authenticated servers allow their browser shell/assets to load before sign-in;
-API and media access still require their existing permissions.
+Use [encrypted remote connections](https://utensils.io/mold/deployment/relay)
+for LAN or access outside your network. Every client pins the host key from a
+private one-use invitation and receives its own revocable grant. The Lambda
+relay carries ciphertext; prompts, API credentials and media remain encrypted
+between client and host. Old proxy credentials require an upgrade and fresh
+pairing. Plain HTTP remains available only on the host's private loopback socket.
 
 `--offload` also applies to remote renders and durable sequences on GPU hosts.
 Add `--no-save` to keep one render out of a server's Library; the host still
@@ -422,17 +423,13 @@ edge scrolling, and keeps the viewport stable when selecting.
 Native macOS **Settings ▸ Remote Access**, beside Machines, offers **Pair your
 phone** in the existing first section, alongside the connection address and
 paired-device controls. Scan its QR in the native iOS app or Tauri mobile app.
-Saved machines advertise only routes their listener actually serves: phone
-clients prefer LAN, then Tailscale, with HTTPS proxy fallback after an
-instance-bound credential-free proof. This Mac's loopback listener advertises
-only its prepared managed HTTPS origin. An existing paired machine keeps its
-identity and credential as routes change. For an independently hosted server,
-configure `MOLD_PUBLIC_URL` to advertise its actual public HTTPS relay origin.
-
-Automatic roaming requires a server-minted paired credential. Operator API keys
-remain tied to the explicitly saved address; pair once to enable route learning.
-Probes expose a stable digest tag, so arbitrary operator keys never participate
-in anonymous route proofs. Plain HTTP still requires a trusted network.
+Saved machines advertise only routes their encrypted listener actually serves.
+Native clients prefer LAN and retain the same pinned host identity when moving
+to the Lambda WebSocket relay. Stopping Remote Access closes active sessions.
+Headless servers configure `MOLD_PUBLIC_URL` and `MOLD_SECURE_WEBSOCKET_URL`;
+the private engine remains on loopback. HTTPS browsers may use WSS because of
+browser mixed-content restrictions. Operator credentials stay on the host and
+are never supplied by the connector on behalf of a paired client.
 
 Native iOS queue cards use concise curated model names and open full job details
 on tap, with state-aware per-job controls. Generate exposes searchable per-machine

@@ -1,9 +1,7 @@
+import { isLoopbackOrigin, secureRequestUrl } from "@studio/api/relayTransport";
 import { originalMediaBlob } from "@studio/api/originalMedia";
 import { originAuthenticatedFetch as fetch } from "./originAuth";
-import {
-  resolveRelayMedia,
-  type RelayMediaTicket,
-} from "@studio/api/relayMedia";
+import { secureMediaUrl, releaseSecureMediaUrl } from "@studio/api/secureMedia";
 /*
  * Multi-host gallery media (Task #22). `<img>`/`<video>` elements cannot send
  * an `x-api-key` header and a durable key must never enter a URL, so remote
@@ -114,7 +112,10 @@ function authHeaders(host: HostEntry): Record<string, string> {
 /** A host needs authenticated (blob / ticket) media only when it carries a
  *  per-host API key. The keyless origin and keyless remotes load directly. */
 export function needsAuthedMedia(host: HostEntry): boolean {
-  return !!host.apiKey;
+  return (
+    !!host.apiKey ||
+    !isLoopbackOrigin(secureRequestUrl(`${hostMediaBase(host)}/api/status`))
+  );
 }
 
 async function fetchAuthedObjectUrl(
@@ -273,7 +274,7 @@ function trimThumbnailCache(): void {
   }
 }
 
-interface GalleryMediaTicket extends RelayMediaTicket {
+interface GalleryMediaTicket {
   token: string | null;
   expires_at: number | null;
   auth_required?: boolean;
@@ -302,6 +303,8 @@ export async function resolveStreamableSrc(
   signal?.throwIfAborted();
   const path = mediaPath(filename);
   const directUrl = directMediaUrl(host, filename);
+  const secure = await secureMediaUrl(directUrl, authHeaders(host), signal);
+  if (secure) return secure;
   if (!needsAuthedMedia(host)) return directUrl;
 
   const res = await fetch(`${hostMediaBase(host)}/api/gallery/media-token`, {
@@ -315,13 +318,6 @@ export async function resolveStreamableSrc(
   }
   if (!res.ok) throw new Error(`media-token failed: ${res.status}`);
   const ticket = (await res.json()) as GalleryMediaTicket;
-  const relayUrl = await resolveRelayMedia(
-    ticket,
-    hostMediaBase(host),
-    authHeaders(host),
-    signal,
-  );
-  if (relayUrl) return relayUrl;
   if (ticket.auth_required === false) return directUrl;
   if (!ticket.token || !Number.isSafeInteger(ticket.expires_at)) {
     throw new Error("host returned an invalid gallery media ticket");
@@ -375,6 +371,7 @@ if (typeof window !== "undefined") {
 
 function revokeIfObjectUrl(url: string): void {
   if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+  else releaseSecureMediaUrl(url);
 }
 
 /** Test hook — clear the object-URL cache without touching the DOM. */

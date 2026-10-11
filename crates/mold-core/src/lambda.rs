@@ -395,7 +395,7 @@ write_files:
       RestartSec=10
       ExecStartPre=-/usr/bin/docker rm -f mold
       ExecStartPre=/usr/bin/docker pull {image}
-      ExecStart=/usr/bin/docker run --name mold --gpus all --restart unless-stopped --env-file {env_file} -e MOLD_PORT=7680 -p 127.0.0.1:7680:7680 -v {mount_path}:/workspace {image}
+      ExecStart=/usr/bin/docker run --name mold --gpus all --restart unless-stopped --network host --env-file {env_file} -e MOLD_PORT=7680 -e MOLD_BIND=127.0.0.1 -v {mount_path}:/workspace {image}
       ExecStop=/usr/bin/docker stop mold
 
       [Install]
@@ -887,7 +887,10 @@ mod tests {
             mount_path: "/data/mold".into(),
             env_file: "/etc/mold/lambda.env".into(),
         });
-        assert!(rendered.contains("-p 127.0.0.1:7680:7680"));
+        assert!(rendered.contains("--network host"));
+        assert!(rendered.contains("-e MOLD_BIND=127.0.0.1"));
+        assert!(rendered.contains("-e MOLD_PORT=7680"));
+        assert!(!rendered.contains(" -p "));
         assert!(rendered.contains("-v /data/mold:/workspace"));
         assert!(rendered.contains("--gpus all"));
         assert!(rendered.contains("ghcr.io/utensils/mold:0.10.0-sm90"));

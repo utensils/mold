@@ -206,15 +206,24 @@ async function contextForget() {
   if (!host || host.id === ORIGIN_HOST_ID) return;
   const accepted = await requestConfirm({
     title: "Forget this machine?",
-    body: `${host.name} and its saved API key will be removed from this browser.`,
+    body: `${host.name} and its saved pairing will be removed from this browser.`,
     confirmLabel: "Forget machine",
     danger: true,
   });
   if (!accepted) return;
-  removeHost(host.id);
-  if (getGenerateTargetId() === host.id) setGenerateTargetId(ORIGIN_HOST_ID);
-  refreshHosts();
-  toast("success", `${host.name} forgotten.`);
+  try {
+    await removeHost(host.id);
+    if (getGenerateTargetId() === host.id) setGenerateTargetId(ORIGIN_HOST_ID);
+    refreshHosts();
+    toast("success", `${host.name} forgotten.`);
+  } catch (error) {
+    toast(
+      "error",
+      error instanceof Error
+        ? error.message
+        : "Could not forget this machine. Try again.",
+    );
+  }
 }
 </script>
 

@@ -308,11 +308,14 @@ describe("Lightbox 3-D prints", () => {
       .mockImplementation(() => undefined);
     const createObjectURL = vi.fn(() => "blob:export");
     const revokeObjectURL = vi.fn();
-    vi.stubGlobal("URL", {
-      ...URL,
-      createObjectURL,
-      revokeObjectURL,
-    });
+    vi.stubGlobal(
+      "URL",
+      Object.assign(class extends URL {}, {
+        ...URL,
+        createObjectURL,
+        revokeObjectURL,
+      }),
+    );
     const wrapper = mountWide();
     await flushPromises();
     await wrapper.get("[data-test='mesh-export-stl']").trigger("click");
@@ -509,11 +512,14 @@ describe("Lightbox 3-D geometry options", () => {
     const anchorClick = vi
       .spyOn(HTMLAnchorElement.prototype, "click")
       .mockImplementation(() => undefined);
-    vi.stubGlobal("URL", {
-      ...URL,
-      createObjectURL: vi.fn(() => "blob:export"),
-      revokeObjectURL: vi.fn(),
-    });
+    vi.stubGlobal(
+      "URL",
+      Object.assign(class extends URL {}, {
+        ...URL,
+        createObjectURL: vi.fn(() => "blob:export"),
+        revokeObjectURL: vi.fn(),
+      }),
+    );
     const wrapper = mountWide();
     await flushPromises();
     await wrapper.get("[data-test='mesh-export-stl']").trigger("click");
@@ -543,11 +549,14 @@ describe("Lightbox 3-D geometry options", () => {
     vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(
       () => undefined,
     );
-    vi.stubGlobal("URL", {
-      ...URL,
-      createObjectURL: vi.fn(() => "blob:export"),
-      revokeObjectURL: vi.fn(),
-    });
+    vi.stubGlobal(
+      "URL",
+      Object.assign(class extends URL {}, {
+        ...URL,
+        createObjectURL: vi.fn(() => "blob:export"),
+        revokeObjectURL: vi.fn(),
+      }),
+    );
     const wrapper = mountWide();
     await flushPromises();
     await wrapper.get("[data-test='mesh-export-stl']").trigger("click");
@@ -583,11 +592,14 @@ describe("Lightbox 3-D geometry options", () => {
     vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(
       () => undefined,
     );
-    vi.stubGlobal("URL", {
-      ...URL,
-      createObjectURL: vi.fn(() => "blob:export"),
-      revokeObjectURL: vi.fn(),
-    });
+    vi.stubGlobal(
+      "URL",
+      Object.assign(class extends URL {}, {
+        ...URL,
+        createObjectURL: vi.fn(() => "blob:export"),
+        revokeObjectURL: vi.fn(),
+      }),
+    );
     const wrapper = mountWide();
     await flushPromises();
     await wrapper.get("[data-test='mesh-export-usdz']").trigger("click");

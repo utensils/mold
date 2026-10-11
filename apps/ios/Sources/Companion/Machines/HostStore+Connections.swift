@@ -3,9 +3,10 @@ import MoldClient
 
 extension HostStore {
     func refreshPairedRoutes() async {
-        for host in hosts where ConnectionRoutes.supportsAutomaticRouting(host.apiKey ?? "") {
-            guard !Task.isCancelled else { return }
-            await refresh(host)
+        await withTaskGroup(of: Void.self) { group in
+            for host in hosts where host.secure != nil {
+                group.addTask { await self.refresh(host) }
+            }
         }
     }
 
@@ -16,6 +17,7 @@ extension HostStore {
         current.baseURL = updated.baseURL
         current.connectionEndpoints = updated.connectionEndpoints
         current.connectionInstanceID = updated.connectionInstanceID
+        current.secure = updated.secure
         setHosts(hosts.map { $0.id == updated.id ? current : $0 })
         do { try persist() } catch { report(updated.id, name: updated.name, doing: "remember its connection routes", error) }
     }

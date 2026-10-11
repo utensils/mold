@@ -281,6 +281,10 @@ pub struct Pod {
     #[serde(default)]
     pub ports: serde_json::Value,
     #[serde(default)]
+    // The provider can echo bootstrap private keys and operator credentials.
+    // No client surface needs these after provisioning: discard them at the
+    // deserialization boundary, and never include them in public pod output.
+    #[serde(skip)]
     pub env: serde_json::Value,
     #[serde(default)]
     pub machine: Option<PodMachine>,
@@ -496,13 +500,7 @@ impl RunPodClient {
                 .text()
                 .await
                 .map_err(|e| MoldError::RunPod(format!("RunPod {path} body: {e}")))?;
-            serde_json::from_str(&body).map_err(|e| {
-                MoldError::RunPod(format!(
-                    "RunPod {path}: failed to parse response: {e} — body: {}",
-                    truncate_for_error(&body)
-                ))
-                .into()
-            })
+            serde_json::from_str(&body).map_err(|e| response_parse_error(path, &e).into())
         } else {
             Err(http_error(path, status, resp).await.into())
         }
@@ -527,13 +525,7 @@ impl RunPodClient {
                 .text()
                 .await
                 .map_err(|e| MoldError::RunPod(format!("RunPod {path} body: {e}")))?;
-            serde_json::from_str(&text).map_err(|e| {
-                MoldError::RunPod(format!(
-                    "RunPod {path}: failed to parse response: {e} — body: {}",
-                    truncate_for_error(&text)
-                ))
-                .into()
-            })
+            serde_json::from_str(&text).map_err(|e| response_parse_error(path, &e).into())
         } else {
             Err(http_error(path, status, resp).await.into())
         }
@@ -574,13 +566,7 @@ impl RunPodClient {
                 .text()
                 .await
                 .map_err(|e| MoldError::RunPod(format!("RunPod {path} body: {e}")))?;
-            serde_json::from_str(&text).map_err(|e| {
-                MoldError::RunPod(format!(
-                    "RunPod {path}: failed to parse response: {e} — body: {}",
-                    truncate_for_error(&text)
-                ))
-                .into()
-            })
+            serde_json::from_str(&text).map_err(|e| response_parse_error(path, &e).into())
         } else {
             Err(http_error(path, status, resp).await.into())
         }
@@ -626,8 +612,10 @@ impl RunPodClient {
             .json()
             .await
             .map_err(|e| MoldError::RunPod(format!("RunPod graphql /user json: {e}")))?;
-        if let Some(errs) = body.get("errors") {
-            return Err(MoldError::RunPod(format!("RunPod graphql errors: {errs}")).into());
+        if body.get("errors").is_some() {
+            return Err(
+                MoldError::RunPod("RunPod graphql /user: provider rejected query".into()).into(),
+            );
         }
         let myself = body
             .get("data")
@@ -672,7 +660,7 @@ impl RunPodClient {
                 .cloned()
                 .unwrap_or(serde_json::Value::Array(vec![])),
         )
-        .map_err(|e| MoldError::RunPod(format!("parse gpuTypes: {e}")))?;
+        .map_err(|e| response_parse_error("graphql gpuTypes", &e))?;
         // Aggregate stock across datacenters.
         let mut best_stock: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
@@ -738,7 +726,7 @@ impl RunPodClient {
             other => other,
         };
         let dcs: Vec<Datacenter> = serde_json::from_value(arr)
-            .map_err(|e| MoldError::RunPod(format!("parse dataCenters: {e}")))?;
+            .map_err(|e| response_parse_error("graphql dataCenters", &e))?;
         Ok(dcs)
     }
 
@@ -759,11 +747,11 @@ impl RunPodClient {
             .json()
             .await
             .map_err(|e| MoldError::RunPod(format!("graphql body: {e}")))?;
-        if let Some(errs) = body
+        if body
             .get("errors")
-            .filter(|e| !e.as_array().map(|a| a.is_empty()).unwrap_or(true))
+            .is_some_and(|e| !e.as_array().map(|a| a.is_empty()).unwrap_or(true))
         {
-            return Err(MoldError::RunPod(format!("graphql errors: {errs}")).into());
+            return Err(MoldError::RunPod("RunPod graphql: provider rejected query".into()).into());
         }
         Ok(body)
     }
@@ -849,28 +837,38 @@ impl RunPodClient {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
+fn response_parse_error(path: &str, error: &serde_json::Error) -> MoldError {
+    MoldError::RunPod(format!(
+        "RunPod {path}: invalid JSON response ({:?}, line {}, column {})",
+        error.classify(),
+        error.line(),
+        error.column()
+    ))
+}
+
 async fn http_error(path: &str, status: StatusCode, resp: reqwest::Response) -> MoldError {
     let body = resp.text().await.unwrap_or_default();
-    let msg = truncate_for_error(&body);
+    // Provider diagnostics may echo the submitted bootstrap identity or a pod's
+    // environment. Use content only for a known stock classification; never
+    // include arbitrary response text (including serde values) in errors.
+    let lower = truncate_for_error(&body).to_lowercase();
+    let message = format!("RunPod {path} {status}");
     match status {
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-            MoldError::RunPodAuth(format!("RunPod {path} {status}: {msg}"))
-        }
-        StatusCode::NOT_FOUND => {
-            MoldError::RunPodNotFound(format!("RunPod {path} {status}: {msg}"))
-        }
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => MoldError::RunPodAuth(message),
+        StatusCode::NOT_FOUND => MoldError::RunPodNotFound(message),
         StatusCode::CONFLICT
         | StatusCode::SERVICE_UNAVAILABLE
         | StatusCode::INTERNAL_SERVER_ERROR
             if {
-                let lower = msg.to_lowercase();
                 lower.contains("does not have the resources")
                     || lower.contains("no instances currently available")
             } =>
         {
-            MoldError::RunPodNoStock(format!("RunPod {path} {status}: {msg}"))
+            MoldError::RunPodNoStock(format!(
+                "{message}: provider does not have the resources to deploy this pod"
+            ))
         }
-        _ => MoldError::RunPod(format!("RunPod {path} {status}: {msg}")),
+        _ => MoldError::RunPod(message),
     }
 }
 
@@ -901,7 +899,7 @@ fn truncate_for_error(s: &str) -> String {
     if s.len() <= MAX {
         s.to_string()
     } else {
-        format!("{}…", &s[..MAX])
+        format!("{}…", &s[..s.floor_char_boundary(MAX)])
     }
 }
 
@@ -927,6 +925,29 @@ pub const GPU_PREFERENCE: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_environment_secrets_never_reach_pod_output_or_debug() {
+        for environment in [
+            serde_json::json!({"MOLD_SECURE_BOOTSTRAP":"private-host-seed", "MOLD_API_KEY":"private-operator-key", "HF_TOKEN":"private-download-token"}),
+            serde_json::json!([{"key":"MOLD_SECURE_BOOTSTRAP", "value":"private-host-seed"}]),
+        ] {
+            let pod: Pod =
+                serde_json::from_value(serde_json::json!({"id":"owned-pod", "env":environment}))
+                    .unwrap();
+            let public = serde_json::to_string(&pod).unwrap();
+            let debug = format!("{pod:?}");
+            for secret in [
+                "private-host-seed",
+                "private-operator-key",
+                "private-download-token",
+            ] {
+                assert!(!public.contains(secret));
+                assert!(!debug.contains(secret));
+            }
+            assert!(serde_json::to_value(&pod).unwrap().get("env").is_none());
+        }
+    }
 
     /// The rent confirm states RunPod's own on-demand rate for the cloud the
     /// pod will run on; a missing, zero, or non-finite price says nothing.
@@ -1207,6 +1228,14 @@ mod tests {
         let truncated = truncate_for_error(&long);
         assert!(truncated.ends_with('…'));
         assert!(truncated.chars().count() <= 401);
+    }
+
+    #[test]
+    fn provider_error_excerpt_preserves_utf8_boundaries() {
+        let body = "あ".repeat(200);
+        let truncated = truncate_for_error(&body);
+        assert!(truncated.ends_with('…'));
+        assert!(truncated.len() <= 403);
     }
 
     #[test]

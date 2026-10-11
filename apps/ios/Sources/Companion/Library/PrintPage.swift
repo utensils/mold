@@ -216,14 +216,14 @@ struct ClipPlayer: View {
         let item: AVPlayerItem
         do {
             try PlaybackAudio.configure()
-            let url = try await hosts.backend(for: host).playableURL(for: entry.print.filename, trashed: entry.print.trashedAt != nil)
+            let media = try await hosts.backend(for: host).playableMedia(for: entry.print.filename, trashed: entry.print.trashedAt != nil)
             if Task.isCancelled {
-                if url.isFileURL { try? FileManager.default.removeItem(at: url) }
+                if let url = media.localURL, url.isFileURL { try? FileManager.default.removeItem(at: url) }
                 return
             }
-            item = AVPlayerItem(url: url)
+            item = media.playerItem()
             releasePlaybackFile()
-            playbackFile = url.isFileURL ? url : nil
+            playbackFile = media.localURL?.isFileURL == true ? media.localURL : nil
         } catch is CancellationError {
             return
         } catch {

@@ -515,13 +515,13 @@ Example:
         #[arg(long)]
         json: bool,
     },
-    /// Generate on a fresh or warm RunPod pod, save to ./mold-outputs/
+    /// Generate on an existing paired RunPod pod, save to ./mold-outputs/
     #[command(after_long_help = "\
 Examples:
   mold runpod run \"a cat on a skateboard\"
   mold runpod run \"a sunset\" --model flux2-klein:q8
   mold runpod run \"a robot\" --keep            # leave pod running after
-  mold runpod run \"a sunset\" --gpu 5090       # force a GPU choice")]
+  mold runpod run \"a sunset\" --gpu 5090       # require the paired GPU")]
     Run {
         /// Text prompt
         prompt: String,
@@ -1632,6 +1632,20 @@ pub enum CatalogSortArg {
     Rating,
 }
 
+#[derive(clap::Subcommand)]
+enum PairingAction {
+    /// Save a short-lived pairing invitation with owner-only permissions.
+    Create {
+        #[arg(long, default_value = "127.0.0.1:7680")]
+        target: std::net::SocketAddr,
+        #[arg(long, value_hint=clap::ValueHint::FilePath)]
+        output: std::path::PathBuf,
+        /// Credential-free WSS endpoint for a separately supervised connector.
+        #[arg(long)]
+        relay_url: Option<String>,
+    },
+}
+
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
@@ -2251,7 +2265,8 @@ Examples:
   mold serve --bind 127.0.0.1 --port 9000
   MOLD_PORT=8080 mold serve
 
-Clients connect via MOLD_HOST=http://<addr>:<port>
+Remote clients pair with an invitation from the host, then set MOLD_HOST to
+the paired origin. Plain HTTP is available only on the private loopback engine.
 
 For gated or private Hugging Face repos, export HF_TOKEN in the server
 environment before starting mold serve.")]
@@ -2719,8 +2734,8 @@ Set up once:
   export RUNPOD_API_KEY=<key>                       Or use env var
   mold runpod doctor                                Verify auth
 
-Generate on a fresh pod (the killer feature):
-  mold runpod run \"a cat on a skateboard\"           Creates pod → generates → saves
+Generate on a paired pod selected by MOLD_HOST:
+  mold runpod run \"a cat on a skateboard\"           Uses paired host → generates → saves
   mold runpod run \"a sunset\" --keep                Leave pod up for reuse
 
 Manage pods manually:
@@ -2734,7 +2749,21 @@ Manage pods manually:
         action: RunpodAction,
     },
 
-    /// Connect a machine to an optional HTTPS reverse relay, or run a gateway
+    /// Create an invitation on this authenticated local host.
+    Pairing {
+        #[command(subcommand)]
+        action: PairingAction,
+    },
+
+    /// Pair this client using an owner-only invitation file from the host.
+    Pair {
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
+        invite_file: std::path::PathBuf,
+        #[arg(long, default_value = "Mold CLI")]
+        name: String,
+    },
+
+    /// Connect a machine to the end-to-end encrypted Lambda relay
     Relay {
         #[command(subcommand)]
         action: mold_relay::RelayAction,
@@ -3055,8 +3084,21 @@ fn apply_spatial_tile_override(value: Option<&str>) {
     unsafe { std::env::set_var("MOLD_LTX2_SPATIAL_TILE", value) };
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // SAFETY: synchronous process entry, before runtime/ctrl-C worker threads.
+    let bootstrap = unsafe {
+        mold_server::secure_pairing::bootstrap::BootstrapInput::take_environment_before_threads()
+    };
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to create async runtime")
+        .block_on(async_main(bootstrap));
+}
+
+async fn async_main(
+    bootstrap: anyhow::Result<Option<mold_server::secure_pairing::bootstrap::BootstrapInput>>,
+) {
     // Keep positive compile-time exclusion provenance in every published CLI
     // artifact even after LTO and stripping. Release verification rejects a
     // missing marker as well as either compiled FlashAttention feature.
@@ -3111,7 +3153,10 @@ async fn main() {
     })
     .ok();
 
-    let outcome = run().await;
+    let outcome = match bootstrap {
+        Ok(bootstrap) => run(bootstrap).await,
+        Err(error) => Err(error),
+    };
     // Every exit this process controls goes through here. A forced-local
     // `mold run` publishes through the same gallery archive authority a server
     // does and takes the same writer lease, and a lease file that outlives its
@@ -3195,10 +3240,16 @@ async fn main() {
     }
 }
 
-async fn run() -> anyhow::Result<()> {
+async fn run(
+    bootstrap: Option<mold_server::secure_pairing::bootstrap::BootstrapInput>,
+) -> anyhow::Result<()> {
     // Parse CLI first so we can set the log level based on the subcommand.
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
     let cli = Cli::parse();
+    anyhow::ensure!(
+        bootstrap.is_none() || matches!(&cli.command, Commands::Serve { .. }),
+        "secure bootstrap is accepted only by mold serve"
+    );
 
     // Skill management is self-contained and must keep working even when a
     // configured external MOLD_HOME is offline or the inference stack cannot
@@ -3665,8 +3716,16 @@ async fn run() -> anyhow::Result<()> {
                 unsafe { std::env::set_var("MOLD_MDNS", "0") };
             }
 
-            commands::serve::run(port, &bind, models_dir, gpus, queue_size, discord_enabled)
-                .await?;
+            commands::serve::run(
+                port,
+                &bind,
+                models_dir,
+                gpus,
+                queue_size,
+                discord_enabled,
+                bootstrap,
+            )
+            .await?;
         }
         Commands::Mcp { host } => {
             commands::mcp::run(host).await?;
@@ -3985,6 +4044,23 @@ async fn run() -> anyhow::Result<()> {
                 commands::runpod::run_run(opts).await?
             }
         },
+        Commands::Pairing {
+            action:
+                PairingAction::Create {
+                    target,
+                    output,
+                    relay_url,
+                },
+        } => commands::pairing::create(target, &output, relay_url.as_deref()).await?,
+        Commands::Pair { invite_file, name } => {
+            let invite = mold_secure_client::read_invitation(&invite_file)?;
+            let host = mold_secure_client::pair(invite, &name).await?;
+            mold_secure_client::save_pairing(&host)?;
+            println!(
+                "Paired securely with {}. Set MOLD_HOST to this origin.",
+                host.origin
+            );
+        }
         Commands::Relay { action } => mold_relay::run(action).await?,
         Commands::Lambda { action } => match action {
             LambdaAction::Doctor => commands::lambda::run_doctor().await?,
@@ -4471,7 +4547,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_connector_uses_a_token_file_and_explicit_loopback_target() {
+    fn relay_connector_uses_server_identity_and_explicit_loopback_target() {
         let cli = parse(&[
             "relay",
             "connect",
@@ -4479,8 +4555,8 @@ mod tests {
             "wss://relay.example",
             "--target",
             "127.0.0.1:8765",
-            "--token-file",
-            "/private/relay-token",
+            "--identity-file",
+            "/private/host.identity",
         ]);
         let Commands::Relay {
             action: mold_relay::RelayAction::Connect(args),
@@ -4491,12 +4567,12 @@ mod tests {
         assert_eq!(args.relay_url, "wss://relay.example");
         assert_eq!(args.target, "127.0.0.1:8765".parse().unwrap());
         assert_eq!(
-            args.token_file,
-            Some(std::path::PathBuf::from("/private/relay-token"))
+            args.identity_file,
+            Some(std::path::PathBuf::from("/private/host.identity"))
         );
         assert!(!args.allow_insecure_loopback);
         let (files, _) = on_large_stack(path_completion_tokens);
-        assert!(files.contains(&"--token-file".to_owned()));
+        assert!(files.contains(&"--identity-file".to_owned()));
         assert!(try_parse(&[
             "relay",
             "connect",

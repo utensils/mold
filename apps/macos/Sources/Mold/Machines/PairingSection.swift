@@ -56,7 +56,7 @@ struct PairingSection: View {
             Section("Pairing") {
                 Text("This machine needs no key, so a phone connects with its address alone.")
                     .foregroundStyle(.secondary)
-                if showsPairButton { Button("Pair a Phone…") { showingSheet = true } }
+                if showsPairButton { Button("Pair a Device…") { showingSheet = true } }
             }
         case .needsOperator:
             Section("Pairing") {
@@ -71,7 +71,7 @@ struct PairingSection: View {
         case let .clients(clients):
             Section("Pairing") {
                 ForEach(clients) { client in row(client) }
-                if showsPairButton { Button("Pair a Phone…") { showingSheet = true } }
+                if showsPairButton { Button("Pair a Device…") { showingSheet = true } }
             }
         }
     }

@@ -9,8 +9,7 @@ import Testing
 /// on its own: a link anyone can send must not pair the phone by itself.
 @MainActor
 struct PairingLinkTests {
-    let link = URL(string: "https://utensils.io/mold/pair#version=1&base_url=http%3A%2F%2Fstudio.local%3A7680"
-        + "&token=one-time&expires_at=4000000000&instance_id=inst-1&name=Studio+Mac")!
+    var link: URL { try! SecurePairingFixture.payload().url! }
 
     @Test func aUniversalLinkAsksBeforePairing() {
         let router = AppRouter()

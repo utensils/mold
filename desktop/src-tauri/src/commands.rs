@@ -1,3 +1,4 @@
+use mold_secure_client::RequestBuilderExt;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -387,7 +388,7 @@ async fn shutdown_embedded_or_retain(
         .post(format!("{}/api/shutdown", engine.base_url()))
         .header("X-Api-Key", api_key)
         .timeout(Duration::from_secs(3))
-        .send()
+        .secure_send()
         .await;
     let deadline = tokio::time::Instant::now() + timeout;
     while engine.is_alive() && tokio::time::Instant::now() < deadline {
@@ -462,7 +463,7 @@ async fn stop_local_engine_inner(
             .post(&shutdown_url)
             .header("X-Api-Key", &state.local_api_key)
             .timeout(Duration::from_secs(3))
-            .send()
+            .secure_send()
             .await;
         let deadline = tokio::time::Instant::now() + shutdown_timeout;
         while engine.is_alive() && tokio::time::Instant::now() < deadline {
@@ -509,7 +510,7 @@ async fn probe_host(url: &str, api_key: Option<&str>) -> HostTest {
     let health = client
         .get(format!("{url}/health"))
         .timeout(Duration::from_secs(4))
-        .send()
+        .secure_send()
         .await;
     match health {
         Ok(resp) if resp.status().is_success() => {}
@@ -538,7 +539,7 @@ async fn probe_host(url: &str, api_key: Option<&str>) -> HostTest {
     if let Some(key) = api_key {
         status = status.header("X-Api-Key", key);
     }
-    match status.send().await {
+    match status.secure_send().await {
         Ok(resp) if resp.status() == reqwest::StatusCode::UNAUTHORIZED => HostTest {
             ok: false,
             version: None,

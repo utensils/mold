@@ -2,6 +2,9 @@
 //! logic use the shared Vue wire types while the phone connects only to remote
 //! Mold servers.
 
+#[path = "../../../shared/secure_media_bridge.rs"]
+mod secure_media_bridge;
+use tauri::Manager;
 mod appearance;
 mod background_task;
 mod context_menu;
@@ -34,6 +37,7 @@ pub fn run() {
     install_network_crypto_provider();
 
     let builder = tauri::Builder::default()
+        .manage(secure_media_bridge::MediaBridges::default())
         .manage(background_task::MobileBackgroundTaskState::default())
         .plugin(tauri_plugin_deep_link::init());
     #[cfg(target_os = "android")]
@@ -49,7 +53,18 @@ pub fn run() {
             }
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                window
+                    .state::<secure_media_bridge::MediaBridges>()
+                    .close_window(window.label());
+            }
+        })
         .invoke_handler(tauri::generate_handler![
+            secure_media_bridge::secure_media_open,
+            secure_media_bridge::secure_media_close,
+            secure_media_bridge::secure_host_register,
+            secure_media_bridge::secure_host_forget,
             appearance::set_mobile_appearance,
             background_task::begin_mobile_background_task,
             background_task::end_mobile_background_task,
@@ -139,16 +154,20 @@ mod tests {
     }
 
     #[test]
-    fn ios_registers_mobile_pairing_deep_links() {
+    fn mobile_pairing_uses_verified_https_links_with_exact_paths() {
         let config: serde_json::Value =
             serde_json::from_str(include_str!("../tauri.conf.json")).expect("valid Tauri config");
-        let generated_plist = include_str!("../gen/apple/mold-mobile_iOS/Info.plist");
+        let domains = config["plugins"]["deep-link"]["mobile"].as_array().unwrap();
+        assert_eq!(domains.len(), 1);
+        let domain = &domains[0];
+        assert_eq!(domain["scheme"], serde_json::json!(["https"]));
+        assert_eq!(domain["host"], "utensils.io");
         assert_eq!(
-            config["plugins"]["deep-link"]["mobile"][0]["scheme"][0],
-            "mold"
+            domain["path"],
+            serde_json::json!(["/mold/pair", "/mold/pair/"])
         );
-        assert!(generated_plist.contains("<key>CFBundleURLTypes</key>"));
-        assert!(generated_plist.contains("<string>mold</string>"));
+        assert_eq!(domain["appLink"], true);
+        assert!(domain.get("pathPrefix").is_none());
     }
 
     #[test]

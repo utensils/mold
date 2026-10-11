@@ -175,6 +175,16 @@ struct LibraryStoreTests {
         #expect(hosts.failures.first?.text.contains("disk unavailable") == true)
     }
 
+    @Test func aRecoveredListingClearsOnlyItsOwnFailure() async throws {
+        let (library, hosts, _, _) = try await fleet(first: [try print("a.png")], second: [])
+        let host = hosts.hosts[0]
+        hosts.report(host, doing: "list its prints", MoldClientError.unreachable("offline"))
+        hosts.report(host, doing: "save changes", MoldClientError.unreachable("offline"))
+        await library.reload(host.id)
+        #expect(hosts.failures.count == 1)
+        #expect(hosts.failures.first?.doing == "save changes")
+    }
+
     @Test func hidingACollectionUpdatesEveryMachineCopy() async throws {
         let (library, hosts, one, two) = try await fleet(first: [try print("a.png")], second: [])
         let first = Collection(id: "alpha-shelf", name: "Drafts", slug: "drafts", hidden: false)

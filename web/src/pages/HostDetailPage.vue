@@ -782,14 +782,18 @@ async function forgetMachine() {
   if (!host.value || isOrigin.value) return;
   const accepted = await requestConfirm({
     title: "Forget this machine?",
-    body: `${hostName.value} and its saved API key will be removed from this browser.`,
+    body: `${hostName.value} and its saved pairing will be removed from this browser.`,
     confirmLabel: "Forget machine",
     danger: true,
   });
   if (!accepted) return;
-  removeHost(hostId.value);
-  if (isTarget.value) setGenerateTargetId(ORIGIN_HOST_ID);
-  await router.push("/machines");
+  try {
+    await removeHost(hostId.value);
+    if (isTarget.value) setGenerateTargetId(ORIGIN_HOST_ID);
+    await router.push("/machines");
+  } catch (error) {
+    toast("error", `Couldn't forget this machine: ${errMsg(error)}`);
+  }
 }
 
 async function disconnectMachine() {

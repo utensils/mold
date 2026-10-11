@@ -26,6 +26,7 @@ pub mod mesh_workflow;
 mod metal_memory_admin;
 #[cfg(all(unix, any(target_os = "macos", test)))]
 mod metal_memory_persistence;
+pub mod pairing;
 pub mod ps;
 pub mod pull;
 pub mod quantize;

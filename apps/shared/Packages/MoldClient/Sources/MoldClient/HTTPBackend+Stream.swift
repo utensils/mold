@@ -24,7 +24,7 @@ extension HTTPBackend {
     /// nothing to say. A licence refusal, which is the one refusal the app can
     /// RESOLVE, could not happen at all on a stream, because its payload rides
     /// in the body that was being dropped.
-    func streamRefusal(_ http: HTTPURLResponse, _ bytes: URLSession.AsyncBytes) async -> Error {
+    func streamRefusal(_ http: HTTPURLResponse, _ bytes: MoldResponseBytes) async -> Error {
         do {
             try HTTPRefusal.check(http, await RefusalBody.read(bytes))
         } catch {

@@ -846,6 +846,7 @@ Manage RunPod pods or generate on a fresh pod end-to-end.
 ```bash
 mold config set runpod.api_key <key>
 mold runpod doctor
+# Pair the existing host before generation.
 mold runpod run "a cat on a skateboard"
 mold runpod create --gpu 5090
 mold runpod network-volume create --name models --size 100 --dc US-KS-2
@@ -865,22 +866,28 @@ still lands in `--output-dir` on this machine, which is the point of the
 command.
 See [mold runpod CLI](/deployment/runpod-cli).
 
-## `mold relay`
+## `mold relay`, `mold pairing`, and `mold pair`
 
-Optional outbound HTTPS access to an existing authenticated machine:
+All remote connections use pinned end-to-end encryption. An authenticated
+headless `mold serve` starts its connector automatically when
+`MOLD_SECURE_WEBSOCKET_URL` is set; the relay operator must first provision the
+host's public signing key. `MOLD_PUBLIC_URL` advertises its paired origin.
 
 ```bash
-MOLD_RELAY_TOKEN_FILE=/absolute/path/relay-token mold relay connect \
-  --transport aws --relay-url wss://gateway.example --target 127.0.0.1:7680
-mold relay serve --control-bind 127.0.0.1:7681 --data-bind 127.0.0.1:7682
+# On the host, export a one-use invitation to a private file.
+mold pairing create --output "$MOLD_HOME/secure/invitation.json"
+# On the client, consume the privately transferred file.
+mold pair --invite-file /private/invitation.json --name "My laptop"
+# Optional separate connector instead of the server-managed connector.
+mold relay connect --relay-url wss://gateway.example --target 127.0.0.1:7680
 ```
 
-`--transport aws` selects the production Lambda/WebSocket protocol. The default
-`direct` transport is for the self-hosted development gateway started by
-`mold relay serve`. The gateway publishes one machine.
-Clients use its HTTPS URL and normal Mold credentials. See
-[remote HTTPS relay](/deployment/relay) for authentication, streaming and
-service setup.
+`pairing create` uses the local operator `MOLD_API_KEY`, accepts an explicit
+numeric loopback `--target`, and never prints invitation secrets. `pair` stores
+its per-device identity and grant in the owner-only client store. Set MOLD_HOST
+to its printed origin. Old transport/token flags and `relay serve` are removed;
+upgrade and pair again. See [encrypted remote connections](/deployment/relay)
+for secure headless setup, native/browser media adapters and streaming limits.
 
 ## `mold lambda`
 

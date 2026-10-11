@@ -10,6 +10,10 @@ use tokio::sync::OnceCell;
 
 use crate::commands::AppState;
 
+#[path = "runpod_secure.rs"]
+mod secure;
+pub use secure::RunPodLaunch;
+
 static SUPPORTED_POD_GPU_IDS: OnceCell<std::collections::HashSet<String>> = OnceCell::const_new();
 
 #[derive(Debug, Clone, Serialize)]
@@ -31,6 +35,7 @@ pub struct RunPodOverview {
     pub gpus: Vec<GpuType>,
     pub datacenters: Vec<Datacenter>,
     pub network_volumes: Vec<NetworkVolume>,
+    pub unconfirmed_requests: Vec<String>,
 }
 
 impl RunPodOverview {
@@ -43,6 +48,7 @@ impl RunPodOverview {
             gpus: vec![],
             datacenters: vec![],
             network_volumes: vec![],
+            unconfirmed_requests: vec![],
         }
     }
 }
@@ -317,6 +323,7 @@ where
     build_request(input, hf_token, image_name)
 }
 
+#[cfg(test)]
 async fn launch_pod_with_image_resolver<C, F, Fut>(
     client: &C,
     input: RunPodCreateInput,
@@ -376,14 +383,20 @@ pub async fn runpod_overview(state: tauri::State<'_, AppState>) -> Result<RunPod
         gpus,
         datacenters,
         network_volumes,
+        unconfirmed_requests: secure::pending_names(&state.secrets),
     })
 }
+
+static PROVISION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tauri::command]
 pub async fn runpod_create(
     state: tauri::State<'_, AppState>,
     mut input: RunPodCreateInput,
-) -> Result<Pod, String> {
+    device: mold_secure_client::Binding,
+    resume: Option<serde_json::Value>,
+) -> Result<RunPodLaunch, String> {
+    let _provision = PROVISION.lock().await;
     let (client, _) = client(&state)?.ok_or_else(|| "Add a RunPod API key first.".to_string())?;
     if let Some(volume_id) = input.network_volume_id.clone() {
         let volume = client
@@ -397,11 +410,81 @@ pub async fn runpod_create(
     } else {
         None
     };
-    launch_pod_with_image_resolver(&client, input, hf_token, |gpu_name| {
+    let request = prepare_pod_request_with_image_resolver(&client, input, hf_token, |gpu_name| {
         let gpu_name = gpu_name.to_string();
         async move { resolve_published_image_for_gpu(&gpu_name).await }
     })
-    .await
+    .await?;
+    secure::launch_with_profile(&client, &state.secrets, request, &device, resume).await
+}
+
+/// Durable recovery participates in the caller-validated shared Forget boundary.
+pub fn forget_recovery(window: &tauri::WebviewWindow, namespace: &str) -> Result<(), String> {
+    use tauri::Manager;
+    secure::forget_namespace(&window.state::<AppState>().secrets, namespace)
+}
+
+#[tauri::command]
+pub async fn runpod_clear_unconfirmed(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let _provision = PROVISION.lock().await;
+    let (client, _) = client(&state)?.ok_or("Reconnect RunPod before clearing this request.")?;
+    let owned = client
+        .list_pods()
+        .await
+        .map_err(|_| "RunPod ownership could not be checked. The request was kept.")?;
+    secure::clear_unconfirmed(&state.secrets, &owned)
+}
+
+#[tauri::command]
+pub fn runpod_volume_origin(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<Option<String>, String> {
+    secure::volume_origin(&state.secrets, &id)
+}
+#[tauri::command]
+pub async fn runpod_remember_pairing(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    device: mold_secure_client::Binding,
+    profile: serde_json::Value,
+) -> Result<(), String> {
+    let (client, _) = client(&state)?.ok_or("Add a RunPod API key to verify this instance.")?;
+    let pod = client
+        .list_pods()
+        .await
+        .map_err(|_| "Could not verify RunPod ownership.")?
+        .into_iter()
+        .find(|p| p.id == id)
+        .ok_or("This instance was not found in your RunPod account.")?;
+    let profile = secure::current_profile(
+        profile,
+        &device,
+        &format!("https://{id}-7680.proxy.runpod.net"),
+    )?;
+    secure::associate(&state.secrets, &pod, profile)?;
+    secure::forget(&state.secrets, &id)
+}
+
+#[tauri::command]
+pub async fn runpod_pairing(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    device: mold_secure_client::Binding,
+) -> Result<Option<serde_json::Value>, String> {
+    if let Some(profile) = secure::saved(&state.secrets, &id, &device)? {
+        return Ok(Some(profile));
+    }
+    if state.secrets.runpod_bootstraps().is_empty() {
+        return Ok(None);
+    }
+    let (client, _) = client(&state)?
+        .ok_or_else(|| "Add a RunPod API key to recover this connection.".to_string())?;
+    let pods = client
+        .list_pods()
+        .await
+        .map_err(|_| "Could not verify RunPod ownership. Try again.".to_string())?;
+    secure::recover(&state.secrets, &id, &device, &pods)
 }
 
 async fn resolve_published_image_for_gpu(gpu_display_name: &str) -> Result<String, String> {
@@ -433,14 +516,16 @@ pub async fn runpod_network_volume_create(
             "Network volume size must be between {NETWORK_VOLUME_MIN_GB} and {NETWORK_VOLUME_MAX_GB} GB."
         ));
     }
-    client
+    let volume = client
         .create_network_volume(&CreateNetworkVolumeRequest {
             name: name.into(),
             size: input.size_gb,
             data_center_id: datacenter_id.into(),
         })
         .await
-        .map_err(|e| format!("{e:#}"))
+        .map_err(|e| format!("{e:#}"))?;
+    state.secrets.set(&format!("runpod-fresh-volume.{}", volume.id), "fresh").map_err(|_| "The volume was created, but its provisioning state could not be saved. No GPU was requested.")?;
+    Ok(volume)
 }
 
 #[tauri::command]
@@ -512,7 +597,8 @@ pub async fn runpod_stop(state: tauri::State<'_, AppState>, id: String) -> Resul
 #[tauri::command]
 pub async fn runpod_delete(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
     let (client, _) = client(&state)?.ok_or_else(|| "Add a RunPod API key first.".to_string())?;
-    client.delete_pod(&id).await.map_err(|e| format!("{e:#}"))
+    client.delete_pod(&id).await.map_err(|e| format!("{e:#}"))?;
+    secure::forget(&state.secrets, &id)
 }
 
 #[cfg(test)]
@@ -582,7 +668,7 @@ mod tests {
         assert_eq!(legacy.id.as_deref(), Some("NVIDIA GeForce RTX 5090"));
     }
 
-    fn input() -> RunPodCreateInput {
+    pub(super) fn input() -> RunPodCreateInput {
         RunPodCreateInput {
             name: Some("studio".into()),
             gpu_type_id: "NVIDIA GeForce RTX 5090".into(),

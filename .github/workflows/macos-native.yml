@@ -24,6 +24,12 @@ on:
       - "apps/macos/**"
       # MoldClient and MoldStyle, shared with the iOS companion.
       - "apps/shared/**"
+      - "crates/mold-secure/**"
+      - "crates/mold-secure-client/**"
+      - "crates/mold-relay/**"
+      - "crates/mold-server/src/secure_pairing/**"
+      - "Cargo.lock"
+      - "studio/api/pairing.fixtures.json"
       - ".github/workflows/macos-native.yml"
       # The reusable distribution workflow this one calls: a fix to it must
       # rebuild the nightly, and #1736's did not.
@@ -74,6 +80,7 @@ jobs:
           xcodebuild -version
           echo "macOS SDK: $(xcrun --show-sdk-version --sdk macosx)"
 
+      - uses: dtolnay/rust-toolchain@stable
       - name: Install xcodegen
         run: brew install xcodegen
 

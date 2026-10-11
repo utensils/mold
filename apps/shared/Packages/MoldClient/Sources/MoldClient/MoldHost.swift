@@ -17,9 +17,18 @@ public struct MoldHost: Identifiable, Hashable, Codable, Sendable {
     public var connectionInstanceID: String?
     /// Original user-approved origin, retained when the active route roams.
     public var connectionOriginalURL: URL?
+    /// Pinned host keys and a host-signed grant. Absent legacy remote hosts must pair again.
+    public var secure: SecureHost?
+
+    /// Retired remote bearers cannot authorize protocol 3. Keep the public
+    /// machine entry for re-pairing, but never load or retain its old secret.
+    public var requiresSecurePairing: Bool {
+        secure == nil && !HTTPBackend.isEmbeddedLoopback(baseURL)
+    }
 
     public init(id: UUID = UUID(), name: String, baseURL: URL, apiKey: String? = nil,
-                connectionEndpoints: [ConnectionEndpoint]? = nil, connectionInstanceID: String? = nil, connectionOriginalURL: URL? = nil) {
+                connectionEndpoints: [ConnectionEndpoint]? = nil, connectionInstanceID: String? = nil, connectionOriginalURL: URL? = nil,
+                secure: SecureHost? = nil) {
         self.id = id
         self.name = name
         self.baseURL = baseURL
@@ -27,6 +36,7 @@ public struct MoldHost: Identifiable, Hashable, Codable, Sendable {
         self.connectionEndpoints = connectionEndpoints
         self.connectionInstanceID = connectionInstanceID
         self.connectionOriginalURL = connectionOriginalURL
+        self.secure = secure
     }
 }
 

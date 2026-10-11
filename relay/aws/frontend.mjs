@@ -1,671 +1,104 @@
-import {
-  managedConfig,
-  createManagedEnrollment,
-  resolveNamespace,
-  namespaceKey,
-  validNamespace,
-  activeEnrollment,
-} from "./managed.mjs";
-import { failureCategory } from "./router-core.mjs";
-import { randomUUID } from "node:crypto";
-import { pipeline } from "node:stream/promises";
-import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
-import { GetObjectCommand } from "@aws-sdk/client-s3";
-import { store } from "./aws-store.mjs";
-import { openRequest, cleanHeaders } from "./guest.mjs";
-import {
-  s3,
-  prepareUpload,
-  consumeUpload,
-  stageObject,
-  objectURL,
-  credentialDigest,
-  MAX_BODY,
-  THRESHOLD,
-  OBJECT_THRESHOLD,
-} from "./transfers.mjs";
-const lambda = new LambdaClient({});
-const objectOrigin = () =>
-  process.env.OBJECT_ORIGIN ??
-  `https://${process.env.BUCKET_NAME}.s3.dualstack.${process.env.AWS_REGION}.amazonaws.com`;
-const safeTarget = (path) =>
-  typeof path === "string" &&
-  path.startsWith("/") &&
-  !path.startsWith("//") &&
-  !/[\r\n]/.test(path) &&
-  path.length <= 8192;
-export function normalizeEvent(event) {
-  const headers = Object.fromEntries(
-    Object.entries(event.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v]),
-  );
-  // Regional API Gateway preserves Authorization; never restore caller-supplied aliases.
-  delete headers["x-mold-viewer-authorization"];
-  const method =
-    event.requestContext?.http?.method ?? event.httpMethod ?? "GET";
-  const route = event.rawPath ?? event.path ?? "/";
-  const parameters =
-    event.multiValueQueryStringParameters ??
-    Object.fromEntries(
-      Object.entries(event.queryStringParameters ?? {}).map(([k, v]) => [
-        k,
-        [v],
-      ]),
-    );
-  const query =
-    event.rawQueryString ??
-    new URLSearchParams(
-      Object.entries(parameters).flatMap(([k, values]) =>
-        (values ?? []).map((v) => [k, v]),
-      ),
-    ).toString();
-  const canonical = `${route}${query ? "?" + query : ""}`;
-  const target = headers["x-mold-request-target"] ?? canonical;
+// Protocol 3 has no plaintext application ingress. This Lambda returns public
+// discovery metadata, a trusted Studio redirect, or an explicit upgrade error.
+// It has no DynamoDB, S3, SSM, Lambda invocation or host API dependencies.
+const STUDIO = "https://utensils.io/mold/studio/";
+function configuration(value) {
+  const config = value ?? {
+    websocket_url: process.env.WS_ENDPOINT,
+    host_domain: process.env.MANAGED_HOST_DOMAIN,
+    studio_url: STUDIO,
+  };
+  const ws = new URL(config.websocket_url);
   if (
-    !safeTarget(target) ||
-    !safeTarget(route) ||
-    decodeURIComponent(target.split("?")[0]) !== decodeURIComponent(route)
+    ws.protocol !== "wss:" ||
+    ws.username ||
+    ws.password ||
+    ws.search ||
+    ws.hash ||
+    !ws.hostname.endsWith(".amazonaws.com") ||
+    !/^[a-z0-9][a-z0-9.-]*[a-z0-9]$/.test(config.host_domain ?? "") ||
+    config.host_domain.includes("..") ||
+    config.studio_url !== STUDIO
   )
-    throw new Error("Invalid request target");
-  const body = Buffer.from(
-    event.body ?? "",
-    event.isBase64Encoded ? "base64" : "utf8",
-  );
-  if (body.length > THRESHOLD)
-    throw new Error("Use staged upload for this request");
-  return { method, route, path: target, headers, body, size: body.length };
+    throw new Error("Invalid public relay configuration");
+  return {
+    protocol: 3,
+    websocket_url: ws.toString(),
+    host_domain: config.host_domain,
+    studio_url: STUDIO,
+  };
 }
-const cors = {
-  "access-control-allow-origin": "*",
-  "access-control-expose-headers":
-    "x-mold-relay-request-state,etag,retry-after,x-mold-request-warning,x-mold-thumbnail-rendition,x-mold-relay-object,x-mold-relay-protocol,content-range,content-length,x-mold-seed-used,x-mold-generation-time-ms,x-mold-gpu",
-  "x-mold-relay-protocol": "2",
+const headers = {
+  "content-type": "application/json",
   "cache-control": "no-store",
+  "x-mold-relay-protocol": "3",
+  "access-control-allow-origin": "*",
+  "access-control-expose-headers": "x-mold-relay-protocol",
+  "x-content-type-options": "nosniff",
+  "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
 };
-export function createFrontend(dependencies = {}) {
-  const deps = {
-    store,
-    managed: managedConfig(),
-    request: openRequest,
-    prepareUpload,
-    consumeUpload,
-    stage: stageObject,
-    objectURL,
-    shell: async (key) =>
-      s3.send(
-        new GetObjectCommand({
-          Bucket: process.env.BUCKET_NAME,
-          Key: `shell/${key}`,
-        }),
-      ),
-    invoke: async (payload) =>
-      lambda.send(
-        new InvokeCommand({
-          FunctionName: process.env.AWS_LAMBDA_FUNCTION_NAME,
-          InvocationType: "Event",
-          Payload: Buffer.from(JSON.stringify(payload)),
-        }),
-      ),
-    ...dependencies,
-  };
-  const enrollment = createManagedEnrollment({
-    store: deps.store,
-    config: deps.managed,
-  });
-  const output = (raw, status, headers) => {
+function output(raw, status, extra, body, method) {
+  const metadata = { statusCode: status, headers: { ...headers, ...extra } };
+  const stream =
+    typeof globalThis.awslambda?.HttpResponseStream?.from === "function"
+      ? globalThis.awslambda.HttpResponseStream.from(raw, metadata)
+      : (raw.setMetadata?.(status, metadata.headers), raw);
+  stream.end(method === "HEAD" || status === 204 ? undefined : body);
+}
+export function createFrontend({ config } = {}) {
+  const info = configuration(config);
+  return async (event, raw) => {
+    const method =
+      event.requestContext?.http?.method ?? event.httpMethod ?? "GET";
+    const path = event.rawPath ?? event.path ?? "/";
+    const discovery = path === "/_mold/relay/info" && method === "GET";
+    const enrollment = path === "/_mold/relay/enroll" && method === "POST";
+    if (discovery || enrollment)
+      return output(raw, 200, {}, JSON.stringify(info), method);
     if (
-      headers?.["cache-control"] &&
-      !/(?:^|,)\s*(?:private|no-store|no-cache)(?:\s*(?:,|=|$))/i.test(
-        headers["cache-control"],
-      )
-    ) {
-      headers = { ...headers, "cache-control": "no-store" };
-    }
-    const out =
-      typeof globalThis.awslambda?.HttpResponseStream?.from === "function"
-        ? awslambda.HttpResponseStream.from(raw, {
-            statusCode: status,
-            headers: {
-              ...cors,
-              ...headers,
-              "access-control-allow-origin": "*",
-              "access-control-expose-headers":
-                cors["access-control-expose-headers"],
-              "x-mold-relay-protocol": "2",
-            },
-          })
-        : (raw.setMetadata?.(status, {
-            ...cors,
-            ...headers,
-            "access-control-allow-origin": "*",
-            "access-control-expose-headers":
-              cors["access-control-expose-headers"],
-            "x-mold-relay-protocol": "2",
-          }),
-          raw);
-    out.write("");
-    return out;
-  };
-  const json = (raw, status, value, headers = {}) => {
-    const out = output(raw, status, {
-      "content-type": "application/json",
-      ...headers,
-    });
-    out.end(status === 204 ? undefined : JSON.stringify(value));
-    return out;
-  };
-  async function authenticated(headers, namespace = "") {
-    credentialDigest(headers);
-    const result = await deps.request({
-      path: "/api/status",
-      headers,
-      namespace,
-    });
-    try {
-      let bytes = 0;
-      for await (const chunk of result.response) {
-        bytes += chunk.length;
-        if (bytes > 1048576) throw new Error("Invalid host status response");
-      }
-      if (result.response.statusCode !== 200)
-        throw new Error("Mold authentication refused");
-      return result.sid;
-    } finally {
-      result.close();
-    }
-  }
-  async function createMedia(request) {
-    const sid = await authenticated(request.headers, request.namespace);
-    const id = randomUUID(),
-      expiresAt = Math.floor(Date.now() / 1000) + 900;
-    await deps.store.put(namespaceKey(`media#${id}`, request.namespace), {
-      state: "pending",
-      namespace: request.namespace,
-      createdAt: Math.floor(Date.now() / 1000),
-      credential: credentialDigest(request.headers),
-      sid,
-      expiresAt,
-    });
-    await deps.invoke({
-      kind: "stage",
-      namespace: request.namespace,
-      id,
-      sid,
-      request: {
-        method: "GET",
-        path: request.path,
-        headers: request.headers,
-        namespace: request.namespace,
-      },
-    });
-    return { relay: { id, state: "pending" }, expires_at: expiresAt };
-  }
-  async function stageWorker(event) {
-    const namespace = event.namespace ?? "";
-    if (
-      namespace &&
-      (!validNamespace(namespace) ||
-        !(await activeEnrollment(deps.store, namespace)))
+      method === "OPTIONS" &&
+      (path === "/_mold/relay/info" || path === "/_mold/relay/enroll")
     )
-      return;
-    if ((event.request?.namespace ?? "") !== namespace) return;
-    const job = await deps.store.get(
-      namespaceKey(`media#${event.id}`, namespace),
-    );
-    if (
-      !job ||
-      job.state !== "pending" ||
-      job.expiresAt <= Math.floor(Date.now() / 1000) ||
-      job.sid !== event.sid ||
-      (job.namespace ?? "") !== namespace ||
-      ((namespace || job.credential) &&
-        job.credential !== credentialDigest(event.request.headers ?? {}))
-    )
-      return;
-    if (
-      !(await deps.store.cas(
-        namespaceKey(`media#${event.id}`, namespace),
-        job.revision,
+      return output(
+        raw,
+        204,
         {
-          ...job,
-          state: "working",
-          workingAt: Math.floor(Date.now() / 1000),
+          "access-control-allow-methods": "GET, POST, OPTIONS",
+          "access-control-allow-headers": "content-type",
         },
-      ))
-    )
-      return;
-    let result,
-      phase = "connect";
-    try {
-      result = await deps.request(event.request);
-      phase = "validate-response";
-      if (
-        result.sid !== event.sid ||
-        result.response.statusCode !== 200 ||
-        String(result.response.headers["content-type"] ?? "")
-          .toLowerCase()
-          .startsWith("text/event-stream")
-      )
-        throw new Error("Media refused");
-      phase = "stage-object";
-      const object = await deps.stage(
-        result.response,
-        cleanHeaders(result.response.headers, { response: true }),
         undefined,
-        namespace,
+        method,
       );
-      const { url: unusedURL, ...facts } = object;
-      await deps.store.put(namespaceKey(`media#${event.id}`, namespace), {
-        ...job,
-        state: "ready",
-        ...facts,
-        expiresAt: object.expires_at,
-      });
-    } catch (error) {
-      console.error(
-        "Mold relay media staging failure",
-        phase,
-        failureCategory(error),
-      );
-      await deps.store.put(namespaceKey(`media#${event.id}`, namespace), {
-        ...job,
-        state: "failed",
-      });
-    } finally {
-      result?.close();
-    }
-  }
-  return async (event, raw, context = {}) => {
-    if (event.kind === "stage") {
-      await stageWorker(event);
-      raw.end();
-      return;
-    }
-    let result,
-      cleanup,
-      hasOutput = false;
-    let mutationMayHaveExecuted = false;
-    try {
-      const request = normalizeEvent(event);
-      if (
-        request.route === "/_mold/relay/enroll" ||
-        request.route.startsWith("/_mold/relay/enroll/")
-      ) {
-        const response = await enrollment({
-          ...request,
-          domainName: event.requestContext?.domainName,
-          sourceIP:
-            event.requestContext?.http?.sourceIp ??
-            event.requestContext?.identity?.sourceIp,
-        });
-        json(raw, response.status, response.value);
-        return;
-      }
-      request.namespace = await resolveNamespace(
-        { domainName: event.requestContext?.domainName },
-        deps.store,
-        deps.managed,
-      );
-      if (request.method === "OPTIONS") {
-        const requested =
-          request.headers["access-control-request-headers"] ??
-          "authorization,x-api-key,content-type,x-amz-content-sha256,x-mold-request-target";
-        if (!/^[a-zA-Z0-9, _-]+$/.test(requested))
-          throw new Error("Invalid CORS headers");
-        json(
-          raw,
-          204,
-          {},
-          {
-            "access-control-allow-methods":
-              "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS",
-            "access-control-allow-headers": requested,
-            "access-control-max-age": "600",
-          },
-        );
-        return;
-      }
-      if (
-        [request.route, request.path.split("?")[0]].some((path) =>
-          decodeURIComponent(path).replace(/\/+$/, "").startsWith("/metrics"),
-        )
-      ) {
-        json(raw, 404, { error: "Not found" });
-        return;
-      }
-      if (request.route === "/_mold/relay/info") {
-        json(raw, 200, {
-          protocol: 2,
-          upload_threshold: THRESHOLD,
-          max_body_bytes: MAX_BODY,
-          object_origin: objectOrigin(),
-        });
-        return;
-      }
-      const publicRead =
-        ["GET", "HEAD"].includes(request.method) &&
-        ["/health", "/api/docs", "/api/openapi.json"].includes(request.route);
-      const readTicket =
-        ["GET", "HEAD"].includes(request.method) &&
-        /^\/api\/gallery\/(image|thumbnail|preview|assets|source-media)\//.test(
-          request.route,
-        ) &&
-        new URL(request.path, "https://mold.invalid").searchParams.has(
-          "media_token",
-        );
-      const publicProbe =
-        request.route === "/api/connection-probe" && request.method === "POST";
-      if (publicProbe) {
-        let proof;
-        try {
-          if (request.body.length <= 512)
-            proof = JSON.parse(request.body.toString());
-        } catch {
-          /* Generic refusal below. */
-        }
-        if (
-          request.body.length > 512 ||
-          request.headers["x-api-key"] ||
-          request.headers.authorization ||
-          request.path.includes("?") ||
-          !proof ||
-          !["api", "pairing"].includes(proof.kind) ||
-          typeof proof.key_tag !== "string" ||
-          typeof proof.nonce !== "string" ||
-          !/^[a-f0-9]{16}$/.test(proof.key_tag ?? "") ||
-          !/^[a-f0-9]{64}$/.test(proof.nonce ?? "") ||
-          Object.keys(proof).length !== 3
-        ) {
-          json(raw, 401, { error: "Connection proof refused" });
-          return;
-        }
-      }
-      const publicClaim =
-        request.route === "/api/pairing/claim" && request.method === "POST";
-      if (
-        (decodeURIComponent(request.route).startsWith("/api/") ||
-          request.route.startsWith("/_mold/relay/")) &&
-        !request.headers["x-api-key"] &&
-        !readTicket &&
-        !publicClaim &&
-        !publicProbe &&
-        !publicRead
-      ) {
-        json(raw, 401, { error: "missing X-Api-Key header" });
-        return;
-      }
-      if (
-        request.route === "/_mold/relay/uploads" &&
-        request.method === "POST"
-      ) {
-        const sid = await authenticated(request.headers, request.namespace);
-        json(
-          raw,
-          200,
-          await deps.prepareUpload(
-            JSON.parse(request.body.toString()),
-            request.headers,
-            sid,
-            request.namespace,
-          ),
-        );
-        return;
-      }
-      if (
-        request.route === "/_mold/relay/request" &&
-        request.method === "POST"
-      ) {
-        const sid = await authenticated(request.headers, request.namespace),
-          entry = await deps.consumeUpload(
-            JSON.parse(request.body.toString()).id,
-            request.headers,
-            sid,
-            request.namespace,
-          );
-        cleanup = entry.cleanup;
-        result = await deps.request({
-          namespace: request.namespace,
-          method: entry.method,
-          onForwardAttempt: () => {
-            mutationMayHaveExecuted = !["GET", "HEAD", "OPTIONS"].includes(
-              entry.method,
-            );
-          },
-          path: entry.path,
-          headers: {
-            ...entry.headers,
-            ...Object.fromEntries(
-              Object.entries(request.headers).filter(([k]) =>
-                ["authorization", "x-api-key"].includes(k),
-              ),
-            ),
-          },
-          body: entry.body,
-          size: entry.size,
-        });
-        if (result.sid !== sid) throw new Error("Host session changed");
-      } else if (
-        request.route === "/_mold/relay/media" &&
-        request.method === "POST"
-      ) {
-        const { path } = JSON.parse(request.body.toString());
-        if (
-          !safeTarget(path) ||
-          !path.startsWith("/api/") ||
-          new URL(path, "https://mold.invalid").pathname === "/api/events"
-        )
-          throw new Error("Invalid media path");
-        json(raw, 202, await createMedia({ ...request, path }));
-        return;
-      } else if (
-        request.route.startsWith("/_mold/relay/media/") &&
-        request.method === "GET"
-      ) {
-        const id = request.route.slice("/_mold/relay/media/".length);
-        if (!/^[a-f0-9-]{36}$/.test(id))
-          throw new Error("Invalid media identity");
-        const job = await deps.store.get(
-          namespaceKey(`media#${id}`, request.namespace),
-        );
-        if (
-          !job ||
-          (job.namespace ?? "") !== request.namespace ||
-          job.expiresAt <= Math.floor(Date.now() / 1000) ||
-          job.credential !== credentialDigest(request.headers)
-        )
-          throw new Error("Media grant refused");
-        json(raw, 200, {
-          state:
-            job.state === "pending" &&
-            Math.floor(Date.now() / 1000) -
-              (job.createdAt ?? job.expiresAt - 900) >
-              90
-              ? "failed"
-              : job.state === "working" &&
-                  Math.floor(Date.now() / 1000) -
-                    (job.workingAt ?? job.createdAt ?? job.expiresAt - 900) >
-                    840
-                ? "failed"
-                : job.state === "working"
-                  ? "pending"
-                  : job.state,
-          ...(job.state === "ready"
-            ? {
-                url: await deps.objectURL(
-                  job.key,
-                  Math.max(
-                    1,
-                    Math.min(
-                      900,
-                      job.expiresAt - Math.floor(Date.now() / 1000),
-                    ),
-                  ),
-                  request.namespace,
-                ),
-                expires_at: job.expires_at,
-              }
-            : {}),
-        });
-        return;
-      } else if (request.route.startsWith("/_mold/")) {
-        json(raw, 404, { error: "Not found" });
-        return;
-      } else if (
-        ["GET", "HEAD"].includes(request.method) &&
-        !request.route.startsWith("/api/") &&
-        request.route !== "/health"
-      ) {
-        const asset =
-          /^\/(assets|fonts)\//.test(request.route) ||
-          /^\/(logo\.png|favicon\.ico|icon.*\.png)$/.test(request.route);
-        const shell = await deps.shell(
-          asset ? request.route.slice(1) : "index.html",
-        );
-        const out = output(raw, 200, {
-          "content-type":
-            shell.ContentType ??
-            (asset ? "application/octet-stream" : "text/html"),
-        });
-        hasOutput = true;
-        if (request.method === "HEAD") {
-          shell.Body.destroy();
-          out.end();
-        } else await pipeline(shell.Body, out);
-        return;
-      } else {
-        result = await deps.request({
-          ...request,
-          onForwardAttempt: () => {
-            mutationMayHaveExecuted = !["GET", "HEAD", "OPTIONS"].includes(
-              request.method,
-            );
-          },
-        });
-      }
-      const response = result.response,
-        headers = Object.fromEntries(
-          Object.entries(
-            cleanHeaders(response.headers, { response: true }),
-          ).filter(([key]) => !key.toLowerCase().startsWith("access-control-")),
-        );
-      if (
-        request.route === "/api/gallery/media-token" &&
-        request.method === "POST" &&
-        response.statusCode === 200
-      ) {
-        const chunks = [];
-        let bytes = 0;
-        for await (const b of response) {
-          bytes += b.length;
-          if (bytes > 65536) throw new Error("Invalid media ticket response");
-          chunks.push(b);
-        }
-        const ticket = JSON.parse(Buffer.concat(chunks).toString()),
-          original = JSON.parse(request.body.toString());
-        if (
-          ticket.auth_required !== false &&
-          ticket.token &&
-          safeTarget(original.path)
-        ) {
-          const path = new URL(original.path, "https://mold.invalid");
-          path.searchParams.set("media_token", ticket.token);
-          path.searchParams.set("expires", String(ticket.expires_at));
-          const pending = await createMedia({
-            ...request,
-            path: path.pathname + path.search,
-          });
-          json(raw, 200, { ...ticket, relay: pending.relay });
-          return;
-        }
-        json(raw, 200, ticket);
-        return;
-      }
-      const length = Number(headers["content-length"]);
-      const eventStream = String(headers["content-type"] ?? "").startsWith(
-        "text/event-stream",
-      );
-      if (
-        request.method !== "HEAD" &&
-        ![204, 304].includes(response.statusCode) &&
-        !eventStream &&
-        (!Number.isFinite(length) || length > OBJECT_THRESHOLD)
-      ) {
-        const object = await deps.stage(
-          response,
-          headers,
-          undefined,
-          request.namespace,
-        );
-        json(
-          raw,
-          200,
-          { url: object.url, status: response.statusCode, headers },
-          { "x-mold-relay-object": "1" },
-        );
-        return;
-      }
-      if (eventStream) delete headers["content-length"];
-      const out = output(raw, response.statusCode ?? 502, headers);
-      hasOutput = true;
-      if (
-        request.method === "HEAD" ||
-        [204, 304].includes(response.statusCode)
-      ) {
-        response.resume();
-        out.end();
-        return;
-      }
-      if (eventStream) {
-        let deadline = false;
-        const timer = setTimeout(
-          () => {
-            deadline = true;
-            out.end(": relay reconnect\n\n");
-            result.close();
-          },
-          Math.min(
-            828000,
-            Math.max(
-              1000,
-              (context.getRemainingTimeInMillis?.() ?? 850000) - 20000,
-            ),
-          ),
-        );
-        timer.unref();
-        try {
-          await pipeline(response, out);
-        } catch (error) {
-          if (!deadline) throw error;
-        } finally {
-          clearTimeout(timer);
-        }
-      } else await pipeline(response, out);
-    } catch (error) {
-      console.error("Mold relay frontend failure", failureCategory(error));
-      if (!hasOutput)
-        json(
-          raw,
-          503,
-          {
-            error: "Relay request unavailable or refused",
-            request_state: mutationMayHaveExecuted
-              ? "outcome-unknown"
-              : "not-forwarded",
-          },
-          {
-            "x-mold-relay-request-state": mutationMayHaveExecuted
-              ? "outcome-unknown"
-              : "not-forwarded",
-          },
-        );
-      else raw.destroy?.(new Error("Relay stream interrupted"));
-    } finally {
-      result?.close();
-      await cleanup?.().catch(() => {});
-    }
+    if (path === "/" && (method === "GET" || method === "HEAD"))
+      return output(raw, 303, { location: STUDIO }, "", method);
+    return output(
+      raw,
+      426,
+      {},
+      JSON.stringify({
+        error: "secure-client-required",
+        protocol: 3,
+        message:
+          "Update Mold and pair this device using the encrypted connection.",
+      }),
+      method,
+    );
   };
 }
-const serve = createFrontend();
+const dispatch = async (event, raw) => {
+  try {
+    return await createFrontend()(event, raw);
+  } catch {
+    return output(
+      raw,
+      503,
+      {},
+      JSON.stringify({ error: "relay-unavailable" }),
+      event.httpMethod,
+    );
+  }
+};
 export const handler =
   typeof globalThis.awslambda?.streamifyResponse === "function"
-    ? awslambda.streamifyResponse(serve)
-    : serve;
+    ? globalThis.awslambda.streamifyResponse(dispatch)
+    : dispatch;

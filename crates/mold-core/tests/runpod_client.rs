@@ -125,6 +125,82 @@ async fn create_no_stock_maps_to_runpod_no_stock() {
 // ── happy paths ────────────────────────────────────────────────────────
 
 #[tokio::test]
+async fn provider_errors_never_echo_bootstrap_or_operator_secrets() {
+    const SECRET: &str = "sentinel-private-host-identity-and-operator-key";
+    for endpoint in ["create", "get", "list"] {
+        for status in [200, 401, 404, 500, 503] {
+            let (client, server) = client_with_mock().await;
+            let payload = if status == 200 {
+                // Serde's invalid-type message itself contains this value.
+                let pod = serde_json::json!({"id":"owned", "costPerHr":SECRET, "env":{"MOLD_SECURE_BOOTSTRAP":SECRET}});
+                if endpoint == "list" {
+                    serde_json::json!([pod])
+                } else {
+                    pod
+                }
+            } else {
+                serde_json::json!({"error":"This machine does not have the resources to deploy your pod", "env":{"MOLD_SECURE_BOOTSTRAP":SECRET,"MOLD_API_KEY":SECRET}})
+            };
+            Mock::given(method(if endpoint == "create" { "POST" } else { "GET" }))
+                .and(path(if endpoint == "get" {
+                    "/pods/owned"
+                } else {
+                    "/pods"
+                }))
+                .respond_with(ResponseTemplate::new(status).set_body_json(payload))
+                .mount(&server)
+                .await;
+            let mut request = CreatePodRequest::default();
+            request
+                .env
+                .insert("MOLD_SECURE_BOOTSTRAP".into(), SECRET.into());
+            let error = match endpoint {
+                "create" => client.create_pod(&request).await.unwrap_err(),
+                "get" => client.get_pod("owned").await.unwrap_err(),
+                _ => client.list_pods().await.unwrap_err(),
+            };
+            assert!(
+                !format!("{error:#}").contains(SECRET),
+                "display leaked a provider value"
+            );
+            assert!(
+                !format!("{error:?}").contains(SECRET),
+                "debug leaked a provider value"
+            );
+            if status != 200 {
+                assert!(error.to_string().contains(&status.to_string()));
+            }
+            if status == 500 || status == 503 {
+                assert!(matches!(mold_error(&error), MoldError::RunPodNoStock(_)));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn graphql_errors_never_echo_provider_values() {
+    const SECRET: &str = "sentinel-provider-echoed-secret";
+    for endpoint in ["user", "gpu_types", "datacenters"] {
+        let server = MockServer::start().await;
+        let client = RunPodClient::new_with_graphql(server.uri(), server.uri(), "test-key");
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"errors":[{"message":SECRET}]})),
+            )
+            .mount(&server)
+            .await;
+        let error = match endpoint {
+            "user" => client.user().await.unwrap_err(),
+            "gpu_types" => client.gpu_types().await.unwrap_err(),
+            _ => client.datacenters().await.unwrap_err(),
+        };
+        assert!(!format!("{error:#}").contains(SECRET));
+        assert!(!format!("{error:?}").contains(SECRET));
+    }
+}
+
+#[tokio::test]
 async fn list_pods_parses_minimal_json() {
     let (client, server) = client_with_mock().await;
     Mock::given(method("GET"))

@@ -4,7 +4,7 @@ import type { GalleryImage } from "../api/types";
 import { inTauri, ipc } from "../ipc";
 import { GLB_MIME_TYPE } from "@studio/lib/meshExport";
 import { thumbnailRenditionQuery } from "@studio/lib/thumbnailPersistentCache";
-import { resolveRelayMedia, type RelayMediaTicket } from "@studio/api/relayMedia";
+import { secureMediaUrl, releaseSecureMediaUrl } from "@studio/api/secureMedia";
 import { apiHeaders } from "../api/client";
 
 /**
@@ -35,7 +35,7 @@ const cache = new Map<string, CachedObjectUrl>();
 let retainedBytes = 0;
 
 function revokeCachedObjectUrl(entry: CachedObjectUrl): void {
-  void entry.url.then((url) => URL.revokeObjectURL(url)).catch(() => {});
+  void entry.url.then((url) => releaseMediaUrl(url)).catch(() => {});
 }
 
 /** Record a settled entry's bytes exactly once. */
@@ -86,7 +86,7 @@ export interface AuthedMediaOptions {
   signal?: AbortSignal;
 }
 
-interface GalleryMediaTicket extends RelayMediaTicket {
+interface GalleryMediaTicket {
   token: string | null;
   expires_at: number | null;
   auth_required?: boolean;
@@ -176,7 +176,7 @@ export function authedMediaUrl(path: string, opts: AuthedMediaOptions = {}): Pro
         // flight. Do not leak an object URL that is no longer authoritative.
         if (cache.get(key) !== entry) {
           entry.settled = true;
-          URL.revokeObjectURL(objectUrl);
+          releaseMediaUrl(objectUrl);
         } else {
           settleThumbnail(entry, blob.size);
           trimThumbnailCache();
@@ -210,6 +210,8 @@ export async function streamableMediaUrl(
   if (path.startsWith("mold-local:")) return path;
   const target = opts.target ?? currentTarget();
   const directUrl = `${target.baseUrl.replace(/\/$/, "")}${path}`;
+  const secure = await secureMediaUrl(directUrl, apiHeaders(target), opts.signal);
+  if (secure) return secure;
   if (!target.apiKey) return directUrl;
 
   try {
@@ -220,13 +222,6 @@ export async function streamableMediaUrl(
       ...(opts.signal ? { signal: opts.signal } : {}),
     });
     const ticket = (await response.json()) as GalleryMediaTicket;
-    const relayUrl = await resolveRelayMedia(
-      ticket,
-      target.baseUrl,
-      apiHeaders(target),
-      opts.signal,
-    );
-    if (relayUrl) return relayUrl;
     // A key can remain in Keychain after a host disables authentication. New
     // hosts make that state explicit so the media element can use its normal
     // direct URL instead of treating the harmless stale key as a failure.
@@ -323,7 +318,7 @@ function rememberFullSize(key: string, url: Promise<string>): void {
     if (oldest === undefined) break;
     const evicted = fullSizeCache.get(oldest);
     fullSizeCache.delete(oldest);
-    void evicted?.then((u) => URL.revokeObjectURL(u)).catch(() => {});
+    void evicted?.then((u) => releaseMediaUrl(u)).catch(() => {});
   }
 }
 
@@ -393,7 +388,7 @@ function evictPrefix(prefix: string): void {
   for (const [key, cached] of fullSizeCache) {
     if (!key.startsWith(prefix)) continue;
     fullSizeCache.delete(key);
-    void cached.then((url) => URL.revokeObjectURL(url)).catch(() => {});
+    void cached.then((url) => releaseMediaUrl(url)).catch(() => {});
   }
 }
 
@@ -586,3 +581,8 @@ export const isMeshItem = (item: GalleryImage): boolean => {
     lower.endsWith(".obj")
   );
 };
+
+function releaseMediaUrl(url: string): void {
+  if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+  else releaseSecureMediaUrl(url);
+}

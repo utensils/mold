@@ -33,8 +33,8 @@ watch(
 );
 
 const secondsLeft = computed(() =>
-  session.value?.expires_at
-    ? Math.max(0, session.value.expires_at - now.value)
+  session.value?.invite.expiresAt
+    ? Math.max(0, session.value.invite.expiresAt - now.value)
     : null,
 );
 const expired = computed(() => secondsLeft.value === 0);
@@ -87,10 +87,15 @@ async function startPairing(): Promise<void> {
     address.value = baseUrl;
     const payload: MobilePairingPayload = {
       type: "mold.mobile-pairing",
-      version: 1,
+      version: 2,
       base_url: baseUrl,
-      token: next.token,
-      expires_at: next.expires_at,
+      namespace: next.namespace,
+      host_key: next.host_key,
+      host_noise_key: next.host_noise_key,
+      host_binding_signature: next.host_binding_signature,
+      websocket_url: next.websocket_url,
+      invite_seed: next.invite_seed,
+      invite: next.invite,
       instance_id: next.instance_id,
       name: props.hostLabel || next.hostname || new URL(baseUrl).hostname,
       ...(next.endpoints?.length ? { endpoints: next.endpoints } : {}),

@@ -2,6 +2,8 @@
 members = [
     "crates/mold-core",
     "crates/mold-relay",
+    "crates/mold-secure",
+    "crates/mold-secure-client",
     "crates/mold-db",
     "crates/mold-inference",
     "crates/mold-server",

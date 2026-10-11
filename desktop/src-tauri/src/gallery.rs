@@ -1,3 +1,4 @@
+use mold_secure_client::RequestBuilderExt;
 pub mod mirror;
 
 use std::{
@@ -473,7 +474,7 @@ pub async fn local_gallery_list(
         let response = reqwest::Client::new()
             .get(server_url(&info, "/api/gallery"))
             .header("X-Api-Key", api_key(&info)?)
-            .send()
+            .secure_send()
             .await
             .map_err(|error| format!("Couldn't reach the local gallery server: {error}"))?;
         if !response.status().is_success() {
@@ -524,7 +525,7 @@ pub async fn local_gallery_trash_list(
         let response = reqwest::Client::new()
             .get(server_url(&info, "/api/gallery?view=trash"))
             .header("X-Api-Key", api_key(&info)?)
-            .send()
+            .secure_send()
             .await
             .map_err(|error| format!("Couldn't reach the local gallery server: {error}"))?;
         if !response.status().is_success() {
@@ -1145,7 +1146,7 @@ async fn save_output_bytes_server(
         .header("X-Api-Key", api_key(&info)?)
         .header(reqwest::header::CONTENT_TYPE, GALLERY_IMPORT_CONTENT_TYPE)
         .body(body)
-        .send()
+        .secure_send()
         .await
         .map_err(|error| format!("Couldn't reach the local gallery server: {error}"))?;
     if !response.status().is_success() {
@@ -1212,7 +1213,7 @@ async fn fetch_gallery_bytes(
         request = request.header("X-Api-Key", key);
     }
     let response = request
-        .send()
+        .secure_send()
         .await
         .map_err(|error| format!("Couldn't reach the gallery host: {error}"))?;
     if !response.status().is_success() {
@@ -1592,7 +1593,7 @@ pub async fn save_gallery_media(
         request = request.header("X-Api-Key", key);
     }
     let response = request
-        .send()
+        .secure_send()
         .await
         .map_err(|error| format!("Couldn't reach the media host: {error}"))?;
     if !response.status().is_success() {
@@ -1635,7 +1636,7 @@ pub async fn local_output_file_path(
                 .get(server_url(&info, &format!("/api/gallery/image/{encoded}")))
                 .header("X-Api-Key", api_key(&info)?)
                 .header(reqwest::header::RANGE, "bytes=0-0")
-                .send()
+                .secure_send()
                 .await
                 .map_err(|error| format!("Couldn't reach the local gallery server: {error}"))?;
             if response.status() == reqwest::StatusCode::NOT_FOUND {
@@ -1685,7 +1686,7 @@ pub async fn local_gallery_delete(
         let response = reqwest::Client::new()
             .delete(server_url(&info, &format!("/api/gallery/image/{encoded}")))
             .header("X-Api-Key", api_key(&info)?)
-            .send()
+            .secure_send()
             .await
             .map_err(|error| format!("Couldn't reach the local gallery server: {error}"))?;
         if !response.status().is_success() {
@@ -1723,7 +1724,7 @@ pub async fn local_gallery_restore(
             .post(server_url(&info, "/api/gallery/trash/restore"))
             .header("X-Api-Key", api_key(&info)?)
             .json(&serde_json::json!({ "filenames": [filename] }))
-            .send()
+            .secure_send()
             .await
             .map_err(|error| format!("Couldn't reach the local gallery server: {error}"))?;
         if !response.status().is_success() {
@@ -1762,7 +1763,7 @@ pub async fn local_gallery_delete_forever(
                 &format!("/api/gallery/image/{encoded}?permanent=true"),
             ))
             .header("X-Api-Key", api_key(&info)?)
-            .send()
+            .secure_send()
             .await
             .map_err(|error| format!("Couldn't reach the local gallery server: {error}"))?;
         if !response.status().is_success() {

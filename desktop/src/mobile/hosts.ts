@@ -2,6 +2,21 @@ import type { ApiTarget } from "../lib/api/client";
 import type { ServerStatus } from "../lib/api/types";
 import type { HostRoute } from "../stores/hosts";
 
+/** The embedded engine is the only place a manually entered HTTP key belongs. */
+export function isNumericLoopbackHost(address: string): boolean {
+  try {
+    const url = new URL(address);
+    return (
+      ["http:", "https:"].includes(url.protocol) &&
+      ["127.0.0.1", "[::1]"].includes(url.hostname) &&
+      !url.username &&
+      !url.password
+    );
+  } catch {
+    return false;
+  }
+}
+
 // Mobile and desktop intentionally share host normalization, secret-key
 // slugs, and the host shape consumed by the reusable queue/download stores.
 // Keeping one implementation prevents the same remote from acquiring

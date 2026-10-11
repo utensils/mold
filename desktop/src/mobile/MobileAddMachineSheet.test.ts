@@ -92,8 +92,11 @@ describe("MobileAddMachineSheet", () => {
     wrapper.unmount();
   });
 
-  it("asks for a key when a discovered machine requires one, and can focus it", async () => {
-    const wrapper = sheet({ selectedDiscovered: NEARBY });
+  it("asks for a key only for an embedded numeric loopback machine", async () => {
+    const wrapper = sheet({
+      selectedDiscovered: { ...NEARBY, host: "127.0.0.1" },
+      address: "http://127.0.0.1:7680",
+    });
     await flushPromises();
 
     expect(wrapper.find(".mobile-host-form").exists()).toBe(false);
@@ -103,6 +106,24 @@ describe("MobileAddMachineSheet", () => {
 
     await wrapper.get("[data-test='mobile-discovered-key-prompt']").trigger("submit");
     expect(wrapper.emitted("connect-discovered")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it("submits a paired remote address from the keyboard without a hidden key field", async () => {
+    const wrapper = sheet({ address: "http://studio.local:7680" });
+    await wrapper.get(".mobile-host-form input[autocomplete='url']").trigger("keydown", {
+      key: "Enter",
+    });
+    expect(wrapper.emitted("connect-manual")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it("requires encrypted pairing for a nearby remote machine", () => {
+    const wrapper = sheet({ selectedDiscovered: NEARBY, address: "http://studio.local:7680" });
+    expect(wrapper.find("[data-test='mobile-discovered-api-key']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='mobile-discovered-key-prompt']").text()).toContain(
+      "Pair this machine",
+    );
     wrapper.unmount();
   });
 

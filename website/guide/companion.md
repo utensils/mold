@@ -22,7 +22,7 @@ Open **Machines ▸ Add a Machine…** and pick one of three ways in:
   carries its address. The code is a link, so the iPhone's own Camera opens
   Mold Studio too: it names the machine and pairs only when you tap **Pair**.
   You can paste a pairing link instead. On a phone without the app, the link
-  opens a [page](/pair) that says what to install; the code itself never
+  opens a <a href="/mold/pair/" target="_self">page</a> that says what to install; the code itself never
   reaches the web.
 - **Nearby.** Machines advertising `_mold._tcp` on your network are listed.
   Allow Local Network access when iOS asks.

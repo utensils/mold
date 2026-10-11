@@ -91,8 +91,9 @@ file just written or one Quick Look is reading.
 
 `make engine` builds `rust/mold-macos-ffi` (a staticlib around
 `mold_server::run_server`) and rewrites `Engine.xcconfig` to link it. Without
-it the app is a remote client and needs no Rust toolchain at all, which is the
-point: UI work never costs a 40-minute build. `make engine-clean` goes back.
+it the app is a remote client. `make gen` still builds the small, GPU-free Rust
+crypto XCFramework used by secure remote connections; stable Rust is required,
+without building the inference engine. `make engine-clean` goes back.
 
 Five C functions, and nothing about a render crosses them — the app speaks HTTP
 to loopback, exactly as it speaks to a machine on the network. Stopping is a
@@ -329,15 +330,9 @@ No Intel and nothing below macOS 26 — see "Releasing". (The updater is built:
 see "Updates" -- the key is in place; what it still needs is a first run of
 the publish workflow.)
 
-The app is never a _claimant_. It issues pairing codes: **Pair a Phone…** is
-on every machine's card menu, in the Machine menu, and on the machine's own
-page. A keyed machine's code carries a one-use token (the Mac needs that
-machine's operator key); a keyless machine's code carries only its address.
-Nothing here scans a code or asks to be paired itself. In **Settings ▸ Remote
-Access**, **Pair your phone** also prepares **This Mac** for phone pairing: it
-enrolls a dedicated HTTPS proxy address, starts the outbound connector, and
-checks that address before showing the short-lived QR. The engine continues to
-bind `127.0.0.1` with its app-held key; no inbound port is opened.
+**Pair a Device…** issues a one-use encrypted pairing invitation from a machine’s card menu, Machine menu or machine page. **Add a Machine** accepts that version 2 link on another Mac; iPhone and iPad can scan the same code. A saved remote connection from before the encryption upgrade requires pairing again.
+
+In **Settings ▸ Remote Access**, **Pair a Device** prepares This Mac’s authenticated LAN listener and outbound Lambda connector. The ordinary engine API remains on numeric loopback. LAN clients can reach only the secure WebSocket endpoint and must authenticate using a host-issued device grant. The connector reads the same owner-only host identity as the server; cloud discovery supplies public addresses, never a replacement host identity or owner bearer.
 
 It is not keyless, though. The engine is started with an API key this app
 mints once and keeps in the same owner-only `secrets.json` as every machine's
@@ -640,41 +635,24 @@ several prints and choose **Move to Collection → New Collection…** to name a
 collection and file the selection into it. Open context menus keep their rows
 and submenus stable while background transfer status changes.
 
-## Optional remote HTTPS access
+## Encrypted remote access
 
-An authenticated machine can run `mold relay connect --transport aws` to expose its normal API
-through a trusted HTTPS gateway. Add that HTTPS address through the existing
-Machines flow or pair using a QR whose reachable URL is the public address.
-Normal API-key storage, instance identity, device revocation and signed gallery
-media tickets still apply; the relay enrollment token is only for the host.
-The gateway can see credentials and media. Managed enrollments use separate
-HTTPS origins and isolated host namespaces; the legacy gateway address retains
-its explicitly enrolled host.
-See [the relay guide](https://utensils.io/mold/deployment/relay).
+All remote routes use the shared Rust Noise implementation through MoldClient. Pairing links pin the host’s Ed25519 signing and Noise keys. Each Mac installation keeps a separate private device identity in its owner-only secret store; preferences contain public pins and signed grants. The Lambda relay carries ciphertext, including encrypted API credentials, media, SSE, uploads and HTTP response headers. There is no plaintext or legacy relay fallback.
 
-For **This Mac**, choose **Settings ▸ Remote Access ▸ Pair your phone**. The
-app prepares managed remote access and shows a QR after verifying the proxy
-route. Enrollment requires the managed gateway configuration, wildcard DNS/TLS
-and reviewed runtime deployment described in the relay guide; shipping this
-app change alone does not deploy that service. Closing the sheet keeps remote
-access enabled; **Stop Remote Access** stops the connector and withdraws its
-advertised route. Offline/sleeping hosts remain unavailable, and interrupted
-requests are never replayed by the relay.
+**Settings ▸ Remote Access ▸ Pair a Device** enables This Mac’s encrypted LAN listener and managed relay. Closing the QR sheet keeps access enabled; **Stop Remote Access** cancels both listeners and connections. Sleeping/offline hosts remain unavailable. Lost requests are never replayed. Forget keeps the machine and its connection visible if its credential store cannot be cleared. Device grants renew inside the encrypted channel before expiry; revoking a device stops its access.
+
+AVPlayer uses an encrypted HEAD/Range resource loader for live and retained video, including seeking. The transport bounds requests to 64 MiB, streams larger responses with consumer-driven credit, and multiplexes up to 32 streams per channel. Native builds and TestFlight archives build the GPU-free `mold-secure` XCFramework from source through `apps/shared/build-secure-framework.sh`; the generated framework is ignored by Git. Each archive exports only the documented C interface; its Rust implementation symbols remain local so the shipping engine and client crypto can link safely in the same app. See [the relay guide](https://utensils.io/mold/deployment/relay) and [the protocol contract](../../relay/aws/SECURE-PROTOCOL.md).
+
+LAN-only hosts can pair and reconnect without a cloud endpoint or cloud account. The pairing code still pins the host keys and all traffic uses the encrypted channel.
+
+Cloud peers can negotiate short-lived S3 objects containing only existing Noise ciphertext frames. The client independently pins the storage origin and verifies each complete bounded object before decryption; API keys and plaintext never reach storage. LAN and small records remain inline. Upgrading erases retired remote bearers from the secret store and old Keychain entries while preserving machine names and addresses for pairing again.
 
 Library’s **Media Type** toolbar picker shows All Media, Photos, Videos or 3D
 within the current shelf, preserving search and machine filters. Clicking or
 Command/Shift-clicking a visible tile keeps the viewport in place;
 keyboard navigation still reveals tiles outside the viewport.
 
-Native macOS **Settings ▸ Remote Access**, beside Machines, offers **Pair your
-phone** in the existing first section, alongside the connection address and
-paired-device controls. Scan its QR in the native iOS app or Tauri mobile app.
-Saved machines advertise only routes their listener actually serves: phone
-clients prefer LAN, then Tailscale, with HTTPS proxy fallback after an
-instance-bound credential-free proof. This Mac's loopback listener advertises
-only its prepared managed HTTPS origin. An existing paired machine keeps its
-identity and credential as routes change. For an independently hosted server,
-configure `MOLD_PUBLIC_URL` to advertise its actual public HTTPS relay origin.
+Paired machines prefer LAN, then Tailscale, then the Lambda proxy. Every route completes a handshake against the same pinned host keys before it can carry an API credential. Only addresses served by the encrypted listener are advertised; the private loopback API is never published. Route changes preserve the saved machine identity and grant.
 
 Queue rows show the owning machine's retained input thumbnail, labeled by role,
 including work submitted on another device. Expanded batch children and held jobs

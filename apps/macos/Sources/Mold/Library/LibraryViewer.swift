@@ -137,13 +137,13 @@ struct LibraryViewer: View {
         if entry.print.isVideo {
             // Streamed, not downloaded: a clip can be hundreds of megabytes
             // and waiting for all of it before the first frame is not playback.
-            guard let url = await actions.playableURL(for: entry) else { return }
+            guard let media = await actions.playableMedia(for: entry) else { return }
             guard !Task.isCancelled else {
-                if url.isFileURL { try? FileManager.default.removeItem(at: url) }
+                if let url = media.localURL, url.isFileURL { try? FileManager.default.removeItem(at: url) }
                 return
             }
-            if url.isFileURL { playbackFile = url }
-            let item = AVPlayerItem(url: url)
+            if let url = media.localURL, url.isFileURL { playbackFile = url }
+            let item = media.playerItem()
             let player = AVPlayer(playerItem: item)
             playbackID = entry.id
             self.player = player

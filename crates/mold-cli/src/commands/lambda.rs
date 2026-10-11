@@ -311,6 +311,11 @@ pub async fn run_deploy(opts: DeployOptions) -> Result<()> {
             existing.local_port,
         ) {
             let mut state = existing;
+            if !opts.dry_run {
+                let instance_type = state.instance_type.as_deref()
+                    .context("Recorded Lambda instance type is missing; inspect the owned service manually before upgrading")?;
+                reconcile_private_service(&ip, Path::new(&key), &config, instance_type).await?;
+            }
             if !state.has_live_tunnel(pid_exists) {
                 let pid = spawn_tunnel(&ip, &PathBuf::from(key), port)?;
                 state.tunnel_pid = Some(pid);
@@ -738,6 +743,134 @@ fn spawn_tunnel(ip: &str, key: &Path, local_port: u16) -> Result<u32> {
     Ok(child.id())
 }
 
+fn owned_service(options: CloudInitOptions) -> String {
+    render_cloud_init(&options)
+        .split("    content: |\n")
+        .nth(1)
+        .expect("owned service template")
+        .split("runcmd:\n")
+        .next()
+        .expect("owned service end")
+        .lines()
+        .map(|line| line.strip_prefix("      ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+fn reconcile_owned_service(unit: &str, image: &str) -> Result<Option<String>> {
+    let valid_token = |value: &str| {
+        !value.is_empty()
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"/._:@-".contains(&b))
+    };
+    if unit.len() > 65536 || !valid_token(image) {
+        bail!("Invalid managed Lambda service")
+    }
+    let line = unit
+        .lines()
+        .find(|line| line.starts_with("ExecStart=/usr/bin/docker run "))
+        .context("Custom Lambda service requires an operator upgrade")?;
+    let volume = line
+        .split_once(" -v ")
+        .context("Custom Lambda volume requires an operator upgrade")?
+        .1;
+    let (mount, old_image) = volume
+        .split_once(":/workspace ")
+        .context("Custom Lambda mount requires an operator upgrade")?;
+    if !mount.starts_with('/') || !valid_token(mount) || !valid_token(old_image) {
+        bail!("Custom Lambda service requires an operator upgrade")
+    }
+    let current = owned_service(CloudInitOptions {
+        image: old_image.into(),
+        mount_path: mount.into(),
+        env_file: "/etc/mold/lambda.env".into(),
+    });
+    if unit.trim() == current.trim() {
+        return Ok(None);
+    }
+    let legacy = current
+        .replace("--network host ", "")
+        .replace("-e MOLD_BIND=127.0.0.1", "-p 127.0.0.1:7680:7680");
+    if unit.trim() != legacy.trim() {
+        bail!("Custom Lambda service requires an operator upgrade")
+    }
+    Ok(Some(owned_service(CloudInitOptions {
+        image: image.into(),
+        mount_path: mount.into(),
+        env_file: "/etc/mold/lambda.env".into(),
+    })))
+}
+
+async fn reconcile_private_service(
+    ip: &str,
+    key: &Path,
+    config: &Config,
+    instance_type: &str,
+) -> Result<()> {
+    let remote_read = "sudo test -f /etc/systemd/system/mold-lambda.service && sudo test ! -L /etc/systemd/system/mold-lambda.service && test \"$(sudo stat -c %u /etc/systemd/system/mold-lambda.service)\" = 0 && sudo cat /etc/systemd/system/mold-lambda.service";
+    let output = Command::new("ssh")
+        .args(ssh_common_options())
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-i"])
+        .arg(key)
+        .arg(format!("ubuntu@{ip}"))
+        .arg(remote_read)
+        .stderr(Stdio::null())
+        .output()?;
+    if !output.status.success() {
+        bail!("Could not verify the owned Lambda service over SSH; inspect it with mold lambda ssh before upgrading")
+    }
+    let unit = String::from_utf8(output.stdout).context("Invalid Lambda service text")?;
+    if reconcile_owned_service(&unit, "mold:pending")?.is_none() {
+        return Ok(());
+    }
+    let image = mold_core::cuda_distribution::resolve_distribution_image_reference(
+        config.lambda.image_repository(),
+        instance_type,
+        mold_core::cuda_distribution::distribution_image_version(),
+    )
+    .await?;
+    let updated = reconcile_owned_service(&unit, &image)?
+        .context("Lambda service changed while planning upgrade")?;
+    use sha2::Digest;
+    let expected = hex::encode(sha2::Sha256::digest(unit.as_bytes()));
+    let replacement = hex::encode(sha2::Sha256::digest(updated.as_bytes()));
+    let remote_write = format!(
+        r#"set -eu
+unit=/etc/systemd/system/mold-lambda.service
+temporary=$(sudo mktemp /etc/systemd/system/mold-lambda.service.XXXXXX)
+trap 'sudo rm -f "$temporary"' EXIT
+sudo tee "$temporary" >/dev/null
+test "$(sudo sha256sum "$temporary" | cut -d ' ' -f 1)" = {replacement}
+test "$(sudo sha256sum "$unit" | cut -d ' ' -f 1)" = {expected}
+sudo chmod 644 "$temporary"
+sudo mv -f "$temporary" "$unit"
+sudo systemctl daemon-reload
+sudo systemctl restart mold-lambda.service
+"#
+    );
+    let mut child = Command::new("ssh")
+        .args(ssh_common_options())
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-i"])
+        .arg(key)
+        .arg(format!("ubuntu@{ip}"))
+        .arg(remote_write)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .context("SSH upgrade input unavailable")?
+        .write_all(updated.as_bytes())?;
+    if !child.wait()?.success() {
+        bail!("Lambda service upgrade did not complete; inspect mold lambda logs before retrying")
+    }
+    Ok(())
+}
+
 fn choose_local_port(preferred: u16) -> Result<u16> {
     if TcpListener::bind(("127.0.0.1", preferred)).is_ok() {
         return Ok(preferred);
@@ -845,6 +978,53 @@ async fn enqueue_download(local_port: u16, model: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn fixture_service(image: &str) -> String {
+        render_cloud_init(&CloudInitOptions {
+            image: image.into(),
+            mount_path: "/data/mold".into(),
+            env_file: "/etc/mold/lambda.env".into(),
+        })
+        .split("    content: |\n")
+        .nth(1)
+        .unwrap()
+        .split("runcmd:\n")
+        .next()
+        .unwrap()
+        .lines()
+        .map(|line| line.strip_prefix("      ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+            + "\n"
+    }
+    #[test]
+    fn deploy_reconciles_only_exact_managed_legacy_service() {
+        let current = fixture_service("ghcr.io/utensils/mold@sha256:old");
+        let legacy = current
+            .replace("--network host ", "")
+            .replace("-e MOLD_BIND=127.0.0.1", "-p 127.0.0.1:7680:7680");
+        let updated = reconcile_owned_service(&legacy, "ghcr.io/utensils/mold@sha256:new")
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated, fixture_service("ghcr.io/utensils/mold@sha256:new"));
+        assert!(
+            reconcile_owned_service(&updated, "ghcr.io/utensils/mold@sha256:new")
+                .unwrap()
+                .is_none()
+        );
+        assert!(reconcile_owned_service(
+            &legacy.replace(
+                "Description=mold Lambda container",
+                "Description=other service"
+            ),
+            "ghcr.io/utensils/mold:latest"
+        )
+        .is_err());
+        assert!(reconcile_owned_service(
+            &legacy.replace("-v /data/mold", "-v /private/data with spaces"),
+            "ghcr.io/utensils/mold:latest"
+        )
+        .is_err());
+    }
 
     struct MoldHomeGuard(Option<String>);
 

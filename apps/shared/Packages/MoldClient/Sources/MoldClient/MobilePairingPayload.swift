@@ -4,7 +4,7 @@ import Foundation
 /// PRODUCES a code (`url`); the iPhone companion reads one (`parse`, in
 /// `MobilePairingPayload+Parse.swift`) and redeems it (`HTTPBackend.claimPairing`).
 public struct MobilePairingPayload: Hashable, Sendable {
-    static let version = 1
+    static let version = 2
 
     public let baseURL: String
     public let token: String?
@@ -12,14 +12,16 @@ public struct MobilePairingPayload: Hashable, Sendable {
     public let instanceId: String
     public let name: String
     public let endpoints: [ConnectionEndpoint]?
+    public let secureInvitation: SecureInvitation?
 
-    init(baseURL: String, token: String?, expiresAt: UInt64?, instanceId: String, name: String, endpoints: [ConnectionEndpoint]? = nil) {
+    init(baseURL: String, token: String?, expiresAt: UInt64?, instanceId: String, name: String, endpoints: [ConnectionEndpoint]? = nil, secureInvitation: SecureInvitation? = nil) {
         self.baseURL = baseURL
         self.token = token
         self.expiresAt = expiresAt
         self.instanceId = instanceId
         self.name = name
         self.endpoints = endpoints
+        self.secureInvitation = secureInvitation
     }
 
     /// A keyless machine's code carries its address and identity alone --
@@ -27,13 +29,14 @@ public struct MobilePairingPayload: Hashable, Sendable {
     /// to store. `nil` only for a keyed machine that sent no token: that code
     /// would redeem nothing, so there is nothing honest to show.
     public init?(session: PairingSession, baseURL: URL, name: String) {
-        guard session.token != nil || !session.authRequired else { return nil }
+        guard let invitation = session.secureInvitation, (try? invitation.validate()) != nil else { return nil }
         self.baseURL = baseURL.absoluteString
-        self.token = session.token
-        expiresAt = session.expiresAt
+        self.token = nil
+        expiresAt = invitation.invite.expiresAt
         instanceId = session.instanceId
         self.name = name
         endpoints = session.endpoints
+        secureInvitation = invitation
     }
 
     /// Where a pairing code points (`MOBILE_PAIRING_LINK` in `pairing.ts`): a
@@ -56,11 +59,19 @@ public struct MobilePairingPayload: Hashable, Sendable {
     }
 
     public var url: URL? {
+        guard let secure = secureInvitation, (try? secure.validate()) != nil else { return nil }
         var pairs: [(String, String)] = [("version", String(Self.version)), ("base_url", baseURL)]
-        if let token { pairs.append(("token", token)) }
-        if let expiresAt { pairs.append(("expires_at", String(expiresAt))) }
         pairs.append(("instance_id", instanceId))
         pairs.append(("name", name))
+        pairs.append(("namespace", secure.namespace))
+        pairs.append(("host_key", secure.binding.signingKey))
+        pairs.append(("host_noise_key", secure.binding.noiseKey))
+        pairs.append(("host_binding_signature", secure.binding.signature))
+        if let url = secure.websocketURL { pairs.append(("websocket_url", url.absoluteString)) }
+        pairs.append(("invite_seed", secure.seed))
+        let invite = secure.invite
+        let certificate = "{\"id\":\"\(invite.id)\",\"signingKey\":\"\(invite.signingKey)\",\"expiresAt\":\(invite.expiresAt),\"epoch\":\(invite.epoch),\"signature\":\"\(invite.signature)\"}"
+        pairs.append(("invite", certificate))
         if let endpoints, !endpoints.isEmpty,
            let data = Self.endpointData(endpoints),
            let json = String(data: data, encoding: .utf8) { pairs.append(("endpoints", json)) }

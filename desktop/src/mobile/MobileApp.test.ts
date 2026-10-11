@@ -5,6 +5,8 @@ import { createPinia, type Pinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IDBFactory } from "fake-indexeddb";
 import * as mobileDraftModule from "./mobileComposerDraft";
+import securePairingFixtures from "@studio/api/pairing.fixtures.json";
+import { mobilePairingUrl, type MobilePairingPayload } from "@studio/api/pairing";
 import { createMobileComposerDraft, MOBILE_COMPOSER_DRAFT_KEY } from "./mobileComposerDraft";
 import { clearMemoryDraftsForTest } from "@studio/lib/draftMediaStore";
 import { installMemoryLocalStorage } from "../lib/testSupport/memoryLocalStorage";
@@ -53,6 +55,7 @@ const {
   cancelBarcodeScanner,
   scanPairingQr,
   claimPairingSession,
+  forgetSecureHostForMachine,
   getCurrentDeepLinks,
   onOpenDeepLinks,
   unlistenDeepLinks,
@@ -79,6 +82,7 @@ const {
   cancelBarcodeScanner: vi.fn(),
   scanPairingQr: vi.fn(),
   claimPairingSession: vi.fn(),
+  forgetSecureHostForMachine: vi.fn(),
   getCurrentDeepLinks: vi.fn(),
   onOpenDeepLinks: vi.fn(),
   unlistenDeepLinks: vi.fn(),
@@ -101,6 +105,10 @@ vi.mock("@tauri-apps/plugin-deep-link", () => ({
 vi.mock("@studio/api/pairing", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@studio/api/pairing")>()),
   claimPairingSession,
+}));
+vi.mock("@studio/api/secureStore", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/secureStore")>()),
+  forgetSecureHostForMachine,
 }));
 vi.mock("../lib/api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api/client")>()),
@@ -183,7 +191,7 @@ import { ApiError } from "../lib/api/client";
 
 installMemoryLocalStorage();
 
-const target = { baseUrl: "http://studio.tailnet.ts.net:7680", apiKey: "secret" };
+const target = { baseUrl: "http://studio.tailnet.ts.net:7680", apiKey: null };
 /**
  * A REAL PNG header (signature + IHDR 1170 × 2532, base64): the
  * source-resolution watcher decodes it and reaches the canvas write a
@@ -897,6 +905,7 @@ beforeEach(() => {
   cancelBarcodeScanner.mockReset().mockResolvedValue(undefined);
   scanPairingQr.mockReset();
   claimPairingSession.mockReset();
+  forgetSecureHostForMachine.mockReset().mockResolvedValue(undefined);
   getCurrentDeepLinks.mockReset().mockResolvedValue(null);
   unlistenDeepLinks.mockReset();
   onOpenDeepLinks.mockReset().mockResolvedValue(unlistenDeepLinks);
@@ -1204,7 +1213,9 @@ describe("MobileApp generation lifecycle", () => {
     const activity = wrapper.get("[data-test='mobile-fleet-job']");
     expect(activity.text()).toContain("Studio");
     expect(activity.text()).toContain("FLUX.1 Dev Q4");
-    expect(localStorage.getItem("mold.mobile.live-activity.v1")).not.toContain(target.apiKey);
+    expect(localStorage.getItem("mold.mobile.live-activity.v1")).not.toContain(
+      "retired-test-bearer",
+    );
   });
 
   it("interleaves local and recovered work newest-first", async () => {
@@ -3229,7 +3240,7 @@ describe("MobileApp generation queue", () => {
     expect(wrapper.get("[data-test='mobile-generation-job']").text()).toContain("durable print");
     const persisted = localStorage.getItem("mold.mobile.durable-generations.v1") ?? "";
     expect(persisted).not.toContain("durable print");
-    expect(persisted).not.toContain(target.apiKey);
+    expect(persisted).not.toContain("retired-test-bearer");
     expect(persisted).not.toContain(target.baseUrl);
 
     phase = "running";
@@ -3405,7 +3416,7 @@ describe("MobileApp generation queue", () => {
   it("carries a finished quick Expand to a newly selected host without stale recovery", async () => {
     const renderTarget = {
       baseUrl: "http://render.tailnet.ts.net:7680",
-      apiKey: "render-secret",
+      apiKey: null,
     };
     localStorage.setItem(
       "mold.mobile.hosts.v1",
@@ -3469,7 +3480,7 @@ describe("MobileApp generation queue", () => {
   it("carries an applied single Remix across hosts but still stales semantic edits", async () => {
     const renderTarget = {
       baseUrl: "http://render.tailnet.ts.net:7680",
-      apiKey: "render-secret",
+      apiKey: null,
     };
     localStorage.setItem(
       "mold.mobile.hosts.v1",
@@ -3538,7 +3549,7 @@ describe("MobileApp generation queue", () => {
   it("keeps a reviewed multi-variation batch pinned when host selection changes", async () => {
     const renderTarget = {
       baseUrl: "http://render.tailnet.ts.net:7680",
-      apiKey: "render-secret",
+      apiKey: null,
     };
     localStorage.setItem(
       "mold.mobile.hosts.v1",
@@ -3703,7 +3714,7 @@ describe("MobileApp generation queue", () => {
       name: "wan22-i2v-a14b:q8",
       default_frames: 73,
     };
-    const renderTarget = { baseUrl: "http://render.tailnet.ts.net:7680", apiKey: "secret" };
+    const renderTarget = { baseUrl: "http://render.tailnet.ts.net:7680", apiKey: null };
     localStorage.setItem(
       "mold.mobile.hosts.v1",
       JSON.stringify([
@@ -3810,7 +3821,7 @@ describe("MobileApp generation queue", () => {
   });
 
   it("clears host-local model artifacts and syncs same-name model capabilities", async () => {
-    const remoteTarget = { baseUrl: "http://render.tailnet.ts.net:7680", apiKey: "secret" };
+    const remoteTarget = { baseUrl: "http://render.tailnet.ts.net:7680", apiKey: null };
     const remoteModel: ModelEntry = {
       ...model,
       family: "flux",
@@ -7209,6 +7220,7 @@ describe("MobileApp foreground resume", () => {
     await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
     const name = wrapper.get("input[placeholder='Studio Mac (optional)']");
     const address = wrapper.get("input[autocomplete='url']");
+    await address.setValue("http://127.0.0.1:7680");
     const key = wrapper.get("input[placeholder='If required']");
     const addressFocus = vi.spyOn(address.element as HTMLElement, "focus");
     const keyFocus = vi.spyOn(key.element as HTMLElement, "focus");
@@ -9397,7 +9409,7 @@ describe("MobileApp gallery", () => {
   });
 
   it("loads reachable hosts without waiting for a host already known to be offline", async () => {
-    const offlineTarget = { baseUrl: "http://halcyon.tailnet.ts.net:7680", apiKey: "secret" };
+    const offlineTarget = { baseUrl: "http://halcyon.tailnet.ts.net:7680", apiKey: null };
     localStorage.setItem(
       "mold.mobile.hosts.v1",
       JSON.stringify([
@@ -9468,7 +9480,7 @@ describe("MobileApp gallery", () => {
   });
 
   it("refreshes the Library when a previously offline host recovers", async () => {
-    const recoveredTarget = { baseUrl: "http://halcyon.tailnet.ts.net:7680", apiKey: "secret" };
+    const recoveredTarget = { baseUrl: "http://halcyon.tailnet.ts.net:7680", apiKey: null };
     localStorage.setItem(
       "mold.mobile.hosts.v1",
       JSON.stringify([
@@ -9940,7 +9952,7 @@ describe("MobileApp gallery", () => {
   });
 
   it("deletes one selected print from every host that contains a copy", async () => {
-    const renderTarget = { baseUrl: "http://render.tailnet.ts.net:7680", apiKey: "secret" };
+    const renderTarget = { baseUrl: "http://render.tailnet.ts.net:7680", apiKey: null };
     localStorage.setItem(
       "mold.mobile.hosts.v1",
       JSON.stringify([
@@ -10016,8 +10028,8 @@ describe("MobileApp gallery", () => {
   });
 
   it("does not hide or delete a chained legacy copy outside the representative window", async () => {
-    const renderTarget = { baseUrl: "http://render.tailnet.ts.net:7680", apiKey: "secret" };
-    const archiveTarget = { baseUrl: "http://archive.tailnet.ts.net:7680", apiKey: "secret" };
+    const renderTarget = { baseUrl: "http://render.tailnet.ts.net:7680", apiKey: null };
+    const archiveTarget = { baseUrl: "http://archive.tailnet.ts.net:7680", apiKey: null };
     const routes = [
       { id: "studio-id", name: "Studio", baseUrl: target.baseUrl },
       { id: "render-id", name: "Render", baseUrl: renderTarget.baseUrl },
@@ -10668,7 +10680,7 @@ describe("MobileApp gallery", () => {
   });
 
   it("keeps the viewer open when the print host's models cannot be loaded", async () => {
-    const remoteTarget = { baseUrl: "http://remote.tailnet.ts.net:7680", apiKey: "secret" };
+    const remoteTarget = { baseUrl: "http://remote.tailnet.ts.net:7680", apiKey: null };
     localStorage.setItem(
       "mold.mobile.hosts.v1",
       JSON.stringify([
@@ -10825,7 +10837,7 @@ describe("MobileApp gallery", () => {
   });
 
   it("reloads model ownership after removing the active host before reuse", async () => {
-    const remoteTarget = { baseUrl: "http://remote.tailnet.ts.net:7680", apiKey: "secret" };
+    const remoteTarget = { baseUrl: "http://remote.tailnet.ts.net:7680", apiKey: null };
     const studioModel: ModelEntry = {
       ...model,
       name: "flux:studio-only",
@@ -10915,15 +10927,14 @@ describe("MobileApp gallery", () => {
 });
 
 describe("MobileApp host and catalog coordination", () => {
-  const remoteTarget = { baseUrl: "http://render.tailnet.ts.net:7680", apiKey: "secret" };
+  const remoteTarget = { baseUrl: "http://render.tailnet.ts.net:7680", apiKey: null };
 
   function pairingPayload(overrides: Record<string, unknown> = {}): string {
     return JSON.stringify({
+      ...securePairingFixtures.links[0]!.payload,
       type: "mold.mobile-pairing",
-      version: 1,
+      version: 2,
       base_url: "http://pair.local:7680",
-      token: "one-time-token",
-      expires_at: Math.floor(Date.now() / 1000) + 120,
       instance_id: "pair-id",
       name: "Pair Host",
       ...overrides,
@@ -10931,12 +10942,7 @@ describe("MobileApp host and catalog coordination", () => {
   }
 
   function pairingUrl(overrides: Record<string, unknown> = {}): string {
-    const payload = JSON.parse(pairingPayload(overrides)) as Record<string, string>;
-    const url = new URL("mold://pair");
-    for (const [key, value] of Object.entries(payload)) {
-      if (key !== "type" && value !== null) url.searchParams.set(key, String(value));
-    }
-    return url.toString();
+    return mobilePairingUrl(JSON.parse(pairingPayload(overrides)) as MobilePairingPayload);
   }
 
   async function scanFromMachines(): Promise<void> {
@@ -10984,12 +10990,24 @@ describe("MobileApp host and catalog coordination", () => {
       "/api/status",
     );
 
-    await wrapper.get("[data-test='mobile-discovered-api-key']").setValue("peer-secret");
-    await wrapper.get("[data-test='mobile-discovered-key-prompt']").trigger("submit");
+    expect(wrapper.find("[data-test='mobile-discovered-api-key']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='mobile-discovered-key-prompt']").text()).toContain(
+      "Pair this machine",
+    );
+    expect(wrapper.find("[data-test='mobile-discovered-pair']").exists()).toBe(true);
+  });
+
+  it("erases retired remote Keychain bearers without forgetting saved machines", async () => {
+    const saved = JSON.parse(localStorage.getItem("mold.mobile.hosts.v1") ?? "[]");
+    saved[0].apiKey = "retired-test-bearer";
+    localStorage.setItem("mold.mobile.hosts.v1", JSON.stringify(saved));
+    wrapper = mountMobileApp();
     await flushPromises();
-    expect(apiJsonTo).toHaveBeenCalledWith(
-      { baseUrl: "http://192.168.1.50:7680", apiKey: "peer-secret" },
-      "/api/status",
+    expect(invoke).toHaveBeenCalledWith("keychain_delete_api_key", { hostId: "studio-id" });
+    expect(invoke).not.toHaveBeenCalledWith("keychain_get_api_key", { hostId: "studio-id" });
+    expect(localStorage.getItem("mold.mobile.hosts.v1")).not.toContain("retired-test-bearer");
+    expect(JSON.parse(localStorage.getItem("mold.mobile.hosts.v1") ?? "[]")).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: "studio-id", name: "Studio" })]),
     );
   });
 
@@ -11012,17 +11030,24 @@ describe("MobileApp host and catalog coordination", () => {
       return Promise.resolve(null);
     });
     claimPairingSession.mockResolvedValue({
-      api_key: "paired-key",
+      api_key: null,
       instance_id: "wrong-host",
       hostname: "impostor",
     });
 
     await scanFromMachines();
 
-    expect(claimPairingSession).toHaveBeenCalledWith("http://pair.local:7680", "one-time-token", {
-      name: "Mold on Android",
-      kind: "android",
-    });
+    expect(claimPairingSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        version: 2,
+        base_url: "http://pair.local:7680",
+        host_key: securePairingFixtures.links[0]!.payload.host_key,
+      }),
+      {
+        name: "Mold on Android",
+        kind: "android",
+      },
+    );
     expect(scanPairingQr).not.toHaveBeenCalled();
   });
 
@@ -11145,7 +11170,12 @@ describe("MobileApp host and catalog coordination", () => {
 
   it("rejects expired pairing codes before contacting the host", async () => {
     scanPairingQr.mockResolvedValue({
-      content: pairingPayload({ expires_at: Math.floor(Date.now() / 1000) - 1 }),
+      content: pairingPayload({
+        invite: {
+          ...securePairingFixtures.links[0]!.payload.invite,
+          expiresAt: Math.floor(Date.now() / 1000) - 1,
+        },
+      }),
     });
 
     await scanFromMachines();
@@ -11155,28 +11185,43 @@ describe("MobileApp host and catalog coordination", () => {
     expect(invoke).not.toHaveBeenCalledWith("keychain_set_api_key", expect.anything());
   });
 
+  it("refuses legacy pairing codes before contacting the host", async () => {
+    scanPairingQr.mockResolvedValue({ content: pairingPayload({ version: 1 }) });
+    await scanFromMachines();
+    expect(claimPairingSession).not.toHaveBeenCalled();
+    expect(wrapper?.get(".error-text").text()).toContain("pairing code");
+    expect(invoke).not.toHaveBeenCalledWith("keychain_set_api_key", expect.anything());
+  });
+
   it("rejects a pairing claim from a different server identity", async () => {
     scanPairingQr.mockResolvedValue({ content: pairingPayload() });
     claimPairingSession.mockResolvedValue({
-      api_key: "paired-key",
+      api_key: null,
       instance_id: "wrong-host",
       hostname: "impostor",
     });
 
     await scanFromMachines();
 
-    expect(claimPairingSession).toHaveBeenCalledWith("http://pair.local:7680", "one-time-token", {
-      name: "Mold on iPhone",
-      kind: "iphone",
-    });
+    expect(claimPairingSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        version: 2,
+        base_url: "http://pair.local:7680",
+        host_key: securePairingFixtures.links[0]!.payload.host_key,
+      }),
+      {
+        name: "Mold on iPhone",
+        kind: "iphone",
+      },
+    );
     expect(wrapper?.get(".error-text").text()).toContain("different Mold host");
     expect(invoke).not.toHaveBeenCalledWith("keychain_set_api_key", expect.anything());
   });
 
-  it("stores a verified pairing key through the existing Keychain host path", async () => {
+  it("stores paired host metadata while the secure adapter owns its credentials", async () => {
     scanPairingQr.mockResolvedValue({ content: pairingPayload() });
     claimPairingSession.mockResolvedValue({
-      api_key: "paired-key",
+      api_key: null,
       instance_id: "pair-id",
       hostname: "pair-host",
     });
@@ -11193,11 +11238,15 @@ describe("MobileApp host and catalog coordination", () => {
 
     await scanFromMachines();
     await vi.waitFor(() =>
-      expect(invoke).toHaveBeenCalledWith("keychain_set_api_key", {
-        hostId: "pair-local-7680",
-        apiKey: "paired-key",
-      }),
+      expect(JSON.parse(localStorage.getItem("mold.mobile.hosts.v1") ?? "[]")).toContainEqual(
+        expect.objectContaining({ id: "pair-local-7680", instanceId: "pair-id" }),
+      ),
     );
+    expect(invoke).not.toHaveBeenCalledWith(
+      "keychain_set_api_key",
+      expect.objectContaining({ hostId: "pair-local-7680" }),
+    );
+    expect(localStorage.getItem("mold.mobile.hosts.v1")).not.toContain("invite_seed");
 
     const saved = JSON.parse(localStorage.getItem("mold.mobile.hosts.v1") ?? "[]");
     expect(saved).toContainEqual(
@@ -11219,7 +11268,7 @@ describe("MobileApp host and catalog coordination", () => {
       return Promise.resolve(null);
     });
     claimPairingSession.mockResolvedValue({
-      api_key: "paired-key",
+      api_key: null,
       instance_id: "pair-id",
       hostname: "pair-host",
     });
@@ -11236,11 +11285,15 @@ describe("MobileApp host and catalog coordination", () => {
 
     await scanFromMachines();
     await vi.waitFor(() =>
-      expect(invoke).toHaveBeenCalledWith("keychain_set_api_key", {
-        hostId: "pair-local-7680",
-        apiKey: "paired-key",
-      }),
+      expect(JSON.parse(localStorage.getItem("mold.mobile.hosts.v1") ?? "[]")).toContainEqual(
+        expect.objectContaining({ id: "pair-local-7680", instanceId: "pair-id" }),
+      ),
     );
+    expect(invoke).not.toHaveBeenCalledWith(
+      "keychain_set_api_key",
+      expect.objectContaining({ hostId: "pair-local-7680" }),
+    );
+    expect(localStorage.getItem("mold.mobile.hosts.v1")).not.toContain("invite_seed");
 
     expect(wrapper?.find("[data-test='mobile-pair-scanner']").exists()).toBe(false);
     expect(wrapper?.find(".error-text").exists()).toBe(false);
@@ -11429,14 +11482,14 @@ describe("MobileApp host and catalog coordination", () => {
     expect(await styleOptionIds()).toContain(pulledModel.name);
   });
 
-  it("claims a cold-launch iOS Camera pairing link through the existing Keychain path", async () => {
+  it("claims a cold-launch iOS Camera secure pairing link without copying credentials", async () => {
     Object.defineProperty(window, "__TAURI_INTERNALS__", {
       value: {},
       configurable: true,
     });
     getCurrentDeepLinks.mockResolvedValue([pairingUrl()]);
     claimPairingSession.mockResolvedValue({
-      api_key: "paired-key",
+      api_key: null,
       instance_id: "pair-id",
       hostname: "pair-host",
     });
@@ -11453,17 +11506,28 @@ describe("MobileApp host and catalog coordination", () => {
 
     wrapper = mountMobileApp();
     await vi.waitFor(() =>
-      expect(invoke).toHaveBeenCalledWith("keychain_set_api_key", {
-        hostId: "pair-local-7680",
-        apiKey: "paired-key",
-      }),
+      expect(JSON.parse(localStorage.getItem("mold.mobile.hosts.v1") ?? "[]")).toContainEqual(
+        expect.objectContaining({ id: "pair-local-7680", instanceId: "pair-id" }),
+      ),
     );
+    expect(invoke).not.toHaveBeenCalledWith(
+      "keychain_set_api_key",
+      expect.objectContaining({ hostId: "pair-local-7680" }),
+    );
+    expect(localStorage.getItem("mold.mobile.hosts.v1")).not.toContain("invite_seed");
 
     expect(onOpenDeepLinks).toHaveBeenCalledOnce();
-    expect(claimPairingSession).toHaveBeenCalledWith("http://pair.local:7680", "one-time-token", {
-      name: "Mold on iPhone",
-      kind: "iphone",
-    });
+    expect(claimPairingSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        version: 2,
+        base_url: "http://pair.local:7680",
+        host_key: securePairingFixtures.links[0]!.payload.host_key,
+      }),
+      {
+        name: "Mold on iPhone",
+        kind: "iphone",
+      },
+    );
   });
 
   it("stops listening for iOS pairing links when the mobile shell unmounts", async () => {
@@ -11770,6 +11834,48 @@ describe("MobileApp machines telemetry", () => {
     const telemetry = wrapper.get("[data-test='mobile-host-telemetry']");
     expect(telemetry.get(".host-telemetry-mem").text()).toBe("—");
     expect(telemetry.get(".host-telemetry-queue").text()).toBe("0 waiting");
+  });
+
+  it("waits for secure credential removal before forgetting a machine", async () => {
+    let finish!: () => void;
+    forgetSecureHostForMachine.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await openMachines();
+    await wrapper.get("[data-test='mobile-host-row']").trigger("click");
+    const forget = wrapper.get("[data-test='host-detail-forget']");
+    await forget.trigger("click");
+    await forget.trigger("click");
+    await flushPromises();
+    expect(forgetSecureHostForMachine).toHaveBeenCalledWith(target.baseUrl, status.instance_id);
+    expect(JSON.parse(localStorage.getItem("mold.mobile.hosts.v1") ?? "[]")).toHaveLength(1);
+    expect(wrapper.find("[data-test='mobile-host-detail']").exists()).toBe(true);
+    finish();
+    await flushPromises();
+    expect(JSON.parse(localStorage.getItem("mold.mobile.hosts.v1") ?? "[]")).toHaveLength(0);
+    expect(wrapper.find("[data-test='mobile-host-detail']").exists()).toBe(false);
+  });
+
+  it("keeps a machine and shows secure credential removal failures", async () => {
+    forgetSecureHostForMachine.mockRejectedValue(new Error("Secure storage is locked"));
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await openMachines();
+    await wrapper.get("[data-test='mobile-host-row']").trigger("click");
+    const forget = wrapper.get("[data-test='host-detail-forget']");
+    await forget.trigger("click");
+    await forget.trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-test='mobile-host-detail']").exists()).toBe(true);
+    expect(wrapper.get("[data-test='machine-forget-error']").text()).toContain(
+      "Secure storage is locked",
+    );
+    expect(JSON.parse(localStorage.getItem("mold.mobile.hosts.v1") ?? "[]")).toHaveLength(1);
   });
 
   it("disconnects without forgetting and reconnects only on request", async () => {
@@ -12116,7 +12222,7 @@ describe("mobile Library pinch-to-resize", () => {
 describe("MobileApp automatic generation routing", () => {
   const renderTarget = {
     baseUrl: "http://render.tailnet.ts.net:7680",
-    apiKey: "render-secret",
+    apiKey: null,
   };
 
   function twoHosts(): void {
@@ -12506,7 +12612,7 @@ describe("MobileApp automatic generation routing", () => {
 describe("MobileApp routing target consistency", () => {
   const renderTarget = {
     baseUrl: "http://render.tailnet.ts.net:7680",
-    apiKey: "render-secret",
+    apiKey: null,
   };
 
   function twoHosts(): void {
@@ -13159,7 +13265,7 @@ describe("MobileApp Library organization", () => {
   });
 
   it("removes a disconnected machine's tag chips from the merged Library", async () => {
-    const platoTarget = { baseUrl: "http://plato.tailnet.ts.net:7680", apiKey: "secret" };
+    const platoTarget = { baseUrl: "http://plato.tailnet.ts.net:7680", apiKey: null };
     localStorage.setItem(
       "mold.mobile.hosts.v1",
       JSON.stringify([
@@ -13237,7 +13343,7 @@ describe("MobileApp Library organization", () => {
   });
 
   it("keeps host chips visible in Trash and restores only the selected host copy", async () => {
-    const platoTarget = { baseUrl: "http://plato.tailnet.ts.net:7680", apiKey: "secret" };
+    const platoTarget = { baseUrl: "http://plato.tailnet.ts.net:7680", apiKey: null };
     localStorage.setItem(
       "mold.mobile.hosts.v1",
       JSON.stringify([
@@ -13878,7 +13984,7 @@ describe("MobileApp Create File under", () => {
   // qualifies it. Auto then picks exactly ONE out of that set on model and
   // capacity grounds. A winner that cannot organize must not be sent fields it
   // would quietly ignore.
-  const filerTarget = { baseUrl: "http://render.tailnet.ts.net:7680", apiKey: "render-secret" };
+  const filerTarget = { baseUrl: "http://render.tailnet.ts.net:7680", apiKey: null };
 
   function twoMachines(): void {
     localStorage.setItem(
@@ -14670,7 +14776,7 @@ describe("MobileApp identity photo", () => {
     // for a plan — even when the other one would answer sooner.
     const renderTarget = {
       baseUrl: "http://render.tailnet.ts.net:7680",
-      apiKey: "render-secret",
+      apiKey: null,
     };
     localStorage.setItem(
       "mold.mobile.hosts.v1",

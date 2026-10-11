@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>Pair securely · Mold</title>
+    <link rel="icon" href="/mold/logo-transparent.png" />
+    <link rel="stylesheet" href="/mold/pair/pair.css" />
+    <script src="/mold/pair/pair.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <p class="brand">mold</p>
+      <h1>Pair a device</h1>
+      <section id="pair-ready" hidden>
+        <p>
+          Connect to <strong id="machine"></strong> at
+          <code id="address"></code>.
+        </p>
+        <p>
+          Continue only if you created this pairing code on a machine you trust.
+        </p>
+        <button id="open-studio" type="button">Open secure Studio</button>
+      </section>
+      <section id="pair-missing">
+        <p>Open a fresh pairing link or scan the code on your machine.</p>
+      </section>
+      <p>
+        To use the iPhone or iPad app, install
+        <a href="/mold/guide/companion" rel="noreferrer"
+          >Mold Studio Companion</a
+        >
+        and scan the code again.
+      </p>
+      <p class="note">
+        Pairing invitations expire after two minutes and work once. The
+        invitation stays in this browser until you choose to continue. This page
+        loads no analytics or third-party code.
+      </p>
+      <noscript
+        >JavaScript is required to open the encrypted pairing
+        invitation.</noscript
+      >
+    </main>
+  </body>
+</html>

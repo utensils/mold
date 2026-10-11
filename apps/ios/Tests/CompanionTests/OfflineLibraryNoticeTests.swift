@@ -6,6 +6,10 @@ import Testing
 
 @MainActor
 struct OfflineLibraryNoticeTests {
+    @Test func aFailedReadDoesNotClaimThatEverythingIsConnected() {
+        #expect(OfflineLibraryNotice.summary(hosts: [], hasFailures: true) == "Some requests couldn't finish")
+    }
+
     @Test func noOfflineHostsProduceNoPinnedNotice() {
         #expect(OfflineLibraryNotice.summary(hosts: []) == nil)
     }

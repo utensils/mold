@@ -371,7 +371,7 @@ describe("useHostPoll target sessions", () => {
 
     const requested = poll.refresh();
     void poll.refresh();
-    expect(statusCalls).toBe(1);
+    await vi.waitFor(() => expect(statusCalls).toBe(1));
 
     first.resolve(ok(currentStatus));
     await vi.waitFor(() => expect(statusCalls).toBe(2));
@@ -566,49 +566,33 @@ describe("hostClient library organization plumbing", () => {
     ).rejects.toThrow(/404/);
   });
 });
-it("roams a remembered machine without duplicating its entry or forwarding the key in probes", async () => {
-  const { rememberConnectionRoutes, forgetConnectionRoutes } =
+it("roams a pinned machine without duplicating its remembered entry", async () => {
+  const storage = await import("@studio/api/secureStore");
+  const { forgetConnectionRoutes } =
     await import("@studio/api/connectionRoutes");
   const { addHost, listStoredHosts, removeHost } =
     await import("../../lib/hostRegistry");
   const host = addHost({
     url: "https://roaming-relay.test",
     name: "Roaming",
-    apiKey: "mold_pair_" + "A".repeat(43),
     instanceId: "fixture-machine",
   });
-  const random = vi.spyOn(crypto, "getRandomValues").mockImplementation(((
-    array: Uint8Array,
-  ) => {
-    for (let i = 0; i < array.length; i++)
-      array[i] = [1, 35, 69, 103, 137, 171, 205, 239][i % 8]!;
-    return array;
-  }) as typeof crypto.getRandomValues);
-  rememberConnectionRoutes(host.id, "fixture-machine", host.apiKey!, [
-    { url: "https://roaming-relay.test", kind: "relay" },
-    { url: "http://roaming-lan.test:7680", kind: "lan" },
-  ]);
+  const profile = vi.spyOn(storage, "secureHostForOrigin").mockResolvedValue({
+    namespace: "pinned",
+    instance_id: "fixture-machine",
+    grant: { signature: "fixture-grant" },
+    endpoints: [
+      { url: "http://roaming-lan.test:7680", kind: "lan" },
+      { url: "https://roaming-relay.test", kind: "relay" },
+    ],
+  } as Awaited<ReturnType<typeof storage.secureHostForOrigin>>);
   const status = { ...currentStatus, instance_id: "fixture-machine" };
-  fetchMock.mockImplementation(
-    async (input: RequestInfo | URL, init?: RequestInit) => {
-      if (String(input).endsWith("/api/connection-probe")) {
-        expect(new Headers(init?.headers).has("x-api-key")).toBe(false);
-        expect(JSON.parse(String(init?.body)).nonce).toBe(
-          "0123456789abcdef".repeat(4),
-        );
-        return new Response(
-          JSON.stringify({
-            instance_id: "fixture-machine",
-            proof:
-              "9a36badafd938d50de299050a33365f5e7eedcff7201b02d096f41a3eb9cc4de",
-          }),
-        );
-      }
-      expect(String(input)).toBe("http://roaming-lan.test:7680/api/status");
-      expect(new Headers(init?.headers).get("x-api-key")).toBe(host.apiKey);
-      return ok(status);
-    },
-  );
+  fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+    if (String(input).endsWith("connection-addresses"))
+      return new Response("", { status: 503 });
+    expect(String(input)).toBe("http://roaming-lan.test:7680/api/status");
+    return Response.json(status);
+  });
   try {
     expect(await hostStatus(host)).toEqual(status);
     expect(
@@ -620,8 +604,8 @@ it("roams a remembered machine without duplicating its entry or forwarding the k
       "http://roaming-lan.test:7680",
     );
   } finally {
-    random.mockRestore();
-    removeHost(host.id);
+    profile.mockRestore();
     forgetConnectionRoutes(host.id);
+    await removeHost(host.id);
   }
 });

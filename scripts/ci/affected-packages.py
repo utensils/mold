@@ -159,6 +159,7 @@ def affected(paths, dir_to_name, dependents):
 # Cargo refuses a `pkg/feature` for a package outside the selection, so the
 # list is filtered to the selected packages.
 FEATURE_UNION = {
+    "mold-ai-relay": ("cli",),
     "mold-ai-core": ("pulid",),
     "mold-ai-inference": (
         "pulid",

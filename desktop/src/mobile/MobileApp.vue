@@ -31,12 +31,8 @@ import {
   reconcileCollectionVisibility,
 } from "@studio/lib/collectionVisibility";
 import { restoreRetainedDraftMedia } from "@studio/lib/retainedDraftMedia";
-import {
-  connectionHealth,
-  selectConnectionRoute,
-  rememberConnectionRoutes,
-  forgetConnectionRoutes,
-} from "@studio/api/connectionRoutes";
+import { connectionHealth, forgetConnectionRoutes } from "@studio/api/connectionRoutes";
+import { forgetSecureHostForMachine } from "@studio/api/secureStore";
 import HeldQueueTransferDialog from "@studio/components/HeldQueueTransferDialog.vue";
 import QueueMoveToControl from "@studio/components/QueueMoveToControl.vue";
 import { provideHeldQueueTransfer } from "@studio/composables/useHeldQueueTransfer";
@@ -414,6 +410,7 @@ import {
   mobileHostHealthLabel,
   mobileHostMatchesRoute,
   mobileHostTarget,
+  isNumericLoopbackHost,
   mergeMobileHostsByInstanceId,
   normalizeRemoteAddress,
   recordMobileHostAuthorityRejection,
@@ -4738,7 +4735,7 @@ function loadHosts(): MobileHost[] {
         // Each loader already rejects malformed recovery state safely.
       }
     }
-    if (merged.dropped.length > 0) {
+    if (merged.dropped.length > 0 || raw.some((host) => Boolean(host.apiKey))) {
       localStorage.setItem(
         STORAGE_KEY,
         JSON.stringify(normalized.map(({ apiKey: _apiKey, ...host }) => host)),
@@ -4772,6 +4769,11 @@ async function hydrateApiKeys(): Promise<void> {
   await Promise.all(
     hosts.value.map(async (host) => {
       try {
+        if (!isNumericLoopbackHost(host.baseUrl)) {
+          host.apiKey = "";
+          await invoke("keychain_delete_api_key", { hostId: host.id });
+          return;
+        }
         let key = await invoke<string | null>("keychain_get_api_key", { hostId: host.id });
         let migratedAliasKey = false;
         if (!key) {
@@ -4806,6 +4808,11 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
   hostError.value = "";
   try {
     const baseUrl = normalizeRemoteAddress(address ?? hostInput.address);
+    if (!isNumericLoopbackHost(baseUrl) && hostInput.apiKey.trim()) {
+      throw new Error(
+        "Pair this machine with its encrypted pairing code. Remote API keys are no longer accepted.",
+      );
+    }
     const target = { baseUrl, apiKey: hostInput.apiKey.trim() || null };
     const status = await apiJsonTo<ServerStatus>(target, "/api/status");
     const instanceId = status.instance_id?.trim() || undefined;
@@ -4819,7 +4826,9 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
       (host) => host.id === slug && host.instanceId?.trim() !== instanceId,
     );
     const id = existing?.id ?? (conflictingSlug && instanceId ? instanceId : slug);
-    const successfulApiKey = hostInput.apiKey.trim() || existing?.apiKey || "";
+    const successfulApiKey = isNumericLoopbackHost(baseUrl)
+      ? hostInput.apiKey.trim() || existing?.apiKey || ""
+      : "";
     const saved: MobileHost = {
       id,
       name: hostInput.name.trim() || discoveredName || status.hostname || new URL(baseUrl).hostname,
@@ -4939,26 +4948,17 @@ async function pairFromCode(code: () => Promise<string>): Promise<void> {
   hostError.value = "";
   try {
     const payload = parseMobilePairingPayload(await code());
-    if (payload.expires_at !== null && payload.expires_at <= Math.floor(Date.now() / 1000)) {
+    if (payload.invite.expiresAt <= Math.floor(Date.now() / 1000)) {
       throw new Error("That pairing code expired. Create a new one in the host's Settings.");
     }
-    const baseUrl =
-      payload.endpoints?.length && payload.token
-        ? await selectConnectionRoute({
-            endpoints: payload.endpoints,
-            expectedInstanceId: payload.instance_id,
-            secret: payload.token,
-            kind: "pairing",
-            secureContext: false,
-          })
-        : normalizeRemoteAddress(payload.base_url);
+    const baseUrl = normalizeRemoteAddress(payload.base_url);
     const iPad =
       /iPad/i.test(navigator.userAgent) ||
       (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
     const client: PairingClientIdentity = androidNativeRuntime
       ? { name: "Mold on Android", kind: "android" }
       : { name: iPad ? "Mold on iPad" : "Mold on iPhone", kind: iPad ? "ipad" : "iphone" };
-    const claim = await claimPairingSession(baseUrl, payload.token, client);
+    const claim = await claimPairingSession(payload, client);
     if (claim.instance_id !== payload.instance_id) {
       throw new Error("The pairing code was redeemed by a different Mold host.");
     }
@@ -4973,13 +4973,6 @@ async function pairFromCode(code: () => Promise<string>): Promise<void> {
       // Fence discovery started by connectHost before approving the QR origin.
       forgetConnectionRoutes(paired.id);
       try {
-        rememberConnectionRoutes(
-          paired.id,
-          claim.instance_id,
-          claim.api_key,
-          claim.endpoints ?? payload.endpoints,
-          normalizeRemoteAddress(payload.base_url),
-        );
       } catch {
         // Optional route metadata cannot undo an already redeemed pairing.
       }
@@ -5049,7 +5042,14 @@ async function cancelPairingScan(): Promise<void> {
 }
 
 async function openPairingUrls(urls: string[]): Promise<void> {
-  const pairingUrl = urls.find((url) => url.startsWith("mold://pair?"));
+  const pairingUrl = urls.find((url) => {
+    try {
+      parseMobilePairingPayload(url);
+      return true;
+    } catch {
+      return false;
+    }
+  });
   if (pairingUrl) await pairFromCode(() => Promise.resolve(pairingUrl));
 }
 
@@ -5345,7 +5345,22 @@ function reconnectHost(id: string): void {
   void probeHost(host);
 }
 
-function removeHost(id: string): void {
+const forgettingHosts = new Set<string>();
+const machineForgetError = ref("");
+async function removeHost(id: string): Promise<void> {
+  const removedHost = hosts.value.find((host) => host.id === id);
+  if (!removedHost || forgettingHosts.has(id)) return;
+  forgettingHosts.add(id);
+  machineForgetError.value = "";
+  try {
+    await forgetSecureHostForMachine(removedHost.baseUrl, removedHost.instanceId);
+    await invoke("keychain_delete_api_key", { hostId: id });
+  } catch (error) {
+    machineForgetError.value = `Could not forget ${removedHost.name}: ${describeTransportError(error)}`;
+    return;
+  } finally {
+    forgettingHosts.delete(id);
+  }
   forgetConnectionRoutes(id);
   cancelHostProbe(id);
   knownHostReachability.delete(id);
@@ -5354,7 +5369,6 @@ function removeHost(id: string): void {
   const removedSelectedHost = selectedHostId.value === id;
   const removedCatalogHost = catalogHostId.value === id;
   if (hostDetailId.value === id) hostDetailId.value = "";
-  const removedHost = hosts.value.find((host) => host.id === id);
   hosts.value = hosts.value.filter((host) => host.id !== id);
   if (removedSelectedHost) {
     selectedHostId.value = connectedHosts.value[0]?.id ?? "";
@@ -5370,7 +5384,6 @@ function removeHost(id: string): void {
       removedHost.id,
     ]);
   }
-  void invoke("keychain_delete_api_key", { hostId: id });
 }
 
 function selectCatalogHost(id: string): void {
@@ -14219,6 +14232,14 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       </template>
 
       <template v-else-if="!settingsOpen && tab === 'hosts'">
+        <p
+          v-if="machineForgetError"
+          class="status-line error-text"
+          role="alert"
+          data-test="machine-forget-error"
+        >
+          {{ machineForgetError }}
+        </p>
         <MobileHostDetail
           v-if="hostDetail"
           ref="hostDetailView"

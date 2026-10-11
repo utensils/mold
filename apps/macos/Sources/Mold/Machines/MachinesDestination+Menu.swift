@@ -46,7 +46,7 @@ extension MachinesDestination {
             // `HostStore.remove` is the one door: it forgets the machine, its
             // key, its watchers and its default-ness. Re-deciding any of that
             // here would be a second answer.
-            hosts.remove(host)
+            guard hosts.remove(host) else { return }
             if selectedMachine == host.id.uuidString { selectedMachine = "" }
             if focusedCard == host.id { focusedCard = nil }
         }

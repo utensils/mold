@@ -78,7 +78,7 @@ Library tiles and the picture viewer’s More menu offer **Use as Source** witho
 
 Oversized new still inputs are proportionally reduced to at most 4096 pixels per axis and 2 MiB, applying orientation and preserving transparency. Smaller compatible inputs keep their bytes. Replacing a source clears its old mask; retained source/mask pairs and exported originals remain unchanged. Fresh drafts use Random; a deliberately locked seed of zero remains valid.
 
-Paired connections prefer a verified LAN endpoint over Tailscale and HTTPS relay, including after network changes. 3-D downloads use a temporary file and size check before decoding; only the selected viewer page loads a mesh, and failures offer Retry.
+Paired connections prefer a pinned encrypted LAN endpoint over Tailscale and Lambda relay, including after network changes. A fast LAN handshake avoids a cloud probe; slow proxy or alternate-address checks do not delay the working local route. Nearby discovery also recovers a paired machine after its LAN address changes, preserving its saved identity and key. Unavailable machines are checked again while the app is open, and a Nearby lookup ends within five seconds with an actionable retry instead of an indefinite spinner. Saved Prints offers Retry to reconnect and refresh; connection messages use the available width at larger text sizes and disappear when their request succeeds. 3-D downloads use a temporary file and size check before decoding; only the selected viewer page loads a mesh, and failures offer Retry.
 
 ### Reusing retained source media
 
@@ -208,20 +208,19 @@ accessible from the shelf picker and sidebar, while their prints stay out of
 the general grid, including when another machine holds the tile’s leading copy.
 While Manage Collections is open, the main tab chrome is hidden. Dismissing the sheet restores the Library and its scroll position.
 
-## Optional remote HTTPS access
+## Encrypted remote access
 
-An authenticated machine can run `mold relay connect --transport aws` to expose its normal API
-through a trusted HTTPS gateway. Add that HTTPS address through the existing
-Machines flow or pair using a QR whose reachable URL is the public address.
-Normal API-key storage, instance identity, device revocation and signed gallery
-media tickets still apply; the relay enrollment token is only for the host.
-The gateway can see credentials and media and publishes one machine per process.
-See [the relay guide](https://utensils.io/mold/deployment/relay).
+Pair with a fresh version 2 QR or pairing link. The link pins the host’s signing and Noise keys; each installation keeps its private device identity and API credential in the iOS Keychain. Old pairing codes and saved plaintext remote connections require pairing again after the host and clients are upgraded.
 
-Hosting requires an explicitly running authenticated `mold serve` and connector.
-Native macOS This Mac remains private; the GUI does not automatically open a
-tunnel. Offline/sleeping hosts remain unavailable, and interrupted requests
-are never replayed by the relay.
+MoldClient uses the same Rust Noise implementation as the server. LAN, Tailscale and Lambda relay routes carry encrypted HTTP records over WebSocket, including API headers, uploads, live events, thumbnails, original files and retained media. The relay sees routing metadata and ciphertext. Video playback uses an AVFoundation resource loader with encrypted HEAD/Range requests, so seeking does not buffer an entire movie or expose a bearer URL. Requests are bounded to 64 MiB; responses stream with per-stream credit. Lost mutations are never replayed.
+
+LAN-only hosts can pair and reconnect without a cloud endpoint or cloud account. The pairing code still pins the host keys and all traffic uses the encrypted channel.
+
+When both cloud peers support bulk delivery, consecutive Noise ciphertext frames may travel through short-lived S3 objects. Native clients pin the storage origin independently, reject redirects, and verify the full bounded ciphertext object before decrypting. The video and HTTP interfaces stay the same; LAN and small messages stay inline. The native carrier keeps at most four objects totaling at most 1 MiB in flight, with a 1 MiB body-credit window and coalesced paused-body buffers. WSS capability detection uses the selected route because Foundation reports its upgrade request as HTTPS. Gateway throttling retries exact pending ciphertext under the existing deadline, without reopening HTTP mutations. Old remote API keys are erased during upgrade while saved machine names and addresses remain available for pairing again. Forget waits for credential removal; a locked store retains the machine and reports the failure.
+
+Nearby routes become usable only after a handshake verifies the paired host keys. A fast LAN avoids cloud connections, lower-priority routes start after a short stagger, and stale checks cannot overwrite a recovered or removed machine. Backgrounding closes authenticated channels; foregrounding reconciles state. Device grants renew through the encrypted connection before expiry, and revocation is enforced by the host.
+
+Builds require stable Rust as well as Xcode. `make gen`, `make build` and `make archive` automatically build the GPU-free `mold-secure` XCFramework for Mac, iPhone and Simulator. Generated binaries stay out of Git. See [the relay guide](https://utensils.io/mold/deployment/relay) and [the protocol contract](../../relay/aws/SECURE-PROTOCOL.md).
 
 Live Activity identity uses the bundled Mold logo on the Lock Screen and in every Dynamic Island state, including completion and failure; status remains available through text and accessibility labels. System notification banners use the app icon.
 

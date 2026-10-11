@@ -6,6 +6,13 @@ import Testing
 
 @MainActor
 struct RemotePairingStoreTests {
+    @Test func storedConnectionContainsOnlyPublicMetadata() throws {
+        let owner = RemotePairingHarness().owner
+        let value = String(decoding: try JSONEncoder().encode(owner), as: UTF8.self)
+        #expect(!value.contains("token"))
+        #expect(!value.contains("expiresAt"))
+    }
+
     @Test func preparationEnrollsBeforeShowingOnlyTheVerifiedPublicCode() async throws {
         let harness = RemotePairingHarness()
         let store = harness.store()
@@ -14,8 +21,7 @@ struct RemotePairingStoreTests {
         #expect(phoneHost.baseURL == harness.owner.publicUrl)
         #expect(harness.calls == ["enroll", "save", "stop", "start", "advertise", "verify"])
         #expect(store.state == .ready(harness.owner.publicUrl))
-        #expect(store.pairing.session?.token == "phone-code")
-        #expect(store.pairing.session?.token != harness.owner.token)
+        #expect(store.pairing.session?.secureInvitation != nil)
         #expect(store.enabled)
     }
 
@@ -57,7 +63,7 @@ struct RemotePairingStoreTests {
         _ = try await store.prepare(harness.host)
         harness.calls = []
         await store.disable()
-        #expect(harness.calls == ["stop", "withdraw", "clear", "revoke"])
+        #expect(harness.calls == ["stop", "withdraw", "clear"])
         #expect(!store.enabled)
         #expect(harness.saved == nil)
         #expect(store.state == .off)
@@ -80,7 +86,7 @@ struct RemotePairingStoreTests {
         harness.refuseClear = true
         harness.calls = []
         await store.disable()
-        #expect(harness.calls.contains("revoke"))
+        #expect(!harness.calls.contains("revoke"))
         #expect(!store.enabled)
         #expect(harness.saved != nil)
         #expect(!harness.store().enabled)
@@ -92,8 +98,8 @@ struct RemotePairingStoreTests {
         harness.refuseSave = true
         let store = harness.store()
         await #expect(throws: ManagedRelayFailure.self) { try await store.prepare(harness.host) }
-        #expect(harness.calls.contains("revoke"))
-        #expect(harness.cleanupWasCancelled == [false])
+        #expect(!harness.calls.contains("revoke"))
+        #expect(harness.cleanupWasCancelled.isEmpty)
         #expect(!harness.calls.contains("start"))
         #expect(!store.enabled)
     }
@@ -136,8 +142,8 @@ struct RemotePairingStoreTests {
         #expect(!harness.calls.contains("start"))
         #expect(!store.enabled)
         #expect(store.state == .off)
-        #expect(harness.calls.contains("revoke"))
-        #expect(harness.cleanupWasCancelled == [false])
+        #expect(!harness.calls.contains("revoke"))
+        #expect(harness.cleanupWasCancelled.isEmpty)
     }
 
     @Test func aDeadConnectorReconnectsBeforeItsDailyLeaseRenewal() async throws {
@@ -153,34 +159,17 @@ struct RemotePairingStoreTests {
         #expect(store.state == .ready(harness.owner.publicUrl))
     }
 
-    @Test func enrollmentRejectsForeignOriginsAndOperatorKeys() throws {
-        let harness = RemotePairingHarness()
-        let owner = harness.owner
+    @Test func enrollmentRejectsForeignOriginsAndLegacyOwnerSecrets() throws {
+        let owner = RemotePairingHarness().owner
         try owner.validate()
-        let foreign = ManagedRelayEnrollment(hostId: owner.hostId, token: owner.token,
-            publicUrl: URL(string: "https://foreign.invalid")!, relayUrl: owner.relayUrl, expiresAt: owner.expiresAt)
+        let foreign = ManagedRelayEnrollment(hostId: owner.hostId,
+            publicUrl: URL(string: "https://foreign.invalid")!, relayUrl: owner.relayUrl)
         #expect(throws: ManagedRelayFailure.self) { try foreign.validate() }
-        let wrongKey = ManagedRelayEnrollment(hostId: owner.hostId, token: "operator-key",
-            publicUrl: owner.publicUrl, relayUrl: owner.relayUrl, expiresAt: owner.expiresAt)
-        #expect(throws: ManagedRelayFailure.self) { try wrongKey.validate() }
-    }
-
-    @Test func pairingCannotRaceAnUnfinishedStop() async throws {
-        let harness = RemotePairingHarness()
-        let store = harness.store()
-        _ = try await store.prepare(harness.host)
-        harness.holdRevocation = true
-        let stop = Task { await store.disable() }
-        while harness.revocationGate == nil { await Task.yield() }
-        await #expect(throws: ManagedRelayFailure.self) { try await store.prepare(harness.host) }
-        #expect(!harness.alive)
-        harness.revocationGate?.resume()
-        await stop.value
-        #expect(store.enrollment == nil)
-        #expect(!store.enabled)
-        harness.holdRevocation = false
-        _ = try await store.prepare(harness.host)
-        #expect(harness.alive)
-        #expect(store.enrollment == harness.owner)
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let secrets = SecretStore(directory: directory)
+        try secrets.set(#"{"host_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","token":"old-cloud-bearer"}"#, for: ManagedRelayEnrollment.secretName)
+        #expect(try ManagedRelayEnrollment.load(secrets: secrets) == nil)
+        #expect(try secrets.value(for: ManagedRelayEnrollment.secretName) == nil)
     }
 }

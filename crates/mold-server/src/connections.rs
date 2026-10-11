@@ -1,12 +1,6 @@
-//! Trusted connection advertisements and credential-free instance proofs.
-//! A proof detects accidental address reuse; plaintext HTTP still trusts the network.
-use axum::{
-    extract::{Request, State},
-    http::{header, StatusCode},
-    response::{IntoResponse, Response},
-    Extension, Json,
-};
-use serde::{Deserialize, Serialize};
+//! Host-authorized connection advertisements; every remote route verifies pinned Noise identity.
+use axum::{extract::State, http::header, response::IntoResponse, Extension, Json};
+use serde::Serialize;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::RwLock;
 
@@ -15,12 +9,122 @@ pub(crate) struct ConnectionEndpoint {
     pub url: String,
     pub kind: String,
 }
-#[derive(Default)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct LocalNetworkState {
+    pub enabled: bool,
+    pub epoch: u64,
+}
 pub struct ConnectionAddresses {
     configuration: RwLock<Option<(SocketAddr, Option<String>)>>,
     managed_relay_origin: RwLock<Option<String>>,
+    secure_websocket_url: RwLock<Option<String>>,
+    secure_policy: RwLock<Option<tokio::sync::watch::Receiver<mold_relay::secure::HostPolicy>>>,
+    local_network_enabled: tokio::sync::watch::Sender<LocalNetworkState>,
+    local_network_listener: RwLock<Option<SocketAddr>>,
+}
+impl Default for ConnectionAddresses {
+    fn default() -> Self {
+        Self {
+            configuration: RwLock::default(),
+            managed_relay_origin: RwLock::default(),
+            secure_websocket_url: RwLock::default(),
+            secure_policy: RwLock::default(),
+            local_network_enabled: tokio::sync::watch::channel(LocalNetworkState::default()).0,
+            local_network_listener: RwLock::default(),
+        }
+    }
 }
 impl ConnectionAddresses {
+    /// In-process connectors observe pairing and revocation before the handler replies.
+    pub fn watch_secure_policy(
+        &self,
+    ) -> Option<tokio::sync::watch::Receiver<mold_relay::secure::HostPolicy>> {
+        self.secure_policy
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+    pub(crate) fn set_secure_policy(
+        &self,
+        policy: Option<tokio::sync::watch::Receiver<mold_relay::secure::HostPolicy>>,
+    ) {
+        *self
+            .secure_policy
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = policy;
+    }
+
+    pub fn secure_websocket_url(&self) -> Option<String> {
+        self.secure_websocket_url
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Discovery is only an address hint. Client trust always comes from the
+    /// independently paired host key, including if the cloud changes this URL.
+    pub fn set_secure_websocket_url(&self, value: Option<&str>) -> anyhow::Result<()> {
+        let validated = value
+            .map(|value| {
+                let url = url::Url::parse(value)?;
+                anyhow::ensure!(
+                    value.len() <= 2048
+                        && url.scheme() == "wss"
+                        && url.host_str().is_some()
+                        && url.username().is_empty()
+                        && url.password().is_none()
+                        && url.query().is_none()
+                        && url.fragment().is_none()
+                        && url.port() != Some(0),
+                    "secure relay requires a credential-free WSS URL"
+                );
+                Ok::<_, anyhow::Error>(url.to_string())
+            })
+            .transpose()?;
+        *self
+            .secure_websocket_url
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = validated;
+        Ok(())
+    }
+
+    /// Native Remote Access opt-in. The server opens a second listener using
+    /// the same authenticated router; the private engine address never moves.
+    pub fn set_local_network_enabled(&self, enabled: bool) {
+        self.local_network_enabled.send_if_modified(|state| {
+            if state.enabled == enabled {
+                return false;
+            }
+            state.enabled = enabled;
+            state.epoch = state.epoch.wrapping_add(1);
+            true
+        });
+        if !enabled {
+            self.publish_local_network_listener(None);
+        }
+    }
+
+    pub(crate) fn watch_local_network(&self) -> tokio::sync::watch::Receiver<LocalNetworkState> {
+        self.local_network_enabled.subscribe()
+    }
+
+    pub(crate) fn local_network_listener(&self) -> Option<SocketAddr> {
+        *self
+            .local_network_listener
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    pub(crate) fn publish_local_network_listener(&self, address: Option<(SocketAddr, u64)>) {
+        let mut current = self
+            .local_network_listener
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
+        let state = self.local_network_enabled.borrow();
+        *current = address
+            .filter(|(_, epoch)| state.enabled && state.epoch == *epoch)
+            .map(|(address, _)| address);
+    }
     /// App-owned enrollment may advertise or withdraw a credential-free HTTPS
     /// origin without changing process environment or the bound listener.
     pub fn set_managed_relay_origin(&self, origin: Option<&str>) -> anyhow::Result<()> {
@@ -64,6 +168,17 @@ impl ConnectionAddresses {
             .unwrap_or_else(|p| p.into_inner())
             .clone();
         let mut endpoints = advertised_endpoints(bound, &interfaces, public.as_deref());
+        if let Some(bound) = self.local_network_listener() {
+            for endpoint in advertised_endpoints(bound, &interfaces, None) {
+                if !endpoints
+                    .iter()
+                    .any(|existing| existing.url == endpoint.url)
+                {
+                    endpoints.push(endpoint);
+                }
+            }
+            endpoints.truncate(8);
+        }
         if let Some(url) = managed {
             if !endpoints.iter().any(|endpoint| endpoint.url == url) {
                 endpoints.insert(
@@ -81,12 +196,6 @@ impl ConnectionAddresses {
 }
 pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-pub(crate) fn lower_hex(value: &str, length: usize) -> bool {
-    value.len() == length
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 fn validate_public_url(value: &str) -> anyhow::Result<String> {
     let url = url::Url::parse(value)
@@ -170,18 +279,6 @@ pub(crate) struct ConnectionAddressResponse {
     instance_id: String,
     endpoints: Vec<ConnectionEndpoint>,
 }
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ConnectionProbeRequest {
-    kind: String,
-    key_tag: String,
-    nonce: String,
-}
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-pub(crate) struct ConnectionProbeResponse {
-    instance_id: String,
-    proof: String,
-}
 #[utoipa::path(get, path = "/api/connection-addresses", tag = "server", responses((status = 200, body = ConnectionAddressResponse), (status = 401, description = "Authentication required")))]
 pub(crate) async fn addresses(
     State(state): State<crate::state::AppState>,
@@ -200,59 +297,6 @@ pub(crate) async fn addresses(
         }),
     )
 }
-#[utoipa::path(post, path = "/api/connection-probe", tag = "server", request_body = ConnectionProbeRequest, responses((status = 200, body = ConnectionProbeResponse), (status = 401, description = "Connection proof unavailable")))]
-pub(crate) async fn probe(
-    State(state): State<crate::state::AppState>,
-    auth: Option<Extension<crate::auth::AuthState>>,
-    request: Request,
-) -> Response {
-    let invalid = || {
-        (
-            StatusCode::UNAUTHORIZED,
-            [(header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({"error":"connection proof unavailable"})),
-        )
-            .into_response()
-    };
-    if request
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_none_or(|v| {
-            v.split(';')
-                .next()
-                .is_none_or(|v| !v.trim().eq_ignore_ascii_case("application/json"))
-        })
-    {
-        return invalid();
-    }
-    let Ok(body) = axum::body::to_bytes(request.into_body(), 512).await else {
-        return invalid();
-    };
-    let Ok(request) = serde_json::from_slice::<ConnectionProbeRequest>(&body) else {
-        return invalid();
-    };
-    let Some(Extension(Some(keys))) = auth else {
-        return invalid();
-    };
-    let Some(proof) = keys.connection_proof(
-        &request.kind,
-        &request.key_tag,
-        &request.nonce,
-        &state.instance_id,
-    ) else {
-        return invalid();
-    };
-    (
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(ConnectionProbeResponse {
-            instance_id: state.instance_id.to_string(),
-            proof,
-        }),
-    )
-        .into_response()
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -291,162 +335,22 @@ mod tests {
         assert_eq!(consumer.endpoints()[0].url, "https://operator.example.com");
     }
 
-    use super::*;
-    use sha2::Digest;
     #[tokio::test]
-    async fn connection_routes_enforce_auth_and_validate_anonymous_proofs() {
-        use axum::{
-            body::{to_bytes, Body},
-            http::{Request, StatusCode},
-            middleware,
-        };
+    async fn retired_connection_probe_has_no_route() {
         use tower::ServiceExt;
-        let state = crate::state::AppState::for_tests();
-        state
-            .connection_addresses
-            .configure(
-                "127.0.0.1:7680".parse().unwrap(),
-                Some("https://relay.example"),
-            )
-            .unwrap();
-        let instance = state.instance_id.to_string();
-        let keys = std::sync::Arc::new(crate::auth::ApiKeySet::new_with_metadata_db(
-            std::collections::HashSet::from(["operator".into()]),
-            std::sync::Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap())),
-            instance.clone(),
-        ));
-        let (token, _) = keys.issue_pairing_token().unwrap();
-        let paired = keys
-            .claim_pairing_token(&token, "fixture", "iphone")
-            .unwrap()
-            .unwrap();
-        let app = crate::routes::create_router(state)
-            .layer(middleware::from_fn(crate::auth::require_api_key))
-            .layer(middleware::from_fn_with_state(
-                Some(keys),
-                crate::auth::inject_auth_state,
-            ));
-        let missing = app
-            .clone()
+        let response = crate::routes::create_router(crate::state::AppState::for_tests())
             .oneshot(
-                Request::get("/api/connection-addresses")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
-        let valid = app
-            .clone()
-            .oneshot(
-                Request::get("/api/connection-addresses")
-                    .header("x-api-key", &paired)
-                    .header("host", "evil.example")
-                    .header("forwarded", "host=evil.example;proto=https")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(valid.status(), StatusCode::OK);
-        assert_eq!(valid.headers()["cache-control"], "no-store");
-        let json: serde_json::Value =
-            serde_json::from_slice(&to_bytes(valid.into_body(), 4096).await.unwrap()).unwrap();
-        assert_eq!(json["version"], 1);
-        assert_eq!(json["instance_id"], instance);
-        assert_eq!(
-            json["endpoints"],
-            serde_json::json!([{ "url":"https://relay.example", "kind":"relay" }])
-        );
-        let tag = hex(&sha2::Sha256::digest(paired.as_bytes())[..8]);
-        let nonce = "01".repeat(32);
-        let body = serde_json::json!({"kind":"api","key_tag":tag,"nonce":nonce}).to_string();
-        let proof = app
-            .clone()
-            .oneshot(
-                Request::post("/api/connection-probe")
+                axum::http::Request::post("/api/connection-probe")
                     .header("content-type", "application/json")
-                    .body(Body::from(body.clone()))
+                    .body(axum::body::Body::from("{}"))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(proof.status(), StatusCode::OK);
-        assert_eq!(proof.headers()["cache-control"], "no-store");
-        let json: serde_json::Value =
-            serde_json::from_slice(&to_bytes(proof.into_body(), 4096).await.unwrap()).unwrap();
-        assert_eq!(json["instance_id"], instance);
-        assert_eq!(json["proof"].as_str().unwrap().len(), 64);
-        for bad in [
-            "{}".into(),
-            "x".repeat(513),
-            body.replace("api", "wrong"),
-            body.replace(&nonce, &nonce.to_uppercase().replace("01", "FF")),
-            body.replace(&tag, "0000000000000000"),
-        ] {
-            let invalid = app
-                .clone()
-                .oneshot(
-                    Request::post("/api/connection-probe")
-                        .header("content-type", "application/json")
-                        .body(Body::from(bad))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
-            assert_eq!(invalid.headers()["cache-control"], "no-store");
-        }
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
     }
-    #[tokio::test]
-    async fn keyless_and_operator_routes_refuse_proofs_without_breaking_original_auth() {
-        use axum::{
-            body::{to_bytes, Body},
-            http::{Request, StatusCode},
-            middleware,
-        };
-        use tower::ServiceExt;
-        for operator in [true, false] {
-            let state = crate::state::AppState::for_tests();
-            state
-                .connection_addresses
-                .configure(
-                    "127.0.0.1:7680".parse().unwrap(),
-                    Some("https://relay.example"),
-                )
-                .unwrap();
-            let auth = operator.then(|| {
-                std::sync::Arc::new(crate::auth::ApiKeySet::new(
-                    std::collections::HashSet::from(["password".to_string()]),
-                ))
-            });
-            let app = crate::routes::create_router(state)
-                .layer(middleware::from_fn(crate::auth::require_api_key))
-                .layer(middleware::from_fn_with_state(
-                    auth,
-                    crate::auth::inject_auth_state,
-                ));
-            let response = app.clone().oneshot(Request::post("/api/connection-probe").header("content-type","application/json").body(Body::from(serde_json::json!({"kind":"api","key_tag":hex(&sha2::Sha256::digest(b"password")[..8]),"nonce":"a".repeat(64)}).to_string())).unwrap()).await.unwrap();
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-            assert_eq!(response.headers()["cache-control"], "no-store");
-            let response = app
-                .oneshot(
-                    Request::get("/api/connection-addresses")
-                        .header("x-api-key", "password")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let json: serde_json::Value =
-                serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap())
-                    .unwrap();
-            if operator {
-                assert_eq!(json["endpoints"], serde_json::json!([]));
-            }
-        }
-    }
+
+    use super::*;
     #[test]
     fn public_url_requires_https_origin_without_credentials_or_path() {
         assert_eq!(

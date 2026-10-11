@@ -30,6 +30,8 @@ final class FixtureMachine: @unchecked Sendable {
     private let retainedMediaFixture: Bool
     let retainedFrameFixture: Bool
     private let queueFixture: Bool
+    private let unavailableGallery = Mutex(false)
+    func setGalleryUnavailable(_ unavailable: Bool) { unavailableGallery.withLock { $0 = unavailable } }
     private let allRequests = Mutex<[String]>([])
     func requestLog() -> [String] { allRequests.withLock { $0 } }
     private let queueRequests = Mutex<[String]>([])
@@ -210,6 +212,13 @@ final class FixtureMachine: @unchecked Sendable {
             let request = headers[0].split(separator: " ")
             let path = request.count > 1 ? String(request[1]).components(separatedBy: "?")[0] : ""
             allRequests.withLock { $0.append(String(request.first ?? "") + " " + path) }
+            if path == "/api/gallery", unavailableGallery.withLock({ $0 }) {
+                let body = Data(#"{"error":"relay gateway unavailable; reconcile mutations before retrying"}"#.utf8)
+                var reply = Data("HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
+                reply.append(body)
+                connection.send(content: reply, completion: .contentProcessed { _ in connection.cancel() })
+                return
+            }
             // AVKit probes MP4 byte ranges before decoding; serve a real
             // partial response rather than the export fixture's whole-file reply.
             if landscapePlaybackFixture, path.hasPrefix("/api/gallery/image/fixture-"), path.hasSuffix(".mp4"),

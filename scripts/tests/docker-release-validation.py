@@ -26,6 +26,33 @@ def run_step(name):
 
 
 class DockerReleaseValidation(unittest.TestCase):
+    def test_entrypoint_honors_loopback_bind_without_exporting_secrets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            exported = directory / 'rp_environment'
+            args = directory / 'args'
+            (directory / 'mold').write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$TEST_ARGS"\n')
+            (directory / 'mold').chmod(0o700)
+            source = (ROOT / 'docker/start.sh').read_text().replace(
+                '/etc/rp_environment', str(exported))
+            result = subprocess.run(['bash', '-c', source], env={
+                **os.environ, 'PATH': f'{directory}:/usr/bin:/bin',
+                'MOLD_HOME': str(directory / 'home'),
+                'MOLD_MODELS_DIR': str(directory / 'models'),
+                'HF_HOME': str(directory / 'hf'), 'TEST_ARGS': str(args),
+                'MOLD_BIND': '127.0.0.1', 'MOLD_PORT': '19681',
+                'MOLD_API_KEY': 'operator-secret',
+                'MOLD_SECURE_BOOTSTRAP': 'private-host-identity',
+                'HF_TOKEN': 'provider-secret',
+            }, capture_output=True, text=True, check=True)
+            public_output = exported.read_text() + result.stdout + result.stderr
+            for secret in ['operator-secret', 'private-host-identity', 'provider-secret']:
+                self.assertNotIn(secret, public_output)
+            self.assertEqual(exported.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(args.read_text().splitlines(),
+                             ['serve', '--bind', '127.0.0.1', '--port', '19681'])
+            self.assertIn(f'MOLD_HOME={directory / "home"}', exported.read_text())
+
     def select(self, event, tagged):
         with tempfile.TemporaryDirectory() as directory:
             cwd = Path(directory)

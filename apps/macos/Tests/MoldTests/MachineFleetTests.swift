@@ -25,7 +25,7 @@ struct MachineFleetTests {
         #expect(offered.map(\.kind)
             == [.open, .checkNow, .setDefault, .copyAddress, .pairPhone, .edit, nil, .remove])
         #expect(offered.map(\.title) == [
-            "Open", "Check Now", "Set as Default", "Copy Address", "Pair a Phone…", "Edit…", "",
+            "Open", "Check Now", "Set as Default", "Copy Address", "Pair a Device…", "Edit…", "",
             "Remove…",
         ])
         #expect(offered.last?.isDestructive == true)

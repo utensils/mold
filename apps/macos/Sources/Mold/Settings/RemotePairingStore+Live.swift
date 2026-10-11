@@ -8,18 +8,23 @@ extension RemotePairingStore.Dependencies {
                     loadEnabled: { AppStorageSuite.defaults.bool(forKey: "managedRemoteAccessEnabled") },
                     saveEnabled: { AppStorageSuite.defaults.set($0, forKey: "managedRemoteAccessEnabled") },
                     save: { try ManagedRelayEnrollment.save($0) },
-                    enroll: { try await client.enroll(previous: $0) },
-                    revoke: { try await client.revoke($0) },
+                    enroll: { _ in
+                        #if MOLD_EMBEDDED_ENGINE
+                        var bytes = [UInt8](repeating: 0, count: 32)
+                        guard mold_secure_host_namespace(&bytes, bytes.count) == 0 else { throw ManagedRelayFailure.engineNotRunning }
+                        return try await client.discover(namespace: String(decoding: bytes, as: UTF8.self))
+                        #else
+                        throw ManagedRelayFailure.engineNotRunning
+                        #endif
+                    },
                     start: { owner, port in
                         #if MOLD_EMBEDDED_ENGINE
                         let code = owner.relayUrl.absoluteString.withCString { endpoint in
-                            owner.token.withCString { token in
                                 owner.hostId.withCString { host in
                                     owner.publicUrl.absoluteString.withCString { origin in
-                                        mold_relay_start(endpoint, token, host, port, origin)
+                                        mold_relay_start(endpoint, host, port, origin)
                                     }
                                 }
-                            }
                         }
                         guard code == 0 else { throw ManagedRelayFailure.connector }
                         #else
@@ -42,17 +47,21 @@ extension RemotePairingStore.Dependencies {
                         guard code == 0 else { throw ManagedRelayFailure.connector }
                         #endif
                     }, verify: { session, origin in
-                        guard let token = session.token else { throw ManagedRelayFailure.notReady }
-                        let endpoints = [ConnectionEndpoint(url: origin.absoluteString, kind: .relay)]
-                        // Each proof has a two-second bound. Waiting for the host
-                        // handshake is bounded too, and never consumes the token.
-                        for _ in 0..<10 {
+                        guard let invitation = session.secureInvitation,
+                              let namespace = origin.host?.split(separator: ".").first,
+                              invitation.namespace == String(namespace) else { throw ManagedRelayFailure.notReady }
+                        for _ in 0..<12 {
                             try Task.checkCancellation()
-                            if let _ = try? await ConnectionRoutes.select(endpoints: endpoints, secret: token,
-                                kind: "pairing", instanceID: session.instanceId) { return }
+                            #if MOLD_EMBEDDED_ENGINE
+                            if mold_relay_is_ready() { return }
+                            #endif
                             try await Task.sleep(for: .seconds(1))
                         }
                         throw ManagedRelayFailure.notReady
+                    }, localNetwork: { enabled in
+                        #if MOLD_EMBEDDED_ENGINE
+                        mold_local_network_set_enabled(enabled)
+                        #endif
                     })
     }
 }
@@ -65,6 +74,7 @@ extension RemotePairingStore {
             while !Task.isCancelled {
                 guard let self, let engine else { return }
                 if self.enabled, let host = engine.host {
+                    self.dependencies.localNetwork(true)
                     if self.pendingOperationNeeded(lastRenewal: lastRenewal) {
                         _ = try? await self.prepare(host, renew: true)
                         lastRenewal = .now

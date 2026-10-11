@@ -1,4 +1,6 @@
 use base64::Engine;
+#[cfg(target_os = "ios")]
+use mold_secure_client::RequestBuilderExt;
 
 fn validate_video_url(url: &str) -> Result<(), String> {
     if url.starts_with("https://") || url.starts_with("http://") {
@@ -409,9 +411,9 @@ async fn download_export(
             request = request.header("x-api-key", api_key);
         }
         let mut response = request
-            .send()
+            .secure_send()
             .await
-            .and_then(reqwest::Response::error_for_status)
+            .and_then(|response| response.error_for_status().map_err(Into::into))
             .map_err(|error| format!("could not export this print: {error}"))?;
         let mut file = std::fs::File::create(&staged)
             .map_err(|error| format!("could not stage the export: {error}"))?;
@@ -688,9 +690,9 @@ async fn download_and_save_video(url: String) -> Result<(), String> {
             .map_err(|error| format!("could not prepare the video download: {error}"))?;
         let mut response = client
             .get(&url)
-            .send()
+            .secure_send()
             .await
-            .and_then(reqwest::Response::error_for_status)
+            .and_then(|response| response.error_for_status().map_err(Into::into))
             .map_err(|error| format!("could not download the video: {error}"))?;
         let mut file = std::fs::File::create(&staged)
             .map_err(|error| format!("could not stage the video: {error}"))?;

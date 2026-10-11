@@ -153,13 +153,13 @@ case "$ACTION" in
     require_android_toolchain
     prepare_frontend
     cd "$MOBILE"
-    cargo tauri android build --debug --apk true --target aarch64 --ci "$@"
+    cargo tauri android build --debug --apk --target aarch64 --ci "$@"
     ;;
   test)
     require_android_toolchain
     prepare_frontend
     cd "$MOBILE"
-    cargo tauri android build --debug --apk true --target aarch64 --ci
+    cargo tauri android build --debug --apk --target aarch64 --ci
     cd gen/android
     ./gradlew --no-daemon :tauri-plugin-mold-mobile-native:connectedDebugAndroidTest "$@"
     ;;

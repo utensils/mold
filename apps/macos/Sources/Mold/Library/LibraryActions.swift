@@ -109,10 +109,10 @@ struct LibraryActions {
     /// A URL a player can open directly, ticketed if the machine needs it.
     /// `nil` on a failed ticket -- reported rather than thrown, so the viewer
     /// stays a place that shows pictures, not one that also handles errors.
-    func playableURL(for entry: LibraryEntry) async -> URL? {
+    func playableMedia(for entry: LibraryEntry) async -> PlayableMedia? {
         guard let backend = hosts.backend(for: entry.hostID) else { return nil }
         do {
-            return try await backend.playableURL(for: entry.print.filename,
+            return try await backend.playableMedia(for: entry.print.filename,
                                                  trashed: entry.print.trashedAt != nil)
         } catch {
             hosts.report(error, on: entry.hostID, doing: "play that clip")

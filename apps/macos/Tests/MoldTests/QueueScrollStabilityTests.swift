@@ -12,12 +12,13 @@ struct QueueScrollStabilityTests {
         backend.queueThumbnailPending = true
         let hosts = HostStore(hosts: [host]) { _ in backend }
         hosts.reachability[host.id] = .up(FakeFixtures.serverStatus())
+        let queue = QueueStore(hosts: hosts)
         let content = List {
             ForEach(0..<80) { index in
                 QueueRow(entry: FakeFixtures.queueEntry("scroll-\(index)", state: "queued"),
                          actions: QueueRowActions(), sourceHost: host, act: { _ in })
             }
-        }.listStyle(.inset).environment(hosts)
+        }.listStyle(.inset).environment(hosts).environment(queue)
         let view = NSHostingView(rootView: content)
         let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 650, height: 450),
                               styleMask: [.borderless], backing: .buffered, defer: false)

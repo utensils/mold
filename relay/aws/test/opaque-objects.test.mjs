@@ -1,0 +1,354 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createObjectBroker, objectEnvelope } from "../opaque-objects.mjs";
+import { encodeDocument, decodeDocument } from "../store-codec.mjs";
+function fixture(compressed = false) {
+  const rows = new Map(),
+    cleared = [],
+    heads = [],
+    operations = { get: 0, cas: 0 };
+  let clock = 1000,
+    ready = true,
+    clearFails = false;
+  const store = {
+    async get(k) {
+      operations.get++;
+      const row = rows.get(k);
+      return compressed && row
+        ? { ...decodeDocument(k, row), revision: row.revision }
+        : structuredClone(row);
+    },
+    async cas(k, r, v) {
+      operations.cas++;
+      if ((rows.get(k)?.revision ?? 0) !== r) return false;
+      rows.set(
+        k,
+        compressed
+          ? { ...encodeDocument(k, v), revision: r + 1 }
+          : structuredClone({ ...v, revision: r + 1 }),
+      );
+      return true;
+    },
+  };
+  const storage = {
+    origin: "https://test.s3.us-west-2.amazonaws.com",
+    async grant(key, value) {
+      return {
+        putUrl: `${this.origin}/${key}?put`,
+        getUrl: `${this.origin}/${key}?get`,
+        putHeaders: {
+          "content-type": "application/octet-stream",
+          "x-amz-checksum-sha256": Buffer.from(value.sha256, "hex").toString(
+            "base64",
+          ),
+          "if-none-match": "*",
+        },
+      };
+    },
+    async head(key) {
+      heads.push(key);
+      return ready ? { bytes: 100, sha256: "a".repeat(64) } : undefined;
+    },
+    async clear(key) {
+      if (clearFails) throw new Error("Unavailable");
+      cleared.push(key);
+    },
+  };
+  const broker = createObjectBroker({ store, storage, now: () => clock });
+  const ctx = {
+    namespace: "b".repeat(32),
+    sid: "session",
+    rid: "peer==",
+    sender: "host",
+    direction: "host",
+  };
+  const create = (seq = 0, requestId = String(seq).padStart(32, "0")) => ({
+    a: "object",
+    v: 3,
+    op: "create",
+    requestId,
+    sid: ctx.sid,
+    rid: ctx.rid,
+    seq,
+    count: 2,
+    bytes: 100,
+    sha256: "a".repeat(64),
+  });
+  return {
+    broker,
+    ctx,
+    create,
+    rows,
+    cleared,
+    heads,
+    operations,
+    storage,
+    setTime: (v) => (clock = v),
+    setReady: (v) => (ready = v),
+    setClearFails: (v) => (clearFails = v),
+  };
+}
+test("compressed quota CAS keeps concurrent grants bounded and exact on retry", async () => {
+  const f = fixture(true);
+  const requests = [0, 2, 4, 6, 8].map((seq) => f.create(seq));
+  const replies = await Promise.all(
+    requests.map((r) => f.broker.command(f.ctx, r)),
+  );
+  assert.equal(replies.filter((r) => r.op === "created").length, 4);
+  assert.equal(replies.filter((r) => r.code === "capacity").length, 1);
+  for (let i = 0; i < replies.length; i++) {
+    if (replies[i].op === "created")
+      assert.deepEqual(await f.broker.command(f.ctx, requests[i]), replies[i]);
+  }
+  assert.ok([...f.rows.values()].every((row) => row.codec.S === "deflate-v1"));
+});
+test("one MiB objects fit sixty-four frames without expanding the aggregate reservation budget", async () => {
+  const f = fixture(true);
+  assert.equal(f.broker.policy.maxBytes, 1048576);
+  assert.equal(f.broker.policy.maxCount, 64);
+  assert.equal(f.broker.policy.maxInFlightBytes, 1048576);
+  assert.equal(f.broker.policy.maxInFlightObjects, 4);
+  const request = { ...f.create(), count: 64, bytes: 1048576 };
+  const reply = await f.broker.command(f.ctx, request);
+  assert.equal(reply.op, "created");
+  assert.deepEqual(await f.broker.command(f.ctx, request), reply);
+  assert.equal((await f.broker.command(f.ctx, f.create(64))).code, "capacity");
+  const frame = {
+    a: "data",
+    v: 3,
+    sid: f.ctx.sid,
+    rid: f.ctx.rid,
+    seq: 0,
+    o: {
+      id: reply.id,
+      bytes: request.bytes,
+      count: 64,
+      sha256: request.sha256,
+      url: reply.getUrl,
+    },
+  };
+  assert.ok(objectEnvelope(frame));
+  assert.equal(
+    objectEnvelope({ ...frame, o: { ...frame.o, bytes: 1048577 } }),
+    undefined,
+  );
+  assert.equal(
+    objectEnvelope({ ...frame, o: { ...frame.o, count: 65 } }),
+    undefined,
+  );
+  assert.equal(
+    await f.broker.command(f.ctx, {
+      ...f.create(64),
+      count: 64,
+      bytes: 1048577,
+    }),
+    undefined,
+  );
+  assert.equal(
+    await f.broker.command(f.ctx, {
+      ...f.create(64),
+      count: 65,
+      bytes: 1048576,
+    }),
+    undefined,
+  );
+});
+test("allocation retries are idempotent and changes conflict; parallel allocations respect quota", async () => {
+  const f = fixture();
+  const a = await f.broker.command(f.ctx, f.create());
+  assert.equal(a.op, "created");
+  assert.deepEqual(await f.broker.command(f.ctx, f.create()), a);
+  assert.equal(
+    (await f.broker.command(f.ctx, { ...f.create(), bytes: 101 })).code,
+    "conflict",
+  );
+  const results = await Promise.all(
+    [1, 2, 3, 4, 5].map((n) => f.broker.command(f.ctx, f.create(n * 2))),
+  );
+  assert.equal(results.filter((x) => x.op === "created").length, 3);
+  assert.equal(results.filter((x) => x.code === "capacity").length, 2);
+});
+test("object forwarding verifies stored bytes, canonical URL and session-bound fields", async () => {
+  const f = fixture(),
+    a = await f.broker.command(f.ctx, f.create());
+  const frame = {
+    a: "data",
+    v: 3,
+    sid: f.ctx.sid,
+    rid: f.ctx.rid,
+    seq: a.seq,
+    o: {
+      id: a.id,
+      bytes: a.bytes,
+      sha256: a.sha256,
+      url: a.getUrl,
+      count: a.count,
+    },
+  };
+  assert.equal(
+    (
+      await f.broker.forward(f.ctx, {
+        ...frame,
+        o: { ...frame.o, url: "https://attacker.invalid/" },
+      })
+    ).code,
+    "conflict",
+  );
+  f.setReady(false);
+  assert.equal((await f.broker.forward(f.ctx, frame)).code, "not_ready");
+  f.setReady(true);
+  assert.deepEqual((await f.broker.forward(f.ctx, frame)).frame, frame);
+  assert.equal(
+    (await f.broker.forward({ ...f.ctx, sender: "different" }, frame)).code,
+    "conflict",
+  );
+});
+test("ACK cannot clear partially consumed bundles; whole ACK is idempotent and prevents stale allocation", async () => {
+  const f = fixture(),
+    a = await f.broker.command(f.ctx, f.create());
+  const frame = {
+    a: "data",
+    v: 3,
+    sid: f.ctx.sid,
+    rid: f.ctx.rid,
+    seq: 0,
+    o: {
+      id: a.id,
+      bytes: a.bytes,
+      sha256: a.sha256,
+      url: a.getUrl,
+      count: a.count,
+    },
+  };
+  await f.broker.forward(f.ctx, frame);
+  await f.broker.ack(f.ctx, { a: "ack", next: 1, ack_seq: 1 });
+  assert.equal(f.cleared.length, 0);
+  const release = {
+    a: "object",
+    v: 3,
+    op: "release",
+    requestId: "f".repeat(32),
+    sid: f.ctx.sid,
+    rid: f.ctx.rid,
+    id: a.id,
+  };
+  assert.equal((await f.broker.command(f.ctx, release)).code, "conflict");
+  const ack = { a: "ack", next: 2, ack_seq: 2 };
+  await f.broker.ack(f.ctx, ack);
+  await f.broker.ack(f.ctx, ack);
+  assert.equal(f.cleared.length, 1);
+  assert.deepEqual((await f.broker.forward(f.ctx, frame)).ack, ack);
+  assert.equal((await f.broker.command(f.ctx, f.create())).code, "conflict");
+});
+test("expired allocation is cleaned before capacity returns; cancellation is confined to exact direction", async () => {
+  const f = fixture();
+  await f.broker.command(f.ctx, f.create());
+  await f.broker.command(
+    { ...f.ctx, direction: "device", sender: "peer" },
+    f.create(),
+  );
+  await f.broker.cancel(f.ctx);
+  assert.equal(f.cleared.length, 1);
+  f.setTime(1301);
+  assert.equal(
+    (
+      await f.broker.command(
+        { ...f.ctx, direction: "device", sender: "peer" },
+        f.create(2),
+      )
+    ).op,
+    "created",
+  );
+  assert.equal(f.cleared.length, 2);
+});
+
+test("failed payload clearing retains quota until a successful tombstone retry", async () => {
+  const f = fixture();
+  for (let i = 0; i < 4; i++) await f.broker.command(f.ctx, f.create(i * 2));
+  f.setClearFails(true);
+  await assert.rejects(f.broker.cancel(f.ctx), /Unavailable/);
+  assert.equal(
+    [...f.rows.values()][0].members &&
+      Object.keys([...f.rows.values()][0].members).length,
+    4,
+  );
+  assert.equal(f.cleared.length, 0);
+  f.setClearFails(false);
+  await f.broker.cancel(f.ctx);
+  assert.equal(Object.keys([...f.rows.values()][0].members).length, 0);
+  assert.equal(f.cleared.length, 4);
+});
+
+test("fresh allocation and first forwarding each need one atomic quota mutation", async () => {
+  const f = fixture();
+  const a = await f.broker.command(f.ctx, f.create());
+  assert.equal(a.op, "created");
+  assert.deepEqual(f.operations, { get: 1, cas: 1 });
+  f.operations.get = 0;
+  f.operations.cas = 0;
+  const frame = {
+    a: "data",
+    v: 3,
+    sid: f.ctx.sid,
+    rid: f.ctx.rid,
+    seq: a.seq,
+    o: {
+      id: a.id,
+      bytes: a.bytes,
+      count: a.count,
+      sha256: a.sha256,
+      url: a.getUrl,
+    },
+  };
+  assert.deepEqual((await f.broker.forward(f.ctx, frame)).frame, frame);
+  assert.deepEqual(f.operations, { get: 1, cas: 1 });
+  assert.equal(f.heads.length, 1);
+  f.operations.get = 0;
+  f.operations.cas = 0;
+  assert.deepEqual((await f.broker.forward(f.ctx, frame)).frame, frame);
+  assert.deepEqual(f.operations, { get: 1, cas: 0 });
+  assert.equal(f.heads.length, 1);
+});
+test("release during object verification cannot publish a cleared reservation", async () => {
+  const f = fixture(),
+    a = await f.broker.command(f.ctx, f.create());
+  let start, finish;
+  const started = new Promise((r) => (start = r)),
+    resume = new Promise((r) => (finish = r));
+  f.storage.head = async () => {
+    start();
+    await resume;
+    return { bytes: 100, sha256: "a".repeat(64) };
+  };
+  const frame = {
+    a: "data",
+    v: 3,
+    sid: f.ctx.sid,
+    rid: f.ctx.rid,
+    seq: a.seq,
+    o: {
+      id: a.id,
+      bytes: a.bytes,
+      count: a.count,
+      sha256: a.sha256,
+      url: a.getUrl,
+    },
+  };
+  const forwarding = f.broker.forward(f.ctx, frame);
+  await started;
+  const release = await f.broker.command(f.ctx, {
+    a: "object",
+    v: 3,
+    op: "release",
+    requestId: "f".repeat(32),
+    sid: f.ctx.sid,
+    rid: f.ctx.rid,
+    id: a.id,
+  });
+  finish();
+  const outcome = await forwarding;
+  assert.ok(
+    (release.op === "released" && outcome.code === "expired") ||
+      (release.code === "conflict" && outcome.frame),
+  );
+});

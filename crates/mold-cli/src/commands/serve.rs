@@ -31,6 +31,7 @@ pub async fn run(
     gpus: Option<String>,
     queue_size: usize,
     discord: bool,
+    bootstrap: Option<mold_server::secure_pairing::bootstrap::BootstrapInput>,
 ) -> Result<()> {
     let config = Config::load_or_default();
 
@@ -140,7 +141,15 @@ pub async fn run(
     // rather than wait past systemd's stop timeout and be SIGKILLed — which
     // is what used to lose the whole queue.
     mold_server::allow_hard_shutdown_exit();
-    mold_server::run_server(bind, port, models_path, gpu_selection, queue_size).await
+    mold_server::run_server_with_bootstrap(
+        bind,
+        port,
+        models_path,
+        gpu_selection,
+        queue_size,
+        bootstrap,
+    )
+    .await
 }
 
 #[cfg(all(test, feature = "discord"))]

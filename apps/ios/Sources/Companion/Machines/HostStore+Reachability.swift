@@ -19,6 +19,7 @@ extension HostStore {
     }
 
     func refresh(_ original: MoldHost) async {
+        guard !Task.isCancelled else { return }
         await refreshCoordinator.run(original.id.uuidString) { [weak self] in
             guard let self, let current = self.host(original.id), !Task.isCancelled else { return }
             await self.refreshOnce(current)
@@ -26,11 +27,15 @@ extension HostStore {
     }
 
     private func refreshOnce(_ original: MoldHost) async {
+        let wasUp = isUp(original)
         defer {
             if let current = self.host(original.id), current.baseURL != original.baseURL {
                 stopWatching(original.id)
             }
             reconcileWatchers()
+            if let current = self.host(original.id), isUp(current), !wasUp || current.baseURL != original.baseURL {
+                for listener in listeners { listener(current.id, .resyncRequired) }
+            }
         }
         var host = original
         if let current = self.host(original.id) { host = current }

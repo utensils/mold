@@ -17,6 +17,9 @@ const config = {
     "studio/index.ts",
     // Build-time code is reachable through Vite, not application entry modules.
     "studio/vite/serverUrl.ts",
+    "studio/vite/secureMedia.ts",
+    // Registered by URL and emitted as a standalone service worker by Vite.
+    "studio/api/secureMediaWorker.js",
   ],
   // Exact paths and reasons only. Never add ordinary production modules merely
   // because a test imports them. These are retained test contracts/fixtures.

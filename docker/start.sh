@@ -17,8 +17,11 @@ fi
 # Ensure directories exist
 mkdir -p "${MOLD_HOME:-/root/.mold}" "${MOLD_MODELS_DIR:-/root/.mold/models}" "${HF_HOME:-/root/.cache/huggingface}"
 
-# Export environment for SSH sessions (RunPod convention)
-env | grep -E '^(MOLD_|HF_|CUDA|LD_LIBRARY)' > /etc/rp_environment 2>/dev/null || true
+# Export only non-secret settings for SSH sessions (RunPod convention). Host
+# identity bootstrap, API credentials and provider tokens remain in the service
+# process; they must never be copied into a shell startup file.
+(umask 077; env | grep -E '^(MOLD_(HOME|MODELS_DIR|PORT|BIND|LOG|WEB_DIR)|HF_HOME|CUDA[^=]*|LD_LIBRARY_PATH)=' > /etc/rp_environment) 2>/dev/null || true
+chmod 600 /etc/rp_environment 2>/dev/null || true
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  mold inference server"
@@ -43,5 +46,5 @@ fi
 
 # Start mold server
 exec mold serve \
-    --bind 0.0.0.0 \
+    --bind "${MOLD_BIND:-0.0.0.0}" \
     --port "${MOLD_PORT:-7680}"

@@ -42,28 +42,54 @@ extension HostStore {
 /// The inline banner: newest failure first, each with its own ✕.
 struct FailureBanner: View {
     @Environment(HostStore.self) private var hosts
+    @Environment(\.dynamicTypeSize) private var size
+    var horizontalInset: CGFloat = 16
 
     var body: some View {
         if let failure = hosts.failures.first {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Label {
-                    Text(failure.text).fixedSize(horizontal: false, vertical: true)
-                } icon: {
-                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            Group {
+                if size.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            warning
+                            Spacer(minLength: 0)
+                            dismiss(failure)
+                        }
+                        message(failure)
+                    }
+                } else {
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        warning
+                        message(failure)
+                        dismiss(failure)
+                    }
                 }
-                Spacer(minLength: 0)
-                Button { withAnimation { hosts.dismiss(failure) } } label: {
-                    Label("Dismiss", systemImage: "xmark").labelStyle(.iconOnly)
-                }
-                .buttonStyle(.borderless)
-                .frame(minWidth: 44, minHeight: 44)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
             .background(.regularMaterial, in: .rect(cornerRadius: 16))
-            .padding(.horizontal, 16)
+            .padding(.horizontal, horizontalInset)
             .accessibilityElement(children: .combine)
             .accessibilityAction(named: "Dismiss") { hosts.dismiss(failure) }
         }
+    }
+
+    private var warning: some View {
+        Image(systemName: "exclamationmark.triangle.fill")
+            .foregroundStyle(.orange).accessibilityHidden(true)
+    }
+
+    private func message(_ failure: HostFailure) -> some View {
+        Text(failure.text)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func dismiss(_ failure: HostFailure) -> some View {
+        Button { withAnimation { hosts.dismiss(failure) } } label: {
+            Label("Dismiss", systemImage: "xmark").labelStyle(.iconOnly)
+        }
+        .buttonStyle(.borderless)
+        .frame(minWidth: 44, minHeight: 44)
     }
 }

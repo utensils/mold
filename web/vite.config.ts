@@ -4,6 +4,7 @@ import { defineConfig } from "vitest/config";
 import vue from "@vitejs/plugin-vue";
 import tailwindcss from "@tailwindcss/vite";
 import { devServerUrlPlugin } from "../studio/vite/serverUrl";
+import { secureMediaPlugin } from "../studio/vite/secureMedia";
 
 // In dev we proxy /api + /health to the running mold server so we can
 // iterate on the UI against live data. Override the target with
@@ -23,7 +24,13 @@ const workspaceNodeModules = new URL("../node_modules", import.meta.url)
   .pathname;
 
 export default defineConfig({
-  plugins: [vue(), tailwindcss(), devServerUrlPlugin("Mold web")],
+  base: process.env.VITE_STANDALONE_STUDIO === "1" ? "/mold/studio/" : "/",
+  plugins: [
+    vue(),
+    tailwindcss(),
+    devServerUrlPlugin("Mold web"),
+    secureMediaPlugin(),
+  ],
   resolve: {
     alias: {
       "@ui": uiDir,
@@ -48,6 +55,7 @@ export default defineConfig({
   },
   test: {
     environment: "happy-dom",
+    environmentOptions: { happyDOM: { url: "http://127.0.0.1:3000" } },
     setupFiles: ["src/__tests__/setup.ts"],
     include: ["src/**/*.{test,spec}.ts"],
     coverage: {

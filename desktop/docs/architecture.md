@@ -294,6 +294,11 @@ muxes normally; only a generated AAC track is refused, by name). CI runs the
 or from a manual/nightly workflow — never on pull requests, where the macOS
 desktop gate provides the feedback.
 
+Desktop and mobile install secure transport hooks before mounting, then warm saved
+pairings in the background. A blocked WebKit credential-store read cannot hide the
+entire interface. Individual secure operations still await and validate their current
+pairing profile; startup never falls back to a plaintext remote connection.
+
 The devshell includes `cargo-tauri`, Bun tooling, `lsof`, and ImageMagick. Linux adds WebKitGTK, GTK, Soup, GStreamer, CUDA, and the runtime library paths required by the launched binary. macOS uses system WKWebView and scopes the system C compiler linker variables to desktop commands so the existing Apple build and signing flow is unchanged.
 
 The flake exports `mold-desktop` for the platform default GPU target. Linux also exports `mold-desktop-sm86` for RTX 3090/A40 and `mold-desktop-sm120` for RTX 50-series, plus an AppImage through `desktop-build`. There is intentionally no B200/sm100 desktop package; desktop clients manage those servers remotely. macOS keeps the existing application bundle, signing, and bundle-verification path. Frontend dependencies are pinned through bun2nix on both platforms.
@@ -302,7 +307,22 @@ Desktop-created RunPod machines use the same centralized GPU-family table as
 the CLI. Stable desktop releases fetch the exact release/source container
 manifest and submit `ghcr.io/utensils/mold@sha256:…`; a missing or inconsistent
 manifest fails provisioning without mutable fallback. Main-branch desktop
-nightlies use the corresponding rolling `latest*` map.
+nightlies use the corresponding rolling `latest*` map. Creation provisions the
+host identity and a grant for this installation through the authenticated provider
+request. Only the public device binding crosses into the provisioner; no client
+private key does. Before the paid request, an owner-only recovery journal saves
+the client pairing authority and unique pod name, never the host private identity.
+A lost create reply is recovered from the authenticated instance list by that exact
+name without replaying the paid mutation. Use in Mold saves the verified pairing
+through the ordinary secure store before connecting over the provider's direct
+WSS endpoint. Existing unpaired instances require a fresh host pairing code. Network-volume
+replacement reuses the current canonical pairing and only a public volume-to-host
+association; no host seed is recreated. Unknown existing volumes fail before a
+paid request. A volume created in Mold has one initial-bootstrap marker, consumed
+before provisioning. Unconfirmed requests block another paid create; an explicit
+clear dialog explains possible ongoing billing and lost automatic recovery, and
+a fresh provider inventory refuses to clear a matching pod. Successful pairing
+removes the recovery credential copy.
 
 **Rust toolchain:** the devshell's existing `rust-bin.stable.latest`. If a toolchain/Tauri transitive-dep breakage appears (Aethon had to pin 1.92 because 1.95 broke icu_provider/objc2), pin **only** in the desktop package derivation, never the shared devshell toolchain.
 

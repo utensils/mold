@@ -99,41 +99,43 @@ auto` to preserve useful alpha and remove opaque backgrounds, `on` to
 
 {{prompt_routes}}
 
-## Optional remote HTTPS relay
+## Encrypted remote connections
 
 ```bash
-mold relay connect --transport aws --relay-url wss://API.execute-api.REGION.amazonaws.com/production --target 127.0.0.1:7680
+mold relay connect --relay-url wss://API.execute-api.REGION.amazonaws.com/production --target 127.0.0.1:7680
+mold pairing create --output "$MOLD_HOME/secure/invitation.json"
+mold pair --invite-file /private/invitation.json --name "My client"
 ```
 
-This opens an outbound tunnel for an authenticated server. The enrollment token is
-read from an owner-only `MOLD_RELAY_TOKEN_FILE`; clients use the normal HTTPS
-`MOLD_HOST` and their Mold API key/pairing credential, never that token.
-The production gateway uses API Gateway, Lambda, DynamoDB and private S3.
-Large bodies/media use single-use staged transfers. Generation uses durable queue
-recovery and requires saved output; `--no-save` is refused before admission.
-For a direct local-development gateway:
+Start an authenticated host first. Its owner-only secure identity stays on the
+host; authorize its public signing key through the relay operator's IAM
+provisioning command. Configure MOLD_PUBLIC_URL and MOLD_SECURE_WEBSOCKET_URL
+on headless hosts; mold serve then owns its outbound connector. The separate
+relay connect command reads the identity, never an old relay token.
+The operator creates a one-use, two-minute invitation using MOLD_API_KEY (or
+@owner-only-key-file). Transfer the invitation privately. Each paired client
+stores its own key and revocable grant. MOLD_HOST selects a paired origin.
 
-```bash
-mold relay serve
-```
-
-Legacy gateway access publishes one explicitly enrolled machine. Managed
-enrollment isolates machines behind dedicated HTTPS root origins. Native macOS
-Settings ▸ Remote Access ▸ **Pair your phone** prepares This Mac’s outbound
-connector and verifies its managed proxy route before displaying a QR; gateway
-configuration and wildcard DNS/TLS deployment must be in place first. The engine
-stays authenticated on loopback. Stop Remote Access withdraws the route.
-Phone clients prefer advertised LAN, then Tailscale, then HTTPS proxy routes
-after credential-free instance proof; never invent routes a listener cannot serve.
-The proxy can see credentials/media; do not claim end-to-end encryption or a
-cloud GPU fallback.
-Use `MOLD_RELAY_DIAGNOSTICS=1` for safe connection/reconnect categories.
-See the deployment guide for safe TLS, streaming and metrics routing.
-
-Automatic roaming requires a server-minted paired credential. Operator API keys
-remain tied to the explicitly saved address; pair once to enable route learning.
-Probes expose a stable digest tag, so arbitrary operator keys never participate
-in anonymous route proofs. Plain HTTP still requires a trusted network.
+Direct and relay API traffic, uploads, progress and media use pinned Noise XX over
+LAN or the Lambda WebSocket relay. The cloud sees metadata and ciphertext, not
+API credentials or media. Bounded S3 objects may carry only the same encrypted
+wire bytes; object keys and cloud URLs never replace host identity verification.
+Old proxy credentials cannot be upgraded implicitly;
+upgrade and pair every client again. Plain HTTP is only a private loopback
+engine interface. Do not use raw remote curl or fall back to a cloud-provided
+host key. Uploads are bounded to 64 MiB; responses stream with backpressure.
+Interrupted mutations are never automatically replayed. RunPod create/run use
+owner-authenticated one-time bootstrap for fresh hosts and preserve the existing
+identity for known paired volumes. A private pre-create journal reconciles an
+uncertain paid response without replaying creation. Unknown existing volumes
+require pairing before replacement. An explicit MOLD_HOST selects that exact
+paired pod; provider readiness alone is not trusted Mold readiness. Native Remote Access
+opens the encrypted LAN listener and outbound connector; stopping it closes
+active sessions. HTTPS browsers may require WSS because of mixed-content rules.
+Lambda Labs deployment uses its existing verified SSH tunnel for end-to-end
+encryption. Its Docker container uses host networking and MOLD_BIND=127.0.0.1,
+so the tunneled engine interface remains actual loopback. Docker startup never
+copies API keys, bootstrap identities or provider tokens into SSH environment files.
 
 Gallery GUI exports on native iOS, Tauri and web support an optional GIF extra
 boundary pause through `pause_ms`; inspect the holding host's

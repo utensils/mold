@@ -34,6 +34,7 @@ mesh-matting = []
 mesh-delight = ["mesh-matting"]
 
 [dependencies]
+mold-ai-secure-client = { path = "../mold-secure-client" }
 anyhow = "1"
 http = "1"
 http-body-util = "0.1"
@@ -63,6 +64,8 @@ ureq = { version = "3", features = ["json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
+hex = "0.4"
+mold-ai-secure = { path = "../mold-secure" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tempfile = "3"

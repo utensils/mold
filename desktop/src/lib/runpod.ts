@@ -86,6 +86,7 @@ export interface RunPodNetworkVolumeUpdateInput {
 }
 
 export interface RunPodOverview {
+  unconfirmedRequests?: string[];
   configured: boolean;
   credentialSource: "app" | "environment" | "config" | null;
   account: RunPodAccount | null;

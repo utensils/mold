@@ -3,6 +3,7 @@ import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 import tailwindcss from "@tailwindcss/vite";
 import { devServerUrlPlugin } from "../studio/vite/serverUrl";
+import { secureMediaPlugin } from "../studio/vite/secureMedia";
 
 // The shared Mold Studio design system (tokens + primitives) lives outside
 // this Vite root at ../ui and is consumed by every surface. `vue` is pinned
@@ -14,7 +15,7 @@ const workspaceNodeModules = fileURLToPath(new URL("../node_modules", import.met
 
 // Tauri expects a fixed dev port; 1430 avoids web/'s 5173 and other local apps.
 export default defineConfig({
-  plugins: [vue(), tailwindcss(), devServerUrlPlugin("Mold desktop")],
+  plugins: [vue(), tailwindcss(), devServerUrlPlugin("Mold desktop"), secureMediaPlugin()],
   clearScreen: false,
   resolve: {
     alias: {

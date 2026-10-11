@@ -1,0 +1,34 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const __wbg_decodedrecord_free: (a: number, b: number) => void;
+export const __wbg_identity_free: (a: number, b: number) => void;
+export const __wbg_session_free: (a: number, b: number) => void;
+export const decodeRecord: (a: number, b: number, c: number) => void;
+export const decodedrecord_kind: (a: number) => number;
+export const decodedrecord_payload: (a: number, b: number) => void;
+export const decodedrecord_streamId: (a: number) => number;
+export const encodeRecord: (a: number, b: number, c: number, d: number, e: number) => void;
+export const identity_binding: (a: number, b: number) => void;
+export const identity_close: (a: number) => void;
+export const identity_fromBytes: (a: number, b: number, c: number) => void;
+export const identity_generate: (a: number) => void;
+export const identity_publicNoiseKey: (a: number, b: number) => void;
+export const identity_publicSigningKey: (a: number, b: number) => void;
+export const identity_sign: (a: number, b: number, c: number, d: number) => void;
+export const identity_toBytes: (a: number, b: number) => void;
+export const namespace: (a: number, b: number, c: number) => void;
+export const session_close: (a: number) => void;
+export const session_create: (a: number, b: number, c: number, d: number) => void;
+export const session_established: (a: number) => number;
+export const session_handshakeHash: (a: number, b: number) => void;
+export const session_handshakeRead: (a: number, b: number, c: number, d: number) => void;
+export const session_handshakeWrite: (a: number, b: number) => void;
+export const session_open: (a: number, b: number, c: number, d: number) => void;
+export const session_seal: (a: number, b: number, c: number, d: number) => void;
+export const verifySignature: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
+export const __wbindgen_export: (a: number) => void;
+export const __wbindgen_add_to_stack_pointer: (a: number) => number;
+export const __wbindgen_export2: (a: number, b: number) => number;
+export const __wbindgen_export3: (a: number, b: number, c: number) => void;
+export const __wbindgen_export4: (a: number, b: number, c: number, d: number) => number;

@@ -142,7 +142,7 @@ struct MachinesSettings: View {
     private func remove(_ host: MoldHost) {
         guard isManaged(host) else { return }
         pendingRemoval = MachineRemoval.destruction(of: host) {
-            hosts.remove(host)
+            guard hosts.remove(host) else { return }
             if selection == host.id { selection = nil }
         }
     }

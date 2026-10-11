@@ -19,7 +19,7 @@ extension RunCanvas {
             // `AVPlayer` builds its own requests and cannot carry `X-Api-Key`,
             // so the URL is minted with a media ticket on a keyed host -- the
             // same shared verb the Library plays through.
-            player = AVPlayer(url: try await backend.playableURL(for: filename))
+            player = AVPlayer(playerItem: try await backend.playableMedia(for: filename, trashed: false).playerItem())
         } catch {
             show(.unavailable(error.failureSentence))
             return

@@ -1,3 +1,5 @@
+import { forgetSecureHostForMachine } from "@studio/api/secureStore";
+import { standaloneStudio, studioPrimary } from "./secureStudio";
 import { forgetConnectionRoutes } from "@studio/api/connectionRoutes";
 import { originApiKey } from "./originAuth";
 /*
@@ -40,14 +42,20 @@ export interface HostEntry {
 
 /** The serving origin, always the immutable primary host. */
 export function originUrl(): string {
-  return typeof window !== "undefined" ? window.location.origin : "";
+  return typeof window !== "undefined"
+    ? standaloneStudio()
+      ? (studioPrimary()?.url ?? "")
+      : window.location.origin
+    : "";
 }
 
 export function originHost(): HostEntry {
-  const apiKey = originApiKey();
+  const primary = standaloneStudio() ? studioPrimary() : null;
+  const apiKey = primary ? null : originApiKey();
   return {
     id: ORIGIN_HOST_ID,
-    name: "this server",
+    name: primary?.name ?? "this server",
+    ...(primary?.instanceId ? { instanceId: primary.instanceId } : {}),
     url: originUrl(),
     ...(apiKey ? { apiKey } : {}),
   };
@@ -241,13 +249,22 @@ function writeStoredHosts(hosts: HostEntry[]): void {
 export function listHosts(): HostEntry[] {
   return [
     originHost(),
-    ...listStoredHosts().filter((host) => host.connected !== false),
+    ...listStoredHosts().filter(
+      (host) =>
+        host.connected !== false &&
+        (!standaloneStudio() || host.id !== studioPrimary()?.id),
+    ),
   ];
 }
 
 /** Every remembered host, including explicitly disconnected remotes. */
 export function listKnownHosts(): HostEntry[] {
-  return [originHost(), ...listStoredHosts()];
+  return [
+    originHost(),
+    ...listStoredHosts().filter(
+      (host) => !standaloneStudio() || host.id !== studioPrimary()?.id,
+    ),
+  ];
 }
 
 export function getHost(id: string): HostEntry | null {
@@ -341,6 +358,7 @@ export function addHost(input: AddHostInput): HostEntry {
 
 /** Remove a remembered alias when it proves to be the browser's origin. */
 export function reconcileOriginInstanceId(instanceId: string): void {
+  if (standaloneStudio()) return;
   const normalized = normalizedInstanceId(instanceId);
   if (!normalized) return;
   const stored = listStoredHosts();
@@ -418,9 +436,11 @@ export function updateHost(
 }
 
 /** Remove a stored host. The immutable primary is never removed. */
-export function removeHost(id: string): void {
-  forgetConnectionRoutes(id);
+export async function removeHost(id: string): Promise<void> {
   if (id === ORIGIN_HOST_ID) return;
+  const host = listStoredHosts().find((entry) => entry.id === id);
+  if (host) await forgetSecureHostForMachine(host.url, host.instanceId);
+  forgetConnectionRoutes(id);
   writeStoredHosts(listStoredHosts().filter((h) => h.id !== id));
 }
 

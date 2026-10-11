@@ -9,7 +9,7 @@ struct QueuePaginationTests {
         QueuePageStub.requests = []
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [QueuePageStub.self]
-        return HTTPBackend(host: MoldHost(name: "box", baseURL: URL(string: "http://box/mold")!),
+        return HTTPBackend.testing(host: MoldHost(name: "box", baseURL: URL(string: "http://box/mold")!),
                            session: URLSession(configuration: configuration))
     }
 

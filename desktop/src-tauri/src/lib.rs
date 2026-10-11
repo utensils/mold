@@ -10,6 +10,8 @@ pub mod notifications;
 pub mod relocate;
 pub mod runpod;
 pub mod secrets;
+#[path = "../../../apps/shared/secure_media_bridge.rs"]
+mod secure_media_bridge;
 pub mod server;
 pub mod settings;
 pub mod source_stash;
@@ -117,6 +119,8 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_window_state::Builder::default().build())
+        .manage(secure_media_bridge::MediaBridges::default())
+        .manage(secure_media_bridge::SecureForgetHook(runpod::forget_recovery))
         .setup(move |app| {
             // If Mold was launched from a disk image or a translocation path,
             // offer to move it to /Applications first — running from a transient
@@ -170,6 +174,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            secure_media_bridge::secure_media_open,
+            secure_media_bridge::secure_media_close,
+            secure_media_bridge::secure_host_register,
+            secure_media_bridge::secure_host_forget,
             commands::app_settings_get,
             commands::app_settings_set,
             commands::get_connection,
@@ -216,6 +224,10 @@ pub fn run() {
             commands::secret_clear,
             runpod::runpod_overview,
             runpod::runpod_create,
+            runpod::runpod_pairing,
+            runpod::runpod_volume_origin,
+            runpod::runpod_clear_unconfirmed,
+            runpod::runpod_remember_pairing,
             runpod::runpod_network_volume_create,
             runpod::runpod_network_volume_update,
             runpod::runpod_network_volume_delete,
@@ -231,6 +243,7 @@ pub fn run() {
                 }
             }
             if let tauri::WindowEvent::Destroyed = event {
+                window.state::<secure_media_bridge::MediaBridges>().close_window(window.label());
                 // Best-effort engine shutdown; chain jobs are crash-safe and
                 // resumable, so a hard exit is acceptable as fallback.
                 let state = window.state::<commands::AppState>();

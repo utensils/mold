@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import { ipc } from "../lib/ipc";
+import { provisionSecureRunPod } from "../lib/runpodSecure";
 import {
   emptyRunPodOverview,
   friendlyRunPodError,
@@ -83,8 +84,11 @@ export const useRunPodStore = defineStore("runpod", {
     },
     async create(input: RunPodCreateInput) {
       return runMutation(this, "create", async () => {
-        await ipc.runpodCreate(input);
-        await this.load();
+        try {
+          await provisionSecureRunPod(input);
+        } finally {
+          await this.load();
+        }
       });
     },
     async createNetworkVolume(input: RunPodNetworkVolumeCreateInput) {

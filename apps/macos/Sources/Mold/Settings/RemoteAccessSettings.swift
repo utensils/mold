@@ -28,11 +28,11 @@ struct RemoteAccessSettings: View {
                 } else {
                     SettingsMachineHeader(hosts: hosts, selectedMachine: $selectedMachine)
                 }
-                Button("Pair your phone") { pairingHost = selected }
+                Button("Pair a Device") { pairingHost = selected }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
                     .disabled(selected == nil || (selected?.id == MoldEngine.localHostID && remote.isStopping))
-                    .accessibilityHint("Show a QR code to connect your phone to the selected machine")
+                    .accessibilityHint("Show a QR code or link to connect another device securely")
             }
             if let host = selected {
                 Section("Connection Address") {
@@ -51,7 +51,7 @@ struct RemoteAccessSettings: View {
                                 .foregroundStyle(.secondary)
                         }
                     } else {
-                        Text("Connection routes have not been learned yet. Automatic roaming requires a paired client and a newer authenticated server. Manually entered API keys use their saved address.")
+                        Text("Connection routes have not been learned yet. Automatic roaming requires a paired client and a newer authenticated server. Older saved connections need a new pairing code.")
                             .foregroundStyle(.secondary)
                     }
                     Link("Set Up Remote Access", destination: URL(string: "https://utensils.io/mold/deployment/relay")!)
@@ -60,7 +60,7 @@ struct RemoteAccessSettings: View {
                     PairingSection(host: host, showsPairButton: false)
                 } else if host.id == MoldEngine.localHostID {
                     Section("This Mac") {
-                        Text("Pair your phone to connect through Mold proxy. This Mac’s engine stays on a private local address.")
+                        Text("Pair another device to connect directly on your local network, with the encrypted Mold proxy available when you’re away. Only paired devices can access this Mac.")
                             .foregroundStyle(.secondary)
                         if remote.canStopRemoteAccess {
                             Button("Stop Remote Access") { Task { await remote.disable() } }
