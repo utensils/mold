@@ -281,6 +281,10 @@ pub struct Pod {
     #[serde(default)]
     pub ports: serde_json::Value,
     #[serde(default)]
+    // The provider can echo bootstrap private keys and operator credentials.
+    // No client surface needs these after provisioning: discard them at the
+    // deserialization boundary, and never include them in public pod output.
+    #[serde(skip)]
     pub env: serde_json::Value,
     #[serde(default)]
     pub machine: Option<PodMachine>,
@@ -927,6 +931,29 @@ pub const GPU_PREFERENCE: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_environment_secrets_never_reach_pod_output_or_debug() {
+        for environment in [
+            serde_json::json!({"MOLD_SECURE_BOOTSTRAP":"private-host-seed", "MOLD_API_KEY":"private-operator-key", "HF_TOKEN":"private-download-token"}),
+            serde_json::json!([{"key":"MOLD_SECURE_BOOTSTRAP", "value":"private-host-seed"}]),
+        ] {
+            let pod: Pod =
+                serde_json::from_value(serde_json::json!({"id":"owned-pod", "env":environment}))
+                    .unwrap();
+            let public = serde_json::to_string(&pod).unwrap();
+            let debug = format!("{pod:?}");
+            for secret in [
+                "private-host-seed",
+                "private-operator-key",
+                "private-download-token",
+            ] {
+                assert!(!public.contains(secret));
+                assert!(!debug.contains(secret));
+            }
+            assert!(serde_json::to_value(&pod).unwrap().get("env").is_none());
+        }
+    }
 
     /// The rent confirm states RunPod's own on-demand rate for the cloud the
     /// pod will run on; a missing, zero, or non-finite price says nothing.
