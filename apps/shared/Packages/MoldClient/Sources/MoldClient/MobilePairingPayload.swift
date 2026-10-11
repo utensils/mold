@@ -64,8 +64,8 @@ public struct MobilePairingPayload: Hashable, Sendable {
     public var url: URL? {
         if mode == .regular {
             guard let origin = URL(string: baseURL), DirectHostAddress.isValid(origin), let token, let expiresAt else { return nil }
-            let pairs = [("version", String(Self.version)), ("mode", "regular"), ("base_url", baseURL),
-                         ("instance_id", instanceId), ("name", name), ("pairing_token", token), ("expires_at", String(expiresAt))]
+            let pairs = [("version", String(Self.version)), ("base_url", baseURL),
+                         ("instance_id", instanceId), ("name", name), ("mode", "regular"), ("pairing_token", token), ("expires_at", String(expiresAt))]
             return URL(string: "\(Self.link.absoluteString)#\(FormURLEncoded.queryString(pairs))")
         }
         guard let secure = secureInvitation, (try? secure.validate()) != nil else { return nil }

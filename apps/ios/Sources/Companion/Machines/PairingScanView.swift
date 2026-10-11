@@ -18,8 +18,13 @@ struct PairingScanView: View {
 
     enum Phase: Equatable {
         case scanning
+        case confirming(MobilePairingPayload)
         case pairing(String)
         case failed(String)
+
+        static func afterScan(_ payload: MobilePairingPayload) -> Self {
+            payload.mode == .regular ? .confirming(payload) : .pairing(payload.name)
+        }
     }
 
     var body: some View {
@@ -35,6 +40,20 @@ struct PairingScanView: View {
             }
             switch phase {
             case .scanning: EmptyView()
+            case let .confirming(payload):
+                Section {
+                    Text(payload.name).font(.headline)
+                    Text("\(payload.mode.title): \(payload.mode.explanation)").foregroundStyle(.secondaryText)
+                    Text(payload.baseURL).font(.body.monospaced()).textSelection(.enabled)
+                    Button("Pair") { pair(payload) }
+                        .disabled(payload.isExpired())
+                    Button("Scan Again") { phase = .scanning }
+                } header: {
+                    Text("Pair This Phone?")
+                } footer: {
+                    Text(payload.isExpired() ? "This code has expired. Make a new one on your machine." : "Pair only with a machine you trust: what you make on this phone is sent to it.")
+                        .foregroundStyle(.secondaryText)
+                }
             case let .pairing(name):
                 Label { Text("Pairing with \(name)…") } icon: { ProgressView() }
             case let .failed(reason):
@@ -64,7 +83,7 @@ struct PairingScanView: View {
 
     @ViewBuilder private var scanner: some View {
         if camera.status == .authorized && DataScannerViewController.isSupported && DataScannerViewController.isAvailable {
-            QRScanner(active: phase == .scanning) { redeem($0) }
+            QRScanner(active: phase == .scanning) { scan($0) }
                 .accessibilityLabel("Camera viewfinder for the pairing code")
         } else {
             VStack {
@@ -79,6 +98,17 @@ struct PairingScanView: View {
         }
     }
 
+    private func scan(_ raw: String) {
+        guard phase == .scanning else { return }
+        do {
+            let payload = try MobilePairingPayload.parse(raw)
+            phase = Phase.afterScan(payload)
+            if payload.mode == .secure { pair(payload) }
+        } catch {
+            phase = .failed(error.errorDescription ?? error.sentence)
+        }
+    }
+
     private func redeem(_ raw: String) {
         guard phase == .scanning else { return }
         let payload: MobilePairingPayload
@@ -86,6 +116,10 @@ struct PairingScanView: View {
             phase = .failed(error.errorDescription ?? error.sentence)
             return
         }
+        pair(payload)
+    }
+
+    private func pair(_ payload: MobilePairingPayload) {
         phase = .pairing(payload.name)
         Task {
             do {
