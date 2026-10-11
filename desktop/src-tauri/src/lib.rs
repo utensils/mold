@@ -120,6 +120,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(secure_media_bridge::MediaBridges::default())
+        .manage(secure_media_bridge::SecureForgetHook(runpod::forget_recovery))
         .setup(move |app| {
             // If Mold was launched from a disk image or a translocation path,
             // offer to move it to /Applications first — running from a transient

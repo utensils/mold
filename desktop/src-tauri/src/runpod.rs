@@ -418,6 +418,12 @@ pub async fn runpod_create(
     secure::launch_with_profile(&client, &state.secrets, request, &device, resume).await
 }
 
+/// Durable recovery participates in the caller-validated shared Forget boundary.
+pub fn forget_recovery(window: &tauri::WebviewWindow, namespace: &str) -> Result<(), String> {
+    use tauri::Manager;
+    secure::forget_namespace(&window.state::<AppState>().secrets, namespace)
+}
+
 #[tauri::command]
 pub async fn runpod_clear_unconfirmed(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let _provision = PROVISION.lock().await;

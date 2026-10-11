@@ -322,6 +322,23 @@ pub(super) fn recover(
     }
     Ok(None)
 }
+pub(super) fn forget_namespace(secrets: &SecretStore, namespace: &str) -> Result<(), String> {
+    for raw in secrets.runpod_bootstraps() {
+        let value: Journal = serde_json::from_str(&raw)
+            .map_err(|_| "Saved RunPod recovery state is unreadable.".to_string())?;
+        if value.profile.namespace == namespace {
+            secrets
+                .clear(&format!("runpod-bootstrap.{}", value.id))
+                .map_err(|e| e.to_string())?;
+            if let Some(id) = value.pod_id {
+                secrets
+                    .clear(&format!("runpod-pairing.{id}"))
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
 pub(super) fn forget(secrets: &SecretStore, id: &str) -> Result<(), String> {
     origin(id)?;
     let name = format!("runpod-pairing.{id}");
@@ -547,6 +564,21 @@ mod tests {
         clear_unconfirmed(&secrets, &[]).unwrap();
         assert!(pending_names(&secrets).is_empty());
         assert_eq!(client.calls.load(Ordering::SeqCst), 1);
+    }
+    #[tokio::test]
+    async fn forgetting_pairing_purges_recovery_authority_after_an_incomplete_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = SecretStore::new(dir.path().into());
+        let client = Client {
+            calls: AtomicUsize::new(0),
+            fail: false,
+        };
+        let result = launch(&client, &secrets, request(), &device())
+            .await
+            .unwrap();
+        forget_namespace(&secrets, result.profile["namespace"].as_str().unwrap()).unwrap();
+        assert!(secrets.runpod_bootstraps().is_empty());
+        assert!(saved(&secrets, "pod123", &device()).unwrap().is_none());
     }
     #[tokio::test]
     async fn failing_the_recovery_write_makes_zero_paid_requests() {
