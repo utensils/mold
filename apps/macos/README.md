@@ -10,9 +10,10 @@ The executable inside keeps the short name `Mold`.
 
 Mold Studio declares a single-instance Launch Services policy, so notification clicks and repeated app opens reuse the running application. A notification brings the main window forward on the finished print or Queue; clicks received during startup wait until navigation is ready.
 
-It is the **recommended Mac download** and the replacement for the Tauri
-`desktop/` app on macOS, which is now the legacy Mac build (kept for Macs that
-cannot run macOS 26) and remains the default on Windows and Linux. Releases
+It is one of two Mac desktop apps: it sits beside the cross-platform Tauri
+`desktop/` app (Mold Desktop, macOS 12+, also the Windows and Linux app), and
+the public [Download page](https://utensils.io/mold/download#mac) presents the
+two as peers. Releases
 attach it under the stable name `Mold-Studio-macos-arm64.dmg` as well, so
 `https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg`
 always fetches the newest stable build. The rolling `latest` prerelease also

@@ -82,6 +82,7 @@ export default defineConfig({
     logo: '/logo-transparent.png',
 
     nav: [
+      { text: 'Download', link: '/download' },
       { text: 'Guide', link: '/guide/' },
       { text: 'Models', link: '/models/' },
       { text: 'API', link: '/api/' },
@@ -96,6 +97,7 @@ export default defineConfig({
           text: 'Getting Started',
           items: [
             { text: 'Introduction', link: '/guide/' },
+            { text: 'Download', link: '/download' },
             { text: 'Installation', link: '/guide/installation' },
             { text: 'Configuration', link: '/guide/configuration' },
           ],

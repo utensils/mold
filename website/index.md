@@ -15,14 +15,8 @@ hero:
       text: Get Started
       link: /guide/
     - theme: alt
-      text: Mold Studio for Mac · Latest Release
-      link: https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg
-    - theme: alt
-      text: Mold Studio for Mac · Latest Nightly
-      link: https://github.com/utensils/mold/releases/download/latest/Mold-Studio-macos-arm64.dmg
-    - theme: alt
-      text: Windows Nightly
-      link: https://github.com/utensils/mold/releases/download/latest/Mold-windows-x64-self-signed.exe
+      text: Download
+      link: /download
     - theme: alt
       text: View Models
       link: /models/
@@ -51,15 +45,15 @@ features:
     details: Single binary built on candle. NVIDIA GPUs on Linux and locally
       built x64 Windows packages use CUDA; Apple Silicon uses Metal. No Python
       or libtorch.
-    link: https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg
-    linkText: Mold Studio for Mac · Latest Release
+    link: /download
+    linkText: Download for Mac, Windows or Linux
   - icon:
       src: /icons/windows.svg
     title: Windows Desktop + CLI
     details: Self-signed x64 Desktop and CPU/remote-client CLI builds ship with
       a pinned public certificate and explicit trust instructions.
-    link: https://github.com/utensils/mold/releases/download/latest/Mold-windows-x64-self-signed.exe
-    linkText: Download the Windows nightly
+    link: /download#windows
+    linkText: Download for Windows
   - icon:
       src: /icons/server.svg
     title: Client-Server
@@ -124,38 +118,38 @@ pipeline, automated in CI, or called by an agent. `mold serve`, REST/SSE, MCP,
 and the desktop and web surfaces all extend that same engine and contract;
 the iPhone and Android apps use the same contract as remote-only clients.
 
-## Mold Studio for desktop
+## Desktop apps
 
 Create locally on Apple Silicon or NVIDIA, or connect every Mold machine you
-use. On a Mac, download **[Mold Studio](/guide/macos)** — the native macOS app,
-with mold's Metal engine built in, a merged multi-machine Library, queues,
-models, and machines in one window. On Windows and Linux the desktop app keeps
-generation, a unified multi-host Library, model discovery, live downloads,
-queues, telemetry, and RunPod in one focused workspace; the same app remains
-available as the legacy Mac download for Macs that cannot run macOS 26.
+use. On a Mac there are two desktop apps, side by side: **[Mold
+Studio](/guide/macos)**, built natively for macOS 26, and **[Mold
+Desktop](/guide/desktop)**, the same app that runs on Windows and Linux. Both
+carry mold's Metal engine, a merged multi-machine Library, queues, models and
+machines in one window.
 
 [![Mold Studio desktop app generating an owl](/screenshots/mold-studio-desktop.png)](/guide/desktop)
 
 <div class="platform-downloads">
-  <a class="platform-download platform-download--primary" href="https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg">
+  <a class="platform-download" href="https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg">
     <img src="/icons/apple.svg" alt="" />
-    <span><strong>Mold Studio for Mac</strong><small>Recommended · native · Apple Silicon · macOS 26+</small></span>
+    <span><strong>Mold Studio for Mac</strong><small>Built natively for macOS · Apple Silicon · macOS 26+</small></span>
   </a>
   <a class="platform-download" href="https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg">
     <img src="/icons/apple.svg" alt="" />
-    <span><strong>macOS Desktop (legacy)</strong><small>Tauri app · for Macs before macOS 26</small></span>
+    <span><strong>Mold Desktop for Mac</strong><small>Same app as Windows and Linux · Apple Silicon · macOS 12+</small></span>
   </a>
-  <a class="platform-download" href="https://github.com/utensils/mold/releases/download/latest/Mold-windows-x64-self-signed.exe">
+  <a class="platform-download" href="https://github.com/utensils/mold/releases/latest/download/Mold-windows-x64-self-signed.exe">
     <img src="/icons/windows.svg" alt="" />
-    <span><strong>Windows Desktop (Nightly)</strong><small>Self-signed NSIS installer · x64</small></span>
+    <span><strong>Mold Desktop for Windows</strong><small>Installer · x64</small></span>
   </a>
-  <a class="platform-download" href="https://github.com/utensils/mold/releases/download/latest/mold-x86_64-pc-windows-msvc-cpu.zip">
-    <img src="/icons/terminal.svg" alt="" />
-    <span><strong>Windows CLI (Nightly)</strong><small>Self-signed CPU / remote client · x64</small></span>
+  <a class="platform-download" href="https://github.com/utensils/mold/releases/latest/download/mold-desktop-x86_64-unknown-linux-gnu-cpu.tar.gz">
+    <img src="/icons/linux.svg" alt="" />
+    <span><strong>Mold Desktop for Linux</strong><small>x86_64 · for remote GPU machines</small></span>
   </a>
 </div>
 
-**[Mold Studio for Mac](/guide/macos)** · **[Explore the desktop app](/guide/desktop)** · **[Windows CLI instructions](/guide/installation#windows-cli)**
+**[All downloads](/download)**, including iPhone, iPad, Android, the CLI and
+nightly builds · **[Which Mac app?](/download#mac)**
 
 ## Quick Example
 

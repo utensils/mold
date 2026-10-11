@@ -1,7 +1,6 @@
 # Mold Studio for Mac
 
-Mold Studio is the native macOS app for mold and the **recommended download on
-a Mac**. It is written in Swift, carries mold's own Rust engine running on
+Mold Studio is mold's app built natively for macOS. It is written in Swift, carries mold's own Rust engine running on
 Metal, and talks to every other `mold serve` machine you use over the same
 HTTP API.
 
@@ -23,13 +22,11 @@ itself through Sparkle: **Mold ▸ Check for Updates…** sits under About Mold.
 always downloads the newest build from `main`. Version-pinned DMGs and
 `SHA256SUMS` remain on the [releases page](https://github.com/utensils/mold/releases).
 
-::: tip Coming from the Tauri desktop app?
-Mold Studio installs as **Mold Studio.app**; the older cross-platform desktop
-app is **Mold.app**. Both can sit in /Applications at once while you move
-over. The Tauri app is still published as the
-[legacy Mac download](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)
-for Macs that cannot run macOS 26, and remains the default desktop app on
-[Windows and Linux](/guide/desktop).
+::: tip Two desktop apps on the Mac
+Mold Studio installs as **Mold Studio.app**. [Mold Desktop](/guide/desktop),
+the same app that runs on Windows and Linux, installs as **Mold.app** and runs
+on macOS 12 or newer. Both can sit in /Applications at once and connect to the
+same machines. [Which one?](/download#mac)
 :::
 
 ## Requirements

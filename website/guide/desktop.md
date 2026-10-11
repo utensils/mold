@@ -5,10 +5,11 @@ The remote-only companions have dedicated [iPhone](/guide/iphone) and
 [Android](/guide/android) guides with download, pairing, and setup instructions.
 :::
 
-::: tip On a Mac? Use Mold Studio.
-[Mold Studio for Mac](/guide/macos) is the native macOS app and the
-recommended Mac download. This page covers the cross-platform Tauri desktop
-app, which is the default on Windows and Linux and the legacy app on macOS.
+::: tip Two desktop apps on the Mac
+This page covers **Mold Desktop**, the app that runs on Mac, Windows and
+Linux. On a Mac running macOS 26 you can also use
+[Mold Studio for Mac](/guide/macos), built natively for macOS; the two install
+side by side. [Which one?](/download#mac)
 :::
 
 The Mold desktop app runs on macOS, Linux, and Windows. It puts
@@ -58,60 +59,46 @@ The existing collection shelf and filters remain available.
 ## Download
 
 <div class="platform-downloads">
-  <a class="platform-download platform-download--primary" href="https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg">
-    <img src="/icons/apple.svg" alt="" />
-    <span><strong>Mold Studio for Mac</strong><small>Recommended · native · Apple Silicon · macOS 26+</small></span>
-  </a>
   <a class="platform-download" href="https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg">
     <img src="/icons/apple.svg" alt="" />
-    <span><strong>macOS Desktop (legacy)</strong><small>Tauri app · for Macs before macOS 26</small></span>
+    <span><strong>Mold Desktop for Mac</strong><small>Apple Silicon · macOS 12+</small></span>
   </a>
-  <a class="platform-download" href="https://github.com/utensils/mold/releases/download/latest/Mold-windows-x64-self-signed.exe">
+  <a class="platform-download" href="https://github.com/utensils/mold/releases/latest/download/Mold-windows-x64-self-signed.exe">
     <img src="/icons/windows.svg" alt="" />
-    <span><strong>Windows Desktop (Nightly)</strong><small>Self-signed NSIS installer · x64</small></span>
+    <span><strong>Mold Desktop for Windows</strong><small>Self-signed NSIS installer · x64</small></span>
   </a>
-  <a class="platform-download" href="https://github.com/utensils/mold/releases/download/latest/mold-x86_64-pc-windows-msvc-cpu.zip">
-    <img src="/icons/terminal.svg" alt="" />
-    <span><strong>Windows CLI (Nightly)</strong><small>Self-signed CPU / remote client · x64</small></span>
+  <a class="platform-download" href="https://github.com/utensils/mold/releases/latest/download/mold-desktop-x86_64-unknown-linux-gnu-cpu.tar.gz">
+    <img src="/icons/linux.svg" alt="" />
+    <span><strong>Mold Desktop for Linux</strong><small>x86_64 · for remote GPU machines</small></span>
   </a>
 </div>
 
-Every tagged release ships two signed, notarized, stapled macOS DMGs:
-**Mold Studio** (`Mold-Studio-macos-arm64.dmg`), the native app and the
-recommended Mac download, and this Tauri app (`Mold-macos-arm64.dmg`), kept as
-the legacy Mac download for Macs that cannot run macOS 26. Open the DMG and
-drag the app to Applications; no quarantine dance needed. The two install as
-**Mold Studio.app** and **Mold.app**, so both can sit side by side. Version-pinned
-downloads and `SHA256SUMS` are on the
+Every tagged release ships the Mac DMG signed, notarized and stapled: open it
+and drag **Mold.app** to Applications; no quarantine step is needed. It sits
+beside **Mold Studio.app** if you also use [Mold Studio for Mac](/guide/macos).
+Nightly builds, version-pinned downloads and `SHA256SUMS` are on the
+[Download page](/download#nightly-builds) and the
 [releases page](https://github.com/utensils/mold/releases).
 
-The current Windows downloads are nightly, self-signed CPU/remote-client builds.
-Follow the [Windows trust instructions](#windows) before running them. The
+The Windows installer and CLI are self-signed CPU/remote-client builds,
+published with every tagged release and nightly by the `Windows Nightly`
+workflow (`.github/workflows/windows-nightly.yml`) to the rolling `latest`
+prerelease; the `Desktop` workflow additionally keeps a 14-day CI artifact of
+the same installer. Follow the [Windows trust instructions](#windows) before
+running them; there is not yet a publicly trusted Windows installer. The
 [Windows CLI installation steps](/guide/installation#windows-cli) cover PATH
-setup and connecting to a GPU host. You can also build from source with the
-platform commands below.
+setup and connecting to a GPU host.
 
-Linux builds are currently source/CI distributions: `nix build
-.#mold-desktop` produces the native sm_89 package, with
+The Linux download is a GPU-free archive for remote GPU hosts,
+`mold-desktop-x86_64-unknown-linux-gnu-cpu.tar.gz` (a `usr/` tree with the
+binary, launcher entry and icons); on Arch it is the `mold-ai-desktop-bin` AUR
+package. For local CUDA generation, install `mold-ai-desktop` from the AUR
+(see [Arch Linux / AUR](/guide/installation#arch-linux-aur)) or build with Nix:
+`nix build .#mold-desktop` produces the sm_89 package, with
 `.#mold-desktop-sm86` for RTX 3090/A40 and `.#mold-desktop-sm120` for RTX
-50-series. B200/sm100 is server-only; desktop connects to it remotely.
+50-series. B200/sm100 is server-only; the desktop connects to it remotely.
 `desktop-build` produces the native package on NixOS and a CUDA AppImage on
-conventional Linux. Tagged releases do not publish the AppImage yet.
-
-Tagged releases do publish a GPU-free Linux desktop archive for remote GPU
-hosts, `mold-desktop-x86_64-unknown-linux-gnu-cpu.tar.gz` (a `usr/` tree with
-the binary, launcher entry and icons). On Arch Linux, install it from the AUR
-as `mold-ai-desktop-bin`, or build the CUDA app from source with
-`mold-ai-desktop` (see [Arch Linux / AUR](/guide/installation#arch-linux-aur)).
-
-Windows currently ships through the rolling nightly release. The
-`Windows Nightly` workflow (`.github/workflows/windows-nightly.yml`) publishes
-the self-signed installer, the CLI zip, and the public certificate to the
-rolling `latest` prerelease; the `Desktop` workflow additionally keeps a
-14-day CI artifact of the same installer.
-There is not yet a publicly trusted Windows installer; see [Windows](#windows)
-below for the toolchain, trust steps, and the capabilities that are still
-absent.
+conventional Linux; tagged releases do not publish the AppImage.
 
 ## What it is
 
