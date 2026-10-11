@@ -30,6 +30,14 @@ struct PictureIntake {
     /// The sentence beside the well, or `nil` to clear it. Beside the control
     /// that collected the file rather than in a 422 after the upload (02#7).
     let report: (String?) -> Void
+    var session: PictureImportSession? = nil
+
+    private func accept(_ picture: ImportedPicture) throws {
+        try Task.checkCancellation()
+        guard session?.isCurrent != false else { throw CancellationError() }
+        deliver(picture)
+        session?.advance()
+    }
 
     /// A drop is ORDERED, and so is the strip: a task per file appended in
     /// COMPLETION order, and a small local file could overtake a Library print
@@ -38,9 +46,11 @@ struct PictureIntake {
     func drops(_ drops: [PictureDrop]) -> Task<Void, Never> {
         run(drops) { drop in
             do {
-                deliver(try await PictureSource.bytes(
+                try accept(try await PictureSource.bytes(
                     of: drop, accepting: accepting, hosts: hosts, library: library))
                 return nil
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 // A print that would not come off its machine is that
                 // machine's failure, reported where every other one is.
@@ -55,7 +65,7 @@ struct PictureIntake {
     /// transcode and the base64 do not (02#10).
     func files(_ urls: [URL]) -> Task<Void, Never> {
         run(urls) { url in
-            deliver(try await PictureImport.load(url, accepting: accepting))
+            try accept(try await PictureImport.load(url, accepting: accepting))
             return nil
         }
     }
@@ -68,7 +78,7 @@ struct PictureIntake {
         return run([data]) { data in
             guard let picked = try await PicturePaste.read(data, accepting: accepting)
             else { return nil }
-            deliver(picked)
+            try accept(picked)
             return nil
         }
     }
@@ -88,7 +98,7 @@ struct PictureIntake {
             report(nil)
             var failures: [String] = []
             for item in items {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, session?.isCurrent != false else { return }
                 do {
                     if let refusal = try await each(item) { failures.append(refusal) }
                 } catch is CancellationError {
@@ -97,7 +107,7 @@ struct PictureIntake {
                     failures.append(error.failureSentence)
                 }
             }
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, session?.isCurrent != false else { return }
             report(Self.summary(of: failures))
         }
     }
@@ -112,4 +122,41 @@ struct PictureIntake {
         default: "\(failures.count) of those files couldn't be used."
         }
     }
+}
+
+/// A chooser transaction tracks inputs and destination, while leaving scalar edits live.
+/// Standalone previews may omit a controller; the real Generate tree always supplies it.
+@MainActor
+final class PictureImportSession {
+    private let controller: GenerateController?
+    private var media: DraftMedia?
+    private let model: String?
+    private let host: UUID?
+    private let machine: UUID?
+    private let recipe: String?
+
+    /// Opening a new chooser supersedes earlier work immediately, before its
+    /// destination snapshot is captured or a modal panel can yield execution.
+    static func begin(controller: GenerateController?, replacing task: inout Task<Void, Never>?) -> PictureImportSession {
+        task?.cancel()
+        task = nil
+        return PictureImportSession(controller: controller)
+    }
+
+    init(controller: GenerateController?) {
+        self.controller = controller
+        media = controller?.draft.media
+        model = controller?.modelName
+        host = controller?.hostID
+        machine = controller?.machineChoice
+        recipe = controller?.recipeID
+    }
+
+    var isCurrent: Bool {
+        controller?.draft.media == media && controller?.modelName == model
+            && controller?.hostID == host && controller?.machineChoice == machine
+            && controller?.recipeID == recipe
+    }
+
+    func advance() { media = controller?.draft.media }
 }

@@ -12,7 +12,16 @@ import SwiftUI
 // second element for the badge on a menu that already says what it opens.
 extension PictureWell {
     @ViewBuilder var clickable: some View {
-        if opensOnClick {
+        if let actionTitle {
+            Menu {
+                RowActionMenu(actions: rows, perform: route)
+            } label: {
+                Label(actionTitle, systemImage: "plus")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 6)
+            }
+            .menuStyle(.button)
+        } else if opensOnClick {
             Menu {
                 RowActionMenu(actions: rows, perform: route)
             } label: {

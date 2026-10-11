@@ -19,6 +19,13 @@ final class LibraryStore {
     var unreadCount: Int { unreadMedia.count }
     @ObservationIgnored var unreadCountChanged: ((Int) -> Void)?
 
+    func finishVisit(_ ids: Set<PrintID>) {
+        guard !ids.isEmpty else { return }
+        unreadMedia.markSeen(ids)
+        unreadMedia.save(to: readDefaults)
+        unreadCountChanged?(unreadCount)
+    }
+
     func markViewed(_ id: PrintID) {
         if let tile = tile(containing: id) { unreadMedia.view(tile) }
         else { unreadMedia.view(id) }

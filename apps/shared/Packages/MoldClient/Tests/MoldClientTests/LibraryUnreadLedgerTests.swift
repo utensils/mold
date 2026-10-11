@@ -13,6 +13,37 @@ struct LibraryUnreadLedgerTests {
         ledger.observe(entries: merged, visible: visible ?? merged, loadedHosts: [one, two], presentHosts: [one, two])
     }
 
+    @Test func libraryVisitReadsCapturedCopiesOnlyOnDeparture() throws {
+        var ledger = LibraryUnreadLedger()
+        observe([], ledger: &ledger)
+        let shown = try entry("shown.png", host: one), mirror = try entry("shown.png", host: two)
+        let hidden = try entry("hidden.png", host: one), later = try entry("later.png", host: one)
+        let merged = LibraryMerge.merge([shown, mirror], localHost: nil)
+        observe([shown, mirror, hidden], ledger: &ledger)
+        var visit = LibraryVisit()
+        visit.capture(merged)
+        #expect(ledger.isUnread(shown))
+        observe([shown, mirror, hidden, later], ledger: &ledger)
+        ledger.markSeen(visit.finish())
+        #expect(!ledger.isUnread(shown))
+        #expect(!ledger.isUnread(mirror))
+        #expect(ledger.isUnread(hidden))
+        #expect(ledger.isUnread(later))
+        #expect(visit.finish().isEmpty)
+    }
+
+    @Test func cachedTrashToAllCapturesDespiteIdenticalResolvedQuery() throws {
+        let image = try entry("cached.png", host: one)
+        // Scope, not just the resolved query/revision, controls visit capture.
+        #expect(LibraryScope.trash.resolve(LibraryQuery(), shelves: [], hiddenCollectionIDs: [:])
+            == LibraryScope.all.resolve(LibraryQuery(), shelves: [], hiddenCollectionIDs: [:]))
+        var visit = LibraryVisit()
+        visit.capture([image], scope: .trash)
+        #expect(visit.finish().isEmpty)
+        visit.capture([image], scope: .all)
+        #expect(visit.finish() == [image.id])
+    }
+
     @Test func firstInventoryBaselineThenViewingAndVisitSeenPersist() throws {
         var ledger = LibraryUnreadLedger()
         let old = try entry("old.png", host: one)

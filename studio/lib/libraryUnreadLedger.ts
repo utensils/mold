@@ -1,5 +1,19 @@
+/** Per mounted Library visit: capture displayed projections, clear only on exit.
+ * Physical IDs make leaving independent of later polling or filter changes. */
+export class LibraryVisit {
+  private copies = new Set<string>();
+  capture(groups: readonly (readonly string[])[]): void {
+    for (const group of groups) for (const key of group) this.copies.add(key);
+  }
+  finish(): string[] {
+    const copies = [...this.copies];
+    this.copies.clear();
+    return copies;
+  }
+}
+
 /** Device/browser-local viewed history. A newly connected host's first successful
- * inventory is a compatibility baseline; later arrivals require individual viewing.
+ * inventory is a compatibility baseline; later arrivals remain new until viewed or a Library visit ends.
  * Groups contain physical copy keys supplied by the gallery's merge authority. */
 export class LibraryUnreadLedger {
   known = new Map<string, Set<string>>();

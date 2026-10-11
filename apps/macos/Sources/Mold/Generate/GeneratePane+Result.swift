@@ -31,10 +31,8 @@ extension GeneratePane {
     /// answer, where an absent `max_count` is UNBOUNDED.
     private var referenceRoom: Bool {
         guard let recipe else { return false }
-        let layout = ImageConditioningWells
-            .layout(recipe: recipe, model: selectedModel, media: controller.draft.media)
-        guard let references = layout.references else { return false }
-        return references.hasRoom(for: controller.draft.media.editImages.count)
+        return LibraryAttachmentOffer.resolve(recipe: recipe, model: selectedModel,
+                                              media: controller.draft.media).canAddReference
     }
 
     /// The machine the result is ON. Never `host`: that is the pane's current
@@ -77,31 +75,55 @@ extension GeneratePane {
     /// imported file is -- the draft holds what will be sent.
     private func attachResult(_ result: BatchResult, as kind: LibraryAttachmentKind) async {
         let fence = DraftAttachmentFence(controller: controller, reuse: reuse)
+        let origin = finishedHost
+        let originInstance = origin.flatMap { hosts.instanceID(of: $0.id) }
+        let target = host
+        let targetInstance = target.flatMap { hosts.instanceID(of: $0.id) }
+        func isCurrent() -> Bool {
+            fence.permits(controller, reuse: reuse) && finishedHost == origin
+                && origin.flatMap { hosts.instanceID(of: $0.id) } == originInstance
+                && host == target && target.flatMap { hosts.instanceID(of: $0.id) } == targetInstance
+        }
         guard let data = await bytes(of: result), let filename = result.filename else { return }
-        guard fence.permits(controller, reuse: reuse), let recipe else { return }
+        guard isCurrent(), let recipe else { return }
         let picked: ImportedPicture
+        let typedReference: GenerationReference?
         do {
             picked = try await PictureImport.conforming(
                 data, name: filename, accepting: PictureImport.engineReadable)
+            if kind == .reference, recipe.capabilities.generationReferences?.mode.isVisible == true {
+                typedReference = try await Task.detached(priority: .userInitiated) {
+                    try GenerationReferenceImporter.image(picked)
+                }.value
+            } else { typedReference = nil }
         } catch {
-            guard fence.permits(controller, reuse: reuse),
+            guard isCurrent(),
                   let host = finishedHost else { return }
             hosts.report(error, on: host.id, doing: "use that picture")
             return
         }
-        guard fence.permits(controller, reuse: reuse) else { return }
+        guard isCurrent() else { return }
         var draft = controller.draft
         switch kind {
         case .source:
             guard canReuseAsSource else { return }
             DraftPictureAttachment.useAsSource(picked, in: &draft, recipe: recipe)
         case .reference:
-            let layout = ImageConditioningWells.layout(
-                recipe: recipe, model: selectedModel, media: draft.media)
-            guard let capability = layout.references,
-                  capability.hasRoom(for: draft.media.editImages.count) else { return }
-            DraftPictureAttachment.addReference(
-                picked, to: &draft, capability: capability, recipe: recipe)
+            guard referenceRoom else { return }
+            if let typedReference {
+                do {
+                    try DraftPictureAttachment.addTypedReference(typedReference, to: &draft, recipe: recipe)
+                } catch {
+                    if let target { hosts.report(error, on: target.id, doing: "add that reference") }
+                    return
+                }
+            } else {
+                let layout = ImageConditioningWells.layout(
+                    recipe: recipe, model: selectedModel, media: draft.media)
+                guard let capability = layout.references else { return }
+                DraftPictureAttachment.addReference(
+                    picked, to: &draft, capability: capability, recipe: recipe)
+            }
         }
         controller.draft = draft
         reuse.clear()

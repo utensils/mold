@@ -160,6 +160,26 @@ struct PictureWellTests {
         #expect(forSource.name == "a-face.webp")
     }
 
+    @Test func selectedSecondaryCopyKeepsItsOwnOrigin() async throws {
+        let a = MoldHost(name: "alpha", baseURL: URL(string: "http://alpha")!)
+        let b = MoldHost(name: "beta", baseURL: URL(string: "http://beta")!)
+        let fake = FakeBackend(host: b)
+        fake.mediaAnswer = Self.webP
+        let hosts = HostStore(hosts: [a, b]) { _ in fake }
+        let library = LibraryStore(hosts: hosts)
+        var first = LibraryEntry(host: a, print: FakeFixtures.print("shared.webp"))
+        let second = LibraryEntry(host: b, print: FakeFixtures.print("shared.webp"))
+        first.copies = [second]
+        library.items = [first]
+        #expect(library.entry(second.id)?.hostID == b.id)
+        let result = try await PictureSource.bytes(of: .print(second.id),
+            accepting: PictureImport.engineReadable, hosts: hosts, library: library)
+        #expect(result.data == Self.webP)
+        #expect(PictureSource.isCurrent(second, origin: b, instance: nil, hosts: hosts, library: library))
+        hosts.instanceIDs[b.id] = "replacement"
+        #expect(!PictureSource.isCurrent(second, origin: b, instance: nil, hosts: hosts, library: library))
+    }
+
     /// The identity wells' acceptance policy is the STRICT one, and it is the
     /// same one whichever door a photograph arrives through -- the add well,
     /// a staged well's Replace, or a drop on the group. Copying the general

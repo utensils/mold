@@ -103,7 +103,11 @@ import {
   type SourceResolutionResult,
 } from "@studio/lib/sourceResolution";
 import { restoredCanvasIntent, type CanvasIntent } from "@studio/lib/outputShape";
-import { loadLibraryUnreadLedger, saveLibraryUnreadLedger } from "@studio/lib/libraryUnreadLedger";
+import {
+  LibraryVisit,
+  loadLibraryUnreadLedger,
+  saveLibraryUnreadLedger,
+} from "@studio/lib/libraryUnreadLedger";
 import { observeTimestampViewingHistory } from "@studio/lib/libraryUnreadMigration";
 import {
   groupLogicalGalleryPrints,
@@ -11717,6 +11721,41 @@ async function deleteSelectedGalleryPrints(): Promise<void> {
   if (gallerySelection.value.size === 0) setGallerySelectMode(false);
   galleryDeleting.value = false;
 }
+
+const libraryVisit = new LibraryVisit();
+watch(
+  [tab, () => gallery.value.map(galleryPrintKey), libraryScope, activeCollection],
+  () => {
+    if (
+      tab.value !== "gallery" ||
+      libraryScope.value === "trash" ||
+      libraryScope.value === "sources" ||
+      (libraryScope.value === "collections" && !activeCollection.value)
+    )
+      return;
+    libraryVisit.capture(
+      visibleRepresentatives().map(
+        (print) => mobileUnreadGroups.get(galleryPrintKey(print)) ?? [galleryPrintKey(print)],
+      ),
+    );
+  },
+  { immediate: true },
+);
+function finishMobileLibraryVisit() {
+  const copies = libraryVisit.finish();
+  if (!copies.length) return;
+  mobileUnread.view(copies);
+  const failure = saveLibraryUnreadLedger(MOBILE_UNREAD_KEY, mobileUnread);
+  if (failure) galleryError.value = failure;
+}
+watch(
+  tab,
+  (next, old) => {
+    if (old === "gallery" && next !== old) finishMobileLibraryVisit();
+  },
+  { flush: "sync" },
+);
+onBeforeUnmount(finishMobileLibraryVisit);
 
 function isFreshMobilePrint(print: GalleryPrint): boolean {
   return mobileUnread.isUnread(

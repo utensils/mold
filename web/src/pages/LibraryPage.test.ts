@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, reactive } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import LibraryPage from "./LibraryPage.vue";
+import { useLibraryUnread } from "../stores/libraryUnread";
 import {
   requestConfirm,
   resetNotifications,
@@ -968,6 +969,9 @@ describe("LibraryPage", () => {
     expect((grid.props("fresh") as Set<string>).has("origin|new.png")).toBe(
       true,
     );
+    const unread = useLibraryUnread();
+    wrapper.unmount();
+    expect(unread.ledger.isUnread(["origin|new.png"])).toBe(false);
   });
 });
 

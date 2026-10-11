@@ -99,7 +99,11 @@ struct RootView: View {
             default: break
             }
         }
-        .onChange(of: router.selection) { _, new in
+        .onChange(of: router.selection) { old, new in
+            if old != new {
+                library.finishVisit(router.completedLibraryVisit)
+                router.completedLibraryVisit.removeAll()
+            }
             // ⌘4 (or a restored iPad selection) on a phone: Models lives
             // under Machines there.
             if new == .go(.models), width != .regular { router.selection = .go(.machines); return }

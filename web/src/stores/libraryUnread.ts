@@ -31,6 +31,11 @@ export const useLibraryUnread = defineStore("webLibraryUnread", () => {
       );
       persistenceError.value = saveLibraryUnreadLedger(KEY, ledger);
     },
+    finishVisit(copies: string[]) {
+      if (!copies.length) return;
+      ledger.view(copies);
+      persistenceError.value = saveLibraryUnreadLedger(KEY, ledger);
+    },
     viewPhysical(hostId: string, filename: string) {
       ledger.view([`${hostId}|${filename}`]);
       persistenceError.value = saveLibraryUnreadLedger(KEY, ledger);

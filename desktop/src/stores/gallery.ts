@@ -164,7 +164,7 @@ export interface MergedPrint {
   copies?: GalleryCopy[];
 }
 
-function unreadCopyKeys(entry: MergedPrint): string[] {
+export function unreadCopyKeys(entry: MergedPrint): string[] {
   const copies = entry.copies?.length
     ? entry.copies
     : [{ sourceKey: entry.sourceKey, item: entry.item }];
@@ -999,7 +999,11 @@ export const useGalleryStore = defineStore("gallery", {
       return this.unreadMedia.isUnread(unreadCopyKeys(entry));
     },
     markViewed(entry: MergedPrint) {
-      this.unreadMedia.view(unreadCopyKeys(entry));
+      this.markVisitViewed(unreadCopyKeys(entry));
+    },
+    markVisitViewed(copies: string[]) {
+      if (!copies.length) return;
+      this.unreadMedia.view(copies);
       this.unreadPersistenceError = saveLibraryUnreadLedger(
         "mold.desktop.libraryUnread.v1",
         this.unreadMedia,

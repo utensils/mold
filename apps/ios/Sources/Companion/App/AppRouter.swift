@@ -7,8 +7,14 @@ import Observation
 @Observable
 final class AppRouter {
     let presentationID = UUID()
+    @ObservationIgnored var libraryVisit = LibraryVisit()
     var licenseDetailContext: (host: UUID, job: String)?
-    var selection: TabSelection = .go(.generate)
+    @ObservationIgnored var completedLibraryVisit: Set<PrintID> = []
+    var selection: TabSelection = .go(.generate) {
+        willSet {
+            if newValue != selection { completedLibraryVisit.formUnion(libraryVisit.finish()) }
+        }
+    }
     var isInLibrary: Bool {
         switch selection {
         case .go(.library), .search, .shelf: true

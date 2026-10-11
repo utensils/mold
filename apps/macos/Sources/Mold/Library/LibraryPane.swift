@@ -28,6 +28,7 @@ struct LibraryPane: View {
     @Environment(\.undoManager) var undoManager
     @Binding var destination: Destination
 
+    @State private var visit = LibraryVisit()
     @State var selection = LibraryCursor.Selection.empty
     @State var viewerOrder: [LibraryEntry] = []
     @State var viewing: PrintID?
@@ -89,6 +90,11 @@ struct LibraryPane: View {
                                     query: resolved, selection: selection.items,
                                     showDateSeparators: showDateSeparators)
         return watched(showing)
+            .onAppear { visit.capture(showing.visible, scope: navigation.scope) }
+            .onChange(of: library.rows.value) { visit.capture(showing.visible, scope: navigation.scope) }
+            .onChange(of: navigation.scope) { visit.capture(showing.visible, scope: navigation.scope) }
+            .onChange(of: resolved) { visit.capture(showing.visible, scope: navigation.scope) }
+            .onDisappear { library.finishVisit(visit.finish()) }
             .safeAreaInset(edge: .bottom) { LibraryActivityStatus() }
             .focusedSceneValue(\.refreshAction) { Task { await actions.reload() } }
             .focusedSceneValue(\.inspectorToggle, InspectorToggle(isShowing: showsInspector) {

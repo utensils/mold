@@ -47,8 +47,8 @@ extension LibraryEntry {
     /// neither video nor mesh, but it is not a picture.
     var isAttachableRaster: Bool {
         guard print.trashedAt == nil, !print.isVideo, !print.isMesh else { return false }
-        let raster = Set(["png", "jpeg", "jpg", "webp"])
-        if let format = print.format?.lowercased() { return raster.contains(format) }
+        let raster = Set(["png", "jpeg", "jpg", "webp", "heic", "heif", "tiff", "tif", "gif", "bmp"])
+        if let format = print.format?.lowercased(), raster.contains(format) { return true }
         let ext = (print.filename as NSString).pathExtension.lowercased()
         return raster.contains(ext)
     }
@@ -56,7 +56,7 @@ extension LibraryEntry {
 
 /// Everything that must stay put while authenticated print bytes are fetched.
 struct DraftAttachmentFence: Equatable {
-    let draft: RenderDraft
+    let media: DraftMedia
     let modelName: String?
     let hostID: MoldHost.ID?
     let machineChoice: MoldHost.ID?
@@ -64,7 +64,7 @@ struct DraftAttachmentFence: Equatable {
     let reuseVersion: Int
 
     init(controller: GenerateController, reuse: ReuseStore) {
-        draft = controller.draft
+        media = controller.draft.media
         modelName = controller.modelName
         hostID = controller.hostID
         machineChoice = controller.machineChoice
@@ -82,11 +82,40 @@ extension LibraryPane {
         guard let context = attachmentContext else {
             return LibraryAttachmentOffer(canUseAsSource: false, canAddReference: false)
         }
-        let layout = ImageConditioningWells.layout(
-            recipe: context.recipe, model: context.model, media: generate.draft.media)
-        return LibraryAttachmentOffer(
-            canUseAsSource: layout.showsSourceWell,
-            canAddReference: layout.references?.hasRoom(
-                for: generate.draft.media.editImages.count) == true)
+        return LibraryAttachmentOffer.resolve(recipe: context.recipe, model: context.model,
+                                              media: generate.draft.media)
+    }
+}
+
+@MainActor
+extension LibraryAttachmentOffer {
+    static func resolve(recipe: GenerationRecipe, model: Model?, media: DraftMedia) -> Self {
+        let layout = ImageConditioningWells.layout(recipe: recipe, model: model, media: media)
+        let canAddReference: Bool
+        if let typed = recipe.capabilities.generationReferences, typed.mode.isVisible {
+            canAddReference = typed.kinds.contains("image")
+                && media.generationReferences.count < typed.maxCount
+                && media.generationReferences.filter { $0.kind == "image" }.count < typed.maxImages
+        } else {
+            canAddReference = layout.references?.hasRoom(for: media.editImages.count) == true
+        }
+        return Self(canUseAsSource: layout.showsSourceWell, canAddReference: canAddReference)
+    }
+}
+
+/// Exact endpoints, credentials and server incarnations cannot change mid-download.
+struct LibraryAttachmentRoutes: Equatable {
+    let source: MoldHost?
+    let sourceInstance: String?
+    let destination: MoldHost?
+    let destinationInstance: String?
+}
+
+@MainActor
+extension LibraryAttachmentRoutes {
+    static func capture(source: MoldHost.ID, destination: MoldHost?, hosts: HostStore) -> Self {
+        Self(source: hosts.host(source), sourceInstance: hosts.instanceID(of: source),
+             destination: destination,
+             destinationInstance: destination.flatMap { hosts.instanceID(of: $0.id) })
     }
 }

@@ -33,6 +33,7 @@ struct IdentityGroup: View {
     /// one's message.
     @State var importTask: Task<Void, Never>?
 
+    @Environment(GenerateController.self) var controller: GenerateController?
     @Environment(HostStore.self) var hosts
     @Environment(LibraryStore.self) var library
 
@@ -81,6 +82,7 @@ struct IdentityGroup: View {
                     .foregroundStyle(.secondary)
             }
         }
+        .onDisappear { importTask?.cancel() }
     }
 
     var photos: [IdentityPhoto] { draft.media.identity?.photos ?? [] }

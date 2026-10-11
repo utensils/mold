@@ -7,6 +7,23 @@ import Testing
 
 @MainActor
 struct LibraryAttachmentTests {
+    @Test func typedImageReferencesAreOfferedByCapabilityAndRespectTheirLimit() throws {
+        var json = try #require(JSONSerialization.jsonObject(with: MoldJSON.encoder.encode(FakeFixtures.recipe())) as? [String: Any])
+        json["capabilities"] = ["generation_references": ["mode": "adjustable", "required": true,
+            "kinds": ["image", "video", "audio"], "max_count": 12, "max_images": 9,
+            "max_videos": 3, "max_audios": 3, "min_duration_ms": 2000,
+            "max_duration_ms": 15000, "max_video_duration_ms": 15000,
+            "max_audio_duration_ms": 15000, "max_inline_bytes": 33554432, "requires_visual": true]]
+        let recipe = try MoldJSON.decoder.decode(GenerationRecipe.self, from: JSONSerialization.data(withJSONObject: json))
+        let model = FakeFixtures.model("arbitrary-capable-model")
+        var media = DraftMedia()
+        #expect(LibraryAttachmentOffer.resolve(recipe: recipe, model: model, media: media).canAddReference)
+        media.generationReferences = (0..<9).map { _ in
+            GenerationReference(kind: "image", media: .init(authority: "inline", data: "AA=="), mimeType: "image/png")
+        }
+        #expect(!LibraryAttachmentOffer.resolve(recipe: recipe, model: model, media: media).canAddReference)
+    }
+
     private func entry(_ filename: String, _ format: String, trashed: UInt64? = nil) throws
         -> (MoldHost, LibraryEntry) {
         let host = MoldHost(name: "workstation", baseURL: URL(string: "http://w")!)
@@ -36,7 +53,10 @@ struct LibraryAttachmentTests {
         #expect(fence.permits(controller, reuse: reuse))
 
         controller.draft.prompt = "moved"
+        #expect(fence.permits(controller, reuse: reuse)) // scalar edits remain live
+        controller.draft.media.sourceImage = "replacement"
         #expect(!fence.permits(controller, reuse: reuse))
+        controller.draft.media.sourceImage = nil
         controller.draft.prompt = ""
         controller.recipeID = "edit"
         #expect(!fence.permits(controller, reuse: reuse))
@@ -46,6 +66,81 @@ struct LibraryAttachmentTests {
         controller.machineChoice = nil
         reuse.clear()
         #expect(!fence.permits(controller, reuse: reuse))
+    }
+
+    @Test func openingLibraryCancelsEarlierImportBeforeCapturingItsDestination() async {
+        let (controller, _, _) = stores()
+        var release: CheckedContinuation<Void, Never>?
+        var earlier: Task<Void, Never>? = Task { @MainActor in
+            await withCheckedContinuation { release = $0 }
+            guard !Task.isCancelled else { return }
+            controller.draft.media.editImages.append("old file completion")
+        }
+        while release == nil { await Task.yield() }
+        let oldTask = earlier
+        let librarySession = PictureImportSession.begin(controller: controller, replacing: &earlier)
+        #expect(earlier == nil)
+        #expect(oldTask?.isCancelled == true)
+        release?.resume()
+        await oldTask?.value
+        #expect(controller.draft.media.editImages.isEmpty)
+        #expect(librarySession.isCurrent)
+        controller.draft.media.editImages.append("new library choice")
+        librarySession.advance()
+        #expect(librarySession.isCurrent)
+    }
+
+    @Test func pictureChooserSessionAdvancesOnlyItsOwnAcceptedInputs() {
+        let (controller, _, _) = stores()
+        let session = PictureImportSession(controller: controller)
+        controller.draft.prompt = "keep this live edit"
+        #expect(session.isCurrent)
+        controller.draft.media.editImages.append("first accepted picture")
+        #expect(!session.isCurrent)
+        session.advance()
+        #expect(session.isCurrent)
+        controller.draft.media.editImages.append("unrelated replacement")
+        #expect(!session.isCurrent)
+        let next = PictureImportSession(controller: controller)
+        controller.modelName = "different model"
+        #expect(!next.isCurrent)
+    }
+
+    @Test func statusOnlyHostCanAttachWithoutAnSSEAuthorityAnnouncement() throws {
+        let (source, raster) = try entry("still.png", "png")
+        let target = MoldHost(name: "target", baseURL: URL(string: "http://target")!)
+        let hosts = HostStore(hosts: [source, target]) { FakeBackend(host: $0) }
+        hosts.reachability[source.id] = .up(FakeFixtures.serverStatus(instanceId: "source-status"))
+        hosts.reachability[target.id] = .up(FakeFixtures.serverStatus(instanceId: "target-status"))
+        let library = LibraryStore(hosts: hosts)
+        library.perHost[source.id] = [raster]
+        library.rebuild()
+        #expect(hosts.instanceIDs[source.id] == nil)
+        let routes = LibraryAttachmentRoutes.capture(source: source.id, destination: target, hosts: hosts)
+        #expect(routes.sourceInstance == "source-status")
+        #expect(routes.destinationInstance == "target-status")
+        #expect(PictureSource.isCurrent(raster, origin: source, instance: routes.sourceInstance,
+                                       hosts: hosts, library: library))
+        hosts.reachability[source.id] = .up(FakeFixtures.serverStatus(instanceId: "restarted"))
+        #expect(!PictureSource.isCurrent(raster, origin: source, instance: routes.sourceInstance,
+                                        hosts: hosts, library: library))
+    }
+
+    @Test func attachmentRoutesRejectCredentialAndInstanceChanges() {
+        let source = MoldHost(name: "source", baseURL: URL(string: "http://source")!)
+        let target = MoldHost(name: "target", baseURL: URL(string: "http://target")!)
+        let initial = LibraryAttachmentRoutes(source: source, sourceInstance: "source-1",
+                                              destination: target, destinationInstance: "target-1")
+        #expect(initial != LibraryAttachmentRoutes(source: source, sourceInstance: "source-2",
+                                                    destination: target, destinationInstance: "target-1"))
+        #expect(initial != LibraryAttachmentRoutes(source: source, sourceInstance: "source-1",
+                                                    destination: target, destinationInstance: "target-2"))
+        #expect(initial != LibraryAttachmentRoutes(source: nil, sourceInstance: "source-1",
+                                                    destination: target, destinationInstance: "target-1"))
+        var rekeyed = source
+        rekeyed.apiKey = "replacement"
+        #expect(initial != LibraryAttachmentRoutes(source: rekeyed, sourceInstance: "source-1",
+                                                    destination: target, destinationInstance: "target-1"))
     }
 
     @Test func asyncCompletionRejectsStaleUIAndHostState() async throws {
@@ -104,6 +199,11 @@ struct LibraryAttachmentTests {
 
     @Test func onlyALiveRasterCanEnterAPictureWell() throws {
         #expect(try entry("still.png", "png").1.isAttachableRaster)
+        #expect(try entry("qwen.png", "PNG").1.isAttachableRaster)
+        #expect(try entry("qwen.png", "image/png").1.isAttachableRaster)
+        #expect(try entry("photo.heic", "heic").1.isAttachableRaster)
+        #expect(try entry("photo.tiff", "tiff").1.isAttachableRaster)
+        #expect(try !entry("vector.svg", "svg").1.isAttachableRaster)
         #expect(try !entry("sound.wav", "wav").1.isAttachableRaster)
         #expect(try !entry("clip.mp4", "mp4").1.isAttachableRaster)
         #expect(try !entry("gone.png", "png", trashed: 1).1.isAttachableRaster)

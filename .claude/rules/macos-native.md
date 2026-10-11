@@ -55,10 +55,12 @@ chooses **Use current inputs** after reattaching any needed files. This snapshot
 behavior is Mac-only; preserve the existing scalar-only iOS persistence path.
 
 Library New badges and unread counts share persisted client-local viewing state.
-Only individually displayed viewer media is read; opening Library, refreshes,
-filters and neighboring preloads must not clear unread media. Preserve current
+Individual viewer display marks that logical print read immediately. A Library
+visit captures its displayed eligible projections and marks that captured set
+read when navigation leaves Library. Keep New labels during the visit; exclude
+Trash and unvisited hidden/filtered media, and preserve arrivals after departure. Preserve current
 read status on upgrade and establish an initial baseline for newly connected
-hosts. Later arrivals remain unread across visits and relaunches. Count merged
+hosts. Later arrivals remain unread until viewed or acknowledged by a Library visit. Count merged
 visible active inventory, excluding hidden collections and Trash; retain offline
 history. iOS navigation and native icon badges follow that same ledger, with the
 existing permission/preference controls. Do not let activation-only arrival
