@@ -249,3 +249,71 @@ pub unsafe extern "C" fn mold_secure_session_handshake_hash(
         Err(e) => code(e),
     }
 }
+
+/// Host-side owner-key bootstrap; shares the same private-file rules as Rust.
+#[no_mangle]
+pub unsafe extern "C" fn mold_secure_operator_key(
+    home: *const u8,
+    home_len: usize,
+    candidate: *const u8,
+    candidate_len: usize,
+    destination: *mut u8,
+    capacity: usize,
+) -> i32 {
+    if destination.is_null() || capacity < operator_key::MAX_KEY_BYTES {
+        return -4;
+    }
+    let Ok(home) = (unsafe { input(home, home_len, 4096) }) else {
+        return -1;
+    };
+    let Ok(home) = std::str::from_utf8(home) else {
+        return -1;
+    };
+    if home.is_empty() {
+        return -1;
+    }
+    let candidate = if candidate_len == 0 {
+        None
+    } else {
+        let Ok(bytes) = (unsafe { input(candidate, candidate_len, operator_key::MAX_KEY_BYTES) })
+        else {
+            return -1;
+        };
+        let Ok(value) = std::str::from_utf8(bytes) else {
+            return -1;
+        };
+        Some(value)
+    };
+    match operator_key::resolve(std::path::Path::new(home), candidate) {
+        Ok(key) => unsafe { output(destination, capacity, key.as_bytes()) },
+        Err(_) => -2,
+    }
+}
+
+#[cfg(test)]
+mod operator_tests {
+    use super::*;
+    #[test]
+    fn owner_key_ffi_uses_same_home_authority_and_refuses_small_output_before_writing() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().to_str().unwrap().as_bytes();
+        let candidate = b"native-legacy-key";
+        let mut output = vec![0; 4096];
+        let call = |candidate: &[u8], output: &mut [u8]| unsafe {
+            mold_secure_operator_key(
+                path.as_ptr(),
+                path.len(),
+                candidate.as_ptr(),
+                candidate.len(),
+                output.as_mut_ptr(),
+                output.len(),
+            )
+        };
+        assert_eq!(call(candidate, &mut output[..16]), -4);
+        assert!(!home.path().join("secure").exists());
+        let length = call(candidate, &mut output);
+        assert_eq!(&output[..length as usize], candidate);
+        let length = call(b"other-shell-key", &mut output);
+        assert_eq!(&output[..length as usize], candidate);
+    }
+}

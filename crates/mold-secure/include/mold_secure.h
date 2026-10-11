@@ -27,4 +27,9 @@ int32_t mold_secure_session_open(uint64_t handle, const uint8_t *input, size_t l
 void mold_secure_release(uint64_t handle);
 /* Pure validation: returns 1 valid, 0 invalid; never alters a session. */
 int32_t mold_secure_verify_signature(const uint8_t *public_key, const uint8_t *input, size_t length, const uint8_t *signature);
+/* Host-side owner credential: home UTF-8 path, optional legacy candidate.
+ * Persists one private per-home winner; never replaces an existing key.
+ * Output capacity must be >=4096. Lengths exclude NUL. Returns length or error.
+ * No identity/device grant is created or changed. */
+int32_t mold_secure_operator_key(const uint8_t *home, size_t home_length, const uint8_t *candidate, size_t candidate_length, uint8_t *output, size_t capacity);
 #endif
