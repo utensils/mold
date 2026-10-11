@@ -29,6 +29,8 @@ on macOS 12 or newer. Both can sit in /Applications at once and connect to the
 same machines. [Which one?](/download#mac)
 :::
 
+In the native Mac app, **Use source** is available in the print inspector and source viewer, including right-click menus. Choose a supported input role, or **Choose model…** to select an installed compatible model, recipe and machine without leaving the source. Successful reuse opens Generate; other draft settings are preserved where the selected recipe supports them.
+
 ## Requirements
 
 - Apple Silicon (M1 or newer). There is no Intel build.
