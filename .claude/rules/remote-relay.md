@@ -14,11 +14,15 @@ paths:
 
 # Secure remote and LAN transport
 
-Protocol 3 is a hard cutover. Cloud and non-loopback LAN access use authenticated
-end-to-end encrypted WebSockets. Legacy cloud HTTP APIs, media, uploads and
-version 2 upgrades return 426; there is no compatibility switch. Plain HTTP API
-access remains only on the actual numeric loopback socket for the local engine
-and connector. Host/Forwarded headers never establish local authority.
+Protocol 3 is mandatory for the cloud proxy. Its legacy HTTP APIs, media,
+uploads and version 2 upgrades return 426; there is no plaintext proxy mode.
+Direct hosts support explicit Secure (the default client choice) or Regular
+HTTP(S), including WAN URLs. Regular access requires host opt-in through
+`MOLD_ALLOW_DIRECT_API=1` or the separate embedded Regular listener. Actual
+numeric loopback engine access remains available. Host/Forwarded headers never
+establish local authority. Never downgrade a failed Secure request or reuse a
+Secure device key as a Regular credential. The canonical additive mode contract
+is `docs/plans/direct-connection-modes.md`.
 
 AWS production stays on Lambda, API Gateway WebSockets and DynamoDB admission
 leases. The frontend returns public discovery metadata, a redirect to the

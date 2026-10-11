@@ -30,6 +30,7 @@ mod prompt_history;
 pub mod queue_transfer;
 mod reconcile;
 mod record;
+pub mod regular_clients;
 pub mod scan;
 mod scheduler_estimates;
 pub mod secure_bootstrap;
