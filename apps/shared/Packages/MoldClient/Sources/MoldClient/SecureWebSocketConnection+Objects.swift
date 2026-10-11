@@ -3,13 +3,13 @@ import Foundation
 private enum ObjectBrokerFailure: Error { case disabled }
 
 extension SecureWebSocketConnection {
-    func reserveObject(sequence: UInt64, count: Int) -> Bool {
-        guard objectReservations.count < 4 else { return false }
-        objectReservations[sequence] = sequence + UInt64(count)
+    func reserveObject(sequence: UInt64, count: Int, bytes: Int) -> Bool {
+        guard objectReservations.count < 4, objectReservations.values.reduce(bytes, { $0 + $1.bytes }) <= 1_048_576 else { return false }
+        objectReservations[sequence] = ObjectReservation(end: sequence + UInt64(count), bytes: bytes)
         return true
     }
     func retireObjects(next: UInt64) {
-        objectReservations = objectReservations.filter { $0.value > next }
+        objectReservations = objectReservations.filter { $0.value.end > next }
     }
     func shouldStagePacket(bulk: Bool) -> Bool {
         objectPolicy != nil && !objectAllocationDisabled && (bulk || !stagedFrames.isEmpty)
@@ -23,7 +23,7 @@ extension SecureWebSocketConnection {
         return false
     }
     func scheduleObjectFlush() {
-        if objectSends.count < 4, stagedFrames.count == 16 {
+        if objectSends.count < 4, stagedFrames.count == SecureCipherObject.maxCount {
             flushObjects()
         }
         guard !stagedFrames.isEmpty, objectFlushTask == nil else { return }
@@ -40,8 +40,9 @@ extension SecureWebSocketConnection {
         objectFlushTask?.cancel(); objectFlushTask = nil
         let frames = stagedFrames; stagedFrames.removeAll()
         guard let first = frames.first else { return }
-        let eligible = frames.reduce(0) { $0 + $1.bytes.count + 4 } >= 65_536 && !objectAllocationDisabled
-        let reserved = eligible && reserveObject(sequence: first.sequence, count: frames.count)
+        let bytes = frames.reduce(0) { $0 + $1.bytes.count + 4 }
+        let eligible = bytes >= 65_536 && !objectAllocationDisabled
+        let reserved = eligible && reserveObject(sequence: first.sequence, count: frames.count, bytes: bytes)
         objectSends[first.sequence] = Task {
             defer { completedObjectSend(sequence: first.sequence) }
             do {

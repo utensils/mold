@@ -6,6 +6,7 @@ actor SecureWebSocketConnection: SecureRecordConnection {
     struct PendingFrame { var bytes: Data; var sent: ContinuousClock.Instant?; var tries: Int; var expiresAt: UInt64? }
     struct PacketSend { let bytes: Data; let bulk: Bool; let continuation: CheckedContinuation<Void, any Error> }
     struct ObjectRequest { let batch: SecureObjectBatch; let continuation: CheckedContinuation<SecureObjectGrant, any Error>; let timeout: Task<Void, Never>; let deadline: ContinuousClock.Instant; var nextAttempt: ContinuousClock.Instant }
+    struct ObjectReservation { let end: UInt64; let bytes: Int }
     struct ObjectFetch { let reference: SecureObjectReference; let task: Task<Void, Never> }
     let usesTLS: Bool
     let socket: URLSessionWebSocketTask
@@ -20,7 +21,7 @@ actor SecureWebSocketConnection: SecureRecordConnection {
     var stagedFrames: [(sequence: UInt64, bytes: Data)] = []
     var objectFlushTask: Task<Void, Never>?
     var objectSends: [UInt64: Task<Void, Never>] = [:]
-    var objectReservations: [UInt64: UInt64] = [:]
+    var objectReservations: [UInt64: ObjectReservation] = [:]
     var objectFetches: [UInt64: ObjectFetch] = [:]
     var objectRequests: [String: ObjectRequest] = [:]
     var completedObjectRequests: [String] = []

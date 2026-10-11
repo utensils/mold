@@ -4,13 +4,14 @@ import CryptoKit
 /// A bulk carrier for already encrypted, consecutive reliable frames. It does
 /// not mint cryptographic material or inspect an application request.
 enum SecureCipherObject {
-    static let maxBytes = 262_144
+    static let maxBytes = 1_048_576
+    static let maxCount = 64
     static func canAppend(_ chunks: [Data], _ next: Data) -> Bool {
-        chunks.count < 16 && (1...16_384).contains(next.count) && chunks.reduce(next.count + 4, { $0 + 4 + $1.count }) <= maxBytes
+        chunks.count < maxCount && (1...16_384).contains(next.count) && chunks.reduce(next.count + 4, { $0 + 4 + $1.count }) <= maxBytes
     }
     static func checksum(_ bytes: Data) -> String { SecureHex.encode(Data(SHA256.hash(data: bytes))) }
     static func pack(_ chunks: [Data]) throws -> Data {
-        guard (1...16).contains(chunks.count) else { throw SecureConnectionError.protocolViolation }
+        guard (1...maxCount).contains(chunks.count) else { throw SecureConnectionError.protocolViolation }
         var bytes = Data()
         for chunk in chunks {
             guard (1...16_384).contains(chunk.count), bytes.count + 4 + chunk.count <= maxBytes else { throw SecureConnectionError.protocolViolation }
@@ -19,7 +20,7 @@ enum SecureCipherObject {
         return bytes
     }
     static func unpack(_ input: Data, count: Int, checksum: String) throws -> [Data] {
-        guard (1...16).contains(count), (5...maxBytes).contains(input.count), self.checksum(input) == checksum
+        guard (1...maxCount).contains(count), (5...maxBytes).contains(input.count), self.checksum(input) == checksum
         else { throw SecureConnectionError.protocolViolation }
         let bytes = Data(input)
         var offset = 0, chunks: [Data] = []
@@ -42,8 +43,8 @@ struct SecureObjectPolicy: Sendable {
     static func accept(_ value: Any?, trusted: URL) -> Self? {
         guard let value = value as? [String: Any], value["origin"] as? String == trusted.absoluteString,
               SecureWebSocketConnection.number(value["version"]) == 1,
-              SecureWebSocketConnection.number(value["maxBytes"]) == 262_144,
-              SecureWebSocketConnection.number(value["maxCount"]) == 16,
+              SecureWebSocketConnection.number(value["maxBytes"]) == UInt64(SecureCipherObject.maxBytes),
+              SecureWebSocketConnection.number(value["maxCount"]) == UInt64(SecureCipherObject.maxCount),
               SecureWebSocketConnection.number(value["maxInFlightBytes"]) == 1_048_576,
               SecureWebSocketConnection.number(value["maxInFlightObjects"]) == 4,
               trusted.scheme == "https", trusted.host != nil, trusted.user == nil, trusted.password == nil,
@@ -72,9 +73,9 @@ struct SecureObjectReference: Equatable, Sendable {
     let id: String, bytes: Int, checksum: String, url: URL, count: Int
     init(_ value: [String: Any], policy: SecureObjectPolicy, namespace: String, sid: String, rid: String, direction: String) throws {
         guard let id = value["id"] as? String, (try? SecureHex.decode(id, count: 16)) != nil,
-              let length = SecureWebSocketConnection.number(value["bytes"]), (5...262_144).contains(length),
+              let length = SecureWebSocketConnection.number(value["bytes"]), (5...UInt64(SecureCipherObject.maxBytes)).contains(length),
               let checksum = value["sha256"] as? String, (try? SecureHex.decode(checksum, count: 32)) != nil,
-              let count = SecureWebSocketConnection.number(value["count"]), (1...16).contains(count),
+              let count = SecureWebSocketConnection.number(value["count"]), (1...UInt64(SecureCipherObject.maxCount)).contains(count),
               length >= count * 5, length <= count * 16_388,
               let url = value["url"] as? String else { throw SecureConnectionError.protocolViolation }
         self.id = id; self.bytes = Int(length); self.checksum = checksum; self.count = Int(count)

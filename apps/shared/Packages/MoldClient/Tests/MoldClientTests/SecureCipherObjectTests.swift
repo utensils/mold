@@ -5,14 +5,15 @@ import Testing
 
 struct SecureCipherObjectTests {
     @Test func completeCiphertextFramesRoundTripAndStayInsideTheObjectBound() throws {
-        let chunks = (0..<16).map { Data(repeating: UInt8($0), count: 16_320) }
+        let chunks = (0..<64).map { Data(repeating: UInt8($0), count: 16_320) }
         let bytes = try SecureCipherObject.pack(chunks)
-        #expect(bytes.count == 261_184)
-        #expect(try SecureCipherObject.unpack(bytes, count: 16, checksum: SecureCipherObject.checksum(bytes)) == chunks)
-        #expect(throws: SecureConnectionError.protocolViolation) { try SecureCipherObject.pack(Array(repeating: Data(repeating: 1, count: 16_384), count: 16)) }
+        #expect(bytes.count == 1_044_736)
+        #expect(try SecureCipherObject.unpack(bytes, count: 64, checksum: SecureCipherObject.checksum(bytes)) == chunks)
+        #expect(throws: SecureConnectionError.protocolViolation) { try SecureCipherObject.pack(Array(repeating: Data(repeating: 1, count: 16_384), count: 64)) }
+        #expect(throws: SecureConnectionError.protocolViolation) { try SecureCipherObject.pack(Array(repeating: Data([1]), count: 65)) }
         let full = Data(repeating: 1, count: 16_384)
-        #expect(SecureCipherObject.canAppend(Array(repeating: full, count: 14), full))
-        #expect(!SecureCipherObject.canAppend(Array(repeating: full, count: 15), full), "Split before a sixteenth full chunk exceeds the byte cap")
+        #expect(SecureCipherObject.canAppend(Array(repeating: full, count: 62), full))
+        #expect(!SecureCipherObject.canAppend(Array(repeating: full, count: 63), full), "Split before a sixty-fourth full chunk exceeds the byte cap")
     }
     @Test func malformedObjectNeverExposesAPartialCiphertextFrame() throws {
         let bytes = try SecureCipherObject.pack([Data([1, 2]), Data([3, 4])])
@@ -36,12 +37,12 @@ struct SecureCipherObjectTests {
         }
     }
     @Test func cloudAdvertisementCannotIntroduceAnotherTrustedOrigin() {
-        let offered: [String: Any] = ["version": 1, "origin": "https://evil.example", "maxBytes": 262_144,
-            "maxCount": 16, "maxInFlightBytes": 1_048_576, "maxInFlightObjects": 4]
+        let offered: [String: Any] = ["version": 1, "origin": "https://evil.example", "maxBytes": 1_048_576,
+            "maxCount": 64, "maxInFlightBytes": 1_048_576, "maxInFlightObjects": 4]
         #expect(SecureObjectPolicy.accept(offered, trusted: SecureObjectPolicy.productionOrigin) == nil)
         var trusted = offered; trusted["origin"] = SecureObjectPolicy.productionOrigin.absoluteString
         #expect(SecureObjectPolicy.accept(trusted, trusted: SecureObjectPolicy.productionOrigin) != nil)
-        trusted["maxCount"] = 17
+        trusted["maxCount"] = 65
         #expect(SecureObjectPolicy.accept(trusted, trusted: SecureObjectPolicy.productionOrigin) == nil)
     }
 
@@ -100,6 +101,12 @@ struct SecureCipherObjectTests {
         await connection.close()
     }
 
+    @Test func largerObjectsRetainTheOneMiBAggregateReservationBudget() async throws {
+        let connection = try makeConnection()
+        await connection.checkObjectAggregateBudget()
+        await connection.close()
+    }
+
     @Test func finishingAnEarlierUploadDoesNotFlushTheNextPartialBatchEarly() async throws {
         let connection = try makeConnection()
         await connection.checkCompletionKeepsBatchDeadline()
@@ -137,7 +144,7 @@ private extension SecureWebSocketConnection {
     func checkObjectNegotiation() {
         #expect(socket.originalRequest?.url?.scheme == "https", "Foundation rewrites the WSS upgrade request")
         configureObjectPolicy(["version":1,"origin":SecureObjectPolicy.productionOrigin.absoluteString,
-            "maxBytes":262_144,"maxCount":16,"maxInFlightBytes":1_048_576,"maxInFlightObjects":4])
+            "maxBytes":1_048_576,"maxCount":64,"maxInFlightBytes":1_048_576,"maxInFlightObjects":4])
         #expect(objectPolicy != nil, "The originally selected WSS route supports objects")
     }
     func checkGatewayRetry() async throws {
@@ -152,13 +159,22 @@ private extension SecureWebSocketConnection {
         await #expect(throws: SecureConnectionError.protocolViolation) { try await receiveFrame(["message":"Internal server error"]) }
     }
 
+    func checkObjectAggregateBudget() {
+        #expect(reserveObject(sequence: 0, count: 63, bytes: 63 * 16_388))
+        #expect(!reserveObject(sequence: 63, count: 1, bytes: 16_388), "Length prefixes count against the unchanged 1 MiB per-peer budget")
+        retireObjects(next: 62)
+        #expect(!reserveObject(sequence: 63, count: 1, bytes: 16_388), "Partial ACK does not release the large object")
+        retireObjects(next: 63)
+        #expect(reserveObject(sequence: 63, count: 1, bytes: 16_388))
+    }
+
     func checkObjectReservationBudget() {
-        for index in 0..<4 { #expect(reserveObject(sequence: UInt64(index * 15), count: 15)) }
-        #expect(!reserveObject(sequence: 60, count: 4), "64 full wire chunks need five objects after length prefixes; the tail must stay inline")
+        for index in 0..<4 { #expect(reserveObject(sequence: UInt64(index * 15), count: 15, bytes: 15 * 16_388)) }
+        #expect(!reserveObject(sequence: 60, count: 4, bytes: 4 * 16_388), "Four partial objects retain their slots until cumulative acknowledgement")
         retireObjects(next: 14)
-        #expect(!reserveObject(sequence: 60, count: 4), "Partial ACK cannot release an object")
+        #expect(!reserveObject(sequence: 60, count: 4, bytes: 4 * 16_388), "Partial ACK cannot release an object")
         retireObjects(next: 15)
-        #expect(reserveObject(sequence: 60, count: 4))
+        #expect(reserveObject(sequence: 60, count: 4, bytes: 4 * 16_388))
     }
 
     func checkShortTailBatching() {
