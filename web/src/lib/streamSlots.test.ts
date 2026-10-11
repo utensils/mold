@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { TargetStreamSlots } from "./streamSlots";
+import { TargetStreamSlots } from "@studio/lib/targetStreamSlots";
 
 describe("TargetStreamSlots", () => {
   it("starts at most four browser streams and promotes waiters in order", () => {

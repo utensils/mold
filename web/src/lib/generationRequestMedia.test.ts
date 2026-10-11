@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { GenerateRequestWire } from "../types";
 import {
-  GENERATION_REQUEST_MEDIA_FIELDS,
+  GENERATION_MEDIA_AUTHORITY_FIELDS,
   requestCarriesGenerationMedia,
-} from "./generationRequestMedia";
+} from "@studio/lib/generationMedia";
 
 function request(): GenerateRequestWire {
   return {
@@ -17,7 +17,7 @@ function request(): GenerateRequestWire {
 }
 
 const PRESENT_MEDIA_VALUE: Record<
-  (typeof GENERATION_REQUEST_MEDIA_FIELDS)[number],
+  (typeof GENERATION_MEDIA_AUTHORITY_FIELDS)[number],
   unknown
 > = {
   source_image: "source-bytes",
@@ -38,7 +38,7 @@ const PRESENT_MEDIA_VALUE: Record<
 };
 
 describe("requestCarriesGenerationMedia", () => {
-  it.each(GENERATION_REQUEST_MEDIA_FIELDS)(
+  it.each(GENERATION_MEDIA_AUTHORITY_FIELDS)(
     "classifies present %s as media-bearing",
     (field) => {
       expect(

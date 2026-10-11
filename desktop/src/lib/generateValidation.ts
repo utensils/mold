@@ -25,7 +25,6 @@ import {
 } from "@studio/lib/generationProfile";
 import { namedViewValidationError } from "@studio/lib/namedViews";
 
-export const MAX_INLINE_GENERATION_MEDIA_BYTES = 64 * 1024 * 1024;
 // JSON base64 expands bytes by roughly 4/3 and the server body limit is 64
 // MiB. Keep the whole phone conditioning payload below 45 MiB so the request
 // has room for JSON/scalars without a late extractor rejection.

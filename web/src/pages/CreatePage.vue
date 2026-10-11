@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { canvasSource } from "@studio/lib/canvasSource";
 import { PromptClearRecovery } from "@studio/lib/promptClearRecovery";
-import { restoreRetainedDraftMedia } from "@studio/lib/retainedDraftMedia";
+import { useRetainedSourceRestore } from "../composables/useRetainedSourceRestore";
 import { originAuthenticatedFetch as fetch } from "../lib/originAuth";
 
 import {
@@ -141,8 +141,6 @@ import {
   retainedSourceMediaMembersForRequest,
 } from "@studio/api/gallerySourceMedia";
 import {
-  retainedSourceReuseState,
-  setRetainedSourceReuseIntentIfCurrent,
   clearRetainedSourceReuseIntent,
   retainedSourceReuseIsCurrent,
   retainedSourceReuseSnapshot,
@@ -1765,70 +1763,23 @@ function retryPrint(id: string) {
  * rather than guessing from the keyframe count alone — LTX-2 keyframes are a
  * different control, and they restore nothing either way.
  */
-const retainedRestoreError = ref<string | null>(null);
-const retainedRestorePending = ref(false);
-let retainedRestoreUnmounted = false;
-const retainedRestoreAbort = new AbortController();
-onBeforeUnmount(() => {
-  retainedRestoreUnmounted = true;
-  retainedRestoreAbort.abort();
-});
-let materializingRetainedVersion: number | null = null;
-watch(
-  [retainedSourceReuseState, modelsLoaded],
-  async ([intent, loaded]) => {
-    if (!intent) {
-      retainedRestoreError.value = null;
-      retainedRestorePending.value = false;
-      return;
-    }
-    if (!loaded) {
-      retainedRestorePending.value = true;
-      return;
-    }
-    const snapshot = retainedSourceReuseSnapshot();
-    if (!snapshot || materializingRetainedVersion === snapshot.version) return;
-    materializingRetainedVersion = snapshot.version;
-    retainedRestoreError.value = null;
-    retainedRestorePending.value = true;
-    try {
-      const result = await restoreRetainedDraftMedia({
-        ...intent,
-        read: () => form.state.value,
-        layout: {
-          web: true,
-          boundary: capabilities.value.supportsEndFrame,
-          sourceMode: capabilities.value.sourceImageMode,
-          h3: Boolean(minimaxH3TaskForModel(form.state.value.model)),
-        },
-        signal: retainedRestoreAbort.signal,
-        isCurrent: () =>
-          !retainedRestoreUnmounted &&
-          retainedSourceReuseIsCurrent(snapshot.version),
-      });
-      if (!result || !retainedSourceReuseIsCurrent(snapshot.version)) return;
-      form.state.value = { ...form.state.value, ...result.patch };
+const { error: retainedRestoreError, pending: retainedRestorePending } =
+  useRetainedSourceRestore({
+    loaded: modelsLoaded,
+    read: () => form.state.value,
+    layout: () => ({
+      web: true,
+      boundary: capabilities.value.supportsEndFrame,
+      sourceMode: capabilities.value.sourceImageMode,
+      h3: Boolean(minimaxH3TaskForModel(form.state.value.model)),
+    }),
+    apply: (patch) => {
+      form.state.value = { ...form.state.value, ...patch };
       const restored = activeCanvasSource.value;
       if (restored) preserveRestoredSourceCanvas(restored.base64);
-      setRetainedSourceReuseIntentIfCurrent(snapshot.version, {
-        ...intent,
-        inventory: result.inventory,
-      });
-    } catch (error) {
-      if (retainedSourceReuseIsCurrent(snapshot.version)) {
-        retainedRestoreError.value =
-          error instanceof Error
-            ? error.message
-            : "The original inputs could not be restored. Reuse this print again or reattach them.";
-        toast("error", retainedRestoreError.value);
-      }
-    } finally {
-      if (retainedSourceReuseIsCurrent(snapshot.version))
-        retainedRestorePending.value = false;
-    }
-  },
-  { immediate: true },
-);
+    },
+    onError: (message) => toast("error", message),
+  });
 const pendingEndFrameNotice = ref<OutputMetadata | null>(null);
 function noticeFirstLastFrameRestore(metadata: OutputMetadata) {
   if (!modelsLoaded.value) {

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useMobileKeyboardViewport } from "./useMobileKeyboardViewport";
+import { SourceCanvasController } from "@studio/lib/sourceCanvasController";
 import { queueModelDownloadAvailability } from "@studio/lib/queueModelDownload";
 import { useSourceMediaVisibility } from "@studio/lib/sourceMediaVisibility";
 import SourceMediaBrowser from "@studio/components/SourceMediaBrowser.vue";
@@ -95,13 +97,7 @@ import {
   type PairingClientIdentity,
 } from "@studio/api/pairing";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
-import {
-  resolveDefaultSourceResolution,
-  resolveSourceCanvasTransition,
-  resolveSourceResolution,
-  type SourceDimensions,
-  type SourceResolutionResult,
-} from "@studio/lib/sourceResolution";
+import { type SourceDimensions } from "@studio/lib/sourceResolution";
 import { restoredCanvasIntent, type CanvasIntent } from "@studio/lib/outputShape";
 import {
   LibraryVisit,
@@ -1085,20 +1081,6 @@ let expansionRecoveryId = 0;
 let submissionUiId = 0;
 let recoveryRetryId = 0;
 let unmounted = false;
-let keyboardViewportRestoreTimer: ReturnType<typeof setTimeout> | null = null;
-const KEYBOARD_VIEWPORT_SETTLE_MS = 400;
-const NON_KEYBOARD_INPUT_TYPES = new Set([
-  "button",
-  "checkbox",
-  "color",
-  "file",
-  "hidden",
-  "image",
-  "radio",
-  "range",
-  "reset",
-  "submit",
-]);
 const downloadConsumerId = `mobile-generate-${createUuid()}`;
 const missingModelConsumerId = `mobile-missing-model-${createUuid()}`;
 const missingGenerationModel = ref<{
@@ -2151,9 +2133,7 @@ function generationProfileHashForHost(hostId: string, model: string): string | n
   );
 }
 
-let previousStillSource = "";
-let previousStillResolution: SourceResolutionResult | null = null;
-let previousStillAutomaticResolution: SourceDimensions | null = null;
+const sourceCanvasController = new SourceCanvasController();
 // `restoreComposerDraft` (below) fills this in asynchronously from the saved
 // draft, but the synchronous initial value matters too: a draft saved before
 // `canvasIntent` was persisted carries none, and `restoredCanvasIntent` reads
@@ -2271,12 +2251,11 @@ function discardMissingComposerMedia(): void {
   void nextTick(flushComposerDraft);
 }
 
-let preservedSourceReplacement = "";
 function setCanvasIntent(intent: CanvasIntent) {
   canvasIntent.value = intent;
 }
 function preserveRestoredSourceCanvas(base64: string) {
-  preservedSourceReplacement = base64;
+  sourceCanvasController.preserveRestored(base64);
   canvasIntent.value = "manual";
 }
 
@@ -2296,105 +2275,6 @@ const activeCanvasSource = computed(() =>
     h3: form.h3Authoring,
   }),
 );
-let previousClosingCanvasSource = "";
-let canvasSourceInitialized = false;
-let previousCanvasRecipe = "";
-function preserveBoundaryRemovalCanvas() {
-  const closing =
-    caps.value.sourceImageMode === "h3-boundaries"
-      ? (form.h3Authoring?.lastFrame?.data ?? "")
-      : caps.value.supportsEndFrame
-        ? (form.endFrame?.base64 ?? "")
-        : "";
-  const selected = activeCanvasSource.value?.base64 ?? "";
-  const recipe = `${form.model}:${form.pipeline ?? ""}`;
-  // Removal preserves a manual canvas; deliberate replacement rearms it.
-  if (
-    canvasIntent.value === "manual" &&
-    selected &&
-    (!canvasSourceInitialized ||
-      recipe !== previousCanvasRecipe ||
-      (selected === closing && previousStillSource && closing === previousClosingCanvasSource))
-  ) {
-    preservedSourceReplacement = selected;
-  }
-  previousClosingCanvasSource = closing;
-  canvasSourceInitialized = true;
-  previousCanvasRecipe = recipe;
-}
-
-function applyMobileSourceResolution(
-  base64: string | null,
-  previous: {
-    base64: string;
-    resolution: SourceResolutionResult | null;
-    automaticResolution: SourceDimensions | null;
-  },
-  setDimensions: (width: number | null, height: number | null) => void,
-): {
-  base64: string;
-  resolution: SourceResolutionResult | null;
-  automaticResolution: SourceDimensions | null;
-} {
-  if (!base64) {
-    setDimensions(null, null);
-    // Clearing the source hands the canvas back to the model, but never
-    // overrides a size the user chose deliberately.
-    if (canvasIntent.value !== "manual") canvasIntent.value = "model-default";
-    return { base64: "", resolution: null, automaticResolution: null };
-  }
-  const dimensions =
-    base64 === previous.base64 && previous.resolution
-      ? previous.resolution.source
-      : activeCanvasSource.value?.width && activeCanvasSource.value.height
-        ? { width: activeCanvasSource.value.width, height: activeCanvasSource.value.height }
-        : imageDimensionsFromBase64(base64);
-  if (!dimensions) {
-    setDimensions(null, null);
-    return { base64, resolution: null, automaticResolution: null };
-  }
-  setDimensions(dimensions.width, dimensions.height);
-  const resolution = resolveSourceResolution(
-    dimensions,
-    selectedGenerationModel.value ?? form.family,
-    form.pipeline,
-  );
-  const automaticResolution = resolveDefaultSourceResolution(
-    dimensions,
-    selectedGenerationModel.value ?? form.family,
-    form.pipeline,
-  );
-  const replaced = base64 !== previous.base64;
-  // A reference strip is not a canvas: the size comes from the model. Qwen
-  // edit is the exception the profile names (`primary_is_target`).
-  if (
-    requestConditioning.value !== "references" ||
-    caps.value.referenceImages?.primaryIsTarget === true
-  ) {
-    const preserveReplacement = replaced && preservedSourceReplacement === base64;
-    const nextResolution = resolveSourceCanvasTransition({
-      source: resolution,
-      automatic: automaticResolution,
-      replaced,
-      intent: canvasIntent.value,
-      preserveReplacement,
-    });
-    if (replaced) {
-      preservedSourceReplacement = "";
-      if (preserveReplacement) canvasIntent.value = "manual";
-      else if (canvasIntent.value !== "source-exact") canvasIntent.value = "source";
-    }
-    // A canvasless recipe (a 3-D mesh) renders no pixel canvas: its zero
-    // canvas is the recipe's own answer, and a source's size is not a
-    // resolution to fit it to.
-    if (nextResolution && !formIsCanvasless()) {
-      form.width = nextResolution.width;
-      form.height = nextResolution.height;
-    }
-  }
-  return { base64, resolution, automaticResolution };
-}
-
 /**
  * Whether the live form renders no pixel canvas (a 3-D mesh). The recipe
  * snapshot is the authority; the family is the fallback for a form restored
@@ -2432,27 +2312,33 @@ watch(
         ?.map(({ width, height }) => `${width}x${height}`)
         .join("|") ?? "",
   ],
-  ([base64]) => {
-    preserveBoundaryRemovalCanvas();
-    const replaced = Boolean(base64 && base64 !== previousStillSource);
-    const next = applyMobileSourceResolution(
-      base64,
-      {
-        base64: previousStillSource,
-        resolution: previousStillResolution,
-        automaticResolution: previousStillAutomaticResolution,
-      },
-      (width, height) => {
-        if (activeCanvasSource.value?.base64 === form.sourceImage) {
-          form.sourceImageWidth = width;
-          form.sourceImageHeight = height;
-        }
-      },
-    );
-    previousStillSource = next.base64;
-    previousStillResolution = next.resolution;
-    previousStillAutomaticResolution = next.automaticResolution;
-    if (replaced && requestCarriesSource(requestConditioning.value)) {
+  () => {
+    const next = sourceCanvasController.update({
+      source: activeCanvasSource.value,
+      closingSource:
+        caps.value.sourceImageMode === "h3-boundaries"
+          ? (form.h3Authoring?.lastFrame?.data ?? "")
+          : caps.value.supportsEndFrame
+            ? (form.endFrame?.base64 ?? "")
+            : "",
+      recipeKey: `${form.model}:${form.pipeline ?? ""}`,
+      model: selectedGenerationModel.value ?? form.family,
+      pipeline: form.pipeline,
+      intent: canvasIntent.value,
+      referenceOnly: requestConditioning.value === "references",
+      primaryIsTarget: caps.value.referenceImages?.primaryIsTarget === true,
+      canvasless: form.recipeCapabilities?.canvasless ?? isMeshFamily(form.family),
+    });
+    canvasIntent.value = next.intent;
+    if (activeCanvasSource.value?.base64 === form.sourceImage) {
+      form.sourceImageWidth = next.dimensions?.width ?? null;
+      form.sourceImageHeight = next.dimensions?.height ?? null;
+    }
+    if (next.canvas) {
+      form.width = next.canvas.width;
+      form.height = next.canvas.height;
+    }
+    if (next.replaced && requestCarriesSource(requestConditioning.value)) {
       form.sourceFit = defaultSourceFitPolicy();
     }
   },
@@ -12228,142 +12114,19 @@ function cancelMobileTouch(): void {
   cancelViewPull();
 }
 
-function usesSoftwareKeyboard(target: EventTarget | null): target is HTMLElement {
-  if (!(target instanceof HTMLElement)) return false;
-  if (target.matches("textarea, select, [contenteditable='true']")) return true;
-  if (!(target instanceof HTMLInputElement)) return false;
-  return !NON_KEYBOARD_INPUT_TYPES.has(target.type.toLowerCase());
-}
-
-const keyboardVisible = ref(false);
-const androidShortLandscape = ref(false);
 const createReadinessSlot = ref<HTMLElement | null>(null);
-let keyboardBaselineWidth = window.innerWidth;
-let keyboardBaselineHeight = window.innerHeight;
-let keyboardRotationOpen = false;
-let lastKeyboardViewportHeight = window.innerHeight;
-function syncVisualViewportOffset(): void {
-  const viewport = window.visualViewport;
-  // UIKit may resize the WebView itself after the keyboard opens, making
-  // innerHeight equal visualViewport.height. Preserve the unobscured height
-  // for this orientation instead of mistaking that second resize for Done.
-  if (keyboardBaselineWidth !== window.innerWidth) {
-    keyboardRotationOpen = keyboardVisible.value && usesSoftwareKeyboard(document.activeElement);
-    keyboardBaselineWidth = window.innerWidth;
-    keyboardBaselineHeight = window.innerHeight;
-  }
-  keyboardBaselineHeight = Math.max(
-    keyboardBaselineHeight,
-    window.innerHeight,
-    viewport?.height ?? 0,
-  );
-  androidShortLandscape.value =
-    androidNativeRuntime &&
-    keyboardBaselineWidth > keyboardBaselineHeight &&
-    keyboardBaselineHeight < 500;
-  if (
-    !usesSoftwareKeyboard(document.activeElement) ||
-    (viewport && viewport.height - lastKeyboardViewportHeight > 120)
-  )
-    keyboardRotationOpen = false;
-  keyboardVisible.value =
-    !!viewport && (keyboardRotationOpen || keyboardBaselineHeight - viewport.height > 120);
-  lastKeyboardViewportHeight = viewport?.height ?? window.innerHeight;
-  const pageTop = viewport?.pageTop ?? window.scrollY;
-  document.documentElement.style.setProperty(
-    "--mobile-visual-viewport-page-top",
-    `${Math.max(0, pageTop)}px`,
-  );
-  if (viewport && Number.isFinite(viewport.height) && viewport.height > 0) {
-    document.documentElement.style.setProperty(
-      "--mobile-visual-viewport-height",
-      `${viewport.height}px`,
-    );
-  } else {
-    document.documentElement.style.removeProperty("--mobile-visual-viewport-height");
-  }
-}
-
-function restoreNativeViewport(): void {
-  if (!("__TAURI_INTERNALS__" in window) || unmounted) return;
-  // Keyboard avoidance may scroll WebKit's document layer despite Mold's
-  // non-scrolling root. Reset it without disturbing .mobile-content, whose
-  // independent scroll position belongs to the user.
-  window.scrollTo(0, 0);
-  syncVisualViewportOffset();
-  void invoke("restore_mobile_viewport").catch(() => undefined);
-}
-
-function revealFocusedEditor(editor: HTMLElement): void {
-  // Wait for viewport sizing and keyboard-only chrome to finish updating.
-  // Every editor needs this: WebKit's first pan can leave a low numeric,
-  // password, or sheet field underneath the resized content edge.
-  void nextTick(() => {
-    if (unmounted || document.activeElement !== editor) return;
-    editor.scrollIntoView?.({ block: "nearest", inline: "nearest" });
-  });
-}
-
-function handleKeyboardViewportResize(): void {
-  const widthChanged = keyboardBaselineWidth !== window.innerWidth;
-  syncVisualViewportOffset();
-  if (widthChanged) {
-    cancelKeyboardViewportRestore();
-    keyboardViewportRestoreTimer = setTimeout(() => {
-      keyboardViewportRestoreTimer = null;
-      restoreNativeViewport();
-      const focused = document.activeElement;
-      if (usesSoftwareKeyboard(focused)) revealFocusedEditor(focused);
-    }, 400);
-  }
-  const editor = document.activeElement;
-  if (usesSoftwareKeyboard(editor)) revealFocusedEditor(editor);
-}
-
-function cancelKeyboardViewportRestore(): void {
-  if (!keyboardViewportRestoreTimer) return;
-  clearTimeout(keyboardViewportRestoreTimer);
-  keyboardViewportRestoreTimer = null;
-}
-
-function handleKeyboardFocusIn(event: FocusEvent): void {
-  if (!usesSoftwareKeyboard(event.target)) return;
-  const editor = event.target;
-  cancelKeyboardViewportRestore();
-  // iOS pans WKWebView after focus to reveal an editor. Re-anchor after the
-  // focus turn and once more after the keyboard animation; the Create body's
-  // own overflow remains the only scrollable app layer.
-  queueMicrotask(() => {
-    if (unmounted || document.activeElement !== editor) return;
-    restoreNativeViewport();
-    revealFocusedEditor(editor);
-    keyboardViewportRestoreTimer = setTimeout(() => {
-      keyboardViewportRestoreTimer = null;
-      if (document.activeElement !== editor) return;
-      restoreNativeViewport();
-      revealFocusedEditor(editor);
-    }, KEYBOARD_VIEWPORT_SETTLE_MS);
-  });
-}
-
-/**
- * WKWebView can keep the keyboard-reduced presentation frame after an editor
- * blurs. Repair once after focus has moved, then again after UIKit's keyboard
- * dismissal animation so its final layout pass cannot reinstate the gap.
- */
-function handleKeyboardFocusOut(event: FocusEvent): void {
-  if (!usesSoftwareKeyboard(event.target)) return;
-  queueMicrotask(() => {
-    if (unmounted || usesSoftwareKeyboard(document.activeElement)) return;
-    restoreNativeViewport();
-    cancelKeyboardViewportRestore();
-    keyboardViewportRestoreTimer = setTimeout(() => {
-      keyboardViewportRestoreTimer = null;
-      if (usesSoftwareKeyboard(document.activeElement)) return;
-      restoreNativeViewport();
-    }, KEYBOARD_VIEWPORT_SETTLE_MS);
-  });
-}
+const {
+  keyboardVisible,
+  androidShortLandscape,
+  start: startKeyboardViewport,
+} = useMobileKeyboardViewport({
+  android: androidNativeRuntime,
+  restoreNativeViewport: () => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    window.scrollTo(0, 0);
+    void invoke("restore_mobile_viewport").catch(() => undefined);
+  },
+});
 
 watch(resultPreviewError, (error) => {
   if (!error) return;
@@ -12375,10 +12138,6 @@ onMounted(async () => {
   window.addEventListener("pagehide", flushComposerDraft);
   await restoreComposerDraft();
   if (unmounted) return;
-  document.addEventListener("focusin", handleKeyboardFocusIn, true);
-  document.addEventListener("focusout", handleKeyboardFocusOut, true);
-  window.addEventListener("scroll", syncVisualViewportOffset, true);
-  window.addEventListener("resize", handleKeyboardViewportResize);
   window.addEventListener("pointermove", moveGallerySelectionDrag, { passive: false });
   window.addEventListener("pointerup", finishGallerySelectionDrag);
   window.addEventListener("pointercancel", finishGallerySelectionDrag);
@@ -12390,9 +12149,7 @@ onMounted(async () => {
   window.addEventListener("pointermove", moveGalleryPinch, { passive: false });
   window.addEventListener("pointerup", endGalleryPinch);
   window.addEventListener("pointercancel", endGalleryPinch);
-  window.visualViewport?.addEventListener("resize", handleKeyboardViewportResize);
-  window.visualViewport?.addEventListener("scroll", syncVisualViewportOffset);
-  syncVisualViewportOffset();
+  startKeyboardViewport();
   if ("__TAURI_INTERNALS__" in window) {
     void invoke("restore_mobile_viewport").catch(() => undefined);
     void import("@tauri-apps/api/app")
@@ -12477,10 +12234,6 @@ onBeforeUnmount(() => {
   }
   mobileDownloads.unregisterConsumer(missingModelConsumerId);
   document.removeEventListener("visibilitychange", handleForegroundResume);
-  document.removeEventListener("focusin", handleKeyboardFocusIn, true);
-  document.removeEventListener("focusout", handleKeyboardFocusOut, true);
-  window.removeEventListener("scroll", syncVisualViewportOffset, true);
-  window.removeEventListener("resize", handleKeyboardViewportResize);
   window.removeEventListener("pointermove", moveGallerySelectionDrag);
   window.removeEventListener("pointerup", finishGallerySelectionDrag);
   window.removeEventListener("pointercancel", finishGallerySelectionDrag);
@@ -12493,12 +12246,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("pointerup", endGalleryPinch);
   window.removeEventListener("pointercancel", endGalleryPinch);
   resetPinch(galleryZoom, galleryColumns.value);
-  window.visualViewport?.removeEventListener("resize", handleKeyboardViewportResize);
-  window.visualViewport?.removeEventListener("scroll", syncVisualViewportOffset);
-  document.documentElement.style.removeProperty("--mobile-visual-viewport-page-top");
-  document.documentElement.style.removeProperty("--mobile-visual-viewport-height");
   window.removeEventListener("pageshow", handleForegroundResume);
-  cancelKeyboardViewportRestore();
   if (resultMediaRecoveryTimer !== null) {
     clearTimeout(resultMediaRecoveryTimer);
     resultMediaRecoveryTimer = null;

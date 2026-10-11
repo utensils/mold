@@ -1,36 +1,72 @@
+export type { ChainScript, ChainScriptChain } from "@studio/lib/api/chainTypes";
+import type {
+  CatalogProviderError,
+  DevicePlacement,
+  ExpandTask,
+  KeyframeConditionWire,
+  LoraWeight,
+  Ltx2PipelineMode,
+  Ltx2SpatialUpscale,
+  Ltx2TemporalUpscale,
+  RemixDimension,
+  RemixSourceKind,
+  TimeRange,
+} from "@studio/lib/api/serverTypes";
+export type {
+  AdvancedPlacement,
+  CatalogProviderError,
+  ChainJobState,
+  ChainJobSummary,
+  ChainProgressEvent,
+  CreateChainJobResponse,
+  DevicePlacement,
+  DeviceRef,
+  ExpandTask,
+  GenerationMemoryEstimate,
+  GpuInfo,
+  GpuWorkerStatus,
+  KeyframeConditionWire,
+  KeyframeMetadata,
+  LoraWeight,
+  Ltx2CameraControlInfo,
+  Ltx2ControlAdapterInfo,
+  Ltx2PipelineMode,
+  Ltx2SpatialUpscale,
+  Ltx2TemporalUpscale,
+  MeshServerCapabilities,
+  ModelComponentStatus,
+  ModelComponentsResponse,
+  RamSnapshot,
+  RemixDimension,
+  RemixSourceKind,
+  ServerCapabilities,
+  ServerStatus,
+  SseChainCompleteEvent,
+  TimeRange,
+} from "@studio/lib/api/serverTypes";
+import type { OutputMetadata, GalleryImage } from "./legacyTypes";
+export type { OutputMetadata, GalleryImage, GpuSnapshot, ResourceSnapshot } from "./legacyTypes";
 /**
  * Hand-mirrored subsets of mold-core wire types (serde snake_case).
  * Source of truth: /api/openapi.json — a drift snapshot test guards these
  * once the OpenAPI harness lands (see desktop/docs/architecture.md §5).
  */
 import type { MeshWorkflowProvenance } from "@studio/lib/meshWorkflowProvenance";
-
-import type { ChainOutputMetadata, ChainRequestWire } from "@studio/lib/api/chainTypes";
-import type { HostMemorySnapshot } from "@studio/lib/hostMemory";
-import type {
-  GenerationReference,
-  GenerationReferenceMetadata,
-} from "@studio/lib/generationReferences";
+import type { GenerationReference } from "@studio/lib/generationReferences";
 import type { Ltx2GuidanceOverrides } from "@studio/lib/guidanceOverrides";
 import type { GenerationScheduler } from "@studio/lib/generationCapabilities";
 import type { OutputFormat as WireOutputFormat } from "@studio/lib/generated/generationProfileV1";
-import type { MiniMaxH3Capability } from "@studio/lib/minimaxH3Inventory";
 import type { GenerationProfileSet } from "@studio/lib/generationProfile";
 import type { MeshRequestOptions } from "@studio/lib/meshControls";
-import type { MeshExportGeometryCapabilities } from "@studio/lib/meshExport";
-import type { GenerationAsset } from "@studio/api/generationAssets";
 
 export type { MeshRequestOptions } from "@studio/lib/meshControls";
 import type { SourceFitPolicy } from "@studio/lib/sourceFit";
 import type {
   GalleryCollectionsChangedEvent,
-  GalleryOrganizationFields,
   GalleryRestoredEvent,
-  GalleryTrashCapabilities,
   GalleryTrashedEvent,
   GalleryUpdatedEvent,
 } from "@studio/lib/api/galleryOrganization";
-import type { DurableMediaCapabilities } from "@studio/api/generationAdmission";
 
 // Library organization wire shapes are shared across surfaces; re-export the
 // pieces desktop consumers reach for so `lib/api/types` stays the single
@@ -54,224 +90,9 @@ export type {
   GenerationLifecyclePhase,
 } from "@studio/api/generationAdmission";
 
-export interface GpuSnapshot {
-  ordinal: number;
-  name: string;
-  backend: "cuda" | "metal" | "cpu" | string;
-  vram_total: number;
-  vram_used: number;
-  vram_used_by_mold?: number | null;
-  gpu_utilization?: number | null;
-}
-
-export interface RamSnapshot {
-  total: number;
-  used: number;
-  /** `MemAvailable`; additive on newer servers. */
-  available?: number;
-  /** Evictable ZFS ARC beside `available`, never inside it (#1439). */
-  reclaimable_zfs_arc?: number;
-  used_by_mold: number;
-  used_by_other: number;
-}
-
-export interface ResourceSnapshot {
-  hostname: string;
-  timestamp: number;
-  gpus: GpuSnapshot[];
-  system_ram: RamSnapshot;
-}
-
-/** `/api/status` per-GPU worker row; present only on multi-GPU-aware servers. */
-export interface GpuWorkerStatus {
-  ordinal: number;
-  name: string;
-  vram_total_bytes: number;
-  vram_used_bytes: number;
-  loaded_model?: string | null;
-  state: string;
-}
-
-/** `/api/status` GPU summary (MB units, unlike GpuSnapshot's bytes). */
-export interface GpuInfo {
-  name: string;
-  vram_total_mb: number;
-  vram_used_mb: number;
-  /** "cuda" | "metal"; absent from servers ≤ 0.16 — infer from `name` then. */
-  backend?: string | null;
-}
-
-export interface ServerStatus {
-  version: string;
-  git_sha?: string | null;
-  models_loaded: string[];
-  busy?: boolean;
-  uptime_secs: number;
-  hostname?: string | null;
-  gpu_info?: GpuInfo | null;
-  /** One row per GPU worker; absent/null on single-GPU or older servers. */
-  gpus?: GpuWorkerStatus[] | null;
-  queue_depth?: number | null;
-  queue_capacity?: number | null;
-  /** Whether this host is currently holding queued work from dispatch. */
-  queue_paused?: boolean | null;
-  /** Stable server-installation UUID; absent on older servers. */
-  instance_id?: string | null;
-  /** Disk stats for the filesystem holding the models dir; absent on older servers. */
-  models_disk?: { total_bytes: number; free_bytes: number } | null;
-  /** What this machine's gallery takes on disk, live and trashed, from the
-   * metadata DB's own per-row sizes; absent on older servers and DB-off hosts. */
-  gallery_storage?: {
-    prints: number;
-    bytes: number;
-    trash_prints: number;
-    trash_bytes: number;
-  } | null;
-  /** Host-RAM ledger snapshot; absent on older servers. This is the FRESHER
-   * copy — the queue plan only republishes its mirror when a plan is emitted
-   * for some other reason. Read it through `hostMemoryLevel`, which validates
-   * before anything renders. */
-  host_memory?: HostMemorySnapshot | null;
-}
-
-export type ExpandBackend = "local" | "api";
-
-export interface ExpandCapabilities {
-  configured: boolean;
-  model_present: boolean | null;
-  backend: ExpandBackend;
-  /** The manifest model local expansion resolves. Additive: absent on API
-   * backends and on servers that predate the field, where clients fall back
-   * to `DEFAULT_EXPAND_MODEL`. */
-  model?: string | null;
-}
-
-/** `/api/capabilities.mesh` — mirrors `mold_core::types::MeshCapabilities`. */
-export interface MeshServerCapabilities {
-  generation: boolean;
-  formats: string[];
-  /** The export menu is built from THIS list, never a client constant: a
-   * host that adds an animated turntable container advertises it here. */
-  export_formats: string[];
-  textures: boolean;
-  /** The geometry knobs (`size_mm`, `up_axis`, `origin`) this host applies to
-   * an OBJ / STL / PLY export before it writes the file. Additive, and its
-   * ABSENCE (or null) is the ONLY gate a client has: an older server DROPS
-   * unknown body fields rather than refusing them, so posting these to a host
-   * that never advertised them would hand back the unscaled mesh the user
-   * thought they had resized. Absent ⇒ post `{ format }` exactly as before. */
-  export_geometry?: MeshExportGeometryCapabilities | null;
-}
-
-export interface ServerCapabilities {
-  generation_profile_v1?: boolean;
-  /** 3-D mesh support (additive; absent on servers that predate it):
-   * whether a mesh family has a runnable engine here, the containers this
-   * host stores (GLB only), the containers `POST /api/gallery/export/:filename`
-   * can transcode a stored mesh into, and whether textures are available. */
-  mesh?: MeshServerCapabilities | null;
-  /** Restart-safe encrypted request-media queueing. Absent is unsupported. */
-  durable_media?: DurableMediaCapabilities | null;
-  video_upscale?: {
-    available: boolean;
-    gallery_image?: boolean;
-    contract_version: number;
-    source_library: boolean;
-    source_upload: boolean;
-    input_containers: string[];
-    output_container: string;
-    preserves_primary_audio_when_compatible: boolean;
-    supports_vfr: boolean;
-    supports_hdr: boolean;
-    disclosure: string;
-  } | null;
-  gallery: {
-    can_delete: boolean;
-    /** Trash support (soft delete + retention). Absent on older servers,
-     * which hard-delete, and when the metadata DB is disabled. */
-    trash?: GalleryTrashCapabilities | null;
-    /** Titles / favorites / tags / collections can be edited here. Absent
-     * on older servers ⇒ hide the organization UI. */
-    organize?: boolean;
-    /** Replay-safe bulk organization endpoint. */
-    bulk_mutations?: boolean;
-    media_version?: boolean;
-    conditional_get?: boolean;
-    row_events?: boolean;
-    /** A saved print reads back byte-for-byte from
-     * `GET /api/gallery/image/{filename}`. Absent means an older server. */
-    persists_outputs?: boolean;
-  };
-  /** Server-enforced model families that are not activated in this build. */
-  model_access?: {
-    restrictions: Array<{
-      code: string;
-      family: string;
-      message: string;
-      license_url: string;
-      authorization_url: string;
-    }>;
-  } | null;
-  /** Host-authored, presentation-only H3 inventory. Current servers omit it;
-   * model_access and runtime_available remain independent hard gates. */
-  minimax_h3?: MiniMaxH3Capability | null;
-  /** Continuation support. Absent on older servers, which means the Create
-   * surfaces must hide the extend controls rather than send a rejected
-   * request. */
-  video?: {
-    can_extend?: boolean;
-    extend_default_overlap_frames?: number | null;
-  } | null;
-  catalog?: { available: boolean; families: string[] } | null;
-  /** Server-assisted DNS-SD browse support; absent on older servers. */
-  discovery?: { can_browse: boolean } | null;
-  /** Absent on servers that predate `GET /api/events`. */
-  events?: { available: boolean } | null;
-  /** Stable-URL, header-secret reference ingress. Model access is advertised
-   * separately and may still keep H3 legally unavailable. */
-  reference_uploads?: {
-    available: boolean;
-    protocol_version: number;
-    requires_api_key: boolean;
-    session_path: string;
-    upload_path: string;
-    session_handle_header: string;
-    upload_handle_header: string;
-    max_file_bytes: number;
-    max_session_bytes: number;
-    max_active_sessions: number;
-    session_ttl_ms: number;
-  } | null;
-  /** Live lifecycle and restart-only recovery support. */
-  devices?: {
-    available?: boolean;
-    lifecycle?: boolean;
-    restart_enable?: boolean;
-    stable_pins?: boolean;
-    planned_lanes?: boolean;
-    learned_eta?: boolean;
-  } | null;
-  dispatch?: {
-    active_mode?: string | null;
-    v2_authoritative?: boolean;
-    observes_v2_decisions?: boolean;
-    request_placement_preview?: boolean;
-  } | null;
-  queue?: {
-    pre_render_transfer?: boolean;
-    transfer_identity?: string;
-    can_pause?: boolean;
-    can_pause_job?: boolean;
-    can_cancel_all?: boolean;
-    can_reorder?: boolean;
-    cooperative_cancellation?: boolean;
-    /** The batch chunk limit for durable admission. Its presence IS the
-     * durable-generation contract; there is no separate version probe. */
-    heterogeneous_batch_max_outputs?: number | null;
-  } | null;
-  /** Absent on older servers means unknown, not unavailable. */
-  expand?: ExpandCapabilities | null;
-}
+export type ExpandCapabilities = NonNullable<
+  import("@studio/lib/api/serverTypes").ServerCapabilities["expand"]
+>;
 
 // ── Models ───────────────────────────────────────────────────────────────
 
@@ -398,71 +219,6 @@ export type OutputFormat = WireOutputFormat;
  * sample solvers; only `uni-pc` is accepted by both. */
 export type Scheduler = GenerationScheduler;
 
-// ── LTX-2 advanced video (mold-core `Ltx2*`, kebab-case on the wire) ────────
-
-/** Explicit LTX-2 pipeline mode. Mirrors mold-core `Ltx2PipelineMode`. */
-export type Ltx2PipelineMode =
-  | "one-stage"
-  | "two-stage"
-  | "two-stage-hq"
-  | "distilled"
-  | "ic-lora"
-  | "keyframe"
-  | "a2-vid"
-  | "retake"
-  | "lip-dub"
-  | "t2a";
-/** Spatial latent upscale factor. Mirrors mold-core `Ltx2SpatialUpscale`
- * (`X1_5` → `"x1-5"`, `X2` → `"x2"`). */
-export type Ltx2SpatialUpscale = "x1-5" | "x2";
-
-/** Temporal latent upscale factor. Mirrors mold-core `Ltx2TemporalUpscale`. */
-export type Ltx2TemporalUpscale = "x2";
-
-/** Retake / partial-regeneration time window. Mirrors mold-core `TimeRange`. */
-export interface TimeRange {
-  start_seconds: number;
-  end_seconds: number;
-}
-
-/** One keyframe conditioning image on the wire — mirrors mold-core
- * `KeyframeCondition`, whose `image` field serializes as a base64 STRING. */
-export interface KeyframeConditionWire {
-  frame: number;
-  image: string;
-  name?: string | null;
-}
-
-export interface KeyframeMetadata {
-  frame: number;
-  name?: string | null;
-  sha256: string;
-}
-
-/** One entry in a LoRA stack. `path` is the server-side safetensors path
- * (`LoraInfo.path`); `scale` is 0–2, 1 = full strength. Mirrors mold-core
- * `LoraWeight`. */
-export interface LoraWeight {
-  path: string;
-  scale: number;
-}
-
-export type DeviceRef = { kind: "auto" } | { kind: "cpu" } | { kind: "gpu"; ordinal: number };
-
-export interface AdvancedPlacement {
-  transformer: DeviceRef;
-  vae: DeviceRef;
-  clip_l?: DeviceRef | null;
-  clip_g?: DeviceRef | null;
-  t5?: DeviceRef | null;
-  qwen?: DeviceRef | null;
-}
-
-export interface DevicePlacement {
-  text_encoders: DeviceRef;
-  advanced?: AdvancedPlacement | null;
-}
-
 /** Installed LoRA adapter (`GET /api/loras`). Mirrors mold-core `LoraInfo`. */
 export interface LoraInfo {
   id: string;
@@ -475,18 +231,6 @@ export interface LoraInfo {
   thumbnail_url?: string | null;
   added_at: number;
 }
-
-/** `POST /api/expand` — mirrors mold-core `ExpandRequest`. */
-export type ExpandTask =
-  | "text-to-image"
-  | "text-to-video"
-  | "image-to-video"
-  | "video-to-video"
-  | "retake"
-  | "keyframe-interpolation"
-  | "audio-driven-video"
-  | "reference-to-audio-video"
-  | "text-to-audio";
 
 export interface ExpandRequest {
   prompt: string;
@@ -509,10 +253,6 @@ export interface ExpandResponse {
   original: string;
   expanded: string[];
 }
-
-export type RemixSourceKind = "original" | "current" | "direct";
-export type RemixDimension =
-  "composition" | "camera" | "lighting" | "setting" | "mood" | "movement" | "style";
 
 export interface RemixRequest {
   source_prompt: string;
@@ -542,22 +282,6 @@ export interface PromptTransformProvenance {
   source_kind: RemixSourceKind;
   task: ExpandTask;
   dimensions?: RemixDimension[];
-}
-
-/** `POST /api/generate/estimate` — mirrors mold-core `GenerationMemoryEstimate`. */
-export interface GenerationMemoryEstimate {
-  model: string;
-  peak_memory_bytes: number;
-  activation_memory_bytes: number;
-  available_memory_bytes?: number | null;
-  load_strategy: string;
-  fits_available_memory?: boolean | null;
-  /** Stable requirement resolved against physical capacity, not current load. */
-  capacity_peak_memory_bytes?: number | null;
-  /** Total capacity of the GPU used for the stable requirement. */
-  device_capacity_bytes?: number | null;
-  /** Stable, family-specific fit verdict resolved against that capacity. */
-  fits_device_capacity?: boolean | null;
 }
 
 /** Re-exported so a wire type and the policy that reads it cannot drift. */
@@ -701,29 +425,6 @@ export interface GenerateRequest {
   placement?: DevicePlacement | null;
 }
 
-export interface Ltx2ControlAdapterInfo {
-  id: string;
-  label: string;
-  guide: string;
-  size_bytes: number;
-  installed: boolean;
-  download_model: string;
-  download_repo: string;
-  download_filename: string;
-  download_sha256: string;
-}
-
-export interface Ltx2CameraControlInfo {
-  id: string;
-  label: string;
-  size_bytes: number;
-  installed: boolean;
-  download_model: string;
-  download_repo: string;
-  download_filename: string;
-  download_sha256: string;
-}
-
 export interface CompleteEvent {
   /** Advisories the server attached to this render: it succeeded, but
    * something was adjusted, dropped, or is worth knowing — the multi-face
@@ -782,179 +483,6 @@ export interface CompleteEvent {
   metadata?: OutputMetadata | null;
 }
 
-// ── Gallery ──────────────────────────────────────────────────────────────
-
-/** Embedded `mold:parameters` metadata (mirrors mold-core `OutputMetadata`).
- * Everything beyond the required core is optional — the desktop talks to
- * arbitrary-version remote servers, older ones simply omit newer fields. */
-export interface OutputMetadata {
-  /** User-facing authoring mode; independent of internal auto-chaining. */
-  output_mode?: "one-shot" | "sequence" | null;
-  prompt: string;
-  /** Creation-time print title; the gallery row is the editable authority. */
-  title?: string | null;
-  /** How long the render took, wall clock, in ms. Additive: an older host, a
-   * synthesized row, or a print made before it was recorded carries none, and
-   * the server's zero means "not measured". Render nothing for either. */
-  generation_time_ms?: number | null;
-  /** Tags the print was filed under at creation, exactly as applied. The
-   * gallery row's tag links are the editable authority once it exists. */
-  tags?: string[] | null;
-  /** Display name of the collection the print was filed into at creation —
-   * never the requested id, and never a name the host did not resolve. */
-  collection?: string | null;
-  negative_prompt?: string | null;
-  original_prompt?: string | null;
-  batch_id?: string | null;
-  batch_index?: number | null;
-  batch_count?: number | null;
-  model: string;
-  /** The family the host resolved this render to. Additive: absent on every
-   * print made before it was recorded, which reads as "unknown family", never
-   * as a refusal. It is the only answer a client has for a print whose model
-   * is not installed anywhere. */
-  family?: string | null;
-  seed: number;
-  steps: number;
-  guidance: number;
-  width: number;
-  height: number;
-  /** Generation canvas before any post-generate upscaler resized the file. */
-  generation_width?: number | null;
-  generation_height?: number | null;
-  strength?: number | null;
-  /** Provenance label of the img2img source (additive; newer servers only). */
-  source_image_name?: string | null;
-  /** SHA-256 (hex) of the exact source bytes used — local stash lookup key
-   * for Reuse-settings source restore (additive; newer servers only). */
-  source_image_sha256?: string | null;
-  /** Client-shaped source-fit provenance echoed verbatim by the server
-   * (additive; newer servers only). Parse defensively before restoring. */
-  source_fit?: unknown;
-  /** Provenance label of the identity photo (additive; newer servers only). */
-  id_image_name?: string | null;
-  /** SHA-256 (hex) of the exact identity-photo bytes that rendered — the local
-   * stash key Reuse settings looks the face back up with. Metadata never
-   * carries the photo itself. */
-  id_image_sha256?: string | null;
-  /** Effective identity strength / first conditioned step the render applied
-   * (the server records what actually applied, not what the request asked). */
-  id_weight?: number | null;
-  id_start_step?: number | null;
-  /** The request asked for a transparent background (only ever `true`);
-   * Reuse restores the toggle from it. Additive. */
-  transparent_background?: boolean | null;
-  /** The STORED file carries alpha — also true for an edit of a transparent
-   * reference with the toggle off. Draws the checkerboard. Additive. */
-  has_alpha?: boolean | null;
-  /** Qwen Image 2.1: whether the render retained its prompt prefix's K/V or
-   * recomputed it every step (the two are not bit-identical). Additive. */
-  prefix_cache?: "retained" | "recomputed" | null;
-  /** Ordered content keys for Qwen Image Edit inputs (newer servers only). */
-  edit_image_sha256s?: string[] | null;
-  reference_weight?: number | null;
-  /** Redacted ordered H3 reference provenance (newer servers only). */
-  references?: GenerationReferenceMetadata[] | null;
-  /** Ordered byte-free keyframe provenance (newer servers only). */
-  keyframes?: KeyframeMetadata[] | null;
-  /** Durable sequence job this print was stitched from. Present only for
-   * chain jobs with a server-side record — ephemeral chain outputs and
-   * pre-#564 rows carry nothing (additive; newer servers only). */
-  chain_job_id?: string | null;
-  /** The durable 3-D workflow that produced this print, and the role it plays
-   * in it. Additive: absent on every print made outside a durable mesh workflow and on
-   * every host that predates the field — which reads as an ordinary print,
-   * never as a refusal. */
-  mesh_workflow?: MeshWorkflowProvenance | null;
-  /** The queue id of the generation that produced this print. The server's own
-   * replay idempotence key, and the exact answer to "is this print mine?" —
-   * absent on hosts that predate it. */
-  job_id?: string | null;
-  /** Per-clip execution provenance for a stitched output. `output_mode`
-   * decides whether Reuse settings exposes it as an authored sequence. */
-  chain?: ChainOutputMetadata | null;
-  /** Plain kebab-case name, or a serde-tagged object for parameterized
-   * variants (e.g. `{ "ddim": … }`). Normalize before feeding the form. */
-  scheduler?: string | Record<string, unknown> | null;
-  output_format?: OutputFormat | null;
-  cfg_plus?: boolean | null;
-  lora?: string | null;
-  lora_scale?: number | null;
-  loras?: LoraWeight[] | null;
-  control_model?: string | null;
-  control_scale?: number | null;
-  upscale_model?: string | null;
-  gif_preview?: boolean | null;
-  enable_audio?: boolean | null;
-  /** LTX-2 video-only opt-in as recorded at creation (#1037). */
-  video_only?: boolean | null;
-  audio_file_path?: string | null;
-  source_video_path?: string | null;
-  extend_video_path?: string | null;
-  extend_overlap_frames?: number | null;
-  pipeline?: Ltx2PipelineMode | null;
-  pipeline_requested?: boolean | null;
-  duration_prediction_requested?: boolean | null;
-  /** LTX-2 attention arithmetic the print was rendered with (newer servers):
-   * `ltx2-bf16-math` | `ltx2-bf16-flash` | `ltx2-f32-chunked` |
-   * `ltx2-metal-sdpa`. Output-changing, so it is recorded, never inferred. */
-  attention_path?: string | null;
-  /** LTX-2 INT8 ConvRot execution arm the print was rendered with (newer
-   * servers): `native-w8a8` | `dequant-cuda` | `dequant-metal` |
-   * `dequant-host`. Output-changing between arms, so it is recorded. */
-  int8_arm?: string | null;
-  ic_lora_control?: string | null;
-  retake_range?: TimeRange | null;
-  spatial_upscale?: Ltx2SpatialUpscale | null;
-  temporal_upscale?: Ltx2TemporalUpscale | null;
-  guidance_overrides?: Ltx2GuidanceOverrides | null;
-  /** Wan flow shift and per-expert distill strengths, recorded so Reuse
-   * settings restores exactly what the print was rendered with. */
-  sample_shift?: number | null;
-  distill_strength_high?: number | null;
-  distill_strength_low?: number | null;
-  frames?: number | null;
-  fps?: number | null;
-  /** The 3-D controls that shaped a mesh print, RESOLVED (request values or
-   * the engine defaults). Present only on a mesh print (additive). */
-  mesh?: MeshRequestOptions | null;
-  /** mold version that produced the print. */
-  version?: string | null;
-  /** Legacy desktop-only aliases for `frames` / `fps`; never sent by current
-   * servers but kept so older synthesized rows still display. */
-  video_frames?: number | null;
-  video_fps?: number | null;
-}
-
-export interface GalleryImage extends GalleryOrganizationFields {
-  filename: string;
-  metadata: OutputMetadata;
-  timestamp: number;
-  format?: OutputFormat | null;
-  size_bytes?: number | null;
-  media_version?: string | null;
-  metadata_synthetic?: boolean;
-  /** Independently downloadable files retained by this print. */
-  assets?: GenerationAsset[];
-}
-
-// ── Model components ──────────────────────────────────────────────────────
-
-/** One component of an installed model (mirrors mold-core `ModelComponentStatus`). */
-export interface ModelComponentStatus {
-  kind: string;
-  name: string;
-  present: boolean;
-  path?: string | null;
-  repair_model?: string | null;
-}
-
-/** `GET /api/models/:model/components` — mirrors `ModelComponentsResponse`. */
-export interface ModelComponentsResponse {
-  model: string;
-  components: ModelComponentStatus[];
-}
-
 // ── Downloads ─────────────────────────────────────────────────────────────
 
 export type DownloadJobStatus = "queued" | "active" | "completed" | "failed" | "cancelled";
@@ -1006,12 +534,6 @@ export type DownloadEvent =
   | { type: "job_failed"; id: string; error: string }
   | { type: "job_cancelled"; id: string }
   | { type: "catalog_ready"; id: string; ok: boolean };
-
-/** `POST /api/downloads` — mirrors `CreateDownloadResponse`. */
-export interface CreateDownloadResponse {
-  id: string;
-  position: number;
-}
 
 // ── Server events ─────────────────────────────────────────────────────────
 
@@ -1138,13 +660,6 @@ export interface CatalogSearchResponse {
   provider_errors?: CatalogProviderError[];
 }
 
-export interface CatalogProviderError {
-  source: "hf" | "civitai";
-  message: string;
-  code?: "overloaded" | "rate-limited" | string;
-  retry_after_seconds?: number;
-}
-
 /** One family from `GET /api/catalog/families`. */
 export interface CatalogFamily {
   family: string;
@@ -1231,18 +746,6 @@ export interface ChainRequest {
 }
 
 /**
- * The exact `POST /api/chain-jobs` body desktop submits: studio's canonical
- * clip wire plus the additive creation-time filing the stitched print
- * carries. Kept here rather than in `@studio` because the shared wire is
- * every surface's contract and this is the desktop composer's body type.
- */
-export type ChainCreateRequest = ChainRequestWire & {
-  title?: string;
-  tags?: string[];
-  collection?: { id?: string; name?: string };
-};
-
-/**
  * Auto-expand request accepted by `POST /api/generate/chain/stream`. The
  * server expands one prompt into the canonical `stages` array using the
  * requested total/clip frame budgets.
@@ -1276,184 +779,8 @@ export interface AutoChainRequest {
   collection?: { id?: string; name?: string };
 }
 
-/**
- * SSE `progress` frames from `POST /api/generate/chain/stream`. Newer
- * servers add the durable shim job id to every variant so a connected client
- * can cancel the underlying chain job; older servers omit it.
- */
-export type ChainProgressEvent =
-  | {
-      type: "chain_start";
-      stage_count: number;
-      estimated_total_frames: number;
-      job_id?: string;
-    }
-  | { type: "stage_start"; stage_idx: number; job_id?: string }
-  | {
-      type: "denoise_step";
-      stage_idx: number;
-      step: number;
-      total: number;
-      job_id?: string;
-    }
-  | {
-      type: "stage_done";
-      stage_idx: number;
-      frames_emitted: number;
-      job_id?: string;
-    }
-  | { type: "stitching"; total_frames: number; job_id?: string };
-
-/** Final `complete` frame from `POST /api/generate/chain/stream`. */
-export interface SseChainCompleteEvent {
-  /** Base64 stitched media; empty for metadata-only completions. */
-  video: string;
-  format: OutputFormat;
-  width: number;
-  height: number;
-  frames: number;
-  fps: number;
-  thumbnail?: string | null;
-  gif_preview?: string | null;
-  has_audio?: boolean;
-  duration_ms?: number | null;
-  audio_sample_rate?: number | null;
-  audio_channels?: number | null;
-  stage_count: number;
-  gpu?: number | null;
-  generation_time_ms?: number | null;
-  script: ChainScript;
-  vram_estimate?: { worst_case_bytes: number; fits: boolean } | null;
-  /** Saved gallery filename; present on metadata-only completions. */
-  filename?: string | null;
-  /** Exact metadata persisted beside the stitched output. */
-  metadata?: OutputMetadata | null;
-}
-
-/** `[chain]` table of a `mold.chain.v1` script (mirrors `ChainScriptChain`). */
-export interface ChainScriptChain {
-  model: string;
-  width: number;
-  height: number;
-  fps: number;
-  seed?: number | null;
-  steps: number;
-  guidance: number;
-  strength: number;
-  motion_tail_frames: number;
-  output_format: OutputFormat;
-  enable_audio?: boolean | null;
-}
-
-/**
- * `mold.chain.v1` script (mirrors `ChainScript`). On the JSON wire the stages
- * array key is `stage` (serde rename), matching the TOML `[[stage]]` tables.
- */
-export interface ChainScript {
-  schema: string;
-  chain: ChainScriptChain;
-  stage: ChainStage[];
-}
-
-/** `GET /api/capabilities/chain-limits?model=` (mirrors `ChainLimits`). */
-export interface ChainLimits {
-  model: string;
-  frames_per_clip_cap: number;
-  fps?: number | null;
-  frames_per_clip_runtime_seconds?: number | null;
-  frames_per_clip_recommended: number;
-  max_stages: number;
-  max_total_frames: number;
-  fade_frames_max: number;
-  transition_modes: string[];
-  quantization_family: string;
-  supports_audio: boolean;
-}
-
-export type ChainJobState =
-  "queued" | "running" | "paused" | "interrupted" | "failed" | "completed" | "cancelled";
-
-export type StageState = "pending" | "running" | "completed" | "failed";
-
-export type RetakeMode = "cascade" | "splice";
-
-export interface ChainJobSummary {
-  id: string;
-  state: ChainJobState;
-  model: string;
-  stage_count: number;
-  current_stage: number;
-  created_at_unix_ms: number;
-  updated_at_unix_ms: number;
-  error?: string | null;
-  ephemeral: boolean;
-  execution_phase?: "queued" | "running" | "finalizing" | null;
-}
-
-export interface ChainJobStageDetail {
-  idx: number;
-  state: StageState;
-  /** u64 effective seed, serialized as a decimal string. */
-  seed: string;
-  frames_emitted?: number | null;
-  generation_time_ms?: number | null;
-  has_preview: boolean;
-  has_media?: boolean;
-  cache_ready?: boolean;
-  error?: string | null;
-}
-
-/** `GET /api/chain-jobs/:id` — `ChainJobSummary` flattened + stages/script. */
-export interface ChainJobDetail extends ChainJobSummary {
-  stages: ChainJobStageDetail[];
-  finalizes: { output: string; at_unix_ms: number; stage_seeds: string[] }[];
-  retakes: unknown[];
-  script: ChainScript;
-}
-
-/** `GET /api/chain-jobs`. */
-export interface ChainJobListing {
-  jobs: ChainJobSummary[];
-}
-
-/** `POST /api/chain-jobs` (202). */
-export interface CreateChainJobResponse {
-  job_id: string;
-}
-
-/** `POST /api/chain-jobs/:id/retake` body (mirrors `RetakeRequest`). */
-export interface RetakeRequest {
-  stage_idx: number;
-  mode: RetakeMode;
-  /** u64 seed offset as a decimal string. */
-  seed_offset?: string;
-  prompt?: string;
-}
-
-/** `POST /api/chain-jobs/gc`. */
-export interface GcOutcome {
-  swept_ephemeral_jobs: number;
-  pruned_artifact_dirs: number;
-}
-
-/**
- * SSE `chain_job` frames from `GET /api/chain-jobs/:id/events` (internally
- * tagged snake_case; first frame is always `snapshot`). Mirrors mold-core
- * `ChainJobEvent`.
- */
-export type ChainJobEvent =
-  | { type: "snapshot"; job: ChainJobDetail }
-  | { type: "stage_start"; stage_idx: number }
-  | { type: "denoise_step"; stage_idx: number; step: number; total: number }
-  | {
-      type: "stage_done";
-      stage_idx: number;
-      frames_emitted: number;
-      has_preview: boolean;
-      has_media?: boolean;
-      cache_ready?: boolean;
-    }
-  | { type: "yielded"; pending_small_jobs: number }
-  | { type: "finalizing"; total_frames: number }
-  | { type: "finalized"; output: string; take: number }
-  | { type: "state_changed"; state: ChainJobState; error?: string | null };
+export type {
+  ChainJobDetail,
+  ChainJobListing,
+  ChainJobStageDetail,
+} from "@studio/lib/api/chainTypes";

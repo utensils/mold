@@ -557,3 +557,25 @@ repairs without polling every row. The controller revalidates the owning route,
 credentials, server instance and held job before download and retry, retains license
 consent, and waits for all returned download tickets. Diagnostics and Move to stay
 available throughout recovery; malformed hints never fall back to another model.
+
+## Shared contracts and authoring lifecycle
+
+Common server DTOs live in `studio/lib/api/serverTypes.ts` and `chainTypes.ts`,
+with per-surface imports kept as facades. `lib/api/legacyTypes.ts` explicitly adapts
+persisted desktop rows that omit version or use legacy frame aliases; those shapes
+do not weaken the HTTP contract. `SourceCanvasController` owns still-source canvas
+transitions shared with mobile. The mobile keyboard controller owns viewport
+listeners, focus repair and timers; its injected native bridge remains shell-owned.
+The web retained-source restoration composable owns handover status and cancellation.
+
+The media reader rejects empty video/audio picks and files over 64 MiB before
+allocation. A failed pick leaves the previous attachment intact and reports inline.
+Clear, replacement, model/pipeline changes and disposal fence asynchronous reads.
+Mobile also enforces a 45 MiB combined decoded-media budget at read and commit.
+
+`bun run check:dead-code` runs Knip with exported types included, then a production
+module graph that follows static, lazy and type imports through Vue scripts and
+workspace aliases. Tests cannot keep a production module alive. Exact documented
+fixture/tooling exceptions and the Studio public barrel are intentional; individual
+exports inside live modules still receive Knip's test-inclusive analysis and manual
+review, not a claim that every tested export has a production caller.

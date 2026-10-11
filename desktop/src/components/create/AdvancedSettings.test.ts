@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { reactive } from "vue";
+import * as mediaEncoding from "@studio/lib/base64";
 import AdvancedSettings from "./AdvancedSettings.vue";
 import AccordionSection from "@ui/components/AccordionSection.vue";
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
@@ -977,3 +978,47 @@ describe("AdvancedSettings — file format while a transparent background is on"
     );
   });
 });
+
+it("rejects an oversized source video before reading it and shows the refusal inline", async () => {
+  const form = formFor("ltx2");
+  const wrapper = mountSettings(form);
+  await flushPromises();
+  const input = wrapper.get("[data-test='ltx2-source-video']");
+  const file = new File(["x"], "large.mp4", { type: "video/mp4" });
+  Object.defineProperty(file, "size", { value: 64 * 1024 * 1024 + 1 });
+  Object.defineProperty(input.element, "files", { configurable: true, value: [file] });
+  await input.trigger("change");
+  await flushPromises();
+  expect(form.sourceVideo).toBeNull();
+  expect(wrapper.get("[data-test='advanced-media-error']").text()).toContain("64 MiB");
+  wrapper.unmount();
+});
+
+it.each(["model", "pipeline"] as const)(
+  "rejects a settled media read when %s changes in the same turn",
+  async (field) => {
+    let complete!: (value: string) => void;
+    const encoding = vi.spyOn(mediaEncoding, "blobToBase64").mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+    );
+    const form = formFor("ltx2");
+    const wrapper = mountSettings(form);
+    await flushPromises();
+    const input = wrapper.get("[data-test='ltx2-source-video']");
+    Object.defineProperty(input.element, "files", {
+      configurable: true,
+      value: [new File(["x"], "old.mp4")],
+    });
+    input.element.dispatchEvent(new Event("change"));
+    complete("eA==");
+    if (field === "model") form.model = "ltx2:new";
+    else form.pipeline = "two-stage";
+    await flushPromises();
+    expect(form.sourceVideo).toBeNull();
+    wrapper.unmount();
+    encoding.mockRestore();
+  },
+);

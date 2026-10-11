@@ -58,7 +58,7 @@ import {
   decideGenerateRequestRouting,
   type ChainRoutingDecision,
 } from "../../lib/chainRouting";
-import { fileToBase64 } from "../../lib/image";
+import { useMediaFileReader } from "@studio/composables/useMediaFileReader";
 import {
   advancedVideoValidationError,
   audioOutputValidationError,
@@ -433,20 +433,30 @@ function updateKeyframeFrame(index: number, raw: string) {
 function removeKeyframe(index: number) {
   props.form.keyframes = props.form.keyframes.filter((_, i) => i !== index);
 }
-async function setSourceVideo(event: Event) {
-  const file = (event.target as HTMLInputElement).files?.[0];
-  if (!file) return;
-  attachPickedVideo(props.form, { filename: file.name, base64: await fileToBase64(file) });
+const {
+  error: mediaReadError,
+  read: readMediaFile,
+  invalidate: invalidateMediaRead,
+} = useMediaFileReader();
+watch(
+  () => [props.form, props.form.model, props.form.pipeline],
+  () => invalidateMediaRead(),
+  { flush: "sync" },
+);
+function setSourceVideo(event: Event) {
+  return readMediaFile("sourceVideo", event, (media) => attachPickedVideo(props.form, media));
 }
 function clearSourceVideo() {
+  invalidateMediaRead("sourceVideo");
   props.form.sourceVideo = null;
 }
-async function setExtendVideo(event: Event) {
-  const file = (event.target as HTMLInputElement).files?.[0];
-  if (!file) return;
-  props.form.extendVideo = { filename: file.name, base64: await fileToBase64(file) };
+function setExtendVideo(event: Event) {
+  return readMediaFile("extendVideo", event, (media) => {
+    props.form.extendVideo = media;
+  });
 }
 function clearExtendVideo() {
+  invalidateMediaRead("extendVideo");
   // Drop the overlap too: a value valid for this clip may be invalid for the
   // next one, and a stale number would silently ride along.
   props.form.extendVideo = null;
@@ -479,12 +489,13 @@ const extendSummary = computed(() => {
   const added = extendNewFrames(props.form.frames, extendOverlap.value);
   return added === null ? "" : `Appends ${added} new frames after the source clip.`;
 });
-async function setAudioFile(event: Event) {
-  const file = (event.target as HTMLInputElement).files?.[0];
-  if (!file) return;
-  props.form.audioFile = { filename: file.name, base64: await fileToBase64(file) };
+function setAudioFile(event: Event) {
+  return readMediaFile("audioFile", event, (media) => {
+    props.form.audioFile = media;
+  });
 }
 function clearAudioFile() {
+  invalidateMediaRead("audioFile");
   props.form.audioFile = null;
 }
 function snapFramesField() {
@@ -531,6 +542,9 @@ function reset() {
       </button>
     </div>
 
+    <p v-if="mediaReadError" class="ms-hint" role="alert" data-test="advanced-media-error">
+      {{ mediaReadError }}
+    </p>
     <div class="ms-adv__list">
       <!-- 1 · Scheduler & sampling -->
       <AccordionSection

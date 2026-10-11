@@ -27,12 +27,14 @@ const tier2 = computed(() => supportsAdvanced(props.family));
 function refToOption(r: DeviceRef): string {
   if (r.kind === "auto") return "auto";
   if (r.kind === "cpu") return "cpu";
+  if (r.kind === "device") return `device:${r.id}`;
   return `gpu:${r.ordinal}`;
 }
 
 function optionToRef(opt: string): DeviceRef {
   if (opt === "auto") return { kind: "auto" };
   if (opt === "cpu") return { kind: "cpu" };
+  if (opt.startsWith("device:")) return { kind: "device", id: opt.slice(7) };
   const m = /^gpu:(\d+)$/.exec(opt);
   return m ? { kind: "gpu", ordinal: Number(m[1]) } : { kind: "auto" };
 }
@@ -125,6 +127,12 @@ function advancedValue(field: keyof AdvancedPlacement): string {
     >
       <option value="auto">Auto</option>
       <option value="cpu">CPU</option>
+      <option
+        v-if="advancedValue(componentField).startsWith('device:')"
+        :value="advancedValue(componentField)"
+      >
+        Pinned device {{ advancedValue(componentField).slice(7) }}
+      </option>
       <option v-for="g in gpus" :key="g.ordinal" :value="`gpu:${g.ordinal}`">
         GPU {{ g.ordinal }}
       </option>

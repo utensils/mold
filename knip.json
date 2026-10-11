@@ -1,14 +1,33 @@
 {
   "$schema": "https://unpkg.com/knip@5/schema.json",
-  "include": ["files", "dependencies", "exports"],
+  "include": [
+    "files",
+    "dependencies",
+    "exports",
+    "types"
+  ],
   "ignoreExportsUsedInFile": true,
-  "ignoreBinaries": ["gh"],
-  "ignoreDependencies": ["@mold/ui", "tailwindcss"],
-  "ignoreFiles": ["docs/**", "website/**", "result*", "result*/**"],
+  "ignoreBinaries": [
+    "gh"
+  ],
+  "ignoreDependencies": [
+    "@mold/ui",
+    "tailwindcss"
+  ],
+  "ignoreFiles": [
+    "docs/**",
+    "website/**",
+    "result*",
+    "result*/**"
+  ],
   "workspaces": {
     ".": {
-      "entry": ["scripts/tests/android-app-smoke.mjs"],
-      "project": ["scripts/**/*.{js,mjs,cjs,ts}"]
+      "entry": [
+        "scripts/tests/android-app-smoke.mjs"
+      ],
+      "project": [
+        "scripts/**/*.{js,mjs,cjs,ts}"
+      ]
     },
     "studio": {
       "entry": [
@@ -18,15 +37,29 @@
         "components/SourceMediaPanel.vue",
         "**/*.test.ts"
       ],
-      "project": ["**/*.{ts,vue}"]
+      "project": [
+        "**/*.{ts,vue}"
+      ]
     },
     "ui": {
-      "entry": ["**/*.test.ts", "components/**/*.vue", "icons.ts", "theme.ts"],
-      "project": ["**/*.{ts,vue}"]
+      "entry": [
+        "**/*.test.ts",
+        "components/**/*.vue",
+        "icons.ts",
+        "theme.ts"
+      ],
+      "project": [
+        "**/*.{ts,vue}"
+      ]
     },
     "web": {
-      "entry": ["src/main.ts", "src/**/*.test.ts"],
-      "project": ["src/**/*.{ts,vue}"]
+      "entry": [
+        "src/main.ts",
+        "src/**/*.test.ts"
+      ],
+      "project": [
+        "src/**/*.{ts,vue}"
+      ]
     },
     "desktop": {
       "entry": [
@@ -35,11 +68,19 @@
         "src/**/*.test.ts",
         "vite.mobile.config.ts"
       ],
-      "project": ["src/**/*.{ts,vue}"]
+      "project": [
+        "src/**/*.{ts,vue}"
+      ]
     },
     "relay/aws": {
-      "entry": ["router.mjs", "frontend.mjs", "test/**/*.test.mjs"],
-      "project": ["**/*.mjs"]
+      "entry": [
+        "router.mjs",
+        "frontend.mjs",
+        "test/**/*.test.mjs"
+      ],
+      "project": [
+        "**/*.mjs"
+      ]
     }
   }
 }

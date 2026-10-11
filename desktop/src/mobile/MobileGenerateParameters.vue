@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useMediaFileReader } from "@studio/composables/useMediaFileReader";
 import { inputImageFacts } from "@studio/lib/inputImage";
 import { computed, ref, useId, watch } from "vue";
 import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
@@ -42,7 +43,6 @@ import {
   inlineGenerationMediaBytes,
   decodedBase64Bytes,
   wanRecipeValidationError,
-  MAX_INLINE_GENERATION_MEDIA_BYTES,
   MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES,
   type InlineGenerationMediaField,
 } from "../lib/generateValidation";
@@ -172,6 +172,20 @@ const cameraError = computed(() =>
   ),
 );
 const mediaReadError = ref("");
+const { read: readMediaFile, invalidate: invalidateMediaRead } = useMediaFileReader(
+  {
+    encode: (file) => fileToBase64(file, false),
+    remainingBytes: (field) =>
+      MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES - inlineGenerationMediaBytes(props.form, field),
+    budgetMessage: "Combined generation media must be 45 MiB or smaller on this phone.",
+  },
+  mediaReadError,
+);
+watch(
+  () => [props.form, props.form.model, props.form.pipeline],
+  () => invalidateMediaRead(),
+  { flush: "sync" },
+);
 
 // Declared before `valid`: its immediate validity watch evaluates during
 // setup, so everything the gate reads must already exist.
@@ -379,57 +393,22 @@ function exceedsMobileRequestBudget(
   );
 }
 
-async function setSourceVideo(event: Event): Promise<void> {
-  const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
-  if (!file) return;
-  input.value = "";
-  if (file.size === 0) {
-    mediaReadError.value = "Source video cannot be empty.";
-    return;
-  }
-  if (file.size > MAX_INLINE_GENERATION_MEDIA_BYTES) {
-    mediaReadError.value = "Source videos must be 64 MiB or smaller.";
-    return;
-  }
-  if (exceedsMobileRequestBudget(file.size, "sourceVideo")) {
-    mediaReadError.value = "Combined generation media must be 45 MiB or smaller on this phone.";
-    return;
-  }
-  try {
-    props.form.sourceVideo = { filename: file.name, base64: await fileToBase64(file) };
-    mediaReadError.value = "";
-  } catch {
-    mediaReadError.value = "Couldn’t read that source video. Try choosing it again.";
-  }
+function setSourceVideo(event: Event): Promise<void> {
+  return readMediaFile("sourceVideo", event, (media) => {
+    props.form.sourceVideo = media;
+  });
 }
-
-async function setExtendVideo(event: Event): Promise<void> {
-  const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
-  if (!file) return;
-  input.value = "";
-  if (file.size === 0) {
-    mediaReadError.value = "The video to continue cannot be empty.";
-    return;
-  }
-  if (file.size > MAX_INLINE_GENERATION_MEDIA_BYTES) {
-    mediaReadError.value = "Videos to continue must be 64 MiB or smaller.";
-    return;
-  }
-  if (exceedsMobileRequestBudget(file.size, "extendVideo")) {
-    mediaReadError.value = "Combined generation media must be 45 MiB or smaller on this phone.";
-    return;
-  }
-  try {
-    props.form.extendVideo = { filename: file.name, base64: await fileToBase64(file) };
-    mediaReadError.value = "";
-  } catch {
-    mediaReadError.value = "Couldn’t read that video. Try choosing it again.";
-  }
+function clearSourceVideo(): void {
+  invalidateMediaRead("sourceVideo");
+  props.form.sourceVideo = null;
 }
-
+function setExtendVideo(event: Event): Promise<void> {
+  return readMediaFile("extendVideo", event, (media) => {
+    props.form.extendVideo = media;
+  });
+}
 function clearExtendVideo(): void {
+  invalidateMediaRead("extendVideo");
   // Drop the overlap too: a value valid for this clip may be invalid for the
   // next one, and a stale number would silently ride along.
   props.form.extendVideo = null;
@@ -464,31 +443,15 @@ const extendSummary = computed(() => {
   return added === null ? "" : `Appends ${added} new frames after the source clip.`;
 });
 
-async function setAudioFile(event: Event): Promise<void> {
-  const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
-  if (!file) return;
-  input.value = "";
-  if (file.size === 0) {
-    mediaReadError.value = "Conditioning audio cannot be empty.";
-    return;
-  }
-  if (file.size > MAX_INLINE_GENERATION_MEDIA_BYTES) {
-    mediaReadError.value = "Conditioning audio must be 64 MiB or smaller.";
-    return;
-  }
-  if (exceedsMobileRequestBudget(file.size, "audioFile")) {
-    mediaReadError.value = "Combined generation media must be 45 MiB or smaller on this phone.";
-    return;
-  }
-  try {
-    props.form.audioFile = { filename: file.name, base64: await fileToBase64(file) };
-    mediaReadError.value = "";
-  } catch {
-    mediaReadError.value = "Couldn’t read that audio file. Try choosing it again.";
-  }
+function setAudioFile(event: Event): Promise<void> {
+  return readMediaFile("audioFile", event, (media) => {
+    props.form.audioFile = media;
+  });
 }
-
+function clearAudioFile(): void {
+  invalidateMediaRead("audioFile");
+  props.form.audioFile = null;
+}
 function suggestKeyframeFrame(offset: number): number {
   const last = props.form.keyframes.at(-1);
   return (last ? last.frame + 24 : 0) + offset * 24;
@@ -1209,7 +1172,7 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
           <span class="mobile-generate-label">Conditioning audio</span>
           <div v-if="form.audioFile" class="mobile-generate-picked-file">
             <span>{{ form.audioFile.filename }}</span>
-            <button type="button" class="mobile-generate-clear" @click="form.audioFile = null">
+            <button type="button" class="mobile-generate-clear" @click="clearAudioFile">
               Remove
             </button>
           </div>
@@ -1229,7 +1192,7 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
           <span class="mobile-generate-label">Source video</span>
           <div v-if="form.sourceVideo" class="mobile-generate-picked-file">
             <span>{{ form.sourceVideo.filename }}</span>
-            <button type="button" class="mobile-generate-clear" @click="form.sourceVideo = null">
+            <button type="button" class="mobile-generate-clear" @click="clearSourceVideo">
               Remove
             </button>
           </div>

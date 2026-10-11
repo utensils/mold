@@ -81,9 +81,8 @@ fi
 grep -Fq 'fs: { allow: [".", uiDir, studioDir, workspaceNodeModules] }' web/vite.config.ts ||
   fail "web Vite must allow the root node_modules directory used by its aliases"
 
-for dead_file in web/src/components/Metadata.vue; do
-  test ! -e "$dead_file" || fail "$dead_file is unreachable and must be removed"
-done
+test ! -e web/src/components/Metadata.vue ||
+  fail "web/src/components/Metadata.vue is unreachable and must be removed"
 
 for duplicate in \
   web/src/lib/promptCycler.ts \

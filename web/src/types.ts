@@ -1,12 +1,62 @@
-import type { MeshWorkflowProvenance } from "@studio/lib/meshWorkflowProvenance";
-import type { ChainOutputMetadata } from "@studio/lib/api/chainTypes";
-import type { OutputFormat as WireOutputFormat } from "@studio/lib/generated/generationProfileV1";
 import type {
-  GenerationReference,
-  GenerationReferenceMetadata,
-} from "@studio/lib/generationReferences";
+  CatalogProviderError,
+  DevicePlacement,
+  ExpandTask,
+  KeyframeConditionWire,
+  Ltx2PipelineMode,
+  Ltx2SpatialUpscale,
+  Ltx2TemporalUpscale,
+  OutputMetadata,
+  RemixDimension,
+  RemixSourceKind,
+  TimeRange,
+} from "@studio/lib/api/serverTypes";
+export type {
+  AdvancedPlacement,
+  CatalogProviderError,
+  ChainJobState,
+  ChainJobSummary,
+  ChainProgressEvent,
+  CpuSnapshot,
+  CreateChainJobResponse,
+  DevicePlacement,
+  DeviceRef,
+  ExpandTask,
+  GalleryCapabilities,
+  GalleryImage,
+  GenerationMemoryEstimate,
+  GpuBackend,
+  GpuInfo,
+  GpuSnapshot,
+  GpuWorkerState,
+  GpuWorkerStatus,
+  HostDiskUsage,
+  KeyframeConditionWire,
+  KeyframeMetadata,
+  LoraWeight,
+  Ltx2CameraControlInfo,
+  Ltx2ControlAdapterInfo,
+  Ltx2PipelineMode,
+  Ltx2SourcePreprocessing,
+  Ltx2SpatialUpscale,
+  Ltx2TemporalUpscale,
+  MeshServerCapabilities,
+  ModelComponentOption,
+  ModelComponentStatus,
+  ModelComponentsResponse,
+  OutputMetadata,
+  RamSnapshot,
+  RemixDimension,
+  RemixSourceKind,
+  ResourceSnapshot,
+  ServerCapabilities,
+  ServerStatus,
+  SseChainCompleteEvent,
+  TimeRange,
+} from "@studio/lib/api/serverTypes";
+import type { OutputFormat as WireOutputFormat } from "@studio/lib/generated/generationProfileV1";
+import type { GenerationReference } from "@studio/lib/generationReferences";
 import type { MinimaxH3AuthoringState } from "@studio/lib/minimaxH3Authoring";
-import type { MiniMaxH3Capability } from "@studio/lib/minimaxH3Inventory";
 import type { SourceFitPolicy } from "@studio/lib/sourceFit";
 import type {
   Ltx2GuidanceOverrides,
@@ -19,16 +69,9 @@ import type {
   MeshFormState,
   MeshRequestOptions,
 } from "@studio/lib/meshControls";
-import type { MeshExportGeometryCapabilities } from "@studio/lib/meshExport";
-import type { GenerationAsset } from "@studio/api/generationAssets";
 import type { NamedViewsState } from "@studio/lib/namedViews";
 
 export type { MeshRequestOptions } from "@studio/lib/meshControls";
-import type {
-  GalleryOrganizationFields,
-  GalleryTrashCapabilities,
-} from "@studio/lib/api/galleryOrganization";
-import type { DurableMediaCapabilities } from "@studio/api/generationAdmission";
 
 export type { SourceFitPolicy } from "@studio/lib/sourceFit";
 export type {
@@ -45,32 +88,6 @@ export type OutputFormat = WireOutputFormat;
 
 export type SeedMode = "random" | "static" | "increment";
 
-export type Ltx2PipelineMode =
-  | "one-stage"
-  | "two-stage"
-  | "two-stage-hq"
-  | "distilled"
-  | "ic-lora"
-  | "keyframe"
-  | "a2-vid"
-  | "retake"
-  | "lip-dub"
-  | "t2a";
-export type Ltx2SpatialUpscale = "x1-5" | "x2";
-
-/** LTX-2 source-image conditioning preprocessing as actually executed. */
-export interface Ltx2SourcePreprocessing {
-  profile: { generation: "v2" | "v2_3"; image_crf: number };
-  codec: string;
-  fit_policy: string;
-}
-export type Ltx2TemporalUpscale = "x2";
-
-export interface TimeRange {
-  start_seconds: number;
-  end_seconds: number;
-}
-
 /** Mirrors `mold-core`'s kebab-case `Scheduler` plus a `"default"` sentinel
  * meaning "omit the field". `ddim` / `euler-ancestral` are UNet schedulers and
  * `euler` / `dpm-pp` are wan sample solvers; only `uni-pc` is valid for both.
@@ -84,143 +101,6 @@ export type Scheduler =
 
 /** Re-exported so a wire type and the policy that reads it cannot drift. */
 export type { MeshWorkflowProvenance } from "@studio/lib/meshWorkflowProvenance";
-
-export interface OutputMetadata {
-  /** The durable 3-D workflow that produced this print, and the role it plays
-   * in it. Additive: absent on every print made outside a durable mesh workflow and on
-   * every host that predates the field, which reads as an ordinary print. */
-  mesh_workflow?: MeshWorkflowProvenance | null;
-  /** User-authored print title as it was at creation (D5). Embedded so
-   * mirrors carry it; the gallery row's editable title wins for display. */
-  title?: string | null;
-  /** How long the render took, wall clock, in ms. Additive; absent on an
-   * older host or a print made before it was recorded, zero = not measured. */
-  generation_time_ms?: number | null;
-  /** Tags the print was filed under at creation ("File under"), exactly as
-   * the host applied them. The gallery row's links are the editable
-   * authority once the print exists. Additive. */
-  tags?: string[] | null;
-  /** Display name of the collection the print was filed into at creation —
-   * never the requested id, and never a name the host did not resolve. */
-  collection?: string | null;
-  prompt: string;
-  negative_prompt?: string | null;
-  original_prompt?: string | null;
-  batch_id?: string | null;
-  batch_index?: number | null;
-  batch_count?: number | null;
-  model: string;
-  /** The family the host resolved this render to. Additive: absent on every
-   * print made before it was recorded, which reads as "unknown family", never
-   * as a refusal. It is the only answer a client has for a print whose model
-   * is not installed anywhere. */
-  family?: string | null;
-  seed: number;
-  steps: number;
-  guidance: number;
-  width: number;
-  height: number;
-  generation_width?: number | null;
-  generation_height?: number | null;
-  strength?: number | null;
-  /** Source-image provenance supplied by newer servers. */
-  source_image_name?: string | null;
-  source_image_sha256?: string | null;
-  /** Face-identity (PuLID) provenance — names and digests only, never the
-   * face payload (#1224). Additive: absent on servers that predate identity
-   * conditioning AND on every print that carried no identity photo. Read it
-   * through `@studio/lib/identityConditioning`'s `identityProvenance`. */
-  id_image_name?: string | null;
-  id_image_sha256?: string | null;
-  /** Effective values the render actually applied, not the request's. */
-  id_weight?: number | null;
-  id_start_step?: number | null;
-  /** The request asked for a transparent background (only ever `true`;
-   * Reuse restores the toggle from it). Additive. */
-  transparent_background?: boolean | null;
-  /** The STORED file carries alpha (some pixel below full opacity) — also
-   * true for an edit of a transparent reference with the toggle off. The
-   * Library draws the checkerboard from it (`showsAlphaBed`). Additive. */
-  has_alpha?: boolean | null;
-  /** Client-shaped source-fit provenance echoed verbatim by newer servers.
-   * Parse defensively before restoring. */
-  source_fit?: unknown;
-  /** Ordered content keys for Qwen Image Edit inputs (newer servers only). */
-  edit_image_sha256s?: string[] | null;
-  reference_weight?: number | null;
-  /** Redacted ordered H3 reference provenance (newer servers only). */
-  references?: GenerationReferenceMetadata[] | null;
-  /** Ordered byte-free keyframe provenance (newer servers only). */
-  keyframes?: KeyframeMetadata[] | null;
-  /** Queue id of the generation that produced this print — the server's replay
-   * idempotence key, and the exact answer to "did my job produce this?".
-   * Absent on hosts that predate it. */
-  job_id?: string | null;
-  /** Per-clip execution provenance for a stitched output. Web renders such a
-   * print like any other and reuses it as a plain one-shot. */
-  chain?: ChainOutputMetadata | null;
-  scheduler?: Scheduler | null;
-  output_format?: OutputFormat | null;
-  cfg_plus?: boolean | null;
-  lora?: string | null;
-  lora_scale?: number | null;
-  loras?: LoraWeight[] | null;
-  control_model?: string | null;
-  control_scale?: number | null;
-  upscale_model?: string | null;
-  gif_preview?: boolean | null;
-  enable_audio?: boolean | null;
-  /** LTX-2 video-only opt-in as recorded at creation (#1037). */
-  video_only?: boolean | null;
-  audio_file_path?: string | null;
-  source_video_path?: string | null;
-  extend_video_path?: string | null;
-  extend_overlap_frames?: number | null;
-  pipeline?: Ltx2PipelineMode | null;
-  pipeline_requested?: boolean | null;
-  duration_prediction_requested?: boolean | null;
-  /** LTX-2 source-image preprocessing actually applied (newer servers). */
-  source_preprocessing?: Ltx2SourcePreprocessing | null;
-  /** LTX-2 attention arithmetic the print was rendered with (newer servers):
-   * `ltx2-bf16-math` | `ltx2-bf16-flash` | `ltx2-f32-chunked` |
-   * `ltx2-metal-sdpa`. Output-changing, so it is recorded, never inferred. */
-  attention_path?: string | null;
-  /** LTX-2 INT8 ConvRot execution arm the print was rendered with (newer
-   * servers): `native-w8a8` | `dequant-cuda` | `dequant-metal` |
-   * `dequant-host`. Output-changing between arms, so it is recorded. */
-  int8_arm?: string | null;
-  ic_lora_control?: string | null;
-  retake_range?: TimeRange | null;
-  spatial_upscale?: Ltx2SpatialUpscale | null;
-  temporal_upscale?: Ltx2TemporalUpscale | null;
-  guidance_overrides?: Ltx2GuidanceOverrides | null;
-  /** Wan flow shift and per-expert distill strengths, recorded so Reuse
-   * settings restores exactly what the print was rendered with. */
-  sample_shift?: number | null;
-  distill_strength_high?: number | null;
-  distill_strength_low?: number | null;
-  frames?: number | null;
-  fps?: number | null;
-  /** The 3-D controls that shaped a mesh print, RESOLVED (request values or
-   * the engine defaults). Present only on a mesh print (additive). */
-  mesh?: MeshRequestOptions | null;
-  version: string;
-}
-
-/** One `/api/gallery` row. The organization fields (`title`, `tags`,
- * `favorite`, `collections`, `trashed_at`, `purge_at`) are additive: older
- * hosts omit them and every reader treats absence as "not organized". */
-export interface GalleryImage extends GalleryOrganizationFields {
-  filename: string;
-  metadata: OutputMetadata;
-  timestamp: number;
-  format?: OutputFormat | null;
-  size_bytes?: number | null;
-  media_version?: string | null;
-  metadata_synthetic?: boolean;
-  /** Independently downloadable files retained by this print. */
-  assets?: GenerationAsset[];
-}
 
 export type MediaKind = "image" | "animated" | "video" | "audio" | "mesh";
 
@@ -272,143 +152,6 @@ export function mediaKind(
   return "image";
 }
 
-// Mirror of `mold_core::GalleryCapabilities`. `trash` and `organize` are
-// additive: absent means an older host whose DELETE is permanent and whose
-// prints cannot be titled, tagged, favorited, or collected — the Library hides
-// that UI and keeps the hard-delete wording for such a host.
-export interface GalleryCapabilities {
-  can_delete?: boolean;
-  trash?: GalleryTrashCapabilities | null;
-  organize?: boolean;
-  /** Replay-safe titles/tags/favorites/collection and permanent-delete batches. */
-  bulk_mutations?: boolean;
-  media_version?: boolean;
-  conditional_get?: boolean;
-  row_events?: boolean;
-  /** A saved print reads back byte-for-byte from
-   * `GET /api/gallery/image/{filename}`. Absent means an older server. */
-  persists_outputs?: boolean;
-}
-
-// Mirror of `mold_core::ServerCapabilities`.
-
-/** `/api/capabilities.mesh` — mirrors `mold_core::types::MeshCapabilities`. */
-export interface MeshServerCapabilities {
-  generation: boolean;
-  formats: string[];
-  /** The export menu is built from THIS list, never a client constant: a
-   * host that adds an animated turntable container advertises it here. */
-  export_formats: string[];
-  textures: boolean;
-  /** The size / up-axis / origin contract for geometry exports. ADDITIVE:
-   * absent on every host that predates it, and that absence is the only gate
-   * a client has — an older server drops the three keys instead of refusing
-   * them, so a client that sent them anyway would promise a resize the host
-   * never performed. The shape is the studio policy's, not a second copy. */
-  export_geometry?: MeshExportGeometryCapabilities | null;
-}
-
-export interface ServerCapabilities {
-  generation_profile_v1?: boolean;
-  /** 3-D mesh support (additive; absent on servers that predate it):
-   * whether a mesh family has a runnable engine here, the containers this
-   * host stores (GLB only), the containers `POST /api/gallery/export/:filename`
-   * can transcode a stored mesh into, and whether textures are available. */
-  mesh?: MeshServerCapabilities | null;
-  /** Restart-safe encrypted request-media queueing. Absent is unsupported. */
-  durable_media?: DurableMediaCapabilities | null;
-  video_upscale?: {
-    available: boolean;
-    gallery_image?: boolean;
-    contract_version: number;
-    source_library: boolean;
-    source_upload: boolean;
-    input_containers: string[];
-    output_container: string;
-    preserves_primary_audio_when_compatible: boolean;
-    supports_vfr: boolean;
-    supports_hdr: boolean;
-    disclosure: string;
-  };
-  gallery?: GalleryCapabilities;
-  /** Server-enforced model families that are not activated in this build. */
-  model_access?: {
-    restrictions: Array<{
-      code: string;
-      family: string;
-      message: string;
-      license_url: string;
-      authorization_url: string;
-    }>;
-  };
-  /** Host-authored H3 inventory and exact request-envelope facts. Absent on
-   * older, non-H3, or incomplete hosts; model_access and runtime_available
-   * remain independent hard gates. */
-  minimax_h3?: MiniMaxH3Capability | null;
-  /** Continuation support. Absent on older servers, which means the Create
-   * surfaces must hide the extend controls rather than send a rejected
-   * request. */
-  video?: {
-    can_extend?: boolean;
-    extend_default_overlap_frames?: number | null;
-  };
-  discovery?: { can_browse: boolean };
-  /** Stable-URL, header-secret reference ingress. H3 activation remains a
-   * separate model_access decision. */
-  reference_uploads?: {
-    available: boolean;
-    protocol_version: number;
-    requires_api_key: boolean;
-    session_path: string;
-    upload_path: string;
-    session_handle_header: string;
-    upload_handle_header: string;
-    max_file_bytes: number;
-    max_session_bytes: number;
-    max_active_sessions: number;
-    session_ttl_ms: number;
-  };
-  devices?: {
-    available?: boolean;
-    lifecycle?: boolean;
-    restart_enable?: boolean;
-    stable_pins?: boolean;
-    planned_lanes?: boolean;
-    learned_eta?: boolean;
-  };
-  dispatch?: {
-    active_mode?: string | null;
-    v2_authoritative?: boolean;
-    observes_v2_decisions?: boolean;
-    request_placement_preview?: boolean;
-  };
-  queue?: {
-    can_pause?: boolean;
-    can_pause_job?: boolean;
-    pre_render_transfer?: boolean;
-    transfer_identity?: string;
-    can_cancel_all?: boolean;
-    can_reorder?: boolean;
-    /** Running singleton generations accept cooperative cancellation. */
-    cooperative_cancellation?: boolean;
-    /** The batch chunk limit for durable admission. Its presence IS the
-     * durable-generation contract; there is no separate version probe. */
-    heterogeneous_batch_max_outputs?: number | null;
-  };
-  /** One server-wide, authenticated lifecycle stream. */
-  events?: { available?: boolean };
-  /** Prompt expansion. `model_present` is the routing input: a host that is
-   * known to lack the expander is the one case expansion leaves the
-   * generation route. `model` names what to pull; absent on older servers. */
-  expand?: {
-    configured?: boolean;
-    model_present?: boolean | null;
-    backend?: "local" | "api";
-    remix?: boolean;
-    model?: string | null;
-  } | null;
-}
-
 export function inferFormatFromName(filename: string): OutputFormat | null {
   const lower = filename.toLowerCase();
   if (lower.endsWith(".mp4")) return "mp4";
@@ -421,35 +164,6 @@ export function inferFormatFromName(filename: string): OutputFormat | null {
   if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "jpeg";
   if (lower.endsWith(".png")) return "png";
   return null;
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Generation types (mirror of mold_core::GenerateRequest / GenerateResponse /
-// SseProgressEvent / SseCompleteEvent / ModelInfoExtended / ServerStatus).
-// Client-side uses camelCase; serialization to/from the wire happens in api.ts.
-// ──────────────────────────────────────────────────────────────────────────────
-
-export interface LoraWeight {
-  path: string;
-  scale: number;
-}
-
-// ── Device placement (Agent C: model-ui-overhaul §3) ──────────────────────
-export type DeviceRef =
-  { kind: "auto" } | { kind: "cpu" } | { kind: "gpu"; ordinal: number };
-
-export interface AdvancedPlacement {
-  transformer: DeviceRef;
-  vae: DeviceRef;
-  clip_l?: DeviceRef | null;
-  clip_g?: DeviceRef | null;
-  t5?: DeviceRef | null;
-  qwen?: DeviceRef | null;
-}
-
-export interface DevicePlacement {
-  text_encoders: DeviceRef;
-  advanced?: AdvancedPlacement | null;
 }
 
 // Wire shape — what we POST to /api/generate/stream. snake_case to match serde.
@@ -680,46 +394,6 @@ export interface ModelInfoExtended extends ModelDefaults {
   runtime_unavailable_reason?: string | null;
 }
 
-export interface GpuInfo {
-  name: string;
-  vram_total_mb: number;
-  vram_used_mb: number;
-}
-
-export type GpuWorkerState = "idle" | "generating" | "loading" | "degraded";
-
-export interface GpuWorkerStatus {
-  ordinal: number;
-  name: string;
-  vram_total_bytes: number;
-  vram_used_bytes: number;
-  loaded_model?: string | null;
-  state: GpuWorkerState;
-}
-
-export interface ServerStatus {
-  version: string;
-  git_sha?: string | null;
-  build_date?: string | null;
-  models_loaded: string[];
-  busy: boolean;
-  gpu_info?: GpuInfo | null;
-  uptime_secs: number;
-  hostname?: string | null;
-  memory_status?: string | null;
-  gpus?: GpuWorkerStatus[] | null;
-  queue_depth?: number | null;
-  queue_capacity?: number | null;
-  instance_id?: string | null;
-  models_disk?: HostDiskUsage | null;
-  queue_paused?: boolean | null;
-}
-
-export interface HostDiskUsage {
-  total_bytes: number;
-  free_bytes: number;
-}
-
 // ── /api/queue (L3 reconciliation) ─────────────────────────────────────────
 
 /** `held` is additive: a journalled job the host parked after it exhausted its
@@ -937,81 +611,6 @@ export interface ChainRequestWire {
   output_mode?: "one-shot" | "sequence" | null;
 }
 
-export type ChainProgressEvent =
-  | {
-      type: "chain_start";
-      stage_count: number;
-      estimated_total_frames: number;
-    }
-  | { type: "stage_start"; stage_idx: number }
-  | {
-      type: "denoise_step";
-      stage_idx: number;
-      step: number;
-      total: number;
-    }
-  | {
-      type: "stage_done";
-      stage_idx: number;
-      frames_emitted: number;
-    }
-  | { type: "stitching"; total_frames: number };
-
-export interface SseChainCompleteEvent {
-  video: string; // base64
-  format: OutputFormat;
-  width: number;
-  height: number;
-  frames: number;
-  fps: number;
-  thumbnail?: string | null;
-  gif_preview?: string | null;
-  has_audio?: boolean;
-  duration_ms?: number | null;
-  audio_sample_rate?: number | null;
-  audio_channels?: number | null;
-  stage_count: number;
-  gpu?: number | null;
-  generation_time_ms?: number | null;
-}
-
-export interface ChainJobSummary {
-  id: string;
-  state: ChainJobState;
-  model: string;
-  stage_count: number;
-  current_stage: number;
-  created_at_unix_ms: number;
-  updated_at_unix_ms: number;
-  error: string | null;
-  ephemeral: boolean;
-  execution_phase?: "queued" | "running" | "finalizing" | null;
-}
-
-export type ChainJobState =
-  | "queued"
-  | "running"
-  | "paused"
-  | "interrupted"
-  | "failed"
-  | "completed"
-  | "cancelled";
-
-export interface CreateChainJobResponse {
-  job_id: string;
-}
-
-export type ExpandTask =
-  | "text-to-image"
-  | "text-to-video"
-  | "image-to-video"
-  | "video-to-video"
-  | "retake"
-  | "keyframe-interpolation"
-  | "audio-driven-video"
-  | "reference-to-audio-video"
-  | "text-to-audio";
-
 export interface ExpandRequestWire {
   prompt: string;
   model_family: string;
@@ -1035,16 +634,6 @@ export interface ExpandResponseWire {
   original: string;
   expanded: string[];
 }
-
-export type RemixSourceKind = "original" | "current" | "direct";
-export type RemixDimension =
-  | "composition"
-  | "camera"
-  | "lighting"
-  | "setting"
-  | "mood"
-  | "movement"
-  | "style";
 export interface RemixRequestWire {
   source_prompt: string;
   root_prompt?: string;
@@ -1094,18 +683,6 @@ export interface SourceMediaState {
 export interface KeyframeConditionState {
   frame: number;
   image: SourceImageState;
-}
-
-export interface KeyframeConditionWire {
-  frame: number;
-  image: string;
-  name?: string | null;
-}
-
-export interface KeyframeMetadata {
-  frame: number;
-  name?: string | null;
-  sha256: string;
 }
 
 export interface LoraSelection {
@@ -1299,29 +876,6 @@ export interface GenerateFormState {
   mesh?: MeshFormState;
 }
 
-export interface Ltx2ControlAdapterInfo {
-  id: string;
-  label: string;
-  guide: string;
-  size_bytes: number;
-  installed: boolean;
-  download_model: string;
-  download_repo: string;
-  download_filename: string;
-  download_sha256: string;
-}
-
-export interface Ltx2CameraControlInfo {
-  id: string;
-  label: string;
-  size_bytes: number;
-  installed: boolean;
-  download_model: string;
-  download_repo: string;
-  download_filename: string;
-  download_sha256: string;
-}
-
 // ─── Downloads UI (Agent A) ───────────────────────────────────────────────────
 // Mirror of `mold_core::types::{DownloadJob, JobStatus, DownloadEvent,
 // DownloadsListing}`. Keep field names / string literals in sync with the
@@ -1390,51 +944,6 @@ export type DownloadEventWire =
   /// the primary's `job_done` fires before companions are necessarily on
   /// disk, which is the "model sometimes doesn't show up" race.
   | { type: "catalog_ready"; id: string; ok: boolean };
-// ──────────────────────────────────────────────────────────────────────────────
-// Resource telemetry (Agent B scope). Mirror of `mold_core::ResourceSnapshot`
-// et al. `vram_used_by_mold` / `vram_used_by_other` are null on Metal hosts
-// and on CUDA hosts that fell back to the `nvidia-smi` subprocess path.
-// ──────────────────────────────────────────────────────────────────────────────
-
-export type GpuBackend = "cuda" | "metal";
-
-export interface GpuSnapshot {
-  ordinal: number;
-  name: string;
-  backend: GpuBackend;
-  vram_total: number;
-  vram_used: number;
-  vram_used_by_mold: number | null;
-  vram_used_by_other: number | null;
-  /** 0-100. `null` on Metal and on the `nvidia-smi` fallback path. */
-  gpu_utilization?: number | null;
-}
-
-export interface RamSnapshot {
-  total: number;
-  used: number;
-  /** `MemAvailable`; additive on newer servers. */
-  available?: number;
-  /** Evictable ZFS ARC beside `available`, never inside it (#1439). */
-  reclaimable_zfs_arc?: number;
-  used_by_mold: number;
-  used_by_other: number;
-}
-
-export interface CpuSnapshot {
-  cores: number;
-  /** 0-100 averaged across all cores. */
-  usage_percent: number;
-}
-
-export interface ResourceSnapshot {
-  hostname: string;
-  timestamp: number;
-  gpus: GpuSnapshot[];
-  system_ram: RamSnapshot;
-  /** `null` on the first sample (sysinfo needs a prior refresh to compute deltas). */
-  cpu?: CpuSnapshot | null;
-}
 
 // ─── Catalog (sub-project A) ──────────────────────────────────────────────
 
@@ -1518,13 +1027,6 @@ export interface CatalogListResponse {
   provider_errors?: CatalogProviderError[];
 }
 
-export interface CatalogProviderError {
-  source: "hf" | "civitai";
-  message: string;
-  code?: "overloaded" | "rate-limited" | string;
-  retry_after_seconds?: number;
-}
-
 export interface CatalogFamilyCount {
   family: string;
 }
@@ -1554,35 +1056,3 @@ export type CatalogKind =
   | "tokenizer"
   | "clip"
   | "control-net";
-
-export interface GenerationMemoryEstimate {
-  model: string;
-  peak_memory_bytes: number;
-  activation_memory_bytes: number;
-  available_memory_bytes?: number | null;
-  load_strategy: string;
-  fits_available_memory?: boolean | null;
-  capacity_peak_memory_bytes?: number | null;
-  device_capacity_bytes?: number | null;
-  fits_device_capacity?: boolean | null;
-}
-
-export interface ModelComponentStatus {
-  kind: string;
-  name: string;
-  present: boolean;
-  path?: string | null;
-  repair_model?: string | null;
-  options?: ModelComponentOption[];
-}
-
-export interface ModelComponentOption {
-  label: string;
-  path: string;
-  present: boolean;
-}
-
-export interface ModelComponentsResponse {
-  model: string;
-  components: ModelComponentStatus[];
-}

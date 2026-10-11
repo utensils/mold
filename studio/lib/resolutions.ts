@@ -254,7 +254,7 @@ export function presetsForModel(
  * Exact presets authored for one generation-profile aspect group.
  *
  * A profile group ID is a user selection, not a fuzzy ratio hint. Keeping
- * this lookup separate from `presetsNearRatio` prevents nearby buckets such
+ * an exact ratio match prevents nearby buckets such
  * as LTX-2's 19:11 or Wan's 26:15 from stealing a 16:9 click.
  */
 export function presetsForAspectGroup(
@@ -306,42 +306,6 @@ export function orientationLabel(
 ): "Landscape" | "Portrait" | "Square" {
   if (width === height) return "Square";
   return width > height ? "Landscape" : "Portrait";
-}
-
-export function presetsNearRatio(
-  presets: readonly ResolutionPreset[],
-  ratio: number,
-  tolerance = 0.09,
-): ResolutionPreset[] {
-  if (!(ratio > 0) || presets.length === 0) return [];
-  const ranked = presets
-    .map((preset) => ({
-      preset,
-      diff: Math.abs(preset.width / preset.height - ratio) / ratio,
-    }))
-    .sort((a, b) => a.diff - b.diff);
-  const best = ranked[0]?.diff ?? Number.POSITIVE_INFINITY;
-  if (best > tolerance) return [];
-  return ranked
-    .filter(({ diff }) => diff <= tolerance)
-    .map(({ preset }) => preset)
-    .sort((a, b) => a.width * a.height - b.width * b.height);
-}
-
-export function closestResolutionPreset(
-  presets: readonly ResolutionPreset[],
-  width: number,
-  height: number,
-): ResolutionPreset | null {
-  if (presets.length === 0) return null;
-  const area = width * height;
-  return (
-    [...presets].sort(
-      (a, b) =>
-        Math.abs(a.width * a.height - area) -
-        Math.abs(b.width * b.height - area),
-    )[0] ?? null
-  );
 }
 
 export function megapixelLabel(width: number, height: number): string {

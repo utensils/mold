@@ -22,10 +22,9 @@ import type {
   Ltx2SpatialUpscale,
   Ltx2TemporalUpscale,
   SourceImageState,
-  SourceMediaState,
 } from "../../../types";
 import { MAX_LORA_STACK } from "../../../types";
-import { blobToBase64 } from "../../../lib/base64";
+import { useMediaFileReader } from "@studio/composables/useMediaFileReader";
 import { inputImageBase64, inputImageFacts } from "@studio/lib/inputImage";
 import {
   cameraMotionLoraPath,
@@ -281,30 +280,32 @@ async function readImage(event: Event): Promise<SourceImageState | null> {
     base64,
   };
 }
-async function readMedia(event: Event): Promise<SourceMediaState | null> {
-  const file = await readFile(event);
-  if (!file) return null;
-  return {
-    kind: "upload",
-    filename: file.name,
-    base64: await blobToBase64(file),
-  };
-}
-
-async function onAudioFile(event: Event) {
-  const audioFile = await readMedia(event);
-  if (!audioFile) return;
-  patch({ audioFile, audioFilePath: "" });
+const {
+  error: mediaReadError,
+  read: readMediaFile,
+  invalidate: invalidateMediaRead,
+} = useMediaFileReader();
+watch(
+  () => [props.modelValue.model, props.modelValue.pipeline],
+  () => invalidateMediaRead(),
+  { flush: "sync" },
+);
+function onAudioFile(event: Event) {
+  return readMediaFile("audioFile", event, (media) =>
+    patch({ audioFile: { kind: "upload", ...media }, audioFilePath: "" }),
+  );
 }
 function clearAudioFile() {
+  invalidateMediaRead("audioFile");
   patch({ audioFile: null });
 }
-async function onSourceVideo(event: Event) {
-  const sourceVideo = await readMedia(event);
-  if (!sourceVideo) return;
-  patch({ sourceVideo, sourceVideoPath: "" });
+function onSourceVideo(event: Event) {
+  return readMediaFile("sourceVideo", event, (media) =>
+    patch({ sourceVideo: { kind: "upload", ...media }, sourceVideoPath: "" }),
+  );
 }
 function clearSourceVideo() {
+  invalidateMediaRead("sourceVideo");
   patch({ sourceVideo: null });
 }
 // ── Retake range ──────────────────────────────────────────────────────
@@ -376,6 +377,14 @@ function removeKeyframe(index: number) {
 
 <template>
   <div class="ltx2" data-test="ltx2-suite">
+    <p
+      v-if="mediaReadError"
+      class="ltx2__hint"
+      role="alert"
+      data-test="ltx2-media-error"
+    >
+      {{ mediaReadError }}
+    </p>
     <div class="ltx2__field">
       <label class="ltx2__label">Reference control</label>
       <select

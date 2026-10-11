@@ -694,7 +694,7 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
           );
           return;
         }
-        const chainOutput = detail?.finalizes.at(-1)?.output ?? null;
+        const chainOutput = detail?.finalizes?.at(-1)?.output ?? null;
         const prints = await apiJsonTo<GalleryImage[]>(opts.target, "/api/gallery");
         transportRetries = 0;
         if (settledExternally(job) || !isActive()) return;
