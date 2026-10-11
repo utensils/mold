@@ -23,6 +23,9 @@ public actor BoundedAsyncCache<Key: Hashable & Sendable, Value: Sendable> {
         self.maximumAge = maximumAge
         self.maximumCost = maximumCost; self.concurrency = max(1, concurrency); self.cost = cost
     }
+    /// Internal observation for deterministic concurrency tests.
+    var subscriberCount: Int { jobs.values.reduce(0) { $0 + $1.waiters.count } }
+
     public func value(for key: Key, load: @escaping @Sendable () async throws -> Value) async -> Value? {
         guard !Task.isCancelled else { return nil }
         if let hit = hits[key], Date().timeIntervalSince(hit.fetched) >= maximumAge {

@@ -10,14 +10,14 @@ struct SecureHTTPTransportTests {
         request.httpMethod = "PATCH"
         request.setValue("private-device-bearer", forHTTPHeaderField: "X-Api-Key")
         let task = Task { try await active.response(for: request, body: .data(Data(repeating: 4, count: 3 * 1024 * 1024))) }
-        await connection.waitForData(count: 16)
+        await connection.waitForData(count: 64)
         let sent = await connection.sent
         let open = try #require(sent.first { $0.kind == .open })
         let payload = try #require(JSONSerialization.jsonObject(with: open.payload) as? [String: Any])
         #expect(payload["path"] as? String == "/api/reference%20input?tag=a&tag=b")
         #expect(payload["length"] as? Int == 3 * 1024 * 1024)
         #expect((payload["headers"] as? [[String]])?.contains(["X-Api-Key", "private-device-bearer"]) == true)
-        #expect(sent.filter { $0.kind == .data }.reduce(0) { $0 + $1.payload.count } == 261_120)
+        #expect(sent.filter { $0.kind == .data }.reduce(0) { $0 + $1.payload.count } == 1_044_480)
         await active.close()
         _ = try? await task.value
     }
@@ -29,18 +29,27 @@ struct SecureHTTPTransportTests {
         await connection.offer(SecureHTTPRecord(.headers, 1, Data(#"{"status":200,"headers":[["content-type","text/event-stream"]]}"#.utf8)))
         let (bytes, response) = try await task.value
         #expect(response.statusCode == 200)
-        for _ in 0..<9 { await connection.offer(SecureHTTPRecord(.data, 1, Data(repeating: 7, count: 16_320))) }
+        for _ in 0..<33 { await connection.offer(SecureHTTPRecord(.data, 1, Data(repeating: 7, count: 16_320))) }
         #expect(await connection.creditCount == 0)
         var iterator = bytes.makeAsyncIterator()
         #expect(try await iterator.next() == 7)
         #expect(await connection.creditCount == 0)
-        for _ in 1...130_560 { _ = try await iterator.next() }
+        for _ in 1...524_287 { _ = try await iterator.next() }
         #expect(await connection.creditCount == 1)
-        #expect(await connection.sent.first(where: { $0.kind == .credit })?.credit == 146_880)
+        let credit = try #require(await connection.sent.first(where: { $0.kind == .credit })?.credit)
+        #expect(credit >= 524_288 && credit < 524_288 + 16_384)
         await bytes.cancel()
         #expect(await connection.sent.contains(where: { $0.kind == .cancel && $0.streamID == 1 }))
         #expect(await connection.closed == false)
         await transport.close()
+    }
+
+    @Test func tinyPausedResponseFramesHaveBoundedAllocationCount() {
+        var queue = SecureBodyQueue()
+        for _ in 0..<65_536 { queue.append(Data([7])) }
+        #expect(queue.chunks.count == 4)
+        #expect(queue.chunks.allSatisfy { $0.count == 16_384 })
+        #expect(queue.popFirst() == Data(repeating: 7, count: 16_384))
     }
 
     @Test func disconnectedMutationIsNeverReopened() async throws {

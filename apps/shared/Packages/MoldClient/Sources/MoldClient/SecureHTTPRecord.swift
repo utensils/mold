@@ -3,8 +3,8 @@ import Foundation
 /// The authenticated HTTP record format owned by `mold-secure::records`.
 /// This codec describes the envelope; Rust authenticates and validates every received record.
 struct SecureHTTPRecord: Equatable, Sendable {
-    static let streamWindow = 262_144
-    static let creditBatch = 131_072
+    static let streamWindow = 1_048_576
+    static let creditBatch = 524_288
     enum Kind: UInt8, Sendable { case open = 1, headers, data, end, cancel, credit }
     let kind: Kind
     let streamID: UInt32

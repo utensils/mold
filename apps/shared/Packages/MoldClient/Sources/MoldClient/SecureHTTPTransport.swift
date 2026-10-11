@@ -1,7 +1,7 @@
 import Foundation
 
 /// One authenticated channel, at most 32 independently cancellable HTTP streams.
-/// The receive window is 256 KiB per stream; credit returns in 128 KiB batches
+/// The receive window is 1 MiB per stream; credit returns in 512 KiB batches
 /// only as the consumer pulls data. A closed connection never replays requests.
 actor SecureHTTPTransport: MoldHTTPTransport {
     private struct Stream {
@@ -10,7 +10,7 @@ actor SecureHTTPTransport: MoldHTTPTransport {
         var headers: CheckedContinuation<(MoldResponseBytes, HTTPURLResponse), any Error>?
         var reader: CheckedContinuation<Data?, any Error>?
         var writer: CheckedContinuation<Void, any Error>?
-        var chunks: [Data] = []
+        var chunks = SecureBodyQueue()
         var receiveCredit = SecureHTTPRecord.streamWindow
         var sendCredit = SecureHTTPRecord.streamWindow
         var consumedCredit = 0
@@ -154,7 +154,7 @@ actor SecureHTTPTransport: MoldHTTPTransport {
         try Task.checkCancellation()
         guard let stream = streams[id] else { throw failure ?? SecureConnectionError.closed }
         if let first = stream.chunks.first {
-            streams[id]?.chunks.removeFirst()
+            _ = streams[id]?.chunks.popFirst()
             let consumed = stream.consumedCredit + first.count
             if consumed >= SecureHTTPRecord.creditBatch {
                 streams[id]?.consumedCredit = 0
@@ -216,4 +216,24 @@ private struct SecureStreamBody: MoldBodyReader {
     let id: UInt32
     func read() async throws -> Data? { try await owner.read(id) }
     func cancel() async { await owner.cancel(id) }
+}
+
+/// Coalesce paused tiny frames without delaying a live stream's waiting reader.
+struct SecureBodyQueue {
+    private(set) var chunks: [Data] = []
+    var first: Data? { chunks.first }
+    mutating func append(_ bytes: Data) {
+        var offset = 0
+        if let last = chunks.indices.last, chunks[last].count < 16_384 {
+            let count = min(16_384 - chunks[last].count, bytes.count)
+            chunks[last].append(bytes.prefix(count)); offset += count
+        }
+        while offset < bytes.count {
+            let count = min(16_384, bytes.count - offset)
+            chunks.append(Data(bytes[offset..<(offset + count)])); offset += count
+        }
+    }
+    mutating func popFirst() -> Data? {
+        chunks.isEmpty ? nil : chunks.removeFirst()
+    }
 }

@@ -55,6 +55,7 @@ const {
   cancelBarcodeScanner,
   scanPairingQr,
   claimPairingSession,
+  forgetSecureHostForMachine,
   getCurrentDeepLinks,
   onOpenDeepLinks,
   unlistenDeepLinks,
@@ -81,6 +82,7 @@ const {
   cancelBarcodeScanner: vi.fn(),
   scanPairingQr: vi.fn(),
   claimPairingSession: vi.fn(),
+  forgetSecureHostForMachine: vi.fn(),
   getCurrentDeepLinks: vi.fn(),
   onOpenDeepLinks: vi.fn(),
   unlistenDeepLinks: vi.fn(),
@@ -103,6 +105,10 @@ vi.mock("@tauri-apps/plugin-deep-link", () => ({
 vi.mock("@studio/api/pairing", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@studio/api/pairing")>()),
   claimPairingSession,
+}));
+vi.mock("@studio/api/secureStore", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/secureStore")>()),
+  forgetSecureHostForMachine,
 }));
 vi.mock("../lib/api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api/client")>()),
@@ -899,6 +905,7 @@ beforeEach(() => {
   cancelBarcodeScanner.mockReset().mockResolvedValue(undefined);
   scanPairingQr.mockReset();
   claimPairingSession.mockReset();
+  forgetSecureHostForMachine.mockReset().mockResolvedValue(undefined);
   getCurrentDeepLinks.mockReset().mockResolvedValue(null);
   unlistenDeepLinks.mockReset();
   onOpenDeepLinks.mockReset().mockResolvedValue(unlistenDeepLinks);
@@ -11827,6 +11834,48 @@ describe("MobileApp machines telemetry", () => {
     const telemetry = wrapper.get("[data-test='mobile-host-telemetry']");
     expect(telemetry.get(".host-telemetry-mem").text()).toBe("—");
     expect(telemetry.get(".host-telemetry-queue").text()).toBe("0 waiting");
+  });
+
+  it("waits for secure credential removal before forgetting a machine", async () => {
+    let finish!: () => void;
+    forgetSecureHostForMachine.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await openMachines();
+    await wrapper.get("[data-test='mobile-host-row']").trigger("click");
+    const forget = wrapper.get("[data-test='host-detail-forget']");
+    await forget.trigger("click");
+    await forget.trigger("click");
+    await flushPromises();
+    expect(forgetSecureHostForMachine).toHaveBeenCalledWith(target.baseUrl, status.instance_id);
+    expect(JSON.parse(localStorage.getItem("mold.mobile.hosts.v1") ?? "[]")).toHaveLength(1);
+    expect(wrapper.find("[data-test='mobile-host-detail']").exists()).toBe(true);
+    finish();
+    await flushPromises();
+    expect(JSON.parse(localStorage.getItem("mold.mobile.hosts.v1") ?? "[]")).toHaveLength(0);
+    expect(wrapper.find("[data-test='mobile-host-detail']").exists()).toBe(false);
+  });
+
+  it("keeps a machine and shows secure credential removal failures", async () => {
+    forgetSecureHostForMachine.mockRejectedValue(new Error("Secure storage is locked"));
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await openMachines();
+    await wrapper.get("[data-test='mobile-host-row']").trigger("click");
+    const forget = wrapper.get("[data-test='host-detail-forget']");
+    await forget.trigger("click");
+    await forget.trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-test='mobile-host-detail']").exists()).toBe(true);
+    expect(wrapper.get("[data-test='machine-forget-error']").text()).toContain(
+      "Secure storage is locked",
+    );
+    expect(JSON.parse(localStorage.getItem("mold.mobile.hosts.v1") ?? "[]")).toHaveLength(1);
   });
 
   it("disconnects without forgetting and reconnects only on request", async () => {

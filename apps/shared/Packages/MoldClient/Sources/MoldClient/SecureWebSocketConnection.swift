@@ -7,6 +7,7 @@ actor SecureWebSocketConnection: SecureRecordConnection {
     struct PacketSend { let bytes: Data; let bulk: Bool; let continuation: CheckedContinuation<Void, any Error> }
     struct ObjectRequest { let batch: SecureObjectBatch; let continuation: CheckedContinuation<SecureObjectGrant, any Error>; let timeout: Task<Void, Never>; let deadline: ContinuousClock.Instant; var nextAttempt: ContinuousClock.Instant }
     struct ObjectFetch { let reference: SecureObjectReference; let task: Task<Void, Never> }
+    let usesTLS: Bool
     let socket: URLSessionWebSocketTask
     let urlSession: URLSession
     let objectSession: URLSession
@@ -19,6 +20,7 @@ actor SecureWebSocketConnection: SecureRecordConnection {
     var stagedFrames: [(sequence: UInt64, bytes: Data)] = []
     var objectFlushTask: Task<Void, Never>?
     var objectSends: [UInt64: Task<Void, Never>] = [:]
+    var objectReservations: [UInt64: UInt64] = [:]
     var objectFetches: [UInt64: ObjectFetch] = [:]
     var objectRequests: [String: ObjectRequest] = [:]
     var completedObjectRequests: [String] = []
@@ -48,6 +50,7 @@ actor SecureWebSocketConnection: SecureRecordConnection {
         self.invitation = invitation
         self.trustedObjectOrigin = trustedObjectOrigin
         guard let selected = endpoint ?? host.websocketURL else { throw URLError(.cannotFindHost) }
+        usesTLS = selected.scheme == "wss"
         var parts = URLComponents(url: selected, resolvingAgainstBaseURL: false)
         guard parts?.user == nil, parts?.password == nil, parts?.fragment == nil,
               parts?.scheme == "wss" || (endpoint != nil && parts?.scheme == "ws") else { throw SecureConnectionError.authenticationFailed }
@@ -109,6 +112,7 @@ actor SecureWebSocketConnection: SecureRecordConnection {
         if invitation == nil { hello["objects"] = 1 }
         try await sendJSON(hello)
         let challenge = try await receiveJSON()
+        if Self.isGatewayBusy(challenge) { throw URLError(.resourceUnavailable) }
         let now = UInt64(Date().timeIntervalSince1970)
         guard challenge["a"] as? String == "challenge", Self.number(challenge["v"]) == 3,
               let connectionID = challenge["connectionId"] as? String,
@@ -124,6 +128,7 @@ actor SecureWebSocketConnection: SecureRecordConnection {
         var ready: [String: Any]?, accepted: [String: Any]?
         for _ in 0..<4 {
             let frame = try await receiveJSON()
+            if Self.isGatewayBusy(frame) { throw URLError(.resourceUnavailable) }
             guard Self.number(frame["v"]) == 3 else { throw SecureConnectionError.protocolViolation }
             if frame["a"] as? String == "ready" { ready = frame }
             else if frame["a"] as? String == "accept" { accepted = frame }
@@ -133,9 +138,7 @@ actor SecureWebSocketConnection: SecureRecordConnection {
         guard let ready, let accepted, let sid = ready["sid"] as? String, let rid = ready["rid"] as? String,
               accepted["sid"] as? String == sid, accepted["rid"] as? String == rid else { throw SecureConnectionError.authenticationFailed }
         self.sid = sid; self.rid = rid
-        if invitation == nil, socket.originalRequest?.url?.scheme == "wss" {
-            objectPolicy = SecureObjectPolicy.accept(ready["objects"], trusted: trustedObjectOrigin)
-        }
+        configureObjectPolicy(ready["objects"])
         let noise = try SecureNoiseSession(identity: identity, namespace: host.namespace, host: host.binding, sid: sid, rid: rid)
         self.noise = noise
         readerTask = Task { await receiveLoop() }
@@ -144,6 +147,12 @@ actor SecureWebSocketConnection: SecureRecordConnection {
         try noise.readHandshake(await readPacket())
         try await sendPacket(noise.writeHandshake())
         guard noise.ready else { throw SecureConnectionError.authenticationFailed }
+    }
+
+    func configureObjectPolicy(_ offered: Any?) {
+        if invitation == nil, usesTLS {
+            objectPolicy = SecureObjectPolicy.accept(offered, trusted: trustedObjectOrigin)
+        }
     }
 
     func send(_ record: SecureHTTPRecord) async throws {
@@ -239,6 +248,11 @@ actor SecureWebSocketConnection: SecureRecordConnection {
         catch { await fail(error) }
     }
     func receiveFrame(_ frame: [String: Any]) async throws {
+        // API Gateway can reject an invocation before Lambda runs. Its envelope
+        // identifies no sequence; retain every exact pending ciphertext frame
+        // under the existing bounded retry deadline. Never replay an HTTP call.
+        if Self.isGatewayBusy(frame) { return }
+
         guard Self.number(frame["v"]) == 3, let action = frame["a"] as? String else { throw SecureConnectionError.protocolViolation }
         if action == "heartbeat" { return }
         guard frame["sid"] as? String == sid, frame["rid"] as? String == rid else { throw SecureConnectionError.protocolViolation }
@@ -250,8 +264,9 @@ actor SecureWebSocketConnection: SecureRecordConnection {
             if let lastAck, seq <= lastAck { return }
             guard next <= outgoing, next >= acknowledged else { throw SecureConnectionError.protocolViolation }
             acknowledged = next; lastAck = seq
+            retireObjects(next: next)
             for key in pending.keys where key < next { pending.removeValue(forKey: key) }
-            remoteCredit = Int(credit)
+            remoteCredit = max(0, Int(credit) - Int(outgoing - next))
             let waiter = writer; writer = nil; waiter?.resume()
         case "data":
             guard let seq = Self.number(frame["seq"]), (frame["d"] != nil) != (frame["o"] != nil) else { throw SecureConnectionError.protocolViolation }
@@ -328,7 +343,7 @@ actor SecureWebSocketConnection: SecureRecordConnection {
         for task in objectSends.values { task.cancel() }
         for fetch in objectFetches.values { fetch.task.cancel() }
         for request in objectRequests.values { request.timeout.cancel(); request.continuation.resume(throwing: error) }
-        objectSends.removeAll(); objectFetches.removeAll(); objectRequests.removeAll(); completedObjectRequests.removeAll(); stagedFrames.removeAll()
+        objectSends.removeAll(); objectReservations.removeAll(); objectFetches.removeAll(); objectRequests.removeAll(); completedObjectRequests.removeAll(); stagedFrames.removeAll()
         readerTask = nil; timerTask = nil; senderTask = nil
         writer?.resume(throwing: error); writer = nil
         packetReader?.resume(throwing: error); packetReader = nil
@@ -344,6 +359,14 @@ actor SecureWebSocketConnection: SecureRecordConnection {
         guard data.count <= 32 * 1024, let value = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { throw SecureConnectionError.protocolViolation }
         return value
+    }
+    static func isGatewayBusy(_ frame: [String: Any]) -> Bool {
+        guard Set(frame.keys) == Set(["connectionId", "requestId", "message"]),
+              frame["message"] as? String == "Internal server error" else { return false }
+        return ["connectionId", "requestId"].allSatisfy { key in
+            guard let value = frame[key] as? String else { return false }
+            return (1...128).contains(value.utf8.count) && value.utf8.allSatisfy { (32...126).contains($0) }
+        }
     }
     static func number(_ value: Any?) -> UInt64? {
         guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),

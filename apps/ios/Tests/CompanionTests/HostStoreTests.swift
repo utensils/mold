@@ -12,9 +12,13 @@ import Testing
 struct HostStoreTests {
     final class MemoryCredentials: CredentialStore, @unchecked Sendable {
         var keys: [UUID: String] = [:]
+        var refusesDeletion = false
         func apiKey(for host: UUID) throws -> String? { keys[host] }
         func setAPIKey(_ key: String, for host: UUID) throws { keys[host] = key.isEmpty ? nil : key }
-        func clearAPIKey(for host: UUID) throws { keys[host] = nil }
+        func clearAPIKey(for host: UUID) throws {
+            if refusesDeletion { throw CocoaError(.fileWriteNoPermission) }
+            keys[host] = nil
+        }
     }
 
     private func store(_ fake: FakeBackend = FakeBackend()) -> (HostStore, MemoryCredentials, HostListFile) {
@@ -70,6 +74,18 @@ struct HostStoreTests {
         #expect(hosts.hosts.isEmpty)
         #expect(credentials.keys[host.id] == nil)
         #expect(hosts.defaultMachine == nil)
+    }
+
+    @Test func failingToRemoveCredentialsKeepsTheMachineAndReportsTheFailure() throws {
+        let (hosts, credentials, file) = store()
+        let host = try hosts.add(name: "Studio", address: "10.0.0.4", apiKey: "k", makeDefault: true)
+        credentials.refusesDeletion = true
+        hosts.remove(host.id)
+        #expect(hosts.hosts.map(\.id) == [host.id])
+        #expect(file.load().entries.map(\.id) == [host.id])
+        #expect(credentials.keys[host.id] == "k")
+        #expect(hosts.defaultMachine == host.id)
+        #expect(hosts.failures.count == 1)
     }
 
     @Test func aMachineThatAnswersIsUpAndCountsItsModels() async throws {

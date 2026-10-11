@@ -1,10 +1,10 @@
 import Foundation
 import CryptoKit
 
-/// Ciphertext ordering is checked before Noise sees bytes. Sixteen frames and the last
+/// Ciphertext ordering is checked before Noise sees bytes. Sixty-four frames and the last
 /// 32 duplicate digests are the entire reordering state; gaps are never skipped.
 struct SecureRelayWindow: Sendable {
-    static let capacity = 16
+    static let capacity = 64
     private(set) var next: UInt64 = 0
     private var pending: [UInt64: Data] = [:]
     private var seen: [UInt64: Data] = [:]
@@ -34,7 +34,7 @@ struct SecureRelayWindow: Sendable {
         while let value = pending[next], bytes.count + value.count <= capacity {
             pending.removeValue(forKey: next)
             seen[next] = Data(SHA256.hash(data: value))
-            if next >= 32 { seen.removeValue(forKey: next - 32) }
+            if next >= UInt64(Self.capacity * 2) { seen.removeValue(forKey: next - UInt64(Self.capacity * 2)) }
             next += 1
             bytes.append(value)
         }

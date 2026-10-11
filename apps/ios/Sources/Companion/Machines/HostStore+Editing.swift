@@ -79,9 +79,13 @@ extension HostStore {
     /// Removes a machine and its key. A Default that is removed falls back to
     /// whatever answers, rather than the first row.
     func remove(_ id: MoldHost.ID) {
+        guard let host = host(id) else { return }
+        do { try credentials.clearAPIKey(for: id) } catch {
+            report(id, name: host.name, doing: "forget its secure connection", error)
+            return
+        }
         Task { await HTTPBackend.disconnect(host: id) }
         stopWatching(id)
-        try? credentials.clearAPIKey(for: id)
         setHosts(hosts.filter { $0.id != id })
         for key in [id] {
             setReachability(nil, for: key); setCapabilities(nil, for: key)

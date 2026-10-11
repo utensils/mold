@@ -31,6 +31,7 @@ import {
 } from "@studio/lib/collectionVisibility";
 import { restoreRetainedDraftMedia } from "@studio/lib/retainedDraftMedia";
 import { connectionHealth, forgetConnectionRoutes } from "@studio/api/connectionRoutes";
+import { forgetSecureHostForMachine } from "@studio/api/secureStore";
 import HeldQueueTransferDialog from "@studio/components/HeldQueueTransferDialog.vue";
 import QueueMoveToControl from "@studio/components/QueueMoveToControl.vue";
 import { provideHeldQueueTransfer } from "@studio/composables/useHeldQueueTransfer";
@@ -5342,7 +5343,22 @@ function reconnectHost(id: string): void {
   void probeHost(host);
 }
 
-function removeHost(id: string): void {
+const forgettingHosts = new Set<string>();
+const machineForgetError = ref("");
+async function removeHost(id: string): Promise<void> {
+  const removedHost = hosts.value.find((host) => host.id === id);
+  if (!removedHost || forgettingHosts.has(id)) return;
+  forgettingHosts.add(id);
+  machineForgetError.value = "";
+  try {
+    await forgetSecureHostForMachine(removedHost.baseUrl, removedHost.instanceId);
+    await invoke("keychain_delete_api_key", { hostId: id });
+  } catch (error) {
+    machineForgetError.value = `Could not forget ${removedHost.name}: ${describeTransportError(error)}`;
+    return;
+  } finally {
+    forgettingHosts.delete(id);
+  }
   forgetConnectionRoutes(id);
   cancelHostProbe(id);
   knownHostReachability.delete(id);
@@ -5351,7 +5367,6 @@ function removeHost(id: string): void {
   const removedSelectedHost = selectedHostId.value === id;
   const removedCatalogHost = catalogHostId.value === id;
   if (hostDetailId.value === id) hostDetailId.value = "";
-  const removedHost = hosts.value.find((host) => host.id === id);
   hosts.value = hosts.value.filter((host) => host.id !== id);
   if (removedSelectedHost) {
     selectedHostId.value = connectedHosts.value[0]?.id ?? "";
@@ -5367,7 +5382,6 @@ function removeHost(id: string): void {
       removedHost.id,
     ]);
   }
-  void invoke("keychain_delete_api_key", { hostId: id });
 }
 
 function selectCatalogHost(id: string): void {
@@ -14215,6 +14229,14 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       </template>
 
       <template v-else-if="!settingsOpen && tab === 'hosts'">
+        <p
+          v-if="machineForgetError"
+          class="status-line error-text"
+          role="alert"
+          data-test="machine-forget-error"
+        >
+          {{ machineForgetError }}
+        </p>
         <MobileHostDetail
           v-if="hostDetail"
           ref="hostDetailView"

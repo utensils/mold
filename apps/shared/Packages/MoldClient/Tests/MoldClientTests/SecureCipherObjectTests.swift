@@ -94,6 +94,29 @@ struct SecureCipherObjectTests {
         await connection.close()
     }
 
+    @Test func fourOutstandingObjectsLeaveTheFifthBatchInlineUntilAcknowledged() async throws {
+        let connection = try makeConnection()
+        await connection.checkObjectReservationBudget()
+        await connection.close()
+    }
+
+    @Test func finishingAnEarlierUploadDoesNotFlushTheNextPartialBatchEarly() async throws {
+        let connection = try makeConnection()
+        await connection.checkCompletionKeepsBatchDeadline()
+        await connection.close()
+    }
+
+    @Test func foundationHTTPSUpgradeMetadataDoesNotDisableWSSObjectTransfer() async throws {
+        let connection = try makeConnection()
+        await connection.checkObjectNegotiation()
+        await connection.close()
+    }
+    @Test func gatewayThrottlePreservesPendingCiphertextWithoutReopeningHTTP() async throws {
+        let connection = try makeConnection()
+        try await connection.checkGatewayRetry()
+        await connection.close()
+    }
+
     private func makeConnection() throws -> SecureWebSocketConnection {
         let host = SecureHost(binding: .init(signingKey: "", noiseKey: "", signature: ""), namespace: String(repeating: "a", count: 32),
             websocketURL: URL(string: "wss://fixture.invalid")!, grant: .init(id: "", expiresAt: 0, epoch: 0, signature: ""))
@@ -102,6 +125,41 @@ struct SecureCipherObjectTests {
 }
 
 private extension SecureWebSocketConnection {
+    func checkCompletionKeepsBatchDeadline() {
+        objectPolicy = SecureObjectPolicy(origin: SecureObjectPolicy.productionOrigin)
+        stagedFrames = [(17, Data(repeating: 1, count: 16_349))]
+        objectFlushTask = Task { try? await Task.sleep(for: .seconds(30)) }
+        completedObjectSend(sequence: 0)
+        #expect(stagedFrames.count == 1, "Finishing an unrelated PUT must preserve the existing batching deadline")
+        #expect(objectSends.isEmpty, "A partial batch is not published early")
+    }
+
+    func checkObjectNegotiation() {
+        #expect(socket.originalRequest?.url?.scheme == "https", "Foundation rewrites the WSS upgrade request")
+        configureObjectPolicy(["version":1,"origin":SecureObjectPolicy.productionOrigin.absoluteString,
+            "maxBytes":262_144,"maxCount":16,"maxInFlightBytes":1_048_576,"maxInFlightObjects":4])
+        #expect(objectPolicy != nil, "The originally selected WSS route supports objects")
+    }
+    func checkGatewayRetry() async throws {
+        let ciphertext = Data([1,2,3])
+        pending[1] = PendingFrame(bytes: ciphertext, sent: .now, tries: 1)
+        try await receiveFrame(["connectionId":"fixture","requestId":"fixture","message":"Internal server error"])
+        #expect(pending[1]?.bytes == ciphertext && pending[1]?.tries == 1)
+        #expect(failure == nil)
+        #expect(!Self.isGatewayBusy(["connectionId":"é", "requestId":"fixture", "message":"Internal server error"]))
+        #expect(!Self.isGatewayBusy(["connectionId":"fixture", "requestId":"fixture", "message":"Internal server error", "v":2]))
+        await #expect(throws: SecureConnectionError.protocolViolation) { try await receiveFrame(["message":"Internal server error"]) }
+    }
+
+    func checkObjectReservationBudget() {
+        for index in 0..<4 { #expect(reserveObject(sequence: UInt64(index * 15), count: 15)) }
+        #expect(!reserveObject(sequence: 60, count: 4), "64 full wire chunks need five objects after length prefixes; the tail must stay inline")
+        retireObjects(next: 14)
+        #expect(!reserveObject(sequence: 60, count: 4), "Partial ACK cannot release an object")
+        retireObjects(next: 15)
+        #expect(reserveObject(sequence: 60, count: 4))
+    }
+
     func checkShortTailBatching() {
         objectPolicy = SecureObjectPolicy(origin: SecureObjectPolicy.productionOrigin)
         #expect(!shouldStagePacket(bulk: false), "Initial handshakes and small controls stay inline")

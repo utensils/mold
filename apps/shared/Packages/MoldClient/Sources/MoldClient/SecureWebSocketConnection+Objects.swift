@@ -3,6 +3,14 @@ import Foundation
 private enum ObjectBrokerFailure: Error { case disabled }
 
 extension SecureWebSocketConnection {
+    func reserveObject(sequence: UInt64, count: Int) -> Bool {
+        guard objectReservations.count < 4 else { return false }
+        objectReservations[sequence] = sequence + UInt64(count)
+        return true
+    }
+    func retireObjects(next: UInt64) {
+        objectReservations = objectReservations.filter { $0.value > next }
+    }
     func shouldStagePacket(bulk: Bool) -> Bool {
         objectPolicy != nil && !objectAllocationDisabled && (bulk || !stagedFrames.isEmpty)
     }
@@ -20,7 +28,7 @@ extension SecureWebSocketConnection {
         }
         guard !stagedFrames.isEmpty, objectFlushTask == nil else { return }
         objectFlushTask = Task {
-            do { try await Task.sleep(for: .milliseconds(8)); objectFlushTask = nil; flushObjects() }
+            do { try await Task.sleep(for: .milliseconds(32)); objectFlushTask = nil; flushObjects() }
             catch { }
         }
     }
@@ -29,18 +37,16 @@ extension SecureWebSocketConnection {
     /// could never fill a batch. All staged frames already consume wire credit.
     func flushObjects() {
         guard failure == nil, !stagedFrames.isEmpty else { return }
-        guard objectSends.count < 4 else { scheduleObjectFlush(); return }
         objectFlushTask?.cancel(); objectFlushTask = nil
         let frames = stagedFrames; stagedFrames.removeAll()
         guard let first = frames.first else { return }
+        let eligible = frames.reduce(0) { $0 + $1.bytes.count + 4 } >= 65_536 && !objectAllocationDisabled
+        let reserved = eligible && reserveObject(sequence: first.sequence, count: frames.count)
         objectSends[first.sequence] = Task {
-            defer {
-                objectSends.removeValue(forKey: first.sequence); flushObjects()
-                let waiter = writer; writer = nil; waiter?.resume()
-            }
+            defer { completedObjectSend(sequence: first.sequence) }
             do {
                 let batch = try SecureObjectBatch(sequence: first.sequence, chunks: frames.map(\.bytes))
-                if batch.bytes.count < 131_072 || objectAllocationDisabled {
+                if !reserved {
                     try await sendInlineFrames(frames)
                     return
                 }
@@ -48,6 +54,7 @@ extension SecureWebSocketConnection {
                 do { grant = try await requestObject(batch) }
                 catch ObjectBrokerFailure.disabled {
                     objectAllocationDisabled = true
+                    objectReservations.removeValue(forKey: first.sequence)
                     try await sendInlineFrames(frames)
                     return
                 }
@@ -70,6 +77,14 @@ extension SecureWebSocketConnection {
                 objectSentBytes += frames.reduce(0) { $0 + $1.bytes.count }
             } catch { if !Task.isCancelled { await fail(error) } }
         }
+    }
+
+    func completedObjectSend(sequence: UInt64) {
+        objectSends.removeValue(forKey: sequence)
+        // A completed PUT is unrelated to the next batch's deadline. Preserve
+        // its collection window so steady uploads do not fragment into tiny PUTs.
+        scheduleObjectFlush()
+        let waiter = writer; writer = nil; waiter?.resume()
     }
 
     private func sendInlineFrames(_ frames: [(sequence: UInt64, bytes: Data)]) async throws {
@@ -145,7 +160,7 @@ extension SecureWebSocketConnection {
         let object = try SecureObjectReference(value, policy: policy, namespace: host.namespace, sid: sid, rid: rid, direction: "host")
         let end = sequence + UInt64(object.count)
         if end <= window.next { return true }
-        guard sequence < window.next + 16, end <= window.next + 16 else { throw SecureConnectionError.protocolViolation }
+        guard sequence < window.next + UInt64(SecureRelayWindow.capacity), end <= window.next + UInt64(SecureRelayWindow.capacity) else { throw SecureConnectionError.protocolViolation }
         if let existing = objectFetches[sequence] {
             guard existing.reference == object else { throw SecureConnectionError.protocolViolation }
             return false
