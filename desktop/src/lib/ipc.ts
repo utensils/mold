@@ -1,3 +1,5 @@
+import type { SecureBinding, SecureHostProfile } from "@studio/api/secureCrypto";
+import { listSecureHosts, forgetSecureHost } from "@studio/api/secureStore";
 import { relayFetch } from "@studio/api/relayTransport";
 import {
   captureMirrorOrganization,
@@ -224,9 +226,19 @@ export const ipc = {
     if (!inTauri()) return Promise.resolve(browserFallbackConnection());
     return invoke<ConnectionInfo>("stop_local_engine");
   },
-  /** Drop a host from the saved list and delete its stored API key. */
-  forgetRemoteHost(id: string): Promise<SavedHost[]> {
-    if (!inTauri()) return Promise.resolve([]);
+  /** Remove encrypted/native credentials before dropping the retryable saved entry. */
+  async forgetRemoteHost(id: string): Promise<SavedHost[]> {
+    const saved = (await ipc.appSettingsGet()).savedHosts.find((host) => host.id === id);
+    if (saved) {
+      for (const profile of await listSecureHosts()) {
+        if (
+          profile.origins.includes(saved.url.replace(/\/$/, "")) ||
+          (saved.instanceId && profile.instance_id === saved.instanceId)
+        )
+          await forgetSecureHost(profile.namespace);
+      }
+    }
+    if (!inTauri()) return [];
     return invoke<SavedHost[]>("forget_remote_host", { id });
   },
   async testRemoteHost(url: string, apiKey: string | null): Promise<HostTest> {
@@ -594,10 +606,36 @@ export const ipc = {
     }
     return invoke<RunPodOverview>("runpod_overview");
   },
-  runpodCreate(input: RunPodCreateInput): Promise<RunPodPod> {
+  runpodCreate(
+    input: RunPodCreateInput,
+    device: SecureBinding,
+    resume: SecureHostProfile | null = null,
+  ): Promise<{ pod: RunPodPod; profile: SecureHostProfile }> {
     if (!inTauri())
       return Promise.reject(new Error("RunPod provisioning requires the desktop app."));
-    return invoke<RunPodPod>("runpod_create", { input });
+    return invoke<{ pod: RunPodPod; profile: SecureHostProfile }>("runpod_create", {
+      input,
+      device,
+      resume,
+    });
+  },
+  runpodClearUnconfirmed(): Promise<void> {
+    return invoke<void>("runpod_clear_unconfirmed");
+  },
+  runpodVolumeOrigin(id: string): Promise<string | null> {
+    return invoke<string | null>("runpod_volume_origin", { id });
+  },
+  runpodRememberPairing(
+    id: string,
+    device: SecureBinding,
+    profile: SecureHostProfile,
+  ): Promise<void> {
+    return invoke<void>("runpod_remember_pairing", { id, device, profile });
+  },
+  runpodPairing(id: string, device: SecureBinding): Promise<SecureHostProfile | null> {
+    if (!inTauri())
+      return Promise.reject(new Error("RunPod provisioning requires the desktop app."));
+    return invoke<SecureHostProfile | null>("runpod_pairing", { id, device });
   },
   runpodNetworkVolumeCreate(input: RunPodNetworkVolumeCreateInput): Promise<RunPodNetworkVolume> {
     if (!inTauri())

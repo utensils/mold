@@ -11,9 +11,10 @@ import {
   type RunPodNetworkVolume,
   type RunPodPod,
 } from "../lib/runpod";
-import { inTauri } from "../lib/ipc";
+import { inTauri, ipc } from "../lib/ipc";
 import { useAppPrefsStore } from "../stores/appPrefs";
 import { useHostsStore } from "../stores/hosts";
+import { requireSecureRunPod } from "../lib/runpodSecure";
 import { useRunPodStore } from "../stores/runpod";
 import { useToastStore } from "../stores/toasts";
 import ConfirmDialog from "@ui/components/ConfirmDialog.vue";
@@ -31,6 +32,8 @@ const confirmingDelete = ref<string | null>(null);
 // Confirm before spend: nothing provisions or resumes billing without
 // an explicit acknowledgement.
 const confirmProvision = ref(false);
+const confirmClearUnconfirmed = ref(false);
+const clearingUnconfirmed = ref(false);
 const confirmStartPod = ref<RunPodPod | null>(null);
 const showVolumeCreate = ref(false);
 const editingVolumeId = ref<string | null>(null);
@@ -187,6 +190,20 @@ async function confirmLaunch() {
   } catch {}
 }
 
+async function clearUnconfirmed() {
+  clearingUnconfirmed.value = true;
+  try {
+    await ipc.runpodClearUnconfirmed();
+    confirmClearUnconfirmed.value = false;
+    runpod.clearOperationError();
+    await runpod.load();
+  } catch (error) {
+    toasts.push(errorMessage(error), "error");
+  } finally {
+    clearingUnconfirmed.value = false;
+  }
+}
+
 // Resuming a stopped pod resumes billing — confirm it too, showing the pod's
 // known hourly rate.
 function requestStart(pod: RunPodPod) {
@@ -255,12 +272,13 @@ async function act(action: "start" | "stop" | "delete", pod: RunPodPod) {
 
 async function useInMold(pod: RunPodPod) {
   try {
+    await requireSecureRunPod(pod.id);
     const host = await hosts.connect(podProxyUrl(pod.id), null, pod.name);
     // Send generations to the pod by default; the user can flip back to Auto.
     await prefs.update({ generateTargetHost: host.id });
     toasts.push(`Connected to ${pod.name ?? pod.id}`);
   } catch (error) {
-    toasts.push(`The instance is still starting: ${errorMessage(error)}`, "error");
+    toasts.push(errorMessage(error), "error");
   }
 }
 
@@ -548,6 +566,25 @@ onBeforeUnmount(() => {
           :message="runpod.operationError"
           @dismiss="runpod.clearOperationError()"
         />
+        <section
+          v-if="runpod.overview.unconfirmedRequests?.length"
+          class="mb-4"
+          data-test="unconfirmed-provisioning"
+        >
+          <p>
+            A previous GPU request is unconfirmed. Check your RunPod console before renting again.
+          </p>
+          <p
+            v-for="name in runpod.overview.unconfirmedRequests"
+            :key="name"
+            class="font-mono text-micro"
+          >
+            {{ name }}
+          </p>
+          <button class="ms-toolbar-button" type="button" @click="confirmClearUnconfirmed = true">
+            Clear unconfirmed request…
+          </button>
+        </section>
         <section class="border-border mb-5 rounded-window border bg-bg-deep">
           <div class="flex items-center justify-between px-3 py-2.5">
             <div>
@@ -821,6 +858,26 @@ onBeforeUnmount(() => {
         </div>
       </main>
     </div>
+
+    <ConfirmDialog
+      :open="confirmClearUnconfirmed"
+      title="Clear this unconfirmed request?"
+      confirm-label="I checked RunPod — clear the request"
+      danger
+      :busy="clearingUnconfirmed"
+      @confirm="clearUnconfirmed"
+      @cancel="confirmClearUnconfirmed = false"
+    >
+      <p>
+        The original GPU may still be running and billed even if it is absent from this list. Check
+        the RunPod console first. Clearing loses this request's automatic secure recovery; it does
+        not stop or delete a GPU. Renting again could create a second billed instance.
+      </p>
+      <p>
+        We will refresh your RunPod instance list and refuse to clear a matching instance. An empty
+        result cannot prove the original request never succeeded.
+      </p>
+    </ConfirmDialog>
 
     <ConfirmDialog
       :open="confirmProvision"

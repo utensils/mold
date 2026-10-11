@@ -26,6 +26,12 @@ const defaultExtraHosts = [
 ];
 const extraHosts = [...defaultExtraHosts];
 
+vi.mock("../lib/runpodSecure", () => ({
+  provisionSecureRunPod: vi
+    .fn()
+    .mockRejectedValue(new Error("GPU is unavailable for Pod creation")),
+}));
+
 vi.mock("../lib/ipc", () => ({
   ipc: {
     runpodOverview: (...args: unknown[]) => runpodOverview(...args),

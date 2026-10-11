@@ -61,6 +61,22 @@ impl SecretStore {
         if ALLOWED.contains(&name) {
             return Ok(());
         }
+        if let Some(suffix) = name
+            .strip_prefix("runpod-bootstrap.")
+            .or_else(|| name.strip_prefix("runpod-pairing."))
+            .or_else(|| name.strip_prefix("runpod-volume."))
+            .or_else(|| name.strip_prefix("runpod-fresh-volume."))
+        {
+            anyhow::ensure!(
+                !suffix.is_empty()
+                    && suffix.len() <= 128
+                    && suffix
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
+                "invalid RunPod secret name"
+            );
+            return Ok(());
+        }
         if let Some(suffix) = name.strip_prefix(PER_HOST_PREFIX) {
             anyhow::ensure!(
                 !suffix.is_empty()
@@ -94,6 +110,16 @@ impl SecretStore {
         let loaded = Self::loaded(&self.path, &mut guard);
         loaded.map.remove(name);
         Self::save(&self.path, loaded)
+    }
+
+    pub(crate) fn runpod_bootstraps(&self) -> Vec<String> {
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        Self::loaded(&self.path, &mut guard)
+            .map
+            .iter()
+            .filter(|(key, _)| key.starts_with("runpod-bootstrap."))
+            .map(|(_, value)| value.clone())
+            .collect()
     }
 
     /// Stable credential for the desktop-owned LAN server. An explicit

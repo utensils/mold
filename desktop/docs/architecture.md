@@ -302,7 +302,22 @@ Desktop-created RunPod machines use the same centralized GPU-family table as
 the CLI. Stable desktop releases fetch the exact release/source container
 manifest and submit `ghcr.io/utensils/mold@sha256:…`; a missing or inconsistent
 manifest fails provisioning without mutable fallback. Main-branch desktop
-nightlies use the corresponding rolling `latest*` map.
+nightlies use the corresponding rolling `latest*` map. Creation provisions the
+host identity and a grant for this installation through the authenticated provider
+request. Only the public device binding crosses into the provisioner; no client
+private key does. Before the paid request, an owner-only recovery journal saves
+the client pairing authority and unique pod name, never the host private identity.
+A lost create reply is recovered from the authenticated instance list by that exact
+name without replaying the paid mutation. Use in Mold saves the verified pairing
+through the ordinary secure store before connecting over the provider's direct
+WSS endpoint. Existing unpaired instances require a fresh host pairing code. Network-volume
+replacement reuses the current canonical pairing and only a public volume-to-host
+association; no host seed is recreated. Unknown existing volumes fail before a
+paid request. A volume created in Mold has one initial-bootstrap marker, consumed
+before provisioning. Unconfirmed requests block another paid create; an explicit
+clear dialog explains possible ongoing billing and lost automatic recovery, and
+a fresh provider inventory refuses to clear a matching pod. Successful pairing
+removes the recovery credential copy.
 
 **Rust toolchain:** the devshell's existing `rust-bin.stable.latest`. If a toolchain/Tauri transitive-dep breakage appears (Aethon had to pin 1.92 because 1.95 broke icu_provider/objc2), pin **only** in the desktop package derivation, never the shared devshell toolchain.
 
