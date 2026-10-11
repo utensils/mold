@@ -10,6 +10,8 @@ pub(crate) mod campaign_capture;
 #[cfg(all(feature = "dev-bins", any(feature = "h3", feature = "h3-private-uat")))]
 pub mod campaign_watch;
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+pub(crate) mod compact_transformer;
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub(crate) mod conditioner_cache;
 pub(crate) mod dtype;
 pub(crate) mod engine;

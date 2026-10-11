@@ -41,6 +41,7 @@ use sha2::{Digest, Sha256};
 
 #[cfg(feature = "mp4")]
 use super::backend::{H3BackendArtifactLease, H3BackendExecutionLease, H3CandleBackendDevice};
+use super::compact_transformer::H3CompactTransformerSelection;
 #[cfg(feature = "mp4")]
 use super::engine::H3EngineProgressObserver;
 #[cfg(feature = "mp4")]
@@ -1808,6 +1809,13 @@ pub(crate) struct H3AdmittedRoute {
     pub(crate) admitted_model: &'static str,
     pub(crate) partition_model: &'static str,
     pub(crate) task: Task,
+    /// The compact DiT the ADMITTED identity executes, read from its own
+    /// manifest (`H3CompactTransformerSelection::for_model`). Base and Turbo
+    /// tags select their task's Comfy-Org DiT; a distilled base tier such as
+    /// FastH3 V2 selects its own file while keeping the FL2VA partition —
+    /// Qwen support, the conditioner cache key, the factory canonical model,
+    /// and the VAEs are all partition-keyed and stay shared.
+    pub(crate) transformer: H3CompactTransformerSelection,
 }
 
 pub(crate) fn admitted_h3_route(model: &str) -> Result<H3AdmittedRoute> {
@@ -1817,10 +1825,17 @@ pub(crate) fn admitted_h3_route(model: &str) -> Result<H3AdmittedRoute> {
         contract::base_compact_model(admitted.canonical_model).ok_or_else(|| {
             anyhow!("private H3 admission names a model without a compact engine partition")
         })?;
+    let transformer = H3CompactTransformerSelection::for_model(admitted.canonical_model)?;
+    if transformer.task() != admitted.task
+        || partition_model != contract::base_compact_model_for_task(admitted.task)
+    {
+        bail!("private H3 admission resolved a transformer outside its task partition")
+    }
     Ok(H3AdmittedRoute {
         admitted_model: admitted.canonical_model,
         partition_model,
         task: admitted.task,
+        transformer,
     })
 }
 
@@ -1974,16 +1989,11 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     let admitted_model = route.admitted_model;
     let partition_model = route.partition_model;
     let admitted_task = route.task;
-    let (admitted_transformer_task, admitted_published_artifact) = match admitted_task {
-        Task::Fl2va => (
-            H3TransformerTask::T2VaFl2Va,
-            H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
-        ),
-        Task::Ref2va => (
-            H3TransformerTask::Ref2Va,
-            H3ComfyPublishedArtifact::Ref2VaPrunedInt8ConvRot,
-        ),
-    };
+    // Per-ARTIFACT, not per-task: the admitted identity's own manifest names
+    // the DiT (`H3AdmittedRoute::transformer`).
+    let admitted_transformer = route.transformer;
+    let admitted_transformer_task = admitted_transformer.transformer_task();
+    let admitted_published_artifact = admitted_transformer.published_artifact();
     // Admission runs after reference resolution, so Ref2VA media are already
     // descriptor authorities — the only valid queue/worker form, and the one
     // the public-boundary validator refuses. FL2VA carries no references, so
@@ -2069,7 +2079,10 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     // authenticated envelope check below still validates the same request
     // against the record the artifact pass authorizes.
     timeline.enter(admission_phase::SUPPORT);
-    let storage = H3PrivateComfyStorageAuthority::resolve(paths.models_root, admitted_task)?;
+    let storage = H3PrivateComfyStorageAuthority::resolve_with_transformer(
+        paths.models_root,
+        admitted_transformer,
+    )?;
     let qwen_support = load_qualified_private_qwen_support(paths.models_root, partition_model)?;
     timeline.enter(admission_phase::CONDITIONING);
     let mut prepare_observer = H3EngineProgressObserver::new(progress);
@@ -2143,6 +2156,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     let artifact_report = resolve_installed_artifacts_with_control(
         paths.models_root,
         partition_model,
+        admitted_transformer,
         paths.authorization_record,
         |hash| {
             progress.checkpoint()?;
@@ -3299,6 +3313,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     let artifact_report = resolve_installed_artifacts_with_control(
         paths.models_root,
         frozen_route.partition_model,
+        frozen_route.transformer,
         paths.authorization_record,
         |hash| {
             progress.checkpoint()?;
@@ -3393,7 +3408,10 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     // The route above already validated the base factory and keyed the
     // request contract and artifact qualification on the frozen task.
     let reopened_task = frozen_route.task;
-    let storage = H3PrivateComfyStorageAuthority::resolve(paths.models_root, reopened_task)?;
+    let storage = H3PrivateComfyStorageAuthority::resolve_with_transformer(
+        paths.models_root,
+        frozen_route.transformer,
+    )?;
     let qwen_support =
         load_qualified_private_qwen_support(paths.models_root, frozen_route.partition_model)?;
     let transformer_cancellation = H3PrivatePreparationCancellation { progress };
@@ -3733,6 +3751,11 @@ const fn private_h3_factory_attention_backend(
 struct H3FrozenReopenRoute {
     task: Task,
     partition_model: &'static str,
+    /// The DiT admission selected, re-derived from the same persisted request
+    /// model. The frozen transformer component digest (and the artifact
+    /// qualification identity, whose report lists the selected file) fences
+    /// any disagreement with what admission actually opened.
+    transformer: H3CompactTransformerSelection,
     transformer_task: H3TransformerTask,
     published_artifact: H3ComfyPublishedArtifact,
     mode: Mode,
@@ -3751,23 +3774,22 @@ fn validate_frozen_reopen_route(
 ) -> Result<H3FrozenReopenRoute> {
     validate_base_factory(frozen_factory, owner_fence)?;
     let task = frozen_factory.task();
-    let (transformer_task, published_artifact) = match task {
-        Task::Fl2va => (
-            H3TransformerTask::T2VaFl2Va,
-            H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
-        ),
-        Task::Ref2va => (
-            H3TransformerTask::Ref2Va,
-            H3ComfyPublishedArtifact::Ref2VaPrunedInt8ConvRot,
-        ),
-    };
+    let partition_model = contract::base_compact_model_for_task(task);
+    // The same per-artifact route admission derived, from the same persisted
+    // request model; it must still land on the frozen task's partition.
+    let route = admitted_h3_route(&request.model)?;
+    if route.task != task || route.partition_model != partition_model {
+        bail!("private H3 reopened request model differs from the frozen task partition")
+    }
+    let transformer = route.transformer;
     let mode = contract::validate_resolved_request_contract(request, task)
         .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
     Ok(H3FrozenReopenRoute {
         task,
-        partition_model: contract::base_compact_model_for_task(task),
-        transformer_task,
-        published_artifact,
+        partition_model,
+        transformer,
+        transformer_task: transformer.transformer_task(),
+        published_artifact: transformer.published_artifact(),
         mode,
     })
 }
@@ -8611,11 +8633,35 @@ mod tests {
                 route.partition_model,
                 contract::base_compact_model_for_task(route.task)
             );
+            // A Turbo tag executes its task's Comfy-Org DiT; only a manifest
+            // naming a different reviewed DiT (FastH3) moves this axis.
+            assert_eq!(
+                route.transformer,
+                H3CompactTransformerSelection::base_for_task(route.task)
+            );
         }
         assert_eq!(
             contract::base_compact_model_for_task(Task::Ref2va),
             contract::REF2VA_COMFY
         );
+        for (model, artifact) in [
+            (
+                contract::FL2VA_COMFY,
+                mold_candle::minimax_h3::H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
+            ),
+            (
+                contract::REF2VA_COMFY,
+                mold_candle::minimax_h3::H3ComfyPublishedArtifact::Ref2VaPrunedInt8ConvRot,
+            ),
+        ] {
+            assert_eq!(
+                admitted_h3_route(model)
+                    .unwrap()
+                    .transformer
+                    .published_artifact(),
+                artifact
+            );
+        }
 
         let base = admitted_h3_route(contract::FL2VA_COMFY).unwrap();
         assert_eq!(base.admitted_model, contract::FL2VA_COMFY);

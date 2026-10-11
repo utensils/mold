@@ -1390,12 +1390,40 @@ impl H3Mlp {
     }
 }
 
+/// A token-refiner attention whose four linears are either the protected
+/// dense matrices (Comfy-Org) or INT8 ConvRot (FastH3 V2). Both arms run the
+/// identical refiner arithmetic — ComfyUI's `RefinerBlock`
+/// (`comfy/ldm/minimax/model.py:250-261`) is one class whose `operations.Linear`
+/// dequantizes whatever its `comfy_quant` sidecar declares.
+#[derive(Clone, Debug)]
+enum H3TokenRefinerAttention {
+    Dense(H3Attention),
+    ComfyInt8(H3ComfyInt8Attention),
+}
+
+#[derive(Clone, Debug)]
+enum H3TokenRefinerMlp {
+    Dense(H3Mlp),
+    ComfyInt8(H3ComfyInt8Mlp),
+}
+
+/// The four INT8 ConvRot token-refiner linears of one refiner block, already
+/// resident on the execution device. Unlike a streamed main block, the refiner
+/// is part of the resident core: it runs once per transformer forward and is
+/// charged as fixed resident device bytes by the opened memory evidence.
+pub(super) struct H3ComfyInt8RefinerMatrices {
+    pub qkv: H3ComfyInt8ConvRotLinear,
+    pub out: H3ComfyInt8ConvRotLinear,
+    pub fc1: H3ComfyInt8ConvRotLinear,
+    pub fc2: H3ComfyInt8ConvRotLinear,
+}
+
 #[derive(Clone, Debug)]
 struct H3TokenRefinerBlock {
     norm1: nn::RmsNorm,
-    attention: H3Attention,
+    attention: H3TokenRefinerAttention,
     norm2: nn::RmsNorm,
-    mlp: H3Mlp,
+    mlp: H3TokenRefinerMlp,
 }
 
 impl H3TokenRefinerBlock {
@@ -1417,19 +1445,109 @@ impl H3TokenRefinerBlock {
         }
         Ok(Self {
             norm1: rms_norm_with_dtype(config.hidden_size, config.norm_eps, dtype, vb.pp("norm1"))?,
-            attention: H3Attention::load(config, qkv_layout, dtype, turbo, vb.pp("attn"))?,
+            attention: H3TokenRefinerAttention::Dense(H3Attention::load(
+                config,
+                qkv_layout,
+                dtype,
+                turbo,
+                vb.pp("attn"),
+            )?),
             norm2: rms_norm_with_dtype(config.hidden_size, config.norm_eps, dtype, vb.pp("norm2"))?,
-            mlp: H3Mlp::load(config, dtype, turbo, vb.pp("mlp"))?,
+            mlp: H3TokenRefinerMlp::Dense(H3Mlp::load(config, dtype, turbo, vb.pp("mlp"))?),
+        })
+    }
+
+    /// Build a refiner block over INT8 ConvRot linears. Norms still come from
+    /// `vb`; the matrices never pass through the dense opened-file backend,
+    /// which refuses encoded INT8 storage by design.
+    fn load_comfy_int8(
+        config: &H3TransformerConfig,
+        qkv_layout: H3QkvLayout,
+        dtype: DType,
+        matrices: H3ComfyInt8RefinerMatrices,
+        turbo: Option<&H3TurboBlockDeltas>,
+        vb: VarBuilder,
+    ) -> Result<Self> {
+        if qkv_layout != H3QkvLayout::QkvMajor {
+            candle::bail!("MiniMax H3 Comfy INT8 token refiner requires the QKV-major layout")
+        }
+        let inner_dim = config.attention_inner_dim();
+        if matrices.qkv.in_features() != config.hidden_size
+            || matrices.qkv.out_features() != 3 * inner_dim
+            || matrices.out.in_features() != inner_dim
+            || matrices.out.out_features() != config.hidden_size
+            || matrices.fc1.in_features() != config.hidden_size
+            || matrices.fc1.out_features() != 2 * config.ffn_hidden_size
+            || matrices.fc2.in_features() != config.ffn_hidden_size
+            || matrices.fc2.out_features() != config.hidden_size
+        {
+            candle::bail!(
+                "MiniMax H3 Comfy INT8 token-refiner matrix shapes do not match the frozen config"
+            )
+        }
+        if let Some(turbo) = turbo {
+            validate_turbo_block_shapes(
+                turbo,
+                config.hidden_size,
+                inner_dim,
+                config.ffn_hidden_size,
+                vb.device(),
+            )?;
+        }
+        Ok(Self {
+            norm1: rms_norm_with_dtype(config.hidden_size, config.norm_eps, dtype, vb.pp("norm1"))?,
+            attention: H3TokenRefinerAttention::ComfyInt8(H3ComfyInt8Attention {
+                heads: config.num_attention_heads,
+                head_dim: config.attention_head_dim,
+                inner_dim,
+                qkv: matrices.qkv,
+                qkv_delta: turbo.map(|turbo| turbo.qkv.clone()),
+                q_norm: rms_norm_with_dtype(
+                    config.attention_head_dim,
+                    config.qk_norm_eps,
+                    dtype,
+                    vb.pp("attn.q_norm"),
+                )?,
+                k_norm: rms_norm_with_dtype(
+                    config.attention_head_dim,
+                    config.qk_norm_eps,
+                    dtype,
+                    vb.pp("attn.k_norm"),
+                )?,
+                out: matrices.out,
+                out_delta: turbo.map(|turbo| turbo.out.clone()),
+            }),
+            norm2: rms_norm_with_dtype(config.hidden_size, config.norm_eps, dtype, vb.pp("norm2"))?,
+            mlp: H3TokenRefinerMlp::ComfyInt8(H3ComfyInt8Mlp {
+                width: config.ffn_hidden_size,
+                fc1: matrices.fc1,
+                fc1_delta: turbo.map(|turbo| turbo.fc1.clone()),
+                fc2: matrices.fc2,
+                fc2_delta: turbo.map(|turbo| turbo.fc2.clone()),
+            }),
         })
     }
 
     fn forward(&self, hidden: &Tensor, attention_plan: &H3FrozenAttentionPlan) -> Result<Tensor> {
-        let attention =
-            self.attention
-                .forward(&self.norm1.forward(hidden)?, None, attention_plan)?;
+        let normalized = self.norm1.forward(hidden)?;
+        // The refiner attends without rotary embedding on both arms
+        // (`RefinerBlock.forward` passes no `rope_freqs`, model.py:258-261).
+        let attention = match &self.attention {
+            H3TokenRefinerAttention::Dense(attention) => {
+                attention.forward(&normalized, None, attention_plan)?
+            }
+            H3TokenRefinerAttention::ComfyInt8(attention) => {
+                attention.forward(&normalized, None, attention_plan)?
+            }
+        };
+        drop(normalized);
         let hidden = hidden.broadcast_add(&attention)?;
         drop(attention);
-        let mlp = self.mlp.forward(&self.norm2.forward(&hidden)?)?;
+        let normalized = self.norm2.forward(&hidden)?;
+        let mlp = match &self.mlp {
+            H3TokenRefinerMlp::Dense(mlp) => mlp.forward(&normalized)?,
+            H3TokenRefinerMlp::ComfyInt8(mlp) => mlp.forward(&normalized)?,
+        };
         hidden.broadcast_add(&mlp)
     }
 }
@@ -1524,10 +1642,12 @@ struct H3ComfyInt8Attention {
 }
 
 impl H3ComfyInt8Attention {
+    /// `rotary` is `None` only for the INT8 token refiner, which attends
+    /// without position embedding exactly like its dense twin.
     fn forward(
         &self,
         hidden: &Tensor,
-        rotary: (&Tensor, &Tensor, usize),
+        rotary: Option<(&Tensor, &Tensor, usize)>,
         attention_plan: &H3FrozenAttentionPlan,
     ) -> Result<Tensor> {
         let (batch, seq_len, _) = hidden.dims3()?;
@@ -1600,8 +1720,10 @@ impl H3ComfyInt8Attention {
         drop(qkv);
         q = self.q_norm.forward(&q)?;
         k = self.k_norm.forward(&k)?;
-        q = apply_h3_rotary(&q, rotary.0, rotary.1, rotary.2)?;
-        k = apply_h3_rotary(&k, rotary.0, rotary.1, rotary.2)?;
+        if let Some((cos, sin, rotary_dim)) = rotary {
+            q = apply_h3_rotary(&q, cos, sin, rotary_dim)?;
+            k = apply_h3_rotary(&k, cos, sin, rotary_dim)?;
+        }
         let output = execute_h3_attention(attention_plan, &q, &k, &v)
             .map_err(|error| candle::Error::Msg(error.to_string()))?
             .reshape((batch, seq_len, self.inner_dim))?;
@@ -1836,7 +1958,7 @@ impl H3ComfyInt8TransformerBlockWeights {
                 adaln_indices,
             )?;
             self.attention
-                .forward(&normalized, rotary, attention_plan)?
+                .forward(&normalized, Some(rotary), attention_plan)?
         };
         let hidden = gated_residual(hidden, &update, &gate_attention, adaln_indices)?;
         drop(update);
@@ -2783,6 +2905,7 @@ impl H3StreamedTransformer {
             attention_runtime,
             None,
             None,
+            None,
         )?;
         let loader = H3TransformerBlockLoader {
             config,
@@ -2804,6 +2927,7 @@ impl H3StreamedTransformer {
         attention_runtime: H3AttentionRuntimeAuthority,
         checkpoint_identity_sha256: Option<String>,
         turbo: Option<&H3TurboLoraRuntime>,
+        token_refiner_int8: Option<Vec<H3ComfyInt8RefinerMatrices>>,
     ) -> Result<Self> {
         let compute_dtype = precision.compute_dtype();
         attention_runtime
@@ -2840,14 +2964,37 @@ impl H3StreamedTransformer {
             }
         }
         let mut token_refiner = Vec::with_capacity(config.token_refiner_num_layers);
-        for index in 0..config.token_refiner_num_layers {
-            token_refiner.push(H3TokenRefinerBlock::load(
-                &config,
-                mode.qkv_layout(),
-                compute_dtype,
-                turbo.and_then(|turbo| turbo.token_refiner_block(index)),
-                vb.pp(format!("token_refiner.blocks.{index}")),
-            )?);
+        match token_refiner_int8 {
+            None => {
+                for index in 0..config.token_refiner_num_layers {
+                    token_refiner.push(H3TokenRefinerBlock::load(
+                        &config,
+                        mode.qkv_layout(),
+                        compute_dtype,
+                        turbo.and_then(|turbo| turbo.token_refiner_block(index)),
+                        vb.pp(format!("token_refiner.blocks.{index}")),
+                    )?);
+                }
+            }
+            Some(matrices) => {
+                if matrices.len() != config.token_refiner_num_layers {
+                    candle::bail!(
+                        "MiniMax H3 INT8 token refiner supplies {} blocks, the config has {}",
+                        matrices.len(),
+                        config.token_refiner_num_layers
+                    )
+                }
+                for (index, matrices) in matrices.into_iter().enumerate() {
+                    token_refiner.push(H3TokenRefinerBlock::load_comfy_int8(
+                        &config,
+                        mode.qkv_layout(),
+                        compute_dtype,
+                        matrices,
+                        turbo.and_then(|turbo| turbo.token_refiner_block(index)),
+                        vb.pp(format!("token_refiner.blocks.{index}")),
+                    )?);
+                }
+            }
         }
         Ok(Self {
             mode,
@@ -2902,6 +3049,7 @@ impl H3StreamedTransformer {
         attention_runtime: H3AttentionRuntimeAuthority,
         checkpoint_identity_sha256: String,
         turbo: Option<&H3TurboLoraRuntime>,
+        token_refiner_int8: Option<Vec<H3ComfyInt8RefinerMatrices>>,
     ) -> Result<Self> {
         if !matches!(mode, H3AdaLnMode::Curve { .. })
             || precision != H3PrecisionProfile::OfficialMixedBf16F32
@@ -2917,6 +3065,7 @@ impl H3StreamedTransformer {
             attention_runtime,
             Some(checkpoint_identity_sha256),
             turbo,
+            token_refiner_int8,
         )
     }
 
@@ -4260,6 +4409,132 @@ mod tests {
             &plan,
         )?;
         assert_close(&expected, &actual, 2e-4)
+    }
+
+    /// FastH3 V2's INT8 ConvRot token refiner runs the same refiner
+    /// arithmetic as the dense one over its dequantized weights, with device
+    /// resident (`new_on_device`) storage, and attends without rotary.
+    #[test]
+    fn comfy_int8_token_refiner_matches_its_exact_dense_dequantized_oracle() -> Result<()> {
+        let device = Device::Cpu;
+        let config = H3TransformerConfig {
+            hidden_size: 256,
+            num_layers: 1,
+            token_refiner_num_layers: 1,
+            num_attention_heads: 2,
+            attention_head_dim: 128,
+            ffn_hidden_size: 256,
+            video_latent_channels: 64,
+            audio_latent_channels: 256,
+            patch_size: [1, 2, 2],
+            text_dim: 256,
+            timestep_input_dim: 64,
+            time_embed_hidden_size: 256,
+            time_embed_dim: 128,
+            rope_inv_freq_len: 16,
+            norm_eps: 1e-5,
+            qk_norm_eps: 1e-5,
+            final_norm_eps: 1e-5,
+        };
+        let mode = H3AdaLnMode::Curve {
+            grid: 5,
+            basis_dim: 64,
+        };
+        let precision = H3PrecisionProfile::SyntheticF32;
+        let specs = expected_h3_weight_specs(&config, mode, precision)?;
+        let mut tensors = tensor_map(&specs, &device)?;
+        let quantized = |out_features: usize,
+                         in_features: usize,
+                         seed: usize|
+         -> Result<(H3ComfyInt8ConvRotLinear, Tensor)> {
+            let raw = (0..out_features * in_features)
+                .map(|index| {
+                    let signed = ((index.wrapping_mul(13).wrapping_add(seed)) % 9) as i8 - 4;
+                    signed.to_ne_bytes()[0]
+                })
+                .collect::<Vec<_>>();
+            let scales = (0..out_features)
+                .map(|row| 0.002 + ((row + seed) % 7) as f32 * 0.0002)
+                .collect::<Vec<_>>();
+            let linear = H3ComfyInt8ConvRotLinear::new_on_device(
+                Tensor::from_vec(raw, (out_features, in_features), &device)?,
+                Tensor::from_vec(scales, (out_features, 1), &device)?,
+            )?;
+            let dense = linear.dequantize_weight(DType::F32, &device, 256)?;
+            Ok((linear, dense))
+        };
+        let inner = config.attention_inner_dim();
+        let (qkv, qkv_dense) = quantized(3 * inner, config.hidden_size, 5)?;
+        let (out, out_dense) = quantized(config.hidden_size, inner, 6)?;
+        let (fc1, fc1_dense) = quantized(2 * config.ffn_hidden_size, config.hidden_size, 7)?;
+        let (fc2, fc2_dense) = quantized(config.hidden_size, config.ffn_hidden_size, 8)?;
+        let prefix = "token_refiner.blocks.0";
+        tensors.insert(format!("{prefix}.attn.qkv_proj.weight"), qkv_dense);
+        tensors.insert(format!("{prefix}.attn.out_proj.weight"), out_dense);
+        tensors.insert(format!("{prefix}.mlp.fc1.weight"), fc1_dense);
+        tensors.insert(format!("{prefix}.mlp.fc2.weight"), fc2_dense);
+        let vb = VarBuilder::from_tensors(tensors, DType::F32, &device);
+        let dense =
+            H3TokenRefinerBlock::load(&config, mode.qkv_layout(), DType::F32, None, vb.pp(prefix))?;
+        let quant = H3TokenRefinerBlock::load_comfy_int8(
+            &config,
+            mode.qkv_layout(),
+            DType::F32,
+            H3ComfyInt8RefinerMatrices { qkv, out, fc1, fc2 },
+            None,
+            vb.pp(prefix),
+        )?;
+        assert!(matches!(
+            quant.attention,
+            H3TokenRefinerAttention::ComfyInt8(_)
+        ));
+        assert!(matches!(quant.mlp, H3TokenRefinerMlp::ComfyInt8(_)));
+
+        let rows = 5;
+        let hidden = Tensor::from_vec(
+            (0..rows * config.hidden_size)
+                .map(|index| index as f32 / 1_013.0 - 0.4)
+                .collect::<Vec<_>>(),
+            (1, rows, config.hidden_size),
+            &device,
+        )?;
+        let authority = H3AttentionRuntimeAuthority::bounded_synthetic_math(
+            H3AttentionDevice::Cpu,
+            H3AttentionModelContract {
+                heads: config.num_attention_heads,
+                head_dim: config.attention_head_dim,
+                dtype: H3AttentionDType::F32,
+            },
+        )
+        .map_err(|error| candle::Error::Msg(error.to_string()))?;
+        let plan = authority
+            .freeze_execution(1, rows, rows)
+            .map_err(|error| candle::Error::Msg(error.to_string()))?
+            .token_refiner;
+        let expected = dense.forward(&hidden, &plan)?;
+        let actual = quant.forward(&hidden, &plan)?;
+        assert_close(&expected, &actual, 2e-4)?;
+
+        // A refiner whose matrices disagree with the config is refused.
+        let (wrong, _) = quantized(config.hidden_size, config.hidden_size, 9)?;
+        let (out, _) = quantized(config.hidden_size, inner, 6)?;
+        let (fc1, _) = quantized(2 * config.ffn_hidden_size, config.hidden_size, 7)?;
+        let (fc2, _) = quantized(config.hidden_size, config.ffn_hidden_size, 8)?;
+        assert!(H3TokenRefinerBlock::load_comfy_int8(
+            &config,
+            mode.qkv_layout(),
+            DType::F32,
+            H3ComfyInt8RefinerMatrices {
+                qkv: wrong,
+                out,
+                fc1,
+                fc2
+            },
+            None,
+            vb.pp(prefix),
+        )
+        .is_err());
+        Ok(())
     }
 
     // ------------------------------------------------------ Turbo LoRA branch

@@ -75,11 +75,13 @@ pub use comfy_dit::{
     H3ComfyInt8BlockLoader, H3ComfyInt8BlockMemory, H3ComfyInt8Cancellation,
     H3ComfyMemoryAccounting, H3ComfyNeverCancel, H3ComfyOpenedBlockMemoryEvidence,
     H3ComfyOpenedInt8Checkpoint, H3ComfyOpenedMemoryEvidence, H3ComfyPrunedFormat,
-    H3ComfyPublishedArtifact, H3ComfyQuantizationPolicy, H3ComfyRuntimeBackend,
-    H3ComfyRuntimeRejection, H3ComfyRuntimeRequirement, H3_COMFYUI_SOURCE_REVISION,
-    H3_COMFY_KITCHEN_REPOSITORY, H3_COMFY_KITCHEN_SOURCE_REVISION, H3_COMFY_KITCHEN_VERSION,
-    H3_COMFY_ORG_SOURCE_REVISION, H3_COMFY_PUBLISHED_INT8_HEADER_LEN,
+    H3ComfyPublishedArtifact, H3ComfyPublishedInt8HeaderPins, H3ComfyQuantizationPolicy,
+    H3ComfyRuntimeBackend, H3ComfyRuntimeRejection, H3ComfyRuntimeRequirement,
+    H3_COMFYUI_SOURCE_REVISION, H3_COMFY_KITCHEN_REPOSITORY, H3_COMFY_KITCHEN_SOURCE_REVISION,
+    H3_COMFY_KITCHEN_VERSION, H3_COMFY_ORG_SOURCE_REVISION, H3_COMFY_PUBLISHED_INT8_HEADER_LEN,
     H3_COMFY_PUBLISHED_INT8_HEADER_SHA256, H3_COMFY_PUBLISHED_INT8_TENSOR_COUNT,
+    H3_FASTH3_REPOSITORY, H3_FASTH3_SOURCE_REVISION, H3_FASTH3_V2_INT8_HEADER_LEN,
+    H3_FASTH3_V2_INT8_HEADER_SHA256, H3_FASTH3_V2_INT8_SOURCE_PATH, H3_FASTH3_V2_INT8_TENSOR_COUNT,
 };
 pub use comfy_quant::{
     h3_nvfp4_weight_staging_bytes, select_h3_int8_linear_kind, select_h3_nvfp4_linear_kind,
