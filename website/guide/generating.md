@@ -355,7 +355,8 @@ measured 24 GB envelopes. See
 ### MiniMax H3
 
 The runnable compact H3 surface has two task partitions. FL2VA generates from
-a required first frame; Ref2VA generates from an ordered set of image, video,
+the prompt alone (text-only) or from an optional first and/or last frame;
+Ref2VA generates from an ordered set of image, video,
 or audio references. Both produce synchronized audio-video, use a fixed 24 fps
 clock, and accept 107–345 frames on the `17n+5` grid.
 

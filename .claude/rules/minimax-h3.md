@@ -30,8 +30,26 @@ Moved verbatim from the root CLAUDE.md; loaded only when working under the paths
 **H3 image decode follows PIL `convert("RGB")`** (official `inference_minimax_h3.py:601-603`; diffusers `load_image`), not ComfyUI's PyAV float path: 16-bit samples take the high byte and 16-bit grey clamps, via `img_utils::pillow_rgb8` in `decode_endpoint` and `decode_image_from_binding`.
 
 **FL2VA public admission follows endpoint mode.** `public_fl2va_runtime_envelope_for_mode`
-and `public_fl2va_runtime_bounds_for_mode` own first-only, last-only,
+and `public_fl2va_runtime_bounds_for_mode` own text-only, first-only, last-only,
 and first+last profiles, from the mode the core request validator resolves.
+**Text-only (T2VA, #1552) is the zero-endpoint mode on every compact FL2VA tag,
+base and Turbo**: endpoint count 0 anchored at `"none"`
+(`fl2va_mode_for_envelope`), zero Qwen vision rows and zero condition rows —
+`validate_shape` requires both to be zero for that shape and nonzero for every
+other — and the whole 2,048-row text ceiling is prompt budget (ComfyUI
+`nodes_minimax_h3.py:132-133,139-163`, `text_encoders/minimax.py:193-197`:
+both frames unconnected, bare prompt, no keyframe latent). Its bounds are
+DERIVED, never measured: attention/FFN shrink with the shorter packed sequence,
+everything else keeps the first-frame grant, and
+`qwen_activation_workspace_demand_bytes` charges the WHOLE grant for T2VA,
+because the conditioner's dense text attention is quadratic in text rows and
+the text-only ceiling is the measured sequence's text half — the linear
+per-row model would under-charge it. The compact FL2VA row/recipe advertises
+`source_image: "optional"` through `reviewed_h3_fl2va_source_image`; only a
+stored first-frame record (private-UAT without `h3`) keeps `"required"`. The
+capability inventory's `required_endpoint: "first"` names the reviewed
+reference request's measurement point, not a client gate — clients read
+`source_image` from the profile. Ref2VA still requires references.
 Both admission prechecks and runtime re-opening mint from that same mode.
 The first-only 2,048 text rows and historical measurement denominators stay
 unchanged; a second endpoint adds 1,008 merged pads plus 32 presentation rows,

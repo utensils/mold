@@ -372,7 +372,9 @@ canvas by the compact canvas RULE — see
 [Qualified canvases](#qualified-canvases) — with 1344x768 the default, offers
 the family frame grid (107-345 on `17n+5`) at 24 fps with 124 the default and
 2-50 terminal-inclusive grid points with 21 the default, and fixes batch one,
-MP4 delivery, and a required first-frame source. A reviewed Turbo tag keeps
+MP4 delivery, and a required first-frame source (this stored-record profile
+still pins one first-frame endpoint; the public runtime admits text-only and
+first/last endpoints since #1552). A reviewed Turbo tag keeps
 its distilled adapter's exact step count. Web, desktop, and iPhone remove the family-wide denial only
 when that exact model name and request envelope agree with the complete
 additive component graph. A missing component, widened axis, absent first
@@ -1220,6 +1222,30 @@ scheduled. This is expected model behavior, not a defect in the new tags,
 the harness, or this campaign: FL2VA has always required a source image, and
 PR 1 does not change that contract. Lifting it so an FL2VA tier can run
 text-only is tracked in #1552.
+
+**Text-only FL2VA is admitted since #1552 (2026-10).** The public runtime now
+mints a zero-endpoint envelope for `Mode::TextToAudioVideo` on the base
+`comfy-pruned-int8` tag and every FL2VA Turbo tier
+(`public_fl2va_runtime_envelope_for_mode`, `private_server.rs`): endpoint
+count 0 anchored at `"none"`, zero Qwen vision patches, zero condition rows,
+and the whole 2,048-row text ceiling as prompt budget — ComfyUI's
+`MiniMaxH3ImageToVideo` leaves both frames unconnected and tokenizes the bare
+prompt (`comfy_extras/nodes_minimax_h3.py:132-133,139-163`,
+`comfy/text_encoders/minimax.py:6,193-197`). The compact FL2VA row and
+recipe advertise `source_image: "optional"`; a stored first-frame record
+(private-UAT build without `h3`) still advertises `"required"`, which is what
+it enforces. Its memory bounds are DERIVED from this record's first-frame
+observations, never measured: attention and FFN scale by the packed sequence,
+which is one endpoint's 1,008 condition rows shorter, so they come out
+strictly below the first-frame grant; the Qwen activation workspace keeps the
+full first-frame grant and the per-request demand charges that whole grant
+(the conditioner's dense text attention is quadratic in text rows, and the
+text-only text ceiling is the measured sequence's text half); the condition
+VAE transient, decoder, audio decode, and fixed terms are unchanged. Every
+text-only bound is therefore at or below its first-frame counterpart and no
+term is reduced below what the first-frame measurement supports. A text-only
+UAT A/B (T2V against I2V, base and one Turbo tier, frames and audio viewed)
+has not run yet.
 
 **Adapters pulled ahead of the release are unowned by the running service.**
 This holds for EVERY adapter pulled ahead of the release that first ships its
