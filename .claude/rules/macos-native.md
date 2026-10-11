@@ -5,6 +5,11 @@ paths:
 
 # Native Mac interaction contracts
 
+Native Xcode builds keep Swift package checkouts in their own
+`build/DerivedData/SourcePackages` and disable the shared repository cache.
+Do not clear developer-global SwiftPM caches to repair a build. Keep that local
+artifact path aligned with Sparkle tool discovery in `make-appcast.sh`.
+
 Active Library sync progress replaces the recurring-session countdown banner.
 Expose one Stop Sync control during transfers, including their finishing phase.
 

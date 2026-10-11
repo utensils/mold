@@ -37,8 +37,13 @@ SIGN := MOLD_APP_SIGN_IDENTITY="$(if $(filter Release,$(CONFIG)),-,$(or $(MOLD_D
 # is correct: moving back to Stable waits for a release newer than that count.)
 BUILD_NUMBER ?= $(shell git rev-list --count HEAD 2>/dev/null || echo 1)
 
+# Keep package checkouts beside this build. Runner-global SwiftPM cache entries
+# can outlive their repository directories and prevent all packages resolving.
+# Retain the DerivedData path that make-appcast.sh uses to find Sparkle tools.
 XCB      := xcodebuild -project $(PROJECT) -scheme $(SCHEME) -configuration $(CONFIG) \
-            -derivedDataPath $(BUILD)/DerivedData CONFIGURATION_BUILD_DIR=$(BUILD)/$(CONFIG) $(SIGN) \
+            -derivedDataPath $(BUILD)/DerivedData \
+            -clonedSourcePackagesDirPath "$(BUILD)/DerivedData/SourcePackages" \
+            -disablePackageRepositoryCache CONFIGURATION_BUILD_DIR=$(BUILD)/$(CONFIG) $(SIGN) \
             CURRENT_PROJECT_VERSION=$(BUILD_NUMBER) \
             MARKETING_VERSION=$(MARKETING_VERSION)
 
@@ -153,6 +158,7 @@ test: gen ## Run every test bundle: the package, then the app's own store tests
 	@scripts/tests/engine-freshness.sh
 	@bash scripts/tests/h3-engine-features.sh
 	@bash scripts/tests/dev-signing-scope.sh
+	@bash scripts/tests/swiftpm-isolation.sh
 	@cd $(PACKAGES)/MoldClient && swift test
 	@cd $(PACKAGES)/MoldStyle && swift test
 	@cd $(PACKAGES)/MoldMesh && swift test
