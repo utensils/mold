@@ -62,7 +62,7 @@ extension SourceMediaFileTests {
     @Test func queueOriginalUsesBoundedPrivateStreamingAndRequiresIndex() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [SourceOriginalProtocol.self]
-        let backend = HTTPBackend(host: MoldHost(name: "Fixture", baseURL: URL(string: "http://fixture/prefix")!),
+        let backend = HTTPBackend.testing(host: MoldHost(name: "Fixture", baseURL: URL(string: "http://fixture/prefix")!),
                                   session: URLSession(configuration: configuration))
         let file = try await backend.queueInputOriginal(id: "job #1", index: 2)
         #expect(try Data(contentsOf: file.url) == Data([1, 2, 3]))
