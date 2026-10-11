@@ -11,3 +11,8 @@
   local stash or gallery; it now defers to that fallback, which also runs for
   an archive that retained other roles but not the source, and the identity
   photo is looked back up in the stash as Create's own reuse path already did.
+- **Reuse settings never strands Generate.** A reused print whose every copy
+  sits on an unreachable machine no longer holds the desktop composer on
+  "Restoring the original input files…", and a failed input restore now
+  clears as soon as the input is attached by hand on desktop, web and the
+  phone, instead of only after a New print or Reset.

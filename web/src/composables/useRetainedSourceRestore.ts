@@ -18,6 +18,9 @@ export function useRetainedSourceRestore(options: {
   layout: () => RetainedDraftLayout;
   apply: (patch: Record<string, unknown>) => void;
   onError: (message: string) => void;
+  /** How many inputs the draft holds. A failed restore blocks until
+   * deliberate recovery, and attaching an input by hand is that recovery. */
+  attachedMedia?: () => number;
 }) {
   const error = ref<string | null>(null);
   const pending = ref(false);
@@ -84,5 +87,9 @@ export function useRetainedSourceRestore(options: {
     },
     { immediate: true },
   );
+  if (options.attachedMedia)
+    watch(options.attachedMedia, (count, previous) => {
+      if (count > previous) error.value = null;
+    });
   return { error, pending };
 }

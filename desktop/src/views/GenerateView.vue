@@ -4093,6 +4093,15 @@ watch(
   },
   { immediate: true },
 );
+watch(
+  () => composer.retainedSourceDeclinedVersion,
+  (version) => {
+    if (version === null || !composer.isRetainedSourceCurrent(version)) return;
+    retainedRestorePending.value = false;
+    const fallback = retainedFallback?.version === version ? retainedFallback.metadata : null;
+    if (fallback) void restoreReuseFallback(fallback, restoreEpoch);
+  },
+);
 function invalidateRetainedRestore(): void {
   restoreEpoch += 1;
   retainedRestoreError.value = null;
@@ -4132,8 +4141,13 @@ function applyPrefill() {
   const prefill = composer.take();
   if (!prefill) return;
   const pendingRetainedVersion = composer.takePendingRetainedSourceApplyVersion();
+  // A reuse no copy could be asked about restores like any other prefill: the
+  // decline may well have landed before this view mounted.
+  const legacyRestore =
+    pendingRetainedVersion === null ||
+    composer.retainedSourceDeclinedVersion === pendingRetainedVersion;
   if (
-    pendingRetainedVersion !== null &&
+    !legacyRestore &&
     composer.isRetainedSourceCurrent(pendingRetainedVersion) &&
     "metadata" in prefill
   ) {
@@ -4173,13 +4187,12 @@ function applyPrefill() {
       // without it both endpoints need reattaching and the notice says so.
       Boolean(prefill.metadata.source_image_sha256 ?? prefill.metadata.source_image_name),
     );
-    if (endFrameNotice && pendingRetainedVersion === null) toasts.push(endFrameNotice, "error");
-    if (pendingRetainedVersion === null) void restorePrefillSource(prefill.metadata, restoreEpoch);
+    if (endFrameNotice && legacyRestore) toasts.push(endFrameNotice, "error");
+    if (legacyRestore) void restorePrefillSource(prefill.metadata, restoreEpoch);
     // Independent of the source restore above: identity is its own partition,
     // and a print may carry a face photo on a checkpoint that takes no source
     // image at all — the source restore's own early-outs must not skip it.
-    if (pendingRetainedVersion === null)
-      void restorePrefillIdentityPhoto(prefill.metadata, restoreEpoch);
+    if (legacyRestore) void restorePrefillIdentityPhoto(prefill.metadata, restoreEpoch);
   } else if ("request" in prefill && prefill.request) {
     void restoreRequestSource(prefill.request, restoreEpoch);
   }
@@ -4454,6 +4467,10 @@ watch(
     form.keyframes.length,
   (count, previous) => {
     if (count < previous && !authoritativeReuseApply) invalidateRetainedRestore();
+    // A failed restore blocks until deliberate recovery; attaching an input
+    // by hand is that recovery. The retained authority stays for whatever
+    // roles are still empty, so the submit-time relay can still fill them.
+    else if (count > previous && !authoritativeReuseApply) retainedRestoreError.value = null;
   },
 );
 

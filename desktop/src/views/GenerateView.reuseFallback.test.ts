@@ -13,6 +13,7 @@ import { useGenerateFormStore } from "../stores/generateForm";
 import { useModelStore } from "../stores/models";
 import { useToastStore } from "../stores/toasts";
 import { useComposerStore } from "../stores/composer";
+import { relayRetainedSourceMedia } from "@studio/api/gallerySourceMedia";
 import type { ModelEntry, OutputMetadata } from "../lib/api/types";
 
 vi.mock("vue-router", () => ({
@@ -223,5 +224,66 @@ describe("GenerateView Reuse settings media fallback", () => {
     expect(sourceStashGet).toHaveBeenCalledWith("d".repeat(64));
     expect(form.h3Authoring?.firstFrame?.data).toBe(PNG_1X1);
     expect(form.h3Authoring?.firstFrame?.filename).toBe("mold-jibmix-flux-fp8-1784397960064.png");
+  });
+
+  // A print whose every copy sits on a machine with no resolvable route can
+  // never be asked; the reuse used to hold Generate on "Restoring the
+  // original input files…" for good.
+  it("releases the composer when no copy of the print can be asked", async () => {
+    const form = useGenerateFormStore().form;
+    sourceStashGet.mockResolvedValue("STASHED");
+    const { composer, version } = reuseFromLibrary();
+    const wrapper = mount(GenerateView, { shallow: true, attachTo: document.body });
+    await flushPromises();
+    const card = () => wrapper.findComponent({ name: "ComposerCard" });
+    expect(card().props("disabled")).toBe(true);
+
+    expect(composer.declineRetainedSource(version)).toBe(true);
+    await flushPromises();
+
+    expect(card().props("disabled")).toBe(false);
+    expect(form.sourceImage).toBe("STASHED");
+  });
+
+  // A retained restore that fails blocks Generate until deliberate recovery;
+  // attaching the input by hand IS that recovery, not only ⌘N.
+  it("lets a hand-attached input retire a failed retained restore", async () => {
+    const form = useGenerateFormStore().form;
+    sourceStashGet.mockResolvedValue(null);
+    vi.mocked(relayRetainedSourceMedia).mockRejectedValueOnce(new Error("relay failed"));
+    const { composer, version } = reuseFromLibrary();
+    const wrapper = mount(GenerateView, { shallow: true, attachTo: document.body });
+    await flushPromises();
+    composer.setRetainedSourceIfCurrent(version, {
+      filename: "print.png",
+      origin,
+      inventory: {
+        availability: "available",
+        members: [
+          { member_id: "source", role: "source_image", display_name: "camera.png", size_bytes: 8 },
+        ],
+      },
+      metadata,
+    });
+    await flushPromises();
+    const card = () => wrapper.findComponent({ name: "ComposerCard" });
+    expect(card().props("disabled")).toBe(true);
+
+    form.sourceImage = PNG_1X1;
+    await flushPromises();
+
+    expect(card().props("disabled")).toBe(false);
+  });
+
+  it("releases the composer when the decline lands before Create mounts", async () => {
+    const form = useGenerateFormStore().form;
+    sourceStashGet.mockResolvedValue("STASHED");
+    const { composer, version } = reuseFromLibrary();
+    expect(composer.declineRetainedSource(version)).toBe(true);
+    const wrapper = mount(GenerateView, { shallow: true, attachTo: document.body });
+    await flushPromises();
+
+    expect(wrapper.findComponent({ name: "ComposerCard" }).props("disabled")).toBe(false);
+    expect(form.sourceImage).toBe("STASHED");
   });
 });

@@ -1251,6 +1251,9 @@ watch(
     form.keyframes.length,
   (count, previous) => {
     if (count < previous && !authoritativeReuseApply) invalidateRetainedSourceReuse();
+    // A failed restore blocks until deliberate recovery; attaching an input
+    // by hand is that recovery (desktop's GenerateView follows the same rule).
+    else if (count > previous && !authoritativeReuseApply) retainedRestoreError.value = null;
   },
 );
 let sourceUseEpoch = 0;

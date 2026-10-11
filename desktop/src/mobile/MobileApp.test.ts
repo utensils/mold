@@ -15227,3 +15227,19 @@ it("keeps explicitly opened mobile details reusable outside the source catalog s
   expect(attach).toHaveBeenCalledOnce();
   attach.mockRestore();
 });
+
+// A failed retained restore blocks Develop until deliberate recovery; attaching
+// the input by hand IS that recovery, exactly as on desktop.
+it("lets a hand-attached input retire a failed retained restore", async () => {
+  wrapper = mountMobileApp();
+  await flushPromises();
+  const vm = wrapper.vm as unknown as { retainedRestoreError: string | null };
+  vm.retainedRestoreError = "The original inputs could not be restored.";
+  await flushPromises();
+  const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+
+  liveForm.sourceImage = "MINE";
+  await flushPromises();
+
+  expect(vm.retainedRestoreError).toBeNull();
+});

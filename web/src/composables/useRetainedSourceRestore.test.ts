@@ -121,3 +121,40 @@ it("leaves an unretained print to the Library's stash and gallery fallback", asy
   expect(onError).not.toHaveBeenCalled();
   scope.stop();
 });
+
+it("lets a hand-attached input retire a failed retained restore", async () => {
+  vi.mocked(restoreRetainedDraftMedia).mockRejectedValueOnce(
+    new Error("relay failed"),
+  );
+  setRetainedSourceReuseIntent({
+    filename: "old.png",
+    origin: { baseUrl: "http://host", apiKey: null },
+    inventory,
+  });
+  const attached = ref(0);
+  const scope = effectScope();
+  const restore = scope.run(() =>
+    useRetainedSourceRestore({
+      loaded: ref(true),
+      read: () => ({}),
+      layout: () => ({
+        web: true,
+        boundary: false,
+        sourceMode: "single",
+        h3: false,
+      }),
+      attachedMedia: () => attached.value,
+      apply: vi.fn(),
+      onError: vi.fn(),
+    }),
+  )!;
+  await nextTick();
+  await Promise.resolve();
+  expect(restore.error.value).toBe("relay failed");
+
+  attached.value = 1;
+  await nextTick();
+
+  expect(restore.error.value).toBeNull();
+  scope.stop();
+});

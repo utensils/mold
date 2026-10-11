@@ -1779,6 +1779,22 @@ const { error: retainedRestoreError, pending: retainedRestorePending } =
       if (restored) preserveRestoredSourceCanvas(restored.base64);
     },
     onError: (message) => toast("error", message),
+    attachedMedia: () => {
+      const s = form.state.value;
+      return (
+        s.imageAttachments.length +
+        (s.referenceImages?.length ?? 0) +
+        s.keyframes.length +
+        Number(Boolean(s.endFrame?.base64)) +
+        Number(Boolean(s.identityImage?.base64)) +
+        Number(Boolean(s.maskImage)) +
+        Number(Boolean(s.controlImage)) +
+        Number(Boolean(s.audioFile)) +
+        Number(Boolean(s.sourceVideo)) +
+        Number(Boolean(s.h3Authoring?.firstFrame?.data)) +
+        Number(Boolean(s.h3Authoring?.lastFrame?.data))
+      );
+    },
   });
 const pendingEndFrameNotice = ref<OutputMetadata | null>(null);
 function noticeFirstLastFrameRestore(metadata: OutputMetadata) {
