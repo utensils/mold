@@ -10,7 +10,7 @@ header=$5
 output=$6
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
-rg -o 'mold_secure_[a-z_]+' "$header" | sort -u | sed 's/^/_/' > "$scratch/exports"
+grep -Eo 'mold_secure_[a-z_]+' "$header" | sort -u | sed 's/^/_/' > "$scratch/exports"
 xcrun ld -r -arch "$arch" -platform_version "$platform" 26.0 "$(xcrun --sdk "$sdk" --show-sdk-version)" \
   -all_load "$input" -o "$scratch/secure.o"
 xcrun nmedit -s "$scratch/exports" "$scratch/secure.o"

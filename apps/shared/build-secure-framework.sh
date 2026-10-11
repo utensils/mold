@@ -24,8 +24,11 @@ mkdir -p "$staging/headers"
 cp "$repo/crates/mold-secure/include/mold_secure.h" "$staging/headers/"
 cp "$repo/crates/mold-secure/include/module.modulemap" "$staging/headers/"
 targets=(aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios)
+# Keep inventory failures outside the conditional: they must stop the build,
+# not masquerade as a missing target. The host runner need not install ripgrep.
+installed_targets=$(rustup target list --installed --toolchain "$toolchain")
 for target in "${targets[@]}"; do
-  if ! rustup target list --installed --toolchain "$toolchain" | rg -qx "$target"; then
+  if ! grep -Fx -- "$target" <<< "$installed_targets" >/dev/null; then
     rustup target add --toolchain "$toolchain" "$target"
   fi
   MACOSX_DEPLOYMENT_TARGET=26.0 IPHONEOS_DEPLOYMENT_TARGET=26.0 \

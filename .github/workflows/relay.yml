@@ -12,6 +12,9 @@ on:
       - "Cargo.lock"
       - "scripts/relay/**"
       - "scripts/tests/relay-*-test.py"
+      - "scripts/tests/secure-framework-portability.sh"
+      - "apps/shared/build-secure-framework.sh"
+      - "apps/shared/scripts/isolate-rust-staticlib.sh"
       - "package.json"
       - "bun.lock"
       - ".github/workflows/relay.yml"
@@ -28,6 +31,9 @@ on:
       - "Cargo.lock"
       - "scripts/relay/**"
       - "scripts/tests/relay-*-test.py"
+      - "scripts/tests/secure-framework-portability.sh"
+      - "apps/shared/build-secure-framework.sh"
+      - "apps/shared/scripts/isolate-rust-staticlib.sh"
       - "package.json"
       - "bun.lock"
       - ".github/workflows/relay.yml"
@@ -52,6 +58,7 @@ jobs:
       - run: python3 scripts/tests/relay-deploy-test.py
       - run: python3 scripts/tests/relay-diagnostics-test.py
       - run: python3 scripts/tests/relay-staging-test.py
+      - run: bash scripts/tests/secure-framework-portability.sh
       - run: python3 scripts/relay/deploy.py --build-only --output "$RUNNER_TEMP/relay-packages"
       - run: |
           node -e 'import(process.env.RUNNER_TEMP + "/relay-packages/router/index.mjs")'
