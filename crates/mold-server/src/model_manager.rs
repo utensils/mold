@@ -2937,8 +2937,10 @@ mod tests {
     fn queue_model_download_identifies_missing_reviewed_adapter_without_error_prose() {
         let root = tempfile::tempdir().unwrap();
         let _environment = IsolatedModelEnvironment::hermetic();
-        let mut config = Config::default();
-        config.models_dir = root.path().display().to_string();
+        let config = Config {
+            models_dir: root.path().display().to_string(),
+            ..Config::default()
+        };
         let model = "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21";
         let manifest = mold_core::manifest::find_manifest(model).unwrap();
         for file in &manifest.files {

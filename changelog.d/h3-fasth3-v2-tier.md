@@ -6,5 +6,5 @@
   point with no configuration: 8 steps of `res_multistep` (9 terminal-inclusive
   grid points, a fixed Steps control that explains itself), sigma shift 10 for
   video and 3 for audio, guidance 0. Text-only, first-frame, last-frame, and
-  first+last-frame requests all work, on CUDA and Apple Metal
-  ([#1812](https://github.com/utensils/mold/issues/1812)).
+  first+last-frame requests all work; qualified on CUDA, with Apple Metal
+  not yet validated ([#1812](https://github.com/utensils/mold/issues/1812)).

@@ -2811,8 +2811,8 @@ mod tests {
             |role| matches!(role, H3ArtifactRole::TurboLoraAdapter),
         ] {
             assert_eq!(
-                fasth3.role_bytes(|candidate| role(candidate)).unwrap(),
-                curated.role_bytes(|candidate| role(candidate)).unwrap()
+                fasth3.role_bytes(role).unwrap(),
+                curated.role_bytes(role).unwrap()
             );
         }
         assert_eq!(

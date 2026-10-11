@@ -1222,7 +1222,7 @@ pub(crate) fn authenticated_h3_private_model_rows(
         if let Some(row) = h3_model_row(
             &variant.model,
             &variant.display_name,
-            "Compact FL2VA CUDA runtime with synchronized audio; reviewed Turbo distillation quality profile.",
+            "Compact FL2VA runtime with synchronized audio; reviewed distilled-adapter quality profile.",
             request,
             disk_usage_bytes,
             (profile, alignment, pixels),
