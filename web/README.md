@@ -2,8 +2,18 @@
 
 A small Vue 3 + Vite + Tailwind v4.2 SPA that serves as the browser-facing
 Mold Studio interface for [mold](../). It talks to the serving `mold serve`
-origin and can connect directly to remembered remote servers from its Machines
-workspace.
+origin and can connect to remembered remote servers from its Machines
+workspace. The independently hosted HTTPS Studio is a paired client rather than
+an engine: **Settings → Machines → Switch machine** returns to its connection
+screen without deleting saved pairings. The selected machine's action menu and
+detail page also offer **Disconnect** and **Forget**. Forget removes its secure
+local pairing before clearing the selection; a failed removal remains available
+for retry. Choose another saved machine or paste a fresh invitation to reconnect.
+The numeric loopback engine entry remains fixed in locally served Studio.
+
+Each hosted tab keeps its accepted machine fixed while Studio is mounted. A
+selection change in another tab returns it to the connection screen instead of
+silently sending operations to a different machine.
 
 ## Inspecting inputs
 

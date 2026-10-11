@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, provide, ref } from "vue";
+import { onBeforeUnmount, onMounted, provide, ref } from "vue";
 import {
   parseMobilePairingPayload,
   claimPairingSession,
@@ -13,8 +13,16 @@ import {
   standaloneStudio,
   studioPrimary,
   setStudioPrimary,
+  suspendStudioPrimary,
+  STUDIO_PRIMARY_CHANGED,
+  STUDIO_PRIMARY_KEY,
+  type StudioPrimary,
 } from "./lib/secureStudio";
-import { addHost, listStoredHosts } from "./lib/hostRegistry";
+import {
+  addHost,
+  listStoredHosts,
+  HOSTS_CHANGED_EVENT,
+} from "./lib/hostRegistry";
 import App from "./App.vue";
 import { takeInitialPairingLink } from "./lib/initialPairing";
 import {
@@ -33,7 +41,55 @@ const requiresKey = ref(false);
 const busy = ref(false);
 const key = ref("");
 const error = ref("");
+let attempt = 0;
+let controller: AbortController | undefined;
+let committingSelection = false;
+const routeKey = (host: StudioPrimary | null) =>
+  host
+    ? `${host.url}
+${host.instanceId ?? ""}`
+    : "";
+let acceptedRoute = routeKey(studioPrimary());
+function commitSelection(host: StudioPrimary | null) {
+  committingSelection = true;
+  try {
+    setStudioPrimary(host);
+  } finally {
+    committingSelection = false;
+  }
+  acceptedRoute = routeKey(host);
+}
+function refreshRemembered() {
+  remembered.value = listStoredHosts();
+  if (!remembered.value.some((host) => host.id === selected.value))
+    selected.value = remembered.value[0]?.id ?? "";
+}
+function suspendSelection() {
+  attempt += 1;
+  controller?.abort();
+  ready.value = false;
+  busy.value = false;
+  clearRelayInfoCache();
+  if (hosted) suspendStudioPrimary();
+  acceptedRoute = "";
+  refreshRemembered();
+  error.value = "";
+}
+function selectionChanged() {
+  if (!committingSelection && routeKey(studioPrimary()) !== acceptedRoute)
+    suspendSelection();
+}
+function storageChanged(event: StorageEvent) {
+  if (event.key === STUDIO_PRIMARY_KEY || event.key === null)
+    suspendSelection();
+  else if (event.key === "mold.web.hosts.v1") refreshRemembered();
+}
 async function connect() {
+  const currentAttempt = ++attempt;
+  controller?.abort();
+  controller = new AbortController();
+  const signal = controller.signal;
+  const current = () => currentAttempt === attempt && !signal.aborted;
   busy.value = true;
   error.value = "";
   const candidate = hosted ? null : key.value.trim() || originApiKey();
@@ -45,12 +101,13 @@ async function connect() {
           name: "Mold Studio browser",
           kind: "browser",
         });
+        if (!current()) return;
         const host = addHost({
           url: payload.base_url,
           name: payload.name ?? "Mold machine",
           instanceId: claim.instance_id,
         });
-        setStudioPrimary(host);
+        commitSelection(host);
         selected.value = host.id;
         invitation.value = "";
         remembered.value = listStoredHosts();
@@ -58,19 +115,22 @@ async function connect() {
         const host =
           remembered.value.find((host) => host.id === selected.value) ??
           studioPrimary();
-        if (!host || !(await secureHostForOrigin(host.url))) {
+        const profile = host ? await secureHostForOrigin(host.url) : null;
+        if (!current()) return;
+        if (!host || !profile) {
           error.value =
             "On your machine, open Remote Access and copy a new pairing link. Paste it here to connect securely.";
           return;
         }
-        setStudioPrimary(host);
+        commitSelection(host);
       }
     }
     const response = await originAuthenticatedFetch("/api/status", {
       headers: candidate ? { "x-api-key": candidate } : {},
       redirect: "error",
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(10000)]),
     });
+    if (!current()) return;
     if (!response.ok) {
       requiresKey.value = !hosted && response.status === 401;
       error.value =
@@ -83,6 +143,7 @@ async function connect() {
     key.value = "";
     ready.value = true;
   } catch (failure) {
+    if (currentAttempt !== attempt) return;
     if (hosted) {
       error.value =
         failure instanceof Error
@@ -96,24 +157,32 @@ async function connect() {
         ? " For remote access, open the HTTPS address directly; API-key requests cannot follow redirects."
         : "");
   } finally {
-    busy.value = false;
+    if (currentAttempt === attempt) busy.value = false;
   }
 }
 function changeKey() {
-  ready.value = false;
-  clearRelayInfoCache();
-  if (hosted) {
-    remembered.value = listStoredHosts();
-    error.value = "";
-    return;
-  }
+  if (hosted) commitSelection(null);
+  suspendSelection();
+  if (hosted) return;
   requiresKey.value = true;
   setOriginApiKey("");
   error.value = "Enter this machine's API key to connect.";
 }
 provide(ORIGIN_ACCESS_CHANGE_KEY, changeKey);
 onMounted(() => {
+  if (hosted) {
+    window.addEventListener(STUDIO_PRIMARY_CHANGED, selectionChanged);
+    window.addEventListener("storage", storageChanged);
+    window.addEventListener(HOSTS_CHANGED_EVENT, refreshRemembered);
+  }
   void connect();
+});
+onBeforeUnmount(() => {
+  attempt += 1;
+  controller?.abort();
+  window.removeEventListener(STUDIO_PRIMARY_CHANGED, selectionChanged);
+  window.removeEventListener("storage", storageChanged);
+  window.removeEventListener(HOSTS_CHANGED_EVENT, refreshRemembered);
 });
 </script>
 <template>

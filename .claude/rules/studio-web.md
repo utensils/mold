@@ -164,3 +164,13 @@ normalization path. `SourceCanvasController` owns desktop/mobile still transitio
 manual/restored canvas survives remount, recipe changes and boundary removal;
 a deliberate replacement may re-arm source dimensions. Shells bind form state and
 keep their own presentation behavior.
+
+**Hosted Studio selection:** the `origin` routing alias is immutable only for the
+numeric-loopback engine. In standalone Studio it resolves to a saved pairing that
+can be disconnected or forgotten. All origin consumers use the tab's accepted
+primary snapshot; never reread shared storage per request. Cross-tab selection
+changes suspend the mounted Studio before another machine is selected. Forget
+must remove secure authority by URL/instance even after registry-ID coalescing,
+and only clear selected metadata after secure removal succeeds. Keep attempt
+fences around asynchronous pairing/status work; start the status deadline after
+pairing so interactive local-network permission has its full pairing deadline.

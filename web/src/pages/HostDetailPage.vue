@@ -70,6 +70,7 @@ import {
 import { deriveTelemetry } from "../components/machines/machineTelemetry";
 import {
   ORIGIN_HOST_ID,
+  isImmutableHost,
   HOSTS_CHANGED_EVENT,
   HOSTS_STORAGE_KEY,
   getGenerateTargetId,
@@ -99,6 +100,7 @@ const host = computed(() => {
   return getKnownHost(hostId.value);
 });
 const isOrigin = computed(() => hostId.value === ORIGIN_HOST_ID);
+const immutable = computed(() => isImmutableHost(hostId.value));
 const disconnected = computed(() => host.value?.connected === false);
 const liveHost = computed(() => (disconnected.value ? null : host.value));
 const hostName = ref(host.value?.name ?? "");
@@ -767,7 +769,7 @@ async function onCancelAll() {
 }
 
 async function renameMachine() {
-  if (!host.value || isOrigin.value) return;
+  if (!host.value || immutable.value) return;
   const next = await requestText({
     title: "Rename machine",
     label: "Machine name",
@@ -779,7 +781,7 @@ async function renameMachine() {
 }
 
 async function forgetMachine() {
-  if (!host.value || isOrigin.value) return;
+  if (!host.value || immutable.value) return;
   const accepted = await requestConfirm({
     title: "Forget this machine?",
     body: `${hostName.value} and its saved pairing will be removed from this browser.`,
@@ -797,7 +799,7 @@ async function forgetMachine() {
 }
 
 async function disconnectMachine() {
-  if (!host.value || isOrigin.value) return;
+  if (!host.value || immutable.value) return;
   setHostConnected(hostId.value, false);
   if (isTarget.value) {
     setGenerateTargetId(ORIGIN_HOST_ID);
@@ -809,7 +811,7 @@ async function disconnectMachine() {
 }
 
 function reconnectMachine() {
-  if (!host.value || isOrigin.value) return;
+  if (!host.value || immutable.value) return;
   setHostConnected(hostId.value, true);
   toast("success", `${hostName.value} reconnected.`);
 }
@@ -995,7 +997,7 @@ onBeforeUnmount(() => {
           {{ isTarget ? "Generation target" : "Set as generation target" }}
         </button>
         <button
-          v-if="!isOrigin"
+          v-if="!immutable"
           type="button"
           class="md-action"
           data-test="detail-rename"
@@ -1004,7 +1006,7 @@ onBeforeUnmount(() => {
           Rename
         </button>
         <button
-          v-if="!isOrigin && !disconnected"
+          v-if="!immutable && !disconnected"
           type="button"
           class="md-action"
           data-test="detail-disconnect"
@@ -1013,7 +1015,7 @@ onBeforeUnmount(() => {
           Disconnect
         </button>
         <button
-          v-if="!isOrigin && disconnected"
+          v-if="!immutable && disconnected"
           type="button"
           class="md-action"
           data-test="detail-reconnect"
@@ -1022,7 +1024,7 @@ onBeforeUnmount(() => {
           Reconnect
         </button>
         <button
-          v-if="!isOrigin"
+          v-if="!immutable"
           type="button"
           class="md-action md-action--danger"
           data-test="detail-forget"

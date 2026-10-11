@@ -1,13 +1,17 @@
 import { forgetSecureHostForMachine } from "@studio/api/secureStore";
-import { standaloneStudio, studioPrimary } from "./secureStudio";
+import {
+  standaloneStudio,
+  studioPrimary,
+  setStudioPrimary,
+  type StudioPrimary,
+} from "./secureStudio";
 import { forgetConnectionRoutes } from "@studio/api/connectionRoutes";
 import { originApiKey } from "./originAuth";
 /*
  * Machines host registry (spec §08 G1) — the browser's list of mold servers
- * it can reach. The primary host is ALWAYS the serving origin
- * (`window.location.origin`): it is id "origin", named "this server", never
- * stored and never removable. Every other host is a user-added remote entry
- * persisted to localStorage under `mold.web.hosts.v1`.
+ * it can reach. Numeric loopback keeps an immutable serving host. Hosted
+ * Studio uses "origin" as the routing alias for its selected saved pairing;
+ * that pairing can be disconnected or forgotten like any other remote.
  *
  * API keys stay out of URLs: they live on the entry and are attached as the
  * server's `x-api-key` header by hostClient (see crates/mold-server/src/auth.rs).
@@ -40,7 +44,19 @@ export interface HostEntry {
   connected?: boolean;
 }
 
-/** The serving origin, always the immutable primary host. */
+/** Only a local serving engine is immutable; hosted selection is a pairing. */
+export function isImmutableHost(id: string): boolean {
+  return id === ORIGIN_HOST_ID && !standaloneStudio();
+}
+function sameMachine(a: StudioPrimary, b: StudioPrimary): boolean {
+  return a.instanceId && b.instanceId
+    ? a.instanceId === b.instanceId
+    : a.url === b.url;
+}
+function selectedPairing(): StudioPrimary | null {
+  return standaloneStudio() ? studioPrimary() : null;
+}
+/** The serving origin or the selected hosted pairing's origin. */
 export function originUrl(): string {
   return typeof window !== "undefined"
     ? standaloneStudio()
@@ -252,7 +268,7 @@ export function listHosts(): HostEntry[] {
     ...listStoredHosts().filter(
       (host) =>
         host.connected !== false &&
-        (!standaloneStudio() || host.id !== studioPrimary()?.id),
+        (!selectedPairing() || !sameMachine(host, selectedPairing()!)),
     ),
   ];
 }
@@ -262,17 +278,21 @@ export function listKnownHosts(): HostEntry[] {
   return [
     originHost(),
     ...listStoredHosts().filter(
-      (host) => !standaloneStudio() || host.id !== studioPrimary()?.id,
+      (host) => !selectedPairing() || !sameMachine(host, selectedPairing()!),
     ),
   ];
 }
 
 export function getHost(id: string): HostEntry | null {
+  const primary = selectedPairing();
+  if (primary?.id === id) return { ...originHost(), id };
   return listHosts().find((h) => h.id === id) ?? null;
 }
 
 /** A remembered host regardless of whether it is currently connected. */
 export function getKnownHost(id: string): HostEntry | null {
+  const primary = selectedPairing();
+  if (primary?.id === id) return { ...originHost(), id };
   return listKnownHosts().find((h) => h.id === id) ?? null;
 }
 
@@ -307,7 +327,7 @@ export function addHost(input: AddHostInput): HostEntry {
   const url = normalizeHostAddress(input.url) ?? input.url;
   const name = input.name.trim() || url;
 
-  if (url === originUrl()) return originHost();
+  if (!standaloneStudio() && url === originUrl()) return originHost();
 
   const stored = listStoredHosts();
   const instanceId = normalizedInstanceId(input.instanceId);
@@ -418,10 +438,15 @@ export function updateHost(
   patch: Partial<Omit<HostEntry, "id">>,
   preserveConnectionRoutes = false,
 ): HostEntry | null {
-  if (id === ORIGIN_HOST_ID) return null;
+  if (isImmutableHost(id)) return null;
   const stored = listStoredHosts();
-  const current = stored.find((h) => h.id === id);
+  const primary = selectedPairing();
+  const current =
+    id === ORIGIN_HOST_ID && primary
+      ? stored.find((host) => sameMachine(host, primary))
+      : stored.find((host) => host.id === id);
   if (!current) return null;
+  id = current.id;
   if (
     !preserveConnectionRoutes &&
     ((patch.url !== undefined && patch.url !== current.url) ||
@@ -432,16 +457,45 @@ export function updateHost(
     forgetConnectionRoutes(id);
   const updated: HostEntry = { ...current, ...patch, id };
   writeStoredHosts(stored.map((h) => (h.id === id ? updated : h)));
+  // A route edit requires reconnecting through the gate. A rename is metadata.
+  if (primary && sameMachine(current, primary)) {
+    const verifiedRoute =
+      preserveConnectionRoutes &&
+      !!primary.instanceId &&
+      updated.instanceId === primary.instanceId;
+    if (
+      updated.connected === false ||
+      updated.instanceId !== primary.instanceId ||
+      (updated.url !== primary.url && !verifiedRoute)
+    )
+      setStudioPrimary(null);
+    else setStudioPrimary({ ...updated, url: primary.url });
+  }
   return updated;
 }
 
 /** Remove a stored host. The immutable primary is never removed. */
 export async function removeHost(id: string): Promise<void> {
-  if (id === ORIGIN_HOST_ID) return;
-  const host = listStoredHosts().find((entry) => entry.id === id);
-  if (host) await forgetSecureHostForMachine(host.url, host.instanceId);
-  forgetConnectionRoutes(id);
-  writeStoredHosts(listStoredHosts().filter((h) => h.id !== id));
+  if (isImmutableHost(id)) return;
+  // The selected snapshot survives registry alias coalescing. Never skip
+  // authority removal just because its former storage id no longer exists.
+  const host =
+    id === ORIGIN_HOST_ID
+      ? selectedPairing()
+      : listStoredHosts().find((entry) => entry.id === id);
+  if (!host) return;
+  await forgetSecureHostForMachine(host.url, host.instanceId);
+  const remaining = listStoredHosts().filter((entry) => {
+    if (!sameMachine(entry, host)) return true;
+    forgetConnectionRoutes(entry.id);
+    return false;
+  });
+  writeStoredHosts(remaining);
+  const primary = selectedPairing();
+  if (primary && sameMachine(primary, host)) {
+    forgetConnectionRoutes(ORIGIN_HOST_ID);
+    setStudioPrimary(null);
+  }
 }
 
 /** Keep a host remembered while including/excluding it from every live mix. */

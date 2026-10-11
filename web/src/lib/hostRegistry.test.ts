@@ -1,10 +1,13 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { setStudioPrimary, studioPrimary } from "./secureStudio";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ORIGIN_HOST_ID,
   HOSTS_STORAGE_KEY,
   addHost,
   dedupeByInstanceId,
   getGenerateTargetId,
+  getHost,
+  getKnownHost,
   hostIdFromUrl,
   listHosts,
   listKnownHosts,
@@ -26,6 +29,7 @@ vi.mock("@studio/api/secureStore", () => ({ forgetSecureHostForMachine }));
 
 beforeEach(() => {
   localStorage.clear();
+  setStudioPrimary(null);
   forgetSecureHostForMachine.mockReset().mockResolvedValue(undefined);
 });
 
@@ -324,4 +328,119 @@ it("keeps a forgotten host visible for retry when encrypted credential deletion 
   );
   await expect(removeHost(entry.id)).rejects.toThrow("key store unavailable");
   expect(listStoredHosts()).toContainEqual(entry);
+});
+
+afterEach(() => vi.unstubAllEnvs());
+describe("hosted Studio selected pairing lifecycle", () => {
+  beforeEach(() => vi.stubEnv("VITE_STANDALONE_STUDIO", "1"));
+  function selectedHost() {
+    const host = addHost({
+      url: "https://halcyon.invalid",
+      name: "Halcyon",
+      instanceId: "host-a",
+    });
+    setStudioPrimary(host);
+    return host;
+  }
+  it("forgets the selected routing alias and its actual stored authority", async () => {
+    const host = selectedHost();
+    await removeHost(ORIGIN_HOST_ID);
+    expect(forgetSecureHostForMachine).toHaveBeenCalledWith(
+      host.url,
+      host.instanceId,
+    );
+    expect(studioPrimary()).toBeNull();
+    expect(listStoredHosts()).toEqual([]);
+  });
+  it("preserves selected metadata and retry when secure removal fails", async () => {
+    const host = selectedHost();
+    forgetSecureHostForMachine.mockRejectedValueOnce(
+      new Error("storage unavailable"),
+    );
+    await expect(removeHost(ORIGIN_HOST_ID)).rejects.toThrow(
+      "storage unavailable",
+    );
+    expect(studioPrimary()?.id).toBe(host.id);
+    expect(listStoredHosts()).toHaveLength(1);
+    await removeHost(ORIGIN_HOST_ID);
+    expect(studioPrimary()).toBeNull();
+  });
+  it("forgets selected authority even when its stored id was coalesced", async () => {
+    const host = selectedHost();
+    localStorage.setItem(
+      HOSTS_STORAGE_KEY,
+      JSON.stringify([{ ...host, id: "survivor" }]),
+    );
+    await removeHost(ORIGIN_HOST_ID);
+    expect(forgetSecureHostForMachine).toHaveBeenCalledWith(
+      host.url,
+      host.instanceId,
+    );
+    expect(listStoredHosts()).toEqual([]);
+    expect(studioPrimary()).toBeNull();
+  });
+  it("disconnects selected pairing without deleting credentials", () => {
+    const host = selectedHost();
+    setHostConnected(ORIGIN_HOST_ID, false);
+    expect(studioPrimary()).toBeNull();
+    expect(listStoredHosts().find((h) => h.id === host.id)?.connected).toBe(
+      false,
+    );
+    expect(forgetSecureHostForMachine).not.toHaveBeenCalled();
+  });
+  it("does not silently change the mounted tab route when another tab selects a host", () => {
+    const host = selectedHost();
+    localStorage.setItem(
+      "mold.web.primary.v3",
+      JSON.stringify({ id: "b", name: "Other", url: "https://other.invalid" }),
+    );
+    expect(studioPrimary()?.url).toBe(host.url);
+    expect(originHost().url).toBe(host.url);
+    expect(listHosts()[0]?.url).toBe(host.url);
+  });
+});
+
+it("does not erase another tab's newer saved selection when forgetting this tab's primary", async () => {
+  vi.stubEnv("VITE_STANDALONE_STUDIO", "1");
+  const first = addHost({
+    url: "https://first.invalid",
+    name: "First",
+    instanceId: "a",
+  });
+  const second = addHost({
+    url: "https://second.invalid",
+    name: "Second",
+    instanceId: "b",
+  });
+  setStudioPrimary(first);
+  localStorage.setItem("mold.web.primary.v3", JSON.stringify(second));
+  await removeHost(ORIGIN_HOST_ID);
+  expect(studioPrimary()).toBeNull();
+  expect(
+    JSON.parse(localStorage.getItem("mold.web.primary.v3")!),
+  ).toMatchObject({ id: second.id });
+});
+
+it("resolves a hosted primary's durable id through the accepted route snapshot", () => {
+  vi.stubEnv("VITE_STANDALONE_STUDIO", "1");
+  const host = addHost({
+    url: "https://first.invalid",
+    name: "First",
+    instanceId: "a",
+  });
+  setStudioPrimary(host);
+  expect(getHost(host.id)).toMatchObject({
+    id: host.id,
+    url: host.url,
+    instanceId: "a",
+  });
+  expect(getKnownHost(host.id)).toMatchObject({ id: host.id, url: host.url });
+  localStorage.setItem(
+    "mold.web.primary.v3",
+    JSON.stringify({ ...host, url: "https://different.invalid" }),
+  );
+  expect(getHost(host.id)?.url).toBe(host.url);
+  setHostConnected(ORIGIN_HOST_ID, false);
+  expect(getHost(host.id)).toBeNull();
+  expect(getKnownHost(host.id)?.connected).toBe(false);
 });
