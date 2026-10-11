@@ -40,9 +40,9 @@ use super::attention::H3AttentionDevice;
 use super::attention::{H3AttentionDType, H3AttentionModelContract, H3AttentionRuntimeAuthority};
 use super::comfy_quant::{H3ComfyInt8ConvRotLinear, H3_COMFY_PORTABLE_ROW_CHUNK};
 use super::dit::{
-    expected_h3_weight_specs, H3AdaLnMode, H3ComfyInt8BlockMatrices, H3LoadedTransformerBlock,
-    H3PrecisionProfile, H3QkvLayout, H3StreamedTransformer, H3StreamedTransformerIdentity,
-    H3TransformerConfig, H3TransformerTask,
+    expected_h3_weight_specs, H3AdaLnMode, H3ComfyInt8BlockMatrices, H3ComfyInt8RefinerMatrices,
+    H3LoadedTransformerBlock, H3PrecisionProfile, H3QkvLayout, H3StreamedTransformer,
+    H3StreamedTransformerIdentity, H3TransformerConfig, H3TransformerTask,
 };
 use super::turbo_runtime::H3TurboLoraRuntime;
 
@@ -62,6 +62,33 @@ pub const H3_COMFY_PUBLISHED_INT8_HEADER_SHA256: &str =
 /// Tensor entries in the exact released header; there is no `__metadata__`
 /// entry to subtract.
 pub const H3_COMFY_PUBLISHED_INT8_TENSOR_COUNT: usize = 932;
+/// FastVideo's Comfy-layout FastH3 repository: a full-weight DMD distillation
+/// of MiniMax-H3, pruned from the T2VA partition into the same curve-AdaLN
+/// INT8 ConvRot layout Comfy-Org publishes.
+pub const H3_FASTH3_REPOSITORY: &str = "FastVideo/FastVideo-FastH3-Comfy";
+pub const H3_FASTH3_SOURCE_REVISION: &str = "ec1e3aa374a91c57b0b94a1623b7e657c0498cf2";
+/// Repository-relative path of the FastH3 V2 8-step INT8 ConvRot DiT.
+pub const H3_FASTH3_V2_INT8_SOURCE_PATH: &str =
+    "diffusion_models/fastvideo_fasth3_8step_v2_pruned_int8_convrot.safetensors";
+/// JSON header length of the FastH3 V2 INT8 ConvRot artifact at
+/// [`H3_FASTH3_SOURCE_REVISION`] (prefix excluded). Golden header:
+/// `testdata/minimax_h3/fasth3/fasth3-v2-pruned-int8-convrot.header`.
+pub const H3_FASTH3_V2_INT8_HEADER_LEN: u64 = 114_256;
+/// SHA-256 of the eight-byte length prefix plus the exact published JSON
+/// header bytes of the FastH3 V2 INT8 ConvRot artifact.
+pub const H3_FASTH3_V2_INT8_HEADER_SHA256: &str =
+    "9b750bb184553a8c94a0feef4f67f72972bb4492f323753bebaa9fc08a57cd2e";
+/// Tensor entries in the FastH3 V2 header, `__metadata__` excluded: the 932
+/// Comfy-Org entries, plus 50 x {`weight`, `weight_scale`, `comfy_quant`} VSA
+/// gates and 8 x {`weight_scale`, `comfy_quant`} for the INT8 token refiner.
+pub const H3_FASTH3_V2_INT8_TENSOR_COUNT: usize = 1_098;
+/// Block-relative module of the video-sparse-attention gate that FastVideo's
+/// VSA-trained checkpoints carry. ComfyUI's dense attention never reads it
+/// (`comfy/ldm/minimax/model.py:169-172`: "VSA gate, unused by the dense
+/// forward; consumed by sparse attention patches"); only
+/// `comfy_extras/nodes_sparse_attention.py:275` does. Mold executes dense
+/// attention, so the gate is authenticated and then never loaded.
+pub(super) const H3_VSA_GATE_MODULE: &str = "attn.to_gate_compress";
 
 pub(super) const MAX_HEADER_BYTES: u64 = 8 * 1024 * 1024;
 pub(super) const MAX_TENSORS: usize = 4_096;
@@ -71,7 +98,6 @@ const CONVROT_GROUP_SIZE: usize = 256;
 const PUBLISHED_INT8_CURVE_GRID: usize = 1_025;
 const PUBLISHED_INT8_CURVE_BASIS: usize = 8;
 const PUBLISHED_INT8_COMFY_QUANT_BYTES: usize = 72;
-const PUBLISHED_INT8_COMFY_QUANT_COUNT: usize = 200;
 const PUBLISHED_INT8_COMFY_QUANT_PAYLOAD: &[u8; PUBLISHED_INT8_COMFY_QUANT_BYTES] =
     br#"{"format": "int8_tensorwise", "convrot": true, "convrot_groupsize": 256}"#;
 pub(super) const FILE_READ_CHUNK_BYTES: usize = 8 * 1024 * 1024;
@@ -116,14 +142,83 @@ pub enum H3ComfyPublishedArtifact {
     Ref2VaPrunedBf16,
     Ref2VaPrunedFp8Scaled,
     Ref2VaPrunedInt8ConvRot,
+    /// FastVideo's FastH3 V2 8-step DMD distillation in the Comfy pruned INT8
+    /// ConvRot layout ([`H3_FASTH3_REPOSITORY`] @ [`H3_FASTH3_SOURCE_REVISION`]).
+    /// It was pruned from the T2VA partition, so it executes the FL2VA task
+    /// face with exactly the FL2VA conditioning tensors. Two structural facts
+    /// differ from [`Self::Fl2VaPrunedInt8ConvRot`] and nothing else does: the
+    /// eight token-refiner linears are INT8 ConvRot (Comfy-Org keeps them
+    /// BF16), and fifty unused VSA gates ride along (see
+    /// [`H3_VSA_GATE_MODULE`]).
+    FastH3V2Fl2VaPrunedInt8ConvRot,
+}
+
+/// Structural deltas one published INT8 ConvRot artifact carries on top of the
+/// Comfy-Org pruned schema. Derived only from a source-pinned artifact (or a
+/// test fixture), never from a header's own claims.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct H3ComfyInt8SchemaVariant {
+    /// The eight token-refiner linears are INT8 ConvRot with per-row scales
+    /// and `comfy_quant` sidecars instead of protected BF16 matrices.
+    pub(super) quantized_token_refiner: bool,
+    /// Every main block carries an INT8 ConvRot `attn.to_gate_compress`
+    /// triple that dense attention never reads.
+    pub(super) vsa_gate_compress: bool,
+}
+
+impl H3ComfyInt8SchemaVariant {
+    pub(super) const COMFY_ORG: Self = Self {
+        quantized_token_refiner: false,
+        vsa_gate_compress: false,
+    };
+    pub(super) const FASTH3_V2: Self = Self {
+        quantized_token_refiner: true,
+        vsa_gate_compress: true,
+    };
+
+    /// Exact `comfy_quant` sidecar count at the released geometry: one per
+    /// quantized main-block linear (50 x 4), plus the token refiner's (2 x 4)
+    /// and the VSA gates (50) when present.
+    pub(super) const fn released_comfy_quant_count(self) -> usize {
+        let mut count = 200;
+        if self.quantized_token_refiner {
+            count += 8;
+        }
+        if self.vsa_gate_compress {
+            count += 50;
+        }
+        count
+    }
+}
+
+/// Exact header pins of one published INT8 ConvRot artifact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct H3ComfyPublishedInt8HeaderPins {
+    pub header_len: u64,
+    pub header_identity_sha256: &'static str,
+    pub tensor_count: usize,
+    /// The released `__metadata__` map, as exact key/value pairs.
+    pub metadata: &'static [(&'static str, &'static str)],
 }
 
 impl H3ComfyPublishedArtifact {
+    /// Every published artifact, in declaration order.
+    pub const ALL: [Self; 7] = [
+        Self::Fl2VaPrunedBf16,
+        Self::Fl2VaPrunedFp8Scaled,
+        Self::Fl2VaPrunedInt8ConvRot,
+        Self::Ref2VaPrunedBf16,
+        Self::Ref2VaPrunedFp8Scaled,
+        Self::Ref2VaPrunedInt8ConvRot,
+        Self::FastH3V2Fl2VaPrunedInt8ConvRot,
+    ];
+
     pub const fn task(self) -> H3TransformerTask {
         match self {
-            Self::Fl2VaPrunedBf16 | Self::Fl2VaPrunedFp8Scaled | Self::Fl2VaPrunedInt8ConvRot => {
-                H3TransformerTask::T2VaFl2Va
-            }
+            Self::Fl2VaPrunedBf16
+            | Self::Fl2VaPrunedFp8Scaled
+            | Self::Fl2VaPrunedInt8ConvRot
+            | Self::FastH3V2Fl2VaPrunedInt8ConvRot => H3TransformerTask::T2VaFl2Va,
             Self::Ref2VaPrunedBf16
             | Self::Ref2VaPrunedFp8Scaled
             | Self::Ref2VaPrunedInt8ConvRot => H3TransformerTask::Ref2Va,
@@ -136,18 +231,85 @@ impl H3ComfyPublishedArtifact {
             Self::Fl2VaPrunedFp8Scaled | Self::Ref2VaPrunedFp8Scaled => {
                 H3ComfyPrunedFormat::Fp8Scaled
             }
-            Self::Fl2VaPrunedInt8ConvRot | Self::Ref2VaPrunedInt8ConvRot => {
-                H3ComfyPrunedFormat::Int8ConvRot
-            }
+            Self::Fl2VaPrunedInt8ConvRot
+            | Self::Ref2VaPrunedInt8ConvRot
+            | Self::FastH3V2Fl2VaPrunedInt8ConvRot => H3ComfyPrunedFormat::Int8ConvRot,
+        }
+    }
+
+    /// Hugging Face repository the artifact is pinned from.
+    pub const fn source_repository(self) -> &'static str {
+        match self {
+            Self::FastH3V2Fl2VaPrunedInt8ConvRot => H3_FASTH3_REPOSITORY,
+            _ => "Comfy-Org/MiniMax-H3",
+        }
+    }
+
+    /// Exact repository revision the size, digest, and header pins belong to.
+    pub const fn source_repository_revision(self) -> &'static str {
+        match self {
+            Self::FastH3V2Fl2VaPrunedInt8ConvRot => H3_FASTH3_SOURCE_REVISION,
+            _ => H3_COMFY_ORG_SOURCE_REVISION,
         }
     }
 
     pub const fn file_bytes(self) -> u64 {
-        match self.format() {
-            H3ComfyPrunedFormat::Bf16 => 40_225_724_176,
-            H3ComfyPrunedFormat::Fp8Scaled => 20_958_205_608,
-            H3ComfyPrunedFormat::Int8ConvRot => 20_970_379_616,
+        match self {
+            Self::FastH3V2Fl2VaPrunedInt8ConvRot => 22_128_378_696,
+            _ => match self.format() {
+                H3ComfyPrunedFormat::Bf16 => 40_225_724_176,
+                H3ComfyPrunedFormat::Fp8Scaled => 20_958_205_608,
+                H3ComfyPrunedFormat::Int8ConvRot => 20_970_379_616,
+            },
         }
+    }
+
+    /// Exact released header pins, for the INT8 ConvRot artifacts the opened
+    /// runtime accepts. BF16 and FP8 artifacts carry their configuration in
+    /// `__metadata__` and are header-inspected without a pinned identity.
+    pub const fn published_int8_header_pins(self) -> Option<H3ComfyPublishedInt8HeaderPins> {
+        match self {
+            Self::Fl2VaPrunedInt8ConvRot | Self::Ref2VaPrunedInt8ConvRot => {
+                Some(H3ComfyPublishedInt8HeaderPins {
+                    header_len: H3_COMFY_PUBLISHED_INT8_HEADER_LEN,
+                    header_identity_sha256: H3_COMFY_PUBLISHED_INT8_HEADER_SHA256,
+                    tensor_count: H3_COMFY_PUBLISHED_INT8_TENSOR_COUNT,
+                    metadata: &[],
+                })
+            }
+            Self::FastH3V2Fl2VaPrunedInt8ConvRot => Some(H3ComfyPublishedInt8HeaderPins {
+                header_len: H3_FASTH3_V2_INT8_HEADER_LEN,
+                header_identity_sha256: H3_FASTH3_V2_INT8_HEADER_SHA256,
+                tensor_count: H3_FASTH3_V2_INT8_TENSOR_COUNT,
+                // `safetensors.torch.save_file`'s default marker, the only
+                // metadata FastVideo's export writes.
+                metadata: &[("format", "pt")],
+            }),
+            Self::Fl2VaPrunedBf16
+            | Self::Fl2VaPrunedFp8Scaled
+            | Self::Ref2VaPrunedBf16
+            | Self::Ref2VaPrunedFp8Scaled => None,
+        }
+    }
+
+    /// Structural deltas from the Comfy-Org pruned INT8 schema.
+    pub(super) const fn int8_schema_variant(self) -> H3ComfyInt8SchemaVariant {
+        match self {
+            Self::FastH3V2Fl2VaPrunedInt8ConvRot => H3ComfyInt8SchemaVariant::FASTH3_V2,
+            _ => H3ComfyInt8SchemaVariant::COMFY_ORG,
+        }
+    }
+
+    /// True when the eight token-refiner linears are INT8 ConvRot and load
+    /// through the same opened INT8 linear as the main blocks.
+    pub const fn quantizes_token_refiner(self) -> bool {
+        self.int8_schema_variant().quantized_token_refiner
+    }
+
+    /// True when the artifact carries VSA gates mold authenticates but never
+    /// loads (dense attention, `comfy/ldm/minimax/model.py:169-172`).
+    pub const fn carries_unused_vsa_gates(self) -> bool {
+        self.int8_schema_variant().vsa_gate_compress
     }
 
     pub const fn content_sha256(self) -> &'static str {
@@ -169,6 +331,9 @@ impl H3ComfyPublishedArtifact {
             }
             Self::Ref2VaPrunedInt8ConvRot => {
                 "9255f52b6677845ad238f20dfaafa94727053694127ab7f255c048f0f9365779"
+            }
+            Self::FastH3V2Fl2VaPrunedInt8ConvRot => {
+                "0922785978dc9bfe1adf27d8b291b0ca763f9f165f882e6cb297c72fbb6deda8"
             }
         }
     }
@@ -212,6 +377,14 @@ pub struct H3ComfyMemoryAccounting {
 pub struct H3ComfyQuantizationPolicy {
     pub quantized_layers: Vec<String>,
     pub protected_weight_tensors: Vec<String>,
+    /// Quantized modules the checkpoint carries that the dense H3 forward
+    /// never reads (FastH3's VSA gates). Their storage and `comfy_quant`
+    /// sidecars are authenticated, hashed into the content digest, and never
+    /// loaded or charged as resident. Empty for every Comfy-Org artifact, and
+    /// then absent from both the serialized form and the policy digest, so
+    /// existing policy identities are byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignored_layers: Vec<String>,
     pub policy_sha256: String,
 }
 
@@ -474,6 +647,19 @@ impl H3ComfyOpenedInt8Checkpoint {
         self.source.runtime_bytes_read.load(Ordering::Relaxed)
     }
 
+    /// True when the authenticated policy quantizes the token refiner (FastH3
+    /// V2), so the resident core loads it through the INT8 ConvRot linear.
+    /// Read from the validated policy rather than the artifact so a schema
+    /// fixture exercises the same path a published file does.
+    pub fn quantizes_token_refiner(&self) -> bool {
+        self.candidate
+            .strategy
+            .quantization_policy
+            .quantized_layers
+            .iter()
+            .any(|layer| layer.starts_with("token_refiner."))
+    }
+
     /// Load resident stages and retain only the opened file plus an opaque
     /// exact-block loader for the fifty main blocks.
     pub fn load(
@@ -535,6 +721,18 @@ impl H3ComfyOpenedInt8Checkpoint {
         let mode = self.candidate.strategy.adaln_mode;
         let precision = self.candidate.strategy.dense_compute_precision;
         let task = self.candidate.strategy.task;
+        let token_refiner_int8 = if self.quantizes_token_refiner() {
+            Some(
+                (0..self.config.token_refiner_num_layers)
+                    .map(|index| {
+                        self.source
+                            .load_resident_int8_refiner(index, device, cancellation.as_ref())
+                    })
+                    .collect::<candle::Result<Vec<_>>>()?,
+            )
+        } else {
+            None
+        };
         let transformer = H3StreamedTransformer::load_comfy_int8_resident(
             self.config.clone(),
             task,
@@ -544,6 +742,7 @@ impl H3ComfyOpenedInt8Checkpoint {
             attention,
             self.checkpoint_identity_sha256.clone(),
             turbo.as_deref(),
+            token_refiner_int8,
         )?;
         cancellation_boundary(cancellation.as_ref())?;
         let loader = H3ComfyInt8BlockLoader {
@@ -633,6 +832,29 @@ fn open_h3_comfy_int8_checkpoint(
     expected_content: Option<(u64, &str)>,
     cancellation: &dyn H3ComfyInt8Cancellation,
 ) -> InspectionResult<H3ComfyOpenedInt8Checkpoint> {
+    open_h3_comfy_int8_checkpoint_with_variant(
+        path,
+        config,
+        requested_task,
+        published_artifact,
+        H3ComfyInt8SchemaVariant::COMFY_ORG,
+        expected_content,
+        cancellation,
+    )
+}
+
+/// `unpublished_variant` selects the schema deltas for a metadata-described
+/// (unpublished, test-fixture) checkpoint; a published artifact always uses
+/// its own source-pinned variant and ignores it.
+fn open_h3_comfy_int8_checkpoint_with_variant(
+    path: &Path,
+    config: H3TransformerConfig,
+    requested_task: H3TransformerTask,
+    published_artifact: Option<H3ComfyPublishedArtifact>,
+    unpublished_variant: H3ComfyInt8SchemaVariant,
+    expected_content: Option<(u64, &str)>,
+    cancellation: &dyn H3ComfyInt8Cancellation,
+) -> InspectionResult<H3ComfyOpenedInt8Checkpoint> {
     if let Some(artifact) = published_artifact {
         if artifact.format() != H3ComfyPrunedFormat::Int8ConvRot {
             return Err(failure(
@@ -698,18 +920,20 @@ fn open_h3_comfy_int8_checkpoint(
             ));
         }
     }
-    let candidate = inspect_parsed_header(
+    let candidate = inspect_parsed_header_with_variant(
         parsed.clone(),
         config.clone(),
         requested_task,
         H3ComfyPrunedFormat::Int8ConvRot,
         published_artifact,
+        unpublished_variant,
     )?;
-    if published_artifact.is_some() {
+    if let Some(artifact) = published_artifact {
         validate_published_int8_quantization_sidecars(
             &mut file,
             &parsed,
             &candidate.strategy.quantization_policy,
+            artifact.int8_schema_variant().released_comfy_quant_count(),
             cancellation,
         )?;
     }
@@ -1089,17 +1313,25 @@ fn validate_published_int8_quantization_sidecars(
     file: &mut File,
     parsed: &ParsedHeader,
     policy: &H3ComfyQuantizationPolicy,
+    expected_sidecars: usize,
     cancellation: &dyn H3ComfyInt8Cancellation,
 ) -> InspectionResult<()> {
-    if policy.quantized_layers.len() != PUBLISHED_INT8_COMFY_QUANT_COUNT {
+    let sidecars = policy.quantized_layers.len() + policy.ignored_layers.len();
+    if sidecars != expected_sidecars {
         return Err(failure(
             H3ComfyCheckpointErrorCode::InvalidMetadata,
             format!(
-                "published H3 INT8 authority requires exactly {PUBLISHED_INT8_COMFY_QUANT_COUNT} quantized layers"
+                "published H3 INT8 authority requires exactly {expected_sidecars} quantized layers, found {sidecars}"
             ),
         ));
     }
-    for layer in &policy.quantized_layers {
+    // Ignored (never-loaded) layers are authenticated exactly like loaded
+    // ones: their sidecar payload is part of the reviewed artifact.
+    for layer in policy
+        .quantized_layers
+        .iter()
+        .chain(policy.ignored_layers.iter())
+    {
         cancellation_boundary_inspection(cancellation)?;
         let name = format!("{layer}.comfy_quant");
         let tensor = parsed.tensors.get(&name).ok_or_else(|| {
@@ -1492,6 +1724,46 @@ impl H3ComfyOpenedSource {
     ) -> candle::Result<Tensor> {
         self.load_dense_tensor(name, DType::F32, &Device::Cpu, cancellation)
     }
+
+    /// Load one INT8 ConvRot token-refiner block onto the execution device.
+    ///
+    /// The refiner is resident core, not a streamed block: its packed bytes and
+    /// row scales are uploaded once, one tensor at a time (the same
+    /// read -> CPU tensor -> `to_device` staging the dense fixed tensors use),
+    /// and retained on the device. The opened memory evidence therefore charges
+    /// them as fixed protected device bytes at their encoded size — exactly
+    /// what stays resident — instead of the 2-byte BF16 matrices a Comfy-Org
+    /// refiner carries. The forward then needs no per-call upload: the native
+    /// CUDA kernel reads the resident bytes, and the portable arm dequantizes
+    /// bounded row chunks of them.
+    fn load_resident_int8_refiner(
+        &self,
+        index: usize,
+        device: &Device,
+        cancellation: &dyn H3ComfyInt8Cancellation,
+    ) -> candle::Result<H3ComfyInt8RefinerMatrices> {
+        let linear = |suffix: &str| -> candle::Result<H3ComfyInt8ConvRotLinear> {
+            let layer = format!("token_refiner.blocks.{index}.{suffix}");
+            let weight = self
+                .load_raw_int8(&format!("{layer}.weight"), cancellation)?
+                .to_device(device)?;
+            let scale = self
+                .load_f32_cpu(&format!("{layer}.weight_scale"), cancellation)?
+                .to_device(device)?;
+            if resident_load_requires_synchronization(device.location()) {
+                device.synchronize()?;
+            }
+            H3ComfyInt8ConvRotLinear::new_on_device(weight, scale)
+        };
+        let matrices = H3ComfyInt8RefinerMatrices {
+            qkv: linear("attn.qkv_proj")?,
+            out: linear("attn.out_proj")?,
+            fc1: linear("mlp.fc1")?,
+            fc2: linear("mlp.fc2")?,
+        };
+        cancellation_boundary(cancellation)?;
+        Ok(matrices)
+    }
 }
 
 struct H3ComfyOpenedBackend {
@@ -1656,6 +1928,13 @@ impl H3ComfyInt8BlockLoader {
                     .load_f32_cpu(&format!("{layer}.weight_scale"), self.cancellation.as_ref())?,
             )
         };
+        // Exactly the four dense-forward linears. A FastH3 block's
+        // `attn.to_gate_compress` triple is deliberately never read: ComfyUI's
+        // dense `Attention.forward` does not touch it
+        // (`comfy/ldm/minimax/model.py:169-172`, "unused by the dense
+        // forward"), only the sparse-attention patch does
+        // (`comfy_extras/nodes_sparse_attention.py:275`). It was authenticated
+        // at open time and is excluded from `calculate_block_memory`.
         let matrices = H3ComfyInt8BlockMatrices {
             qkv: linear("attn.qkv_proj")?,
             out: linear("attn.out_proj")?,
@@ -1696,6 +1975,7 @@ fn calculate_block_memory(
         )
     }
     let prefix = format!("blocks.{index}.");
+    let ignored_prefix = format!("{prefix}{H3_VSA_GATE_MODULE}.");
     let mut encoded_host_bytes = 0u64;
     let mut max_host_read_staging_bytes = 0u64;
     let mut max_device_weight_staging_bytes = 0u64;
@@ -1705,7 +1985,11 @@ fn calculate_block_memory(
         .range(prefix.clone()..)
         .take_while(|(name, _)| name.starts_with(&prefix))
     {
-        if name.ends_with(".comfy_quant") {
+        // The VSA gate is never read by `load_block` (dense attention, Comfy
+        // `model.py:169-172`), so it is neither host-retained, staged, nor
+        // device-resident. Its bytes still belong to the block's content
+        // digest (`hash_open_file`), which authenticates the whole payload.
+        if name.ends_with(".comfy_quant") || name.starts_with(&ignored_prefix) {
             continue;
         }
         let bytes = tensor.data_offsets[1] - tensor.data_offsets[0];
@@ -2020,6 +2304,47 @@ fn inspect_parsed_header(
     expected_format: H3ComfyPrunedFormat,
     published_artifact: Option<H3ComfyPublishedArtifact>,
 ) -> InspectionResult<H3ComfyCheckpointCandidate> {
+    inspect_parsed_header_with_variant(
+        parsed,
+        config,
+        task,
+        expected_format,
+        published_artifact,
+        H3ComfyInt8SchemaVariant::COMFY_ORG,
+    )
+}
+
+fn inspect_parsed_header_with_variant(
+    parsed: ParsedHeader,
+    config: H3TransformerConfig,
+    task: H3TransformerTask,
+    expected_format: H3ComfyPrunedFormat,
+    published_artifact: Option<H3ComfyPublishedArtifact>,
+    unpublished_variant: H3ComfyInt8SchemaVariant,
+) -> InspectionResult<H3ComfyCheckpointCandidate> {
+    if let Some(artifact) = published_artifact {
+        if artifact.task() != task {
+            return Err(failure(
+                H3ComfyCheckpointErrorCode::TaskAuthorityMismatch,
+                format!(
+                    "H3 requested task {task:?} does not match source authority {:?}",
+                    artifact.task()
+                ),
+            ));
+        }
+    }
+    let variant = match published_artifact {
+        Some(artifact) => artifact.int8_schema_variant(),
+        None => unpublished_variant,
+    };
+    if variant != H3ComfyInt8SchemaVariant::COMFY_ORG
+        && expected_format != H3ComfyPrunedFormat::Int8ConvRot
+    {
+        return Err(failure(
+            H3ComfyCheckpointErrorCode::FormatMismatch,
+            "H3 INT8 schema variants apply only to INT8 ConvRot checkpoints",
+        ));
+    }
     config.validate().map_err(|error| {
         failure(
             H3ComfyCheckpointErrorCode::ConfigMismatch,
@@ -2065,7 +2390,7 @@ fn inspect_parsed_header(
     {
         validate_published_int8_header_authority(&parsed, artifact, mode)?;
         (
-            Some(published_int8_quantization(&config, mode)?),
+            Some(published_int8_quantization(&config, mode, variant)?),
             H3ComfyPrunedFormat::Int8ConvRot,
             true,
         )
@@ -2099,8 +2424,13 @@ fn inspect_parsed_header(
             ),
         ));
     }
-    let (mut expected, policy) =
-        expected_schema(&config, mode, detected_format, quantization.as_ref())?;
+    let (mut expected, policy) = expected_schema_with_variant(
+        &config,
+        mode,
+        detected_format,
+        quantization.as_ref(),
+        variant,
+    )?;
     if embedded_quantization_tensors {
         apply_published_int8_storage_overrides(&mut expected, &config)?;
         add_published_int8_quantization_tensors(&mut expected, &policy)?;
@@ -2131,6 +2461,11 @@ fn inspect_parsed_header(
         (H3TransformerTask::T2VaFl2Va, H3ComfyPrunedFormat::Fp8Scaled) => {
             H3ComfyPublishedArtifact::Fl2VaPrunedFp8Scaled
         }
+        (H3TransformerTask::T2VaFl2Va, H3ComfyPrunedFormat::Int8ConvRot)
+            if variant == H3ComfyInt8SchemaVariant::FASTH3_V2 =>
+        {
+            H3ComfyPublishedArtifact::FastH3V2Fl2VaPrunedInt8ConvRot
+        }
         (H3TransformerTask::T2VaFl2Va, H3ComfyPrunedFormat::Int8ConvRot) => {
             H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot
         }
@@ -2146,7 +2481,7 @@ fn inspect_parsed_header(
     });
     Ok(H3ComfyCheckpointCandidate {
         artifact,
-        source_repository_revision: H3_COMFY_ORG_SOURCE_REVISION.to_owned(),
+        source_repository_revision: artifact.source_repository_revision().to_owned(),
         implementation_revision: H3_COMFYUI_SOURCE_REVISION.to_owned(),
         expected_content_sha256: artifact.content_sha256().to_owned(),
         header_identity_sha256: parsed.header_identity_sha256,
@@ -2177,10 +2512,27 @@ fn validate_published_int8_header_authority(
             "only the source-pinned published INT8 ConvRot header may omit safetensors metadata",
         ));
     }
-    if !parsed.metadata.is_empty() {
+    let Some(pins) = artifact.published_int8_header_pins() else {
         return Err(failure(
             H3ComfyCheckpointErrorCode::InvalidMetadata,
-            "published H3 INT8 header authority requires the released empty metadata map",
+            "published H3 INT8 artifact has no pinned header authority",
+        ));
+    };
+    // Exactly the released metadata map: empty for Comfy-Org, the single
+    // `{"format": "pt"}` marker for FastH3. A config or quantization map here
+    // would be a different object claiming the pinned identity.
+    let released_metadata = pins
+        .metadata
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect::<BTreeMap<_, _>>();
+    if parsed.metadata != released_metadata {
+        return Err(failure(
+            H3ComfyCheckpointErrorCode::InvalidMetadata,
+            format!(
+                "published H3 INT8 header authority requires the released metadata map {:?}",
+                pins.metadata
+            ),
         ));
     }
     if parsed.file_len != artifact.file_bytes() {
@@ -2189,9 +2541,9 @@ fn validate_published_int8_header_authority(
             "published H3 INT8 artifact length differs from its source authority",
         ));
     }
-    if parsed.header_len != H3_COMFY_PUBLISHED_INT8_HEADER_LEN
-        || parsed.header_identity_sha256 != H3_COMFY_PUBLISHED_INT8_HEADER_SHA256
-        || parsed.tensors.len() != H3_COMFY_PUBLISHED_INT8_TENSOR_COUNT
+    if parsed.header_len != pins.header_len
+        || parsed.header_identity_sha256 != pins.header_identity_sha256
+        || parsed.tensors.len() != pins.tensor_count
     {
         return Err(failure(
             H3ComfyCheckpointErrorCode::InvalidHeader,
@@ -2215,6 +2567,7 @@ fn validate_published_int8_header_authority(
 fn published_int8_quantization(
     config: &H3TransformerConfig,
     mode: H3AdaLnMode,
+    variant: H3ComfyInt8SchemaVariant,
 ) -> InspectionResult<QuantizationMetadata> {
     let base = expected_h3_weight_specs(config, mode, H3PrecisionProfile::OfficialMixedBf16F32)
         .map_err(|error| {
@@ -2223,8 +2576,9 @@ fn published_int8_quantization(
                 error.to_string(),
             )
         })?;
-    let layers = published_quantized_layers(config, &base)?
+    let layers = published_quantized_layers_for(config, &base, variant)?
         .into_iter()
+        .chain(vsa_gate_layers(config, variant))
         .map(|name| {
             (
                 name,
@@ -2247,7 +2601,11 @@ fn add_published_int8_quantization_tensors(
     expected: &mut BTreeMap<String, ExpectedTensor>,
     policy: &H3ComfyQuantizationPolicy,
 ) -> InspectionResult<()> {
-    for layer in &policy.quantized_layers {
+    for layer in policy
+        .quantized_layers
+        .iter()
+        .chain(policy.ignored_layers.iter())
+    {
         let name = format!("{layer}.comfy_quant");
         if expected
             .insert(
@@ -2420,6 +2778,9 @@ pub(super) fn h3_block_linear_targets(
     Ok(targets)
 }
 
+/// The Comfy-Org quantized set (main blocks only); production derives every
+/// variant's set through [`published_quantized_layers_for`].
+#[cfg(test)]
 fn published_quantized_layers(
     config: &H3TransformerConfig,
     base: &BTreeMap<String, super::dit::H3TensorSpec>,
@@ -2432,12 +2793,72 @@ fn published_quantized_layers(
     )
 }
 
+/// The quantized layer set one INT8 schema variant loads: the 200 main-block
+/// linears, plus the eight token-refiner linears when the variant quantizes
+/// them. Derived through [`h3_block_linear_targets`], the same authority the
+/// Turbo adapter contract reads.
+fn published_quantized_layers_for(
+    config: &H3TransformerConfig,
+    base: &BTreeMap<String, super::dit::H3TensorSpec>,
+    variant: H3ComfyInt8SchemaVariant,
+) -> InspectionResult<BTreeSet<String>> {
+    let scopes: &[H3BlockLinearScope] = if variant.quantized_token_refiner {
+        &[
+            H3BlockLinearScope::MainBlock,
+            H3BlockLinearScope::TokenRefinerBlock,
+        ]
+    } else {
+        &[H3BlockLinearScope::MainBlock]
+    };
+    Ok(h3_block_linear_targets(config, base, scopes)?
+        .into_iter()
+        .map(|target| target.module)
+        .collect())
+}
+
+/// One VSA gate module per main block when the variant carries them.
+fn vsa_gate_layers(
+    config: &H3TransformerConfig,
+    variant: H3ComfyInt8SchemaVariant,
+) -> impl Iterator<Item = String> {
+    let count = if variant.vsa_gate_compress {
+        config.num_layers
+    } else {
+        0
+    };
+    (0..count).map(|index| format!("blocks.{index}.{H3_VSA_GATE_MODULE}"))
+}
+
+#[cfg(test)]
 fn expected_schema(
     config: &H3TransformerConfig,
     mode: H3AdaLnMode,
     format: H3ComfyPrunedFormat,
     quantization: Option<&QuantizationMetadata>,
 ) -> InspectionResult<(BTreeMap<String, ExpectedTensor>, H3ComfyQuantizationPolicy)> {
+    expected_schema_with_variant(
+        config,
+        mode,
+        format,
+        quantization,
+        H3ComfyInt8SchemaVariant::COMFY_ORG,
+    )
+}
+
+fn expected_schema_with_variant(
+    config: &H3TransformerConfig,
+    mode: H3AdaLnMode,
+    format: H3ComfyPrunedFormat,
+    quantization: Option<&QuantizationMetadata>,
+    variant: H3ComfyInt8SchemaVariant,
+) -> InspectionResult<(BTreeMap<String, ExpectedTensor>, H3ComfyQuantizationPolicy)> {
+    if variant != H3ComfyInt8SchemaVariant::COMFY_ORG && format != H3ComfyPrunedFormat::Int8ConvRot
+    {
+        return Err(failure(
+            H3ComfyCheckpointErrorCode::FormatMismatch,
+            "H3 INT8 schema variants apply only to INT8 ConvRot checkpoints",
+        ));
+    }
     let base = expected_h3_weight_specs(config, mode, H3PrecisionProfile::OfficialMixedBf16F32)
         .map_err(|error| {
             failure(
@@ -2453,7 +2874,15 @@ fn expected_schema(
     // storage while preserving the logical FP32 compute contract. Deriving the
     // quantized set from "every BF16 matrix" would silently admit nine layers
     // that the published artifacts intentionally retain in BF16.
-    let quantizable = published_quantized_layers(config, &base)?;
+    //
+    // FastH3 V2 is the one published exception: FastVideo's export also
+    // quantizes the eight token-refiner linears (ComfyUI builds them as plain
+    // `operations.Linear`, `comfy/ldm/minimax/model.py:250-256`, so the mixed
+    // ops load them through the same `comfy_quant` path as a block linear),
+    // and it carries one never-read VSA gate per block. The variant names
+    // both facts; nothing is inferred from the header.
+    let quantizable = published_quantized_layers_for(config, &base, variant)?;
+    let ignored = vsa_gate_layers(config, variant).collect::<BTreeSet<_>>();
     let quantized_layers = if format == H3ComfyPrunedFormat::Bf16 {
         if quantization.is_some() {
             return Err(failure(
@@ -2470,10 +2899,14 @@ fn expected_schema(
             )
         })?;
         let actual = metadata.layers.keys().cloned().collect::<BTreeSet<_>>();
-        if actual != quantizable {
+        let declared = quantizable
+            .union(&ignored)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if actual != declared {
             return Err(failure(
                 H3ComfyCheckpointErrorCode::InvalidMetadata,
-                set_mismatch("quantized layer", &quantizable, &actual),
+                set_mismatch("quantized layer", &declared, &actual),
             ));
         }
         for (name, layer) in &metadata.layers {
@@ -2507,7 +2940,7 @@ fn expected_schema(
                 H3ComfyPrunedFormat::Bf16 => unreachable!(),
             }
         }
-        actual
+        quantizable
     };
 
     let mut expected = BTreeMap::new();
@@ -2562,7 +2995,29 @@ fn expected_schema(
             }
         }
     }
+    // `Attention.to_gate_compress = Linear(hidden, inner, bias=False)`
+    // (`comfy/ldm/minimax/model.py:172`), stored as INT8 ConvRot with the same
+    // per-output-row scale as every other quantized linear.
+    let inner = config.attention_inner_dim();
+    for layer in &ignored {
+        for (suffix, dtype, shape) in [
+            ("weight", "I8", vec![inner, config.hidden_size]),
+            ("weight_scale", "F32", vec![inner, 1]),
+        ] {
+            let name = format!("{layer}.{suffix}");
+            if expected
+                .insert(name.clone(), ExpectedTensor { dtype, shape })
+                .is_some()
+            {
+                return Err(failure(
+                    H3ComfyCheckpointErrorCode::TensorSchemaMismatch,
+                    format!("H3 ignored VSA gate tensor {name:?} collides with a weight"),
+                ));
+            }
+        }
+    }
     let quantized_layers = quantized_layers.into_iter().collect::<Vec<_>>();
+    let ignored_layers = ignored.into_iter().collect::<Vec<_>>();
     let mut digest = Sha256::new();
     digest.update(format.stable_id().as_bytes());
     for layer in &quantized_layers {
@@ -2583,11 +3038,22 @@ fn expected_schema(
             digest.update(encoded);
         }
     }
+    // Absent for every Comfy-Org artifact, so their policy digests are
+    // byte-identical to the pre-FastH3 contract.
+    if !ignored_layers.is_empty() {
+        digest.update(b"\0mold.minimax-h3.comfy-ignored-quantized-layers.v1\0");
+        digest.update((ignored_layers.len() as u64).to_le_bytes());
+        for layer in &ignored_layers {
+            digest.update((layer.len() as u64).to_le_bytes());
+            digest.update(layer.as_bytes());
+        }
+    }
     Ok((
         expected,
         H3ComfyQuantizationPolicy {
             quantized_layers,
             protected_weight_tensors: protected,
+            ignored_layers,
             policy_sha256: hex_digest(digest.finalize()),
         },
     ))
@@ -2997,11 +3463,21 @@ mod tests {
         mode: H3AdaLnMode,
         format: H3ComfyPrunedFormat,
     ) -> String {
+        quant_metadata_with_variant(config, mode, format, H3ComfyInt8SchemaVariant::COMFY_ORG)
+    }
+
+    fn quant_metadata_with_variant(
+        config: &H3TransformerConfig,
+        mode: H3AdaLnMode,
+        format: H3ComfyPrunedFormat,
+        variant: H3ComfyInt8SchemaVariant,
+    ) -> String {
         let base = expected_h3_weight_specs(config, mode, H3PrecisionProfile::OfficialMixedBf16F32)
             .unwrap();
-        let layers = published_quantized_layers(config, &base)
+        let layers = published_quantized_layers_for(config, &base, variant)
             .unwrap()
             .into_iter()
+            .chain(vsa_gate_layers(config, variant))
             .map(|name| {
                 let metadata = match format {
                     H3ComfyPrunedFormat::Fp8Scaled => serde_json::json!({
@@ -3025,13 +3501,28 @@ mod tests {
         mode: H3AdaLnMode,
         format: H3ComfyPrunedFormat,
     ) -> (Value, Vec<u8>) {
-        let quantization =
-            (format != H3ComfyPrunedFormat::Bf16).then(|| quant_metadata(config, mode, format));
+        fixture_header_with_variant(config, mode, format, H3ComfyInt8SchemaVariant::COMFY_ORG)
+    }
+
+    fn fixture_header_with_variant(
+        config: &H3TransformerConfig,
+        mode: H3AdaLnMode,
+        format: H3ComfyPrunedFormat,
+        variant: H3ComfyInt8SchemaVariant,
+    ) -> (Value, Vec<u8>) {
+        let quantization = (format != H3ComfyPrunedFormat::Bf16)
+            .then(|| quant_metadata_with_variant(config, mode, format, variant));
         let quantization_parsed = quantization
             .as_ref()
             .map(|raw| serde_json::from_str::<QuantizationMetadata>(raw).unwrap());
-        let (expected, _) =
-            expected_schema(config, mode, format, quantization_parsed.as_ref()).unwrap();
+        let (expected, _) = expected_schema_with_variant(
+            config,
+            mode,
+            format,
+            quantization_parsed.as_ref(),
+            variant,
+        )
+        .unwrap();
         let mut offset = 0u64;
         let mut header = Map::new();
         let mut data = Vec::new();
@@ -3072,12 +3563,15 @@ mod tests {
             grid: PUBLISHED_INT8_CURVE_GRID,
             basis_dim: PUBLISHED_INT8_CURVE_BASIS,
         };
-        let quantization = published_int8_quantization(&config, mode).unwrap();
-        let (mut expected, policy) = expected_schema(
+        let variant = artifact.int8_schema_variant();
+        let pins = artifact.published_int8_header_pins().unwrap();
+        let quantization = published_int8_quantization(&config, mode, variant).unwrap();
+        let (mut expected, policy) = expected_schema_with_variant(
             &config,
             mode,
             H3ComfyPrunedFormat::Int8ConvRot,
             Some(&quantization),
+            variant,
         )
         .unwrap();
         apply_published_int8_storage_overrides(&mut expected, &config).unwrap();
@@ -3100,17 +3594,62 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(
-            cursor,
-            artifact.file_bytes() - H3_COMFY_PUBLISHED_INT8_HEADER_LEN - 8
-        );
+        // The schema alone reproduces the published payload length exactly.
+        assert_eq!(cursor, artifact.file_bytes() - pins.header_len - 8);
         ParsedHeader {
-            metadata: BTreeMap::new(),
+            metadata: pins
+                .metadata
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect(),
             tensors,
-            header_len: H3_COMFY_PUBLISHED_INT8_HEADER_LEN,
+            header_len: pins.header_len,
             file_len: artifact.file_bytes(),
-            header_identity_sha256: H3_COMFY_PUBLISHED_INT8_HEADER_SHA256.to_owned(),
+            header_identity_sha256: pins.header_identity_sha256.to_owned(),
         }
+    }
+
+    /// The checked-in golden header of one published INT8 artifact: the exact
+    /// eight-byte length prefix plus the exact published JSON bytes, fetched
+    /// by `scripts/fetch-minimax-h3-turbo-header.py` (provenance in
+    /// `testdata/minimax_h3/comfy_dit/README.md`).
+    fn golden_header_bytes(artifact: H3ComfyPublishedArtifact) -> Vec<u8> {
+        let name = match artifact {
+            H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot => {
+                "comfy-org-fl2va-pruned-int8-convrot.header"
+            }
+            H3ComfyPublishedArtifact::FastH3V2Fl2VaPrunedInt8ConvRot => {
+                "fasth3-v2-pruned-int8-convrot.header"
+            }
+            other => panic!("no golden header is checked in for {other:?}"),
+        };
+        std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("testdata/minimax_h3/comfy_dit")
+                .join(name),
+        )
+        .unwrap()
+    }
+
+    /// Lay `header` over a SPARSE file of `artifact`'s published length, so
+    /// the production reader sees the real file size while the multi-GB
+    /// payload (zeros) costs no disk.
+    fn golden_sparse_file(
+        artifact: H3ComfyPublishedArtifact,
+        header: &[u8],
+    ) -> (tempfile::TempDir, PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("published.safetensors");
+        let mut file = File::create(&path).unwrap();
+        file.set_len(artifact.file_bytes()).unwrap();
+        file.write_all(header).unwrap();
+        drop(file);
+        (directory, path)
+    }
+
+    fn parse_golden_header(artifact: H3ComfyPublishedArtifact, header: &[u8]) -> ParsedHeader {
+        let (_directory, path) = golden_sparse_file(artifact, header);
+        read_safetensors_header(&path).unwrap()
     }
 
     fn write_fixture(header: &Value, data: &[u8], tag: &str) -> std::path::PathBuf {
@@ -3141,12 +3680,19 @@ mod tests {
     }
 
     fn runtime_fixture() -> (H3TransformerConfig, Value, Vec<u8>) {
+        runtime_fixture_with_variant(H3ComfyInt8SchemaVariant::COMFY_ORG)
+    }
+
+    fn runtime_fixture_with_variant(
+        variant: H3ComfyInt8SchemaVariant,
+    ) -> (H3TransformerConfig, Value, Vec<u8>) {
         let config = runtime_config();
         let mode = H3AdaLnMode::Curve {
             grid: 5,
             basis_dim: 64,
         };
-        let (header, mut data) = fixture_header(&config, mode, H3ComfyPrunedFormat::Int8ConvRot);
+        let (header, mut data) =
+            fixture_header_with_variant(&config, mode, H3ComfyPrunedFormat::Int8ConvRot, variant);
         let scales = header
             .as_object()
             .unwrap()
@@ -3746,7 +4292,8 @@ mod tests {
             grid: PUBLISHED_INT8_CURVE_GRID,
             basis_dim: PUBLISHED_INT8_CURVE_BASIS,
         };
-        let quantization = published_int8_quantization(&config, mode).unwrap();
+        let comfy = H3ComfyInt8SchemaVariant::COMFY_ORG;
+        let quantization = published_int8_quantization(&config, mode, comfy).unwrap();
         let (_, policy) = expected_schema(
             &config,
             mode,
@@ -3754,10 +4301,10 @@ mod tests {
             Some(&quantization),
         )
         .unwrap();
-        assert_eq!(
-            policy.quantized_layers.len(),
-            PUBLISHED_INT8_COMFY_QUANT_COUNT
-        );
+        let expected_sidecars = comfy.released_comfy_quant_count();
+        assert_eq!(policy.quantized_layers.len(), 200);
+        assert_eq!(expected_sidecars, 200);
+        assert!(policy.ignored_layers.is_empty());
 
         let mut tensors = BTreeMap::new();
         let mut data = Vec::new();
@@ -3797,9 +4344,23 @@ mod tests {
             &mut file,
             &parsed,
             &policy,
+            expected_sidecars,
             &H3ComfyNeverCancel,
         )
         .unwrap();
+        let mut file = File::open(&path).unwrap();
+        assert_eq!(
+            validate_published_int8_quantization_sidecars(
+                &mut file,
+                &parsed,
+                &policy,
+                H3ComfyInt8SchemaVariant::FASTH3_V2.released_comfy_quant_count(),
+                &H3ComfyNeverCancel,
+            )
+            .unwrap_err()
+            .code,
+            H3ComfyCheckpointErrorCode::InvalidMetadata
+        );
 
         let mut mutable = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         mutable.seek(SeekFrom::Start(8 + 17)).unwrap();
@@ -3812,6 +4373,7 @@ mod tests {
                 &mut file,
                 &parsed,
                 &policy,
+                expected_sidecars,
                 &H3ComfyNeverCancel,
             )
             .unwrap_err()
@@ -3822,9 +4384,15 @@ mod tests {
         let cancelled = ToggleCancellation(AtomicBool::new(true));
         let mut file = File::open(&path).unwrap();
         assert_eq!(
-            validate_published_int8_quantization_sidecars(&mut file, &parsed, &policy, &cancelled,)
-                .unwrap_err()
-                .code,
+            validate_published_int8_quantization_sidecars(
+                &mut file,
+                &parsed,
+                &policy,
+                expected_sidecars,
+                &cancelled,
+            )
+            .unwrap_err()
+            .code,
             H3ComfyCheckpointErrorCode::Cancelled
         );
         let _ = std::fs::remove_file(path);
@@ -4340,6 +4908,571 @@ mod tests {
             .map(|(left, right)| (left - right).abs())
             .fold(0f32, f32::max);
         assert!(max_error <= 1e-6, "max interpolation error {max_error}");
+        Ok(())
+    }
+
+    // ------------------------------------------------------- FastH3 V2 artifact
+
+    const GOLDEN_INT8_ARTIFACTS: [H3ComfyPublishedArtifact; 2] = [
+        H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
+        H3ComfyPublishedArtifact::FastH3V2Fl2VaPrunedInt8ConvRot,
+    ];
+
+    fn inspect_published(
+        parsed: ParsedHeader,
+        artifact: H3ComfyPublishedArtifact,
+    ) -> InspectionResult<H3ComfyCheckpointCandidate> {
+        inspect_parsed_header(
+            parsed,
+            H3TransformerConfig::default(),
+            artifact.task(),
+            artifact.format(),
+            Some(artifact),
+        )
+    }
+
+    fn tensor_bytes(tensor: &HeaderTensor) -> u64 {
+        tensor.data_offsets[1] - tensor.data_offsets[0]
+    }
+
+    fn token_refiner_linear_names() -> Vec<String> {
+        (0..2)
+            .flat_map(|index| {
+                H3_BLOCK_LINEAR_WEIGHT_SUFFIXES
+                    .iter()
+                    .map(move |suffix| format!("token_refiner.blocks.{index}.{suffix}"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fasth3_artifact_pins_are_its_own() {
+        let artifact = H3ComfyPublishedArtifact::FastH3V2Fl2VaPrunedInt8ConvRot;
+        assert_eq!(artifact.task(), H3TransformerTask::T2VaFl2Va);
+        assert_eq!(artifact.format(), H3ComfyPrunedFormat::Int8ConvRot);
+        assert_eq!(artifact.file_bytes(), 22_128_378_696);
+        assert_eq!(
+            artifact.content_sha256(),
+            "0922785978dc9bfe1adf27d8b291b0ca763f9f165f882e6cb297c72fbb6deda8"
+        );
+        assert_eq!(artifact.source_repository(), H3_FASTH3_REPOSITORY);
+        assert_eq!(
+            artifact.source_repository_revision(),
+            "ec1e3aa374a91c57b0b94a1623b7e657c0498cf2"
+        );
+        assert!(artifact.quantizes_token_refiner());
+        assert!(artifact.carries_unused_vsa_gates());
+        assert_eq!(
+            artifact.int8_schema_variant().released_comfy_quant_count(),
+            258
+        );
+        let pins = artifact.published_int8_header_pins().unwrap();
+        assert_eq!(pins.header_len, 114_256);
+        assert_eq!(pins.tensor_count, 1_098);
+        assert_eq!(pins.metadata, &[("format", "pt")]);
+
+        // Every Comfy-Org artifact keeps its pre-FastH3 pins byte for byte.
+        for comfy in [
+            H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
+            H3ComfyPublishedArtifact::Ref2VaPrunedInt8ConvRot,
+        ] {
+            assert_eq!(
+                comfy.published_int8_header_pins(),
+                Some(H3ComfyPublishedInt8HeaderPins {
+                    header_len: H3_COMFY_PUBLISHED_INT8_HEADER_LEN,
+                    header_identity_sha256: H3_COMFY_PUBLISHED_INT8_HEADER_SHA256,
+                    tensor_count: H3_COMFY_PUBLISHED_INT8_TENSOR_COUNT,
+                    metadata: &[],
+                })
+            );
+            assert_eq!(
+                comfy.source_repository_revision(),
+                H3_COMFY_ORG_SOURCE_REVISION
+            );
+            assert!(!comfy.quantizes_token_refiner());
+            assert!(!comfy.carries_unused_vsa_gates());
+            assert_eq!(
+                comfy.int8_schema_variant().released_comfy_quant_count(),
+                200
+            );
+        }
+        assert_eq!(H3ComfyPublishedArtifact::ALL.len(), 7);
+        assert_eq!(
+            H3ComfyPublishedArtifact::ALL
+                .iter()
+                .filter(|item| item.published_int8_header_pins().is_some())
+                .count(),
+            3
+        );
+    }
+
+    #[test]
+    fn published_int8_golden_headers_match_their_pins() {
+        for artifact in GOLDEN_INT8_ARTIFACTS {
+            let bytes = golden_header_bytes(artifact);
+            let pins = artifact.published_int8_header_pins().unwrap();
+            assert_eq!(
+                hex_digest(Sha256::digest(&bytes)),
+                pins.header_identity_sha256,
+                "{artifact:?}"
+            );
+            assert_eq!(
+                u64::from_le_bytes(bytes[..8].try_into().unwrap()),
+                pins.header_len
+            );
+            assert_eq!(bytes.len() as u64, pins.header_len + 8);
+            let parsed = parse_golden_header(artifact, &bytes);
+            assert_eq!(parsed.header_identity_sha256, pins.header_identity_sha256);
+            assert_eq!(parsed.header_len, pins.header_len);
+            assert_eq!(parsed.tensors.len(), pins.tensor_count);
+            assert_eq!(parsed.file_len, artifact.file_bytes());
+            assert_eq!(
+                parsed.metadata,
+                pins.metadata
+                    .iter()
+                    .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                    .collect::<BTreeMap<_, _>>()
+            );
+        }
+    }
+
+    /// The schema mold derives for each artifact is the header's exact tensor
+    /// inventory: same names, dtypes, and shapes, and the same payload length.
+    #[test]
+    fn published_int8_golden_headers_equal_the_derived_schema() {
+        let inventory = |parsed: &ParsedHeader| {
+            parsed
+                .tensors
+                .iter()
+                .map(|(name, tensor)| (name.clone(), tensor.dtype.clone(), tensor.shape.clone()))
+                .collect::<Vec<_>>()
+        };
+        for artifact in GOLDEN_INT8_ARTIFACTS {
+            let golden = parse_golden_header(artifact, &golden_header_bytes(artifact));
+            let derived = published_int8_parsed_header(artifact);
+            assert_eq!(inventory(&golden), inventory(&derived), "{artifact:?}");
+        }
+    }
+
+    #[test]
+    fn published_int8_golden_headers_inspect_as_their_own_artifact() {
+        for artifact in GOLDEN_INT8_ARTIFACTS {
+            let bytes = golden_header_bytes(artifact);
+            let candidate =
+                inspect_published(parse_golden_header(artifact, &bytes), artifact).unwrap();
+            assert_eq!(candidate.artifact, artifact);
+            assert_eq!(
+                candidate.source_repository_revision,
+                artifact.source_repository_revision()
+            );
+            assert_eq!(candidate.expected_content_sha256, artifact.content_sha256());
+            assert_eq!(
+                candidate.strategy.adaln_mode,
+                H3AdaLnMode::Curve {
+                    grid: PUBLISHED_INT8_CURVE_GRID,
+                    basis_dim: PUBLISHED_INT8_CURVE_BASIS,
+                }
+            );
+            // The payload-free public inspection reaches the same answer.
+            let (_directory, path) = golden_sparse_file(artifact, &bytes);
+            let public =
+                inspect_h3_comfy_published_header(&path, artifact.task(), artifact).unwrap();
+            assert_eq!(public, candidate);
+        }
+
+        let comfy = inspect_published(
+            published_int8_parsed_header(H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot),
+            H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
+        )
+        .unwrap();
+        let fast = inspect_published(
+            published_int8_parsed_header(H3ComfyPublishedArtifact::FastH3V2Fl2VaPrunedInt8ConvRot),
+            H3ComfyPublishedArtifact::FastH3V2Fl2VaPrunedInt8ConvRot,
+        )
+        .unwrap();
+        let comfy_policy = &comfy.strategy.quantization_policy;
+        let fast_policy = &fast.strategy.quantization_policy;
+        assert_eq!(comfy_policy.quantized_layers.len(), 200);
+        assert!(comfy_policy.ignored_layers.is_empty());
+        assert_eq!(fast_policy.quantized_layers.len(), 208);
+        assert_eq!(
+            fast_policy
+                .quantized_layers
+                .iter()
+                .filter(|layer| layer.starts_with("token_refiner.blocks."))
+                .count(),
+            8
+        );
+        assert_eq!(fast_policy.ignored_layers.len(), 50);
+        assert!(fast_policy
+            .ignored_layers
+            .iter()
+            .all(|layer| layer.ends_with(".attn.to_gate_compress")));
+        assert_ne!(comfy_policy.policy_sha256, fast_policy.policy_sha256);
+        // The ONLY protected weights FastH3 gives up are the eight refiner
+        // linears; norms, projections, and the FP32 islands stay protected.
+        let comfy_protected = comfy_policy
+            .protected_weight_tensors
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let fast_protected = fast_policy
+            .protected_weight_tensors
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert!(fast_protected.is_subset(&comfy_protected));
+        assert_eq!(
+            comfy_protected
+                .difference(&fast_protected)
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            token_refiner_linear_names().into_iter().collect()
+        );
+        // Ignored layers never ride the serialized Comfy-Org policy.
+        assert!(!serde_json::to_string(comfy_policy)
+            .unwrap()
+            .contains("ignored_layers"));
+    }
+
+    #[test]
+    fn fasth3_and_comfy_org_headers_cannot_claim_each_other() {
+        let fast_artifact = H3ComfyPublishedArtifact::FastH3V2Fl2VaPrunedInt8ConvRot;
+        let comfy_artifact = H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot;
+        let fast = parse_golden_header(fast_artifact, &golden_header_bytes(fast_artifact));
+        let comfy = parse_golden_header(comfy_artifact, &golden_header_bytes(comfy_artifact));
+        assert_eq!(
+            inspect_published(fast.clone(), comfy_artifact)
+                .unwrap_err()
+                .code,
+            H3ComfyCheckpointErrorCode::InvalidMetadata
+        );
+        assert!(inspect_published(comfy, fast_artifact).is_err());
+        assert_eq!(
+            inspect_parsed_header(
+                fast,
+                H3TransformerConfig::default(),
+                H3TransformerTask::Ref2Va,
+                H3ComfyPrunedFormat::Int8ConvRot,
+                Some(fast_artifact),
+            )
+            .unwrap_err()
+            .code,
+            H3ComfyCheckpointErrorCode::TaskAuthorityMismatch
+        );
+        let bytes = golden_header_bytes(fast_artifact);
+        let (_directory, path) = golden_sparse_file(fast_artifact, &bytes);
+        assert_eq!(
+            inspect_h3_comfy_published_header(&path, H3TransformerTask::Ref2Va, fast_artifact)
+                .unwrap_err()
+                .code,
+            H3ComfyCheckpointErrorCode::TaskAuthorityMismatch
+        );
+        assert_eq!(
+            inspect_h3_comfy_published_header(
+                &path,
+                H3TransformerTask::T2VaFl2Va,
+                H3ComfyPublishedArtifact::Ref2VaPrunedInt8ConvRot,
+            )
+            .unwrap_err()
+            .code,
+            H3ComfyCheckpointErrorCode::TaskAuthorityMismatch
+        );
+    }
+
+    #[test]
+    fn fasth3_header_mutations_fail_closed() {
+        let artifact = H3ComfyPublishedArtifact::FastH3V2Fl2VaPrunedInt8ConvRot;
+        let golden = || parse_golden_header(artifact, &golden_header_bytes(artifact));
+        let code = |parsed| inspect_published(parsed, artifact).unwrap_err().code;
+        inspect_published(golden(), artifact).unwrap();
+
+        let mut parsed = golden();
+        parsed.metadata.clear();
+        assert_eq!(code(parsed), H3ComfyCheckpointErrorCode::InvalidMetadata);
+
+        let mut parsed = golden();
+        parsed.metadata.insert("format".into(), "np".into());
+        assert_eq!(code(parsed), H3ComfyCheckpointErrorCode::InvalidMetadata);
+
+        let mut parsed = golden();
+        parsed.metadata.insert(
+            "config".into(),
+            config_metadata(
+                &H3TransformerConfig::default(),
+                PUBLISHED_INT8_CURVE_GRID,
+                PUBLISHED_INT8_CURVE_BASIS,
+            ),
+        );
+        assert_eq!(code(parsed), H3ComfyCheckpointErrorCode::InvalidMetadata);
+
+        let mut parsed = golden();
+        parsed.header_identity_sha256 = H3_COMFY_PUBLISHED_INT8_HEADER_SHA256.into();
+        assert_eq!(code(parsed), H3ComfyCheckpointErrorCode::InvalidHeader);
+
+        let mut parsed = golden();
+        parsed.file_len = H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot.file_bytes();
+        assert_eq!(code(parsed), H3ComfyCheckpointErrorCode::SourceSizeMismatch);
+
+        // A refiner linear back at BF16: same count, so only the schema refuses.
+        let mut parsed = golden();
+        parsed
+            .tensors
+            .get_mut("token_refiner.blocks.1.mlp.fc2.weight")
+            .unwrap()
+            .dtype = "BF16".into();
+        assert_eq!(
+            code(parsed),
+            H3ComfyCheckpointErrorCode::TensorSchemaMismatch
+        );
+
+        // A gate whose storage is not INT8 ConvRot.
+        let mut parsed = golden();
+        parsed
+            .tensors
+            .get_mut("blocks.17.attn.to_gate_compress.weight")
+            .unwrap()
+            .dtype = "BF16".into();
+        assert_eq!(
+            code(parsed),
+            H3ComfyCheckpointErrorCode::TensorSchemaMismatch
+        );
+
+        let mut parsed = golden();
+        parsed
+            .tensors
+            .get_mut("blocks.17.attn.to_gate_compress.weight_scale")
+            .unwrap()
+            .shape = vec![1];
+        assert_eq!(
+            code(parsed),
+            H3ComfyCheckpointErrorCode::TensorSchemaMismatch
+        );
+
+        // A gate renamed to an unknown module keeps the count but not the set.
+        let mut parsed = golden();
+        let gate = parsed
+            .tensors
+            .remove("blocks.3.attn.to_gate_compress.comfy_quant")
+            .unwrap();
+        parsed
+            .tensors
+            .insert("blocks.3.attn.to_gate_other.comfy_quant".into(), gate);
+        assert_eq!(
+            code(parsed),
+            H3ComfyCheckpointErrorCode::TensorSchemaMismatch
+        );
+
+        // A missing gate also changes the pinned tensor count.
+        let mut parsed = golden();
+        parsed
+            .tensors
+            .remove("blocks.49.attn.to_gate_compress.weight_scale");
+        assert_eq!(code(parsed), H3ComfyCheckpointErrorCode::InvalidHeader);
+
+        let mut parsed = golden();
+        parsed.tensors.get_mut("adaln_t_table").unwrap().shape[0] = PUBLISHED_INT8_CURVE_GRID - 1;
+        assert_eq!(code(parsed), H3ComfyCheckpointErrorCode::ConfigMismatch);
+    }
+
+    /// Gates are excluded from every block charge, so each FastH3 block costs
+    /// exactly what its Comfy-Org twin does; the fixed core charges the INT8
+    /// refiner at its encoded (resident) size instead of 2-byte BF16.
+    #[test]
+    fn fasth3_memory_skips_gates_and_charges_the_resident_int8_refiner() {
+        let fast_artifact = H3ComfyPublishedArtifact::FastH3V2Fl2VaPrunedInt8ConvRot;
+        let comfy_artifact = H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot;
+        let fast = parse_golden_header(fast_artifact, &golden_header_bytes(fast_artifact));
+        let comfy = parse_golden_header(comfy_artifact, &golden_header_bytes(comfy_artifact));
+        let config = H3TransformerConfig::default();
+        let curve = published_int8_curve_projection_tensors(&config);
+        for index in 0..config.num_layers {
+            assert_eq!(
+                calculate_block_memory(&fast, &curve, index, config.num_layers).unwrap(),
+                calculate_block_memory(&comfy, &curve, index, config.num_layers).unwrap(),
+                "block {index}"
+            );
+        }
+        let digests = (0..config.num_layers)
+            .map(|index| format!("{index:064x}"))
+            .collect::<Vec<_>>();
+        let fast_evidence =
+            calculate_opened_memory_evidence(&fast, &curve, config.num_layers, &digests).unwrap();
+        let comfy_evidence =
+            calculate_opened_memory_evidence(&comfy, &curve, config.num_layers, &digests).unwrap();
+        assert_eq!(fast_evidence.blocks, comfy_evidence.blocks);
+
+        let refiner_bf16 = token_refiner_linear_names()
+            .iter()
+            .map(|name| tensor_bytes(&comfy.tensors[name]))
+            .sum::<u64>();
+        let refiner_int8 = token_refiner_linear_names()
+            .iter()
+            .flat_map(|weight| {
+                let layer = weight.strip_suffix(".weight").unwrap().to_owned();
+                [weight.clone(), format!("{layer}.weight_scale")]
+            })
+            .map(|name| tensor_bytes(&fast.tensors[&name]))
+            .sum::<u64>();
+        // 2 x (qkv 21504x5376 + out 5376x7168 + fc1 28672x5376 + fc2 5376x14336)
+        let refiner_parameters =
+            2 * (21_504 * 5_376 + 5_376 * 7_168 + 28_672 * 5_376 + 5_376 * 14_336);
+        let refiner_rows = 2 * (21_504 + 5_376 + 28_672 + 5_376);
+        assert_eq!(refiner_bf16, 2 * refiner_parameters);
+        assert_eq!(refiner_int8, refiner_parameters + 4 * refiner_rows);
+        assert_eq!(
+            fast_evidence.fixed_protected_device_bytes,
+            comfy_evidence.fixed_protected_device_bytes - refiner_bf16 + refiner_int8
+        );
+        assert_eq!(
+            fast_evidence.fixed_encoded_host_bytes,
+            comfy_evidence.fixed_encoded_host_bytes - refiner_bf16 + refiner_int8
+        );
+        // The largest fixed tensor (and so the load staging bound) is now the
+        // INT8 refiner fc1 rather than its BF16 twin.
+        assert_eq!(
+            comfy_evidence.fixed_max_host_read_staging_bytes,
+            2 * 28_672 * 5_376
+        );
+        assert_eq!(
+            fast_evidence.fixed_max_host_read_staging_bytes,
+            28_672 * 5_376
+        );
+
+        // Everything the payload holds beyond Comfy-Org's is the gates, the
+        // refiner's scales/sidecars, and the refiner's halved weights.
+        let gate_bytes = fast
+            .tensors
+            .iter()
+            .filter(|(name, _)| name.contains(".attn.to_gate_compress."))
+            .map(|(_, tensor)| tensor_bytes(tensor))
+            .sum::<u64>();
+        assert_eq!(gate_bytes, 50 * (7_168 * 5_376 + 4 * 7_168 + 72));
+        let payload = |parsed: &ParsedHeader| parsed.file_len - parsed.header_len - 8;
+        assert_eq!(
+            payload(&fast) - payload(&comfy),
+            gate_bytes + (refiner_int8 + 8 * 72) - refiner_bf16
+        );
+        assert_ne!(
+            fast_evidence.identity_sha256,
+            comfy_evidence.identity_sha256
+        );
+    }
+
+    #[test]
+    fn fasth3_shaped_runtime_loads_an_int8_refiner_and_never_reads_vsa_gates() -> candle::Result<()>
+    {
+        for variant in [
+            H3ComfyInt8SchemaVariant::COMFY_ORG,
+            H3ComfyInt8SchemaVariant::FASTH3_V2,
+        ] {
+            let (config, header, data) = runtime_fixture_with_variant(variant);
+            let gate_bytes = header
+                .as_object()
+                .unwrap()
+                .iter()
+                .filter(|(name, _)| name.contains(".attn.to_gate_compress."))
+                .map(|(_, tensor)| {
+                    tensor["data_offsets"][1].as_u64().unwrap()
+                        - tensor["data_offsets"][0].as_u64().unwrap()
+                })
+                .sum::<u64>();
+            assert_eq!(gate_bytes > 0, variant.vsa_gate_compress);
+            let path = write_fixture(&header, &data, "fasth3-runtime");
+            let opened = open_h3_comfy_int8_checkpoint_with_variant(
+                &path,
+                config.clone(),
+                H3TransformerTask::T2VaFl2Va,
+                None,
+                variant,
+                None,
+                &H3ComfyNeverCancel,
+            )
+            .map_err(|error| candle::Error::Msg(error.to_string()))?;
+            assert_eq!(
+                opened.quantizes_token_refiner(),
+                variant.quantized_token_refiner
+            );
+            assert_eq!(
+                opened
+                    .candidate()
+                    .strategy
+                    .quantization_policy
+                    .ignored_layers
+                    .len(),
+                if variant.vsa_gate_compress {
+                    config.num_layers
+                } else {
+                    0
+                }
+            );
+            let memory = opened.memory_evidence().clone();
+            let (transformer, mut loader) = opened.load(&Device::Cpu)?;
+            assert!(loader.is_exact_pair_for(&transformer));
+            // The resident core reads exactly the fixed tensors its evidence
+            // charges — for FastH3 that includes the INT8 refiner bytes.
+            assert_eq!(loader.bytes_read(), memory.fixed_encoded_host_bytes);
+            for block in &memory.blocks {
+                let before = loader.bytes_read();
+                let loaded = loader.load_block(usize::from(block.index))?;
+                assert_eq!(
+                    loader.bytes_read() - before,
+                    block.memory.encoded_host_bytes + block.memory.protected_device_bytes,
+                    "{variant:?} block {}",
+                    block.index
+                );
+                drop(loaded);
+            }
+            // Every payload byte was read exactly once, except the gates.
+            assert_eq!(loader.bytes_read() + gate_bytes, data.len() as u64);
+            let _ = std::fs::remove_file(path);
+        }
+        Ok(())
+    }
+
+    /// Opens the real FastH3 V2 file when `MOLD_H3_FASTH3_CHECKPOINT` names it:
+    /// full content digest, sidecar payloads, memory evidence, and a CPU load
+    /// of the resident core plus one streamed block. Ignored by default (it
+    /// hashes 22 GB); run with `--ignored` on a host that has the file.
+    #[test]
+    #[ignore = "needs the 22 GB FastH3 V2 checkpoint at MOLD_H3_FASTH3_CHECKPOINT"]
+    fn real_fasth3_checkpoint_opens_and_loads_when_present() -> candle::Result<()> {
+        let Some(path) = std::env::var_os("MOLD_H3_FASTH3_CHECKPOINT") else {
+            eprintln!("MOLD_H3_FASTH3_CHECKPOINT is unset; skipping");
+            return Ok(());
+        };
+        let artifact = H3ComfyPublishedArtifact::FastH3V2Fl2VaPrunedInt8ConvRot;
+        let opened = open_h3_comfy_published_int8_checkpoint(
+            Path::new(&path),
+            H3TransformerTask::T2VaFl2Va,
+            artifact,
+            &H3ComfyNeverCancel,
+        )
+        .map_err(|error| candle::Error::Msg(error.to_string()))?;
+        assert_eq!(opened.candidate().artifact, artifact);
+        assert_eq!(opened.content_sha256(), artifact.content_sha256());
+        assert!(opened.quantizes_token_refiner());
+        let memory = opened.memory_evidence().clone();
+        assert_eq!(memory.blocks.len(), 50);
+        // Block 0's encoded bytes, sidecars and the never-loaded gate excluded.
+        let block0_read = opened
+            .source
+            .header
+            .tensors
+            .iter()
+            .filter(|(name, _)| {
+                name.starts_with("blocks.0.")
+                    && !name.ends_with(".comfy_quant")
+                    && !name.contains(".attn.to_gate_compress.")
+            })
+            .map(|(_, tensor)| tensor_bytes(tensor))
+            .sum::<u64>();
+        let (transformer, mut loader) = opened.load(&Device::Cpu)?;
+        assert!(loader.is_exact_pair_for(&transformer));
+        assert_eq!(loader.bytes_read(), memory.fixed_encoded_host_bytes);
+        let before = loader.bytes_read();
+        drop(loader.load_block(0)?);
+        assert_eq!(loader.bytes_read() - before, block0_read);
         Ok(())
     }
 }

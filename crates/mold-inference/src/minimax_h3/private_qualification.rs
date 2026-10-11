@@ -23,6 +23,8 @@ use mold_candle::minimax_h3::{
 use mold_core::manifest::{find_manifest, storage_path, ModelComponent, ModelFile, ModelManifest};
 use mold_core::minimax_h3::{self as contract, Task};
 use serde::{Deserialize, Serialize};
+
+use super::compact_transformer::H3CompactTransformerSelection;
 use sha2::{Digest, Sha256};
 use tokenizers::Tokenizer;
 
@@ -281,23 +283,52 @@ pub(crate) fn qualify_private_artifacts_with_control(
     authorization_record: &Path,
     progress: impl FnMut(H3ArtifactHashProgress) -> Result<()>,
 ) -> Result<H3PrivateArtifactQualificationReport> {
-    inspect_artifacts_with_control(models_root, model, authorization_record, true, progress)
+    let transformer = base_transformer_for_partition(model)?;
+    inspect_artifacts_with_control(
+        models_root,
+        model,
+        transformer,
+        authorization_record,
+        true,
+        progress,
+    )
 }
 
 /// Runtime resolution trusts complete installed weights, retaining structure and
 /// authorization checks. Explicit qualification remains a separate full scan.
+///
+/// `transformer` is the admitted identity's DiT selection: the partition
+/// manifest supplies every other artifact, and the selection's own
+/// Transformer row replaces the partition's. A base selection reproduces the
+/// pre-selection report — and its qualification identity — byte for byte.
 pub(crate) fn resolve_installed_artifacts_with_control(
     models_root: &Path,
     model: &str,
+    transformer: H3CompactTransformerSelection,
     authorization_record: &Path,
     progress: impl FnMut(H3ArtifactHashProgress) -> Result<()>,
 ) -> Result<H3PrivateArtifactQualificationReport> {
-    inspect_artifacts_with_control(models_root, model, authorization_record, false, progress)
+    inspect_artifacts_with_control(
+        models_root,
+        model,
+        transformer,
+        authorization_record,
+        false,
+        progress,
+    )
+}
+
+/// The base DiT selection of an exact partition model; refuses anything else
+/// exactly as `qualification_manifest` does.
+fn base_transformer_for_partition(model: &str) -> Result<H3CompactTransformerSelection> {
+    let (_, task, _) = qualification_manifest(model)?;
+    Ok(H3CompactTransformerSelection::base_for_task(task))
 }
 
 pub(crate) fn inspect_artifacts_with_control(
     models_root: &Path,
     model: &str,
+    transformer: H3CompactTransformerSelection,
     authorization_record: &Path,
     verify_contents: bool,
     mut progress: impl FnMut(H3ArtifactHashProgress) -> Result<()>,
@@ -308,12 +339,25 @@ pub(crate) fn inspect_artifacts_with_control(
     let private_scope = validate_private_scope(models_root, authorization_record)?;
     #[cfg(feature = "h3")]
     let _ = authorization_record;
-    let (manifest, task, published_transformer) = qualification_manifest(model)?;
+    let (manifest, task, _) = qualification_manifest(model)?;
+    if transformer.task() != task {
+        bail!("private H3 artifact qualification was handed a cross-task transformer selection")
+    }
+    let published_transformer = transformer.published_artifact();
+    let (transformer_manifest, transformer_file) = transformer.transformer_file()?;
     let root = private_scope.models_root.clone();
     let artifacts = manifest
         .files
         .iter()
-        .map(|file| resolve_artifact(&root, manifest, file))
+        .map(|file| {
+            if file.component == ModelComponent::Transformer {
+                // The partition's own row for a base selection; the admitted
+                // tag's row for a substituted DiT.
+                resolve_artifact(&root, transformer_manifest, transformer_file)
+            } else {
+                resolve_artifact(&root, manifest, file)
+            }
+        })
         .collect::<Result<Vec<_>>>()?;
     let total_bytes = artifacts.iter().try_fold(0_u64, |total, artifact| {
         total

@@ -90,6 +90,18 @@ pub const LIGHTX2V_REVISION: &str = "05ef678438e84933c406131b59abbf86919b3aac";
 /// mold ships).
 pub const DRBAPH_TURBO_LORA_REPO: &str = "drbaph/MiniMax-H3-Turbo-Lora-ComfyUI";
 pub const DRBAPH_TURBO_LORA_REVISION: &str = "be8eb3ea3466cbb7def202ffec0d2fdc054256ac";
+/// FastVideo's Comfy-layout FastH3 repository (#1812).
+///
+/// Only a TRANSFORMER comes from it: FastH3 V2 is a full-weight DMD
+/// distillation of MiniMax-H3, pruned from the T2VA partition into the same
+/// curve-AdaLN INT8 ConvRot layout as [`COMFY_REPO`]'s FL2VA DiT, so a FastH3
+/// tier executes the FL2VA task face and its conditioner, both VAEs, and every
+/// config still resolve to [`COMFY_REPO`] and [`OFFICIAL_REPO`]. The pinned
+/// file and its header facts live in mold-candle's
+/// `H3ComfyPublishedArtifact::FastH3V2Fl2VaPrunedInt8ConvRot`. No manifest tag
+/// names this repository yet; registering one is data on top of this pin.
+pub const FASTVIDEO_FASTH3_REPO: &str = "FastVideo/FastVideo-FastH3-Comfy";
+pub const FASTVIDEO_FASTH3_REVISION: &str = "ec1e3aa374a91c57b0b94a1623b7e657c0498cf2";
 pub const LICENSE_SHA256: &str = MINIMAX_H3_LICENSE_SHA256;
 
 pub const FL2VA_OFFICIAL: &str = "minimax-h3-fl2va:official-bf16";
@@ -1212,6 +1224,7 @@ pub fn repo_revision(repo: &str) -> Option<&'static str> {
         NVFP4_REPO => Some(NVFP4_REVISION),
         LIGHTX2V_REPO => Some(LIGHTX2V_REVISION),
         DRBAPH_TURBO_LORA_REPO => Some(DRBAPH_TURBO_LORA_REVISION),
+        FASTVIDEO_FASTH3_REPO => Some(FASTVIDEO_FASTH3_REVISION),
         _ => None,
     }
 }
@@ -5970,6 +5983,11 @@ mod tests {
                 tier.model
             );
         }
+        assert_eq!(FASTVIDEO_FASTH3_REPO, "FastVideo/FastVideo-FastH3-Comfy");
+        assert_eq!(
+            repo_revision(FASTVIDEO_FASTH3_REPO),
+            Some("ec1e3aa374a91c57b0b94a1623b7e657c0498cf2")
+        );
         assert_eq!(LIGHTX2V_REPO, "lightx2v/Minimax-h3-Turbo");
         assert_eq!(
             LIGHTX2V_REVISION,
