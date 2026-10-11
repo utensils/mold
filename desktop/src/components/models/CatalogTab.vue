@@ -24,7 +24,7 @@ import {
   type CatalogKindFilter,
   type CatalogSortOption,
 } from "../../lib/catalogFilters";
-import { isCatalogModelId, modelDisplayName } from "../../lib/models";
+import { isCatalogModelId, modelDisplayName } from "@studio/lib/modelDisplay";
 import { MEDIA_TYPE_KIND, mediaTypeMatches, type MediaType } from "../../lib/modelAvailability";
 import { OUTPUT_KIND_SECTION_LABEL } from "../../composables/useCreateOutputKind";
 import { useInfiniteScrollSentinel } from "../../lib/useInfiniteScrollSentinel";
@@ -171,7 +171,10 @@ function manifestCatalogEntry(model: ModelEntry): CatalogEntry {
     id: model.name,
     source: "hf",
     source_id: model.hf_repo || null,
-    name: modelDisplayName(model),
+    // `name` stays the manifest id (variants split it on `:`); the
+    // presented name rides as `display_name`.
+    name: model.name,
+    display_name: modelDisplayName(model),
     family: model.family,
     kind: "checkpoint",
     nsfw: false,
@@ -516,10 +519,10 @@ async function pullTo(entry: CatalogEntry, host: HostView | null) {
   try {
     // A decline needs no toast: the modal WAS the interaction.
     if (!(await queueOnHost(entry, host))) return;
-    toasts.push(`Pulling ${entry.display_name ?? entry.name}${host ? ` on ${host.label}` : ""}`);
+    toasts.push(`Pulling ${modelDisplayName(entry)}${host ? ` on ${host.label}` : ""}`);
   } catch (err) {
     if (err instanceof ApiError && err.status === 409) {
-      toasts.push(`${entry.display_name ?? entry.name} is already queued.`);
+      toasts.push(`${modelDisplayName(entry)} is already queued.`);
     } else {
       toasts.push(String(err), "error");
     }
@@ -565,7 +568,7 @@ async function startBatch(): Promise<void> {
     } else {
       const entry = entriesById.get(item.modelId);
       failures.push(
-        `${entry?.display_name ?? entry?.name ?? "Model"}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
+        `${entry ? modelDisplayName(entry) : "Model"}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
       );
     }
   });
@@ -964,7 +967,7 @@ onUnmounted(() => {
 
     <DownloadTargetDialog
       v-if="pendingEntry"
-      :model-name="pendingEntry.display_name ?? pendingEntry.name"
+      :model-name="modelDisplayName(pendingEntry)"
       :targets="actionTargets(pendingEntry)"
       @close="pendingEntry = null"
       @select="(host) => pendingEntry && void pullTo(pendingEntry, host)"

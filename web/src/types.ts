@@ -10,6 +10,7 @@ import type {
   RemixDimension,
   RemixSourceKind,
   TimeRange,
+  ModelPresentationFields,
 } from "@studio/lib/api/serverTypes";
 export type {
   AdvancedPlacement,
@@ -309,7 +310,8 @@ export interface ModelDefaults {
   description: string;
 }
 
-export interface ModelInfoExtended extends ModelDefaults {
+export interface ModelInfoExtended
+  extends ModelDefaults, ModelPresentationFields {
   name: string;
   family: string;
   size_gb: number;
@@ -319,10 +321,6 @@ export interface ModelInfoExtended extends ModelDefaults {
   downloaded: boolean;
   disk_usage_bytes?: number | null;
   remaining_download_bytes?: number | null;
-  /** Human-readable title for catalog installs whose `name` is an opaque
-   * `cv:<id>` / `hf:<repo>` identifier. Additive — absent on older servers
-   * and on manifest models. Display only: every API call keeps `name`. */
-  display_name?: string | null;
   /** Installed-catalog classification; absent on older servers and manifest rows. */
   kind?: string | null;
   /** Installed-catalog modality (`image` / `video`); absent when unknown. */

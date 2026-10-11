@@ -19,7 +19,7 @@ import { useCatalog } from "../../composables/useCatalog";
 import { useHostRouting } from "../../composables/useHostRouting";
 import { useModelInstallTargets } from "../../composables/useModelInstallTargets";
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
-import { modelDisplayName } from "@studio/lib/modelDisplay";
+import { modelDisplayName, modelPresentation } from "@studio/lib/modelDisplay";
 import {
   modelRuntimeNotice,
   modelRuntimeNoticeAcrossHosts,
@@ -189,8 +189,10 @@ const weightsLabel = computed(() => modelWeightsLabel(kind.value));
 const description = computed(() => {
   const raw = (
     metadataEntry.value?.description ??
-    installedModel.value?.description ??
-    ""
+    (installedModel.value
+      ? (modelPresentation(installedModel.value).summary ??
+        installedModel.value.description)
+      : "")
   ).trim();
   if (!raw || metadataEntry.value) return raw;
 

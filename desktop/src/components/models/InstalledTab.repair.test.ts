@@ -212,7 +212,7 @@ describe("InstalledTab model info drawer", () => {
     ]);
 
     const drawer = wrapper.get("[data-test='catalog-detail-drawer']");
-    expect(drawer.text()).toContain("sdxl-base:fp16");
+    expect(drawer.text()).toContain("SDXL Base 1.0");
     // Presence summary + per-component rows in the ON THIS HOST section.
     expect(drawer.get("[data-test='component-list']").text()).toContain("1/2 present");
     expect(fetchModelComponents).toHaveBeenCalledWith("sdxl-base:fp16", undefined);

@@ -18,7 +18,7 @@ import { useToastStore } from "../../stores/toasts";
 import { modelSource } from "@studio/lib/modelSource";
 import { formatEta, formatGB, formatRate, percent } from "../../lib/format";
 import { PLATFORM_UI } from "../../lib/platform";
-import { modelDisplayNameForId } from "../../lib/models";
+import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
 import SourceGlyph from "@ui/components/SourceGlyph.vue";
 import type { DownloadJobStatus } from "../../lib/api/types";
 

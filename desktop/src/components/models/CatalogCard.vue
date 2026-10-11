@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
+import { modelDisplayName } from "@studio/lib/modelDisplay";
 import { modelKindLabel, modelKindValue } from "@studio/lib/modelMetadata";
 import SourceGlyph from "@ui/components/SourceGlyph.vue";
 import ModelFamilyPlaceholder from "./ModelFamilyPlaceholder.vue";
@@ -75,7 +76,7 @@ const glyphSource = computed<ModelSource>(() =>
 const showAction = computed(() => props.installable ?? !props.entry.installed);
 
 const pageUrl = computed(() => catalogPageUrl(props.entry));
-const displayName = computed(() => props.entry.display_name ?? props.entry.name);
+const displayName = computed(() => modelDisplayName(props.entry));
 const kindValue = computed(() => modelKindValue(props.entry));
 const description = computed(() => props.entry.description?.trim() || null);
 const accessibilityLabel = computed(

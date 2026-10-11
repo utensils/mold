@@ -9,6 +9,7 @@
  */
 import { computed } from "vue";
 import { STARTER_MODELS } from "@mold/studio";
+import { modelDisplayName } from "@studio/lib/modelDisplay";
 import Icon from "@ui/components/Icon.vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
 import { useDownloads } from "../../composables/useDownloads";
@@ -73,7 +74,9 @@ async function pull(model: string) {
       >
         <div class="cold__meta">
           <div class="cold__name-row">
-            <span class="cold__name">{{ s.displayName }}</span>
+            <span class="cold__name">{{
+              modelDisplayName({ name: s.model })
+            }}</span>
             <span v-if="s.recommended" class="cold__rec">recommended</span>
           </div>
           <span class="cold__note">{{ s.speed }} · {{ s.size }}</span>

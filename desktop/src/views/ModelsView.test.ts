@@ -157,7 +157,7 @@ describe("ModelsView segments", () => {
   it("Discover shows the unified merged list — installed models and live catalog together", async () => {
     const wrapper = await mountView();
     await selectSegment(wrapper, "Browse more");
-    expect(wrapper.text()).toContain("flux-dev:q8");
+    expect(wrapper.text()).toContain("FLUX.1 Dev Q8");
     expect(wrapper.text()).toContain("FLUX.2 Klein");
   });
 
@@ -196,7 +196,7 @@ describe("ModelsView segments", () => {
   it("treats the legacy ?tab=catalog deep link as the Discover view", async () => {
     const wrapper = await mountView("/models?tab=catalog");
     expect(wrapper.find("[data-test='catalog-source-chips']").exists()).toBe(true);
-    expect(wrapper.text()).toContain("flux-dev:q8");
+    expect(wrapper.text()).toContain("FLUX.1 Dev Q8");
     expect(wrapper.text()).toContain("LTX-2 Distilled");
     const all = wrapper.get('[aria-label="What they make"]').findAll("button")[0]!;
     expect(all.attributes("aria-checked")).toBe("true");
@@ -262,7 +262,7 @@ describe("ModelsView downloads and remote hosts", () => {
     expect(
       wrapper.findAll("[data-test='installed-host']").some((chip) => chip.text() === "hal9000"),
     ).toBe(true);
-    expect(wrapper.find("[aria-label='Downloading qwen-image:q4 on hal9000']").exists()).toBe(true);
+    expect(wrapper.find("[aria-label='Downloading Qwen Image Q4 on hal9000']").exists()).toBe(true);
   });
 
   it("keeps local defaults while merging richer metadata from a duplicate remote model", async () => {

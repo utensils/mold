@@ -17,7 +17,7 @@ describe("MissingModelDialog", () => {
       attachTo: document.body,
     });
     const dialog = bodyGet("[data-test='missing-model-dialog']");
-    expect(dialog.text()).toContain("jibmix-flux:fp8");
+    expect(dialog.text()).toContain("jibMixFlux v7.2 PixelHeaven FP8");
     expect(dialog.text()).toContain("plato");
     expect(dialog.text()).toContain("11.4 GB");
 

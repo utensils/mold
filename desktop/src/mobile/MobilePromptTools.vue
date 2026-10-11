@@ -6,7 +6,7 @@ import { fetchHistoryFrom, type HistoryEntry } from "../lib/api/history";
 import type { GenerateForm } from "../lib/generateForm";
 import type { ExpandTask, ModelEntry, RemixDimension, RemixSourceKind } from "../lib/api/types";
 import { remixDimensionsForTask } from "@studio/lib/promptTransform";
-import { modelDisplayNameForId } from "../lib/models";
+import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
 
 const props = withDefaults(
   defineProps<{

@@ -21,8 +21,7 @@ import {
   isModelRuntimeUnavailable,
   RUNTIME_UNAVAILABLE_BADGE,
 } from "@studio/lib/modelRuntimeAvailability";
-import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
-import { styleDisplayName } from "@studio/lib/styleLabel";
+import { modelDisplayNameForId, styleName } from "@studio/lib/modelDisplay";
 import StyleMenu from "@studio/components/StyleMenu.vue";
 import Popover from "@ui/components/Popover.vue";
 import type { ModelInfoExtended } from "../../types";
@@ -94,10 +93,10 @@ const current = computed(
   () => props.models.find((m) => m.name === props.model) ?? null,
 );
 
-/** Plain name first. `styleDisplayName` already stands the family's friendly
- *  label in for a bare manifest id, so the id is never said twice. */
-const styleName = computed(() => {
-  if (current.value) return styleDisplayName(current.value);
+/** Plain name first. `styleName` stands the family's friendly label in for
+ *  an id nothing names, so the id is never said twice. */
+const chipName = computed(() => {
+  if (current.value) return styleName(current.value);
   if (!props.model) return "";
   const name = modelDisplayNameForId(props.model, props.models);
   return name === props.model ? "" : name;
@@ -149,10 +148,10 @@ function browse() {
         @keydown="onChipKeydown"
       >
         <span data-test="selected-model-name" class="style-chip__label">
-          {{ styleName || styleId || "Choose a style" }}
+          {{ chipName || styleId || "Choose a style" }}
         </span>
         <span
-          v-if="styleId && styleId !== styleName"
+          v-if="styleId && styleId !== chipName"
           data-test="style-chip-id"
           class="style-chip__id"
           >{{ styleId }}</span
@@ -221,9 +220,8 @@ function browse() {
 }
 .style-chip__label {
   min-width: 0;
-  /* A catalog display name can run to a sentence ("FLUX.1 Schnell Q8 — fast
-   * 4-step, general purpose"); the chip keeps the words that name it and the
-   * menu row carries the rest. */
+  /* A catalog install's provider title can run long; the chip keeps the
+   * words that name it and the menu row carries the rest. */
   max-width: 22ch;
   overflow: hidden;
   text-overflow: ellipsis;

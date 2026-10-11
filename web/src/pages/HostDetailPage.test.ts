@@ -1216,6 +1216,7 @@ describe("HostDetailPage — models", () => {
       {
         name: "flux-dev:q8",
         display_name: "Studio portrait",
+        title: "Studio portrait",
         family: "flux",
         size_gb: 12,
         is_loaded: true,

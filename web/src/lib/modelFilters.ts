@@ -1,4 +1,3 @@
-import { familyLabel } from "@studio/lib/modelFamily";
 import { isGenerationModel } from "@studio/lib/generationModels";
 
 import type { ModelInfoExtended } from "../types";
@@ -38,7 +37,3 @@ function normalizeQuantization(value: string): string {
 export function variantRank(model: ModelInfoExtended): number {
   return VARIANT_RANKS[modelQuantization(model)] ?? 999;
 }
-
-// The label table is shared with desktop and iPhone (#806); re-exported here
-// so every existing `modelFilters` consumer keeps its import.
-export { familyLabel };

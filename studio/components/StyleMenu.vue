@@ -2,8 +2,7 @@
 import { computed, nextTick, onMounted, ref, useId, watch } from "vue";
 import { familyLabel } from "../lib/modelFamily";
 import { formatBytes } from "../lib/formatBytes";
-import { modelDisplayName, modelDisplayNameForId } from "../lib/modelDisplay";
-import { styleDisplayName } from "../lib/styleLabel";
+import { modelDisplayNameForId, modelPresentation } from "../lib/modelDisplay";
 import { modelSource } from "../lib/modelSource";
 import SourceGlyph from "@ui/components/SourceGlyph.vue";
 import type { StyleMenuModel } from "../lib/styleMenu";
@@ -18,8 +17,10 @@ import type { StyleMenuModel } from "../lib/styleMenu";
  * It is always-rendered content. Visibility, placement, dismissal and the
  * refresh-on-open belong to the host, which mounts this only while open.
  *
- * Every row says the plain thing in sans and the technical truth in mono, on
- * the same row: friendly name, then id · size · state.
+ * Every row says the plain thing in sans and the technical truth in mono:
+ * the short title with its variant chip, then id · size · state, then the
+ * one-line reason to pick it — all from `modelPresentation`, the one naming
+ * authority.
  *
  * Nothing here may reach a store, a router or a shell — `studio/` stays
  * browser-safe and application-shell independent
@@ -110,9 +111,10 @@ const showFilter = computed(() => props.models.length > FILTER_THRESHOLD);
 
 function matches(model: M, needle: string): boolean {
   if (!needle) return true;
-  const haystack = `${model.name} ${modelDisplayName(model)} ${styleDisplayName(model)} ${
-    model.description ?? ""
-  } ${model.family} ${familyLabel(model.family)}`;
+  const presented = modelPresentation(model);
+  const haystack = `${model.name} ${presented.displayName} ${presented.title} ${
+    presented.summary ?? ""
+  } ${model.description ?? ""} ${model.family} ${familyLabel(model.family)}`;
   return haystack.toLocaleLowerCase().includes(needle);
 }
 
@@ -161,34 +163,6 @@ function rowIndexFor(model: M): number {
 
 function sizeLabel(model: M): string | null {
   return model.disk_usage_bytes ? formatBytes(model.disk_usage_bytes) : null;
-}
-
-/**
- * The row's TITLE, in the lexicon's own order: the description first, then a
- * curated `display_name`, then the family's friendly name — never the id,
- * which is a "never say" as a primary label (`docs/design/README.md` §2) and
- * already rides beneath in mono. `modelDisplayName` answers a different
- * question — "what is this row called" — and for every manifest style the
- * answer is its id, so using it here printed `flux-schnell:q8` over
- * `flux-schnell:q8 · 23.1 GB` while the chip above already said the
- * description.
- */
-function title(model: M): string {
-  return styleDisplayName(model);
-}
-
-/**
- * The row's second line: the OTHER name it has.
- *
- * `styleDisplayName` ranks the description above `display_name`, so a catalog
- * row carrying both would otherwise lose the curated one entirely. Nothing is
- * repeated — a name equal to the title, or to the id already in mono, is not
- * a second fact.
- */
-function secondaryName(model: M): string | null {
-  const other = modelDisplayName(model);
-  if (other === title(model) || other === model.name) return null;
-  return other;
 }
 
 function isSelected(model: M): boolean {
@@ -324,6 +298,12 @@ onMounted(() => {
         <span class="ms-model__name" :title="phantomLabel">{{
           phantomLabel
         }}</span>
+        <span
+          v-if="phantomLabel !== phantom"
+          data-test="model-option-missing-id"
+          class="ms-model__meta"
+          >{{ phantom }}</span
+        >
         <span class="ms-model__tag">Not on this machine — get it</span>
       </span>
     </button>
@@ -352,12 +332,21 @@ onMounted(() => {
           <SourceGlyph :source="modelSource(model)" class="ms-model__glyph" />
         </slot>
         <span class="ms-model__body">
-          <span
-            data-test="model-option-name"
-            class="ms-model__name"
-            :title="title(model)"
-          >
-            {{ title(model) }}
+          <span class="ms-model__title">
+            <span
+              data-test="model-option-name"
+              class="ms-model__name"
+              :title="modelPresentation(model).displayName"
+            >
+              {{ modelPresentation(model).title }}
+            </span>
+            <span
+              v-if="modelPresentation(model).variant"
+              data-test="model-option-variant"
+              class="ms-model__variant"
+            >
+              {{ modelPresentation(model).variant }}
+            </span>
           </span>
           <span class="ms-model__meta">
             <span data-test="model-option-id">{{ model.name }}</span>
@@ -387,11 +376,11 @@ onMounted(() => {
             {{ availabilityTag?.(model) }}
           </span>
           <span
-            v-if="secondaryName(model)"
+            v-if="modelPresentation(model).summary"
             data-test="model-option-description"
             class="ms-model__desc"
           >
-            {{ secondaryName(model) }}
+            {{ modelPresentation(model).summary }}
           </span>
         </span>
         <span
@@ -516,12 +505,27 @@ onMounted(() => {
   width: 12px;
   height: 12px;
 }
-/* A style id is one long unbroken token. It WRAPS rather than being cut: the
- * id is the thing a person copies, so an ellipsis makes the row useless. */
+/* The title and its variant chip share a line and wrap together. */
+.ms-model__title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 6px;
+}
 .ms-model__name {
-  display: block;
   overflow-wrap: anywhere;
   color: var(--mold-text, #e5e5e5);
+}
+/* The variant is what tells siblings apart (`Q4`, `Turbo 4-step 768p`): a
+ * small mono chip beside the title, never a second sentence. */
+.ms-model__variant {
+  flex-shrink: 0;
+  padding: 0 4px;
+  border: 1px solid var(--mold-border, #2a2a2a);
+  border-radius: var(--mold-radius-2, 4px); /* literal: token fallback only */
+  font-family: var(--mold-font-mono, ui-monospace, monospace);
+  font-size: var(--mold-fs-micro, 0.6875rem);
+  color: var(--mold-text-dim, #9ca3af);
 }
 /* Technical truth in mono, beneath the plain name. */
 .ms-model__meta {

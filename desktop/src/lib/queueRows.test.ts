@@ -74,7 +74,7 @@ const shared = (part: Record<string, unknown> = {}): QueueRow =>
 describe("queue rows speak the lexicon", () => {
   it("titles a print by its words and a clip by its scenes", () => {
     expect(rowTitle(print())).toBe("a brass teapot");
-    expect(rowTitle(print({ prompt: "  " }))).toBe("flux-dev:q4");
+    expect(rowTitle(print({ prompt: "  " }))).toBe("FLUX.1 Dev Q4");
   });
 
   it("says Waiting · Being made · Finished as sentences", () => {

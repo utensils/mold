@@ -1367,7 +1367,9 @@ describe("MobileGalleryViewer info sheet", () => {
     await flushPromises();
 
     expect(document.activeElement).toBe(view.get(".mobile-library-sheet-panel").element);
-    expect(view.get("[data-test='gallery-viewer-print-details']").text()).toContain("flux-dev:q8");
+    expect(view.get("[data-test='gallery-viewer-print-details']").text()).toContain(
+      "FLUX.1 Dev Q8",
+    );
     expect(view.get("[data-test='gallery-viewer-print-details']").text()).toContain("1024×1024");
   });
 

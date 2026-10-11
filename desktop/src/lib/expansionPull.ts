@@ -1,6 +1,6 @@
 import type { DownloadJob } from "./api/types";
 import { formatBytes, formatEta, percent } from "./format";
-import { modelDisplayNameForId, type DisplayableModel } from "./models";
+import { modelDisplayNameForId, type DisplayableModel } from "@studio/lib/modelDisplay";
 
 export type ExpansionPullPhase = "missing" | "connecting" | "starting";
 export type ExpansionPullKind =

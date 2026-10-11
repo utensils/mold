@@ -252,13 +252,13 @@ beforeEach(() => {
         jsonResponse(
           target.baseUrl === studio.baseUrl
             ? [
-                model("installed:q8", "flux", true),
+                model("installed:q8", "flux", true, { title: "A test model" }),
                 model("safe-variant:q4", "ltx2", false, {
                   size_gb: 4,
                   remaining_download_bytes: 6_000_000_000,
                 }),
               ]
-            : [model("installed:q8", "flux", true)],
+            : [model("installed:q8", "flux", true, { title: "A test model" })],
         ),
       );
     }
@@ -302,7 +302,9 @@ describe("MobileCatalogView", () => {
         if (path === "/api/models")
           return Promise.resolve(
             jsonResponse(
-              target.baseUrl === renderBox.baseUrl ? [model("installed:q8", "flux", true)] : [],
+              target.baseUrl === renderBox.baseUrl
+                ? [model("installed:q8", "flux", true, { title: "A test model" })]
+                : [],
             ),
           );
         return Promise.resolve(new Response(null, { status: 204 }));
@@ -544,7 +546,7 @@ describe("MobileCatalogView", () => {
 
     const card = wrapper
       .findAll("[data-test='mobile-catalog-card']")
-      .find((candidate) => candidate.text().includes("MiniMax H3 Ref2VA"))!;
+      .find((candidate) => candidate.text().includes("MiniMax H3 References"))!;
     expect(card.text()).toContain("Installed");
     await card.get(".mobile-catalog-card-open").trigger("click");
     await flushPromises();
@@ -625,7 +627,7 @@ describe("MobileCatalogView", () => {
     await flushPromises();
     const card = wrapper
       .findAll("[data-test='mobile-catalog-card']")
-      .find((candidate) => candidate.text().includes("MiniMax H3 FL2VA"))!;
+      .find((candidate) => candidate.text().includes("MiniMax H3 Frames"))!;
     await card.get(".mobile-catalog-card-open").trigger("click");
     await flushPromises();
     let detail = document.querySelector<HTMLElement>("[data-test='mobile-catalog-detail']")!;
@@ -1487,7 +1489,9 @@ describe("MobileCatalogView", () => {
       if (path === "/api/models") {
         return Promise.resolve(
           jsonResponse(
-            target.baseUrl === renderBox.baseUrl ? [model("installed:q8", "flux", true)] : [],
+            target.baseUrl === renderBox.baseUrl
+              ? [model("installed:q8", "flux", true, { title: "A test model" })]
+              : [],
           ),
         );
       }
@@ -1569,7 +1573,9 @@ describe("MobileCatalogView", () => {
       if (path === "/api/models") {
         return Promise.resolve(
           jsonResponse(
-            target.baseUrl === renderBox.baseUrl ? [model("installed:q8", "flux", true)] : [],
+            target.baseUrl === renderBox.baseUrl
+              ? [model("installed:q8", "flux", true, { title: "A test model" })]
+              : [],
           ),
         );
       }
@@ -2425,7 +2431,7 @@ describe("MobileCatalogView", () => {
     await flushPromises();
 
     const row = wrapper.get("[data-test='mobile-catalog-download']");
-    expect(row.text()).toContain("flux-dev:q8");
+    expect(row.text()).toContain("FLUX.1 Dev Q8");
     expect(row.text()).toContain("Preparing");
     expect(row.text()).toContain("Verifying file [1/4]");
     expect(row.text()).not.toContain("Waiting");

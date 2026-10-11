@@ -1,45 +1,31 @@
 /**
  * How a model family is named to a person.
  *
- * The wire carries a slug (`wan`, `ltx-2`, `qwen-image-edit`); every surface
- * has to turn that into the name the family is actually known by. This lived
- * only in `web/`, so desktop and iPhone rendered the raw slug — a Wan row read
- * "wan" on desktop and "Wan Video" on web, which is exactly the cross-surface
- * drift #806 exists to close. The CLI and Discord already share their own
- * label function pinned to `tests/fixtures/wan/surface-parity-v1.json`; this is the
- * Studio half of the same contract.
+ * The wire carries a slug (`wan`, `ltx2`, `qwen-image-edit`); the name comes
+ * from the ONE authority, `mold_core::model_presentation::family_label`, via
+ * the generated `FAMILY_LABELS` (#806 closed the cross-surface drift a
+ * per-client table caused). Spellings that differ only in separators
+ * (`ltx-2`, `minimax_h3`, `zimage`) resolve to the canonical slug's label.
  *
  * Unknown slugs title-case rather than fall back to the raw string, so a family
  * added server-side reads as a name on day one without a client release.
  */
+import { FAMILY_LABELS } from "./generated/modelPresentationV1";
 
-const FAMILY_LABELS: Record<string, string> = {
-  flux: "FLUX",
-  flux2: "Flux.2",
-  "flux-2": "Flux.2",
-  sd15: "SD 1.5",
-  "sd1.5": "SD 1.5",
-  sdxl: "SDXL",
-  sd3: "SD3",
-  "sd3.5": "SD3.5",
-  "z-image": "Z-Image",
-  zimage: "Z-Image",
-  "qwen-image": "Qwen Image",
-  "qwen-image-edit": "Qwen Image Edit",
-  "qwen-image21": "Qwen Image 2.1",
-  wuerstchen: "Wuerstchen",
-  "ltx-video": "LTX Video",
-  ltx2: "LTX-2",
-  "ltx-2": "LTX-2",
-  wan: "Wan Video",
-  "minimax-h3": "MiniMax H3",
-  minimax_h3: "MiniMax H3",
-  minimaxh3: "MiniMax H3",
-};
+const looseKey = (family: string) =>
+  family
+    .trim()
+    .toLowerCase()
+    .replace(/[-_.\s]/g, "");
+
+const LABELS_BY_LOOSE_KEY = new Map(
+  Object.entries(FAMILY_LABELS).map(([slug, label]) => [looseKey(slug), label]),
+);
 
 export function familyLabel(family: string): string {
   return (
     FAMILY_LABELS[family] ??
+    LABELS_BY_LOOSE_KEY.get(looseKey(family)) ??
     family
       .split(/[-_]/)
       .filter(Boolean)

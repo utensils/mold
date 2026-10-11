@@ -229,7 +229,7 @@ import { copyableError, describeTransportError } from "../lib/api/errors";
 import { startCatalogDownload } from "../lib/api/catalog";
 import { computeEtaSeconds, useDownloadsStore, type DownloadsState } from "../stores/downloads";
 import { usePullResumeStore } from "../stores/pullResume";
-import { modelDisplayNameForId } from "../lib/models";
+import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
 import {
   authedMediaUrl,
   fetchGalleryMediaBytes,

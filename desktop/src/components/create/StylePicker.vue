@@ -10,8 +10,7 @@ import {
 } from "../../composables/useCreateOutputKind";
 import { useGenerateFormStore } from "../../stores/generateForm";
 import { familyLabel } from "@studio/lib/modelFamily";
-import { modelDisplayNameForId } from "../../lib/models";
-import { styleDisplayName } from "@studio/lib/styleLabel";
+import { modelDisplayNameForId, styleName } from "@studio/lib/modelDisplay";
 import type { GenerateForm } from "../../lib/generateForm";
 import type { ModelEntry } from "../../lib/api/types";
 
@@ -40,13 +39,12 @@ const sectionLabel = computed(() => OUTPUT_KIND_SECTION_LABEL[picker.outputKind.
 const sectionEmpty = computed(() => OUTPUT_KIND_EMPTY[picker.outputKind.value]);
 const browseTarget = computed(() => OUTPUT_KIND_BROWSE_TARGET[picker.outputKind.value]);
 
-/** Plain name first, in the lexicon's order: the style's own description, then
- *  a curated display name, then the family's friendly label. A bare manifest id
- *  is never the label (`docs/design/README.md` §2) — it rides beside in mono.
- *  ONE rule with the menu's rows, which read `styleDisplayName` too. */
+/** Plain name first, from the one naming authority (`styleName`: title and
+ *  variant, the family's friendly label for an id nothing names). A bare id is
+ *  never the label (`docs/design/README.md` §2) — it rides beside in mono. */
 const styleLabel = computed(() => {
   const model = picker.selectedPickerModel.value;
-  if (model) return styleDisplayName(model);
+  if (model) return styleName(model);
   const missing = picker.missingModelId.value;
   if (!missing) return "";
   const name = modelDisplayNameForId(missing, picker.pickerModels.value);

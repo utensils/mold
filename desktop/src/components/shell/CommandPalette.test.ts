@@ -271,7 +271,7 @@ describe("CommandPalette shortcut column and mock groups", () => {
     expect(groupOf("Surprise me")).toBe("make");
     expect(groupOf("My images")).toBe("go");
     expect(groupOf("Machines")).toBe("go");
-    expect(groupOf("Use flux-dev:q4")).toBe("styles");
+    expect(groupOf("Use FLUX.1 Dev Q4")).toBe("styles");
     expect(groupOf("Connect a machine…")).toBe("machines");
     expect(groupOf("Rent a GPU…")).toBe("machines");
     expect([...groups.values()]).not.toContain("do");
@@ -551,7 +551,7 @@ describe("CommandPalette model search", () => {
     await wrapper.get("input").setValue("flux");
     await wrapper
       .findAll("[role='option']")
-      .find((o) => o.text().includes("Use flux-dev:q4"))!
+      .find((o) => o.text().includes("Use FLUX.1 Dev Q4"))!
       .trigger("click");
 
     expect(update).not.toHaveBeenCalled();

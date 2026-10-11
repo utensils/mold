@@ -32,13 +32,14 @@ import { formatMemoryGB, formatMemoryGBPair } from "@studio/lib/formatMemory";
 import { unifiedMemoryHost } from "@studio/lib/telemetryMemory";
 import { inferBackendFromGpuName } from "../lib/hosts";
 import { machineSentence } from "../lib/machineSentence";
+import { modelDiskBytes, modelSizeLabels } from "../lib/models";
 import {
   isOpaqueModelId,
-  modelDiskBytes,
   modelDisplayName,
   modelDisplayNameForId,
-  modelSizeLabels,
-} from "../lib/models";
+  modelPresentation,
+  styleName,
+} from "@studio/lib/modelDisplay";
 import { modelSource } from "@studio/lib/modelSource";
 import { ipc } from "../lib/ipc";
 import type {
@@ -1087,13 +1088,13 @@ async function forget() {
           >
             <li v-for="m in installedModels" :key="m.name" data-test="model-row">
               <ModelTableRow
-                :name="modelDisplayName(m)"
+                :name="styleName(m)"
                 :id="m.name"
                 :source="modelSource(m)"
                 :loaded="m.is_loaded"
                 :family="m.family"
                 :page-url="m.hf_repo ? `https://huggingface.co/${m.hf_repo}` : null"
-                :note="m.description || null"
+                :note="modelPresentation(m).summary"
                 :size-primary="
                   modelSizeLabels(m).weights ?? modelSizeLabels(m).runtime ?? 'Size unavailable'
                 "

@@ -92,7 +92,7 @@ import { copyImageBytesToClipboard } from "../lib/clipboard";
 import { copyLocalOutputPath } from "../lib/localOutputPath";
 import { primaryModifierPressed } from "../lib/platform";
 import { allowsNativeContextMenu, allowsNativeSelectAll, isSelectAllChord } from "../lib/shortcuts";
-import { modelDisplayNameForId } from "../lib/models";
+import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
 import type { GalleryImage } from "../lib/api/types";
 import { isUpscaledImage } from "../lib/gallery/upscaled";
 import { readGalleryMediaBase64, readGalleryMediaBlob } from "../lib/gallery/sourceMedia";
