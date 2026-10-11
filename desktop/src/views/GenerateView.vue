@@ -4017,6 +4017,17 @@ let materializingRetainedVersion: number | null = null;
  *  retain still restores from the local stash and the gallery by name, which
  *  is what the phone does too. */
 let retainedFallback: { version: number; metadata: OutputMetadata } | null = null;
+/** Nothing was retained, so the closing still of a first/last-frame print
+ *  has no fallback either (metadata records its name, never its bytes) —
+ *  say so, as an ordinary prefill does. */
+function discloseUnrestorableEndFrame(metadata: OutputMetadata): void {
+  const notice = firstLastFrameRestoreNotice(
+    caps.value.supportsEndFrame,
+    metadata.keyframes,
+    Boolean(metadata.source_image_sha256 ?? metadata.source_image_name),
+  );
+  if (notice) toasts.push(notice, "error");
+}
 async function restoreReuseFallback(metadata: OutputMetadata, epoch: number): Promise<void> {
   await Promise.all([
     restorePrefillSource(metadata, epoch),
@@ -4042,15 +4053,7 @@ watch(
     const fallback = retainedFallback?.version === version ? retainedFallback.metadata : null;
     try {
       if (fallback && handoff.inventory.availability !== "available") {
-        // Nothing was retained, so the closing still of a first/last-frame
-        // print has no fallback either (metadata records its name, never its
-        // bytes) — say so, as an ordinary prefill does.
-        const endFrameNotice = firstLastFrameRestoreNotice(
-          caps.value.supportsEndFrame,
-          fallback.keyframes,
-          Boolean(fallback.source_image_sha256 ?? fallback.source_image_name),
-        );
-        if (endFrameNotice) toasts.push(endFrameNotice, "error");
+        discloseUnrestorableEndFrame(fallback);
         await restoreReuseFallback(fallback, epoch);
         return;
       }
@@ -4103,7 +4106,9 @@ watch(
     if (version === null || !composer.isRetainedSourceCurrent(version)) return;
     retainedRestorePending.value = false;
     const fallback = retainedFallback?.version === version ? retainedFallback.metadata : null;
-    if (fallback) void restoreReuseFallback(fallback, restoreEpoch);
+    if (!fallback) return;
+    discloseUnrestorableEndFrame(fallback);
+    void restoreReuseFallback(fallback, restoreEpoch);
   },
 );
 function invalidateRetainedRestore(): void {

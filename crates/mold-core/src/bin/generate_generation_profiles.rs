@@ -117,17 +117,8 @@ fn quoted(value: &str) -> String {
     serde_json::to_string(value).expect("a string serializes")
 }
 
-fn family_rows() -> Vec<(&'static str, &'static str)> {
-    mold_core::model_presentation::FAMILY_SLUGS
-        .iter()
-        .map(|slug| {
-            (
-                *slug,
-                mold_core::model_presentation::family_label(slug)
-                    .expect("listed slugs have labels"),
-            )
-        })
-        .collect()
+fn family_rows() -> &'static [(&'static str, &'static str)] {
+    mold_core::model_presentation::FAMILY_LABELS
 }
 
 fn render_presentation_typescript() -> String {
@@ -153,7 +144,7 @@ export const MODEL_PRESENTATIONS: Readonly<Record<string, ModelPresentationV1>> 
         out.push_str(" },\n");
     }
     out.push_str("};\n\nexport const FAMILY_LABELS: Readonly<Record<string, string>> = {\n");
-    for (slug, label) in family_rows() {
+    for (slug, label) in family_rows().iter().copied() {
         let _ = writeln!(out, "  {}: {},", quoted(slug), quoted(label));
     }
     out.push_str("};\n");
@@ -182,7 +173,7 @@ public enum ModelPresentationTable {\n",
         );
     }
     out.push_str("    ]\n\n    public static let familyLabels: [String: String] = [\n");
-    for (slug, label) in family_rows() {
+    for (slug, label) in family_rows().iter().copied() {
         let _ = writeln!(out, "        {}: {},", quoted(slug), quoted(label));
     }
     out.push_str("    ]\n}\n");

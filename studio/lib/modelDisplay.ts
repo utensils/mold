@@ -71,6 +71,12 @@ function catalogFallbackTitle(name: string): string {
  * ids) the provider title, then the catalog description, then a readable
  * form of the id → an older server's `display_name` → the raw id.
  */
+function generatedPresentation(id: string) {
+  return Object.hasOwn(MODEL_PRESENTATIONS, id)
+    ? MODEL_PRESENTATIONS[id]
+    : undefined;
+}
+
 export function modelPresentation(
   modelOrId: DisplayableModel | string,
 ): ModelPresentation {
@@ -91,8 +97,9 @@ export function modelPresentation(
     };
   }
 
+  // Own keys only: `constructor` or `toString` is not a model.
   const generated =
-    MODEL_PRESENTATIONS[name] ?? MODEL_PRESENTATIONS[name.toLowerCase()];
+    generatedPresentation(name) ?? generatedPresentation(name.toLowerCase());
   if (generated) {
     const variant = generated.variant ?? null;
     return {

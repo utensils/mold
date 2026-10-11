@@ -60,8 +60,7 @@ final class ModelStore {
         return Dictionary(grouping: rows, by: \.family)
             .map { ($0.key, $0.value.sorted { $0.headline.localizedStandardCompare($1.headline) == .orderedAscending }) }
             .sorted {
-                Model.familyLabel(forFamily: $0.family)
-                    .localizedStandardCompare(Model.familyLabel(forFamily: $1.family)) == .orderedAscending
+                Model.familyPrecedes($0.family, $1.family)
             }
     }
 

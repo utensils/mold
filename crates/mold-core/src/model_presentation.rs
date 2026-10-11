@@ -41,56 +41,55 @@ impl ModelPresentation {
     }
 }
 
+/// Every family this build names: the canonical slug and its plain label.
+/// The one table — `family_label` reads it and the generated client tables
+/// are written from it, so a family cannot be named in one and missing from
+/// the other.
+pub const FAMILY_LABELS: &[(&str, &str)] = &[
+    ("flux", "FLUX.1"),
+    ("flux2", "FLUX.2"),
+    ("sd15", "SD 1.5"),
+    ("sd3", "SD 3.5"),
+    ("sd3.5", "SD 3.5"),
+    ("sdxl", "SDXL"),
+    ("z-image", "Z-Image"),
+    ("qwen-image", "Qwen Image"),
+    ("qwen-image-edit", "Qwen Image Edit"),
+    ("qwen-image21", "Qwen Image 2.1"),
+    ("wuerstchen", "Wuerstchen"),
+    ("ltx-video", "LTX Video"),
+    ("ltx2", "LTX-2"),
+    ("wan", "Wan Video"),
+    ("minimax-h3", "MiniMax H3"),
+    ("hunyuan3d", "Hunyuan3D"),
+    ("controlnet", "ControlNet"),
+    ("qwen3-expand", "Prompt expansion"),
+    ("upscaler", "Upscaler"),
+];
+
+/// Older spellings that still reach this function from configs and wire
+/// payloads, mapped onto their canonical slug.
+const FAMILY_ALIASES: &[(&str, &str)] = &[
+    ("qwen_image", "qwen-image"),
+    ("wuerstchen-v2", "wuerstchen"),
+    ("ltx_video", "ltx-video"),
+    ("minimax_h3", "minimax-h3"),
+    ("minimaxh3", "minimax-h3"),
+];
+
 /// The plain name of a model family, for section headers and family-only
 /// contexts. `None` for a family this build does not know, so callers keep
 /// their own fallback (the slug) rather than inventing a name.
 pub fn family_label(family: &str) -> Option<&'static str> {
-    Some(match family {
-        "flux" => "FLUX.1",
-        "flux2" => "FLUX.2",
-        "sd15" => "SD 1.5",
-        "sd3" | "sd3.5" => "SD 3.5",
-        "sdxl" => "SDXL",
-        "z-image" => "Z-Image",
-        "qwen-image" | "qwen_image" => "Qwen Image",
-        "qwen-image-edit" => "Qwen Image Edit",
-        "qwen-image21" => "Qwen Image 2.1",
-        "wuerstchen" | "wuerstchen-v2" => "Wuerstchen",
-        "ltx-video" | "ltx_video" => "LTX Video",
-        "ltx2" => "LTX-2",
-        "wan" => "Wan Video",
-        "minimax-h3" | "minimax_h3" | "minimaxh3" => "MiniMax H3",
-        "hunyuan3d" => "Hunyuan3D",
-        "controlnet" => "ControlNet",
-        "qwen3-expand" => "Prompt expansion",
-        "upscaler" => "Upscaler",
-        _ => return None,
-    })
+    let canonical = FAMILY_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == family)
+        .map_or(family, |(_, slug)| *slug);
+    FAMILY_LABELS
+        .iter()
+        .find(|(slug, _)| *slug == canonical)
+        .map(|(_, label)| *label)
 }
-
-/// Every family label this build knows, keyed by the canonical slug, for the
-/// generated client tables.
-pub const FAMILY_SLUGS: &[&str] = &[
-    "flux",
-    "flux2",
-    "sd15",
-    "sd3",
-    "sd3.5",
-    "sdxl",
-    "z-image",
-    "qwen-image",
-    "qwen-image-edit",
-    "qwen-image21",
-    "wuerstchen",
-    "ltx-video",
-    "ltx2",
-    "wan",
-    "minimax-h3",
-    "hunyuan3d",
-    "controlnet",
-    "qwen3-expand",
-    "upscaler",
-];
 
 /// The presentation of one curated checkpoint.
 pub fn presentation(manifest: &ModelManifest) -> ModelPresentation {
@@ -452,8 +451,17 @@ mod tests {
     fn unknown_families_have_no_label_so_callers_keep_their_fallback() {
         assert_eq!(family_label("companion"), None);
         assert_eq!(family_label(""), None);
-        for slug in FAMILY_SLUGS {
-            assert!(family_label(slug).is_some(), "{slug}");
+        for (alias, slug) in FAMILY_ALIASES {
+            assert_eq!(family_label(alias), family_label(slug), "{alias}");
+        }
+        // Every family a curated model belongs to has a label, except the
+        // component companions that never appear as a section.
+        for manifest in known_manifests().iter().filter(|m| !m.hidden) {
+            assert!(
+                family_label(&manifest.family).is_some(),
+                "{} has no family label",
+                manifest.family
+            );
         }
     }
 

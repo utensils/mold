@@ -109,11 +109,23 @@ const phantomLabel = computed(() =>
 const FILTER_THRESHOLD = 8;
 const showFilter = computed(() => props.models.length > FILTER_THRESHOLD);
 
+/** Each row's presentation, resolved once per model list rather than on
+ * every read in the template. */
+const presentations = computed(
+  () =>
+    new Map(
+      props.models.map((model) => [model.name, modelPresentation(model)]),
+    ),
+);
+function presented(model: M) {
+  return presentations.value.get(model.name) ?? modelPresentation(model);
+}
+
 function matches(model: M, needle: string): boolean {
   if (!needle) return true;
-  const presented = modelPresentation(model);
-  const haystack = `${model.name} ${presented.displayName} ${presented.title} ${
-    presented.summary ?? ""
+  const shown = presented(model);
+  const haystack = `${model.name} ${shown.displayName} ${shown.title} ${
+    shown.summary ?? ""
   } ${model.description ?? ""} ${model.family} ${familyLabel(model.family)}`;
   return haystack.toLocaleLowerCase().includes(needle);
 }
@@ -336,16 +348,16 @@ onMounted(() => {
             <span
               data-test="model-option-name"
               class="ms-model__name"
-              :title="modelPresentation(model).displayName"
+              :title="presented(model).displayName"
             >
-              {{ modelPresentation(model).title }}
+              {{ presented(model).title }}
             </span>
             <span
-              v-if="modelPresentation(model).variant"
+              v-if="presented(model).variant"
               data-test="model-option-variant"
               class="ms-model__variant"
             >
-              {{ modelPresentation(model).variant }}
+              {{ presented(model).variant }}
             </span>
           </span>
           <span class="ms-model__meta">
@@ -376,11 +388,11 @@ onMounted(() => {
             {{ availabilityTag?.(model) }}
           </span>
           <span
-            v-if="modelPresentation(model).summary"
+            v-if="presented(model).summary"
             data-test="model-option-description"
             class="ms-model__desc"
           >
-            {{ modelPresentation(model).summary }}
+            {{ presented(model).summary }}
           </span>
         </span>
         <span

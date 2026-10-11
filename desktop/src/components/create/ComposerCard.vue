@@ -24,6 +24,7 @@ import type { ApiTarget } from "../../lib/api/client";
 import { MAX_BATCH_SIZE } from "../../lib/generateForm";
 import {
   PROMPT_HEIGHT_INITIAL,
+  PROMPT_HEIGHT_MIN,
   PROMPT_HEIGHT_STEP,
   availablePromptHeight,
   draggedPromptHeight,
@@ -302,6 +303,7 @@ defineExpose({ focus, expand, record, isEditingPrompt: () => promptEditorOpen.va
         role="separator"
         aria-orientation="horizontal"
         aria-label="Prompt height"
+        :aria-valuemin="Math.min(PROMPT_HEIGHT_MIN, Math.round(promptRoom))"
         :aria-valuenow="Math.round(promptHeight)"
         :aria-valuemax="Math.round(promptRoom)"
         tabindex="0"

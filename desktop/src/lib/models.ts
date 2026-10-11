@@ -54,15 +54,17 @@ export function mergeModelPresentationMetadata<T extends ModelEntry>(
       ? supplement.description
       : (preferred.description ?? supplement.description);
 
-  const pick = (key: "title" | "variant" | "summary" | "family_label") =>
-    hasText(preferred[key]) ? preferred[key] : supplement[key];
+  // The four presentation fields are one answer from one server build: take
+  // them together from whichever copy has a title, never one machine's title
+  // beside another's variant.
+  const presented = hasText(preferred.title) ? preferred : supplement;
   return {
     ...preferred,
     display_name: displayName,
-    title: pick("title"),
-    variant: pick("variant"),
-    summary: pick("summary"),
-    family_label: pick("family_label"),
+    title: presented.title,
+    variant: presented.variant,
+    summary: presented.summary,
+    family_label: presented.family_label,
     kind: hasText(preferred.kind) ? preferred.kind : supplement.kind,
     modality: hasText(preferred.modality) ? preferred.modality : supplement.modality,
     description,

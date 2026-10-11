@@ -72,4 +72,16 @@ public extension Model {
     static func familyLabel(forFamily family: String) -> String {
         ModelPresentationTable.familyLabels[family] ?? family
     }
+
+    /// The order family sections appear in: by the label their header shows,
+    /// then by slug — two slugs can share a label (`sd3` / `sd3.5`), and a
+    /// sort with no tie-break would let dictionary order swap the sections
+    /// between refreshes.
+    static func familyPrecedes(_ a: String, _ b: String) -> Bool {
+        switch familyLabel(forFamily: a).localizedStandardCompare(familyLabel(forFamily: b)) {
+        case .orderedAscending: true
+        case .orderedDescending: false
+        case .orderedSame: a < b
+        }
+    }
 }

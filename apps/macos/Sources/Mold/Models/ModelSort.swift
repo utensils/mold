@@ -32,8 +32,7 @@ extension ModelSort {
         Dictionary(grouping: rows, by: \.family)
             .map { (family: $0.key, rows: sorted($0.value, by: sort)) }
             .sorted {
-                Model.familyLabel(forFamily: $0.family)
-                    .localizedStandardCompare(Model.familyLabel(forFamily: $1.family)) == .orderedAscending
+                Model.familyPrecedes($0.family, $1.family)
             }
     }
 

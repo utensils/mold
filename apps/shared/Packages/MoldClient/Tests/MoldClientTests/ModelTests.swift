@@ -172,3 +172,12 @@ private func loadModels() throws -> [Model] {
     #expect(!model.matchesDiscovery(CatalogQuery(source: "civitai")))
     #expect(!model.matchesDiscovery(CatalogQuery(family: "wan")))
 }
+
+@Test func familySectionsOrderByLabelThenSlug() {
+    // `sd3` and `sd3.5` share "SD 3.5"; the slug breaks the tie so the
+    // sections never swap between refreshes.
+    #expect(Model.familyPrecedes("sd3", "sd3.5"))
+    #expect(!Model.familyPrecedes("sd3.5", "sd3"))
+    #expect(Model.familyPrecedes("flux", "sdxl"))
+    #expect(!Model.familyPrecedes("sd3", "sd3"))
+}

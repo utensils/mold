@@ -24,7 +24,9 @@ const LABELS_BY_LOOSE_KEY = new Map(
 
 export function familyLabel(family: string): string {
   return (
-    FAMILY_LABELS[family] ??
+    (Object.hasOwn(FAMILY_LABELS, family)
+      ? FAMILY_LABELS[family]
+      : undefined) ??
     LABELS_BY_LOOSE_KEY.get(looseKey(family)) ??
     family
       .split(/[-_]/)
