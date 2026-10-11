@@ -113,9 +113,15 @@ impl ObjectSocket {
                         safe_category(error)
                     );
                 }
-                let _ = out.try_send(Err(SocketError::Io(std::io::Error::other(
-                    "secure ciphertext carrier unavailable",
-                ))));
+                let message = if result
+                    .as_ref()
+                    .is_err_and(|e| e.to_string() == "secure gateway temporarily busy")
+                {
+                    "secure gateway temporarily busy; retry connecting"
+                } else {
+                    "secure ciphertext carrier unavailable"
+                };
+                let _ = out.try_send(Err(SocketError::Io(std::io::Error::other(message))));
             }
             worker_stop.cancel();
         });
@@ -261,6 +267,99 @@ fn supports_objects(value: &Value, trusted: &str) -> bool {
 }
 fn peer(value: &Value) -> Option<Peer> {
     Some((value["sid"].as_str()?.into(), value["rid"].as_str()?.into()))
+}
+fn is_gateway_delivery_failure(value: &Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.len() == 3
+            && value["message"] == "Internal server error"
+            && ["connectionId", "requestId"].iter().all(|key| {
+                value[*key].as_str().is_some_and(|id| {
+                    !id.is_empty()
+                        && id.len() <= 128
+                        && id.bytes().all(|b| (0x21..=0x7e).contains(&b))
+                })
+            })
+    })
+}
+#[cfg(test)]
+mod gateway_tests {
+    use super::*;
+    #[tokio::test]
+    async fn dropped_gateway_frame_retries_only_original_ciphertext() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (raw, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(raw).await.unwrap();
+            socket
+                .send(Message::Text(
+                    json!({"a":"ready","v":3,"sid":"s","rid":"r"})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            let original = socket.next().await.unwrap().unwrap();
+            socket.send(Message::Text(json!({"connectionId":"example=","message":"Internal server error","requestId":"request-id"}).to_string().into())).await.unwrap();
+            let retried = socket.next().await.unwrap().unwrap();
+            assert_eq!(retried, original);
+            socket
+                .send(Message::Text(
+                    json!({"a":"ack","v":3,"sid":"s","rid":"r","next":1,"credit":64,"ack_seq":1})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+        let (raw, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+            .await
+            .unwrap();
+        let mut socket = ObjectSocket::new(raw, "11".repeat(16), false);
+        socket.next().await.unwrap().unwrap();
+        let mut wire = ReliableChannel::new("s".into(), "r".into());
+        wire.queue_packet(&[42; 32]).unwrap();
+        let original = wire.outgoing(0).unwrap();
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&original[0]).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), socket.next())
+                .await
+                .is_err()
+        );
+        let retry = wire.outgoing(10_000).unwrap();
+        assert_eq!(retry, original);
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&retry[0]).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+        let Message::Text(ack) = socket.next().await.unwrap().unwrap() else {
+            panic!()
+        };
+        assert_eq!(serde_json::from_str::<Value>(&ack).unwrap()["a"], "ack");
+        server.await.unwrap();
+    }
+    #[test]
+    fn only_bounded_gateway_delivery_notice_is_transient_loss() {
+        let notice = json!({"connectionId":"example=","message":"Internal server error","requestId":"request-id"});
+        assert!(is_gateway_delivery_failure(&notice));
+        for other in [
+            json!({"connectionId":"example=","message":"Forbidden","requestId":"request-id"}),
+            json!({"connectionId":"example=","message":"Internal server error"}),
+            json!({"connectionId":"example=","message":"Internal server error","requestId":"request-id","a":"cancel"}),
+            json!({"connectionId":"x".repeat(129),"message":"Internal server error","requestId":"request-id"}),
+            json!({"connectionId":"example=","message":"Internal server error","requestId":0}),
+        ] {
+            assert!(!is_gateway_delivery_failure(&other));
+        }
+    }
 }
 async fn send(socket: &mut RawSocket, value: Value, delivery: &DeliveryTracker) -> Result<()> {
     tokio::time::timeout(
@@ -766,6 +865,16 @@ async fn run(
                 continue;
             };
             let value: Value = serde_json::from_str(text)?;
+            if is_gateway_delivery_failure(&value) {
+                if sid.is_none() {
+                    bail!("secure gateway temporarily busy");
+                }
+                // API Gateway can drop one invocation under pressure. Leave
+                // sequence/ACK state and deadlines untouched so the existing
+                // carrier retransmits only retained ciphertext or an exact
+                // object allocation. Never restart an application request.
+                continue;
+            }
             if value["a"] == "ready" {
                 enabled = supports_objects(&value["objects"], &trusted);
                 sid = value["sid"].as_str().map(str::to_string);
