@@ -154,16 +154,20 @@ mod tests {
     }
 
     #[test]
-    fn ios_registers_mobile_pairing_deep_links() {
+    fn mobile_pairing_uses_verified_https_links_with_exact_paths() {
         let config: serde_json::Value =
             serde_json::from_str(include_str!("../tauri.conf.json")).expect("valid Tauri config");
-        let generated_plist = include_str!("../gen/apple/mold-mobile_iOS/Info.plist");
+        let domains = config["plugins"]["deep-link"]["mobile"].as_array().unwrap();
+        assert_eq!(domains.len(), 1);
+        let domain = &domains[0];
+        assert_eq!(domain["scheme"], serde_json::json!(["https"]));
+        assert_eq!(domain["host"], "utensils.io");
         assert_eq!(
-            config["plugins"]["deep-link"]["mobile"][0]["scheme"][0],
-            "mold"
+            domain["path"],
+            serde_json::json!(["/mold/pair", "/mold/pair/"])
         );
-        assert!(generated_plist.contains("<key>CFBundleURLTypes</key>"));
-        assert!(generated_plist.contains("<string>mold</string>"));
+        assert_eq!(domain["appLink"], true);
+        assert!(domain.get("pathPrefix").is_none());
     }
 
     #[test]

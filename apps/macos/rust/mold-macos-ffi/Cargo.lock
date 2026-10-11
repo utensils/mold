@@ -2911,6 +2911,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "mold-ai-secure",
+ "mold-ai-secure-client",
  "reqwest",
  "rustix",
  "rustls",
@@ -2971,6 +2972,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.28.0",
  "tokio-util",
+ "uuid",
  "zeroize",
 ]
 

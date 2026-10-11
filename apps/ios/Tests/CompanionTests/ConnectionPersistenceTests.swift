@@ -9,7 +9,10 @@ struct ConnectionPersistenceTests {
     @Test func roamingRetainsOneMachineAndItsKeyAcrossLaunches() throws {
         let file = HostListFile(url: FileManager.default.temporaryDirectory.appending(path: "routes-\(UUID()).json"))
         let credentials = HostStoreTests.MemoryCredentials()
-        let host = MoldHost(name: "HAL9000", baseURL: URL(string: "http://192.168.1.2:7680")!, apiKey: "test-key")
+        let host = MoldHost(name: "HAL9000", baseURL: URL(string: "http://192.168.1.2:7680")!, apiKey: "test-key",
+            secure: SecureHost(binding: .init(signingKey: "pin", noiseKey: "noise", signature: "signature"), namespace: "namespace",
+                websocketURL: URL(string: "wss://relay.example")!,
+                grant: .init(id: "grant", expiresAt: 4_000_000_000, epoch: 0, signature: "signature")))
         try credentials.setAPIKey("test-key", for: host.id)
         let hosts = HostStore(list: file, credentials: credentials, makeBackend: { _ in FakeBackend() })
         hosts.setHosts([host])

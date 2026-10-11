@@ -29,8 +29,9 @@
             "https"
           ],
           "host": "utensils.io",
-          "pathPrefix": [
-            "/mold/pair"
+          "path": [
+            "/mold/pair",
+            "/mold/pair/"
           ],
           "appLink": true
         }
