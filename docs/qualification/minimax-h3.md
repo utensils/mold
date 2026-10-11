@@ -372,7 +372,9 @@ canvas by the compact canvas RULE — see
 [Qualified canvases](#qualified-canvases) — with 1344x768 the default, offers
 the family frame grid (107-345 on `17n+5`) at 24 fps with 124 the default and
 2-50 terminal-inclusive grid points with 21 the default, and fixes batch one,
-MP4 delivery, and a required first-frame source. A reviewed Turbo tag keeps
+MP4 delivery, and a required first-frame source (this stored-record profile
+still pins one first-frame endpoint; the public runtime admits text-only and
+first/last endpoints since #1552). A reviewed Turbo tag keeps
 its distilled adapter's exact step count. Web, desktop, and iPhone remove the family-wide denial only
 when that exact model name and request envelope agree with the complete
 additive component graph. A missing component, widened axis, absent first
@@ -1221,6 +1223,30 @@ the harness, or this campaign: FL2VA has always required a source image, and
 PR 1 does not change that contract. Lifting it so an FL2VA tier can run
 text-only is tracked in #1552.
 
+**Text-only FL2VA is admitted since #1552 (2026-10).** The public runtime now
+mints a zero-endpoint envelope for `Mode::TextToAudioVideo` on the base
+`comfy-pruned-int8` tag and every FL2VA Turbo tier
+(`public_fl2va_runtime_envelope_for_mode`, `private_server.rs`): endpoint
+count 0 anchored at `"none"`, zero Qwen vision patches, zero condition rows,
+and the whole 2,048-row text ceiling as prompt budget — ComfyUI's
+`MiniMaxH3ImageToVideo` leaves both frames unconnected and tokenizes the bare
+prompt (`comfy_extras/nodes_minimax_h3.py:132-133,139-163`,
+`comfy/text_encoders/minimax.py:6,193-197`). The compact FL2VA row and
+recipe advertise `source_image: "optional"`; a stored first-frame record
+(private-UAT build without `h3`) still advertises `"required"`, which is what
+it enforces. Its memory bounds are DERIVED from this record's first-frame
+observations, never measured: attention and FFN scale by the packed sequence,
+which is one endpoint's 1,008 condition rows shorter, so they come out
+strictly below the first-frame grant; the Qwen activation workspace keeps the
+full first-frame grant and the per-request demand charges that whole grant
+(the conditioner's dense text attention is quadratic in text rows, and the
+text-only text ceiling is the measured sequence's text half); the condition
+VAE transient, decoder, audio decode, and fixed terms are unchanged. Every
+text-only bound is therefore at or below its first-frame counterpart and no
+term is reduced below what the first-frame measurement supports. A text-only
+UAT A/B (T2V against I2V, base and one Turbo tier, frames and audio viewed)
+has not run yet.
+
 **Adapters pulled ahead of the release are unowned by the running service.**
 This holds for EVERY adapter pulled ahead of the release that first ships its
 tag, not only this campaign's two: they all land in the shared model store at
@@ -1713,6 +1739,58 @@ Any change to the pinned license, Q&A, source revisions, component identities,
 supported territory, execution layout, attention backend, quantization policy,
 or public product surface requires updating this record and re-running the
 applicable review before release.
+
+## Distill tiers and text-only campaign (#1812, 2026-10-10)
+
+Four new FL2VA identities and text-only (T2VA, zero-endpoint) admission were
+exercised on plato (one L40S per render, CUDA, production home
+`/storage/mold`, scratch servers on the branch build) through the public
+server path. Every render below is 1344x768, 124 frames at 24 fps (5.17 s),
+32 kHz stereo AAC, guidance 0. Each output was inspected as a contact sheet of
+frames 0, 20, ..., 120, and its audio was checked with `volumedetect` and
+`aspectralstats` flatness (0.10-0.16 on every clip: tonal content, not noise).
+Wall clock is the CLI round trip including load, encode, VAE decode, and
+muxing; "denoise" is the pipeline's own phase time.
+
+| Tag | Mode | Seed | Wall | Denoise | Inspection |
+| --- | --- | --- | --- | --- | --- |
+| `comfy-pruned-int8-turbo-8step` | text-only | 1812 | first-load run | n/a | Coherent street scene, requested push-in, mean -12.1 dB |
+| `comfy-pruned-int8` (base, default steps) | text-only | 1812 | 934 s | 888 s | Coherent, saxophonist among passersby, mean -18.0 dB |
+| `comfy-pruned-int8-dmad-4step` | text-only | 1812 | 360 s | 182 s | Coherent night street, mean -17.3 dB |
+| `comfy-pruned-int8-pdmd-2step` | text-only | 1812 | 269 s | 92 s | Coherent; a duplicated saxophonist appears mid-clip (2-step artefact), mean -10.8 dB |
+| `comfy-pruned-int8-pdmd-4step` | text-only | 1812 | 361 s | 183 s | Coherent, push-in, mean -11.5 dB |
+| `fasth3-v2-int8` | text-only | 1812 | 600 s (first load) | 392 s | Coherent, push-in, crowd motion, mean -17.7 dB |
+| `comfy-pruned-int8-dmad-4step` | first frame | 77 | 260 s | 190 s | Opens on the supplied frame, a woman enters, static camera honoured |
+| `comfy-pruned-int8-pdmd-2step` | first frame | 77 | 166 s | 96 s | Opens on the frame; camera drifts in despite "holds steady"; interaction present |
+| `comfy-pruned-int8-pdmd-4step` | first frame | 77 | 261 s | n/a | Opens on the frame, a woman enters |
+| `fasth3-v2-int8` | first frame | 77 | 539 s | 445 s | Opens on the frame, a woman walks up and stops, static camera |
+
+Per transformer evaluation the LoRA tiers and the base cost about 45 s at
+this shape; FastH3 costs about 49 s (its INT8 token refiner and ConvRot path
+are the same kernels; the difference was not profiled). FastH3's eight
+evaluations therefore buy no wall-clock win over the 8-step Turbo tier on
+dense attention: its upstream operating point also runs FastVideo's 80%
+video-sparse attention, which mold does not implement (the VSA gate tensors
+are authenticated and never loaded).
+
+The campaign surfaced one defect, fixed on the branch: the runtime-bound
+observer refused a text-only render after it had finished because the
+condition-VAE phase legitimately reports zero workspace when no frame is
+encoded (`private_runtime_observer.rs`, `observation_zero_fields`).
+
+**Device memory.** A second pair of text-only renders (seed 4242, a dim
+lighthouse-stairwell prompt; both coherent, quiet wind ambience at mean
+-40 dB) ran concurrently with 1 Hz `nvidia-smi` sampling, each on its own
+GPU and scratch server: FastH3 peaked at 31,148 MiB device memory used
+(denoise 399 s) and DMAD 4-step at 21,266 MiB (denoise 216 s). These are
+whole-GPU peaks of a warm server process, not per-phase attributions; the
+FastH3 server had served two earlier FastH3 renders. Why FastH3 holds about
+10 GB more than the LoRA tier at the same shape was not profiled.
+
+Not done in this campaign: a same-seed A/B of the Kijai rank-reduced DMAD/PDMD
+adapters against their upstream full-rank files (`ZhengmingYu/DMAD`,
+`pdmd2026/pdmd_{2,4}NFE_lora`), per-phase VRAM attribution, 768x768 renders,
+and any Metal run.
 
 ## Public FL2VA endpoint admission correction (2026-10-04)
 

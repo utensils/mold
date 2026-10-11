@@ -112,8 +112,10 @@ and `ffprobe` on `PATH` before the server advertises that feature.
   Metal as well as CUDA; fp8-scaled Wan checkpoints remain CUDA-only.
   MiniMax H3's compact runtime is supported on SM89 CUDA and Apple Metal;
   Metal admission checks each request against live unified-memory headroom.
-  FL2VA requires at least one boundary frame: first, last, or both, with roughly 1,000
-  prompt tokens with paired frames and charging their additional memory.
+  FL2VA accepts text-only (no frame), first, last, or both boundary frames,
+  with roughly 1,000 prompt tokens with paired frames and charging their
+  additional memory. Distilled FL2VA tiers include Turbo 4/8-step, DMAD
+  4-step, PDMD 2/4-step, and FastVideo's FastH3 V2 8-step (CUDA-qualified).
   Queued FL2VA jobs preserve first/last endpoint roles through durable storage
   and replay, including all supported Turbo tiers.
   Forced-local H3 execution accepts one FL2VA request; batches, sequences, and

@@ -21,6 +21,9 @@ fails the test rather than the download.
 | `fl2v-4step-768p-v1.0-r21.header` | `drbaph/MiniMax-H3-Turbo-Lora-ComfyUI` | `be8eb3ea3466cbb7def202ffec0d2fdc054256ac` | `minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_resized_avg_rank_21_bf16.safetensors` | 2026-09-02 | `scripts/fetch-minimax-h3-turbo-header.py` | 52,928 | `e9a8cf11d436ab25df9667896a02c9768aca800ed5b8e5d794e80b7cb866f539` | `1b85da614014024a0c9507f12558917dcc69b6adb564e716324594f401723115` |
 | `fl2v-8step-v1.0-r21.header` | `drbaph/MiniMax-H3-Turbo-Lora-ComfyUI` | `be8eb3ea3466cbb7def202ffec0d2fdc054256ac` | `minimax_h3_fl2v_turbo_8step_v1.0_comfyui_resized_avg_rank_21_bf16.safetensors` | 2026-09-02 | `scripts/fetch-minimax-h3-turbo-header.py` | 52,944 | `f1bbb213d10d64aaf63d4e973d72887e43d356a3352ba73534e04aa317795f2a` | `a3208be61329c27a6754c53db9a21a3c86e2a285381700adf2d97e279c062840` |
 | `ref2v-4step-v0.1-r21.header` | `drbaph/MiniMax-H3-Turbo-Lora-ComfyUI` | `be8eb3ea3466cbb7def202ffec0d2fdc054256ac` | `minimax_h3_ref2v_turbo_4step_v0.1_comfyui_resized_avg_rank_21_bf16.safetensors` | 2026-09-02 | `scripts/fetch-minimax-h3-turbo-header.py` | 52,952 | `3c1db66284973ee4eec4e9700e12b1fc587b1aa7f85af6a811daac0d15b4db6f` | `2c6abb194cff3e26c2295c87892913adf0c92d8f784f305238246759f9b333d0` |
+| `kijai-dmad-4step-r39.header` | `Kijai/MiniMax-H3-experimental` | `d8023be02fefbb3633b0cd335c3879f91177299d` | `loras/minimax_h3_DMAD_4step_full_lora_avg_rank_39_bf16.safetensors` | 2026-10-10 | `scripts/fetch-minimax-h3-turbo-header.py` | 75,056 | `74971e9ce7b56ca419d6e47386aa0d7bf8c19d34212035bc9c713f8c7c7e9228` | `ddfdd94f4c9a0f32bf3649bb8e98ca20db572e4db6bcd9cca546a5b33ea32d11` |
+| `kijai-pdmd-2step-r38.header` | `Kijai/MiniMax-H3-experimental` | `d8023be02fefbb3633b0cd335c3879f91177299d` | `loras/minimax_h3_pdmd_2step_lora_avg_rank_38_bf16.safetensors` | 2026-10-10 | `scripts/fetch-minimax-h3-turbo-header.py` | 75,176 | `bd205e79c03b6a3af719b26d4b06d9a3957e9e3576fb38831e153f1055850187` | `a17f3eb45ab16be56fce79a522604a8ec1ce41d732022ad398c5908b230eec55` |
+| `kijai-pdmd-4step-r57.header` | `Kijai/MiniMax-H3-experimental` | `d8023be02fefbb3633b0cd335c3879f91177299d` | `loras/minimax_h3_pdmd_4step_lora_avg_rank_57_bf16.safetensors` | 2026-10-10 | `scripts/fetch-minimax-h3-turbo-header.py` | 75,384 | `76286d05ac5664890bba39bf9f252894036ab3baab4ffe87fa82548ec58b073d` | `b5c62eb228a4f604890566ad698713703ed221302e0df1c067725c39f11efc37` |
 
 The last three rows are SVD-resized derivatives rather than published PEFT
 exports: 416 tensors instead of 624 (no `alpha` scalars), a per-module rank
@@ -37,6 +40,25 @@ than a number, and they omit `resized_from` entirely. That second fact is why
 `resized_from` is required rather than checked only when present — a
 present-only check would let a different approximation of a different adapter
 through the metadata fence.
+
+The three `kijai-*` rows are the per-module-alpha shape
+(`H3TurboLoraShape::PerModuleAlpha`): Kijai's rank-reduced DMAD / PDMD distill
+adapters. They carry the same 208 modules and 624 tensors as a uniform export,
+but every module's rank is its own (2–128, read from the header) and its
+`alpha` is a BF16 scalar EQUAL to that rank, so the computed `alpha / rank` is
+exactly `1.0`. The resize ran over the fused Q/K/V matrix (kohya "Dynamic
+resize … from 384"), so the fused `lora_B` is dense, not block-diagonal, and
+the rank ceiling is `min(in, out)` of the fused projection. Their
+`__metadata__` is a closed set — `baked_scale "1.0"`, `converted_layout`,
+`conversion`, and optional kohya `ss_*` keys — with no `training_rank`,
+`resized_from`, or `qkv_fusion`. Until wave 2 registers them as tiers they are
+claimed by `H3_TURBO_LORA_KIJAI_PINS` (`H3TurboLoraPublishedPin::header_fixture`)
+rather than by a tier. Their published-weight check is opt-in:
+
+```bash
+MOLD_TEST_H3_KIJAI_LORA_DIR=/path/to/the/three/files \
+  cargo test -p mold-ai-candle --lib published_kijai -- --ignored
+```
 
 Re-fetching any row is a straight rerun, e.g.:
 
@@ -56,7 +78,7 @@ opens the output file — so a copy pulled from the wrong revision or a
 mirror that ignores `Range` is caught before it reaches disk.
 
 Every `.header` in this directory must be claimed by some
-`H3TurboLoraTier::header_fixture_path()`;
+`H3TurboLoraTier::header_fixture_path()` or published pin;
 `every_checked_in_header_fixture_is_claimed_by_a_tier` fails otherwise.
 A fixture no tier names is validated by nothing, so a golden header for a
 tier that has not landed belongs in the change that lands the tier, not

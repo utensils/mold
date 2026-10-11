@@ -1707,6 +1707,8 @@ non_diegetic_music: N/A
 ```bash
 # First-frame conditioning; the prompt file holds the instruction line plus the three fields
 mold run minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p "$(cat h3-prompt.txt)" --first-frame presenter.png --duration 5 --seed 83009
+# Text-only (T2VA): no frame and no instruction line; the three fields build the whole timeline
+mold run minimax-h3-fl2va:comfy-pruned-int8-turbo-8step "$(cat h3-prompt.txt)" --duration 5 --seed 83009
 ```
 
 #### Sources

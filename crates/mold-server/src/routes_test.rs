@@ -12832,6 +12832,10 @@ mod tests {
             OFFICIAL_REPO, REF2VA_COMFY, REF2VA_COMFY_NVFP4, REF2VA_COMFY_TURBO_4STEP,
             REF2VA_COMFY_TURBO_4STEP_R21, REF2VA_OFFICIAL,
         };
+        use mold_core::minimax_h3::{FASTVIDEO_FASTH3_REPO, FL2VA_FASTH3_V2_INT8};
+        use mold_core::minimax_h3::{
+            FL2VA_COMFY_DMAD_4STEP, FL2VA_COMFY_PDMD_2STEP, FL2VA_COMFY_PDMD_4STEP,
+        };
         // Both compact task partitions execute since #825, so their answer
         // depends only on how this binary was compiled; the pinned layouts
         // below are unrunnable everywhere.
@@ -12851,8 +12855,8 @@ mod tests {
         // Every H3 row's `hf_repo` is the BASE stack's repository, derived
         // from the manifest's Transformer file (`catalog::model_row`), which
         // is why every Turbo tag below reads `COMFY_REPO` whatever its own
-        // adapter source is — the two lightx2v tags and the three drbaph
-        // `-r21` tags included: the tag executes the Comfy-Org INT8 stack,
+        // adapter source is — the two lightx2v tags, the three drbaph `-r21`
+        // tags, and the three Kijai DMAD/PDMD tags included: the tag executes the Comfy-Org INT8 stack,
         // and the third-party adapter's own repository and revision are
         // provenance carried by the manifest FILE row
         // (`TurboManifestTier::adapter_hf_repo` / `adapter_hf_revision`), not
@@ -12915,6 +12919,18 @@ mod tests {
                     ref2va.0,
                     ref2va.1
                 ),
+                // FastH3 V2 substitutes the TRANSFORMER itself, so its row
+                // names the distilled DiT's own repository.
+                (
+                    FL2VA_FASTH3_V2_INT8,
+                    false,
+                    FASTVIDEO_FASTH3_REPO,
+                    fl2va.0,
+                    fl2va.1
+                ),
+                (FL2VA_COMFY_DMAD_4STEP, false, COMFY_REPO, fl2va.0, fl2va.1),
+                (FL2VA_COMFY_PDMD_2STEP, false, COMFY_REPO, fl2va.0, fl2va.1),
+                (FL2VA_COMFY_PDMD_4STEP, false, COMFY_REPO, fl2va.0, fl2va.1),
                 (
                     FL2VA_OFFICIAL,
                     false,

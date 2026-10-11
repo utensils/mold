@@ -41,6 +41,7 @@ use sha2::{Digest, Sha256};
 
 #[cfg(feature = "mp4")]
 use super::backend::{H3BackendArtifactLease, H3BackendExecutionLease, H3CandleBackendDevice};
+use super::compact_transformer::H3CompactTransformerSelection;
 #[cfg(feature = "mp4")]
 use super::engine::H3EngineProgressObserver;
 #[cfg(feature = "mp4")]
@@ -97,9 +98,9 @@ use crate::attention::{AttentionBackend, AttentionChunkPolicy};
 // Feature-independent: the envelope validators below name this in their
 // signatures in every build, matching how the type itself is defined.
 use crate::engine::GenerationReferenceBinding;
-use crate::h3_factory::H3FactoryTurboAdapterAuthority;
 #[cfg(feature = "mp4")]
 use crate::h3_factory::H3PrivateFl2VaFactoryAuthority;
+use crate::h3_factory::{H3FactoryBaseSamplerOverride, H3FactoryTurboAdapterAuthority};
 use crate::progress::ProgressReporter;
 use crate::{
     h3_factory_activation_prerequisites, FrozenH3FactoryAuthority, H3FactoryActivationPrerequisite,
@@ -284,9 +285,10 @@ impl H3PrivateRuntimeEnvelopeRecord {
     }
 
     /// The record's serialized shape is task-neutral; what a task changes is
-    /// which conditioning fields are meaningful. FL2VA pins exactly one
-    /// first-frame endpoint and no condition audio, while Ref2VA carries no
-    /// endpoint at all and prices its conditioning from ordered references.
+    /// which conditioning fields are meaningful. FL2VA pins its endpoint
+    /// mode — none (text-only), first, last, or first+last — and no condition
+    /// audio, while Ref2VA carries no endpoint at all and prices its
+    /// conditioning from ordered references.
     pub(crate) fn validate_for_task(&self, task: Task) -> Result<()> {
         self.validate_for_task_with_adapter(task, None)
     }
@@ -318,6 +320,27 @@ impl H3PrivateRuntimeEnvelopeRecord {
             }
         };
         self.validate_for_task_with_reviewed_steps(task, reviewed_steps)
+    }
+
+    /// The step authority a FROZEN quantization authority carries: its
+    /// task-checked Turbo adapter, else a reviewed distilled base tier's
+    /// exact grid points (FastH3 V2), else the undistilled range. The two
+    /// distillations never compose.
+    pub(crate) fn validate_for_task_with_distillation(
+        &self,
+        task: Task,
+        turbo: Option<&H3FactoryTurboAdapterAuthority>,
+        base_sampler: Option<&H3FactoryBaseSamplerOverride>,
+    ) -> Result<()> {
+        match (turbo, base_sampler) {
+            (_, None) => self.validate_for_task_with_adapter(task, turbo),
+            (None, Some(base_sampler)) => {
+                self.validate_for_task_with_reviewed_steps(task, Some(base_sampler.grid_points()))
+            }
+            (Some(_), Some(_)) => bail!(
+                "private H3 distilled base tier and Turbo adapter step authorities cannot both apply"
+            ),
+        }
     }
 
     /// Apply a step count whose task scoping the CALLER has already
@@ -363,7 +386,17 @@ impl H3PrivateRuntimeEnvelopeRecord {
     }
 
     fn validate_shape(&self, task: Task) -> Result<()> {
+        // Text-only FL2VA (#1552) is the one shape whose conditioning
+        // ceilings are ZERO: no endpoint means no vision patches and no
+        // condition latents, and an envelope claiming either is refused
+        // rather than read as some other mode.
+        let text_only = task == Task::Fl2va
+            && fl2va_mode_for_envelope(self.endpoint_count, &self.endpoint_anchor)
+                == Some(Mode::TextToAudioVideo);
         let conditioning_ok = match task {
+            Task::Fl2va if text_only => {
+                self.max_qwen_vision_rows == 0 && self.max_condition_visual_rows == 0
+            }
             Task::Fl2va => {
                 fl2va_mode_for_envelope(self.endpoint_count, &self.endpoint_anchor).is_some()
                     && self.max_condition_visual_rows > 0
@@ -373,6 +406,11 @@ impl H3PrivateRuntimeEnvelopeRecord {
                     && self.endpoint_anchor == "none"
                     && self.max_condition_visual_rows > 0
             }
+        };
+        let conditioning_ceilings: &[u64] = if text_only {
+            &[]
+        } else {
+            &[self.max_qwen_vision_rows, self.max_condition_visual_rows]
         };
         // The canvas and the clip length are RULES, not equalities:
         // `mold_core`'s `is_admitted_compact_canvas` and `valid_frame_count`
@@ -390,13 +428,12 @@ impl H3PrivateRuntimeEnvelopeRecord {
             || !conditioning_ok
             || [
                 self.max_qwen_output_text_rows,
-                self.max_qwen_vision_rows,
-                self.max_condition_visual_rows,
                 self.max_target_video_rows,
                 self.max_target_audio_rows,
                 self.max_total_packed_rows,
             ]
             .contains(&0)
+            || conditioning_ceilings.contains(&0)
         {
             bail!("private H3 runtime qualification has an invalid compact-quality envelope")
         }
@@ -414,10 +451,22 @@ impl H3PrivateRuntimeEnvelopeRecord {
         request: &H3FactoryPreparedRequestInput,
         turbo: Option<&H3FactoryTurboAdapterAuthority>,
     ) -> Result<()> {
+        self.validate_prepared_with_distillation(request, turbo, None)
+    }
+
+    /// [`Self::validate_prepared_with_adapter`] for a frozen authority that may
+    /// carry a distilled base tier instead of a Turbo adapter.
+    #[cfg(feature = "mp4")]
+    fn validate_prepared_with_distillation(
+        &self,
+        request: &H3FactoryPreparedRequestInput,
+        turbo: Option<&H3FactoryTurboAdapterAuthority>,
+        base_sampler: Option<&H3FactoryBaseSamplerOverride>,
+    ) -> Result<()> {
         // The request's own task selects the conditioning contract, and the
         // adapter must have been reviewed for that same task before its step
         // count is applied.
-        self.validate_for_task_with_adapter(request.task, turbo)?;
+        self.validate_for_task_with_distillation(request.task, turbo, base_sampler)?;
         // Name every differing axis: one bare mismatch sentence made a
         // wrong-tier step count, an off-canvas size, and an over-cap prompt
         // all read identically, which is undebuggable from a client.
@@ -1793,6 +1842,13 @@ pub(crate) struct H3AdmittedRoute {
     pub(crate) admitted_model: &'static str,
     pub(crate) partition_model: &'static str,
     pub(crate) task: Task,
+    /// The compact DiT the ADMITTED identity executes, read from its own
+    /// manifest (`H3CompactTransformerSelection::for_model`). Base and Turbo
+    /// tags select their task's Comfy-Org DiT; a distilled base tier such as
+    /// FastH3 V2 selects its own file while keeping the FL2VA partition —
+    /// Qwen support, the conditioner cache key, the factory canonical model,
+    /// and the VAEs are all partition-keyed and stay shared.
+    pub(crate) transformer: H3CompactTransformerSelection,
 }
 
 pub(crate) fn admitted_h3_route(model: &str) -> Result<H3AdmittedRoute> {
@@ -1802,11 +1858,35 @@ pub(crate) fn admitted_h3_route(model: &str) -> Result<H3AdmittedRoute> {
         contract::base_compact_model(admitted.canonical_model).ok_or_else(|| {
             anyhow!("private H3 admission names a model without a compact engine partition")
         })?;
+    let transformer = H3CompactTransformerSelection::for_model(admitted.canonical_model)?;
+    if transformer.task() != admitted.task
+        || partition_model != contract::base_compact_model_for_task(admitted.task)
+    {
+        bail!("private H3 admission resolved a transformer outside its task partition")
+    }
     Ok(H3AdmittedRoute {
         admitted_model: admitted.canonical_model,
         partition_model,
         task: admitted.task,
+        transformer,
     })
+}
+
+/// The reviewed distilled base tier's sampling contract an admitted identity
+/// carries, fenced against the DiT its route selected: a substituted
+/// transformer requires its tier's override, and a task-base transformer
+/// (base and Turbo tags) carries none.
+pub(crate) fn private_h3_base_sampler_for_route(
+    admitted_model: &str,
+    transformer: H3CompactTransformerSelection,
+) -> Result<Option<H3FactoryBaseSamplerOverride>> {
+    let base_sampler = H3FactoryBaseSamplerOverride::for_model(admitted_model)?;
+    if base_sampler.is_some() == transformer.is_task_base() {
+        bail!(
+            "private H3 admission paired {admitted_model} with a transformer outside its distilled tier"
+        )
+    }
+    Ok(base_sampler)
 }
 
 /// Preserve the complete cause chain at the durable admission boundary.
@@ -1959,16 +2039,11 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     let admitted_model = route.admitted_model;
     let partition_model = route.partition_model;
     let admitted_task = route.task;
-    let (admitted_transformer_task, admitted_published_artifact) = match admitted_task {
-        Task::Fl2va => (
-            H3TransformerTask::T2VaFl2Va,
-            H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
-        ),
-        Task::Ref2va => (
-            H3TransformerTask::Ref2Va,
-            H3ComfyPublishedArtifact::Ref2VaPrunedInt8ConvRot,
-        ),
-    };
+    // Per-ARTIFACT, not per-task: the admitted identity's own manifest names
+    // the DiT (`H3AdmittedRoute::transformer`).
+    let admitted_transformer = route.transformer;
+    let admitted_transformer_task = admitted_transformer.transformer_task();
+    let admitted_published_artifact = admitted_transformer.published_artifact();
     // Admission runs after reference resolution, so Ref2VA media are already
     // descriptor authorities — the only valid queue/worker form, and the one
     // the public-boundary validator refuses. FL2VA carries no references, so
@@ -2054,7 +2129,10 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     // authenticated envelope check below still validates the same request
     // against the record the artifact pass authorizes.
     timeline.enter(admission_phase::SUPPORT);
-    let storage = H3PrivateComfyStorageAuthority::resolve(paths.models_root, admitted_task)?;
+    let storage = H3PrivateComfyStorageAuthority::resolve_with_transformer(
+        paths.models_root,
+        admitted_transformer,
+    )?;
     let qwen_support = load_qualified_private_qwen_support(paths.models_root, partition_model)?;
     timeline.enter(admission_phase::CONDITIONING);
     let mut prepare_observer = H3EngineProgressObserver::new(progress);
@@ -2128,6 +2206,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     let artifact_report = resolve_installed_artifacts_with_control(
         paths.models_root,
         partition_model,
+        admitted_transformer,
         paths.authorization_record,
         |hash| {
             progress.checkpoint()?;
@@ -2185,6 +2264,15 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     timeline.enter(admission_phase::ADAPTER);
     let turbo_adapter =
         super::turbo::resolve_turbo_authority_for_request(admitted_model, paths.models_root)?;
+    // A distilled base tier (FastH3 V2) brings its own sampling contract with
+    // its substituted DiT: read from the reviewed tier row by the admitted
+    // identity and fenced against the transformer selection, so the frozen
+    // identity, the envelope's exact step count, and the integrator all name
+    // the same distillation.
+    let base_sampler = private_h3_base_sampler_for_route(admitted_model, admitted_transformer)?;
+    if turbo_adapter.is_some() && base_sampler.is_some() {
+        bail!("private H3 distilled base tier and Turbo adapter cannot both apply")
+    }
     timeline.enter(admission_phase::QUALIFICATION);
     #[cfg(not(feature = "h3"))]
     let private_compute_capability = compute_capability
@@ -2200,7 +2288,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         &attention_qualification_sha256,
     )?;
     #[cfg(feature = "h3")]
-    let runtime_qualification = public_runtime_qualification(
+    let runtime_qualification = public_runtime_qualification_with_distillation(
         &artifact_report,
         (request.width, request.height),
         request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
@@ -2212,6 +2300,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         attention.kernel().identity(),
         &attention_qualification_sha256,
         turbo_adapter.as_ref(),
+        base_sampler.as_ref(),
         admitted_task,
         // The request's own ordered set, which the contract validation above
         // already accepted. Ref2VA's conditioning envelope is a function of
@@ -2240,9 +2329,10 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     // would reject every Turbo attempt. The row ceilings were already asked
     // before the artifact pass; this is the authenticated backstop over every
     // axis, the compiled precheck's ceilings included.
-    runtime_qualification.validate_prepared_envelope_with_turbo(
+    runtime_qualification.validate_prepared_envelope_with_distillation(
         &admission_request.request,
         turbo_adapter.as_ref(),
+        base_sampler.as_ref(),
     )?;
     let seed = admission_request.seed;
     request.seed = Some(seed);
@@ -2355,6 +2445,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
                 qwen_policy_sha256: qwen_policy_identity.into(),
                 pruned_adaln_table_sha256,
                 turbo_adapter: turbo_adapter.clone(),
+                base_sampler: base_sampler.clone(),
             },
             prepared_attempt: None,
             execution_budget_echo: None,
@@ -3260,6 +3351,14 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     // FL2VA constant, so a frozen Ref2VA attempt reaches its own validators.
     let frozen_route = validate_frozen_reopen_route(request, frozen_factory, &owner_fence)?;
     let mode = frozen_route.mode;
+    // The frozen distilled base tier must be exactly the one the request's own
+    // identity and selected DiT imply — a FastH3 attempt never reopens on the
+    // Comfy-Org DiT's sampling contract, nor the reverse.
+    if private_h3_base_sampler_for_route(&request.model, frozen_route.transformer)?.as_ref()
+        != frozen_factory.quantization().base_sampler_override()
+    {
+        bail!("private H3 reopened distilled base tier differs from admission evidence")
+    }
     // The same per-task source admission resolved: the frozen FL2VA route
     // reopens the reviewed record file, the frozen Ref2VA route re-mints the
     // compiled capture-scope profile (deterministic, so the identity fence
@@ -3283,6 +3382,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     let artifact_report = resolve_installed_artifacts_with_control(
         paths.models_root,
         frozen_route.partition_model,
+        frozen_route.transformer,
         paths.authorization_record,
         |hash| {
             progress.checkpoint()?;
@@ -3343,7 +3443,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         &attention_qualification_sha256,
     )?;
     #[cfg(feature = "h3")]
-    let runtime_qualification = public_runtime_qualification(
+    let runtime_qualification = public_runtime_qualification_with_distillation(
         &artifact_report,
         (request.width, request.height),
         request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
@@ -3356,6 +3456,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         &attention_qualification_sha256,
         // Whatever admission froze, not a fresh environment read.
         frozen_factory.quantization().turbo_adapter(),
+        frozen_factory.quantization().base_sampler_override(),
         // The FROZEN task, and the same ordered set admission derived its
         // envelope from. The identity fence a few lines below compares the
         // re-minted record against what admission froze, so a substituted
@@ -3377,7 +3478,10 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     // The route above already validated the base factory and keyed the
     // request contract and artifact qualification on the frozen task.
     let reopened_task = frozen_route.task;
-    let storage = H3PrivateComfyStorageAuthority::resolve(paths.models_root, reopened_task)?;
+    let storage = H3PrivateComfyStorageAuthority::resolve_with_transformer(
+        paths.models_root,
+        frozen_route.transformer,
+    )?;
     let qwen_support =
         load_qualified_private_qwen_support(paths.models_root, frozen_route.partition_model)?;
     let transformer_cancellation = H3PrivatePreparationCancellation { progress };
@@ -3481,8 +3585,11 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     let seed = prepared_attempt.seed();
     let prepared = prepared_attempt.into_factory_inputs();
     prepared.revalidate()?;
-    runtime_qualification
-        .validate_prepared_envelope_with_turbo(prepared.prepared_request_input(), frozen_turbo)?;
+    runtime_qualification.validate_prepared_envelope_with_distillation(
+        prepared.prepared_request_input(),
+        frozen_turbo,
+        frozen_factory.quantization().base_sampler_override(),
+    )?;
     let enriched_factory = frozen_factory.with_private_prepared_attempt(
         prepared.factory_attempt_input().clone(),
         prepared.budget_echo_input().clone(),
@@ -3717,6 +3824,11 @@ const fn private_h3_factory_attention_backend(
 struct H3FrozenReopenRoute {
     task: Task,
     partition_model: &'static str,
+    /// The DiT admission selected, re-derived from the same persisted request
+    /// model. The frozen transformer component digest (and the artifact
+    /// qualification identity, whose report lists the selected file) fences
+    /// any disagreement with what admission actually opened.
+    transformer: H3CompactTransformerSelection,
     transformer_task: H3TransformerTask,
     published_artifact: H3ComfyPublishedArtifact,
     mode: Mode,
@@ -3735,23 +3847,22 @@ fn validate_frozen_reopen_route(
 ) -> Result<H3FrozenReopenRoute> {
     validate_base_factory(frozen_factory, owner_fence)?;
     let task = frozen_factory.task();
-    let (transformer_task, published_artifact) = match task {
-        Task::Fl2va => (
-            H3TransformerTask::T2VaFl2Va,
-            H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
-        ),
-        Task::Ref2va => (
-            H3TransformerTask::Ref2Va,
-            H3ComfyPublishedArtifact::Ref2VaPrunedInt8ConvRot,
-        ),
-    };
+    let partition_model = contract::base_compact_model_for_task(task);
+    // The same per-artifact route admission derived, from the same persisted
+    // request model; it must still land on the frozen task's partition.
+    let route = admitted_h3_route(&request.model)?;
+    if route.task != task || route.partition_model != partition_model {
+        bail!("private H3 reopened request model differs from the frozen task partition")
+    }
+    let transformer = route.transformer;
     let mode = contract::validate_resolved_request_contract(request, task)
         .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
     Ok(H3FrozenReopenRoute {
         task,
-        partition_model: contract::base_compact_model_for_task(task),
-        transformer_task,
-        published_artifact,
+        partition_model,
+        transformer,
+        transformer_task: transformer.transformer_task(),
+        published_artifact: transformer.published_artifact(),
         mode,
     })
 }
@@ -4380,9 +4491,7 @@ fn runtime_envelope_conditioning(
     match request.task {
         Task::Fl2va => {
             let expected: &[H3FactoryEndpointAnchor] = match request.mode {
-                Mode::TextToAudioVideo => {
-                    bail!("public H3 text-only qualification remains unavailable")
-                }
+                Mode::TextToAudioVideo => &[],
                 Mode::FirstFrameToAudioVideo => &[H3FactoryEndpointAnchor::First],
                 Mode::LastFrameToAudioVideo => &[H3FactoryEndpointAnchor::Last],
                 Mode::FirstAndLastFrameToAudioVideo => &[
@@ -4476,9 +4585,10 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
             owner,
             consumption_binding,
         } = *self;
-        runtime_envelope.validate_prepared_with_adapter(
+        runtime_envelope.validate_prepared_with_distillation(
             prepared.prepared_request_input(),
             authority.quantization().turbo_adapter(),
+            authority.quantization().base_sampler_override(),
         )?;
         let observed_envelope = runtime_envelope_observation(prepared.prepared_request_input())?;
         let observed_compute_capability = match attention.device() {
@@ -5376,9 +5486,21 @@ impl H3PrivateRuntimeQualificationAuthority {
         request: &H3FactoryPreparedRequestInput,
         turbo: Option<&H3FactoryTurboAdapterAuthority>,
     ) -> Result<()> {
+        self.validate_prepared_envelope_with_distillation(request, turbo, None)
+    }
+
+    /// The same backstop, with a distilled base tier's exact step count when
+    /// the attempt carries one.
+    #[cfg(feature = "mp4")]
+    fn validate_prepared_envelope_with_distillation(
+        &self,
+        request: &H3FactoryPreparedRequestInput,
+        turbo: Option<&H3FactoryTurboAdapterAuthority>,
+        base_sampler: Option<&H3FactoryBaseSamplerOverride>,
+    ) -> Result<()> {
         self.record
             .envelope
-            .validate_prepared_with_adapter(request, turbo)
+            .validate_prepared_with_distillation(request, turbo, base_sampler)
     }
 
     pub(crate) fn revalidate(&self) -> Result<()> {
@@ -5764,9 +5886,11 @@ fn public_runtime_envelope_for_shape(
     }
 }
 
-/// The serialized count and first anchor identify supported endpoint modes.
+/// The serialized count and first anchor identify supported endpoint modes;
+/// zero endpoints anchored at `"none"` is text-only (T2VA, #1552).
 fn fl2va_mode_for_envelope(count: u32, anchor: &str) -> Option<Mode> {
     match (count, anchor) {
+        (0, "none") => Some(Mode::TextToAudioVideo),
         (1, "first") => Some(Mode::FirstFrameToAudioVideo),
         (1, "last") => Some(Mode::LastFrameToAudioVideo),
         (2, "first") => Some(Mode::FirstAndLastFrameToAudioVideo),
@@ -5779,6 +5903,14 @@ fn fl2va_mode_for_envelope(count: u32, anchor: &str) -> Option<Mode> {
 /// b87fe48b `comfy/text_encoders/minimax.py:193-197` and
 /// `comfy_extras/nodes_minimax_h3.py:140-163` prepare both images separately.
 /// Keep the first-only budget and measurement denominators unchanged.
+///
+/// Text-only (T2VA, #1552) is the zero-endpoint case of the same rule: with
+/// both frames unconnected ComfyUI tokenizes the bare prompt
+/// (`comfy/text_encoders/minimax.py:6`, `:193-197` with `images == []`) and
+/// encodes no keyframe latent (`comfy_extras/nodes_minimax_h3.py:139-163`), so
+/// the envelope carries zero vision patches and zero condition rows, and the
+/// whole 2,048-row text ceiling is prompt budget. Its packed sequence is one
+/// endpoint's 1,008 condition rows shorter than first-frame's.
 #[cfg(feature = "h3")]
 fn public_fl2va_runtime_envelope_for_mode(
     canvas: (u32, u32),
@@ -5787,7 +5919,7 @@ fn public_fl2va_runtime_envelope_for_mode(
     mode: Mode,
 ) -> Result<H3PrivateRuntimeEnvelopeRecord> {
     let (count, anchor) = match mode {
-        Mode::TextToAudioVideo => bail!("public H3 text-only qualification remains unavailable"),
+        Mode::TextToAudioVideo => (0, "none"),
         Mode::FirstFrameToAudioVideo => (1, "first"),
         Mode::LastFrameToAudioVideo => (1, "last"),
         Mode::FirstAndLastFrameToAudioVideo => (2, "first"),
@@ -5830,6 +5962,9 @@ fn public_fl2va_runtime_bounds_for_mode(
     // Qwen demand is linear in text rows plus pre-merge vision patches. Use
     // the measured sequence as a floor so existing first-only grants stay
     // byte-identical, while two endpoints receive the larger charged grant.
+    // Text-only keeps the floor too: its text ceiling is the measured text
+    // sequence and the conditioner's dense text attention is quadratic in
+    // it, so dropping the vision patches must not shrink the grant.
     bounds.qwen_activation_workspace_bytes = scale(
         fl2va_observed::QWEN_ACTIVATION_WORKSPACE_DEVICE_BYTES,
         if envelope.endpoint_count > 1 {
@@ -6621,9 +6756,48 @@ pub fn h3_capture_bound_report(
         .collect()
 }
 
-#[cfg(feature = "h3")]
+/// [`public_runtime_qualification_with_distillation`] without a distilled
+/// base tier — the shape every pre-#1812 caller (and test) names.
+#[cfg(all(feature = "h3", test))]
 #[allow(clippy::too_many_arguments)]
 fn public_runtime_qualification(
+    artifact: &H3PrivateArtifactQualificationReport,
+    canvas: (u32, u32),
+    frames: u32,
+    steps: u32,
+    device_id: &str,
+    device_ordinal: usize,
+    compute_capability: Option<(u16, u16)>,
+    attention_runtime_identity_sha256: &str,
+    attention_kernel_identity: &str,
+    attention_qualification_sha256: &str,
+    turbo: Option<&H3FactoryTurboAdapterAuthority>,
+    task: Task,
+    references: &[mold_core::GenerationReference],
+    mode: Mode,
+) -> Result<H3PrivateRuntimeQualificationAuthority> {
+    public_runtime_qualification_with_distillation(
+        artifact,
+        canvas,
+        frames,
+        steps,
+        device_id,
+        device_ordinal,
+        compute_capability,
+        attention_runtime_identity_sha256,
+        attention_kernel_identity,
+        attention_qualification_sha256,
+        turbo,
+        None,
+        task,
+        references,
+        mode,
+    )
+}
+
+#[cfg(feature = "h3")]
+#[allow(clippy::too_many_arguments)]
+fn public_runtime_qualification_with_distillation(
     artifact: &H3PrivateArtifactQualificationReport,
     // The request's own canvas and clip length.
     // `validate_public_runtime_profile_with_turbo` refuses them below unless
@@ -6645,6 +6819,9 @@ fn public_runtime_qualification(
     attention_kernel_identity: &str,
     attention_qualification_sha256: &str,
     turbo: Option<&H3FactoryTurboAdapterAuthority>,
+    // A reviewed distilled base tier (FastH3 V2) fixes the step count exactly
+    // as a Turbo adapter does; the two never compose.
+    base_sampler: Option<&H3FactoryBaseSamplerOverride>,
     // The partition this record authorizes, and — for Ref2VA — the ordered
     // reference set its conditioning envelope is derived from. FL2VA carries
     // none and its envelope also depends on the validated endpoint mode.
@@ -6664,7 +6841,12 @@ fn public_runtime_qualification(
             )
         }
     }
-    let turbo_steps = turbo.map(H3FactoryTurboAdapterAuthority::grid_points);
+    if turbo.is_some() && base_sampler.is_some() {
+        bail!("private H3 distilled base tier and Turbo adapter step authorities cannot both apply")
+    }
+    let turbo_steps = turbo
+        .map(H3FactoryTurboAdapterAuthority::grid_points)
+        .or_else(|| base_sampler.map(H3FactoryBaseSamplerOverride::grid_points));
     let (schema, decision, canonical_model, task_name) = public_runtime_profile_identities(task);
     if !matches!(compute_capability, Some((8, 9)) | None)
         || artifact.canonical_model != canonical_model
@@ -8533,6 +8715,94 @@ mod tests {
         }
     }
 
+    /// The FastH3 V2 distilled base tier routes through the FL2VA partition on
+    /// its OWN DiT, carries its reviewed sampling override, and fixes the
+    /// envelope step axis at exactly its 9 grid points.
+    #[test]
+    fn the_fasth3_route_carries_its_distilled_base_tier_and_exact_steps() {
+        let route = admitted_h3_route(contract::FL2VA_FASTH3_V2_INT8).unwrap();
+        assert_eq!(route.admitted_model, contract::FL2VA_FASTH3_V2_INT8);
+        assert_eq!(route.partition_model, contract::FL2VA_COMFY);
+        assert_eq!(route.task, Task::Fl2va);
+        assert_eq!(
+            route.transformer.published_artifact(),
+            mold_candle::minimax_h3::H3ComfyPublishedArtifact::FastH3V2Fl2VaPrunedInt8ConvRot
+        );
+        assert!(!route.transformer.is_task_base());
+
+        let base_sampler =
+            private_h3_base_sampler_for_route(route.admitted_model, route.transformer)
+                .unwrap()
+                .expect("FastH3 carries its distilled tier");
+        assert_eq!(base_sampler.grid_points(), 9);
+        assert_eq!(base_sampler.video_shift(), 10.0);
+        assert_eq!(base_sampler.audio_shift(), 3.0);
+        assert_eq!(
+            base_sampler.sampler_kind().as_str(),
+            H3SamplerKind::ComfyResMultistep.as_str()
+        );
+        // Base and Turbo tags carry none, and a mismatched pairing fails
+        // closed in both directions.
+        for model in [contract::FL2VA_COMFY, contract::FL2VA_COMFY_TURBO_8STEP] {
+            let route = admitted_h3_route(model).unwrap();
+            assert_eq!(
+                private_h3_base_sampler_for_route(model, route.transformer).unwrap(),
+                None,
+                "{model}"
+            );
+        }
+        assert!(private_h3_base_sampler_for_route(
+            contract::FL2VA_FASTH3_V2_INT8,
+            H3CompactTransformerSelection::base_for_task(Task::Fl2va)
+        )
+        .is_err());
+        assert!(
+            private_h3_base_sampler_for_route(contract::FL2VA_COMFY, route.transformer).is_err()
+        );
+
+        // The step axis: exactly 9, never the base range.
+        reviewed_envelope(9)
+            .validate_for_task_with_distillation(Task::Fl2va, None, Some(&base_sampler))
+            .unwrap();
+        for wrong in [
+            contract::COMPACT_BASE_MIN_STEPS,
+            contract::COMPACT_MAX_STEPS,
+            5,
+            8,
+            10,
+        ] {
+            let error = reviewed_envelope(wrong)
+                .validate_for_task_with_distillation(Task::Fl2va, None, Some(&base_sampler))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("renders exactly 9 steps"),
+                "{wrong}: {error}"
+            );
+        }
+        // Without the override the same 9-point envelope is out of range.
+        assert!(reviewed_envelope(9)
+            .validate_for_task_with_distillation(Task::Fl2va, None, None)
+            .is_err());
+        // A Turbo adapter and a distilled base tier never compose.
+        let turbo = H3FactoryTurboAdapterAuthority::for_reviewed_tier(
+            contract::turbo_tier_for_model(contract::FL2VA_COMFY_TURBO_8STEP)
+                .unwrap()
+                .tier_stable_id,
+            &"a".repeat(64),
+            &"b".repeat(64),
+            1,
+            1,
+            1,
+        )
+        .unwrap();
+        let error = reviewed_envelope(9)
+            .validate_for_task_with_distillation(Task::Fl2va, Some(&turbo), Some(&base_sampler))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cannot both apply"), "{error}");
+    }
+
     /// The undistilled envelope's floor is the smallest REVIEWED schedule,
     /// not the sampler's arithmetic minimum.
     ///
@@ -8584,11 +8854,35 @@ mod tests {
                 route.partition_model,
                 contract::base_compact_model_for_task(route.task)
             );
+            // A Turbo tag executes its task's Comfy-Org DiT; only a manifest
+            // naming a different reviewed DiT (FastH3) moves this axis.
+            assert_eq!(
+                route.transformer,
+                H3CompactTransformerSelection::base_for_task(route.task)
+            );
         }
         assert_eq!(
             contract::base_compact_model_for_task(Task::Ref2va),
             contract::REF2VA_COMFY
         );
+        for (model, artifact) in [
+            (
+                contract::FL2VA_COMFY,
+                mold_candle::minimax_h3::H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
+            ),
+            (
+                contract::REF2VA_COMFY,
+                mold_candle::minimax_h3::H3ComfyPublishedArtifact::Ref2VaPrunedInt8ConvRot,
+            ),
+        ] {
+            assert_eq!(
+                admitted_h3_route(model)
+                    .unwrap()
+                    .transformer
+                    .published_artifact(),
+                artifact
+            );
+        }
 
         let base = admitted_h3_route(contract::FL2VA_COMFY).unwrap();
         assert_eq!(base.admitted_model, contract::FL2VA_COMFY);
@@ -8923,15 +9217,222 @@ mod tests {
         assert!(envelope
             .validate_prepared_with_adapter(&request, None)
             .is_err());
-        for mode in [Mode::ReferenceToAudioVideo, Mode::TextToAudioVideo] {
-            assert!(public_fl2va_runtime_envelope_for_mode(
-                MEASURED_CANVAS,
-                MEASURED_FRAMES,
-                contract::COMFY_DEFAULT_STEPS,
-                mode,
-            )
-            .is_err());
+        assert!(public_fl2va_runtime_envelope_for_mode(
+            MEASURED_CANVAS,
+            MEASURED_FRAMES,
+            contract::COMFY_DEFAULT_STEPS,
+            Mode::ReferenceToAudioVideo,
+        )
+        .is_err());
+    }
+
+    /// Text-only FL2VA (T2VA, #1552): zero boundary endpoints. ComfyUI's
+    /// `MiniMaxH3ImageToVideo` leaves both frames unconnected
+    /// (`comfy_extras/nodes_minimax_h3.py:132-133,139-163`) and the
+    /// presentation is the bare prompt (`comfy/text_encoders/minimax.py:6,
+    /// 193-197`), so the envelope carries no vision pads and no condition
+    /// latents, and every grant is at or below the first-frame one.
+    #[cfg(all(feature = "h3", feature = "mp4"))]
+    #[test]
+    fn public_fl2va_authority_admits_text_only_within_the_first_frame_ledger() {
+        let envelope = public_fl2va_runtime_envelope_for_mode(
+            MEASURED_CANVAS,
+            MEASURED_FRAMES,
+            contract::COMFY_DEFAULT_STEPS,
+            Mode::TextToAudioVideo,
+        )
+        .unwrap();
+        let first = public_fl2va_runtime_envelope_for_mode(
+            MEASURED_CANVAS,
+            MEASURED_FRAMES,
+            contract::COMFY_DEFAULT_STEPS,
+            Mode::FirstFrameToAudioVideo,
+        )
+        .unwrap();
+        assert_eq!(envelope.endpoint_count, 0);
+        assert_eq!(envelope.endpoint_anchor, "none");
+        assert_eq!(envelope.max_qwen_vision_rows, 0);
+        assert_eq!(envelope.max_condition_visual_rows, 0);
+        assert_eq!(
+            envelope.max_qwen_output_text_rows,
+            first.max_qwen_output_text_rows
+        );
+        assert_eq!(envelope.max_target_video_rows, first.max_target_video_rows);
+        assert_eq!(envelope.max_target_audio_rows, first.max_target_audio_rows);
+        assert!(envelope.max_total_packed_rows < first.max_total_packed_rows);
+        envelope.validate_for_task(Task::Fl2va).unwrap();
+
+        let text = public_fl2va_runtime_bounds_for_mode(
+            MEASURED_CANVAS,
+            MEASURED_FRAMES,
+            Mode::TextToAudioVideo,
+        )
+        .unwrap();
+        let single = public_fl2va_runtime_bounds_for_mode(
+            MEASURED_CANVAS,
+            MEASURED_FRAMES,
+            Mode::FirstFrameToAudioVideo,
+        )
+        .unwrap();
+        text.validate().unwrap();
+        for (name, text_bytes, single_bytes) in [
+            (
+                "fixed_runtime_host",
+                text.fixed_runtime_host_bytes,
+                single.fixed_runtime_host_bytes,
+            ),
+            (
+                "fixed_runtime_device",
+                text.fixed_runtime_device_bytes,
+                single.fixed_runtime_device_bytes,
+            ),
+            (
+                "qwen_activation_workspace",
+                text.qwen_activation_workspace_bytes,
+                single.qwen_activation_workspace_bytes,
+            ),
+            (
+                "vae_construction",
+                text.vae_construction_device_workspace_bytes,
+                single.vae_construction_device_workspace_bytes,
+            ),
+            (
+                "condition_vae",
+                text.condition_vae_workspace_device_bytes,
+                single.condition_vae_workspace_device_bytes,
+            ),
+            (
+                "attention",
+                text.attention_workspace_device_bytes,
+                single.attention_workspace_device_bytes,
+            ),
+            (
+                "ffn",
+                text.ffn_workspace_device_bytes,
+                single.ffn_workspace_device_bytes,
+            ),
+            (
+                "decoder_tile",
+                text.decoder_tile_workspace_device_bytes,
+                single.decoder_tile_workspace_device_bytes,
+            ),
+            (
+                "audio_decode",
+                text.audio_decode_workspace_device_bytes,
+                single.audio_decode_workspace_device_bytes,
+            ),
+        ] {
+            assert!(
+                text_bytes <= single_bytes,
+                "{name}: text-only {text_bytes} > first-frame {single_bytes}"
+            );
         }
+        // The denoise transients are linear in packed rows and text-only packs
+        // one endpoint's 1,008 condition rows fewer.
+        assert!(text.attention_workspace_device_bytes < single.attention_workspace_device_bytes);
+        assert!(text.ffn_workspace_device_bytes < single.ffn_workspace_device_bytes);
+        // The conditioner's text attention is quadratic in TEXT rows and the
+        // text-only ceiling is the measured text sequence, so its grant is not
+        // reduced by the missing vision patches — never under-charge.
+        assert_eq!(
+            text.qwen_activation_workspace_bytes,
+            single.qwen_activation_workspace_bytes
+        );
+
+        let mut request = prepared_request_for_compact_quality_envelope();
+        request.mode = Mode::TextToAudioVideo;
+        request.endpoints.clear();
+        request.rows = H3FactoryPreparedRowsInput {
+            qwen_output_text_rows: 30,
+            qwen_vision_rows: 0,
+            condition_visual_rows: 0,
+            condition_audio_rows: 0,
+            target_video_rows: REVIEWED_MAX_TARGET_VIDEO_ROWS,
+            target_audio_rows: REVIEWED_MAX_TARGET_AUDIO_ROWS,
+            total_packed_rows: 30 + REVIEWED_MAX_TARGET_VIDEO_ROWS + REVIEWED_MAX_TARGET_AUDIO_ROWS,
+        };
+        let authority = public_runtime_qualification(
+            &artifact_report(),
+            MEASURED_CANVAS,
+            MEASURED_FRAMES,
+            contract::COMFY_DEFAULT_STEPS,
+            "gpu-0",
+            0,
+            Some((8, 9)),
+            &sha('a'),
+            "synthetic-qualified-kernel",
+            &sha('b'),
+            None,
+            Task::Fl2va,
+            &[],
+            Mode::TextToAudioVideo,
+        )
+        .unwrap();
+        authority.revalidate().unwrap();
+        assert_eq!(authority.record.envelope, envelope);
+        precheck_private_h3_prepared_rows(&authority.record.envelope, &request.rows, 30).unwrap();
+        authority
+            .record
+            .envelope
+            .validate_prepared_with_adapter(&request, None)
+            .unwrap();
+        let observation = runtime_envelope_observation(&request).unwrap();
+        assert_eq!(observation.endpoint_count, 0);
+        assert_eq!(observation.endpoint_anchor, "none");
+        // A text-only prompt gets the whole text ceiling: no label, no pads.
+        request.rows.qwen_output_text_rows = envelope.max_qwen_output_text_rows;
+        request.rows.total_packed_rows = envelope.max_total_packed_rows;
+        envelope
+            .validate_prepared_with_adapter(&request, None)
+            .unwrap();
+
+        // The text-only envelope admits no endpoint, no vision patches and no
+        // condition latents, and the first-frame envelope still refuses T2VA.
+        let mut with_patch = request.clone();
+        with_patch.rows.qwen_vision_rows = 1;
+        assert!(envelope
+            .validate_prepared_with_adapter(&with_patch, None)
+            .is_err());
+        let mut with_endpoint = prepared_request_for_compact_quality_envelope();
+        with_endpoint.mode = Mode::TextToAudioVideo;
+        assert!(envelope
+            .validate_prepared_with_adapter(&with_endpoint, None)
+            .is_err());
+        assert!(runtime_envelope_observation(&with_endpoint).is_err());
+        assert!(first
+            .validate_prepared_with_adapter(&request, None)
+            .is_err());
+    }
+
+    /// A zero-endpoint envelope is the T2VA shape ONLY when it is consistent:
+    /// no vision patches and no condition latents. A count-0 envelope that
+    /// still claims conditioning ceilings, or a 1-endpoint envelope with none,
+    /// is refused rather than read as either mode.
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn text_only_envelope_shape_requires_zero_conditioning_ceilings() {
+        let mut text_only = record().envelope;
+        text_only.endpoint_count = 0;
+        text_only.endpoint_anchor = "none".into();
+        text_only.max_qwen_vision_rows = 0;
+        text_only.max_condition_visual_rows = 0;
+        text_only.validate_for_task(Task::Fl2va).unwrap();
+
+        let mut leaked = text_only.clone();
+        leaked.max_condition_visual_rows = 1;
+        assert!(leaked.validate_for_task(Task::Fl2va).is_err());
+        let mut leaked = text_only.clone();
+        leaked.max_qwen_vision_rows = 1;
+        assert!(leaked.validate_for_task(Task::Fl2va).is_err());
+        let mut wrong_anchor = text_only.clone();
+        wrong_anchor.endpoint_anchor = "first".into();
+        assert!(wrong_anchor.validate_for_task(Task::Fl2va).is_err());
+        // Ref2VA keeps requiring its conditioning ceilings.
+        assert!(text_only.validate_for_task(Task::Ref2va).is_err());
+
+        let mut empty_first = record().envelope;
+        empty_first.max_condition_visual_rows = 0;
+        assert!(empty_first.validate_for_task(Task::Fl2va).is_err());
     }
 
     /// The base tier mints its envelope from the REQUEST's step count, and the
@@ -9179,10 +9680,11 @@ mod tests {
             } else {
                 assert!(outcome.is_err());
             }
-            // Every reviewed distillation is 4-step or 8-step, so the grid is
-            // 5 or 9 terminal-inclusive points. A future 6-step tier must
-            // widen this deliberately rather than pass by accident.
-            assert!(matches!(contract_entry.grid_points, 5 | 9));
+            // Every reviewed distillation is 2-step (PDMD), 4-step or 8-step,
+            // so the grid is 3, 5 or 9 terminal-inclusive points. A future
+            // 6-step tier must widen this deliberately rather than pass by
+            // accident.
+            assert!(matches!(contract_entry.grid_points, 3 | 5 | 9));
         }
     }
 
@@ -9746,6 +10248,7 @@ mod tests {
                 qwen_policy_sha256: sha('7'),
                 pruned_adaln_table_sha256: sha('8'),
                 turbo_adapter: None,
+                base_sampler: None,
             },
             prepared_attempt: None,
             execution_budget_echo: None,

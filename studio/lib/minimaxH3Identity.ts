@@ -26,6 +26,18 @@ export const MINIMAX_H3_FL2VA_COMFY_TURBO_8STEP_R21 =
   "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21";
 export const MINIMAX_H3_REF2VA_COMFY_TURBO_4STEP_R21 =
   "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21";
+// FastVideo's FastH3 V2 8-step: a distilled BASE tier — the FL2VA compact stack
+// with FastVideo's full-weight distilled transformer, not a LoRA.
+export const MINIMAX_H3_FL2VA_FASTH3_V2_INT8 =
+  "minimax-h3-fl2va:fasth3-v2-int8";
+// DMAD / PDMD distill tiers on the FL2VA compact base: Kijai's rank-reduced
+// builds, published by Kijai/MiniMax-H3-experimental.
+export const MINIMAX_H3_FL2VA_COMFY_DMAD_4STEP =
+  "minimax-h3-fl2va:comfy-pruned-int8-dmad-4step";
+export const MINIMAX_H3_FL2VA_COMFY_PDMD_2STEP =
+  "minimax-h3-fl2va:comfy-pruned-int8-pdmd-2step";
+export const MINIMAX_H3_FL2VA_COMFY_PDMD_4STEP =
+  "minimax-h3-fl2va:comfy-pruned-int8-pdmd-4step";
 
 function normalize(value: string): string {
   return value.trim().toLowerCase().replaceAll("_", "-");
@@ -60,7 +72,11 @@ export function canonicalMinimaxH3ModelName(
     value === MINIMAX_H3_REF2VA_COMFY_TURBO_4STEP ||
     value === MINIMAX_H3_FL2VA_COMFY_TURBO_4STEP_768P_R21 ||
     value === MINIMAX_H3_FL2VA_COMFY_TURBO_8STEP_R21 ||
-    value === MINIMAX_H3_REF2VA_COMFY_TURBO_4STEP_R21
+    value === MINIMAX_H3_REF2VA_COMFY_TURBO_4STEP_R21 ||
+    value === MINIMAX_H3_FL2VA_FASTH3_V2_INT8 ||
+    value === MINIMAX_H3_FL2VA_COMFY_DMAD_4STEP ||
+    value === MINIMAX_H3_FL2VA_COMFY_PDMD_2STEP ||
+    value === MINIMAX_H3_FL2VA_COMFY_PDMD_4STEP
   ) {
     return value;
   }

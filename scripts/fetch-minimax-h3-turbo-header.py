@@ -71,13 +71,20 @@ HF_HOST = "https://huggingface.co"
 # __metadata__ keys worth echoing in the summary when a published header
 # carries them. Not every tier has every key: rank-uniform lightx2v/Comfy
 # adapters carry training_rank/training_alpha/training_scale; drbaph's
-# dynamic-rank resized adapters carry baked_scale/resized_from instead.
+# dynamic-rank resized adapters carry baked_scale/resized_from instead;
+# Kijai's per-module-alpha DMAD/PDMD adapters carry baked_scale plus
+# converted_layout/conversion and kohya ss_* resize bookkeeping.
 METADATA_ECHO_KEYS = (
     "training_rank",
     "training_alpha",
     "training_scale",
     "baked_scale",
     "resized_from",
+    "converted_layout",
+    "conversion",
+    "ss_network_dim",
+    "ss_network_alpha",
+    "ss_training_comment",
 )
 
 

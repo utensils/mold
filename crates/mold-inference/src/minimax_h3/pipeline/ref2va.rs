@@ -112,6 +112,12 @@ pub(crate) trait H3Ref2VaBackend {
         crate::minimax_h3::sampler::H3_VIDEO_SHIFT
     }
 
+    /// Audio shift the sigma grid is built with (see
+    /// `H3Fl2VaBackend::sampler_audio_shift`).
+    fn sampler_audio_shift(&self) -> f32 {
+        crate::minimax_h3::sampler::H3_AUDIO_SHIFT
+    }
+
     /// Hard admission bound for the complete packed sequence, including text,
     /// every reference block, and both generated suffixes.
     fn maximum_packed_rows(&self) -> usize;
@@ -555,12 +561,13 @@ pub(crate) fn execute_staged(
     validate_packed_tensors(&video_rows, &audio_rows, &text.states, &packed)?;
 
     let sampler_kind = backend.sampler_kind();
-    let schedule = H3DualSchedule::new_for_sampler_with_video_shift(
+    let schedule = H3DualSchedule::new_for_sampler_with_shifts(
         prepared.grid_points,
         sampler_kind,
         backend.sampler_video_shift(),
+        backend.sampler_audio_shift(),
     )?;
-    let mut sampler = H3DualSampler::new(sampler_kind);
+    let mut sampler = H3DualSampler::with_noise_seed(sampler_kind, prepared.seed);
     let counts = schedule.counts();
     control.checkpoint(H3PipelineEvent {
         phase: H3PipelinePhase::Denoise,

@@ -17,24 +17,24 @@ features today?
 
 ## Source Image Workflows
 
-| Family          | img2img | Inpainting | Edit / video references                                |
-| --------------- | ------- | ---------- | ------------------------------------------------------ |
-| FLUX.1          | Yes     | Yes        | No                                                     |
-| SDXL            | Yes     | Yes        | One IP-Adapter image prompt, alongside img2img         |
-| SD 1.5          | Yes     | Yes        | One IP-Adapter image prompt, alongside img2img         |
-| SD 3.5          | Yes     | Yes        | No                                                     |
-| Z-Image         | Yes     | Yes        | No                                                     |
-| Flux.2 Klein    | Yes     | Yes        | No                                                     |
-| Flux.2 Dev      | No      | No         | Up to 4 ordered native references                      |
-| Wuerstchen v2   | Yes     | Yes        | No                                                     |
-| Qwen-Image      | Yes     | Yes        | No                                                     |
-| Qwen-Image-Edit | No      | No         | Yes                                                    |
-| Qwen Image 2.1  | No      | No         | Up to 10 ordered references                            |
-| LTX Video       | Not yet | Not yet    | Not yet                                                |
-| LTX-2           | Yes     | No         | Keyframes                                              |
-| Wan Video       | N/A     | N/A        | First/last frame on capable checkpoints                |
-| MiniMax H3      | N/A     | N/A        | First and/or last frame (FL2VA), ordered refs (Ref2VA) |
-| Hunyuan3D       | N/A     | N/A        | Required source image — the only conditioning it has   |
+| Family          | img2img | Inpainting | Edit / video references                                    |
+| --------------- | ------- | ---------- | ---------------------------------------------------------- |
+| FLUX.1          | Yes     | Yes        | No                                                         |
+| SDXL            | Yes     | Yes        | One IP-Adapter image prompt, alongside img2img             |
+| SD 1.5          | Yes     | Yes        | One IP-Adapter image prompt, alongside img2img             |
+| SD 3.5          | Yes     | Yes        | No                                                         |
+| Z-Image         | Yes     | Yes        | No                                                         |
+| Flux.2 Klein    | Yes     | Yes        | No                                                         |
+| Flux.2 Dev      | No      | No         | Up to 4 ordered native references                          |
+| Wuerstchen v2   | Yes     | Yes        | No                                                         |
+| Qwen-Image      | Yes     | Yes        | No                                                         |
+| Qwen-Image-Edit | No      | No         | Yes                                                        |
+| Qwen Image 2.1  | No      | No         | Up to 10 ordered references                                |
+| LTX Video       | Not yet | Not yet    | Not yet                                                    |
+| LTX-2           | Yes     | No         | Keyframes                                                  |
+| Wan Video       | N/A     | N/A        | First/last frame on capable checkpoints                    |
+| MiniMax H3      | N/A     | N/A        | Optional first/last frame (FL2VA) or ordered refs (Ref2VA) |
+| Hunyuan3D       | N/A     | N/A        | Required source image — the only conditioning it has       |
 
 ## Control and Adapters
 
@@ -97,11 +97,12 @@ slot. See [Wan](/models/wan).
 | LTX Video  | Yes     | Not yet | No        | No         | No     | No      | No      | No          |
 | LTX-2      | Yes     | Yes     | Yes       | Yes        | Yes    | Yes     | Yes     | Yes         |
 | Wan Video  | Yes     | Yes     | No        | First/last | No     | No      | No      | No          |
-| MiniMax H3 | No¹     | Yes     | Ref2VA    | First      | No     | No      | No      | Required    |
+| MiniMax H3 | Yes¹    | Yes     | Ref2VA    | First/last | No     | No      | No      | Required    |
 | All others | No      | No      | No        | No         | No     | No      | No      | No          |
 
-¹ The currently advertised compact FL2VA profile requires a first frame.
-Ref2VA instead requires an ordered set of image, video, or audio references.
+¹ Every compact FL2VA tag, base and Turbo, renders text-only (T2VA) with no
+frame, or from a first frame, a last frame, or both. Ref2VA instead requires
+an ordered set of image, video, or audio references.
 
 LTX Video, LTX-2, and Wan all default to MP4. This lets LTX-2 preserve
 synchronized audio when requested. Wan renders video only and has no audio

@@ -13,7 +13,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use candle_core::Device;
 use mold_candle::minimax_h3::{
     H3AuthenticatedQwenNvfp4Authority, H3ComfyOpenedInt8Checkpoint, H3ComfyPublishedArtifact,
-    H3QwenNvfp4RuntimePlacement, H3RawTokenizer, H3TransformerTask,
+    H3QwenNvfp4RuntimePlacement, H3RawTokenizer,
 };
 use mold_core::manifest::{find_manifest, storage_path, ModelComponent, ModelManifest};
 use mold_core::minimax_h3::{self as contract, Layout, Mode, Task};
@@ -56,10 +56,11 @@ use crate::h3_factory::{
 };
 use crate::progress::ProgressReporter;
 
-const FL2VA_TRANSFORMER_SOURCE: &str =
-    "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors";
-const REF2VA_TRANSFORMER_SOURCE: &str =
-    "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors";
+use super::compact_transformer::{
+    is_reviewed_compact_transformer, H3CompactTransformerSelection, FL2VA_TRANSFORMER_SOURCE,
+    REF2VA_TRANSFORMER_SOURCE,
+};
+
 const QWEN_WEIGHT_SOURCE: &str = "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors";
 const FL2VA_TASK_CONFIG_SOURCE: &str = "transformer/config.json";
 const REF2VA_TASK_CONFIG_SOURCE: &str = "transformer_ref/config.json";
@@ -210,6 +211,12 @@ pub(crate) struct H3PrivateComfyStorageAuthority {
     /// resolved paths, two of which differ per task, so it distinguishes the
     /// tasks on its own — and FL2VA's digest stays byte-identical.
     task: Task,
+    /// The compact DiT this authority resolved its transformer path from.
+    /// Like `task`, it stays out of the identity digest: the resolved
+    /// transformer PATH already differs per selection, and a base selection
+    /// resolves the same path it always did, so existing digests are
+    /// byte-identical.
+    transformer_selection: H3CompactTransformerSelection,
     identity_sha256: String,
 }
 
@@ -233,16 +240,25 @@ pub(crate) struct H3PrivateOpenedActivationFacts {
 }
 
 impl H3PrivateComfyStorageAuthority {
+    /// Resolve the task's base compact stack with its Comfy-Org DiT.
     pub(crate) fn resolve(models_root: &Path, task: Task) -> Result<Self> {
+        Self::resolve_with_transformer(
+            models_root,
+            H3CompactTransformerSelection::base_for_task(task),
+        )
+    }
+
+    /// Resolve the selection's task stack — Qwen, task config, and VAEs from
+    /// the task's base compact manifest — with the selected DiT.
+    pub(crate) fn resolve_with_transformer(
+        models_root: &Path,
+        transformer_selection: H3CompactTransformerSelection,
+    ) -> Result<Self> {
+        let task = transformer_selection.task();
         let (models_root, root_identity) = validate_storage_root(models_root)?;
         let manifest = private_comfy_manifest(task)?;
-        let (transformer_source, task_config_source) = comfy_task_sources(task);
-        let transformer = resolve_component(
-            manifest,
-            &models_root,
-            transformer_source,
-            ModelComponent::Transformer,
-        )?;
+        let (_, task_config_source) = comfy_task_sources(task);
+        let transformer = resolve_selected_transformer(transformer_selection, &models_root)?;
         let qwen_weights = resolve_component(
             manifest,
             &models_root,
@@ -262,6 +278,7 @@ impl H3PrivateComfyStorageAuthority {
             qwen_weights,
             task_config,
             task,
+            transformer_selection,
             identity_sha256: String::new(),
         };
         authority.identity_sha256 = storage_authority_identity(&authority);
@@ -271,6 +288,10 @@ impl H3PrivateComfyStorageAuthority {
 
     pub(crate) fn transformer_path(&self) -> &Path {
         &self.transformer
+    }
+
+    pub(crate) fn transformer_selection(&self) -> H3CompactTransformerSelection {
+        self.transformer_selection
     }
 
     /// Canonical, validated models root this authority resolved under. The
@@ -357,6 +378,8 @@ impl H3PrivateComfyStorageAuthority {
         qwen.revalidate()?;
         vae.validate()?;
         validate_transformer_contract(self.task, transformer.candidate().artifact)?;
+        self.transformer_selection
+            .require_artifact(transformer.candidate().artifact)?;
         validate_vae_contract(self.task, vae.task(), vae.canonical_model())?;
         if transformer.source_path() != self.transformer || qwen.source_path() != self.qwen_weights
         {
@@ -421,17 +444,12 @@ impl H3PrivateComfyStorageAuthority {
         // Recompute through the same task-keyed source resolution `resolve`
         // used; re-deriving from one task's constants would refuse the other
         // task's authority at its own first validation.
-        let (transformer_source, task_config_source) = comfy_task_sources(self.task);
+        let (_, task_config_source) = comfy_task_sources(self.task);
         if root != self.models_root
             || root_identity != self.root_identity
+            || self.transformer_selection.task() != self.task
             || self.identity_sha256 != storage_authority_identity(self)
-            || self.transformer
-                != resolve_component(
-                    private_comfy_manifest(self.task)?,
-                    &root,
-                    transformer_source,
-                    ModelComponent::Transformer,
-                )?
+            || self.transformer != resolve_selected_transformer(self.transformer_selection, &root)?
             || self.qwen_weights
                 != resolve_component(
                     private_comfy_manifest(self.task)?,
@@ -451,6 +469,40 @@ impl H3PrivateComfyStorageAuthority {
         }
         Ok(())
     }
+}
+
+/// The transformer path one selection names. A base selection resolves from
+/// the task's base compact manifest exactly as before; a substituted DiT
+/// resolves from the admitted tag's own manifest row, which must still be an
+/// H3 manifest of the same task.
+fn resolve_selected_transformer(
+    selection: H3CompactTransformerSelection,
+    models_root: &Path,
+) -> Result<PathBuf> {
+    let task = selection.task();
+    let manifest = if selection.is_task_base() {
+        private_comfy_manifest(task)?
+    } else {
+        let (manifest, _) = selection.transformer_file()?;
+        let manifest_contract = contract::manifest_contract(manifest)
+            .ok_or_else(|| anyhow!("MiniMax H3 transformer manifest lost its contract"))?;
+        if manifest.family != contract::FAMILY
+            || manifest_contract.task != task
+            || (!cfg!(feature = "h3") && manifest_contract.runtime_available)
+        {
+            bail!(
+                "private H3 storage requires the exact {} transformer manifest",
+                selection.manifest_model()
+            )
+        }
+        manifest
+    };
+    resolve_component(
+        manifest,
+        models_root,
+        selection.source(),
+        ModelComponent::Transformer,
+    )
 }
 
 fn private_comfy_manifest(task: Task) -> Result<&'static ModelManifest> {
@@ -1507,8 +1559,10 @@ fn raw_checkpoint_input(
     transformer: &H3ComfyOpenedInt8Checkpoint,
 ) -> Result<H3FactoryRawCheckpointInput> {
     transformer.revalidate()?;
-    validate_transformer_contract(task, transformer.candidate().artifact)?;
-    let (expected_artifact, _) = expected_published_transformer(task);
+    // Which reviewed DiT this is was settled by the storage selection that
+    // opened it; here the opened bytes must match THAT artifact's own pins.
+    let expected_artifact = transformer.candidate().artifact;
+    validate_transformer_contract(task, expected_artifact)?;
     let evidence = transformer.memory_evidence();
     if transformer.content_sha256() != expected_artifact.content_sha256()
         || evidence.verified_file_bytes != expected_artifact.file_bytes()
@@ -1556,27 +1610,14 @@ fn raw_checkpoint_input(
     Ok(input)
 }
 
-/// The exact published transformer and its transformer-task discriminant for
-/// one admitted task.
-const fn expected_published_transformer(
-    task: Task,
-) -> (H3ComfyPublishedArtifact, H3TransformerTask) {
-    match task {
-        Task::Fl2va => (
-            H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
-            H3TransformerTask::T2VaFl2Va,
-        ),
-        Task::Ref2va => (
-            H3ComfyPublishedArtifact::Ref2VaPrunedInt8ConvRot,
-            H3TransformerTask::Ref2Va,
-        ),
-    }
-}
-
+/// Task-level transformer contract: the artifact must be one of the reviewed
+/// compact DiTs of `task` (Comfy-Org's, or a reviewed substitution such as
+/// FastH3 V2 on the FL2VA face). The EXACT artifact is pinned by the storage
+/// authority's selection (`H3CompactTransformerSelection::require_artifact`)
+/// and, at reopen, by the frozen transformer component digest.
 fn validate_transformer_contract(task: Task, artifact: H3ComfyPublishedArtifact) -> Result<()> {
-    let (expected_artifact, expected_task) = expected_published_transformer(task);
-    if artifact != expected_artifact || artifact.task() != expected_task {
-        bail!("private H3 prepared attempt requires the exact {task:?} INT8 ConvRot transformer")
+    if !is_reviewed_compact_transformer(task, artifact) {
+        bail!("private H3 prepared attempt requires a reviewed {task:?} INT8 ConvRot transformer, got {artifact:?}")
     }
     Ok(())
 }
@@ -1638,6 +1679,16 @@ pub(crate) fn qwen_activation_workspace_demand_bytes(
         .map(|bytes| (bytes / 100).next_multiple_of(64 * 1024 * 1024))
         .ok_or_else(|| anyhow!("private H3 Qwen activation demand overflow"))?;
     match request.task {
+        // Text-only FL2VA (#1552) packs no vision patches, so the linear
+        // per-row model would charge a ~2,048-row prompt about a third of the
+        // grant. But the conditioner's text attention is dense and quadratic
+        // in TEXT rows (`mold-candle` `text.rs` `causal_attention`), and the
+        // text-only ceiling IS the measured sequence's text half (2,033 of
+        // 2,048 rows), so that term did not shrink. Nothing text-only has been
+        // measured yet; charge the whole grant rather than under-charge.
+        Task::Fl2va if request.mode == Mode::TextToAudioVideo => {
+            Ok(granted_qwen_activation_workspace_bytes)
+        }
         // FL2VA's envelope CAPS the sequence at the rows the observation was
         // taken over, so the grant is an upper bound the request can only sit
         // under. Clamping rather than refusing keeps a full-length prompt at
@@ -2696,6 +2747,22 @@ mod tests {
         );
         assert_eq!(shorter_demand % (64 * 1024 * 1024), 0, "{shorter_demand}");
 
+        // Text-only (T2VA, #1552) packs no vision patches, but the
+        // conditioner's text attention is dense and quadratic in TEXT rows and
+        // the text-only ceiling is the measured text sequence, so the per-row
+        // linear model would under-charge a full-length prompt. It is charged
+        // the whole grant whatever its row count.
+        for text_rows in [30, 2_048] {
+            let mut text_only = fl2va_shape(text_rows, 0);
+            text_only.mode = Mode::TextToAudioVideo;
+            text_only.endpoints.clear();
+            assert_eq!(
+                qwen_activation_workspace_demand_bytes(&text_only, FL2VA_PUBLIC_CEILING).unwrap(),
+                FL2VA_PUBLIC_CEILING,
+                "{text_rows}"
+            );
+        }
+
         let ref2va_shape = |vision_rows: u64| {
             let mut request = fl2va_frozen.clone();
             request.canonical_model = contract::REF2VA_COMFY.into();
@@ -3000,6 +3067,48 @@ mod tests {
         assert_ne!(fl2va.identity_sha256(), authority.identity_sha256());
     }
 
+    /// A substituted DiT changes exactly one resolved path — the transformer,
+    /// from its own manifest row — and keeps the FL2VA stack's Qwen, task
+    /// config, and VAEs. The storage identity moves with that path, and the
+    /// base selection resolves byte-identically to the task-only resolver.
+    #[test]
+    fn a_fasth3_selection_swaps_only_the_transformer_path() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let base = H3PrivateComfyStorageAuthority::resolve(&root, Task::Fl2va).unwrap();
+        let explicit_base = H3PrivateComfyStorageAuthority::resolve_with_transformer(
+            &root,
+            H3CompactTransformerSelection::base_for_task(Task::Fl2va),
+        )
+        .unwrap();
+        assert_eq!(base.identity_sha256(), explicit_base.identity_sha256());
+        assert_eq!(base.transformer_path(), explicit_base.transformer_path());
+
+        let manifest = super::super::compact_transformer::test_fasth3_manifest();
+        let selection = H3CompactTransformerSelection::for_manifest(manifest).unwrap();
+        let fast =
+            H3PrivateComfyStorageAuthority::resolve_with_transformer(&root, selection).unwrap();
+        fast.validate().unwrap();
+        assert_eq!(fast.transformer_selection(), selection);
+        assert!(fast
+            .transformer_path()
+            .ends_with(mold_candle::minimax_h3::H3_FASTH3_V2_INT8_SOURCE_PATH));
+        assert_ne!(fast.transformer_path(), base.transformer_path());
+        assert_eq!(fast.qwen_weights_path(), base.qwen_weights_path());
+        assert_eq!(fast.task_config_path(), base.task_config_path());
+        assert_ne!(fast.identity_sha256(), base.identity_sha256());
+        let staging = tempfile::tempdir().unwrap();
+        let staging = staging.path().canonicalize().unwrap();
+        fast.vae_plan(&staging).unwrap();
+
+        // The FL2VA-face DiT cannot be selected onto the Ref2VA stack.
+        let ref2va = H3PrivateComfyStorageAuthority::resolve(&root, Task::Ref2va).unwrap();
+        assert!(ref2va
+            .transformer_selection()
+            .require_artifact(selection.published_artifact())
+            .is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn hidden_storage_rejects_symlink_and_accepts_group_writable_roots() {
@@ -3067,6 +3176,9 @@ mod tests {
             contract::FL2VA_COMFY_TURBO_8STEP_768P,
             contract::FL2VA_COMFY_TURBO_4STEP_768P_R21,
             contract::FL2VA_COMFY_TURBO_8STEP_R21,
+            contract::FL2VA_COMFY_DMAD_4STEP,
+            contract::FL2VA_COMFY_PDMD_2STEP,
+            contract::FL2VA_COMFY_PDMD_4STEP,
             // The first Ref2VA Turbo tag in this list: a resized tier keys
             // storage on the Ref2VA partition exactly as its full-rank source
             // does, so the two authorities must still agree on the OTHER task.
@@ -3156,6 +3268,22 @@ mod tests {
         assert!(validate_transformer_contract(
             Task::Ref2va,
             H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot
+        )
+        .is_err());
+        // FastH3 V2 is a reviewed FL2VA-face DiT and nothing else.
+        validate_transformer_contract(
+            Task::Fl2va,
+            H3ComfyPublishedArtifact::FastH3V2Fl2VaPrunedInt8ConvRot,
+        )
+        .unwrap();
+        assert!(validate_transformer_contract(
+            Task::Ref2va,
+            H3ComfyPublishedArtifact::FastH3V2Fl2VaPrunedInt8ConvRot
+        )
+        .is_err());
+        assert!(validate_transformer_contract(
+            Task::Fl2va,
+            H3ComfyPublishedArtifact::Fl2VaPrunedBf16
         )
         .is_err());
 

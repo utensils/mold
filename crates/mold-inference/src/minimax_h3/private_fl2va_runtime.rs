@@ -965,6 +965,10 @@ where
         self.admitted.quantization.video_shift()
     }
 
+    fn sampler_audio_shift(&self) -> f32 {
+        self.admitted.quantization.audio_shift()
+    }
+
     fn encode_text(
         &mut self,
         prompt: &str,
@@ -2031,10 +2035,11 @@ where
         let (prepared, retention) = prepared.into_runtime_parts()?;
         retention.revalidate()?;
         let expected_denoise_forwards =
-            super::sampler::H3DualSchedule::new_for_sampler_with_video_shift(
+            super::sampler::H3DualSchedule::new_for_sampler_with_shifts(
                 prepared.grid_points(),
                 admitted.quantization.sampler_kind(),
                 admitted.quantization.video_shift(),
+                admitted.quantization.audio_shift(),
             )?
             .counts()
             .transformer_evaluations;
@@ -2550,6 +2555,10 @@ where
         self.admitted.quantization.video_shift()
     }
 
+    fn sampler_audio_shift(&self) -> f32 {
+        self.admitted.quantization.audio_shift()
+    }
+
     fn encode_text(
         &mut self,
         prompt: &str,
@@ -2748,6 +2757,10 @@ where
 
     fn sampler_video_shift(&self) -> f32 {
         self.admitted.quantization.video_shift()
+    }
+
+    fn sampler_audio_shift(&self) -> f32 {
+        self.admitted.quantization.audio_shift()
     }
 
     fn maximum_packed_rows(&self) -> usize {
@@ -3432,6 +3445,7 @@ mod tests {
         let body = &body[..end];
         assert!(body.contains("self.admitted.quantization.sampler_kind()"));
         assert!(body.contains("self.admitted.quantization.video_shift()"));
+        assert!(body.contains("self.admitted.quantization.audio_shift()"));
         let literal = format!("H3SamplerKind::{}", "ComfyResMultistep");
         assert!(
             !body.contains(&literal),
@@ -3580,6 +3594,7 @@ mod tests {
                 qwen_policy_sha256: sha('d'),
                 pruned_adaln_table_sha256: sha('e'),
                 turbo_adapter: None,
+                base_sampler: None,
             },
             components: [
                 H3FactoryComponentRole::Conditioner,

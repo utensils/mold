@@ -2937,8 +2937,10 @@ mod tests {
     fn queue_model_download_identifies_missing_reviewed_adapter_without_error_prose() {
         let root = tempfile::tempdir().unwrap();
         let _environment = IsolatedModelEnvironment::hermetic();
-        let mut config = Config::default();
-        config.models_dir = root.path().display().to_string();
+        let config = Config {
+            models_dir: root.path().display().to_string(),
+            ..Config::default()
+        };
         let model = "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21";
         let manifest = mold_core::manifest::find_manifest(model).unwrap();
         for file in &manifest.files {
@@ -4129,6 +4131,10 @@ mod tests {
                 mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_R21,
                 mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP_R21,
                 mold_core::minimax_h3::REF2VA_COMFY_TURBO_4STEP_R21,
+                mold_core::minimax_h3::FL2VA_FASTH3_V2_INT8,
+                mold_core::minimax_h3::FL2VA_COMFY_DMAD_4STEP,
+                mold_core::minimax_h3::FL2VA_COMFY_PDMD_2STEP,
+                mold_core::minimax_h3::FL2VA_COMFY_PDMD_4STEP,
                 mold_core::minimax_h3::FL2VA_COMFY_NVFP4,
                 mold_core::minimax_h3::REF2VA_COMFY_NVFP4,
                 mold_core::minimax_h3::FL2VA_OFFICIAL,

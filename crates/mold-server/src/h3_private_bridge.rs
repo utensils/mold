@@ -890,6 +890,24 @@ const fn private_h3_record_runtime() -> bool {
     cfg!(feature = "h3-private-uat") && !cfg!(feature = "h3")
 }
 
+/// The source-image contract an executable compact FL2VA row advertises.
+///
+/// The public runtime mints its envelope from the request's own endpoint
+/// mode, and text-only (T2VA, zero endpoints) is one of those modes since
+/// #1552 — ComfyUI's `MiniMaxH3ImageToVideo` takes both frames as optional
+/// inputs (`comfy_extras/nodes_minimax_h3.py:132-133`), and every FL2VA Turbo
+/// adapter is published as `FL2VA / T2VA` — so the first frame is OPTIONAL.
+/// A stored-record runtime authenticates a record that pins exactly one
+/// first-frame endpoint by equality, so it keeps advertising what it enforces.
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
+const fn reviewed_h3_fl2va_source_image() -> mold_core::SourceImageCapability {
+    if private_h3_record_runtime() {
+        mold_core::SourceImageCapability::Required
+    } else {
+        mold_core::SourceImageCapability::Optional
+    }
+}
+
 /// The reviewed single-quality-point profile for one compact FL2VA identity.
 /// A Turbo tag renders the same canvas/duration envelope; the only axis its
 /// reviewed tier moves is the fixed step count.
@@ -915,7 +933,7 @@ fn reviewed_h3_private_generation_profile_for(
         default_frames: Some(frames),
         default_fps: Some(fps),
         default_negative_prompt: None,
-        source_image: Some(mold_core::SourceImageCapability::Required),
+        source_image: Some(reviewed_h3_fl2va_source_image()),
         supports_sequence: false,
         supports_extend: false,
         // Same single authority as the row: H3 declares synchronized audio.
@@ -1024,9 +1042,11 @@ fn reviewed_h3_private_generation_profile_for(
     // that core does not — a stored record on an undistilled tag — authors
     // its own sentence beside the pin, because the inherited floor note would
     // tell a user to pick a step count on a control that has no range.
-    let turbo_tier = mold_core::minimax_h3::turbo_tier_for_model(model);
-    let fixed_steps = private_record_runtime || turbo_tier.is_some();
-    if private_record_runtime && turbo_tier.is_none() {
+    // Distilled — a Turbo adapter or a distilled base tier (FastH3 V2) — is
+    // one authority, `fixed_steps_for_model`, never "has a Turbo tier".
+    let distilled_steps = mold_core::minimax_h3::fixed_steps_for_model(model);
+    let fixed_steps = private_record_runtime || distilled_steps.is_some();
+    if private_record_runtime && distilled_steps.is_none() {
         recipe.steps.note = Some(format!(
             "Fixed by this build's stored qualification record: {steps} terminal-inclusive sampler grid points."
         ));
@@ -1083,7 +1103,7 @@ fn reviewed_h3_private_generation_profile_for(
     recipe.defaults.steps = steps;
     recipe.defaults.frames = Some(frames);
     recipe.defaults.fps = Some(fps);
-    recipe.capabilities.source_image = Some(mold_core::SourceImageCapability::Required);
+    recipe.capabilities.source_image = Some(reviewed_h3_fl2va_source_image());
     let alignment = recipe.resolution.alignment;
     mold_core::qualify_generation_profile_delivery(
         &mut profile,
@@ -1147,7 +1167,7 @@ pub(crate) fn authenticated_h3_private_model_row(
     h3_model_row(
         &partition.model,
         &partition.display_name,
-        "Compact FL2VA CUDA runtime with synchronized audio; supported first-frame quality profile.",
+        "Compact FL2VA runtime with synchronized audio; text-only or first/last-frame conditioning.",
         request,
         disk_usage_bytes,
         (generation_profile, alignment, pixels),
@@ -1202,7 +1222,7 @@ pub(crate) fn authenticated_h3_private_model_rows(
         if let Some(row) = h3_model_row(
             &variant.model,
             &variant.display_name,
-            "Compact FL2VA CUDA runtime with synchronized audio; reviewed Turbo distillation quality profile.",
+            "Compact FL2VA runtime with synchronized audio; reviewed distilled-adapter quality profile.",
             request,
             disk_usage_bytes,
             (profile, alignment, pixels),
@@ -1340,7 +1360,7 @@ fn h3_model_row(
             supports_negative_prompt: false,
             fixed_scale: Some(0.0),
         }),
-        source_image: Some(mold_core::SourceImageCapability::Required),
+        source_image: Some(reviewed_h3_fl2va_source_image()),
         generation_profile: Some(generation_profile),
     })
 }
@@ -2549,7 +2569,7 @@ mod presentation_tests {
             default_frames: Some(mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES),
             default_fps: Some(mold_core::minimax_h3::FIXED_FPS),
             default_negative_prompt: None,
-            source_image: Some(mold_core::SourceImageCapability::Required),
+            source_image: Some(super::reviewed_h3_fl2va_source_image()),
             supports_sequence: false,
             supports_extend: false,
             supports_audio: mold_core::catalog::declared_audio_capability(
@@ -2589,6 +2609,27 @@ mod presentation_tests {
                 .expect("a Turbo tier explains itself");
             assert!(note.starts_with("Fixed by the "), "{}: {note}", tier.model);
             assert_ne!(Some(note), expected.as_deref(), "{}", tier.model);
+        }
+
+        // A distilled BASE tier (FastH3 V2) pins its own count too — the
+        // fixedness is "distilled", never "has a Turbo adapter".
+        for tier in mold_core::minimax_h3::REVIEWED_DISTILLED_BASE_TIERS {
+            let (fixed, _, _) =
+                super::reviewed_h3_private_generation_profile_for(tier.model, tier.steps)
+                    .expect("the distilled base row resolves");
+            let fixed_recipe = fixed.default_recipe().expect("one reviewed recipe");
+            assert_eq!(fixed_recipe.steps.default, tier.steps, "{}", tier.model);
+            assert_eq!(fixed_recipe.steps.min, tier.steps, "{}", tier.model);
+            assert_eq!(fixed_recipe.steps.max, tier.steps, "{}", tier.model);
+            assert_eq!(fixed_recipe.steps.recommended, vec![tier.steps]);
+            assert_eq!(
+                fixed_recipe.steps.mode,
+                mold_core::generation_profile::ControlMode::Fixed,
+                "{}",
+                tier.model
+            );
+            let note = fixed_recipe.steps.note.as_deref().unwrap_or_default();
+            assert!(note.contains("distilled tier"), "{}: {note}", tier.model);
         }
     }
 
@@ -2971,11 +3012,30 @@ mod tests {
         assert_eq!(row.defaults.min_frames, Some(bound_min_frames));
         assert_eq!(row.defaults.max_frames, Some(bound_max_frames));
         assert_eq!(row.defaults.default_steps, 21);
-        assert_eq!(
-            row.source_image,
-            Some(mold_core::SourceImageCapability::Required)
-        );
+        // Text-only FL2VA (#1552): the public runtime mints a zero-endpoint
+        // envelope, so the first frame is optional on the row AND the recipe;
+        // only a stored first-frame record still requires it.
+        let expected_source_image = if super::private_h3_record_runtime() {
+            mold_core::SourceImageCapability::Required
+        } else {
+            mold_core::SourceImageCapability::Optional
+        };
+        assert_eq!(row.source_image, Some(expected_source_image));
         let profile = row.generation_profile.unwrap();
+        assert_eq!(
+            profile.default_recipe().unwrap().capabilities.source_image,
+            Some(expected_source_image)
+        );
+        assert!(
+            !profile
+                .default_recipe()
+                .unwrap()
+                .capabilities
+                .boundary_frames
+                .as_ref()
+                .expect("FL2VA advertises boundary frames")
+                .first_required
+        );
         assert_eq!(
             capability.partitions[0]
                 .request
@@ -3145,9 +3205,12 @@ mod tests {
                 mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP_768P,
                 mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_R21,
                 mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP_R21,
+                mold_core::minimax_h3::FL2VA_COMFY_DMAD_4STEP,
+                mold_core::minimax_h3::FL2VA_COMFY_PDMD_2STEP,
+                mold_core::minimax_h3::FL2VA_COMFY_PDMD_4STEP,
             ]),
             "the FL2VA partition advertises exactly the FL2VA Turbo tags, \
-             including the two SVD-resized rank-21 tiers"
+             including the two SVD-resized rank-21 tiers and the DMAD/PDMD distills"
         );
         assert!(
             !advertised.contains(mold_core::minimax_h3::REF2VA_COMFY_TURBO_4STEP),

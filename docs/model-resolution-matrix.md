@@ -2115,9 +2115,9 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### Profile `minimax-h3.minimax-h3-fl2va`
 
-Schema 1 · hash `427c543e65142f5af7778d64da94804784cf8abbcd80c14c83ce34abe93e8440` · default recipe `default`
+Schema 1 · hash `a555bc8996e2753dc88e4614fa7a0865e61b36f4cfbdcc323d1c30a7923d2f85` · default recipe `default`
 
-Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1`.
+Models: `minimax-h3-fl2va:comfy-pruned-int8-dmad-4step`, `minimax-h3-fl2va:comfy-pruned-int8-pdmd-4step`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1`.
 
 #### Default (`default`)
 
@@ -2137,11 +2137,35 @@ Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`, `minimax-h3-fl2va
 
 Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cdaaa03fa4497e89ac64ff169219acf`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
+### `minimax-h3-fl2va:comfy-pruned-int8-pdmd-2step`
+
+Schema 1 · hash `2da9a9dc4d31f738eab51e004be8de42736cbe398954a814c480e821a783b3fc` · default recipe `default`
+
+Models: `minimax-h3-fl2va:comfy-pruned-int8-pdmd-2step`.
+
+#### Default (`default`)
+
+- Resolution: dynamic; alignment `32`; minimum `256x256`; maximum `1032192` pixels; axis limit `2016`; aspect range `0.25–4`.
+- Defaults: `1344x768`, 3 steps, guidance 0.
+- Steps: 3–3 by 1; guidance: 0–0 by 0.1 (Fixed).
+- Temporal: frames 107–345 on `17n+5` (default 124); FPS fixed 24; duration limit 15s.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `7:4` | `1344x768` (recommended) |
+| `20:11` | `1280x704` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `1:1` | `768x768` (recommended), `960x960` (recommended) |
+| `4:7` | `768x1344` (recommended) |
+| `11:20` | `704x1280` (recommended) |
+
+Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cdaaa03fa4497e89ac64ff169219acf`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
 ### Profile `minimax-h3.minimax-h3-fl2va`
 
-Schema 1 · hash `01ab0d9e1360c3a66bce7b67beeb55f6b03ec0f03637c3f530adc3d9bc2e6080` · default recipe `default`
+Schema 1 · hash `38eb0c95a6b02291a04f18989194de8f5edc4eb896bf7d1d6b5eaf376bdbc7ba` · default recipe `default`
 
-Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21`.
+Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21`, `minimax-h3-fl2va:fasth3-v2-int8`.
 
 #### Default (`default`)
 
@@ -2211,7 +2235,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### Profile `minimax-h3.minimax-h3-ref2va`
 
-Schema 1 · hash `4f4190c21846fd5150a0dacd4dc342515dce81764670d68800a8c58d07106242` · default recipe `default`
+Schema 1 · hash `b10f2a30d5b0e7ce5faf826e9acaaf9a885efff93a1b4bda9b9ba3f5d79b9059` · default recipe `default`
 
 Models: `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`, `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21`.
 

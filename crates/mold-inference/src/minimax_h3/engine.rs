@@ -1347,6 +1347,7 @@ mod tests {
                 qwen_policy_sha256: sha('d'),
                 pruned_adaln_table_sha256: sha('e'),
                 turbo_adapter: None,
+                base_sampler: None,
             },
             components: [
                 H3FactoryComponentRole::Conditioner,

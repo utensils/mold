@@ -445,6 +445,18 @@ describe("MiniMax H3 Studio authority", () => {
     expect(turboV11.maxSteps).toBe(5);
     expect(turboV11.minFrames).toBe(107);
     expect(turboV11.maxFrames).toBe(345);
+
+    // FastH3 V2 is a distilled BASE tier (no adapter), and its schedule is
+    // just as fixed: 8 steps = 9 terminal-inclusive grid points.
+    const fasth3 = minimaxH3AuthoringCapabilities({
+      name: "minimax-h3-fl2va:fasth3-v2-int8",
+      family: "minimax-h3",
+    })!;
+    expect(fasth3.task).toBe("fl2va");
+    expect(fasth3.minSteps).toBe(9);
+    expect(fasth3.maxSteps).toBe(9);
+    expect(fasth3.minFrames).toBe(107);
+    expect(fasth3.maxFrames).toBe(345);
   });
 
   it("keeps runtime and legal access as independent fail-closed authorities", () => {

@@ -41,6 +41,13 @@
 //! unchanged. No slice bookkeeping is needed, which is why nothing here
 //! mirrors FLUX's `FusedSlice`.
 //!
+//! Nothing here depends on that block-diagonal structure, either: the forward
+//! is `(x @ Aᵀ) @ Bᵀ` for ANY `B`. A per-module-alpha adapter
+//! (`H3TurboLoraShape::PerModuleAlpha`) was rank-reduced over the fused
+//! matrix, so its `lora_B` is dense and its rank is per module; it loads
+//! through this same path, with a per-module `alpha / rank` of exactly `1.0`
+//! and its BF16 `alpha` scalars folded away exactly like a uniform file's.
+//!
 //! # Residency
 //!
 //! CUDA loads every delta once and keeps the 1,956,118,528-byte adapter
@@ -382,7 +389,8 @@ impl H3TurboLoraRuntime {
         &self.content_sha256
     }
 
-    /// The one `alpha / rank` every module agreed on.
+    /// The one `alpha / rank` every module agreed on (`1.0` for both
+    /// rank-reduced shapes).
     pub const fn scale(&self) -> f32 {
         self.scale
     }
@@ -426,8 +434,11 @@ impl H3TurboLoraRuntime {
     /// Exact resident device bytes of every `lora_A` / `lora_B` matrix.
     ///
     /// The 208 `alpha` scalars are folded into each delta's `scale` at load
-    /// and never stay resident, so this is the adapter's payload minus
-    /// `208 * 4` bytes.
+    /// and never stay resident, so at the file's BF16 width this is the
+    /// adapter's payload minus the alpha bytes: `208 * 4` for a uniform file's
+    /// F32 alphas, `208 * 2` for a per-module-alpha file's BF16 alphas, and
+    /// nothing for a resized file, which has none. Ranks vary per module on
+    /// both rank-reduced shapes; the sum is over each module's own matrices.
     pub const fn device_bytes(&self) -> u64 {
         self.device_bytes
     }
@@ -1675,5 +1686,282 @@ mod tests {
             passed.to_vec2::<f32>().unwrap(),
             base.to_vec2::<f32>().unwrap()
         );
+    }
+
+    /// Rank columns of a fused `[3·out, rank]` `lora_B` that feed more than
+    /// one of the q/k/v output thirds. Zero for a block-diagonal B.
+    fn columns_shared_across_qkv(b: &Tensor) -> usize {
+        let third = b.dim(0).unwrap() / 3;
+        let used = (0..3)
+            .map(|part| {
+                b.narrow(0, part * third, third)
+                    .unwrap()
+                    .abs()
+                    .unwrap()
+                    .sum(0)
+                    .unwrap()
+                    .to_dtype(DType::F32)
+                    .unwrap()
+                    .to_vec1::<f32>()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        (0..b.dim(1).unwrap())
+            .filter(|&column| used.iter().filter(|part| part[column] > 0.0).count() > 1)
+            .count()
+    }
+
+    /// A per-module-alpha adapter loads through the same path: per-module
+    /// ranks, a computed unit scale, BF16 alphas excluded from the resident
+    /// bytes, and a DENSE fused Q/K/V `lora_B` applied as plain `(x Aᵀ) Bᵀ`.
+    #[test]
+    fn a_per_module_alpha_adapter_loads_with_unit_scale_and_dense_fused_b() {
+        let tier = H3TurboLoraTier::Fl2v8StepV10; // identity stand-in only
+        let (_directory, path, pinned) = fixtures::pinned_per_module_alpha();
+        let ranks = fixtures::dynamic_module_ranks(&pinned);
+        let payload_bytes = std::fs::metadata(&path).unwrap().len()
+            - 8
+            - u64::from_le_bytes(std::fs::read(&path).unwrap()[..8].try_into().unwrap());
+        let module_count = ranks.len() as u64;
+
+        let resident = H3TurboLoraRuntime::open_against(
+            &path,
+            &pinned,
+            tier,
+            &Device::Cpu,
+            DType::BF16,
+            &H3ComfyNeverCancel,
+        )
+        .unwrap();
+        // Payload minus one two-byte BF16 alpha per module.
+        assert_eq!(resident.device_bytes(), payload_bytes - module_count * 2);
+        assert_eq!(resident.scale(), 1.0);
+
+        let runtime = H3TurboLoraRuntime::open_against(
+            &path,
+            &pinned,
+            tier,
+            &Device::Cpu,
+            DType::F32,
+            &H3ComfyNeverCancel,
+        )
+        .unwrap();
+        assert_eq!(runtime.scale(), 1.0);
+        let mut observed = std::collections::BTreeSet::new();
+        for (prefix, deltas) in [
+            ("blocks.0", runtime.main_block(0).unwrap()),
+            ("blocks.1", runtime.main_block(1).unwrap()),
+            (
+                "token_refiner.blocks.0",
+                runtime.token_refiner_block(0).unwrap(),
+            ),
+        ] {
+            for kind in H3TurboLoraModuleKind::ALL {
+                let key = format!("diffusion_model.{prefix}.{}", kind.suffix());
+                assert_eq!(deltas.kind(kind).rank(), ranks[&key], "{key}");
+                assert_eq!(deltas.kind(kind).scale(), 1.0, "{key}");
+                observed.insert(ranks[&key]);
+            }
+        }
+        assert!(observed.len() > 2, "{observed:?}");
+
+        // The fixture's fused B has no structural zeros: every entry of the
+        // generator is populated. The delta is still exactly x (B A)ᵀ.
+        let name = "diffusion_model.blocks.0.attn.qkv_proj";
+        let rank = ranks[name];
+        let down = expected_matrix(&format!("{name}.lora_A.weight"), rank, 256);
+        let up = expected_matrix(&format!("{name}.lora_B.weight"), 768, rank);
+        assert!(
+            columns_shared_across_qkv(&up) > 0,
+            "fixture B must be dense, not block-diagonal"
+        );
+        let x = ramp(3, 256, 77, &Device::Cpu);
+        let expected = x
+            .matmul(&up.matmul(&down).unwrap().t().unwrap().contiguous().unwrap())
+            .unwrap()
+            .to_vec2::<f32>()
+            .unwrap();
+        let observed = runtime
+            .main_block(0)
+            .unwrap()
+            .qkv
+            .delta(&x)
+            .unwrap()
+            .to_vec2::<f32>()
+            .unwrap();
+        for (row, expected_row) in observed.iter().zip(expected.iter()) {
+            for (value, want) in row.iter().zip(expected_row.iter()) {
+                assert!((value - want).abs() < 1e-3, "{value} vs {want}");
+            }
+        }
+    }
+
+    /// The byte figures a per-module-alpha pin charges, DERIVED from its
+    /// checked-in golden header with the same helpers the loader uses.
+    #[test]
+    fn per_module_alpha_pin_bytes_derive_from_the_golden_headers() {
+        use super::super::turbo_lora::{
+            published_pin_header_modules, H3_TURBO_LORA_KIJAI_DMAD_4STEP,
+            H3_TURBO_LORA_KIJAI_PDMD_2STEP, H3_TURBO_LORA_KIJAI_PDMD_4STEP,
+            H3_TURBO_LORA_MODULE_COUNT,
+        };
+        for (pin, resident, widest_module, host_staging) in [
+            // The widest module is a rank-128 fused Q/K/V in every file:
+            // 128 x (5,376 + 21,504) x 2 bytes; its B is the widest matrix.
+            (
+                H3_TURBO_LORA_KIJAI_DMAD_4STEP,
+                366_571_520u64,
+                6_881_280u64,
+                11_010_048u64,
+            ),
+            (
+                H3_TURBO_LORA_KIJAI_PDMD_2STEP,
+                380_939_776,
+                6_881_280,
+                11_010_048,
+            ),
+            (
+                H3_TURBO_LORA_KIJAI_PDMD_4STEP,
+                558_659_584,
+                6_881_280,
+                11_010_048,
+            ),
+        ] {
+            let (summary, modules) = published_pin_header_modules(&pin);
+            let derived_resident = modules.values().map(module_delta_bytes).sum::<u64>();
+            // Resident == payload minus one BF16 alpha per module.
+            assert_eq!(
+                derived_resident,
+                summary.payload_bytes - (H3_TURBO_LORA_MODULE_COUNT as u64) * 2,
+                "{pin:?}"
+            );
+            assert_eq!(derived_resident, resident, "{pin:?}");
+            assert_eq!(
+                modules.values().map(module_delta_bytes).max().unwrap(),
+                widest_module,
+                "{pin:?}"
+            );
+            assert_eq!(
+                modules
+                    .values()
+                    .flat_map(|module| [&module.lora_a, &module.lora_b])
+                    .map(tensor_ref_bytes)
+                    .max()
+                    .unwrap()
+                    * 2,
+                host_staging,
+                "{pin:?}"
+            );
+            // Every rank-reduced module is far below the uniform adapter.
+            assert!(derived_resident < 1_956_118_528 / 3, "{pin:?}");
+        }
+    }
+
+    /// Opt-in real-weight check: each published Kijai adapter authenticates,
+    /// loads, and its deltas compute — the fused Q/K/V delta checked against
+    /// an independent `x (B A)ᵀ` over the raw tensors.
+    #[test]
+    #[ignore = "requires MOLD_TEST_H3_KIJAI_LORA_DIR holding the three Kijai adapters"]
+    fn published_kijai_adapters_load_and_compute_deltas() {
+        use super::super::turbo_lora::{H3_TURBO_LORA_KIJAI_PINS, H3_TURBO_LORA_MODULE_COUNT};
+        let directory = std::env::var("MOLD_TEST_H3_KIJAI_LORA_DIR")
+            .expect("MOLD_TEST_H3_KIJAI_LORA_DIR must be set to run this test");
+        let tiers = H3TurboLoraTier::ALL
+            .into_iter()
+            .filter(|tier| tier.shape().is_per_module_alpha())
+            .collect::<Vec<_>>();
+        assert_eq!(tiers.len(), H3_TURBO_LORA_KIJAI_PINS.len());
+        for tier in tiers {
+            let pin = tier.published_pin().unwrap();
+            let path = std::path::Path::new(&directory).join(tier.file_name());
+            let runtime = H3TurboLoraRuntime::open_against(
+                &path,
+                &tier.expectation(),
+                tier,
+                &Device::Cpu,
+                DType::F32,
+                &H3ComfyNeverCancel,
+            )
+            .unwrap_or_else(|error| panic!("{}: {error}", pin.file_name()));
+            assert_eq!(runtime.content_sha256(), pin.content_sha256);
+            assert_eq!(runtime.scale(), 1.0);
+            assert_eq!(runtime.block_count(), 50);
+            assert_eq!(runtime.token_refiner_block_count(), 2);
+            let payload = pin.file_bytes - 8 - pin.header_len;
+            // F32 residency is twice the BF16 matrices.
+            assert_eq!(
+                runtime.device_bytes(),
+                (payload - (H3_TURBO_LORA_MODULE_COUNT as u64) * 2) * 2,
+                "{pin:?}"
+            );
+
+            let raw = candle::safetensors::load(&path, &Device::Cpu).unwrap();
+            let x = ramp(2, 5_376, 11, &Device::Cpu).affine(1e-3, 0.0).unwrap();
+            let mut dense_fused = 0usize;
+            for index in 0..runtime.block_count() {
+                let block = runtime.main_block(index).unwrap();
+                for kind in H3TurboLoraModuleKind::ALL {
+                    let delta = block.kind(kind);
+                    let input = ramp(2, delta.in_features(), 5, &Device::Cpu)
+                        .affine(1e-3, 0.0)
+                        .unwrap();
+                    let values = delta
+                        .delta(&input)
+                        .unwrap()
+                        .flatten_all()
+                        .unwrap()
+                        .to_vec1::<f32>()
+                        .unwrap();
+                    assert!(
+                        values.iter().all(|value| value.is_finite()),
+                        "{index} {kind:?}"
+                    );
+                }
+                let name = format!("diffusion_model.blocks.{index}.attn.qkv_proj");
+                let a = raw[&format!("{name}.lora_A.weight")]
+                    .to_dtype(DType::F32)
+                    .unwrap();
+                let b = raw[&format!("{name}.lora_B.weight")]
+                    .to_dtype(DType::F32)
+                    .unwrap();
+                let alpha = raw[&format!("{name}.alpha")]
+                    .to_dtype(DType::F32)
+                    .unwrap()
+                    .to_scalar::<f32>()
+                    .unwrap();
+                assert_eq!(alpha, a.dim(0).unwrap() as f32, "{name}");
+                // A block-diagonal B feeds every rank column into exactly
+                // one of q/k/v; a fused-matrix resize shares them.
+                if columns_shared_across_qkv(&b) > 0 {
+                    dense_fused += 1;
+                }
+                let expected = x
+                    .matmul(&a.t().unwrap())
+                    .unwrap()
+                    .matmul(&b.t().unwrap())
+                    .unwrap();
+                let observed = block.qkv.delta(&x).unwrap();
+                let error = (observed - &expected)
+                    .unwrap()
+                    .abs()
+                    .unwrap()
+                    .max_all()
+                    .unwrap()
+                    .to_scalar::<f32>()
+                    .unwrap();
+                let peak = expected
+                    .abs()
+                    .unwrap()
+                    .max_all()
+                    .unwrap()
+                    .to_scalar::<f32>()
+                    .unwrap();
+                assert!(
+                    error <= 1e-4 * peak.max(1e-6),
+                    "{name}: {error} vs peak {peak}"
+                );
+            }
+            assert!(dense_fused > 0, "{pin:?}");
+        }
     }
 }

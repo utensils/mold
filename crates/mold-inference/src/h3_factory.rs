@@ -22,7 +22,7 @@ use crate::minimax_h3::backend::{
 use crate::minimax_h3::offload::FrozenH3BlockStreamingPlan;
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 use crate::minimax_h3::private_server::H3PrivateFactoryActivationEvidence;
-use crate::minimax_h3::sampler::{H3DualSchedule, H3SamplerKind, H3_VIDEO_SHIFT};
+use crate::minimax_h3::sampler::{H3DualSchedule, H3SamplerKind, H3_AUDIO_SHIFT, H3_VIDEO_SHIFT};
 use crate::minimax_h3::vae_runtime::expected_h3_comfy_vae_artifact_plan_identity;
 use crate::minimax_h3::{FrozenH3ConditionerPlacement, H3ConditionerExecution};
 
@@ -939,6 +939,7 @@ pub enum H3FactorySamplerKind {
     OfficialEuler,
     ComfyResMultistep,
     ComfyEuler,
+    ComfyLcm,
 }
 
 impl H3FactorySamplerKind {
@@ -951,6 +952,7 @@ impl H3FactorySamplerKind {
             Self::OfficialEuler => H3SamplerKind::OfficialEuler,
             Self::ComfyResMultistep => H3SamplerKind::ComfyResMultistep,
             Self::ComfyEuler => H3SamplerKind::ComfyEuler,
+            Self::ComfyLcm => H3SamplerKind::ComfyLcm,
         }
     }
 
@@ -959,6 +961,7 @@ impl H3FactorySamplerKind {
             H3SamplerKind::OfficialEuler => Self::OfficialEuler,
             H3SamplerKind::ComfyResMultistep => Self::ComfyResMultistep,
             H3SamplerKind::ComfyEuler => Self::ComfyEuler,
+            H3SamplerKind::ComfyLcm => Self::ComfyLcm,
         }
     }
 }
@@ -981,10 +984,23 @@ pub fn media_model_matches_h3_authority(model: &str, authority: &FrozenH3Factory
         .quantization()
         .turbo_adapter()
         .map(H3FactoryTurboAdapterAuthority::tier_stable_id);
-    match mold_core::minimax_h3::turbo_tier_for_model(model) {
+    let adapter_matches = match mold_core::minimax_h3::turbo_tier_for_model(model) {
         Some(tier) => adapter_tier == Some(tier.tier_stable_id),
         None => adapter_tier.is_none() || cfg!(feature = "h3-private-uat"),
-    }
+    };
+    // A distilled base tier shares its task's partition, so the partition
+    // comparison above cannot tell it from the base tag; the frozen sampling
+    // contract can, and the pairing is strict in both directions — no
+    // capture-scope exception, because no env override selects a base tier.
+    let base_matches = match (
+        mold_core::minimax_h3::distilled_base_tier_for_model(model),
+        authority.quantization().base_sampler_override(),
+    ) {
+        (Some(tier), Some(frozen)) => frozen.matches_tier(tier),
+        (None, None) => true,
+        _ => false,
+    };
+    adapter_matches && base_matches
 }
 
 /// Identity of one authenticated Turbo LoRA adapter overlaid on the compact
@@ -1010,6 +1026,7 @@ pub struct H3FactoryTurboAdapterAuthority {
     sampler_kind: H3FactorySamplerKind,
     grid_points: u32,
     video_shift_bits: u32,
+    audio_shift_bits: u32,
     resident_device_bytes: u64,
     device_staging_peak_bytes: u64,
     host_staging_peak_bytes: u64,
@@ -1038,6 +1055,7 @@ impl H3FactoryTurboAdapterAuthority {
             sampler_kind: H3FactorySamplerKind::from_runtime(reviewed.sampler_kind),
             grid_points: reviewed.grid_points,
             video_shift_bits: reviewed.video_shift.to_bits(),
+            audio_shift_bits: reviewed.audio_shift.to_bits(),
             resident_device_bytes,
             device_staging_peak_bytes,
             host_staging_peak_bytes,
@@ -1127,6 +1145,14 @@ impl H3FactoryTurboAdapterAuthority {
                 f32::from_bits(self.video_shift_bits)
             );
         }
+        if self.audio_shift_bits != reviewed.audio_shift.to_bits() {
+            bail!(
+                "MiniMax H3 Turbo tier {:?} is reviewed at audio shift {}, not {}",
+                self.tier_stable_id,
+                reviewed.audio_shift,
+                f32::from_bits(self.audio_shift_bits)
+            );
+        }
         if !self.sampler_kind.runtime_kind().uses_comfy_simple_grid() {
             bail!(
                 "MiniMax H3 Turbo distillations require a Comfy sigma grid, got {}",
@@ -1156,11 +1182,12 @@ impl H3FactoryTurboAdapterAuthority {
         }
         // The schedule has to be buildable before any weight is loaded, and its
         // evaluation count must not collapse below the reviewed step count.
-        let counts = H3DualSchedule::new_for_sampler_with_video_shift(
+        let counts = H3DualSchedule::new_for_sampler_with_shifts(
             usize::try_from(self.grid_points)
                 .map_err(|_| anyhow!("MiniMax H3 Turbo grid points exceed usize"))?,
             self.sampler_kind.runtime_kind(),
             self.video_shift(),
+            self.audio_shift(),
         )?
         .counts();
         if counts.effective_grid_points != counts.requested_grid_points {
@@ -1187,6 +1214,13 @@ impl H3FactoryTurboAdapterAuthority {
         f32::from_bits(self.video_shift_bits)
     }
 
+    /// The audio shift the tier was distilled at (the family 3 for every
+    /// Turbo tier; DMAD/PDMD move it).
+    #[cfg_attr(not(any(feature = "h3", feature = "h3-private-uat")), allow(dead_code))]
+    pub(crate) fn audio_shift(&self) -> f32 {
+        f32::from_bits(self.audio_shift_bits)
+    }
+
     fn update_identity(&self, hash: &mut Sha256) {
         let Self {
             tier_stable_id,
@@ -1195,6 +1229,7 @@ impl H3FactoryTurboAdapterAuthority {
             sampler_kind,
             grid_points,
             video_shift_bits,
+            audio_shift_bits,
             resident_device_bytes,
             device_staging_peak_bytes,
             host_staging_peak_bytes,
@@ -1214,6 +1249,143 @@ impl H3FactoryTurboAdapterAuthority {
         hash.update(resident_device_bytes.to_le_bytes());
         hash.update(device_staging_peak_bytes.to_le_bytes());
         hash.update(host_staging_peak_bytes.to_le_bytes());
+        // Additive since #1812: a tier at the family audio shift hashes exactly
+        // the bytes it hashed before the field existed, so every frozen identity
+        // already recorded for a Turbo tier is unchanged; a tier that moves the
+        // audio shift appends a tagged, fixed-width record.
+        if *audio_shift_bits != H3_AUDIO_SHIFT.to_bits() {
+            hash.update(b"\0audio-shift\0");
+            hash.update(audio_shift_bits.to_le_bytes());
+        }
+    }
+}
+
+/// A reviewed BASE tier's own sampling contract: the integrator and the two
+/// flow shifts a distilled full-weight checkpoint (FastH3 V2: `res_multistep`
+/// at 10/3) was trained for, in place of the compact layout's default
+/// `ComfyResMultistep` at 12/3.
+///
+/// Like [`H3FactoryTurboAdapterAuthority`] it is an additive authority: the
+/// frozen identity of a plan without one is byte-identical to before it
+/// existed, and a plan carrying one hashes it. A distill LoRA and a distilled
+/// base never compose, so an authority carrying both is refused.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct H3FactoryBaseSamplerOverride {
+    sampler_kind: H3FactorySamplerKind,
+    /// The EXACT terminal-inclusive schedule length the distilled base was
+    /// trained for. Like a Turbo tier's, it is a property of the weights, so
+    /// the runtime envelope and the prepared request must both equal it.
+    grid_points: u32,
+    video_shift_bits: u32,
+    audio_shift_bits: u32,
+}
+
+impl H3FactoryBaseSamplerOverride {
+    /// Build and validate a base-tier sampling contract. Only Comfy-grid
+    /// integrators are admissible (the compact layout's sigma table), and both
+    /// shifts must build a schedule.
+    pub fn new(
+        sampler_kind: H3FactorySamplerKind,
+        grid_points: u32,
+        video_shift: f32,
+        audio_shift: f32,
+    ) -> Result<Self> {
+        let value = Self {
+            sampler_kind,
+            grid_points,
+            video_shift_bits: video_shift.to_bits(),
+            audio_shift_bits: audio_shift.to_bits(),
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    /// The sampling contract of one reviewed distilled base tier, read from
+    /// mold-core's [`mold_core::minimax_h3::REVIEWED_DISTILLED_BASE_TIERS`]
+    /// row — never supplied — so a substituted DiT cannot be paired with an
+    /// integrator, shift, or step count it was not distilled for.
+    pub fn for_distilled_base_tier(
+        tier: &mold_core::minimax_h3::DistilledBaseManifestTier,
+    ) -> Result<Self> {
+        let kind = H3SamplerKind::parse(tier.sampler).ok_or_else(|| {
+            anyhow!(
+                "MiniMax H3 distilled base tier {} names an unknown sampler {:?}",
+                tier.model,
+                tier.sampler
+            )
+        })?;
+        Self::new(
+            H3FactorySamplerKind::from_runtime(kind),
+            tier.steps,
+            tier.video_shift,
+            tier.audio_shift,
+        )
+    }
+
+    /// The reviewed distilled base tier a model identity selects, as an
+    /// override; `None` for every identity without one.
+    pub fn for_model(model: &str) -> Result<Option<Self>> {
+        mold_core::minimax_h3::distilled_base_tier_for_model(model)
+            .map(Self::for_distilled_base_tier)
+            .transpose()
+    }
+
+    /// Whether this override is exactly `tier`'s reviewed contract.
+    pub fn matches_tier(&self, tier: &mold_core::minimax_h3::DistilledBaseManifestTier) -> bool {
+        Self::for_distilled_base_tier(tier).is_ok_and(|reviewed| reviewed == *self)
+    }
+
+    pub const fn sampler_kind(&self) -> H3FactorySamplerKind {
+        self.sampler_kind
+    }
+
+    pub const fn grid_points(&self) -> u32 {
+        self.grid_points
+    }
+
+    pub fn video_shift(&self) -> f32 {
+        f32::from_bits(self.video_shift_bits)
+    }
+
+    pub fn audio_shift(&self) -> f32 {
+        f32::from_bits(self.audio_shift_bits)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if !self.sampler_kind.runtime_kind().uses_comfy_simple_grid() {
+            bail!(
+                "MiniMax H3 base-tier sampling override requires a Comfy sigma grid, got {}",
+                self.sampler_kind.as_str()
+            );
+        }
+        if !(2..=H3_FACTORY_MAX_GRID_POINTS).contains(&self.grid_points) {
+            bail!(
+                "MiniMax H3 base-tier sampling override has invalid grid points {}",
+                self.grid_points
+            );
+        }
+        H3DualSchedule::new_for_sampler_with_shifts(
+            usize::try_from(self.grid_points)?,
+            self.sampler_kind.runtime_kind(),
+            self.video_shift(),
+            self.audio_shift(),
+        )?;
+        Ok(())
+    }
+
+    fn update_identity(&self, hash: &mut Sha256) {
+        let Self {
+            sampler_kind,
+            grid_points,
+            video_shift_bits,
+            audio_shift_bits,
+        } = self;
+        hash.update(b"\0base-sampler-override\0");
+        hash.update(sampler_kind.as_str().as_bytes());
+        hash.update([0]);
+        hash.update(grid_points.to_le_bytes());
+        hash.update(video_shift_bits.to_le_bytes());
+        hash.update(audio_shift_bits.to_le_bytes());
     }
 }
 
@@ -1235,6 +1407,10 @@ pub enum H3FactoryQuantizationAuthority {
         /// `None` for the reviewed 21-step baseline; `Some` only for an
         /// authenticated Turbo tier.
         turbo_adapter: Option<H3FactoryTurboAdapterAuthority>,
+        /// `None` for every base checkpoint sampled with the compact layout's
+        /// default (`ComfyResMultistep` at 12/3); `Some` only for a reviewed
+        /// distilled base tier whose own sampling contract differs.
+        base_sampler: Option<H3FactoryBaseSamplerOverride>,
     },
 }
 
@@ -1248,6 +1424,7 @@ impl H3FactoryQuantizationAuthority {
                     qwen_policy_sha256,
                     pruned_adaln_table_sha256,
                     turbo_adapter,
+                    base_sampler,
                 },
                 Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
             ) => {
@@ -1256,6 +1433,14 @@ impl H3FactoryQuantizationAuthority {
                 require_sha256(pruned_adaln_table_sha256, "H3 pruned AdaLN table")?;
                 if let Some(turbo_adapter) = turbo_adapter {
                     turbo_adapter.validate()?;
+                }
+                if let Some(base_sampler) = base_sampler {
+                    if turbo_adapter.is_some() {
+                        bail!(
+                            "MiniMax H3 distilled base tier and Turbo adapter sampling contracts cannot both apply"
+                        );
+                    }
+                    base_sampler.validate()?;
                 }
                 Ok(())
             }
@@ -1278,6 +1463,7 @@ impl H3FactoryQuantizationAuthority {
                 qwen_policy_sha256,
                 pruned_adaln_table_sha256,
                 turbo_adapter,
+                base_sampler,
             } => {
                 hash.update(b"comfy-pruned-int8-convrot-nvfp4-awq\0");
                 hash.update(transformer_policy_sha256.as_bytes());
@@ -1291,6 +1477,11 @@ impl H3FactoryQuantizationAuthority {
                         hash.update([0]);
                         turbo_adapter.update_identity(hash);
                     }
+                }
+                // Additive: absent hashes nothing, so every existing frozen
+                // identity is unchanged.
+                if let Some(base_sampler) = base_sampler {
+                    base_sampler.update_identity(hash);
                 }
             }
         }
@@ -1315,18 +1506,57 @@ impl H3FactoryQuantizationAuthority {
     pub(crate) fn sampler_kind(&self) -> H3SamplerKind {
         match self {
             Self::OfficialBf16 => H3SamplerKind::OfficialEuler,
-            Self::ComfyPrunedInt8ConvrotNvfp4Awq { turbo_adapter, .. } => match turbo_adapter {
-                None => H3SamplerKind::ComfyResMultistep,
-                Some(turbo_adapter) => turbo_adapter.resolved_sampler_kind(),
+            Self::ComfyPrunedInt8ConvrotNvfp4Awq {
+                turbo_adapter,
+                base_sampler,
+                ..
+            } => match (turbo_adapter, base_sampler) {
+                (Some(turbo_adapter), _) => turbo_adapter.resolved_sampler_kind(),
+                (None, Some(base_sampler)) => base_sampler.sampler_kind.runtime_kind(),
+                (None, None) => H3SamplerKind::ComfyResMultistep,
             },
         }
     }
 
-    /// The video shift the sigma grid must be built with.
+    /// The EXACT grid-point count this authority's distillation fixes — the
+    /// Turbo tier's or the distilled base tier's — or `None` for the
+    /// adjustable undistilled range.
+    pub fn fixed_grid_points(&self) -> Option<u32> {
+        match (self.turbo_adapter(), self.base_sampler_override()) {
+            (Some(turbo), _) => Some(turbo.grid_points()),
+            (None, Some(base)) => Some(base.grid_points()),
+            (None, None) => None,
+        }
+    }
+
+    /// A reviewed distilled base tier's own sampling contract, if any.
+    pub fn base_sampler_override(&self) -> Option<&H3FactoryBaseSamplerOverride> {
+        match self {
+            Self::OfficialBf16 => None,
+            Self::ComfyPrunedInt8ConvrotNvfp4Awq { base_sampler, .. } => base_sampler.as_ref(),
+        }
+    }
+
+    /// The video shift the sigma grid must be built with: the Turbo tier's,
+    /// else the distilled base tier's, else the family 12.
     #[cfg_attr(not(any(feature = "h3", feature = "h3-private-uat")), allow(dead_code))]
     pub(crate) fn video_shift(&self) -> f32 {
-        self.turbo_adapter()
-            .map_or(H3_VIDEO_SHIFT, |turbo| turbo.video_shift())
+        match (self.turbo_adapter(), self.base_sampler_override()) {
+            (Some(turbo), _) => turbo.video_shift(),
+            (None, Some(base)) => base.video_shift(),
+            (None, None) => H3_VIDEO_SHIFT,
+        }
+    }
+
+    /// The audio shift the sigma grid must be built with, resolved in the
+    /// same order as [`Self::video_shift`]; the family 3 by default.
+    #[cfg_attr(not(any(feature = "h3", feature = "h3-private-uat")), allow(dead_code))]
+    pub(crate) fn audio_shift(&self) -> f32 {
+        match (self.turbo_adapter(), self.base_sampler_override()) {
+            (Some(turbo), _) => turbo.audio_shift(),
+            (None, Some(base)) => base.audio_shift(),
+            (None, None) => H3_AUDIO_SHIFT,
+        }
     }
 
     /// Resident device bytes this authority's Turbo adapter charges.
@@ -4230,6 +4460,7 @@ impl FrozenH3FactoryAuthority {
                             H3FactoryQuantizationAuthority::ComfyPrunedInt8ConvrotNvfp4Awq {
                                 transformer_policy_sha256,
                                 turbo_adapter,
+                                base_sampler,
                                 ..
                             },
                             Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
@@ -4265,6 +4496,15 @@ impl FrozenH3FactoryAuthority {
                                         "MiniMax H3 prepared request uses {} grid points but its Turbo tier is reviewed for {}",
                                         attempt.request.grid_points,
                                         turbo_adapter.grid_points()
+                                    );
+                                }
+                            }
+                            if let Some(base_sampler) = base_sampler {
+                                if attempt.request.grid_points != base_sampler.grid_points() {
+                                    bail!(
+                                        "MiniMax H3 prepared request uses {} grid points but its distilled base tier is reviewed for {}",
+                                        attempt.request.grid_points,
+                                        base_sampler.grid_points()
                                     );
                                 }
                             }
@@ -6722,6 +6962,17 @@ mod tests {
         .collect()
     }
 
+    /// [`exact_input`] without the prepared attempt, its budget echo, and the
+    /// typed attention runtime — a contract-only authority whose grid points
+    /// no fixture attempt pins.
+    fn attempt_free_input() -> H3FactoryAuthorityInput {
+        let mut input = exact_input();
+        input.prepared_attempt = None;
+        input.execution_budget_echo = None;
+        input.attention_runtime = None;
+        input
+    }
+
     fn exact_input() -> H3FactoryAuthorityInput {
         let prepared_attempt = prepared_attempt();
         let attention = attention();
@@ -6765,6 +7016,7 @@ mod tests {
                 qwen_policy_sha256: sha('c'),
                 pruned_adaln_table_sha256: sha('e'),
                 turbo_adapter: None,
+                base_sampler: None,
             },
             prepared_attempt: Some(prepared_attempt),
             execution_budget_echo: Some(execution_budget_echo),
@@ -7095,6 +7347,7 @@ mod tests {
             qwen_policy_sha256: sha('c'),
             pruned_adaln_table_sha256: sha('e'),
             turbo_adapter: adapter,
+            base_sampler: None,
         };
     }
 
@@ -7259,6 +7512,9 @@ mod tests {
             contract::FL2VA_COMFY_TURBO_4STEP_768P_R21,
             contract::FL2VA_COMFY_TURBO_8STEP_R21,
             contract::REF2VA_COMFY_TURBO_4STEP_R21,
+            contract::FL2VA_COMFY_DMAD_4STEP,
+            contract::FL2VA_COMFY_PDMD_2STEP,
+            contract::FL2VA_COMFY_PDMD_4STEP,
             contract::REF2VA_COMFY,
             "minimax-h3-fl2va:comfy-pruned-int8-turbo-2step",
         ] {
@@ -7414,6 +7670,280 @@ mod tests {
         assert_eq!(frozen.quantization().video_shift(), 6.0);
         // ...and the identity moves with it.
         assert_ne!(frozen.identity_sha256(), baseline.identity_sha256());
+    }
+
+    /// The base-tier hook a distilled full-weight checkpoint (FastH3 V2:
+    /// `res_multistep` at 10/3) declares its own sampling contract through.
+    #[test]
+    fn a_base_sampler_override_sets_the_integrator_and_both_shifts() {
+        let baseline = FrozenH3FactoryAuthority::new_contract_only(exact_input()).unwrap();
+        // Default behaviour is unchanged: RES multistep at 12/3.
+        assert_eq!(baseline.quantization().base_sampler_override(), None);
+        assert_eq!(
+            baseline.quantization().sampler_kind(),
+            H3SamplerKind::ComfyResMultistep
+        );
+        assert_eq!(baseline.quantization().video_shift(), 12.0);
+        assert_eq!(baseline.quantization().audio_shift(), 3.0);
+
+        let with_override = |kind, video, audio| {
+            let mut input = exact_input();
+            let H3FactoryQuantizationAuthority::ComfyPrunedInt8ConvrotNvfp4Awq {
+                base_sampler, ..
+            } = &mut input.quantization
+            else {
+                panic!("fixture uses the compact layout");
+            };
+            // The fixture's prepared attempt renders 5 grid points, and a
+            // frozen override must equal the attempt's own count.
+            *base_sampler = Some(H3FactoryBaseSamplerOverride::new(kind, 5, video, audio).unwrap());
+            FrozenH3FactoryAuthority::new_contract_only(input).unwrap()
+        };
+        let fasth3 = with_override(H3FactorySamplerKind::ComfyResMultistep, 10.0, 3.0);
+        assert_eq!(
+            fasth3.quantization().sampler_kind(),
+            H3SamplerKind::ComfyResMultistep
+        );
+        assert_eq!(fasth3.quantization().video_shift(), 10.0);
+        assert_eq!(fasth3.quantization().audio_shift(), 3.0);
+        assert_ne!(fasth3.identity_sha256(), baseline.identity_sha256());
+
+        // Every field of the override reaches the identity.
+        let lcm = with_override(H3FactorySamplerKind::ComfyLcm, 10.0, 3.0);
+        let audio = with_override(H3FactorySamplerKind::ComfyResMultistep, 10.0, 2.0);
+        let video = with_override(H3FactorySamplerKind::ComfyResMultistep, 12.0, 3.0);
+        for other in [&lcm, &audio, &video] {
+            assert_ne!(other.identity_sha256(), fasth3.identity_sha256());
+        }
+        // Even an override equal to the default is a declared contract, so it
+        // is a different frozen identity from declaring none.
+        assert_ne!(video.identity_sha256(), baseline.identity_sha256());
+        assert_eq!(lcm.quantization().sampler_kind(), H3SamplerKind::ComfyLcm);
+    }
+
+    #[test]
+    fn a_base_sampler_override_is_validated_and_never_composes_with_turbo() {
+        let error =
+            H3FactoryBaseSamplerOverride::new(H3FactorySamplerKind::OfficialEuler, 9, 12.0, 3.0)
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("Comfy sigma grid"), "{error}");
+        for (video, audio) in [
+            (0.0f32, 3.0f32),
+            (10.0, -1.0),
+            (f32::NAN, 3.0),
+            (10.0, f32::INFINITY),
+        ] {
+            assert!(H3FactoryBaseSamplerOverride::new(
+                H3FactorySamplerKind::ComfyResMultistep,
+                9,
+                video,
+                audio
+            )
+            .is_err());
+        }
+        for grid_points in [0, 1, H3_FACTORY_MAX_GRID_POINTS + 1] {
+            assert!(H3FactoryBaseSamplerOverride::new(
+                H3FactorySamplerKind::ComfyResMultistep,
+                grid_points,
+                10.0,
+                3.0
+            )
+            .is_err());
+        }
+
+        let mut input = exact_input();
+        let turbo = turbo_authority_for(TURBO_4STEP_TIER);
+        apply_turbo_budget(&mut input, &turbo);
+        input.quantization = H3FactoryQuantizationAuthority::ComfyPrunedInt8ConvrotNvfp4Awq {
+            transformer_policy_sha256: sha('d'),
+            qwen_policy_sha256: sha('c'),
+            pruned_adaln_table_sha256: sha('e'),
+            turbo_adapter: Some(turbo),
+            base_sampler: Some(
+                H3FactoryBaseSamplerOverride::new(
+                    H3FactorySamplerKind::ComfyResMultistep,
+                    9,
+                    10.0,
+                    3.0,
+                )
+                .unwrap(),
+            ),
+        };
+        let error = FrozenH3FactoryAuthority::new_contract_only(input)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cannot both apply"), "{error}");
+    }
+
+    /// The FastH3 V2 override is READ from mold-core's reviewed distilled
+    /// base tier row (FastVideo README: res_multistep, 8 steps = 9 grid
+    /// points, shift 10 video / 3 audio), and the grid points reach the
+    /// frozen identity.
+    #[test]
+    fn the_fasth3_base_override_is_the_reviewed_distilled_tier_contract() {
+        let tier = contract::distilled_base_tier_for_model(contract::FL2VA_FASTH3_V2_INT8).unwrap();
+        let fasth3 = H3FactoryBaseSamplerOverride::for_distilled_base_tier(tier).unwrap();
+        assert_eq!(
+            fasth3,
+            H3FactoryBaseSamplerOverride::new(
+                H3FactorySamplerKind::ComfyResMultistep,
+                9,
+                10.0,
+                3.0
+            )
+            .unwrap()
+        );
+        assert_eq!(fasth3.grid_points(), 9);
+        assert!(fasth3.matches_tier(tier));
+        assert_eq!(
+            H3FactoryBaseSamplerOverride::for_model(contract::FL2VA_FASTH3_V2_INT8).unwrap(),
+            Some(fasth3.clone())
+        );
+        for model in [
+            contract::FL2VA_COMFY,
+            contract::REF2VA_COMFY,
+            contract::FL2VA_COMFY_TURBO_8STEP,
+        ] {
+            assert_eq!(
+                H3FactoryBaseSamplerOverride::for_model(model).unwrap(),
+                None
+            );
+        }
+        // Every reviewed distilled base tier builds its own override.
+        for tier in contract::REVIEWED_DISTILLED_BASE_TIERS {
+            let reviewed = H3FactoryBaseSamplerOverride::for_distilled_base_tier(tier).unwrap();
+            assert_eq!(reviewed.grid_points(), tier.steps);
+            assert_eq!(reviewed.sampler_kind().as_str(), tier.sampler);
+            assert_eq!(reviewed.video_shift(), tier.video_shift);
+            assert_eq!(reviewed.audio_shift(), tier.audio_shift);
+        }
+        let mut unknown = *tier;
+        unknown.sampler = "comfy-unknown";
+        assert!(H3FactoryBaseSamplerOverride::for_distilled_base_tier(&unknown).is_err());
+        let mut other_grid = fasth3.clone();
+        other_grid.grid_points = 5;
+        assert!(!other_grid.matches_tier(tier));
+
+        // The grid points are part of the frozen identity.
+        let frozen_with = |value: H3FactoryBaseSamplerOverride| {
+            let mut input = attempt_free_input();
+            let H3FactoryQuantizationAuthority::ComfyPrunedInt8ConvrotNvfp4Awq {
+                base_sampler, ..
+            } = &mut input.quantization
+            else {
+                panic!("fixture uses the compact layout");
+            };
+            *base_sampler = Some(value);
+            FrozenH3FactoryAuthority::new_contract_only(input).unwrap()
+        };
+        let nine = frozen_with(fasth3.clone());
+        let five = frozen_with(
+            H3FactoryBaseSamplerOverride::new(
+                H3FactorySamplerKind::ComfyResMultistep,
+                5,
+                10.0,
+                3.0,
+            )
+            .unwrap(),
+        );
+        assert_ne!(nine.identity_sha256(), five.identity_sha256());
+        assert_eq!(nine.quantization().fixed_grid_points(), Some(9));
+        let baseline = FrozenH3FactoryAuthority::new_contract_only(attempt_free_input()).unwrap();
+        assert_eq!(baseline.quantization().fixed_grid_points(), None);
+    }
+
+    /// FastH3 shares FL2VA's partition, so only its frozen sampling contract
+    /// tells it apart from the base tag — and the pairing is strict in both
+    /// directions.
+    #[test]
+    fn media_model_pairing_requires_the_exact_frozen_distilled_base_tier() {
+        let baseline = FrozenH3FactoryAuthority::new_contract_only(attempt_free_input()).unwrap();
+        assert!(!media_model_matches_h3_authority(
+            contract::FL2VA_FASTH3_V2_INT8,
+            &baseline
+        ));
+
+        let mut input = attempt_free_input();
+        let H3FactoryQuantizationAuthority::ComfyPrunedInt8ConvrotNvfp4Awq { base_sampler, .. } =
+            &mut input.quantization
+        else {
+            panic!("fixture uses the compact layout");
+        };
+        *base_sampler =
+            H3FactoryBaseSamplerOverride::for_model(contract::FL2VA_FASTH3_V2_INT8).unwrap();
+        let fasth3 = FrozenH3FactoryAuthority::new_contract_only(input).unwrap();
+        assert!(media_model_matches_h3_authority(
+            contract::FL2VA_FASTH3_V2_INT8,
+            &fasth3
+        ));
+        for mismatched in [
+            contract::FL2VA_COMFY,
+            contract::FL2VA_COMFY_TURBO_8STEP,
+            contract::REF2VA_COMFY,
+        ] {
+            assert!(
+                !media_model_matches_h3_authority(mismatched, &fasth3),
+                "{mismatched}"
+            );
+        }
+    }
+
+    /// Every reviewed Turbo tier carries the family audio shift, and the field
+    /// is re-proved against the table like the rest of the triple.
+    #[test]
+    fn a_turbo_authority_carries_its_reviewed_audio_shift() {
+        for tier in [
+            TURBO_4STEP_TIER,
+            TURBO_8STEP_TIER,
+            TURBO_4STEP_768P_V11_TIER,
+            TURBO_8STEP_768P_TIER,
+        ] {
+            let authority = turbo_authority_for(tier);
+            assert_eq!(authority.audio_shift().to_bits(), H3_AUDIO_SHIFT.to_bits());
+            let mut tampered = authority.clone();
+            tampered.audio_shift_bits = 2.0f32.to_bits();
+            let error = tampered.validate().unwrap_err().to_string();
+            assert!(error.contains("audio shift"), "{error}");
+        }
+        let mut input = exact_input();
+        let turbo = turbo_authority_for(TURBO_4STEP_TIER);
+        apply_turbo_budget(&mut input, &turbo);
+        with_turbo_adapter(&mut input, Some(turbo.clone()));
+        let frozen = FrozenH3FactoryAuthority::new_contract_only(input).unwrap();
+        assert_eq!(frozen.quantization().audio_shift(), 3.0);
+
+        // The field is additive: at the family audio shift the identity bytes
+        // are exactly the pre-#1812 field sequence, so no recorded Turbo
+        // identity moves. A moved audio shift appends a tagged record.
+        let pre_1812 = |authority: &H3FactoryTurboAdapterAuthority| {
+            let mut hash = Sha256::new();
+            hash.update(b"turbo-adapter\0");
+            for field in [
+                authority.tier_stable_id(),
+                authority.adapter_identity_sha256(),
+                authority.adapter_content_sha256(),
+                authority.sampler_kind().as_str(),
+            ] {
+                hash.update(field.as_bytes());
+                hash.update([0]);
+            }
+            hash.update(authority.grid_points().to_le_bytes());
+            hash.update(authority.video_shift().to_bits().to_le_bytes());
+            hash.update(authority.resident_device_bytes().to_le_bytes());
+            hash.update(authority.device_staging_peak_bytes().to_le_bytes());
+            hash.update(authority.host_staging_peak_bytes().to_le_bytes());
+            hash.finalize()
+        };
+        let current = |authority: &H3FactoryTurboAdapterAuthority| {
+            let mut hash = Sha256::new();
+            authority.update_identity(&mut hash);
+            hash.finalize()
+        };
+        assert_eq!(current(&turbo), pre_1812(&turbo));
+        let mut moved = turbo.clone();
+        moved.audio_shift_bits = 2.0f32.to_bits();
+        assert_ne!(current(&moved), pre_1812(&moved));
     }
 
     #[test]

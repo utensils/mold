@@ -2356,6 +2356,52 @@ describe("CreatePage layout and behavior", () => {
     );
   });
 
+  // Text-only FL2VA (#1552): a host whose row advertises the first frame as
+  // OPTIONAL admits a prompt with no boundary frames, so nothing blocks it.
+  it("does not block a text-only H3 print when the host makes the first frame optional", async () => {
+    const h3Model: ModelInfoExtended = {
+      name: "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step",
+      family: "minimax-h3",
+      display_name: "MiniMax H3 FL2VA Turbo 8-step",
+      size_gb: 42.9,
+      is_loaded: false,
+      last_used: null,
+      hf_repo: "Comfy-Org/MiniMax-H3",
+      downloaded: true,
+      default_steps: 9,
+      default_guidance: 0,
+      default_width: 1344,
+      default_height: 768,
+      default_frames: 124,
+      default_fps: 24,
+      description: "Compact FL2VA runtime; text-only or first/last-frame",
+      source_image: "optional",
+    };
+    hostModelsMock.mockResolvedValue([h3Model]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = h3Model.name;
+    form.state.value.modelFamily = h3Model.family;
+    form.state.value.prompt = "";
+    form.state.value.sourceImageCapability = "optional";
+    form.state.value.h3Authoring = {
+      firstFrame: null,
+      lastFrame: null,
+      references: [],
+    };
+    await nextTick();
+    expect(wrapper.get("[data-test='page-generation-blocker']").text()).toBe(
+      "Add a prompt before generating.",
+    );
+
+    form.state.value.prompt = "a lighthouse in a storm, waves crashing";
+    await nextTick();
+    expect(wrapper.find("[data-test='page-generation-blocker']").exists()).toBe(
+      false,
+    );
+  });
+
   it("acknowledges Generate immediately and swallows a double click", async () => {
     hostModelsMock.mockResolvedValue([
       installedModelRow("flux-dev:q4", "flux"),

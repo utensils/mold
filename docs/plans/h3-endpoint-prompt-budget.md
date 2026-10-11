@@ -15,8 +15,8 @@ undercharge memory.
   1,008 maximum vision pads and presentation allowance; cap vision patches and
   conditioning latents by endpoint count. Last-only uses the same endpoint
   policy, without weakening
-  duplicate/order checks. Text-only remains unavailable under the current
-  qualification and is tracked separately in #1552.
+  duplicate/order checks. Text-only was out of scope here; it was later
+  admitted as a zero-endpoint envelope (#1812, tracked in #1552).
 - Scale Qwen and denoise grants using the additional conditioner and packed rows.
   Keep historical measurement denominators and the current canvas/frame limits.
   Condition-VAE peak remains per encode, not the sum of sequential encodes.
