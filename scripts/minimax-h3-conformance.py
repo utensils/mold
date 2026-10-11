@@ -69,6 +69,10 @@ EXPECTED_REVISIONS = {
     # derivatives of three adapters already pinned above, runnable on the
     # compact stacks.
     "drbaph-resized-loras": "be8eb3ea3466cbb7def202ffec0d2fdc054256ac",
+    # Third-party rank-reduced DMAD / PDMD distill LoRA adapters (Kijai builds,
+    # per-module rank with alpha == rank, lossy): runnable on the FL2VA
+    # compact stack.
+    "kijai-experimental-loras": "d8023be02fefbb3633b0cd335c3879f91177299d",
     "sglang": "0c3a76fa0a5bfab410b645f4143e7e8e3cc25c77",
     "vllm-omni": "3d7fc3b9ba3cac88d579d4dc35b78b0b641675fc",
 }

@@ -485,7 +485,7 @@ pub const H3_TURBO_LORA_KIJAI_PINS: [H3TurboLoraPublishedPin; 3] = [
     H3_TURBO_LORA_KIJAI_PDMD_4STEP,
 ];
 
-/// One of the eight reviewed published Turbo adapters. Detection never uses a
+/// One of the eleven reviewed published Turbo / distill adapters. Detection never uses a
 /// filename: the independently parsed header must agree with this authority,
 /// and each tier names the repository and revision it was published at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -508,11 +508,34 @@ pub enum H3TurboLoraTier {
     Fl2v8StepV10Rank21,
     /// SVD-resized derivative of [`Self::Ref2v4StepV10`], average rank 21.
     Ref2v4StepV10Rank21,
+    /// DMAD 4-step FL2VA distill adapter, Kijai's rank-reduced build (average
+    /// rank 39). Every per-file fact is read from
+    /// [`H3_TURBO_LORA_KIJAI_DMAD_4STEP`].
+    Fl2vDmad4StepKijaiR39,
+    /// PDMD 2-step FL2VA distill adapter, Kijai's rank-reduced build (average
+    /// rank 38), from [`H3_TURBO_LORA_KIJAI_PDMD_2STEP`].
+    Fl2vPdmd2StepKijaiR38,
+    /// PDMD 4-step FL2VA distill adapter, Kijai's rank-reduced build (average
+    /// rank 57), from [`H3_TURBO_LORA_KIJAI_PDMD_4STEP`].
+    Fl2vPdmd4StepKijaiR57,
+}
+
+/// The basename of a repository-relative path, at compile time.
+const fn path_basename(path: &'static str) -> &'static str {
+    let bytes = path.as_bytes();
+    let mut index = bytes.len();
+    while index > 0 {
+        if bytes[index - 1] == b'/' {
+            return path.split_at(index).1;
+        }
+        index -= 1;
+    }
+    path
 }
 
 impl H3TurboLoraTier {
     /// Every reviewed tier, in a stable order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 11] = [
         Self::Fl2v8StepV10,
         Self::Fl2v768p4StepV10,
         Self::Ref2v4StepV10,
@@ -521,7 +544,29 @@ impl H3TurboLoraTier {
         Self::Fl2v768p4StepV10Rank21,
         Self::Fl2v8StepV10Rank21,
         Self::Ref2v4StepV10Rank21,
+        Self::Fl2vDmad4StepKijaiR39,
+        Self::Fl2vPdmd2StepKijaiR38,
+        Self::Fl2vPdmd4StepKijaiR57,
     ];
+
+    /// The published pin a tier reads every per-file fact from, for the
+    /// tiers whose facts live in an [`H3TurboLoraPublishedPin`] rather than
+    /// in this enum's own match arms.
+    pub const fn published_pin(self) -> Option<H3TurboLoraPublishedPin> {
+        match self {
+            Self::Fl2vDmad4StepKijaiR39 => Some(H3_TURBO_LORA_KIJAI_DMAD_4STEP),
+            Self::Fl2vPdmd2StepKijaiR38 => Some(H3_TURBO_LORA_KIJAI_PDMD_2STEP),
+            Self::Fl2vPdmd4StepKijaiR57 => Some(H3_TURBO_LORA_KIJAI_PDMD_4STEP),
+            Self::Fl2v8StepV10
+            | Self::Fl2v768p4StepV10
+            | Self::Ref2v4StepV10
+            | Self::Fl2v768p4StepV11
+            | Self::Fl2v768p8StepV10
+            | Self::Fl2v768p4StepV10Rank21
+            | Self::Fl2v8StepV10Rank21
+            | Self::Ref2v4StepV10Rank21 => None,
+        }
+    }
 
     pub const fn stable_id(self) -> &'static str {
         match self {
@@ -538,6 +583,15 @@ impl H3TurboLoraTier {
             }
             Self::Ref2v4StepV10Rank21 => {
                 "minimax-h3.turbo-lora.ref2v-4step-v0.1.comfyui-bf16.resized-avg-rank-21.v1"
+            }
+            Self::Fl2vDmad4StepKijaiR39 => {
+                "minimax-h3.turbo-lora.fl2v-dmad-4step.kijai-bf16.avg-rank-39.v1"
+            }
+            Self::Fl2vPdmd2StepKijaiR38 => {
+                "minimax-h3.turbo-lora.fl2v-pdmd-2step.kijai-bf16.avg-rank-38.v1"
+            }
+            Self::Fl2vPdmd4StepKijaiR57 => {
+                "minimax-h3.turbo-lora.fl2v-pdmd-4step.kijai-bf16.avg-rank-57.v1"
             }
         }
     }
@@ -564,6 +618,15 @@ impl H3TurboLoraTier {
             Self::Ref2v4StepV10Rank21 => {
                 "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_resized_avg_rank_21_bf16.safetensors"
             }
+            Self::Fl2vDmad4StepKijaiR39 => {
+                path_basename(H3_TURBO_LORA_KIJAI_DMAD_4STEP.repository_path)
+            }
+            Self::Fl2vPdmd2StepKijaiR38 => {
+                path_basename(H3_TURBO_LORA_KIJAI_PDMD_2STEP.repository_path)
+            }
+            Self::Fl2vPdmd4StepKijaiR57 => {
+                path_basename(H3_TURBO_LORA_KIJAI_PDMD_4STEP.repository_path)
+            }
         }
     }
 
@@ -577,6 +640,9 @@ impl H3TurboLoraTier {
             Self::Fl2v768p4StepV10Rank21 | Self::Fl2v8StepV10Rank21 | Self::Ref2v4StepV10Rank21 => {
                 H3_TURBO_LORA_DRBAPH_REPOSITORY
             }
+            Self::Fl2vDmad4StepKijaiR39 => H3_TURBO_LORA_KIJAI_DMAD_4STEP.repository,
+            Self::Fl2vPdmd2StepKijaiR38 => H3_TURBO_LORA_KIJAI_PDMD_2STEP.repository,
+            Self::Fl2vPdmd4StepKijaiR57 => H3_TURBO_LORA_KIJAI_PDMD_4STEP.repository,
         }
     }
 
@@ -593,6 +659,9 @@ impl H3TurboLoraTier {
             Self::Fl2v768p4StepV10Rank21 | Self::Fl2v8StepV10Rank21 | Self::Ref2v4StepV10Rank21 => {
                 H3_TURBO_LORA_DRBAPH_SOURCE_REVISION
             }
+            Self::Fl2vDmad4StepKijaiR39 => H3_TURBO_LORA_KIJAI_DMAD_4STEP.revision,
+            Self::Fl2vPdmd2StepKijaiR38 => H3_TURBO_LORA_KIJAI_PDMD_2STEP.revision,
+            Self::Fl2vPdmd4StepKijaiR57 => H3_TURBO_LORA_KIJAI_PDMD_4STEP.revision,
         }
     }
 
@@ -614,6 +683,16 @@ impl H3TurboLoraTier {
             | Self::Fl2v768p4StepV10Rank21
             | Self::Fl2v8StepV10Rank21
             | Self::Ref2v4StepV10Rank21 => self.file_name().to_owned(),
+            // Kijai publishes under `loras/`; the pin carries the exact path.
+            Self::Fl2vDmad4StepKijaiR39 => {
+                H3_TURBO_LORA_KIJAI_DMAD_4STEP.repository_path.to_owned()
+            }
+            Self::Fl2vPdmd2StepKijaiR38 => {
+                H3_TURBO_LORA_KIJAI_PDMD_2STEP.repository_path.to_owned()
+            }
+            Self::Fl2vPdmd4StepKijaiR57 => {
+                H3_TURBO_LORA_KIJAI_PDMD_4STEP.repository_path.to_owned()
+            }
         }
     }
 
@@ -624,6 +703,9 @@ impl H3TurboLoraTier {
             Self::Fl2v768p4StepV10Rank21 => 298_177_224,
             Self::Fl2v8StepV10Rank21 => 327_035_608,
             Self::Ref2v4StepV10Rank21 => 326_935_264,
+            Self::Fl2vDmad4StepKijaiR39 => H3_TURBO_LORA_KIJAI_DMAD_4STEP.file_bytes,
+            Self::Fl2vPdmd2StepKijaiR38 => H3_TURBO_LORA_KIJAI_PDMD_2STEP.file_bytes,
+            Self::Fl2vPdmd4StepKijaiR57 => H3_TURBO_LORA_KIJAI_PDMD_4STEP.file_bytes,
         }
     }
 
@@ -653,6 +735,9 @@ impl H3TurboLoraTier {
             Self::Ref2v4StepV10Rank21 => {
                 "2c6abb194cff3e26c2295c87892913adf0c92d8f784f305238246759f9b333d0"
             }
+            Self::Fl2vDmad4StepKijaiR39 => H3_TURBO_LORA_KIJAI_DMAD_4STEP.content_sha256,
+            Self::Fl2vPdmd2StepKijaiR38 => H3_TURBO_LORA_KIJAI_PDMD_2STEP.content_sha256,
+            Self::Fl2vPdmd4StepKijaiR57 => H3_TURBO_LORA_KIJAI_PDMD_4STEP.content_sha256,
         }
     }
 
@@ -664,6 +749,9 @@ impl H3TurboLoraTier {
             Self::Fl2v768p4StepV10Rank21 => 52_928,
             Self::Fl2v8StepV10Rank21 => 52_944,
             Self::Ref2v4StepV10Rank21 => 52_952,
+            Self::Fl2vDmad4StepKijaiR39 => H3_TURBO_LORA_KIJAI_DMAD_4STEP.header_len,
+            Self::Fl2vPdmd2StepKijaiR38 => H3_TURBO_LORA_KIJAI_PDMD_2STEP.header_len,
+            Self::Fl2vPdmd4StepKijaiR57 => H3_TURBO_LORA_KIJAI_PDMD_4STEP.header_len,
         }
     }
 
@@ -695,6 +783,9 @@ impl H3TurboLoraTier {
             Self::Ref2v4StepV10Rank21 => {
                 "3c1db66284973ee4eec4e9700e12b1fc587b1aa7f85af6a811daac0d15b4db6f"
             }
+            Self::Fl2vDmad4StepKijaiR39 => H3_TURBO_LORA_KIJAI_DMAD_4STEP.header_identity_sha256,
+            Self::Fl2vPdmd2StepKijaiR38 => H3_TURBO_LORA_KIJAI_PDMD_2STEP.header_identity_sha256,
+            Self::Fl2vPdmd4StepKijaiR57 => H3_TURBO_LORA_KIJAI_PDMD_4STEP.header_identity_sha256,
         }
     }
 
@@ -707,6 +798,9 @@ impl H3TurboLoraTier {
             | Self::Fl2v768p4StepV10Rank21
             | Self::Fl2v8StepV10Rank21 => H3TransformerTask::T2VaFl2Va,
             Self::Ref2v4StepV10 | Self::Ref2v4StepV10Rank21 => H3TransformerTask::Ref2Va,
+            Self::Fl2vDmad4StepKijaiR39 => H3_TURBO_LORA_KIJAI_DMAD_4STEP.task,
+            Self::Fl2vPdmd2StepKijaiR38 => H3_TURBO_LORA_KIJAI_PDMD_2STEP.task,
+            Self::Fl2vPdmd4StepKijaiR57 => H3_TURBO_LORA_KIJAI_PDMD_4STEP.task,
         }
     }
 
@@ -744,6 +838,9 @@ impl H3TurboLoraTier {
                 source: Self::Ref2v4StepV10,
                 baked_scale: 0.0625,
             },
+            Self::Fl2vDmad4StepKijaiR39 => H3_TURBO_LORA_KIJAI_DMAD_4STEP.shape,
+            Self::Fl2vPdmd2StepKijaiR38 => H3_TURBO_LORA_KIJAI_PDMD_2STEP.shape,
+            Self::Fl2vPdmd4StepKijaiR57 => H3_TURBO_LORA_KIJAI_PDMD_4STEP.shape,
         }
     }
 
@@ -3146,6 +3243,9 @@ impl H3TurboLoraTier {
             Self::Fl2v768p4StepV10Rank21 => "fl2v-4step-768p-v1.0-r21.header",
             Self::Fl2v8StepV10Rank21 => "fl2v-8step-v1.0-r21.header",
             Self::Ref2v4StepV10Rank21 => "ref2v-4step-v0.1-r21.header",
+            Self::Fl2vDmad4StepKijaiR39 => H3_TURBO_LORA_KIJAI_DMAD_4STEP.header_fixture,
+            Self::Fl2vPdmd2StepKijaiR38 => H3_TURBO_LORA_KIJAI_PDMD_2STEP.header_fixture,
+            Self::Fl2vPdmd4StepKijaiR57 => H3_TURBO_LORA_KIJAI_PDMD_4STEP.header_fixture,
         };
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("testdata/minimax_h3/turbo")
@@ -3240,17 +3340,18 @@ mod tests {
     /// fails here, and so does a tier whose fixture was never committed.
     #[test]
     fn every_checked_in_header_fixture_is_claimed_by_a_tier() {
-        // A published pin that is not yet a tier claims its own fixture; once
-        // a tier arm reads its facts from that pin, the two name one file.
+        // Every Kijai pin is now a tier, so the tier set alone must claim
+        // every fixture; a pin that is not a tier would leave an orphan here.
         let claimed = H3TurboLoraTier::ALL
             .into_iter()
             .map(|tier| tier.header_fixture_path())
-            .chain(
-                H3_TURBO_LORA_KIJAI_PINS
-                    .iter()
-                    .map(published_pin_header_fixture_path),
-            )
             .collect::<std::collections::BTreeSet<_>>();
+        for pin in &H3_TURBO_LORA_KIJAI_PINS {
+            assert!(
+                claimed.contains(&published_pin_header_fixture_path(pin)),
+                "{pin:?} is not claimed by a tier"
+            );
+        }
         let directory =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/minimax_h3/turbo");
         let mut present = std::collections::BTreeSet::new();
@@ -3302,26 +3403,30 @@ mod tests {
             // its own header.
             let metadata_number =
                 |key: &str| -> f32 { parsed.metadata.get(key).unwrap().parse::<f32>().unwrap() };
-            assert_eq!(
-                parsed
-                    .metadata
-                    .get("training_rank")
-                    .unwrap()
-                    .parse::<usize>()
-                    .unwrap(),
-                H3_TURBO_LORA_TRAINING_RANK,
-                "{tier:?}"
-            );
-            assert_eq!(
-                parsed.metadata.get("target_format").unwrap(),
-                H3_TURBO_LORA_TARGET_FORMAT,
-                "{tier:?}"
-            );
-            assert_eq!(
-                parsed.metadata.get("source_format").unwrap(),
-                H3_TURBO_LORA_SOURCE_FORMAT,
-                "{tier:?}"
-            );
+            // A per-module-alpha export declares none of the PEFT training
+            // metadata; the two PEFT-derived shapes declare all of it.
+            if !tier.shape().is_per_module_alpha() {
+                assert_eq!(
+                    parsed
+                        .metadata
+                        .get("training_rank")
+                        .unwrap()
+                        .parse::<usize>()
+                        .unwrap(),
+                    H3_TURBO_LORA_TRAINING_RANK,
+                    "{tier:?}"
+                );
+                assert_eq!(
+                    parsed.metadata.get("target_format").unwrap(),
+                    H3_TURBO_LORA_TARGET_FORMAT,
+                    "{tier:?}"
+                );
+                assert_eq!(
+                    parsed.metadata.get("source_format").unwrap(),
+                    H3_TURBO_LORA_SOURCE_FORMAT,
+                    "{tier:?}"
+                );
+            }
             match tier.shape() {
                 H3TurboLoraShape::Uniform {
                     training_rank,
@@ -3387,8 +3492,39 @@ mod tests {
                         "{tier:?} still declares training_alpha"
                     );
                 }
-                H3TurboLoraShape::PerModuleAlpha { .. } => {
-                    unreachable!("no shipped tier is per-module-alpha yet")
+                H3TurboLoraShape::PerModuleAlpha { baked_scale } => {
+                    // One alpha per module: the full 624-tensor count.
+                    assert_eq!(parsed.tensors.len(), H3_TURBO_LORA_TENSOR_COUNT, "{tier:?}");
+                    assert_ne!(payload, H3_TURBO_LORA_PAYLOAD_BYTES, "{tier:?}");
+                    assert_eq!(
+                        metadata_number(METADATA_BAKED_SCALE_KEY).to_bits(),
+                        baked_scale.to_bits(),
+                        "{tier:?}"
+                    );
+                    assert_eq!(
+                        parsed.metadata.get(METADATA_CONVERTED_LAYOUT_KEY).unwrap(),
+                        H3_TURBO_LORA_KIJAI_CONVERTED_LAYOUT,
+                        "{tier:?}"
+                    );
+                    assert_eq!(
+                        parsed.metadata.get(METADATA_CONVERSION_KEY).unwrap(),
+                        H3_TURBO_LORA_KIJAI_CONVERSION,
+                        "{tier:?}"
+                    );
+                    assert!(
+                        !parsed.metadata.contains_key("training_rank"),
+                        "{tier:?} declares a training rank"
+                    );
+                    // Every per-file fact is the pin's, never restated.
+                    let pin = tier
+                        .published_pin()
+                        .expect("per-module-alpha tiers are pinned");
+                    assert_eq!(tier.expectation(), pin.expectation(), "{tier:?}");
+                    assert_eq!(tier.file_name(), pin.file_name(), "{tier:?}");
+                    assert_eq!(tier.repository_path(), pin.repository_path, "{tier:?}");
+                    assert_eq!(tier.training_scale(), 1.0, "{tier:?}");
+                    assert_eq!(tier.training_alpha(), None, "{tier:?}");
+                    assert_eq!(tier.source_tier(), None, "{tier:?}");
                 }
             }
             assert_eq!(
@@ -3408,6 +3544,10 @@ mod tests {
                 }
                 H3_TURBO_LORA_LIGHTX2V_REPOSITORY | H3_TURBO_LORA_DRBAPH_REPOSITORY => {
                     tier.file_name().to_owned()
+                }
+                // Kijai publishes under `loras/` too.
+                H3_TURBO_LORA_KIJAI_REPOSITORY => {
+                    format!("{H3_TURBO_LORA_DIRECTORY}/{}", tier.file_name())
                 }
                 other => panic!("{tier:?} publishes from unregistered repository {other}"),
             };
@@ -3444,6 +3584,14 @@ mod tests {
         assert_eq!(
             H3_TURBO_LORA_DRBAPH_SOURCE_REVISION,
             "be8eb3ea3466cbb7def202ffec0d2fdc054256ac"
+        );
+        assert_eq!(
+            H3_TURBO_LORA_KIJAI_REPOSITORY,
+            "Kijai/MiniMax-H3-experimental"
+        );
+        assert_eq!(
+            H3_TURBO_LORA_KIJAI_SOURCE_REVISION,
+            "d8023be02fefbb3633b0cd335c3879f91177299d"
         );
         assert_eq!(H3_TURBO_LORA_TENSOR_COUNT, H3_TURBO_LORA_MODULE_COUNT * 3);
         assert_eq!(
@@ -3502,7 +3650,9 @@ mod tests {
             // tier keeps its OWN source and baked scale so it is exercised
             // through the shape it actually ships. A uniform tier keeps the
             // fixture's small rank, exactly as before.
-            if let shape @ H3TurboLoraShape::Dynamic { .. } = tier.shape() {
+            if let shape @ (H3TurboLoraShape::Dynamic { .. }
+            | H3TurboLoraShape::PerModuleAlpha { .. }) = tier.shape()
+            {
                 expectation.shape = shape;
             }
             expectation.source_repository = tier.source_repository().to_owned();
@@ -3521,7 +3671,7 @@ mod tests {
                 "{tier:?}"
             );
         }
-        // Exactly three reviewed sources, and every tier names one of them.
+        // Exactly four reviewed sources, and every tier names one of them.
         for tier in H3TurboLoraTier::ALL {
             match tier.source_repository() {
                 H3_TURBO_LORA_REPOSITORY => {
@@ -3537,6 +3687,11 @@ mod tests {
                     assert_eq!(tier.source_revision(), H3_TURBO_LORA_DRBAPH_SOURCE_REVISION);
                     // Only a resized derivative comes from this repository.
                     assert!(tier.shape().is_dynamic(), "{tier:?}");
+                }
+                H3_TURBO_LORA_KIJAI_REPOSITORY => {
+                    assert_eq!(tier.source_revision(), H3_TURBO_LORA_KIJAI_SOURCE_REVISION);
+                    // Only a per-module-alpha export comes from this repository.
+                    assert!(tier.shape().is_per_module_alpha(), "{tier:?}");
                 }
                 other => panic!("{tier:?} names unreviewed repository {other}"),
             }
@@ -3562,9 +3717,11 @@ mod tests {
                 },
                 "{tier:?}"
             );
+            // A per-module-alpha export declares no training rank at all.
             assert_eq!(
                 expectation.training_rank(),
-                Some(H3_TURBO_LORA_TRAINING_RANK)
+                (!tier.shape().is_per_module_alpha()).then_some(H3_TURBO_LORA_TRAINING_RANK),
+                "{tier:?}"
             );
             assert_eq!(expectation.task, tier.task());
             assert_eq!(
@@ -4961,12 +5118,17 @@ mod tests {
         assert_eq!(shape.source_tier(), None);
         assert_eq!(shape.baked_scale(), Some(1.0));
         assert_eq!(shape.qkv_fusion(), None);
-        // Neither existing shape answers the new predicates.
+        // Only the Kijai tiers are per-module-alpha, and the rank-reduced
+        // predicate covers exactly both rank-reduced shapes.
         for tier in H3TurboLoraTier::ALL {
-            assert!(!tier.shape().is_per_module_alpha(), "{tier:?}");
+            assert_eq!(
+                tier.shape().is_per_module_alpha(),
+                tier.source_repository() == H3_TURBO_LORA_KIJAI_REPOSITORY,
+                "{tier:?}"
+            );
             assert_eq!(
                 tier.shape().has_per_module_rank(),
-                tier.shape().is_dynamic(),
+                tier.shape().is_dynamic() || tier.shape().is_per_module_alpha(),
                 "{tier:?}"
             );
         }
@@ -5380,10 +5542,18 @@ mod tests {
             );
             assert_eq!(expectation.scale(), 1.0);
             assert_eq!(expectation.training_rank(), None);
-            // Never collides with a shipped tier's artifact.
+            // Exactly one shipped tier reads its facts from this pin, and no
+            // other tier shares its artifact.
+            let owners = H3TurboLoraTier::ALL
+                .into_iter()
+                .filter(|tier| tier.published_pin() == Some(*pin))
+                .collect::<Vec<_>>();
+            assert_eq!(owners.len(), 1, "{pin:?}");
             for tier in H3TurboLoraTier::ALL {
-                assert_ne!(tier.content_sha256(), pin.content_sha256);
-                assert_ne!(tier.file_name(), pin.file_name());
+                if tier != owners[0] {
+                    assert_ne!(tier.content_sha256(), pin.content_sha256);
+                    assert_ne!(tier.file_name(), pin.file_name());
+                }
             }
         }
         assert_eq!(
@@ -5424,17 +5594,21 @@ mod tests {
     fn published_kijai_adapters_authenticate_against_their_pins() {
         let directory = std::env::var("MOLD_TEST_H3_KIJAI_LORA_DIR")
             .expect("MOLD_TEST_H3_KIJAI_LORA_DIR must be set to run this test");
-        for pin in &H3_TURBO_LORA_KIJAI_PINS {
-            let path = std::path::Path::new(&directory).join(pin.file_name());
-            // `Fl2v8StepV10` only stands in for the tier identity wave 2
-            // registers; every checked fact comes from the pin.
+        let tiers = H3TurboLoraTier::ALL
+            .into_iter()
+            .filter(|tier| tier.shape().is_per_module_alpha())
+            .collect::<Vec<_>>();
+        assert_eq!(tiers.len(), H3_TURBO_LORA_KIJAI_PINS.len());
+        for tier in tiers {
+            let pin = tier.published_pin().unwrap();
+            let path = std::path::Path::new(&directory).join(tier.file_name());
             let contract = authenticate_h3_turbo_lora_adapter_against(
                 &path,
-                &pin.expectation(),
-                H3TurboLoraTier::Fl2v8StepV10,
+                &tier.expectation(),
+                tier,
                 &H3ComfyNeverCancel,
             )
-            .unwrap_or_else(|error| panic!("{}: {error}", pin.file_name()));
+            .unwrap_or_else(|error| panic!("{}: {error}", tier.file_name()));
             assert_eq!(contract.content_sha256(), pin.content_sha256);
             let inspection = contract.inspection();
             assert_eq!(
