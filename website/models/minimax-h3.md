@@ -366,17 +366,26 @@ The current compact implementation supports this request profile:
   (9 for `-turbo-8step`, `-turbo-8step-768p`, and `-turbo-8step-r21`, 5 for
   `-turbo-4step-768p`, `-turbo-4step-768p-v1.1`, and `-turbo-4step-768p-r21`),
   because that count is the distilled adapter's own schedule length
-- at least one boundary image: first frame, last frame, or both; endpoint
-  order is first then last, and each image contributes its own conditioning
-  and memory charge. Text-only generation remains unavailable (tracked in
-  [#1552](https://github.com/utensils/mold/issues/1552))
+- zero, one, or two boundary images on every FL2VA tag, base and Turbo:
+  text-only (T2VA — no frame, the prompt builds the whole clip), first frame,
+  last frame, or both. Endpoint order is first then last, and each image
+  contributes its own conditioning and memory charge; a text-only request
+  charges no vision or condition rows. Ref2VA still requires at least one
+  reference. This is a complete text-only command:
+
+  ```bash
+  mold run minimax-h3-fl2va:comfy-pruned-int8-turbo-8step "a lighthouse keeper climbs the spiral stairs at dusk, wind howling" --seed 7
+  ```
+
 - queued jobs retain exact first/last endpoint roles through durable storage
   and server restart; the same queue behavior applies to FL2VA Turbo tiers
 - MP4 output with synchronized generated audio
-- a prompt of roughly 1,000 tokens or fewer: the reviewed conditioner sequence
-  keeps the first-only 2,048-row budget and adds 1,040 rows for a second
-  endpoint (1,008 vision pads plus label/delimiter allowance). Both frames
-  therefore retain roughly 1,000 prompt tokens. The exact remaining budget is
+- a prompt of roughly 1,000 tokens or fewer when a frame is attached: the
+  reviewed conditioner sequence keeps the first-only 2,048-row budget and adds
+  1,040 rows for a second endpoint (1,008 vision pads plus label/delimiter
+  allowance). Both frames therefore retain roughly 1,000 prompt tokens, and a
+  text-only request, which carries no vision pads, gets the whole 2,048-row
+  budget. The exact remaining budget is
   derived from the tokenized presentation; a longer prompt is refused before
   artifact verification. Two endpoints also increase the Qwen and denoise
   memory grants, so they still must pass live device and host admission

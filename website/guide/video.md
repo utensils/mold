@@ -115,7 +115,8 @@ clearing it (`--no-negative` on the CLI) sends a real empty negative. See
 ## MiniMax H3
 
 MiniMax H3 always returns MP4 with synchronized generated audio. The compact
-FL2VA route requires a first frame; the compact Ref2VA route takes 1–12 ordered
+FL2VA route renders text-only or from a first frame, a last frame, or both;
+the compact Ref2VA route takes 1–12 ordered
 image, video, or audio references. Both use 24 fps and a `17n+5` frame grid
 from 107 through 345 frames.
 

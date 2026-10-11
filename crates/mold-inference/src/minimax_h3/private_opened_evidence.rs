@@ -1638,6 +1638,16 @@ pub(crate) fn qwen_activation_workspace_demand_bytes(
         .map(|bytes| (bytes / 100).next_multiple_of(64 * 1024 * 1024))
         .ok_or_else(|| anyhow!("private H3 Qwen activation demand overflow"))?;
     match request.task {
+        // Text-only FL2VA (#1552) packs no vision patches, so the linear
+        // per-row model would charge a ~2,048-row prompt about a third of the
+        // grant. But the conditioner's text attention is dense and quadratic
+        // in TEXT rows (`mold-candle` `text.rs` `causal_attention`), and the
+        // text-only ceiling IS the measured sequence's text half (2,033 of
+        // 2,048 rows), so that term did not shrink. Nothing text-only has been
+        // measured yet; charge the whole grant rather than under-charge.
+        Task::Fl2va if request.mode == Mode::TextToAudioVideo => {
+            Ok(granted_qwen_activation_workspace_bytes)
+        }
         // FL2VA's envelope CAPS the sequence at the rows the observation was
         // taken over, so the grant is an upper bound the request can only sit
         // under. Clamping rather than refusing keeps a full-length prompt at
@@ -2695,6 +2705,22 @@ mod tests {
              {shorter_demand}"
         );
         assert_eq!(shorter_demand % (64 * 1024 * 1024), 0, "{shorter_demand}");
+
+        // Text-only (T2VA, #1552) packs no vision patches, but the
+        // conditioner's text attention is dense and quadratic in TEXT rows and
+        // the text-only ceiling is the measured text sequence, so the per-row
+        // linear model would under-charge a full-length prompt. It is charged
+        // the whole grant whatever its row count.
+        for text_rows in [30, 2_048] {
+            let mut text_only = fl2va_shape(text_rows, 0);
+            text_only.mode = Mode::TextToAudioVideo;
+            text_only.endpoints.clear();
+            assert_eq!(
+                qwen_activation_workspace_demand_bytes(&text_only, FL2VA_PUBLIC_CEILING).unwrap(),
+                FL2VA_PUBLIC_CEILING,
+                "{text_rows}"
+            );
+        }
 
         let ref2va_shape = |vision_rows: u64| {
             let mut request = fl2va_frozen.clone();
