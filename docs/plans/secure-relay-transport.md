@@ -56,22 +56,28 @@ Keep five concepts separate:
 | Host identity | Persistent host public/private key; independent of hostname, IP, cloud namespace and process restart |
 | Relay enrollment | Permission to occupy a cloud routing namespace; never an API or decryption credential |
 | Device identity | Distinct key per client installation; private key in platform secure storage or owner-only headless file |
-| Principal | Host-local user/account identity; initially the existing owner, later separate users |
-| Grant | Host-issued mapping of device to principal, scopes and revocation generation |
+| Principal (future application feature) | Host-local user/account identity resolved by host policy |
+| Grant | Signed opaque identifier bound to the host namespace, device signing/Noise keys, expiry and revocation epoch |
 
-Existing per-device paired credentials already have separate revocation. Extend
-that model rather than replacing every client with one shared encryption key.
-Transport accepts a verified device identity and delivers an authenticated
-principal/grant context to the existing API authorization layer. A device key
-is authentication, not permission to every API. Never inject an operator API
-key on behalf of an arbitrary secure tunnel.
+Each paired device has its own host-owned grant and credential, with independent
+revocation. The transport supplies the authenticated device/grant context; the
+host resolves that context against the current paired-client record before API
+access. Pairing and grant administration remain operator-only. Never inject an
+operator API key on behalf of an arbitrary secure tunnel.
 
-Prepare versioned grant records with `device_id`, `principal_id`, key fingerprint,
-scope set, creation/expiry, revoked state and monotonic authorization generation.
-The first implementation can map existing access to the owner principal while
-keeping pairing/grant administration restricted to the operator. Implementing
-an account service or inventing roles before product requirements is unnecessary.
-Future roles must be enforced at host APIs, including reads/media and mutations.
+Application accounts, role/scope policies, and per-principal quotas are future
+features. The cloud registration's `principalId` identifies routing/billing
+ownership, not an application user. Future host policy can map the existing
+`(server_instance_id, grant_id)` to a principal and scope set without changing
+Noise, WebSocket/S3 framing, or the grant wire format. Such policies must cover
+API reads, mutations, protected media and active streams, and invalidate cached
+authority when access changes. Those role semantics need their own acceptance
+tests when implemented; this cutover does not claim two-principal isolation.
+
+Client storage currently keeps one active paired profile per host namespace.
+Using multiple accounts simultaneously in one client installation may require
+storage and UI changes; separate installations already have independent device
+identities and grants. No shared client encryption key is introduced.
 
 Revocation closes the affected secure sessions, rejects new handshakes and
 prevents new object grants. Check current authorization before dispatch and
@@ -122,7 +128,7 @@ stream, no EC2, and no provisioned concurrency. The HTTP frontend serves only
 public discovery, a redirect to the independently deployed Studio, and explicit
 426 refusals for retired plaintext endpoints.
 
-Bound sessions and concurrent streams per host/device/principal, handshake
+Bound sessions and concurrent streams per host/device, handshake
 rate, object count/bytes/lifetime, frame size, reorder memory and work queues.
 Apply fair scheduling so uploads cannot starve status, cancellation or media.
 Cloud admission is a cost/abuse control; the host remains the permission authority.
@@ -219,12 +225,13 @@ unused capability scaffold.
    Inspect frame/log fixtures with recognizable secrets to prove application
    plaintext is absent from cloud components.
 5. Swift and browser/Tauri adapters, all HTTP bypasses, native video seek and
-   background/foreground recovery, multiple devices and two different scopes.
+   background/foreground recovery, independent devices and operator/paired-client
+   authorization boundaries.
 6. Exact-head CI, independent review, staged live deployment with verified v3-only recovery,
    LAN→cellular→LAN and offline/restart proof, then the authorized hard cutover and explicit device re-pairing.
 
 Acceptance matrix must include at least two simultaneous clients; one revoked
-while the other streams; two principals with different access; same-LAN direct
+while the other streams; separate operator administration; same-LAN direct
 selection; remote fallback; a headless host with no app running; large upload
 and download above Lambda ingress/response thresholds; Range/HEAD and seek;
 long SSE reconnect; and a lost mutation response without duplicate execution.

@@ -1,3 +1,10 @@
+vi.mock("../lib/originAuth", async (original) => ({
+  ...(await original<typeof import("../lib/originAuth")>()),
+  originAuthenticatedFetch: vi.fn(
+    async () => new Response("{}", { status: 503 }),
+  ),
+}));
+import { setStudioPrimary, studioPrimary } from "../lib/secureStudio";
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nextTick, reactive, ref } from "vue";
@@ -249,6 +256,7 @@ async function mountDetail() {
 
 beforeEach(() => {
   localStorage.clear();
+  setStudioPrimary(null);
   const host = addHost({
     url: "192.168.1.20:7680",
     name: "Studio",
@@ -1315,4 +1323,25 @@ describe("HostDetailPage — library", () => {
       apiKey: "secret",
     });
   });
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+it("offers Forget and disconnect for the hosted selected alias but not local origin", async () => {
+  vi.stubEnv("VITE_STANDALONE_STUDIO", "1");
+  setStudioPrimary(getKnownHost(routeHolder.id)!);
+  routeHolder.id = "origin";
+  const w = await mountDetail();
+  expect(w.find('[data-test="detail-disconnect"]').exists()).toBe(true);
+  await w.get('[data-test="detail-forget"]').trigger("click");
+  await flushPromises();
+  expect(studioPrimary()).toBeNull();
+  expect(routerPush).toHaveBeenCalledWith("/machines");
+});
+it("keeps numeric loopback origin immutable in the detail screen", async () => {
+  routeHolder.id = "origin";
+  const w = await mountDetail();
+  expect(w.find('[data-test="detail-forget"]').exists()).toBe(false);
+  expect(w.find('[data-test="detail-disconnect"]').exists()).toBe(false);
 });

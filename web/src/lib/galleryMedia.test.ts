@@ -16,9 +16,12 @@ import {
 import {
   ORIGIN_HOST_ID,
   addHost,
+  originHost,
   removeHost,
   type HostEntry,
 } from "./hostRegistry";
+
+import { setStudioPrimary } from "./secureStudio";
 
 const origin: HostEntry = { id: ORIGIN_HOST_ID, name: "this server", url: "" };
 const keylessRemote: HostEntry = {
@@ -386,4 +389,110 @@ it("cancels media resolution before issuing a ticket request", async () => {
     resolveStreamableSrc(authedRemote, "clip.mp4", controller.signal),
   ).rejects.toMatchObject({ name: "AbortError" });
   expect(globalThis.fetch).not.toHaveBeenCalled();
+});
+
+describe("hosted thumbnail authority", () => {
+  afterEach(() => {
+    delete (globalThis as { caches?: unknown }).caches;
+  });
+  it("does not reuse persisted alias tiles after a document reload into another machine", async () => {
+    const stored = installFakeCaches();
+    mockFetch(() => ({ ok: true, blob: async () => new Blob(["tile"]) }));
+    const a = {
+      ...authedRemote,
+      id: "origin",
+      url: "https://a.invalid",
+      instanceId: "a",
+    };
+    const b = { ...a, url: "https://b.invalid", instanceId: "b" };
+    await resolveThumbnailSrc(a, "same.png", { mediaVersion: "1000:10" });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(stored.size).toBe(1);
+    __resetGalleryMediaForTests();
+    await resolveThumbnailSrc(b, "same.png", { mediaVersion: "1000:10" });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    expect(stored.size).toBe(2);
+    __resetGalleryMediaForTests();
+    await resolveThumbnailSrc(a, "same.png", { mediaVersion: "1000:10" });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+  });
+  it("does not reuse an origin thumbnail for another URL or instance", async () => {
+    mockFetch(() => ({ ok: true, blob: async () => new Blob(["tile"]) }));
+    const a = {
+      ...authedRemote,
+      id: "origin",
+      url: "https://a.invalid",
+      instanceId: "a",
+    };
+    const b = { ...a, url: "https://b.invalid", instanceId: "b" };
+    const options = { mediaVersion: "1000:10" };
+    const first = await resolveThumbnailSrc(a, "same.png", options);
+    const second = await resolveThumbnailSrc(b, "same.png", options);
+    const replacement = await resolveThumbnailSrc(
+      { ...b, instanceId: "replacement" },
+      "same.png",
+      options,
+    );
+    expect(new Set([first, second, replacement]).size).toBe(3);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("evicts the selected alias thumbnail with the actual saved machine", async () => {
+    vi.stubEnv("VITE_STANDALONE_STUDIO", "1");
+    localStorage.clear();
+    const host = addHost({
+      url: "https://a.invalid",
+      name: "A",
+      instanceId: "a",
+    });
+    setStudioPrimary(host);
+    try {
+      const stored = installFakeCaches();
+      mockFetch(() => ({ ok: true, blob: async () => new Blob(["tile"]) }));
+      const snapshot = { ...originHost(), apiKey: "fixture-key" };
+      const first = await resolveThumbnailSrc(snapshot, "same.png", {
+        mediaVersion: "1000:10",
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      expect(stored.size).toBe(1);
+      evictHostMedia(host.id);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(stored.size).toBe(0);
+      const second = await resolveThumbnailSrc(snapshot, "same.png", {
+        mediaVersion: "1000:10",
+      });
+      expect(second).not.toBe(first);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    } finally {
+      setStudioPrimary(null);
+      localStorage.clear();
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
+it("does not persist a thumbnail whose response completes after Forget eviction", async () => {
+  const stored = installFakeCaches();
+  let finish!: (blob: Blob) => void;
+  mockFetch(() => ({
+    ok: true,
+    blob: () =>
+      new Promise<Blob>((resolve) => {
+        finish = resolve;
+      }),
+  }));
+  try {
+    const pending = resolveThumbnailSrc(authedRemote, "late.png", {
+      mediaVersion: "1000:10",
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    evictHostMedia(authedRemote.id);
+    finish(new Blob(["private tile"]));
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(stored.size).toBe(0);
+  } finally {
+    delete (globalThis as { caches?: unknown }).caches;
+  }
 });

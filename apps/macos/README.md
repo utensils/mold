@@ -272,6 +272,11 @@ inside every bundle, so one committed copy is correct.
 
 ### Publishing a build
 
+Native Xcode builds resolve Swift packages in `build/DerivedData/SourcePackages`
+and bypass the shared SwiftPM repository cache. A stale runner cache therefore
+cannot prevent Sparkle or the local encrypted transport framework from resolving.
+The build never deletes developer-global package caches.
+
 `make appcast APPCAST_CHANNEL=stable|nightly` generates and signs one channel's
 feed with Sparkle's own `generate_appcast`, taken from beside the XCFramework
 SwiftPM resolved so the signer and the framework cannot drift. The private key

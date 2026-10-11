@@ -25,21 +25,15 @@ export async function claimSecurePairing(
   let channel: SecureChannel | undefined;
   try {
     identity = await deviceIdentity();
-    // On browsers HTTPS mixed-content rules exclude ws:// LAN addresses. The
-    // native/Tauri surfaces can use the same pinned protocol directly on LAN.
+    // Try pinned encrypted LAN routes even from HTTPS: browser local-network
+    // permissions decide availability. A refusal falls through to the cloud.
     const candidates = parseConnectionEndpoints(payload.endpoints ?? []);
     if (
       !candidates.some((endpoint) => endpoint.url === payload.base_url) &&
       !payload.websocket_url
     )
       candidates.push({ url: new URL(payload.base_url).origin, kind: "lan" });
-    const direct = candidates.filter(
-      (endpoint) =>
-        endpoint.kind !== "relay" &&
-        (typeof location === "undefined" ||
-          location.protocol !== "https:" ||
-          endpoint.url.startsWith("https:")),
-    );
+    const direct = candidates.filter((endpoint) => endpoint.kind !== "relay");
     let failure: unknown;
     for (const endpoint of direct.slice(0, 2)) {
       const url = new URL("/_mold/secure", endpoint.url);
@@ -50,7 +44,9 @@ export async function claimSecurePairing(
           identity,
           invite: { certificate: payload.invite, identity: invitation },
           websocket: url.href,
-          signal: AbortSignal.timeout(2500),
+          // Pairing is an explicit user action and may need a browser local-
+          // network permission response. Ordinary health probes stay at 2.5 s.
+          signal: AbortSignal.timeout(15000),
         });
         break;
       } catch (error) {

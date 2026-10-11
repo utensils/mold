@@ -334,8 +334,18 @@ require_release_job_text "docker" \
   'max-parallel: ${{ github.event_name == '\''schedule'\'' && 2 || 6 }}'
 require_release_job_text "release-latest" \
   "if: github.event_name != 'schedule' && github.ref == 'refs/heads/main'"
-require_release_job_text "docker" \
-  'type=raw,value=latest${{ matrix.suffix }},enable={{is_default_branch}}'
+require_release_job_need "publish-container-readiness" "docker"
+require_release_job_text "publish-container-readiness" \
+  "if: github.event_name == 'schedule' || startsWith(github.ref, 'refs/tags/v')"
+require_release_job_text "publish-container-readiness" \
+  'scripts/publish-container-readiness.sh'
+require_release_job_text "publish-container-readiness" \
+  'scripts/promote-container-latest.sh'
+require_release_job_text "publish-container-readiness" \
+  'group: rolling-container-publication'
+if release_job_text docker | grep -Fq 'type=raw,value=latest'; then
+  fail "latest aliases must only advance after every source-verified target is ready"
+fi
 require_release_job_text "docker" \
   'type=raw,value=sha-${{ github.sha }}${{ matrix.suffix }}'
 require_release_job_text "docker" \
@@ -476,7 +486,7 @@ provenance_checksum_line="$(
 [[ "$provenance_checksum_line" -gt "$provenance_line" ]] \
   || fail "release provenance checksum must be appended after provenance generation"
 container_manifest_line="$(
-  grep -n 'scripts/create-container-digest-manifest.sh' "$repo_root/$release" | cut -d: -f1
+  grep -n 'scripts/create-container-digest-manifest.sh' "$repo_root/$release" | tail -n 1 | cut -d: -f1
 )"
 container_checksum_line="$(
   grep -n 'sha256sum mold-container-digests.json >> SHA256SUMS' \
@@ -505,6 +515,9 @@ for phase_g_path in \
   scripts/probe-cuda-embedded-ptx.py \
   scripts/create-release-provenance.sh \
   scripts/create-container-digest-manifest.sh \
+  scripts/publish-container-readiness.sh \
+  scripts/promote-container-latest.sh \
+  scripts/tests/container-readiness.sh \
   scripts/qualify-cuda-sm86.sh \
   scripts/validate-cuda-qualification-report.py \
   scripts/verify-png-artifact.py \
@@ -1058,5 +1071,7 @@ if PATH="$verifier_bin:$PATH" \
   scripts/package-cuda-release-archive.sh "$fixture_bin/mold" "$test_root/baked.tar.gz" >/dev/null 2>&1; then
   fail "release archive packer accepted a completion script that bakes in the staging path"
 fi
+
+bash scripts/tests/container-readiness.sh
 
 echo "cuda distribution contract: ok"

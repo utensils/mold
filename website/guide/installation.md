@@ -262,8 +262,9 @@ To uninstall: `sudo pacman -R mold-ai-bin` (or whichever package you installed).
 The flake is a source revision channel, not the self-updater's binary release
 channel. Pin the flake input or Git revision for reproducibility. Nix packages
 do not consult `MOLD_DISTRIBUTION_IMAGE_VERSION`; source and Nix-built cloud
-clients default to the mutable `latest*` container channel unless a release
-builder explicitly embeds an official distribution version.
+clients use a source-pinned container readiness manifest. Automatic cloud
+provisioning fails before paid creation when that exact revision has no verified
+container publication. A package version alone does not establish readiness.
 
 ```bash
 # Run directly: no install needed

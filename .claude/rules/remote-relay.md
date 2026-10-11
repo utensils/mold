@@ -77,7 +77,9 @@ status, stream IDs, content and logical EOF/cancellation stay inside Noise. Oute
 version 3 frames expose only routing IDs and bounded reliable sequence/ACK data.
 Reorder and deduplicate ciphertext before decrypting; retransmit identical bytes
 at the same sequence, never encrypt new bytes with a reused nonce. Request EOF
-is logical, not a TCP half-close. Heartbeats do not count as application progress.
+is logical, not a TCP half-close. Interrupting an active response must report a
+body error; only authenticated logical End may produce successful EOF. Heartbeats
+do not count as application progress.
 A reconnect starts a fresh Noise session; never replay uncertain mutations.
 
 Cloud host admission additionally requires an enabled operator-provisioned public
@@ -90,7 +92,9 @@ GetConnection before evicting a peer; retry a live peer once with exact bytes.
 Diagnostics report scoped aggregate reasons and fleet metrics without raw logs,
 message bodies, keys or credentials.
 
-Route selection favors verified LAN, then Tailscale, then cloud. Start lower
+Route selection favors verified LAN, then Tailscale, then cloud. HTTPS browser
+origins must not pre-filter encrypted LAN WebSockets: the browser enforces its
+local-network permission and mixed-content rules; refusals fall back to cloud. Start lower
 priority probes after bounded delays; the first valid best-priority route wins
 without waiting for same-priority peers. Cancel losers and fence stale completions
 after route replacement/removal. Advertise only interfaces the actual secure

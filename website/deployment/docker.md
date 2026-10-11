@@ -89,15 +89,22 @@ GPU's compute capability:
 | Datacenter Blackwell (B200/B300)  | `ghcr.io/utensils/mold:latest-sm100` |
 | Consumer Blackwell (RTX 50/PRO)   | `ghcr.io/utensils/mold:latest-sm120` |
 
-The `latest*` aliases are mutable rolling main-branch channels. A release
-creates each `<version>*` tag once and rejects a release rerun if the existing
-tag points at different content. Tags remain registry names, however, so
-stable Mold provisioning does not trust them as immutable: the release also
-publishes `mold-container-digests.json`, and Lambda, RunPod CLI, and desktop
-submit the selected `ghcr.io/utensils/mold@sha256:…` reference. A missing,
-malformed, wrong-release, or wrong-source manifest fails closed without tag
-fallback. Manual Docker commands may pin the same digest for identical
-semantics. Generic Ampere maps to sm_80; ambiguous generic Blackwell uses the
+The `latest*` aliases are mutable convenience names, refreshed only after all
+six images pass source verification on a scheduled build or stable tag. Older
+runs leave them unchanged once `main` advances. Automatic provisioning never
+uses these aliases. A release creates each `<version>*` tag once and publishes
+`mold-container-digests.json`; stable clients validate that exact release and
+source before submitting `ghcr.io/utensils/mold@sha256:…`.
+
+Nightly, source, and Nix clients require a full source SHA and fetch
+`mold-container-digests-<source-sha>.json` from the rolling GitHub release.
+Scheduled and stable Docker builds publish this readiness asset only after all
+six targets pass verification. The first valid manifest for a source is kept
+on rebuilds. An unavailable, incomplete, or mismatching manifest fails before
+paid host creation; a newer CLI can therefore be available before its matching
+containers. Use a published matching build or explicitly supply a reviewed
+`@sha256` image. Manual Docker commands may pin the same digest.
+Generic Ampere maps to sm_80; ambiguous generic Blackwell uses the
 default sm_89 image rather than guessing sm_100 or sm_120.
 
 B200 support is simulated, not hardware-qualified. The sm_100 image is built

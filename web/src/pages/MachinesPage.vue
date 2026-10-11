@@ -17,6 +17,7 @@ import {
   HOSTS_CHANGED_EVENT,
   HOSTS_STORAGE_KEY,
   ORIGIN_HOST_ID,
+  isImmutableHost,
   getGenerateTargetId,
   listKnownHosts,
   originHost,
@@ -193,7 +194,7 @@ function contextConnect() {
 function contextDisconnect() {
   const host = contextMenu.value?.host;
   closeContextMenu();
-  if (!host || host.id === ORIGIN_HOST_ID) return;
+  if (!host || isImmutableHost(host.id)) return;
   setHostConnected(host.id, false);
   if (getGenerateTargetId() === host.id) setGenerateTargetId(ORIGIN_HOST_ID);
   refreshHosts();
@@ -203,7 +204,7 @@ function contextDisconnect() {
 async function contextForget() {
   const host = contextMenu.value?.host;
   closeContextMenu();
-  if (!host || host.id === ORIGIN_HOST_ID) return;
+  if (!host || isImmutableHost(host.id)) return;
   const accepted = await requestConfirm({
     title: "Forget this machine?",
     body: `${host.name} and its saved pairing will be removed from this browser.`,
@@ -324,13 +325,13 @@ async function contextForget() {
         Copy address
       </button>
       <div
-        v-if="contextMenu.host.id !== ORIGIN_HOST_ID"
+        v-if="!isImmutableHost(contextMenu.host.id)"
         class="machine-context__separator"
         role="separator"
       />
       <button
         v-if="
-          contextMenu.host.id !== ORIGIN_HOST_ID &&
+          !isImmutableHost(contextMenu.host.id) &&
           contextMenu.host.connected === false
         "
         type="button"
@@ -341,7 +342,7 @@ async function contextForget() {
       </button>
       <button
         v-if="
-          contextMenu.host.id !== ORIGIN_HOST_ID &&
+          !isImmutableHost(contextMenu.host.id) &&
           contextMenu.host.connected !== false
         "
         type="button"
@@ -351,7 +352,7 @@ async function contextForget() {
         Disconnect
       </button>
       <button
-        v-if="contextMenu.host.id !== ORIGIN_HOST_ID"
+        v-if="!isImmutableHost(contextMenu.host.id)"
         type="button"
         role="menuitem"
         class="machine-context__danger"

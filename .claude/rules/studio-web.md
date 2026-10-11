@@ -96,6 +96,13 @@ downloads and changed job identity never trigger a retry.
 
 **Queue action-state invariant:** Mutations follow the exact owning host and job, current route/instance and supported lifecycle, capabilities, and shared per-row busy reservations. Queued/paused jobs alone offer Pause/Resume; Held recovery requires durable authority and uses the existing download/license flow. Prefer the row’s `model_download` hint only when its nonblank model exactly matches the held, retryable row; present malformed/null/mismatched hints fail closed, while absent hints permit legacy batch-code recovery. A verified row hint renders without per-row polling; acquisition still rechecks the exact route, credentials, server instance and job before mutation. Inline recovery stays beside diagnostics, Details and Move controls, never nested inside another button. Unknown/cancelling/terminal jobs are read-only. Mobile swipes retain a Details fallback when no mutation is eligible. Held cancellation captures and persists only-held intent before DELETE, including automatic retries; a 409 clears that intent rather than broadening it to running work.
 
+Hosted Studio's `origin` is a UI selection alias, never persisted job ownership.
+Freeze new admissions and chains to the saved machine ID, explicit target and
+server instance before any asynchronous work. Recovery, cancellation, retry and
+completion media use that same owner; an unavailable or ambiguous owner never
+falls back to the currently selected machine. Retain unresolved durable journals
+so reconnecting the exact machine can resume recovery.
+
 Library unread state is client-local. Individual viewer display marks one logical print read immediately. Capture the eligible displayed projections during a Library visit and acknowledge those IDs on departure; keep New labels during the visit and preserve filtered-out, hidden, Trash, and later arrivals. Polling or preloading outside Library never acknowledges media. Preserve legacy read baselines, deduplicate visible merged copies, exclude hidden collections and Trash, and surface local persistence failures without overwriting prior history. Manual-save progress counts processed selections when copy-versus-existing evidence is unavailable.
 
 Continuous Library rows preserve actual metadata aspect ratios with 2-point seams
@@ -164,3 +171,22 @@ normalization path. `SourceCanvasController` owns desktop/mobile still transitio
 manual/restored canvas survives remount, recipe changes and boundary removal;
 a deliberate replacement may re-arm source dimensions. Shells bind form state and
 keep their own presentation behavior.
+
+**Hosted Studio selection:** the `origin` routing alias is immutable only for the
+numeric-loopback engine. In standalone Studio it resolves to a saved pairing that
+can be disconnected or forgotten. All origin consumers use the tab's accepted
+primary snapshot; never reread shared storage per request. Cross-tab selection
+changes suspend the mounted Studio before another machine is selected. Forget
+must remove secure authority by URL/instance even after registry-ID coalescing,
+and only clear selected metadata after secure removal succeeds. Keep attempt
+fences around asynchronous pairing/status work; start the status deadline after
+pairing so interactive local-network permission has its full pairing deadline.
+
+Hosted primary changes after App has mounted require a fresh document, not just
+an App remount: module-level Models/Downloads and Pinia state can retain old
+machine rows with origin-relative actions. Clear transport and the accepted
+snapshot before one guarded reload; refuse same-document reconnect while it is
+pending. A fresh document with remembered pairings but no accepted primary stays
+at the chooser. Thumbnail memory and persistent keys include captured machine
+URL and instance plus the saved ID used for Forget eviction; a late response
+after eviction must not repopulate that cache.

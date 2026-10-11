@@ -1,4 +1,12 @@
-import { enableAutoUnmount, mount } from "@vue/test-utils";
+import { addHost, listStoredHosts } from "../lib/hostRegistry";
+import { setStudioPrimary, studioPrimary } from "../lib/secureStudio";
+import { requestConfirm } from "../lib/toasts";
+const forgetPairing = vi.hoisted(() => vi.fn());
+vi.mock("@studio/api/secureStore", async (original) => ({
+  ...(await original<typeof import("@studio/api/secureStore")>()),
+  forgetSecureHostForMachine: forgetPairing,
+}));
+import { enableAutoUnmount, flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nextTick, ref } from "vue";
 import type { HostStatus } from "../components/machines/hostClient";
@@ -100,10 +108,13 @@ const mountPage = () =>
 enableAutoUnmount(afterEach);
 afterEach(() => {
   document.body.innerHTML = "";
+  vi.unstubAllEnvs();
 });
 
 beforeEach(() => {
   localStorage.clear();
+  setStudioPrimary(null);
+  forgetPairing.mockReset().mockResolvedValue(undefined);
   toastMock.mockClear();
   pushMock.mockClear();
   poll = {
@@ -347,4 +358,45 @@ describe("MachinesPage", () => {
     await w.get('[data-test="add-machine-card"]').trigger("click");
     expect(w.findComponent(ConnectModal).props("open")).toBe(true);
   });
+});
+
+it("offers selected hosted pairing actions and keeps failed Forget recoverable", async () => {
+  vi.stubEnv("VITE_STANDALONE_STUDIO", "1");
+  const host = addHost({
+    url: "https://selected.invalid",
+    name: "Selected",
+    instanceId: "selected-host",
+  });
+  setStudioPrimary(host);
+  poll.loading.value = false;
+  poll.online.value = true;
+  poll.status.value = makeStatus();
+  const wrapper = mountPage();
+  await wrapper.get('[data-test="host-actions"]').trigger("click");
+  const menu = wrapper.get('[data-test="machine-context-menu"]');
+  expect(menu.text()).toContain("Disconnect");
+  const forget = menu
+    .findAll("button")
+    .find((button) => button.text() === "Forget…")!;
+  expect(forget).toBeDefined();
+  vi.mocked(requestConfirm).mockResolvedValueOnce(true);
+  forgetPairing.mockRejectedValueOnce(new Error("storage failed"));
+  await forget.trigger("click");
+  await flushPromises();
+  expect(studioPrimary()?.id).toBe(host.id);
+  expect(listStoredHosts()).toHaveLength(1);
+  expect(toastMock).toHaveBeenCalledWith(
+    "error",
+    expect.stringContaining("storage failed"),
+  );
+  await wrapper.get('[data-test="host-actions"]').trigger("click");
+  vi.mocked(requestConfirm).mockResolvedValueOnce(true);
+  await wrapper
+    .get('[data-test="machine-context-menu"]')
+    .findAll("button")
+    .find((button) => button.text() === "Forget…")!
+    .trigger("click");
+  await flushPromises();
+  expect(studioPrimary()).toBeNull();
+  expect(listStoredHosts()).toHaveLength(0);
 });

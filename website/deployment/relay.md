@@ -19,6 +19,15 @@ one-use invitation; transfer it privately. Each client receives its own identity
 and independently revocable grant. Forgetting a client locally removes its local
 access; revoke it on the host to invalidate every retained copy of that grant.
 
+In hosted browser Studio, **Settings → Machines → Switch machine** opens the
+connection screen while retaining saved pairings. The selected machine's menu
+and detail page offer **Disconnect** and **Forget** too. Forget removes the local
+pairing and returns to that screen; if removal fails, retry remains available.
+Choose another saved machine or paste a fresh pairing link. Selection changes,
+including changes from another tab, reload the workspace before another machine
+can use it. This clears old model and download state while keeping durable jobs
+bound to the machine that accepted them.
+
 Native clients prefer an advertised LAN address and retain the same pinned
 identity when moving to the relay. An HTTPS browser may need the WSS relay
 because browsers restrict unencrypted WebSocket URLs from HTTPS pages. Such

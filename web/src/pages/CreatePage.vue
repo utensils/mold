@@ -2337,7 +2337,7 @@ const machineStatus = computed<
 /** The browser's own sentence about the connection — the mock's Machine rule.
  * A browser has no local GPU, so this is never "making images here". */
 const MACHINE_SENTENCE =
-  "This tab is talking to a machine on your network. Close the tab and it keeps working.";
+  "Images are made on the selected machine. Closing this tab does not stop its work.";
 const machineQueueDepth = computed(() => machineHost.value?.queueDepth ?? null);
 /** Bytes for the card's meter, from the routing poll's strongest GPU. */
 const machineMemoryUsed = computed(() => {

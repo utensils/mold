@@ -18,6 +18,40 @@ vi.mock("../api", () => ({
 
 import { fetchQueue, listGalleryFrom } from "../api";
 
+describe("unavailable job ownership", () => {
+  afterEach(async () => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+    (await import("../lib/secureStudio")).setStudioPrimary(null);
+    localStorage.clear();
+  });
+  it.each([null, "origin", "forgotten-machine"])(
+    "never polls the current hosted origin for an unowned recovered job (%s)",
+    async (hostId) => {
+      vi.stubEnv("VITE_STANDALONE_STUDIO", "1");
+      (await import("../lib/secureStudio")).setStudioPrimary({
+        id: "new-machine",
+        name: "New machine",
+        url: "https://new.example",
+      });
+      vi.useFakeTimers();
+      vi.mocked(fetchQueue).mockClear();
+      const job = makeJob({ hostId, target: null });
+      const settle = vi.fn();
+      const handle = startQueueReconciler(ref([job]), settle, {
+        intervalMs: 500,
+      });
+      try {
+        await vi.advanceTimersByTimeAsync(600);
+        expect(fetchQueue).not.toHaveBeenCalled();
+        expect(settle).not.toHaveBeenCalled();
+      } finally {
+        handle.stop();
+      }
+    },
+  );
+});
+
 function makeJob(overrides: Partial<Job> = {}): Job {
   return {
     id: "client-1",

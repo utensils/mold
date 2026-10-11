@@ -90,6 +90,9 @@ jobs:
       - name: Unlink the engine
         run: make engine-clean
 
+      - name: Verify package resolution isolation
+        run: bash scripts/tests/swiftpm-isolation.sh
+
 # PAUSED 2026-10-06: Native test/lint gate has a 45-minute budget; basic app build retained. Restore after runner capacity is improved.
 #       - name: Architecture lints
 #         run: make lint

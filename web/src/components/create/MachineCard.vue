@@ -32,7 +32,7 @@ const props = withDefaults(
   }>(),
   {
     sentence:
-      "This tab is talking to a machine on your network. Close the tab and it keeps working.",
+      "Images are made on the selected machine. Closing this tab does not stop its work.",
     used: null,
     total: null,
     queue: null,

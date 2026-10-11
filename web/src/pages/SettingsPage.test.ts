@@ -1,3 +1,4 @@
+import { setStudioPrimary } from "../lib/secureStudio";
 import { ORIGIN_ACCESS_CHANGE_KEY, setOriginApiKey } from "../lib/originAuth";
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -198,6 +199,8 @@ describe("SettingsPage", () => {
   });
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
+    setStudioPrimary(null);
     globalThis.fetch = originalFetch;
     theme.value = "safelight-dark";
     matchSystem.value = false;
@@ -223,6 +226,31 @@ describe("SettingsPage", () => {
     } finally {
       wrapper.unmount();
       setOriginApiKey("");
+    }
+  });
+
+  it("offers hosted Switch machine without a plaintext API key", async () => {
+    vi.stubEnv("VITE_STANDALONE_STUDIO", "1");
+    setStudioPrimary({
+      id: "selected",
+      name: "Selected",
+      url: "https://selected.invalid",
+      instanceId: "a",
+    });
+    const change = vi.fn();
+    const wrapper = mount(SettingsPage, {
+      global: { provide: { [ORIGIN_ACCESS_CHANGE_KEY as symbol]: change } },
+    });
+    try {
+      await flushPromises();
+      await openSection(wrapper, "hosts");
+      expect(wrapper.find('[data-test="change-origin-api-key"]').exists()).toBe(
+        false,
+      );
+      await wrapper.get('[data-test="switch-studio-machine"]').trigger("click");
+      expect(change).toHaveBeenCalledOnce();
+    } finally {
+      wrapper.unmount();
     }
   });
 

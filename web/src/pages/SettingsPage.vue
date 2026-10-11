@@ -50,6 +50,7 @@ import {
 } from "@studio/api/config";
 import { styleLabel, styleName } from "@studio/lib/modelDisplay";
 import type { DeviceInfo } from "@studio/api/devices";
+import { standaloneStudio } from "../lib/secureStudio";
 import { ORIGIN_ACCESS_CHANGE_KEY } from "../lib/originAuth";
 import { matchSystem, theme } from "../lib/theme";
 import type { ThemeId } from "@ui/theme";
@@ -77,6 +78,7 @@ import {
   type CatalogCredentialStatus,
 } from "../api";
 
+const hosted = standaloneStudio();
 const changeOriginKey = inject(ORIGIN_ACCESS_CHANGE_KEY, null);
 const WEB_SECTIONS = sectionsForSurface("web");
 
@@ -585,7 +587,7 @@ onBeforeUnmount(() => {
             <span class="settings-value">{{ serverSummary }}</span>
           </SettingRow>
           <SettingRow
-            v-if="changeOriginKey && pairingHost.apiKey"
+            v-if="changeOriginKey && !hosted && pairingHost.apiKey"
             label="Browser API key"
             help="Clear this tab's saved key and connect with another API key."
           >
@@ -596,6 +598,20 @@ onBeforeUnmount(() => {
               @click="changeOriginKey"
             >
               Change API key
+            </button>
+          </SettingRow>
+          <SettingRow
+            v-if="changeOriginKey && hosted"
+            label="Selected machine"
+            help="Choose another saved machine or connect with a new pairing link."
+          >
+            <button
+              type="button"
+              class="settings-link"
+              data-test="switch-studio-machine"
+              @click="changeOriginKey"
+            >
+              Switch machine
             </button>
           </SettingRow>
           <div class="settings-panel-row">

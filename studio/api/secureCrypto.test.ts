@@ -16,6 +16,7 @@ import {
   namespace,
   verifySignature,
 } from "./secureCrypto";
+import { SecureChannel } from "./secureChannel";
 import fixture from "../../relay/aws/test/fixtures/admission-v3.json";
 
 beforeAll(() =>
@@ -28,7 +29,10 @@ beforeAll(() =>
     ),
   }),
 );
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 describe("the same Rust protocol in the browser", () => {
   it("matches the cloud's canonical challenge and certificate bytes", () => {
     vi.useFakeTimers();
@@ -121,4 +125,53 @@ describe("the same Rust protocol in the browser", () => {
       device.free();
     }
   });
+});
+
+it("lets browser policy decide whether pinned LAN WebSockets are available from HTTPS", async () => {
+  vi.stubGlobal("location", { protocol: "https:" });
+  const browserRefusal = new DOMException(
+    "Local network permission denied",
+    "SecurityError",
+  );
+  const socket = vi.fn(function () {
+    throw browserRefusal;
+  });
+  vi.stubGlobal("WebSocket", socket);
+  const hostIdentity = Identity.fromBytes(new Uint8Array(64).fill(11));
+  const identity = Identity.fromBytes(new Uint8Array(64).fill(12));
+  try {
+    const keys = binding(hostIdentity);
+    const host = {
+      namespace: namespace(hostIdentity.publicSigningKey()),
+      host_key: keys.signingKey,
+      host_noise_key: keys.noiseKey,
+      host_binding_signature: keys.signature,
+      websocket_url: null,
+    };
+    const grant = {
+      id: "01".repeat(16),
+      expiresAt: Math.floor(Date.now() / 1000) + 600,
+      epoch: 0,
+      signature: "",
+    };
+    grant.signature = hex(
+      hostIdentity.sign(grantBytes(host, binding(identity), grant)),
+    );
+    await expect(
+      SecureChannel.connect({
+        host,
+        identity,
+        grant,
+        websocket: "ws://192.168.1.4:7680/_mold/secure",
+      }),
+    ).rejects.toBe(browserRefusal);
+    expect(socket).toHaveBeenCalledWith(
+      "ws://192.168.1.4:7680/_mold/secure?v=3",
+    );
+  } finally {
+    hostIdentity.close();
+    hostIdentity.free();
+    identity.close();
+    identity.free();
+  }
 });

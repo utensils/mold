@@ -118,6 +118,24 @@ struct StreamState {
     cancel: CancellationToken,
     head_seen: bool,
 }
+impl StreamState {
+    fn fail(mut self, message: &'static str) {
+        self.cancel.cancel();
+        let error = anyhow::anyhow!(message);
+        if let Some(head) = self.head.take() {
+            let _ = head.send(Err(error));
+        } else {
+            let _ = self.body.try_send(Err(error));
+        }
+    }
+}
+// Parent cancellation can make the timer ready before the connection-stop arm.
+// Only an authenticated End may close a live response without an error.
+fn cancel_stream(streams: &mut BTreeMap<u32, StreamState>, id: u32) {
+    if let Some(state) = streams.remove(&id) {
+        state.fail("secure request cancelled; mutation outcome may be unknown");
+    }
+}
 enum Command {
     Start {
         open: Open,
@@ -605,9 +623,9 @@ async fn drive(
   tokio::select!{
    _=stop.cancelled()=>return Ok(()),
    _=heartbeat.tick()=>{if last_heartbeat.elapsed()>Duration::from_secs(45){bail!("secure peer heartbeat timed out")}tokio::time::timeout(Duration::from_secs(5),socket.send(Message::Text(serde_json::json!({"a":"heartbeat","v":3}).to_string().into()))).await??;},
-   _=tick.tick()=>{let cancelled=streams.iter().filter(|(_,s)|s.cancel.is_cancelled()||s.head.as_ref().is_some_and(|h|h.is_closed())).map(|(id,_)|*id).collect::<Vec<_>>();for id in cancelled{if wire.can_queue(){if let Some(s)=streams.remove(&id){s.cancel.cancel();}wire.queue_packet(&session.seal(&Record::Cancel{stream_id:id,code:"cancelled".into()}.encode()?)?)?;}}},
+   _=tick.tick()=>{let cancelled=streams.iter().filter(|(_,s)|s.cancel.is_cancelled()||s.head.as_ref().is_some_and(|h|h.is_closed())).map(|(id,_)|*id).collect::<Vec<_>>();for id in cancelled{if wire.can_queue(){cancel_stream(&mut streams,id);wire.queue_packet(&session.seal(&Record::Cancel{stream_id:id,code:"cancelled".into()}.encode()?)?)?;}}},
    command=commands.recv(),if wire.can_queue()=>{match command.context("secure client released")? {
-    Command::Start{open,id,state}=>{last_stream=id;if streams.len()>=MAX_STREAMS{if let Some(head)=state.head{let _=head.send(Err(anyhow::anyhow!("secure concurrent stream limit exceeded")));}state.cancel.cancel();continue}streams.insert(id,state);wire.queue_packet(&session.seal(&Record::Open{stream_id:id,request:open}.encode()?)?)?;},
+    Command::Start{open,id,state}=>{last_stream=id;if streams.len()>=MAX_STREAMS{state.fail("secure concurrent stream limit exceeded");continue}streams.insert(id,state);wire.queue_packet(&session.seal(&Record::Open{stream_id:id,request:open}.encode()?)?)?;},
     Command::Record(record)=>{if streams.contains_key(&record.stream_id()){wire.queue_packet(&session.seal(&record.encode()?)?)?;}},
     Command::Consumed(id,bytes)=>{if let Some(state)=streams.get_mut(&id){if let Some(bytes)=state.receive_credit.consume(bytes)?{wire.queue_packet(&session.seal(&Record::Credit{stream_id:id,bytes}.encode()?)?)?;}}},
    }},
@@ -619,21 +637,15 @@ if value["a"]=="cancel"{bail!("secure peer closed")}
       Record::Data{bytes,..}=>{let state=streams.get_mut(&id).context("unknown secure response")?;if !state.head_seen{bail!("body before response head")}state.receive_credit.receive(bytes.len() as u32)?;if state.body.try_send(Ok(bytes.into())).is_err(){state.cancel.cancel();}},
       Record::Credit{bytes,..}=>{if let Some(state)=streams.get(&id){if state.upload_credit.available_permits()+bytes as usize>STREAM_WINDOW as usize{bail!("upload credit exceeded")}state.upload_credit.add_permits(bytes as usize);}},
       Record::End{..}=>{let state=streams.remove(&id).context("unknown secure EOF")?;if !state.head_seen{bail!("EOF before head")}state.cancel.cancel();},
-      Record::Cancel{..}=>{if let Some(mut state)=streams.remove(&id){state.cancel.cancel();let error=anyhow::anyhow!("secure request cancelled; mutation outcome may be unknown");if let Some(head)=state.head.take(){let _=head.send(Err(error));}else{let _=state.body.try_send(Err(error));}}},
+      Record::Cancel{..}=>cancel_stream(&mut streams,id),
       Record::Open{..}=>bail!("host opened an unauthorized request"),
      }}
     },Message::Ping(data)=>socket.send(Message::Pong(data)).await?,Message::Pong(_)=>{},_=>bail!("secure socket closed"),
    }}
   }
  }}.await;
-    for (_, mut state) in streams {
-        state.cancel.cancel();
-        let error = anyhow::anyhow!("secure connection lost; mutation outcome may be unknown");
-        if let Some(head) = state.head.take() {
-            let _ = head.send(Err(error));
-        } else {
-            let _ = state.body.try_send(Err(error));
-        }
+    for (_, state) in streams {
+        state.fail("secure connection lost; mutation outcome may be unknown");
     }
     result
 }
@@ -777,5 +789,64 @@ mod bounded_metadata_tests {
         let response: reqwest::Response =
             http::Response::new(reqwest::Body::from("{\"grant\":1}")).into();
         assert_eq!(bounded_authority_json(response).await.unwrap()["grant"], 1);
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    fn pending_stream(
+        headers_pending: bool,
+    ) -> (
+        BTreeMap<u32, StreamState>,
+        oneshot::Receiver<Result<Headers>>,
+        crate::BodyReceiver,
+    ) {
+        let (head_tx, head_rx) = oneshot::channel();
+        let (body_tx, body_rx) = crate::body_channel();
+        let cancel = CancellationToken::new();
+        // Force the exact state the timer observes after Forget cancels a
+        // parent token, before the connection-stop select arm is polled.
+        cancel.cancel();
+        let state = StreamState {
+            head: headers_pending.then_some(head_tx),
+            body: body_tx,
+            upload_credit: Arc::new(Semaphore::new(STREAM_WINDOW as usize)),
+            receive_credit: ReceiveCredit::default(),
+            cancel,
+            head_seen: !headers_pending,
+        };
+        (BTreeMap::from([(1, state)]), head_rx, body_rx)
+    }
+
+    #[tokio::test]
+    async fn cancelled_timer_cleanup_reports_body_error_instead_of_successful_eof() {
+        let (mut streams, _, mut body) = pending_stream(false);
+        cancel_stream(&mut streams, 1);
+        assert!(streams.is_empty());
+        let error = body
+            .recv()
+            .await
+            .expect("a cancelled response must not look like successful EOF")
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("mutation outcome may be unknown"));
+        assert!(body.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelled_timer_cleanup_reports_explicit_error_before_headers() {
+        let (mut streams, head, _) = pending_stream(true);
+        cancel_stream(&mut streams, 1);
+        assert!(streams.is_empty());
+        let error = head
+            .await
+            .expect("cancellation must report why the response was interrupted")
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("mutation outcome may be unknown"));
     }
 }

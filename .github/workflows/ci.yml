@@ -254,6 +254,9 @@ jobs:
               - 'scripts/create-release-provenance.sh'
               - 'scripts/create-desktop-dmg.sh'
               - 'scripts/create-container-digest-manifest.sh'
+              - 'scripts/publish-container-readiness.sh'
+              - 'scripts/promote-container-latest.sh'
+              - 'scripts/tests/container-readiness.sh'
               - 'scripts/validate-cuda-qualification-report.py'
               - 'scripts/verify-png-artifact.py'
               - 'scripts/tests/ci-coverage-disk-guard.sh'
@@ -814,6 +817,8 @@ jobs:
           python3 scripts/tests/ci-build-first.py
           bash scripts/tests/candle-single-identity.sh
           bash scripts/tests/no-tracked-ignored-files.sh
+      - name: Verify container publication readiness contracts
+        run: bash scripts/tests/container-readiness.sh
       - name: Format
         run: cargo fmt --all -- --check
       - name: Install basic workspace build dependencies
