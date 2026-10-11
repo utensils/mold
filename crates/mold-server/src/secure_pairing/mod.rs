@@ -42,8 +42,13 @@ impl SecurePairing {
     pub fn new(identity: Identity, devices: Vec<SecureDevice>) -> Self {
         let policy = tokio::sync::watch::channel(mold_relay::secure::HostPolicy {
             epoch: 0,
-            active: devices.iter().filter(|device| device.expires_at > unix_time()).map(|device| device.grant_id.clone()).collect(),
-        }).0;
+            active: devices
+                .iter()
+                .filter(|device| device.expires_at > unix_time())
+                .map(|device| device.grant_id.clone())
+                .collect(),
+        })
+        .0;
         Self {
             policy,
             identity: Arc::new(identity),
@@ -68,10 +73,7 @@ impl SecurePairing {
         serde_json::json!({"protocol":3,"namespace":self.namespace(),"host_key":binding.signing_key,"host_noise_key":binding.noise_key,"host_binding_signature":binding.signature})
     }
     pub fn issue_invite(&self) -> Result<IssuedInvite> {
-        ensure!(
-            self.has_device_capacity(),
-            "paired device capacity reached"
-        );
+        ensure!(self.has_device_capacity(), "paired device capacity reached");
         let identity = Identity::generate()?;
         let secret = zeroize::Zeroizing::new(identity.to_bytes());
         let now = unix_time();
@@ -241,7 +243,10 @@ impl SecurePairing {
         self.publish_policy();
     }
     fn publish_policy(&self) {
-        self.policy.send_replace(mold_relay::secure::HostPolicy { epoch: self.epoch(), active: self.active_ids() });
+        self.policy.send_replace(mold_relay::secure::HostPolicy {
+            epoch: self.epoch(),
+            active: self.active_ids(),
+        });
     }
     pub fn watch_policy(&self) -> tokio::sync::watch::Receiver<mold_relay::secure::HostPolicy> {
         self.policy.subscribe()

@@ -1,6 +1,6 @@
+use base64::Engine;
 #[cfg(target_os = "ios")]
 use mold_secure_client::RequestBuilderExt;
-use base64::Engine;
 
 fn validate_video_url(url: &str) -> Result<(), String> {
     if url.starts_with("https://") || url.starts_with("http://") {

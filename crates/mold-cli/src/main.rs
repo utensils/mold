@@ -1636,7 +1636,7 @@ pub enum CatalogSortArg {
 enum PairingAction {
     /// Save a short-lived pairing invitation with owner-only permissions.
     Create {
-        #[arg(long, default_value="127.0.0.1:7680")]
+        #[arg(long, default_value = "127.0.0.1:7680")]
         target: std::net::SocketAddr,
         #[arg(long, value_hint=clap::ValueHint::FilePath)]
         output: std::path::PathBuf,
@@ -4010,7 +4010,9 @@ async fn run() -> anyhow::Result<()> {
                 commands::runpod::run_run(opts).await?
             }
         },
-        Commands::Pairing { action: PairingAction::Create { target, output } } => commands::pairing::create(target,&output).await?,
+        Commands::Pairing {
+            action: PairingAction::Create { target, output },
+        } => commands::pairing::create(target, &output).await?,
         Commands::Pair { invite_file, name } => {
             let invite = mold_secure_client::read_invitation(&invite_file)?;
             let host = mold_secure_client::pair(invite, &name).await?;

@@ -53,7 +53,13 @@ pub fn run() {
             }
             Ok(())
         })
-        .on_window_event(|window,event| { if matches!(event,tauri::WindowEvent::Destroyed) {window.state::<secure_media_bridge::MediaBridges>().close_window(window.label());} })
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                window
+                    .state::<secure_media_bridge::MediaBridges>()
+                    .close_window(window.label());
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             secure_media_bridge::secure_media_open,
             secure_media_bridge::secure_media_close,

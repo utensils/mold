@@ -687,7 +687,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 39,
         kind: MigrationKind::Sql(V39_QUEUE_TRANSFERS),
     },
-    Migration {version:40,kind:MigrationKind::Sql(V40_SECURE_DEVICES)},
+    Migration {
+        version: 40,
+        kind: MigrationKind::Sql(V40_SECURE_DEVICES),
+    },
 ];
 
 /// The gallery listing is `WHERE output_dir = ? ORDER BY

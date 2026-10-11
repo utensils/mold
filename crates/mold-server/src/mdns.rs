@@ -359,10 +359,12 @@ pub fn register(bind: &str, port: u16, txt: Vec<(String, String)>) -> Result<Mdn
     // A wildcard socket serves only its actual IP family. Advertising the
     // other family can strand clients that prefer an unreachable AAAA record.
     if let Ok(address) = bind.parse::<IpAddr>() {
-        daemon.disable_interface(match address {
-            IpAddr::V4(_) => IfKind::IPv6,
-            IpAddr::V6(_) => IfKind::IPv4,
-        }).context("could not constrain mDNS to the listener address family")?;
+        daemon
+            .disable_interface(match address {
+                IpAddr::V4(_) => IfKind::IPv6,
+                IpAddr::V6(_) => IfKind::IPv4,
+            })
+            .context("could not constrain mDNS to the listener address family")?;
     }
 
     let raw_host = hostname::get()

@@ -1,6 +1,6 @@
 //! Opt-in LAN access exposes only the pinned encrypted transport.
 
-use crate::{ConnectionAddresses, secure_pairing::SecurePairing};
+use crate::{secure_pairing::SecurePairing, ConnectionAddresses};
 use axum::{extract::ConnectInfo, Extension, Router};
 use hyper_util::{rt::TokioIo, service::TowerToHyperService};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
@@ -16,7 +16,9 @@ impl LanAccess {
     pub(crate) async fn shutdown(mut self) {
         self.addresses.set_local_network_enabled(false);
         self.cancel.cancel();
-        if let Some(task) = self.task.take() { let _ = task.await; }
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
     }
 }
 impl Drop for LanAccess {
@@ -33,8 +35,13 @@ pub(crate) fn start(
     txt: Vec<(String, String)>,
 ) -> LanAccess {
     let cancel = CancellationToken::new();
-    let task = secure.map(|secure| tokio::spawn(run(secure, target, addresses.clone(), cancel.clone(), txt)));
-    LanAccess { cancel, addresses, task }
+    let task = secure
+        .map(|secure| tokio::spawn(run(secure, target, addresses.clone(), cancel.clone(), txt)));
+    LanAccess {
+        cancel,
+        addresses,
+        task,
+    }
 }
 
 async fn run(
@@ -67,14 +74,20 @@ async fn run(
                 continue;
             }
         };
-        let Ok(bound) = listener.local_addr() else { continue; };
+        let Ok(bound) = listener.local_addr() else {
+            continue;
+        };
         // Stop can race the asynchronous bind. Never republish after opt-out.
-        if cancel.is_cancelled() || !enabled.borrow().enabled || enabled.borrow().epoch != epoch { continue; }
+        if cancel.is_cancelled() || !enabled.borrow().enabled || enabled.borrow().epoch != epoch {
+            continue;
+        }
         addresses.publish_local_network_listener(Some((bound, epoch)));
         #[cfg(feature = "mdns")]
         let advertisement = if crate::mdns::enabled_from_env() {
             crate::mdns::register("0.0.0.0", bound.port(), txt.clone()).ok()
-        } else { None };
+        } else {
+            None
+        };
         #[cfg(not(feature = "mdns"))]
         let _ = &txt;
         let session_stop = cancel.child_token();
@@ -108,8 +121,12 @@ async fn run(
         // listener. Dropping an axum serve future alone leaves them alive.
         connections.shutdown().await;
         #[cfg(feature = "mdns")]
-        if let Some(advertisement) = advertisement { advertisement.shutdown(); }
-        if cancel.is_cancelled() { return; }
+        if let Some(advertisement) = advertisement {
+            advertisement.shutdown();
+        }
+        if cancel.is_cancelled() {
+            return;
+        }
     }
 }
 
@@ -145,23 +162,40 @@ impl PrivateBackend {
             }
             connections.shutdown().await;
         });
-        Ok(Self { address, cancel, task: Some(task) })
+        Ok(Self {
+            address,
+            cancel,
+            task: Some(task),
+        })
     }
     pub async fn shutdown(mut self) {
         self.cancel.cancel();
-        if let Some(task) = self.task.take() { let _ = task.await; }
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
     }
 }
 impl Drop for PrivateBackend {
-    fn drop(&mut self) { self.cancel.cancel(); }
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
 }
 
 /// The API remains on the authenticated loopback boundary. LAN and cloud use
 /// one authority and the same per-device revocation policy.
-pub(crate) fn secure_router(secure: Arc<SecurePairing>, target: SocketAddr, cancel: CancellationToken) -> Router {
-    mold_relay::secure::lan_router(mold_relay::secure::HostConfig {
-        identity: secure.identity.clone(), target, policy: secure.watch_policy(),
-    }, cancel)
+pub(crate) fn secure_router(
+    secure: Arc<SecurePairing>,
+    target: SocketAddr,
+    cancel: CancellationToken,
+) -> Router {
+    mold_relay::secure::lan_router(
+        mold_relay::secure::HostConfig {
+            identity: secure.identity.clone(),
+            target,
+            policy: secure.watch_policy(),
+        },
+        cancel,
+    )
 }
 
 #[cfg(test)]
@@ -178,23 +212,46 @@ mod tests {
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-        }).await.unwrap()
+        })
+        .await
+        .unwrap()
     }
 
     #[tokio::test]
     async fn opt_in_exposes_only_secure_upgrade_and_stop_closes_upgraded_sockets() {
         let addresses = Arc::new(ConnectionAddresses::default());
-        let secure = Arc::new(SecurePairing::new(mold_secure::Identity::generate().unwrap(), Vec::new()));
-        let guard = start(Some(secure), "127.0.0.1:1".parse().unwrap(), addresses.clone(), Vec::new());
+        let secure = Arc::new(SecurePairing::new(
+            mold_secure::Identity::generate().unwrap(),
+            Vec::new(),
+        ));
+        let guard = start(
+            Some(secure),
+            "127.0.0.1:1".parse().unwrap(),
+            addresses.clone(),
+            Vec::new(),
+        );
         assert!(addresses.local_network_listener().is_none());
         addresses.set_local_network_enabled(true);
         let address = published(&addresses).await;
         let client = reqwest::Client::new();
-        assert_eq!(client.get(format!("http://{address}/api/status")).send().await.unwrap().status(), StatusCode::NOT_FOUND);
-        let response = client.get(format!("http://{address}/_mold/secure?v=3"))
-            .header("connection", "upgrade").header("upgrade", "websocket")
-            .header("sec-websocket-version", "13").header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
-            .send().await.unwrap();
+        assert_eq!(
+            client
+                .get(format!("http://{address}/api/status"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        let response = client
+            .get(format!("http://{address}/_mold/secure?v=3"))
+            .header("connection", "upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .send()
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
         let mut upgraded = response.upgrade().await.unwrap();
         addresses.set_local_network_enabled(false);
@@ -202,38 +259,75 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), async {
             let mut bytes = [0; 32];
             while matches!(upgraded.read(&mut bytes).await, Ok(n) if n > 0) {}
-        }).await.expect("Stop must close detached WebSocket upgrade tasks");
+        })
+        .await
+        .expect("Stop must close detached WebSocket upgrade tasks");
         published(&addresses).await;
-        assert!(client.get(format!("http://{address}/api/status")).send().await.is_err());
+        assert!(client
+            .get(format!("http://{address}/api/status"))
+            .send()
+            .await
+            .is_err());
         guard.shutdown().await;
         assert!(addresses.local_network_listener().is_none());
     }
 
     #[tokio::test]
     async fn explicit_lan_backend_uses_private_ephemeral_port_and_closes_stalled_requests() {
-        let app = Router::new().route("/api/status", axum::routing::get(|ConnectInfo(peer): ConnectInfo<SocketAddr>| async move {
-            assert!(peer.ip().is_loopback()); "private"
-        })).route("/stalled", axum::routing::get(|| async {
-            std::future::pending::<&'static str>().await
-        }));
+        let app = Router::new()
+            .route(
+                "/api/status",
+                axum::routing::get(|ConnectInfo(peer): ConnectInfo<SocketAddr>| async move {
+                    assert!(peer.ip().is_loopback());
+                    "private"
+                }),
+            )
+            .route(
+                "/stalled",
+                axum::routing::get(|| async { std::future::pending::<&'static str>().await }),
+            );
         let backend = PrivateBackend::start(app).await.unwrap();
         let address = backend.address;
         assert!(address.ip().is_loopback());
         assert_ne!(address.port(), 0);
         let client = reqwest::Client::new();
-        assert_eq!(client.get(format!("http://{address}/api/status")).send().await.unwrap().text().await.unwrap(), "private");
-        let stalled = tokio::spawn(async move { reqwest::get(format!("http://{address}/stalled")).await });
+        assert_eq!(
+            client
+                .get(format!("http://{address}/api/status"))
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap(),
+            "private"
+        );
+        let stalled =
+            tokio::spawn(async move { reqwest::get(format!("http://{address}/stalled")).await });
         tokio::time::sleep(Duration::from_millis(25)).await;
         backend.shutdown().await;
-        assert!(tokio::time::timeout(Duration::from_secs(1), stalled).await.unwrap().unwrap().is_err());
-        assert!(client.get(format!("http://{address}/api/status")).send().await.is_err());
+        assert!(tokio::time::timeout(Duration::from_secs(1), stalled)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err());
+        assert!(client
+            .get(format!("http://{address}/api/status"))
+            .send()
+            .await
+            .is_err());
     }
 
     #[tokio::test]
     async fn an_unauthenticated_engine_never_opens_lan_access() {
         let addresses = Arc::new(ConnectionAddresses::default());
         addresses.set_local_network_enabled(true);
-        let _guard = start(None, "127.0.0.1:1".parse().unwrap(), addresses.clone(), Vec::new());
+        let _guard = start(
+            None,
+            "127.0.0.1:1".parse().unwrap(),
+            addresses.clone(),
+            Vec::new(),
+        );
         tokio::time::sleep(Duration::from_millis(25)).await;
         assert!(addresses.local_network_listener().is_none());
     }

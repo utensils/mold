@@ -1,5 +1,3 @@
-#[path = "../../../apps/shared/secure_media_bridge.rs"]
-mod secure_media_bridge;
 pub mod clipboard;
 pub mod commands;
 pub mod connection;
@@ -12,6 +10,8 @@ pub mod notifications;
 pub mod relocate;
 pub mod runpod;
 pub mod secrets;
+#[path = "../../../apps/shared/secure_media_bridge.rs"]
+mod secure_media_bridge;
 pub mod server;
 pub mod settings;
 pub mod source_stash;
