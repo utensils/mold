@@ -16,3 +16,7 @@
   "Restoring the original input files…", and a failed input restore now
   clears as soon as the input is attached by hand on desktop, web and the
   phone, instead of only after a New print or Reset.
+- **Reusing a print no longer adds it to the Queue.** "Use these settings" on
+  the desktop put the finished print back in the Queue as "Finished — saved to
+  My images", one more row per reuse, and Clear finished could take it off the
+  canvas. The reused print is now only shown on the canvas.

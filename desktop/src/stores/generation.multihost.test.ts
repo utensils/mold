@@ -279,6 +279,28 @@ describe("showGalleryPrint", () => {
     expect(streamableMediaUrl.mock.calls[0]?.[1]).toMatchObject({ target: print.target });
   });
 
+  // Reuse puts a FINISHED print on the canvas; it is not work. Listing it made
+  // every "Use these settings" reappear in the Queue as "Finished — saved to
+  // My images", and each reuse added another row.
+  it("keeps a reused print on the canvas and out of the queue", async () => {
+    const store = useGenerationStore();
+    const { useQueueActivity } = await import("../composables/useQueueActivity");
+    const queue = useQueueActivity();
+    const first = store.showGalleryPrint(print, request());
+    expect(first.fromLibrary).toBe(true);
+    expect(store.active).toBe(first);
+    expect(queue.rows.value.some((row) => row.key === `print:${first.clientId}`)).toBe(false);
+
+    const second = store.showGalleryPrint({ ...print, filename: "other.png" }, request());
+    expect(store.active).toBe(second);
+    expect(store.jobs.filter((job) => job.fromLibrary)).toEqual([second]);
+    expect(queue.rows.value).toEqual([]);
+
+    // Clear finished clears the queue's history, not the picture on screen.
+    store.prune(0);
+    expect(store.active).toBe(second);
+  });
+
   it("carries the recorded render time, and zero when the print does not know", () => {
     const store = useGenerationStore();
     const timed = store.showGalleryPrint(

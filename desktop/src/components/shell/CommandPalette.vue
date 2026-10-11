@@ -488,7 +488,9 @@ const staticCommands = computed<Command[]>(() => {
       },
     });
   }
-  if (generation.jobs.some((j) => j.status === "complete" || j.status === "error")) {
+  if (
+    generation.jobs.some((j) => !j.fromLibrary && (j.status === "complete" || j.status === "error"))
+  ) {
     cmds.push({
       id: "act-clear-finished",
       title: "Clear finished",

@@ -742,7 +742,9 @@ export function useQueueCommands(): QueueCommands {
       { separator: true },
       {
         label: "Clear finished",
-        disabled: !generation.jobs.some((j) => j.status === "complete" || j.status === "error"),
+        disabled: !generation.jobs.some(
+          (j) => !j.fromLibrary && (j.status === "complete" || j.status === "error"),
+        ),
         action: () => generation.prune(0),
       },
     ];
