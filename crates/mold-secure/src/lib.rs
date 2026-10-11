@@ -33,3 +33,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(any(unix, windows))]
 pub mod identity_file;
+
+#[cfg(any(unix, windows))]
+pub mod operator_key;
