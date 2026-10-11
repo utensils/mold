@@ -74,6 +74,28 @@ fn create_file(path: &Path) -> io::Result<File> {
 fn create_file(path: &Path) -> io::Result<File> {
     windows::create_file(path)
 }
+#[cfg(unix)]
+fn install(temporary: &Path, destination: &Path, replace: bool) -> io::Result<()> {
+    if replace {
+        fs::rename(temporary, destination)
+    } else {
+        fs::hard_link(temporary, destination)
+    }
+}
+#[cfg(windows)]
+fn install(temporary: &Path, destination: &Path, replace: bool) -> io::Result<()> {
+    windows::install(temporary, destination, replace)
+}
+#[cfg(unix)]
+fn sync_directory(directory: &File) -> io::Result<()> {
+    directory.sync_all()
+}
+#[cfg(windows)]
+fn sync_directory(_directory: &File) -> io::Result<()> {
+    // Windows installation uses MoveFileExW(MOVEFILE_WRITE_THROUGH). Directory
+    // handles do not support the POSIX fsync contract.
+    Ok(())
+}
 
 /// Create missing private directories without creating a host identity. Existing
 /// target directories must already be private; never repair permissions silently.
@@ -95,7 +117,17 @@ pub fn ensure_private_directory(path: &Path) -> io::Result<()> {
         }
         Err(error) => return Err(error),
     }
-    validate(&open(path, true)?, true)
+    validate(&open(path, true)?, true)?;
+    #[cfg(unix)]
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        // Persist a newly created private ancestor before a caller relies on a
+        // journal beneath it. Existing ancestors need no permission changes.
+        // Only this durability handle follows already traversed ancestors
+        // (for example macOS /tmp -> /private/tmp). Key/owner validation above
+        // still refuses a symlink at the private directory or file itself.
+        sync_directory(&open(&parent.canonicalize()?, true)?)?;
+    }
+    Ok(())
 }
 
 /// Bounded read of owner-only client state. No file or directory is created.
@@ -120,6 +152,14 @@ pub fn read_private_file(path: &Path, max_bytes: usize) -> io::Result<Zeroizing<
 /// Atomic owner-only client state writes. Replacement is explicit and validates
 /// any existing destination first. Caller chooses a private subdirectory.
 pub fn write_private_file(path: &Path, bytes: &[u8], replace: bool) -> io::Result<()> {
+    write_private_file_with_commit(path, bytes, replace, sync_directory)
+}
+fn write_private_file_with_commit(
+    path: &Path,
+    bytes: &[u8],
+    replace: bool,
+    commit: impl FnOnce(&File) -> io::Result<()>,
+) -> io::Result<()> {
     if bytes.len() > 65536 {
         return Err(invalid("private state exceeds its size bound"));
     }
@@ -152,11 +192,7 @@ pub fn write_private_file(path: &Path, bytes: &[u8], replace: bool) -> io::Resul
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
-        if replace {
-            fs::rename(&temporary, path)
-        } else {
-            fs::hard_link(&temporary, path)
-        }
+        install(&temporary, path, replace)
     })();
     let cleanup = match fs::remove_file(&temporary) {
         Ok(()) => Ok(()),
@@ -165,6 +201,7 @@ pub fn write_private_file(path: &Path, bytes: &[u8], replace: bool) -> io::Resul
     };
     installed?;
     cleanup?;
+    commit(&parent)?;
     Ok(())
 }
 /// Read-only connector API. Rejects symlinks/reparse points before reading keys.
@@ -182,11 +219,7 @@ pub fn read_host_identity(path: &Path) -> io::Result<Identity> {
 pub fn load_or_create_host_identity(home: &Path) -> io::Result<Identity> {
     fs::create_dir_all(home)?;
     let directory = home.canonicalize()?.join("secure");
-    match create_directory(&directory) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(e),
-    };
+    ensure_private_directory(&directory)?;
     let parent = open(&directory, true)?;
     validate(&parent, true)?;
     let path = directory.join("host.identity");
@@ -202,15 +235,19 @@ pub fn load_or_create_host_identity(home: &Path) -> io::Result<Identity> {
             file.write_all(&secret)?;
             file.sync_all()?;
             drop(file);
-            match fs::hard_link(&temporary, &path) {
+            match install(&temporary, &path, false) {
                 Ok(()) => Ok(()),
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
                 Err(e) => Err(e),
             }
         })();
-        let cleanup = fs::remove_file(&temporary);
+        let cleanup = match fs::remove_file(&temporary) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        };
         installed?;
         cleanup?;
+        sync_directory(&parent)?;
     }
     // Another process can observe the committed hard link during the tiny
     // interval before its private temporary link is removed. Never weaken link
@@ -229,6 +266,34 @@ pub fn load_or_create_host_identity(home: &Path) -> io::Result<Identity> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn directory_commit_handles_existing_system_path_aliases() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let file = alias.join("private/client.json");
+        write_private_file(&file, b"client", false).unwrap();
+        assert_eq!(&*read_private_file(&file, 10).unwrap(), b"client");
+    }
+    #[test]
+    fn uncertain_durable_commit_does_not_report_success_or_allow_create_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("private/pending.json");
+        let result = write_private_file_with_commit(&path, b"authority", false, |_| {
+            Err(io::Error::other("simulated directory flush failure"))
+        });
+        assert!(result.is_err());
+        assert_eq!(&*read_private_file(&path, 100).unwrap(), b"authority");
+        assert_eq!(
+            write_private_file(&path, b"replacement", false)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+    }
     #[test]
     fn host_identity_round_trip_is_private_and_read_does_not_create() {
         let temp = tempfile::tempdir().unwrap();

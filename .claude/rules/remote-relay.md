@@ -42,6 +42,9 @@ and clients use shared private-file helpers: owner-only POSIX permissions or a
 protected current-user-only Windows DACL, bounded reads, no symlinks/reparse
 points or extra hard links. A corrupt, permissive or missing connector identity
 fails closed; never replace the server pin on an error. Keep key buffers zeroized.
+Private journals must commit before a paid provider mutation: flush file contents
+and POSIX directory entries, or use a Windows write-through same-directory move.
+An uncertain commit fails closed and retains the journal for reconciliation.
 
 Pairing QR v2 carries the host key binding, namespace, endpoints, optional cloud WebSocket URL,
 a short-lived invitation certificate and its private invitation seed. The seed
