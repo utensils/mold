@@ -34,7 +34,7 @@ impl SettingsStore {
 pub struct AppState {
     pub conn: tokio::sync::Mutex<Conn>,
     pub local_server: tokio::sync::Mutex<LocalServer>,
-    /// Persistent per-install key for the desktop-owned LAN server; exported
+    /// Persistent per-home owner key shared by the desktop and native host; exported
     /// as MOLD_API_KEY before the embedded engine starts.
     pub local_api_key: String,
     pub secrets: crate::secrets::SecretStore,
