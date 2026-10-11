@@ -183,7 +183,7 @@ test("only active host/device sessions can broker exact ciphertext objects and A
     async head() {
       return { bytes: 100, sha256: "a".repeat(64) };
     },
-    async remove(key) {
+    async clear(key) {
       removed.push(key);
     },
   };
@@ -248,7 +248,7 @@ test("only active host/device sessions can broker exact ciphertext objects and A
 test("cloud certificates cannot allocate paid storage until the host accepts them", async () => {
   const storage = {
     origin: "https://test.s3.us-west-2.amazonaws.com",
-    async remove() {},
+    async clear() {},
   };
   const f = fixture({ storage }),
     h = identity(),
@@ -613,7 +613,7 @@ test("disconnected namespaces retain bounded quota only until their short lease 
 test("object capability requires both peers and cannot be enabled by device alone", async () => {
   const storage = {
     origin: "https://test.s3.us-west-2.amazonaws.com",
-    async remove() {},
+    async clear() {},
   };
   const f = fixture({ storage, objectCapabilities: { host: 0, device: 1 } }),
     h = identity(),

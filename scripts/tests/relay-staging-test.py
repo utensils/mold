@@ -46,6 +46,7 @@ class StagingBounds(unittest.TestCase):
         objects=next(s for s in statements if 's3:PutObject' in s['Action'])
         self.assertEqual(objects['Resource']['Fn::Sub'],'${Ciphertext.Arn}/ciphertext/v3/*')
         self.assertNotIn('s3:ListBucket',actions)
+        self.assertNotIn('s3:DeleteObject',actions)
         writes = next(s for s in statements if "dynamodb:PutItem" in s["Action"])
         self.assertNotIn("v3-registration#*", writes["Condition"]["ForAllValues:StringLike"]["dynamodb:LeadingKeys"])
 

@@ -20,12 +20,13 @@ a staging result. Account profile is `dev.urandom.io`, region `us-west-2`.
 - [x] Staging stack `mold-relay-v3-uat` uses WSS
       `wss://4dp9o267oi.execute-api.us-west-2.amazonaws.com/uat` and isolated bucket
       `mold-relay-v3-uat-042506291754-us-west-2`. No EC2 or production DNS change.
-- [x] Reviewed stage broker hash after host-accept hardening:
-      `LMLdT8vPtIFVKDtdKEP/FtDM7SQVHJAJAzrqlHUU44U=`. Record superseding hashes here
+- [x] Reviewed stage broker hash after host-accept and tombstone hardening:
+      `lu3cLfotZYdQVCN2DICUm8TIMoJPDWK38nur6dgU0eI=`. Record superseding hashes here
       before using newer evidence. Production hashes are **not yet assigned**.
 - [x] Staged carrier checks: invalid checksum rejected; signed exact PUT/GET
       succeeds; conditional duplicate cannot overwrite; path segments encode exactly
-      once; complete ACK deletes only its object; lost ACK recovers after deletion.
+      once; complete ACK clears only its payload into a zero-byte tombstone; replayed
+      conditional PUT receives 412; lost ACK recovers without fetching the tombstone.
 - [x] Read-only legacy inventory found zero objects in production `uploads/`
       and `_mold/objects/`; recheck after old writes stop. DynamoDB had 11 known
       legacy metadata rows, and exactly two owned old SSM parameters. No secret

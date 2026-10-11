@@ -160,7 +160,7 @@ identical ciphertext. Never re-encrypt or decrypt an unverified partial object.
 
 Sender retains original ciphertext until acknowledged and retransmits the same
 ref/bytes. A fully old ref is acknowledged without fetching again: it is already
-outside the receive window and may have been deleted. Partial old refs still
+outside the receive window and its payload may have been cleared. Partial old refs still
 require a complete bounded fetch/verification before accepting their new tail.
 
 ## Release, limits and errors
@@ -169,11 +169,11 @@ The broker tracks at most four live allocations / 1 MiB for each
 namespace+sid+rid+direction. Limits apply across retries and parallel Lambdas.
 Each admitted peer has at most 16 unacknowledged original sequence slots. Hosts
 are capped at 32 namespaces and 32 peers each; invite peers cannot allocate.
-Expired reservations do not create authorization. Cleanup deletes only objects
+Expired reservations do not create authorization. Cleanup replaces payloads only
 under `ciphertext/v3/`; old plaintext prefixes have no runtime IAM access.
 
 Cumulative ACK `next >= seq+count` releases that direction's matching forwarded
-objects. Duplicate/stale ACKs cannot delete a newer session or another peer's
+objects. Duplicate/stale ACKs cannot clear a newer session or another peer's
 objects. Explicit cancellation releases both directions. The sender can abandon
 an allocation before forwarding with:
 
@@ -190,10 +190,16 @@ an allocation before forwarding with:
 ```
 
 Reply is `{a:"object",v:3,op:"released",requestId,sid,rid,id}`. Release is
-idempotent, sender/session fenced, and may not delete a forwarded unacknowledged
+idempotent, sender/session fenced, and may not clear a forwarded unacknowledged
 object. Cancel the whole channel instead when abandoning forwarded bytes.
-Cleanup errors retain quota until retried; a one-day S3 lifecycle is the final
-cleanup backstop, not the normal path. Never delete real host media.
+ACK/cancel/release cleanup overwrites the payload with a zero-byte tombstone at
+its original key before releasing quota. The key stays occupied so a still-valid
+`If-None-Match: *` upload grant cannot recreate ciphertext after acknowledgement;
+replay receives 412. The original grant binds the nonzero length and checksum,
+so clients cannot write a tombstone themselves. Old fully consumed references
+recover the recorded ACK without fetching the now-empty object. Cleanup failures
+retain quota until retried. A one-day S3 lifecycle removes the tombstones and
+abandoned ciphertext. Never modify real host media.
 
 Recoverable broker replies are
 `{a:"object",v:3,op:"error",requestId,sid,rid,code}` with code exactly one of
@@ -209,6 +215,6 @@ the normal v3 fail-closed admission rules. No error contains an S3 URL or body.
 The private bucket blocks all public access, denies insecure transport, uses
 server-side encryption in addition to Noise, and allows only exact production
 Studio origins for browser GET/HEAD/PUT CORS with checksum/content headers.
-Lambda IAM is limited to `ciphertext/v3/*` object read/write/delete and scoped
+Lambda IAM is limited to `ciphertext/v3/*` object read/write and scoped
 admission/quota rows. No S3 list, legacy content, bearer secret or API invoke
 authority is required for the runtime.

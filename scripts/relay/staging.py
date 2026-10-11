@@ -25,7 +25,7 @@ def template():
             {"Effect": "Allow", "Action": ["logs:CreateLogStream", "logs:PutLogEvents"], "Resource": get("Logs", "Arn")},
             {"Effect": "Allow", "Action": ["dynamodb:GetItem"], "Resource": get("Sessions", "Arn"), "Condition": {"ForAllValues:StringLike": {"dynamodb:LeadingKeys": runtime_keys + ["v3-registration#*"]}}},
             {"Effect": "Allow", "Action": ["dynamodb:PutItem", "dynamodb:DeleteItem"], "Resource": get("Sessions", "Arn"), "Condition": {"ForAllValues:StringLike": {"dynamodb:LeadingKeys": runtime_keys}}},
-            {"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:DeleteObject"],"Resource":sub('${Ciphertext.Arn}/ciphertext/v3/*')},
+            {"Effect":"Allow","Action":["s3:GetObject","s3:PutObject"],"Resource":sub('${Ciphertext.Arn}/ciphertext/v3/*')},
             {"Effect": "Allow", "Action": "execute-api:ManageConnections", "Resource": sub("arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/uat/*/@connections/*")}
         ]}}]}},
         "Router": {"Type": "AWS::Lambda::Function", "Properties": {"FunctionName": NAME + "-router", "Runtime": "nodejs22.x", "Handler": "index.handler", "Architectures": ["arm64"], "MemorySize": 256, "Timeout": 10, "ReservedConcurrentExecutions": 32, "Role": get("Role", "Arn"), "Code": {"ZipFile": "exports.handler=async()=>({statusCode:503});"}, "Environment": {"Variables": {"TABLE_NAME": ref("Sessions"), "CIPHERTEXT_BUCKET":ref('Ciphertext'),"MANAGEMENT_ENDPOINT": sub("https://${Api}.execute-api.${AWS::Region}.amazonaws.com/uat")}}}},

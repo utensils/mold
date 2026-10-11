@@ -105,7 +105,7 @@ export function createObjectBroker({
     const ids = Object.entries(row.members)
       .filter(([, m]) => m.deleting)
       .map(([id]) => id);
-    await Promise.all(ids.map((id) => storage.remove(objectPath(c, id))));
+    await Promise.all(ids.map((id) => storage.clear(objectPath(c, id))));
     if (ids.length)
       await mutate(c, (old) => {
         const members = { ...old.members };
@@ -227,7 +227,7 @@ export function createObjectBroker({
     const row = await store.get(rowKey(c)),
       m = row?.members?.[f.o.id];
     // A lost cumulative ACK can cause a legitimate reference retry after its
-    // object was deleted. Resend the recipient's exact recorded ACK; never
+    // object payload was cleared. Resend the recipient's exact recorded ACK; never
     // fetch or re-forward an already consumed object, or invent new ack_seq.
     if (f.seq + f.o.count <= row?.next && row.ack) return { ack: row.ack };
     if (

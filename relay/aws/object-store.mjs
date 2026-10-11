@@ -3,11 +3,10 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
-  DeleteObjectCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
-export function createObjectStorage(env = process.env, credentials) {
+export function createObjectStorage(env = process.env, credentials, transport) {
   if (!env.CIPHERTEXT_BUCKET) return;
   const bucket = env.CIPHERTEXT_BUCKET,
     region = env.AWS_REGION;
@@ -17,11 +16,13 @@ export function createObjectStorage(env = process.env, credentials) {
   )
     throw new Error("ObjectConfiguration");
   const origin = `https://${bucket}.s3.${region}.amazonaws.com`;
-  const s3 = new S3Client({
-    region,
-    maxAttempts: 2,
-    ...(credentials ? { credentials } : {}),
-  });
+  const s3 =
+    transport ??
+    new S3Client({
+      region,
+      maxAttempts: 2,
+      ...(credentials ? { credentials } : {}),
+    });
   const input = (key) => {
     if (!key.startsWith("ciphertext/v3/")) throw new Error("ObjectPrefix");
     return { Bucket: bucket, Key: key };
@@ -83,10 +84,19 @@ export function createObjectStorage(env = process.env, credentials) {
         throw error;
       }
     },
-    async remove(key) {
-      await s3.send(new DeleteObjectCommand(input(key)), {
-        abortSignal: AbortSignal.timeout(2000),
-      });
+    async clear(key) {
+      // Keep the key occupied until lifecycle expiry: deleting it would let a
+      // still-valid conditional upload grant recreate bytes after quota release.
+      await s3.send(
+        new PutObjectCommand({
+          ...input(key),
+          Body: Buffer.alloc(0),
+          ContentLength: 0,
+          ContentType: "application/octet-stream",
+          Metadata: { "mold-tombstone": "1" },
+        }),
+        { abortSignal: AbortSignal.timeout(2000) },
+      );
     },
   };
 }

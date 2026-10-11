@@ -3,10 +3,11 @@ import assert from "node:assert/strict";
 import { createObjectBroker } from "../opaque-objects.mjs";
 function fixture() {
   const rows = new Map(),
-    deleted = [],
+    cleared = [],
     heads = [];
   let clock = 1000,
-    ready = true;
+    ready = true,
+    clearFails = false;
   const store = {
     async get(k) {
       return structuredClone(rows.get(k));
@@ -36,8 +37,9 @@ function fixture() {
       heads.push(key);
       return ready ? { bytes: 100, sha256: "a".repeat(64) } : undefined;
     },
-    async remove(key) {
-      deleted.push(key);
+    async clear(key) {
+      if (clearFails) throw new Error("Unavailable");
+      cleared.push(key);
     },
   };
   const broker = createObjectBroker({ store, storage, now: () => clock });
@@ -65,10 +67,11 @@ function fixture() {
     ctx,
     create,
     rows,
-    deleted,
+    cleared,
     heads,
     setTime: (v) => (clock = v),
     setReady: (v) => (ready = v),
+    setClearFails: (v) => (clearFails = v),
   };
 }
 test("allocation retries are idempotent and changes conflict; parallel allocations respect quota", async () => {
@@ -121,7 +124,7 @@ test("object forwarding verifies stored bytes, canonical URL and session-bound f
     "conflict",
   );
 });
-test("ACK cannot delete partially consumed bundles; whole ACK is idempotent and prevents stale allocation", async () => {
+test("ACK cannot clear partially consumed bundles; whole ACK is idempotent and prevents stale allocation", async () => {
   const f = fixture(),
     a = await f.broker.command(f.ctx, f.create());
   const frame = {
@@ -140,7 +143,7 @@ test("ACK cannot delete partially consumed bundles; whole ACK is idempotent and 
   };
   await f.broker.forward(f.ctx, frame);
   await f.broker.ack(f.ctx, { a: "ack", next: 1, ack_seq: 1 });
-  assert.equal(f.deleted.length, 0);
+  assert.equal(f.cleared.length, 0);
   const release = {
     a: "object",
     v: 3,
@@ -154,7 +157,7 @@ test("ACK cannot delete partially consumed bundles; whole ACK is idempotent and 
   const ack = { a: "ack", next: 2, ack_seq: 2 };
   await f.broker.ack(f.ctx, ack);
   await f.broker.ack(f.ctx, ack);
-  assert.equal(f.deleted.length, 1);
+  assert.equal(f.cleared.length, 1);
   assert.deepEqual((await f.broker.forward(f.ctx, frame)).ack, ack);
   assert.equal((await f.broker.command(f.ctx, f.create())).code, "conflict");
 });
@@ -166,7 +169,7 @@ test("expired allocation is cleaned before capacity returns; cancellation is con
     f.create(),
   );
   await f.broker.cancel(f.ctx);
-  assert.equal(f.deleted.length, 1);
+  assert.equal(f.cleared.length, 1);
   f.setTime(1301);
   assert.equal(
     (
@@ -177,5 +180,22 @@ test("expired allocation is cleaned before capacity returns; cancellation is con
     ).op,
     "created",
   );
-  assert.equal(f.deleted.length, 2);
+  assert.equal(f.cleared.length, 2);
+});
+
+test("failed payload clearing retains quota until a successful tombstone retry", async () => {
+  const f = fixture();
+  for (let i = 0; i < 4; i++) await f.broker.command(f.ctx, f.create(i * 2));
+  f.setClearFails(true);
+  await assert.rejects(f.broker.cancel(f.ctx), /Unavailable/);
+  assert.equal(
+    [...f.rows.values()][0].members &&
+      Object.keys([...f.rows.values()][0].members).length,
+    4,
+  );
+  assert.equal(f.cleared.length, 0);
+  f.setClearFails(false);
+  await f.broker.cancel(f.ctx);
+  assert.equal(Object.keys([...f.rows.values()][0].members).length, 0);
+  assert.equal(f.cleared.length, 4);
 });
