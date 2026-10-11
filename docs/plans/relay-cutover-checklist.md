@@ -22,7 +22,9 @@ a staging result. Account profile is `dev.urandom.io`, region `us-west-2`.
       `mold-relay-v3-uat-042506291754-us-west-2`. No EC2 or production DNS change.
 - [x] Reviewed stage broker hash after host-accept, tombstone, atomic allocation and bounded quota compression:
       `7NuM/cdc7x3Ntp3hbROcXHuhAmjlOfqHqE7ByGDpsgc=`. Record superseding hashes here
-      before using newer evidence. Production hashes are **not yet assigned**.
+      before using newer evidence. The bounded 1 MiB/count64 experiment supersedes
+      this with `eU3qm1Bzc9QAJtgM7XqQ4E+GNJFYLaSrITvGGGDQGjo=`; see the cost
+      evidence for the isolated comparison. Production hashes are **not yet assigned**.
 - [x] Staged carrier checks: invalid checksum rejected; signed exact PUT/GET
       succeeds; conditional duplicate cannot overwrite; path segments encode exactly
       once; complete ACK clears only its payload into a zero-byte tombstone; replayed
@@ -44,7 +46,13 @@ a staging result. Account profile is `dev.urandom.io`, region `us-west-2`.
 - [x] The uninterrupted 200 MiB debug-client transfer completed with exact bytes
       and bounded memory. [Cost evidence](relay-cost-evidence.md) records its
       UTC interval, code hash, measured cloud counts and official regional rates.
-      Optimized-build and compact-storage measurements are still separate checks.
+      Optimized-build and compact-storage measurements are recorded separately.
+- [x] Final 1 MiB/count64 staging checks passed on the recorded router hash:
+      optimized Rust 20 MiB exact transfer (30.233 s), browser 3 MiB exact echo
+      (8.83 s), 192 KiB Range and SSE, native 3 MiB+13-byte exact echo, Range/SSE
+      (12.064 s), and native AVPlayer decode/seek/exact download (18.187 s).
+      Native ciphertext object ratios were 97.37% upload and 96.43% download.
+      These are staging proofs, not installed-production or physical-phone proof.
 
 ## Required release gate
 

@@ -63,6 +63,7 @@ pages so the tier, operation and region can be independently checked.
 | S3 GET or HEAD | 0.0000004 | Same S3 catalog |
 | S3 Standard GB-month | 0.023 | Same S3 catalog |
 | Internet egress, first paid 10 TB tier | 0.09 per GB | [AWS data-transfer Oregon catalog](https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AWSDataTransfer/current/us-west-2/index.json) |
+| CloudWatch Standard log ingestion | 0.50 per GB | [Oregon CloudWatch catalog](https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonCloudWatch/current/us-west-2/index.json) |
 
 All current outer messages fit a single 32 KiB increment. CloudWatch's
 [MessageCount definition](https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-websocket-api-logging.html)
@@ -98,11 +99,11 @@ revision/TTL outside the compressed bytes. An SDK-generated synthetic four-objec
 row with a 936-character session token measured 15,483 JSON bytes versus 2,423
 compressed bytes: approximately 16 versus 3 billed write units including row
 metadata. That is an 81% reduction for this representative row, not every database
-write. Its live benefit must be measured before claiming a lower operating cost. Removing a
+write. The following optimized-build sample measures its live benefit. Removing a
 cloud HEAD request alone would save little money (about $0.0016/GiB at this object
 count); its latency benefit and admission implications need separate review.
 
-## Earlier baselines and limits
+## Optimized build and compressed quota baseline
 
 After deploying bounded quota compression (router
 `7NuM/cdc7x3Ntp3hbROcXHuhAmjlOfqHqE7ByGDpsgc=`), the optimized Rust build verified
@@ -122,6 +123,14 @@ minute-margin caveats still apply. Using the same rates and inferred S3 lifecycl
 counts gives **$0.003453 for 20 MiB, or $0.17678/GiB**, before the same additional
 costs listed above. This comparison includes both the compact storage change and
 the optimized client/host build, so it does not attribute every saving to compression.
+CloudWatch `IncomingBytes` for that same minute was 214,699 bytes; log ingestion
+adds approximately $0.005–0.006/GiB of application data at the published rate.
+Internet egress remains additional: S3 ciphertext downloads plus residual inline
+base64 frames are approximately the application size with modest framing overhead.
+At the first paid tier, a practical estimate for this sample is about $0.28/GiB
+including egress and ingestion, before negligible short-lived storage/connection
+charges and any free-tier credits. Exact billed egress was not independently
+metered, so this is an estimate rather than an invoice-derived total.
 
 The actual live two-member quota row measured 8,832 JSON bytes versus 2,958 stored
 bytes (66.5% smaller). Unlike the synthetic estimate, real concurrent Lambda
@@ -131,6 +140,51 @@ compression. Exact capabilities and conditional-write authority were preserved.
 The initial inline-only 3 MiB sample took 13.847 seconds (0.217 MiB/s), with
 830 Lambda REPORTs and 48.004 billed seconds. Increasing flow-control windows
 alone did not solve bulk cost. Short object samples varied substantially with
-debug-build batching and concurrency, so the uninterrupted 200 MiB run above is
-the primary current performance evidence. No LAN speed, release-build speed,
-multi-user saturation limit, or physical-iPhone result is inferred from it.
+debug-build batching and concurrency. The uninterrupted 200 MiB run is the
+long-duration reliability baseline; the optimized 20 MiB run measures current
+release-build throughput and compact-storage costs. No LAN speed, multi-user
+saturation limit, or physical-iPhone result is inferred from either run.
+
+
+## Larger objects within the same total byte budget
+
+The final bounded experiment raised one object's limit from 256 KiB / 16 frames
+to 1 MiB / 64 frames. It retained the 1 MiB total outstanding object-byte budget,
+four-object count limit, 64-frame reliable window, 1 MiB HTTP stream window,
+HEAD verification and 32-slot staging concurrency limit. Router hash:
+`eU3qm1Bzc9QAJtgM7XqQ4E+GNJFYLaSrITvGGGDQGjo=`.
+
+The isolated optimized Rust transfer ran from `21:21:25.274173Z` through
+`21:21:55.935982Z`, verified 20,971,520 application bytes, and completed in
+30.233 seconds (0.662 MiB/s). This is a 7.1% throughput improvement over the
+32.387-second / 0.618 MiB/s baseline, with CPU time 0.46 seconds and maximum RSS
+24,854,528 bytes. The 512 KiB consumed-credit batch means most steady-state
+objects were approximately 500 KiB; the largest observed object was 1,000,539
+bytes. The aggregate byte budget did not grow.
+
+The exact log interval (`21:21:25Z`–`21:21:58Z`) contained 39 host objects,
+19,704,580 ciphertext bytes and 1,217 represented frames, with 400 Lambda REPORTs,
+54.773 billed seconds, duration p50 96.90 ms / p95 287.48 ms and no diagnostic
+errors. Compared with the preceding baseline, object lifecycle count fell 51%,
+Lambda invocation count 24% and billed execution time 23%. One bounded operator
+row-size read consumed three DynamoDB read units in this interval. Its active
+one-member row measured 4,525 JSON bytes versus 1,808 stored bytes.
+
+Whole-minute metrics for `21:21:00Z`–`21:22:00Z` reported 1,972 DynamoDB read
+units, 492 write units, zero Lambda errors/throttles, peak concurrency 16 and
+140,638 log-ingestion bytes. Those writes are 71% below the 256 KiB baseline.
+The API `MessageCount` reported 245, which is below that minute's 409 Lambda
+invocations and is not reconciled with its documented to/from definition.
+Therefore its current value must not be treated as a complete billable-message
+attribution. Later client checks started in later minutes, outside this sample.
+
+The observed counters and inferred S3 operations yield a provisional subtotal
+of $0.07592/GiB before egress, logs, storage and connection minutes. As a cost
+sensitivity calculation, allocating the previous baseline's 825 API messages
+instead of the reported 245 increases this subtotal to **$0.10561/GiB**. That
+allowance is a scenario, not a proven upper bound. Estimated Internet egress and
+measured log ingestion add roughly another $0.10/GiB at the rates above. The
+result is approximately **$0.21/GiB under that message allowance**, rather than
+an invoice-derived total. The independently measured reductions in S3 object
+count, DynamoDB units and Lambda execution support retaining the larger batches
+without relying on the unresolved API counter.
