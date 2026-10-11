@@ -12,8 +12,8 @@ release_tag="$3"
 source_sha="$4"
 shift 4
 
-[[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
-  || { echo "invalid release tag: $release_tag" >&2; exit 64; }
+[[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ || "$release_tag" == "sha-$source_sha" ]] \
+  || { echo "invalid release tag or source identity: $release_tag" >&2; exit 64; }
 [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] \
   || { echo "invalid source SHA: $source_sha" >&2; exit 64; }
 for command in jq realpath; do

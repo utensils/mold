@@ -925,7 +925,6 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=raw,value=latest${{ matrix.suffix }},enable={{is_default_branch}}
             type=raw,value=sha-${{ github.sha }}${{ matrix.suffix }}
 
       - name: Build and push
@@ -998,6 +997,24 @@ jobs:
             exit 1
           fi
 
+      - name: Record verified source target digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          SUFFIX: ${{ matrix.suffix }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          jq -n \
+            --arg target "$TARGET" \
+            --arg tag "sha-$GITHUB_SHA$SUFFIX" \
+            --arg digest "$DIGEST" \
+            '{target: $target, tag: $tag, digest: $digest}' \
+            > "container-source-digest-$TARGET.json"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: container-source-digest-${{ matrix.target }}
+          path: container-source-digest-${{ matrix.target }}.json
+
       - name: Record exact stable target digest
         if: startsWith(github.ref, 'refs/tags/v')
         env:
@@ -1018,6 +1035,50 @@ jobs:
         with:
           name: container-digest-${{ matrix.target }}
           path: container-digest-${{ matrix.target }}.json
+
+  # Readiness is independent of native archives. Publish only after every
+  # target passed its exact-source binary smoke; never move the rolling tag.
+  publish-container-readiness:
+    if: github.event_name == 'schedule' || startsWith(github.ref, 'refs/tags/v')
+    needs: [docker]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: rolling-container-publication
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: container-source-digest-*
+          path: artifacts
+          merge-multiple: true
+      - name: Generate source-pinned readiness manifest
+        run: |
+          scripts/create-container-digest-manifest.sh \
+            "artifacts/mold-container-digests-$GITHUB_SHA.json" \
+            "ghcr.io/$GITHUB_REPOSITORY" "sha-$GITHUB_SHA" "$GITHUB_SHA" \
+            artifacts/container-source-digest-*.json
+      - name: Publish readiness without replacing an existing source pin
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/publish-container-readiness.sh "$GITHUB_REPOSITORY" "$GITHUB_SHA" \
+            "artifacts/mold-container-digests-$GITHUB_SHA.json"
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote verified current-main latest aliases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/promote-container-latest.sh "$GITHUB_REPOSITORY" "$GITHUB_SHA" \
+            "artifacts/mold-container-digests-$GITHUB_SHA.json"
 
   # Rolling pre-release on every push to main
   release-latest:

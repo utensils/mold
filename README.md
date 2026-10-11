@@ -37,6 +37,10 @@ Nightly CLI from the latest published `main` build:
 curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | MOLD_CHANNEL=nightly sh
 ```
 
+Automatic cloud provisioning uses a verified container digest for the client’s exact
+source revision. Nightly/source builds wait for their matching container readiness
+manifest; an unpublished image fails before creating a paid host.
+
 The installer selects a compatible build and verifies its checksum. Linux x86_64
 clients without a visible NVIDIA GPU receive a GPU-free CLI. To use only remote
 GPU hosts, including from a machine with NVIDIA hardware:

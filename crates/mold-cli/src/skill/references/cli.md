@@ -730,6 +730,12 @@ does not prevent that retry; unrelated errors propagate. `MOLD_VAE_TILED`
 controls this Metal recovery path. Bounded Candle convolution workspaces replace
 the old proactive span cap. CPU/CUDA Z-Image decode policy is unchanged.
 
+Automatic cloud creation resolves a verified `@sha256` container for this
+client build before paying for a host. Nightly/source clients require the
+readiness manifest for their exact source SHA; if it is unavailable, use a
+published matching build or an explicitly reviewed image digest. Do not replace
+this check with a mutable `latest` tag or retry paid creation blindly.
+
 ## Encrypted remote connections
 
 ```bash

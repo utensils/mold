@@ -166,16 +166,15 @@ pub fn image_tag_for_gpu_name(
 /// Image tag base embedded by release CI.
 ///
 /// Main-branch rolling binaries set this to `latest`; tagged official builds
-/// set the exact tag. Source and Nix builds intentionally use the
-/// mutable rolling channel unless their build system explicitly supplies an
-/// official distribution version. A local Cargo package version is not
-/// evidence that the matching container was published.
+/// set the exact tag. Source and Nix builds use readiness metadata pinned to
+/// their exact source commit. A local Cargo package version or mutable image
+/// alias is not evidence that a compatible container was published.
 pub fn distribution_image_version() -> &'static str {
     option_env!("MOLD_DISTRIBUTION_IMAGE_VERSION").unwrap_or("latest")
 }
 
 pub const OFFICIAL_IMAGE_REPOSITORY: &str = "ghcr.io/utensils/mold";
-const STABLE_MANIFEST_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const MANIFEST_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug, serde::Deserialize)]
 struct ContainerDigestManifest {
@@ -213,14 +212,40 @@ pub fn is_exact_image_digest_reference(repository: &str) -> bool {
         && digest.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
+fn manifest_release_identity(version: &str, build_sha: &str) -> anyhow::Result<String> {
+    if version.trim().is_empty() || version.trim() == "latest" {
+        anyhow::ensure!(
+            build_sha.len() == 40 && build_sha.chars().all(|ch| ch.is_ascii_hexdigit()),
+            "automatic cloud provisioning requires a full source commit and a published container readiness manifest; use an official published build or an explicit @sha256 image"
+        );
+        Ok(format!("sha-{}", build_sha.to_ascii_lowercase()))
+    } else {
+        normalized_stable_tag(version)
+            .ok_or_else(|| anyhow::anyhow!("unsupported stable distribution version: {version}"))
+    }
+}
+
+fn container_manifest_url(version: &str, build_sha: &str) -> anyhow::Result<String> {
+    let identity = manifest_release_identity(version, build_sha)?;
+    let (release, asset) = if let Some(source) = identity.strip_prefix("sha-") {
+        ("latest", format!("mold-container-digests-{source}.json"))
+    } else {
+        (identity.as_str(), "mold-container-digests.json".to_string())
+    };
+    Ok(format!(
+        "https://github.com/utensils/mold/releases/download/{release}/{asset}"
+    ))
+}
+
 fn image_reference_from_digest_manifest(
     repository: &str,
     gpu_name: &str,
     version: &str,
     manifest_json: &str,
 ) -> anyhow::Result<String> {
-    let release_tag = normalized_stable_tag(version)
-        .ok_or_else(|| anyhow::anyhow!("stable distribution version is invalid: {version}"))?;
+    let build_sha = crate::build_info::GIT_SHA.trim();
+    let release_tag = manifest_release_identity(version, build_sha)?;
+    let rolling = release_tag.starts_with("sha-");
     let manifest: ContainerDigestManifest = serde_json::from_str(manifest_json)
         .map_err(|error| anyhow::anyhow!("invalid container digest manifest: {error}"))?;
     anyhow::ensure!(
@@ -236,7 +261,36 @@ fn image_reference_from_digest_manifest(
             && manifest.source_sha.chars().all(|ch| ch.is_ascii_hexdigit()),
         "container digest manifest contains an invalid source commit"
     );
-    let build_sha = crate::build_info::GIT_SHA.trim();
+    if rolling {
+        anyhow::ensure!(
+            manifest.source_sha.eq_ignore_ascii_case(build_sha),
+            "container readiness source does not match this Mold build"
+        );
+        anyhow::ensure!(
+            manifest.targets.len() == 6,
+            "container readiness manifest must contain all six CUDA targets"
+        );
+        for target in [
+            CudaImageTarget::Sm80,
+            CudaImageTarget::Sm86,
+            CudaImageTarget::Sm89,
+            CudaImageTarget::Sm90,
+            CudaImageTarget::Sm100,
+            CudaImageTarget::Sm120,
+        ] {
+            let entry = manifest.targets.get(target.manifest_key()).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "container readiness manifest omits {}",
+                    target.manifest_key()
+                )
+            })?;
+            anyhow::ensure!(
+                entry.tag == format!("{release_tag}{}", target.suffix())
+                    && is_exact_image_digest_reference(&format!("{repository}@{}", entry.digest)),
+                "container readiness target is invalid"
+            );
+        }
+    }
     if build_sha != "unknown" && !build_sha.is_empty() {
         anyhow::ensure!(
             manifest
@@ -254,7 +308,11 @@ fn image_reference_from_digest_manifest(
     let entry = manifest.targets.get(target.manifest_key()).ok_or_else(|| {
         anyhow::anyhow!("container digest manifest omits {}", target.manifest_key())
     })?;
-    let expected_tag = image_tag_for_gpu_name(gpu_name, version)?;
+    let expected_tag = if rolling {
+        format!("{release_tag}{}", target.suffix())
+    } else {
+        image_tag_for_gpu_name(gpu_name, version)?
+    };
     anyhow::ensure!(
         entry.tag == expected_tag,
         "container digest manifest tag mismatch for {}",
@@ -272,7 +330,7 @@ fn image_reference_from_digest_manifest(
     ))
 }
 
-async fn fetch_stable_container_digest_manifest(
+async fn fetch_container_digest_manifest(
     url: &str,
     timeout: std::time::Duration,
 ) -> anyhow::Result<String> {
@@ -283,24 +341,24 @@ async fn fetch_stable_container_digest_manifest(
         .get(url)
         .send()
         .await
-        .map_err(|error| anyhow::anyhow!("fetch stable container digest manifest: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("fetch container digest manifest: {error}"))?;
     anyhow::ensure!(
         response.status().is_success(),
-        "stable container digest manifest returned HTTP {}; refusing mutable tag fallback",
+        "container readiness manifest returned HTTP {}; refusing mutable tag fallback and paid provisioning because no matching image is ready for this build",
         response.status()
     );
     response
         .text()
         .await
-        .map_err(|error| anyhow::anyhow!("read stable container digest manifest: {error}"))
+        .map_err(|error| anyhow::anyhow!("read container digest manifest: {error}"))
 }
 
 /// Resolve the exact image reference submitted to a cloud provider.
 ///
-/// Rolling `latest*` builds intentionally use mutable tags. Official stable
-/// builds fetch the target-to-digest manifest attached to that exact GitHub
-/// release and submit `repository@sha256:...`; a missing or malformed manifest
-/// fails closed. Custom repositories must already be supplied as an explicit
+/// Official stable builds fetch the exact release manifest; nightly and source
+/// builds fetch a readiness manifest named for their full source commit. Both
+/// submit `repository@sha256:...`; missing or inconsistent metadata fails before
+/// paid provisioning. Mutable tags never establish readiness. Custom repositories must already be supplied as an explicit
 /// digest because Mold cannot authenticate their tag policy.
 pub async fn resolve_distribution_image_reference(
     repository: &str,
@@ -312,23 +370,12 @@ pub async fn resolve_distribution_image_reference(
     if is_exact_image_digest_reference(repository) {
         return Ok(repository.to_string());
     }
-    if version.is_empty() || version == "latest" {
-        return Ok(format!(
-            "{repository}:{}",
-            image_tag_for_gpu_name(gpu_name, "latest")?
-        ));
-    }
     anyhow::ensure!(
         repository == OFFICIAL_IMAGE_REPOSITORY,
-        "stable provisioning from a custom image repository requires an explicit @sha256 digest"
+        "automatic provisioning from a custom image repository requires an explicit @sha256 digest"
     );
-    let release_tag = normalized_stable_tag(version)
-        .ok_or_else(|| anyhow::anyhow!("unsupported stable distribution version: {version}"))?;
-    let url = format!(
-        "https://github.com/utensils/mold/releases/download/{release_tag}/mold-container-digests.json"
-    );
-    let manifest_json =
-        fetch_stable_container_digest_manifest(&url, STABLE_MANIFEST_HTTP_TIMEOUT).await?;
+    let url = container_manifest_url(version, crate::build_info::GIT_SHA.trim())?;
+    let manifest_json = fetch_container_digest_manifest(&url, MANIFEST_HTTP_TIMEOUT).await?;
     image_reference_from_digest_manifest(repository, gpu_name, version, &manifest_json)
 }
 
@@ -727,6 +774,73 @@ mod tests {
     }
 
     #[test]
+    fn rolling_image_reference_requires_a_published_digest_for_its_exact_source() {
+        let source = crate::build_info::GIT_SHA;
+        let mut manifest = serde_json::json!({
+            "schema_version": "mold.container-digests.v1",
+            "release_tag": format!("sha-{source}"),
+            "source_sha": source,
+            "repository": OFFICIAL_IMAGE_REPOSITORY,
+            "targets": {"sm86": {"tag": format!("sha-{source}-sm86"), "digest": format!("sha256:{}", "a".repeat(64))}}
+        });
+        for target in [
+            CudaImageTarget::Sm80,
+            CudaImageTarget::Sm86,
+            CudaImageTarget::Sm89,
+            CudaImageTarget::Sm90,
+            CudaImageTarget::Sm100,
+            CudaImageTarget::Sm120,
+        ] {
+            manifest["targets"][target.manifest_key()] = serde_json::json!({"tag": format!("sha-{source}{}", target.suffix()), "digest": format!("sha256:{}", "a".repeat(64))});
+        }
+        assert_eq!(
+            image_reference_from_digest_manifest(
+                OFFICIAL_IMAGE_REPOSITORY,
+                "A40",
+                "latest",
+                &manifest.to_string()
+            )
+            .unwrap(),
+            format!("{OFFICIAL_IMAGE_REPOSITORY}@sha256:{}", "a".repeat(64))
+        );
+        manifest["source_sha"] = serde_json::json!("b".repeat(40));
+        assert!(image_reference_from_digest_manifest(
+            OFFICIAL_IMAGE_REPOSITORY,
+            "A40",
+            "latest",
+            &manifest.to_string()
+        )
+        .is_err());
+        manifest["source_sha"] = serde_json::json!(source);
+        manifest["targets"]["sm86"]["tag"] = serde_json::json!("latest-sm86");
+        assert!(image_reference_from_digest_manifest(
+            OFFICIAL_IMAGE_REPOSITORY,
+            "A40",
+            "latest",
+            &manifest.to_string()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rolling_readiness_url_is_source_pinned_and_refuses_unknown_source() {
+        let source = "a".repeat(40);
+        assert_eq!(container_manifest_url("latest", &source).unwrap(), format!("https://github.com/utensils/mold/releases/download/latest/mold-container-digests-{source}.json"));
+        for unknown in ["", "unknown", "abc1234", "../main"] {
+            assert!(container_manifest_url("latest", unknown).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn rolling_custom_repository_cannot_bypass_digest_readiness() {
+        assert!(
+            resolve_distribution_image_reference("registry.example/mold", "A40", "latest")
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
     fn stable_image_reference_is_pinned_to_the_exact_target_digest() {
         let digest = format!("sha256:{}", "a".repeat(64));
         let source_sha = format!("{:0<40}", crate::build_info::GIT_SHA);
@@ -792,7 +906,7 @@ mod tests {
         });
 
         let started = std::time::Instant::now();
-        let error = fetch_stable_container_digest_manifest(
+        let error = fetch_container_digest_manifest(
             &format!("http://{address}/mold-container-digests.json"),
             std::time::Duration::from_millis(50),
         )
@@ -802,7 +916,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("fetch stable container digest manifest"));
+            .contains("fetch container digest manifest"));
         assert!(
             started.elapsed() < std::time::Duration::from_secs(2),
             "manifest fetch did not honor its bounded timeout"
