@@ -18,10 +18,9 @@ installSystemThemeSync(() => {
   const { theme, matchSystem } = loadMobileSettings();
   return { theme, matchSystem };
 });
-void installSecureNative()
-  .catch(() => {
-    // The normal pairing UI reports unreadable or expired identities by name.
-  })
-  .finally(() => {
-    createApp(App).use(createPinia()).mount("#app");
-  });
+// Hooks are installed synchronously before the first await. Stored credentials
+// warm in the background: an OS storage prompt must not hide the whole app.
+void installSecureNative().catch(() => {
+  // Secure operations still await and validate their own current profile.
+});
+createApp(App).use(createPinia()).mount("#app");

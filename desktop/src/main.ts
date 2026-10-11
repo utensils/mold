@@ -13,10 +13,9 @@ applyPlatformAttribute(document.documentElement);
 // Scene-by-scene authoring is gone; its draft and its IndexedDB media are not
 // until something frees them. Fire and forget — nothing on screen waits on it.
 void retireSequenceStorage();
-void installSecureNative()
-  .catch(() => {
-    // The normal pairing UI reports unreadable or expired identities by name.
-  })
-  .finally(() => {
-    createApp(App).use(createPinia()).use(router).mount("#app");
-  });
+// Hooks are installed synchronously before the first await. Stored credentials
+// warm in the background: an OS storage prompt must not hide the whole app.
+void installSecureNative().catch(() => {
+  // Secure operations still await and validate their own current profile.
+});
+createApp(App).use(createPinia()).use(router).mount("#app");

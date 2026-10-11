@@ -734,7 +734,10 @@ native transport's bounded process memory. Host cards persist public names and
 addresses only. Never place credentials in localStorage, URLs, logs or generated
 project files. Settings lists devices with `GET /api/pairing/clients` and revokes
 one with `DELETE /api/pairing/clients/:id`; a paired client cannot manage other
-grants. Remote access requires authenticated secure pairing.
+grants. Remote access requires authenticated secure pairing. Secure transport hooks
+are installed before the interface mounts; saved credentials warm in the background
+so an operating-system storage prompt cannot prevent the app from appearing. Each
+secure operation still awaits and validates its own pairing profile.
 
 Gallery media uses the native secure media bridge: a short-lived loopback
 capability forwards GET, HEAD and Range through the same encrypted transport.
@@ -973,20 +976,18 @@ thumbnail window. Native and physical-device acceptance remain tracked in
 [issue #1628](https://github.com/utensils/mold/issues/1628). Scene authoring is
 intentionally absent.
 
-## Optional remote HTTPS access
+## Remote access
 
-An authenticated machine can run `mold relay connect --transport aws` to expose its normal API
-through a trusted HTTPS gateway. Add that HTTPS address through the existing
-Machines flow or pair using a QR whose reachable URL is the public address.
-Normal API-key storage, instance identity, device revocation and signed gallery
-media tickets still apply; the relay enrollment token is only for the host.
-The gateway can see credentials and media and publishes one machine per process.
+Pair from the host's version 2 invitation to pin its signing and Noise keys. LAN,
+Tailscale, and Lambda routes carry the same authenticated encrypted channel; the
+relay and its private bulk-object bucket see ciphertext, not API keys or media.
+Nearby candidates must prove the paired host identity before replacing a relay route.
 See [the relay guide](https://utensils.io/mold/deployment/relay).
 
-Hosting requires an explicitly running authenticated `mold serve` and connector.
-Native macOS This Mac remains private; the GUI does not automatically open a
-tunnel. Offline/sleeping hosts remain unavailable, and interrupted requests
-are never replayed by the relay.
+The host must be running with Remote Access enabled. In native macOS, Pair a Device
+starts the encrypted LAN listener and managed relay; Stop Remote Access closes both.
+Headless hosts use the secure connector described in the relay guide. Offline or
+sleeping hosts remain unavailable, and interrupted mutations are never replayed.
 
 ### GIF export timing parity
 
