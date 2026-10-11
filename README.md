@@ -330,6 +330,8 @@ input sets from newly completed jobs share storage while keeping per-job
 provenance. Native Mac and
 desktop library copies also retain those sources on supported destinations.
 
+In the native Mac app, **Use source** is available in the print inspector and source viewer, including right-click menus. Choose a supported input role, or **Choose model…** to select an installed compatible model, recipe and machine without leaving the source. Successful reuse opens Generate; other draft settings are preserved where the selected recipe supports them.
+
 Every GUI's print details lists retained source media, including reference images,
 opening/ending frames, masks, control images, audio and video. **Source Media** in
 the library browses those inputs with media-type, machine and text filters. Open

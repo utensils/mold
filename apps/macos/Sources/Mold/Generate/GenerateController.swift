@@ -94,15 +94,15 @@ final class GenerateController {
     /// overwrite them with the recipe's defaults. Also pins `machineChoice`
     /// to this host (M8 decision 2): the model was adopted THERE, so "Use
     /// These Settings" must not leave the run pointed at Auto.
-    func adopt(model: Model, on host: MoldHost.ID, keepingDraft: Bool) {
+    func adopt(model: Model, on host: MoldHost.ID, keepingDraft: Bool, selectedRecipe: GenerationRecipe? = nil) {
         modelName = model.name
         modelFamily = model.family
         modelSupportsAudio = model.supportsAudio
         modelSupportsDurationPrediction = model.offersDurationPrediction
         hostID = host
-        recipeID = nil
+        recipeID = selectedRecipe?.id
         machineChoice = host
-        guard let recipe = model.defaultRecipe else {
+        guard let recipe = selectedRecipe ?? model.defaultRecipe else {
             clearRecipeCapabilities()
             // No recipe to reconcile against, but the draft must not keep
             // describing the PREVIOUS model's layout -- the request builder

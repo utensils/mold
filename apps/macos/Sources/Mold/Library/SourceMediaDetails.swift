@@ -6,6 +6,7 @@ import SwiftUI
 struct SourceMediaDetails: View {
     @Environment(HostStore.self) private var hosts
     @Environment(LibraryStore.self) private var library
+    @Environment(\.sourceMediaStaged) private var onStaged
     @Environment(\.dismiss) private var dismiss
     let source: SourceMediaDisplay
     let initial: String
@@ -33,24 +34,25 @@ struct SourceMediaDetails: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     if let row = current {
-                        Group {
-                            if let image { ZoomableImage(image: image, identity: row.id) }
-                            else if let player {
-                                if (inspectedKind?.rawValue ?? row.member.contentKind) == "audio" { SourceAudioPlayback(player: player) }
-                                else { VideoPlaybackView(player: player) }
-                            }
-                            else if let error {
-                                ContentUnavailableView("Original unavailable", systemImage: "exclamationmark.triangle",
-                                    description: Text(error))
-                            } else { ProgressView("Loading original…") }
-                        }.frame(maxWidth: .infinity).frame(height: (inspectedKind?.rawValue ?? row.member.contentKind) == "audio" ? nil : 320)
-                        if error != nil { Button("Retry original") { retry += 1 } }
-                        Text(row.member.displayName).font(.headline).textSelection(.enabled)
-                        Text("\((inspectedKind?.rawValue ?? row.member.contentKind).capitalized) · \(ByteCountFormatter.string(fromByteCount: Int64(row.member.sizeBytes), countStyle: .file))")
-                            .font(.subheadline).foregroundStyle(.secondary)
-                        if let pixels { Text(pixels).font(.caption).foregroundStyle(.secondary) }
-                        Text("Viewing copy on \(row.owner.hostName)").font(.caption)
-                        SourceMediaCard(owner: row.owner, member: inspectedKey == loadKey ? (inspectedKind.map { row.member.inspected(as: $0) } ?? row.member) : row.member, gallery: gallery, showsPreview: false)
+                        SourceMediaCard(owner: row.owner, member: inspectedKey == loadKey ? (inspectedKind.map { row.member.inspected(as: $0) } ?? row.member) : row.member, gallery: gallery, showsPreview: false) {
+                            Group {
+                                if let image { ZoomableImage(image: image, identity: row.id) }
+                                else if let player {
+                                    if (inspectedKind?.rawValue ?? row.member.contentKind) == "audio" { SourceAudioPlayback(player: player) }
+                                    else { VideoPlaybackView(player: player) }
+                                }
+                                else if let error {
+                                    ContentUnavailableView("Original unavailable", systemImage: "exclamationmark.triangle",
+                                        description: Text(error))
+                                } else { ProgressView("Loading original…") }
+                            }.frame(maxWidth: .infinity).frame(height: (inspectedKind?.rawValue ?? row.member.contentKind) == "audio" ? nil : 320)
+                            if error != nil { Button("Retry original") { retry += 1 } }
+                            Text(row.member.displayName).font(.headline).textSelection(.enabled)
+                            Text("\((inspectedKind?.rawValue ?? row.member.contentKind).capitalized) · \(ByteCountFormatter.string(fromByteCount: Int64(row.member.sizeBytes), countStyle: .file))")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                            if let pixels { Text(pixels).font(.caption).foregroundStyle(.secondary) }
+                            Text("Viewing copy on \(row.owner.hostName)").font(.caption)
+                        }
                     } else {
                         ContentUnavailableView("Source no longer available", systemImage: "lock",
                             description: Text("The selected print or machine changed. Close this view and choose an available source."))
@@ -82,6 +84,7 @@ struct SourceMediaDetails: View {
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
         .frame(minWidth: 640, idealWidth: 780, minHeight: 650)
+        .environment(\.sourceMediaStaged, { dismiss(); onStaged() })
         .task(id: loadKey) { await load() }
         .onDisappear(perform: clear)
         .onExitCommand { dismiss() }

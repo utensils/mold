@@ -2,7 +2,7 @@ import MoldClient
 import SwiftUI
 
 /// One exact publication-owned member; preview and original bytes stay separate.
-struct SourceMediaCard: View {
+struct SourceMediaCard<Content: View>: View {
     @Environment(LibraryStore.self) private var library
     @Environment(HostStore.self) private var hosts
     @Environment(GenerateController.self) private var generate
@@ -13,6 +13,8 @@ struct SourceMediaCard: View {
     var gallery = false
     var showsPreview = true
     var openSource: (() -> Void)?
+    @ViewBuilder var content: () -> Content
+    @State private var choosingModel = false
     @State private var preview: NSImage?
     @State private var displayedKey: SourcePreviewKey?
     @State private var choice: SourceMediaAttachment?
@@ -33,6 +35,7 @@ struct SourceMediaCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            content()
             let layout = gallery ? AnyLayout(VStackLayout(alignment: .leading, spacing: 10)) : AnyLayout(HStackLayout(alignment: .top, spacing: 12))
             if showsPreview { layout {
                 Group {
@@ -62,16 +65,13 @@ struct SourceMediaCard: View {
             if member.role.hasPrefix("matting_processed") {
                 Text("Processed image. Reuse adds it as a new input.").font(.caption).foregroundStyle(.secondary)
             }
-            if !choices.isEmpty {
-                Menu {
-                    ForEach(choices) { destination in
-                        Button(destination.title) { failure = nil; choice = destination }
-                    }
-                } label: { Label("Use source", systemImage: "arrow.up.forward") }
-                .disabled(choice != nil)
-                .accessibilityIdentifier("source-media-reuse")
+            if member.contentKind != "unknown" {
+                Menu { RowActionMenu(actions: reuseMenu, perform: perform) } label: { Label("Use source", systemImage: "arrow.up.forward") }
+                    .disabled(choice != nil)
+                    .help("Attach this original to Generate as a supported input.")
+                    .accessibilityIdentifier("source-media-reuse")
             } else {
-                Text(member.contentKind == "unknown" ? "This source type cannot be attached in this app." : "Choose a compatible model in Generate to use this source.")
+                Text("Open this source to check which inputs it supports.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if choice != nil { ProgressView("Preparing source…") }
@@ -80,6 +80,22 @@ struct SourceMediaCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(gallery ? 12 : 0)
         .background(.quaternary.opacity(gallery ? 0.25 : 0), in: RoundedRectangle(cornerRadius: 16))
+        .contentShape(Rectangle())
+        .rowActionMenu(SourceMediaReuseAction.menu(choices: choices, canOpen: openSource != nil,
+                                                   knownKind: member.contentKind != "unknown", busy: choice != nil), perform: perform)
+        .sheet(isPresented: $choosingModel) {
+            SourceMediaModelChooser(member: member) { host, model, recipe, role in
+                guard choice == nil, library.allowsSource(previewKey.authority, detail: !gallery), hosts.host(host.id) == host, hosts.isUp(host),
+                      models.model(named: model.name, on: host.id) == model,
+                      SourceMediaReuseOffer.offers(model: model, member: member, draft: generate.draft)
+                        .contains(where: { $0.recipe == recipe && $0.choices.contains(role) }) else {
+                    failure = "The model or machine changed. Choose the source again to retry."
+                    return
+                }
+                generate.adopt(model: model, on: host.id, keepingDraft: true, selectedRecipe: recipe)
+                failure = nil; choice = role
+            }
+        }
         .accessibilityElement(children: .contain)
         .onDisappear { preview = nil; displayedKey = nil }
         .task(id: previewKey) {
@@ -97,6 +113,21 @@ struct SourceMediaCard: View {
         }
     }
 
+    private var reuseMenu: [RowAction<SourceMediaReuseAction>] {
+        SourceMediaReuseAction.menu(choices: choices, canOpen: false,
+                                   knownKind: member.contentKind != "unknown", busy: choice != nil)
+    }
+
+    private func perform(_ action: SourceMediaReuseAction) {
+        switch action {
+        case .open: openSource?()
+        case .chooseModel: if choice == nil { choosingModel = true }
+        case let .attach(destination):
+            guard choice == nil, choices.contains(destination) else { return }
+            failure = nil; choice = destination
+        }
+    }
+
     private func loadPreview() async {
         preview = nil; displayedKey = nil
         guard library.allowsSource(previewKey.authority, detail: !gallery), member.contentKind == "image", let host = hosts.host(owner.hostID) else { return }
@@ -107,7 +138,10 @@ struct SourceMediaCard: View {
     }
 
     private func attach(_ destination: SourceMediaAttachment) async {
-        guard library.allowsSource(previewKey.authority, detail: !gallery), let host = hosts.host(owner.hostID), let recipe else { return }
+        guard library.allowsSource(previewKey.authority, detail: !gallery), let host = hosts.host(owner.hostID), let recipe else {
+            failure = "This source or model is no longer available. Choose the source again to retry."
+            return
+        }
         let instance = hosts.instanceIDs[owner.hostID]
         let fence = ReferenceImportFence(model: generate.modelName, host: target, recipe: recipe, media: generate.draft.media)
         let destinationRoute = target.flatMap(hosts.host)
@@ -142,4 +176,13 @@ struct SourceMediaCard: View {
 
 extension EnvironmentValues {
     @Entry var sourceMediaStaged: () -> Void = {}
+}
+
+extension SourceMediaCard where Content == EmptyView {
+    init(owner: LibraryEntry, member: RetainedSourceMedia.Member, gallery: Bool = false,
+         showsPreview: Bool = true, openSource: (() -> Void)? = nil) {
+        self.owner = owner; self.member = member; self.gallery = gallery
+        self.showsPreview = showsPreview; self.openSource = openSource
+        self.content = { EmptyView() }
+    }
 }

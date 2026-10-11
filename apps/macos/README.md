@@ -894,6 +894,8 @@ Deleting the media currently open in a Library viewer keeps the viewer open on t
 
 ### Source Media
 
+In the native Mac app, **Use source** is available in the print inspector and source viewer, including right-click menus. Choose a supported input role, or **Choose model…** to select an installed compatible model, recipe and machine without leaving the source. Successful reuse opens Generate; other draft settings are preserved where the selected recipe supports them.
+
 The Library sidebar's Source Media destination browses original inputs retained
 by visible prints on the selected machines. Details lists the same members for
 each selected print, including references, boundary frames, masks, audio and
