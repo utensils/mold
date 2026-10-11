@@ -23,6 +23,12 @@ public final class SourceMediaCatalog {
         public var roles: String { Array(Set(usages.map { $0.member.sourceLabel })).sorted().joined(separator: " · ") }
     }
     public private(set) var revision = 0
+    @ObservationIgnored private var contentEpoch = 0
+    private var hostContentRevisions: [UUID: Int] = [:]
+    private var ownerContentRevisions: [PrintID: Int] = [:]
+    public func contentRevision(for owner: PrintID) -> Int {
+        max(hostContentRevisions[owner.host, default: 0], ownerContentRevisions[owner, default: 0])
+    }
     @ObservationIgnored private var activeAuthorities: Set<SourceMediaAuthority> = []
     public private(set) var rows: [Row] = []
     public private(set) var sources: [Source] = []
@@ -39,6 +45,22 @@ public final class SourceMediaCatalog {
     }
     public init() {}
 
+    /// A captured gallery row loses access when its exact inventory is revoked.
+    public func contains(_ row: Row) -> Bool {
+        _ = contentRevision(for: row.owner.id)
+        // Observe membership pruning too (another window can change browser scope).
+        _ = rows.count
+        guard let hit = cached[row.owner.id], hit.authority == row.authority,
+              hit.inventory.availability == .available else { return false }
+        return hit.inventory.members.contains(row.member)
+    }
+
+    private func revoke(_ owner: PrintID) {
+        cached[owner] = nil
+        contentEpoch &+= 1
+        ownerContentRevisions[owner] = contentEpoch
+    }
+
     public func invalidate(host: UUID, filename: String? = nil) {
         let affected: (PrintID) -> Bool = { $0.host == host && (filename == nil || $0.filename == filename) }
         generation = UUID()
@@ -48,6 +70,12 @@ public final class SourceMediaCatalog {
         failures = failures.filter { !affected($0.key) }
         loading = false
         revision += 1
+        contentEpoch &+= 1
+        if let filename { ownerContentRevisions[.init(host: host, filename: filename)] = contentEpoch }
+        else {
+            hostContentRevisions[host] = contentEpoch
+            ownerContentRevisions = ownerContentRevisions.filter { $0.key.host != host }
+        }
     }
 
     public func retain(authorities: Set<SourceMediaAuthority>) {
@@ -72,8 +100,8 @@ public final class SourceMediaCatalog {
             guard !refresh, let hit = cached[owner.id], now.timeIntervalSince(hit.fetched) < 60 else { return true }
             return hit.inventory.availability != .available && hit.inventory.availability != .unavailableLegacy
         }
-        // Expired results are not authority while they are being revalidated.
-        for owner in pending { cached[owner.id] = nil }
+        // Keep the unchanged-authority display while requests are in flight.
+        // Every refusal drops its cached row; reuse still verifies at the server.
         completed = owners.count - pending.count
         publish(owners: owners)
         // Resolve routes before dispatch. Tasks carry only immutable, Sendable request data.
@@ -85,7 +113,6 @@ public final class SourceMediaCatalog {
             return Request(entries: entries, client: valid ? backend(host) : nil,
                            route: capturedRoute, instance: capturedInstance)
         }
-        let positions = Dictionary(owners.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
         var resolved = owners.filter { cached[$0.id] != nil }
         var publishedCount = resolved.count
         await withTaskGroup(of: (Int, Result<RetainedSourceMedia.Inventories, Error>).self) { group in
@@ -119,7 +146,11 @@ public final class SourceMediaCatalog {
                     }
                     for owner in entries {
                         guard let inventory = result.inventories[owner.print.filename] else {
+                            revoke(owner.id)
                             failures[owner.id] = "The machine did not return this print's source inventory."; continue
+                        }
+                        if let previous = cached[owner.id], previous.inventory != inventory {
+                            contentEpoch &+= 1; ownerContentRevisions[owner.id] = contentEpoch
                         }
                         cached[owner.id] = Cached(authority: .init(owner: owner, route: request.route, instance: request.instance), inventory: inventory, fetched: now)
                         if inventory.availability != .available && (inventory.availability != .unavailableLegacy || RetainedSourceMedia.disclosable(owner.print.metadata)) {
@@ -127,13 +158,16 @@ public final class SourceMediaCatalog {
                         }
                     }
                 } catch {
-                    for owner in entries { failures[owner.id] = error.localizedDescription }
+                    for owner in entries {
+                        revoke(owner.id)
+                        failures[owner.id] = error.localizedDescription
+                    }
                 }
                 completed += entries.count
                 resolved.append(contentsOf: entries)
                 // Geometric publication bounds repeated grouping work; progress stays live.
-                if resolved.count >= max(1, publishedCount * 2) || completed == total {
-                    publish(owners: resolved.sorted { positions[$0.id, default: 0] < positions[$1.id, default: 0] })
+                if entries.contains(where: { failures[$0.id] != nil }) || resolved.count >= max(1, publishedCount * 2) || completed == total {
+                    publish(owners: owners)
                     publishedCount = resolved.count
                 }
                 enqueue()

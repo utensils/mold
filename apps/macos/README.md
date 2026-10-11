@@ -914,3 +914,15 @@ Source previews and inventories refresh after 60 seconds. Named gallery changes 
 Held jobs with a server-verified missing model component (including a missing adapter) offer **Download and Retry** directly in Queue and Job Details. The original explanation and Failure Details remain available alongside Move to. Downloads use that job’s exact model and machine, retain normal license review, and retry only after every returned download ticket succeeds. Malformed or mismatched recovery hints never redirect a download; older servers retain their typed missing-model recovery.
 
 Source Media offers media-type and machine filters alongside search. Open a source to inspect its original image, video or audio, file details, and every visible use (including multiple roles and keyframe positions in the same print). Choose an exact copy for reuse or open an owning print to manage retention. Native viewers stream only the selected original into a private temporary file, delete it on dismissal, and bound image decoding; originals larger than 128 MiB are not previewed. No originals are downloaded just by scrolling. Inventory discovery starts with four owners per machine, then batches up to 100 with two concurrent requests; fresh repeated visits make no new inventory requests.
+
+Source details reuse an indexed visibility projection rather than scanning every
+print for each use. Refresh keeps unchanged authorized rows visible while reading
+new inventories; refusals revoke an open original. Updates to another print do not
+restart playback. Older sources with unknown type are inspected only when opened,
+using bounded content decoding; filenames never determine their type. A detected
+supported type enables reuse only for that exact inspected copy.
+
+Sync file comparison/hashing and ordinary navigation draft saves run off the UI
+thread. Final quit still flushes the latest draft, including after leaving Generate.
+See [the October performance audit](docs/performance-audit-2026-10.md) for measured
+source-browser results and remaining profiling candidates.

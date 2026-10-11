@@ -162,3 +162,13 @@ Opening a source shows its original with existing native zoom/playback component
 metadata and every host/print/member use; never collapse several roles in one print.
 Load only the selected original into a bounded private temporary file, cancel on
 dismissal, revoke on authority changes, and release playback/files on close.
+
+Source access must use revision-keyed indexes, never repeated whole-library scans
+per usage row. Cover same-count metadata, visibility, route/key/instance changes.
+Open gallery originals require current exact member inventory, including refusal
+revocation; owner-specific generations must not reload unrelated originals.
+Unknown originals are inspected on demand from bounded authenticated files, never
+inferred from filename. Detected kinds are ephemeral and bound to exact load keys.
+Sync comparison/hash/import metadata work stays off-main with chunk cancellation.
+Draft navigation saves asynchronously; app-lifetime termination flushes the latest
+snapshot even when Generate is no longer mounted.

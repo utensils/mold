@@ -251,3 +251,59 @@ extension SourceMediaCatalogTests {
         #expect(catalog.failures[owner.id] != nil)
     }
 }
+
+extension SourceMediaCatalogTests {
+    @Test func originalRevisionChangesOnlyForItsOwner() {
+        let host = UUID(), otherHost = UUID()
+        let first = PrintID(host: host, filename: "first.png")
+        let second = PrintID(host: host, filename: "second.png")
+        let elsewhere = PrintID(host: otherHost, filename: "first.png")
+        let catalog = SourceMediaCatalog()
+        let before = catalog.contentRevision(for: first)
+        catalog.invalidate(host: host, filename: "second.png")
+        #expect(catalog.contentRevision(for: first) == before)
+        #expect(catalog.contentRevision(for: second) != before)
+        catalog.invalidate(host: host)
+        #expect(catalog.contentRevision(for: first) != before)
+        #expect(catalog.contentRevision(for: elsewhere) == before)
+    }
+}
+
+extension SourceMediaCatalogTests {
+    @Test func expiredSnapshotRemainsVisibleDuringRefreshButRefusalRemovesIt() async {
+        let backend = FakeBackend(), host = UUID(), now = Date()
+        let inventory = RetainedSourceMedia.Inventory(availability: .available, members: [
+            .init(memberId: "source", role: "source_image", displayName: "photo.png", sizeBytes: 5)
+        ])
+        backend.stub("retainedSourceMedia(for:)", returning: inventory)
+        let owner = PrintFixtures.entry("owner.png", host: host), catalog = SourceMediaCatalog()
+        await catalog.load(owners: [owner], backend: { _ in backend }, now: now)
+        backend.stub("retainedSourceMedia(for:)") { _ in
+            await MainActor.run { #expect(catalog.sources.count == 1) }
+            return inventory
+        }
+        await catalog.load(owners: [owner], backend: { _ in backend }, now: now.addingTimeInterval(61))
+        #expect(catalog.sources.count == 1)
+        backend.stub("retainedSourceMedia(for:)", throwing: MoldClientError.unauthorized)
+        await catalog.load(owners: [owner], backend: { _ in backend }, now: now.addingTimeInterval(122))
+        #expect(catalog.sources.isEmpty)
+        #expect(catalog.failures[owner.id] != nil)
+    }
+}
+
+extension SourceMediaCatalogTests {
+    @Test func refusedRefreshRevokesCapturedMemberAndChangesOwnerRevision() async {
+        let backend = FakeBackend(), host = UUID()
+        let owner = PrintFixtures.entry("owner.png", host: host)
+        backend.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .available,
+            members: [.init(memberId: "source", role: "source_image", displayName: "photo.png", sizeBytes: 5)]))
+        let catalog = SourceMediaCatalog()
+        await catalog.load(owners: [owner], backend: { _ in backend })
+        let captured = catalog.rows[0], revision = catalog.contentRevision(for: owner.id)
+        #expect(catalog.contains(captured))
+        backend.stub("retainedSourceMedia(for:)", throwing: MoldClientError.unauthorized)
+        await catalog.load(owners: [owner], backend: { _ in backend }, refresh: true)
+        #expect(!catalog.contains(captured))
+        #expect(catalog.contentRevision(for: owner.id) != revision)
+    }
+}

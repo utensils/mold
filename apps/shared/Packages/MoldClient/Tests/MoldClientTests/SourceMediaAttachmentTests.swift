@@ -22,6 +22,22 @@ struct SourceMediaAttachmentTests {
         let member = RetainedSourceMedia.Member(memberId: "one", role: "future", displayName: "image.png", sizeBytes: 1)
         #expect(SourceMediaAttachment.choices(member: member, recipe: recipe, media: .init()).isEmpty)
     }
+    @Test func inspectedUnknownOnlyChangesKindAndOffersCompatibleActions() throws {
+        let member = RetainedSourceMedia.Member(memberId: "opaque-member", role: "references",
+            displayName: "references-1", sizeBytes: 123, label: "Original reference", mediaKind: "unknown",
+            position: 2, frameIndex: 19, imageRole: "front", contentSha256: String(repeating: "a", count: 64))
+        let inspected = member.inspected(as: .image)
+        var originalJSON = try #require(JSONSerialization.jsonObject(with: MoldJSON.encoder.encode(member)) as? [String: Any])
+        let inspectedJSON = try #require(JSONSerialization.jsonObject(with: MoldJSON.encoder.encode(inspected)) as? [String: Any])
+        originalJSON["media_kind"] = "image"
+        #expect(NSDictionary(dictionary: originalJSON).isEqual(to: inspectedJSON))
+        #expect(member.contentKind == "unknown")
+        let recipe = try recipe(capabilities: ["reads_source_image": true])
+        #expect(SourceMediaAttachment.choices(member: member, recipe: recipe, media: .init()).isEmpty)
+        #expect(SourceMediaAttachment.choices(member: inspected, recipe: recipe, media: .init()) == [.source])
+        #expect(SourceMediaAttachment.choices(member: member.inspected(as: .audio), recipe: recipe, media: .init()).isEmpty)
+        #expect(member.inspected(as: .video).contentKind == "video")
+    }
     @Test func boundaryInputsOfferBothExplicitEndpoints() throws {
         let recipe = try recipe(capabilities: ["boundary_frames": ["mode": "adjustable", "wire": "wan-pair", "min_frames": 9, "first_required": false, "last_required": false]])
         let member = RetainedSourceMedia.Member(memberId: "one", role: "source_image", displayName: "input.png", sizeBytes: 1)
