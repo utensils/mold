@@ -1,8 +1,7 @@
 import type { Ref } from "vue";
 import { fetchQueue, listGalleryFrom } from "../api";
 import { mergeQueueEntries } from "@studio/api/queuePlan";
-import { getHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
-import type { StreamTarget } from "../api";
+import { generationJobTarget } from "../lib/generationJobTarget";
 import type { Job, UseGenerateStream } from "./useGenerateStream";
 
 /// How long to poll `GET /api/queue` between rounds when the server is
@@ -78,14 +77,9 @@ export const DETACHED_SETTLE_NOTE =
  * (API keys are never persisted): look the host back up in the registry so a
  * reloaded page reconciles against the machine that actually holds the job,
  * not the origin's unrelated queue. */
-export function targetForJob(job: Job): Job["target"] {
-  if (job.target) return job.target;
-  if (!job.hostId || job.hostId === ORIGIN_HOST_ID) return null;
-  const host = getHost(job.hostId);
-  if (!host) return null;
-  const target: StreamTarget = { baseUrl: host.url };
-  if (host.apiKey) target.apiKey = host.apiKey;
-  return target;
+export function targetForJob(job: Job): Job["target"] | undefined {
+  const target = generationJobTarget(job);
+  return target?.baseUrl === "" ? null : target;
 }
 
 export function startQueueReconciler(
@@ -94,7 +88,7 @@ export function startQueueReconciler(
   options: {
     intervalMs?: number;
     settleDetached?: (id: string, note: string) => void;
-    resolveTarget?: (job: Job) => Job["target"];
+    resolveTarget?: (job: Job) => Job["target"] | undefined;
   } = {},
 ): QueueReconcilerHandle {
   const intervalMs = options.intervalMs ?? RECONCILE_INTERVAL_MS;
@@ -115,8 +109,10 @@ export function startQueueReconciler(
     }
     const groups = new Map<string, { target: Job["target"]; jobs: Job[] }>();
     for (const job of candidates) {
+      const target = resolveTarget(job);
+      if (target === undefined) continue;
       const key = job.hostId ?? "__origin__";
-      const group = groups.get(key) ?? { target: resolveTarget(job), jobs: [] };
+      const group = groups.get(key) ?? { target, jobs: [] };
       group.jobs.push(job);
       groups.set(key, group);
     }

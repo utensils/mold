@@ -1,5 +1,9 @@
 import { sourceMediaGalleryEvent } from "@studio/lib/sourceMediaResources";
-import { originAuthenticatedFetch, originApiTarget } from "../lib/originAuth";
+import { originAuthenticatedFetch } from "../lib/originAuth";
+import {
+  freezeGenerationRoute,
+  generationJobTarget,
+} from "../lib/generationJobTarget";
 import { computed, onUnmounted, reactive, ref, watch, type Ref } from "vue";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
 import {
@@ -23,7 +27,11 @@ import { TargetStreamSlots } from "@studio/lib/targetStreamSlots";
 import { createUuid } from "@studio/lib/id";
 import { parseGlb } from "@studio/lib/glb";
 import { redactGenerationMediaForPersistence } from "@studio/lib/generationMedia";
-import { getHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
+import {
+  getHost,
+  HOSTS_CHANGED_EVENT,
+  ORIGIN_HOST_ID,
+} from "../lib/hostRegistry";
 import { toast } from "../lib/toasts";
 import {
   fetchGalleryBlob,
@@ -146,6 +154,8 @@ export interface Job {
    * the machine that actually rendered it. */
   hostId: string | null;
   hostLabel: string | null;
+  /** Server identity survives reload without persisting transport credentials. */
+  hostInstanceId?: string;
   /** Exact in-memory route used by cancel and reconciliation. Deliberately not
    * persisted because it may contain a host API key. */
   target: StreamTarget | null;
@@ -506,6 +516,7 @@ interface PersistedJob {
   workStarted: boolean;
   hostId: string | null;
   hostLabel: string | null;
+  hostInstanceId?: string;
   serverId: string | null;
   /** A settled row whose fate the host owns. Persisted so a reload cannot
    * resurrect it as an ordinary failure. */
@@ -661,6 +672,7 @@ function loadPersistedState(raw: string | null): LoadedJobsState {
         workStarted: p.workStarted,
         hostId: p.hostId,
         hostLabel: p.hostLabel,
+        hostInstanceId: p.hostInstanceId,
         target: null,
         serverId: p.serverId,
         durable: p.durableBatch ? true : undefined,
@@ -743,6 +755,7 @@ function persistedJobsJson(jobs: Job[]): string {
     workStarted: j.workStarted,
     hostId: j.hostId,
     hostLabel: j.hostLabel,
+    hostInstanceId: j.hostInstanceId,
     serverId: j.serverId,
     detached: j.detached === true,
     durableBatch: j.durableBatch,
@@ -798,6 +811,7 @@ function persistedJobsJsonFor(source: readonly Job[]): string {
     workStarted: j.workStarted,
     hostId: j.hostId,
     hostLabel: j.hostLabel,
+    hostInstanceId: j.hostInstanceId,
     serverId: j.serverId,
     detached: j.detached === true,
     durableBatch: j.durableBatch,
@@ -1025,6 +1039,7 @@ function createJobRecord(
     workStarted: false,
     hostId: route?.hostId ?? null,
     hostLabel: route?.label ?? null,
+    hostInstanceId: route?.instanceId ?? undefined,
     target: route?.target ?? null,
     serverId: null,
     streamStarted: false,
@@ -1053,7 +1068,6 @@ const durableHydrations = new Map<string, Promise<void>>();
 const durableCancellations = new Map<string, Promise<void>>();
 const durableGallerySnapshots = new Map<string, Promise<GalleryImage[]>>();
 const durableGalleryRows = new Map<string, GalleryImage>();
-let durableRecoveryStarted = false;
 let autoChainRecoveryStarted = false;
 let durableWakeListenersInstalled = false;
 
@@ -1148,10 +1162,13 @@ function galleryRowFromUnknown(
 }
 
 function sharedGallerySnapshot(job: Job): Promise<GalleryImage[]> {
+  const target = routeForDetachedJob(job);
+  if (!target)
+    return Promise.reject(new Error("The original machine is not connected."));
   const key = durableHostKey(job);
   const existing = durableGallerySnapshots.get(key);
   if (existing) return existing;
-  const request = listGalleryFrom(routeForDetachedJob(job));
+  const request = listGalleryFrom(target);
   durableGallerySnapshots.set(key, request);
   return request;
 }
@@ -1227,6 +1244,7 @@ async function durableCompletionResult(
 ): Promise<SseCompleteEvent> {
   const filename = saved.filename;
   const target = routeForDetachedJob(job);
+  if (!target) throw new Error("The original machine is not connected.");
   const print = await galleryRowForCompletion(job, filename);
   const host = getHost(job.hostId ?? ORIGIN_HOST_ID) ?? {
     id: job.hostId ?? ORIGIN_HOST_ID,
@@ -1665,6 +1683,7 @@ function submitDurableJobs(
   route: HostRoute | null,
 ): string[] {
   if (requests.length === 0) return [];
+  route = freezeGenerationRoute(route);
   const refusal = generationRefusal(route);
   if (refusal !== null) throw new Error(refusal);
   const host = route!;
@@ -1961,7 +1980,7 @@ function recoverAutoChainJobs(): void {
     if (!chainJobId || job.state !== "running" || job.durableBatch) continue;
     const target = routeForDetachedJob(job);
     const hostId = job.hostId ?? ORIGIN_HOST_ID;
-    if (hostId !== ORIGIN_HOST_ID && !target) {
+    if (!target) {
       settleDetachedJob(job.id, "That machine is no longer connected.");
       continue;
     }
@@ -1984,8 +2003,6 @@ function recoverAutoChainJobs(): void {
 }
 
 function recoverDurableLifecycle(): void {
-  if (durableRecoveryStarted) return;
-  durableRecoveryStarted = true;
   const grouped = new Map<string, Job[]>();
   for (const job of jobs.value) {
     if (
@@ -2000,8 +2017,11 @@ function recoverDurableLifecycle(): void {
     grouped.set(job.durableBatch.clientBatchId, group);
   }
   for (const [clientBatchId, owned] of grouped) {
-    durableJobsByBatch.set(clientBatchId, owned);
+    if (durableTrackers.has(clientBatchId)) continue;
     const first = owned[0]!;
+    const target = routeForDetachedJob(first);
+    if (!target) continue;
+    durableJobsByBatch.set(clientBatchId, owned);
     const durable = first.durableBatch!;
     const hostId = first.hostId ?? ORIGIN_HOST_ID;
     let tracker = createGenerationBatchTracker({
@@ -2014,16 +2034,10 @@ function recoverDurableLifecycle(): void {
       tracker = { ...tracker, serverBatchId: durable.serverBatchId };
     }
     durableTrackers.set(clientBatchId, tracker);
-    const target = routeForDetachedJob(first);
     const route: HostRoute = {
       hostId,
       label: first.hostLabel ?? hostId,
-      target: target
-        ? { ...target }
-        : {
-            baseUrl:
-              typeof window === "undefined" ? "" : window.location.origin,
-          },
+      target: { ...target },
       instanceId: durable.expectedInstanceId,
       durableGeneration: { heterogeneous_batch_max_outputs: 1 },
       eventsAvailable: true,
@@ -2042,6 +2056,9 @@ function installDurableWakeListeners(): void {
       void reconcileDurableHost(hostId);
   };
   window.addEventListener("pageshow", reconcileAll);
+  // Unavailable owners retain their journal. Reconnecting the exact saved
+  // machine can recover them without replacing any active batch tracker.
+  window.addEventListener(HOSTS_CHANGED_EVENT, recoverDurableLifecycle);
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") reconcileAll();
   });
@@ -2062,7 +2079,6 @@ function resetDurableLifecycleForTests(): void {
   durableCancellations.clear();
   durableGallerySnapshots.clear();
   durableGalleryRows.clear();
-  durableRecoveryStarted = false;
   autoChainRecoveryStarted = false;
 }
 
@@ -2212,6 +2228,7 @@ function submitJob(
   decision: ChainRoutingDecision = { kind: "single" },
   route: HostRoute | null = null,
 ): string {
+  route = freezeGenerationRoute(route);
   if (decision.kind !== "chain" && !isPrebuiltChainRequest(req)) {
     return submitDurableJobs([req as GenerateRequestWire], decision, route)[0]!;
   }
@@ -2282,28 +2299,7 @@ function submitJob(
  * keys never persist): resolve the host back through the registry so cancel
  * reaches the machine that actually holds the job, not the origin. */
 function routeForDetachedJob(job: Job): StreamTarget | undefined {
-  if (job.target) {
-    if (
-      !job.target.apiKey &&
-      (!job.target.baseUrl || job.target.baseUrl === window.location.origin)
-    ) {
-      const key = originApiTarget().apiKey;
-      return { ...job.target, ...(key ? { apiKey: key } : {}) };
-    }
-    return job.target;
-  }
-  if (!job.hostId || job.hostId === ORIGIN_HOST_ID) {
-    const origin = originApiTarget();
-    return {
-      baseUrl: origin.baseUrl,
-      ...(origin.apiKey ? { apiKey: origin.apiKey } : {}),
-    };
-  }
-  const host = getHost(job.hostId);
-  if (!host) return undefined;
-  const target: StreamTarget = { baseUrl: host.url };
-  if (host.apiKey) target.apiKey = host.apiKey;
-  return target;
+  return generationJobTarget(job);
 }
 
 function markCancellationConfirmed(job: Job): void {
@@ -2333,8 +2329,7 @@ async function confirmDurableCancellation(job: Job): Promise<void> {
   job.cancelRequested = true;
   job.cancelling = true;
   persistDurableRecoveryBatch(durable.clientBatchId);
-  const route = durableRoutes.get(job.hostId ?? "");
-  const target = job.target ?? route?.target ?? null;
+  const target = routeForDetachedJob(job);
   if (!target) {
     job.cancelling = false;
     persistDurableRecoveryBatch(durable.clientBatchId);
@@ -2401,13 +2396,16 @@ async function cancelJob(id: string): Promise<void> {
     return confirmDurableCancellation(job);
   }
   if (job.cancelling) return;
+  const target = routeForDetachedJob(job);
+  if ((job.chain?.jobId || job.serverId) && !target)
+    throw new Error("The original machine is not connected.");
   job.cancelling = true;
   // An auto-chained video IS a chain job: cancelled on its own route, never on the
   // generation queue, which has no row for it.
   const chainJobId = job.chain?.jobId;
   if (chainJobId) {
     try {
-      await cancelChainJob(chainJobId, routeForDetachedJob(job));
+      await cancelChainJob(chainJobId, target);
     } catch (error) {
       if (job.state !== "running") return;
       job.cancelling = false;
@@ -2418,7 +2416,7 @@ async function cancelJob(id: string): Promise<void> {
   }
   if (job.serverId) {
     try {
-      await cancelQueueJob(job.serverId, routeForDetachedJob(job));
+      await cancelQueueJob(job.serverId, target);
     } catch (error) {
       // Completion can race the DELETE. If the stream already settled, its
       // terminal frame is authoritative; otherwise cancellation was not
@@ -2451,7 +2449,7 @@ async function retryJob(id: string): Promise<void> {
     throw new Error("This held generation is not retryable yet.");
   }
   const route = durableRoutes.get(job.hostId ?? "");
-  const target = job.target ?? route?.target ?? null;
+  const target = routeForDetachedJob(job);
   if (!target) throw new Error("The original machine is not connected.");
   job.retrying = true;
   job.retryable = false;

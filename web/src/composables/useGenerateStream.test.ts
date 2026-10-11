@@ -1843,3 +1843,170 @@ it("restores serving-origin credentials for detached durable REST actions", () =
   ).toBeUndefined();
   sessionStorage.clear();
 });
+
+describe("hosted job ownership survives primary changes", () => {
+  const machineA = {
+    id: "machine-a",
+    name: "Machine A",
+    url: "https://a.example",
+    instanceId: "instance-1",
+  };
+  const machineB = {
+    id: "machine-b",
+    name: "Machine B",
+    url: "https://b.example",
+    instanceId: "instance-2",
+  };
+  beforeEach(async () => {
+    vi.stubEnv("VITE_STANDALONE_STUDIO", "1");
+    localStorage.clear();
+    const { setStudioPrimary } = await import("../lib/secureStudio");
+    setStudioPrimary(machineA);
+    localStorage.setItem(
+      "mold.web.hosts.v1",
+      JSON.stringify([machineA, machineB]),
+    );
+    __testing__.resetDurableLifecycleForTests();
+    clearJobs();
+    vi.clearAllMocks();
+  });
+  afterEach(async () => {
+    clearJobs();
+    __testing__.resetDurableLifecycleForTests();
+    (await import("../lib/secureStudio")).setStudioPrimary(null);
+    localStorage.clear();
+    vi.unstubAllEnvs();
+  });
+
+  it("freezes hosted origin admissions to a stable machine and cancels there after switching", async () => {
+    const stream = useGenerateStream();
+    const id = await submitDurable(stream, singleGen(), {
+      ...durableRoute,
+      hostId: "origin",
+      target: { baseUrl: "" },
+    });
+    const job = stream.jobs.value.find((entry) => entry.id === id)!;
+    expect(job.hostId).toBe(machineA.id);
+    expect(job.target).toEqual({ baseUrl: machineA.url });
+    expect(admitGenerationBatch.mock.calls[0]?.[0]).toMatchObject({
+      baseUrl: machineA.url,
+    });
+    (await import("../lib/secureStudio")).setStudioPrimary(machineB);
+    await stream.cancel(id);
+    expect(
+      mutateQueueJobOnExpectedInstance.mock.calls.at(-1)?.[0],
+    ).toMatchObject({ baseUrl: machineA.url });
+    __testing__.persistJobs([job]);
+    const restored = __testing__.loadPersistedJobs(
+      localStorage.getItem(__testing__.STORAGE_KEY),
+    );
+    expect(restored[0]?.hostId).toBe(machineA.id);
+    expect(__testing__.routeForDetachedJob(restored[0]!)).toEqual({
+      baseUrl: machineA.url,
+    });
+  });
+
+  it.each([null, "origin", "forgotten-machine"])(
+    "refuses cancellation for a detached job without its original host (%s)",
+    async (hostId) => {
+      const stream = useGenerateStream();
+      const id = await submitDurable(stream, singleGen());
+      const job = stream.jobs.value.find((entry) => entry.id === id)!;
+      job.hostId = hostId;
+      job.target = null;
+      job.durableBatch = undefined;
+      job.hostInstanceId = undefined;
+      await expect(stream.cancel(id)).rejects.toThrow(/original machine/i);
+      expect(cancelQueueJob).not.toHaveBeenCalled();
+      expect(job.state).toBe("running");
+    },
+  );
+
+  it("does not recover a forgotten durable host through the selected machine", async () => {
+    const stream = useGenerateStream();
+    const id = await submitDurable(stream, singleGen());
+    const job = stream.jobs.value.find((entry) => entry.id === id)!;
+    job.hostId = "forgotten-machine";
+    job.target = null;
+    __testing__.resetDurableLifecycleForTests();
+    reconcileGenerationBatches.mockClear();
+    fetchEventSource.mockClear();
+    useGenerateStream();
+    await flushDurable();
+    expect(reconcileGenerationBatches).not.toHaveBeenCalled();
+    expect(fetchEventSource).not.toHaveBeenCalled();
+    expect(job.state).toBe("running");
+  });
+
+  it("recovers an unavailable durable owner when that exact machine reconnects", async () => {
+    (await import("../lib/secureStudio")).setStudioPrimary(machineB);
+    const stream = useGenerateStream();
+    const id = await submitDurable(stream, singleGen());
+    const job = stream.jobs.value.find((entry) => entry.id === id)!;
+    job.target = null;
+    __testing__.resetDurableLifecycleForTests();
+    reconcileGenerationBatches.mockClear();
+    useGenerateStream();
+    await flushDurable();
+    expect(reconcileGenerationBatches).not.toHaveBeenCalled();
+    localStorage.setItem(
+      "mold.web.hosts.v1",
+      JSON.stringify([
+        {
+          id: durableRoute.hostId,
+          name: durableRoute.label,
+          url: durableRoute.target.baseUrl,
+          instanceId: durableRoute.instanceId,
+        },
+      ]),
+    );
+    window.dispatchEvent(new CustomEvent("mold:hosts-changed"));
+    await flushDurable();
+    expect(reconcileGenerationBatches.mock.calls.at(-1)?.[0]).toMatchObject({
+      baseUrl: durableRoute.target.baseUrl,
+    });
+  });
+
+  it("freezes auto-chain ownership and persists its server identity", async () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen(), chainDecision());
+    await flushDurable();
+    const job = stream.jobs.value.find((entry) => entry.id === id)!;
+    expect(lastChainTarget).toEqual({ baseUrl: machineA.url });
+    expect(job.hostId).toBe(machineA.id);
+    __testing__.persistJobs([job]);
+    const restored = __testing__.loadPersistedJobs(
+      localStorage.getItem(__testing__.STORAGE_KEY),
+    )[0]!;
+    expect(restored.hostInstanceId).toBe(machineA.instanceId);
+    (await import("../lib/secureStudio")).setStudioPrimary(machineB);
+    expect(__testing__.routeForDetachedJob(restored)).toEqual({
+      baseUrl: machineA.url,
+    });
+    localStorage.setItem(
+      "mold.web.hosts.v1",
+      JSON.stringify([
+        { ...machineA, instanceId: "replacement-instance" },
+        machineB,
+      ]),
+    );
+    expect(__testing__.routeForDetachedJob(restored)).toBeUndefined();
+  });
+
+  it("never lets an old relative target follow a newly selected primary", async () => {
+    const stream = useGenerateStream();
+    const id = await submitDurable(stream, singleGen(), {
+      ...durableRoute,
+      hostId: "origin",
+      target: { baseUrl: "" },
+    });
+    const job = stream.jobs.value.find((entry) => entry.id === id)!;
+    job.target = { baseUrl: "" };
+    (await import("../lib/secureStudio")).setStudioPrimary(machineB);
+    expect(__testing__.routeForDetachedJob(job)).toEqual({
+      baseUrl: machineA.url,
+    });
+    job.hostId = "origin";
+    expect(__testing__.routeForDetachedJob(job)).toBeUndefined();
+  });
+});
