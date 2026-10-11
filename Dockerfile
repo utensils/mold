@@ -35,6 +35,7 @@ COPY studio studio
 COPY ui ui
 COPY web web
 COPY docs/contracts docs/contracts
+COPY relay/aws/test/fixtures/admission-v3.json relay/aws/test/fixtures/admission-v3.json
 RUN bun run build:web
 
 # ── Stage 1b: Build mold binary ─────────────────────────────────────
