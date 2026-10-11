@@ -118,6 +118,9 @@ and `ffprobe` on `PATH` before the server advertises that feature.
   and replay, including all supported Turbo tiers.
   Forced-local H3 execution accepts one FL2VA request; batches, sequences, and
   Ref2VA reference uploads require the server route.
+  Remote Ref2VA automatically selects authenticated uploads or bounded inline
+  references on hosts with authentication disabled; no client
+  API key is needed for the latter. Server license acceptance remains server-owned.
   Qwen Image 2.1 (non-commercial Qwen Research License) edits from up to ten
   ordered references, renders transparent PNG/WebP cut-outs, runs native 2K
   presets, and ships BF16, INT8, FP8, GGUF and 6-step turbo tiers; its CUDA

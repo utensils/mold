@@ -53,3 +53,12 @@ Hydrated request indices take precedence over the projection, never concatenate;
 preserve duplicates and invalid indices for core validation, and fail closed
 if a scrubbed row's authenticated count disagrees with the projected vector.
 Ref2VA rejects projected FL2VA endpoints as it rejects hydrated endpoints.
+
+**CLI reference transport follows the selected host.** Remote Ref2VA uses
+request-bound upload sessions when a client API key and an available upload
+capability are present; otherwise it prepares bounded inline media using the
+shared decoded-byte limit across all batch siblings before cloning. This supports
+auth-disabled hosts; it never grants access to an auth-enabled host without a valid credential. Capability failures
+other than legacy 404/405 must surface, and rejected uploads or license refusals
+must never trigger a downgrade or forced-local retry. Server-owned model/license
+decisions remain authoritative; H3 has no client acceptance gate.

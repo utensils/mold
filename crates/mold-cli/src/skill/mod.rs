@@ -1051,6 +1051,35 @@ mod tests {
     }
 
     #[test]
+    fn every_skill_profile_explains_h3_reference_transport_and_license_separately() {
+        for profile in [
+            RenderProfile::Portable,
+            RenderProfile::Claude,
+            RenderProfile::Codex,
+            RenderProfile::Pi,
+            RenderProfile::Openclaw,
+            RenderProfile::Copilot,
+            RenderProfile::Cursor,
+            RenderProfile::Gemini,
+            RenderProfile::Goose,
+        ] {
+            let bundle = render_bundle(profile).unwrap();
+            let reference = &bundle
+                .files
+                .iter()
+                .find(|(path, _)| path.ends_with("prompting/minimax-h3/ref2va.md"))
+                .unwrap()
+                .1;
+            assert!(reference.contains("authentication disabled"));
+            assert!(reference.contains("32 MiB"));
+            assert!(reference.contains("combined across all batch siblings"));
+            assert!(reference.contains("License acceptance"));
+            assert!(!reference.contains("MOLD_API_KEY` must be"));
+            assert!(reference.contains("<Subject n>"));
+        }
+    }
+
+    #[test]
     fn prompting_tree_is_identity_agnostic_and_byte_identical_across_renderers() {
         let portable = render_bundle(RenderProfile::Portable).unwrap();
         let canonical = portable

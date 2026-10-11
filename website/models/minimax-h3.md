@@ -542,12 +542,22 @@ mold run minimax-h3-ref2va:comfy-pruned-int8 "a slow dolly through the scene" \
   --steps 21 --guidance 0 --strength 1.0 --format mp4
 ```
 
-References are uploaded through the authenticated streaming reference-upload
-endpoints, so `MOLD_API_KEY` must be configured; Mold never puts reference
-bytes in the request body, the queue journal, or saved metadata; only their
-redacted metadata and digests. An upload session binds one request, so
-`--batch N` above 1 is refused with uploaded references — submit siblings one
-at a time.
+When `MOLD_API_KEY` is configured and the host advertises upload support, the
+CLI streams references through authenticated, request-bound upload sessions.
+Without that combination, it sends inline references up to 32 MiB decoded
+reference bytes combined across all batch siblings. This supports hosts with
+authentication disabled; an auth-enabled host still requires its valid key.
+Rejected uploads are never retried anonymously. During capability discovery,
+missing legacy routes retain inline compatibility, while authentication, server,
+malformed-response, and network failures surface before transfer.
+
+The server seals retained reference bytes separately from the queue journal and
+saved metadata, which carry descriptors and digests. An upload session binds one
+request, so `--batch N` above 1 is refused with uploaded references — submit
+siblings one at a time. Inline references allow batches within that aggregate
+decoded-byte budget.
+License acceptance already recorded on the rendering server needs no duplicate
+client record; H3 has no separate acceptance gate.
 
 ## License and support boundary
 

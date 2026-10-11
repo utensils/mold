@@ -97,6 +97,15 @@ Qwen-Image-Edit the first image is the thing being edited. `--reference` also
 carries MiniMax H3's Ref2VA inputs, which is why it additionally accepts
 `video=PATH` and `audio=PATH`; a bare path always means an image.
 
+For H3, the CLI uses request-bound upload sessions when an API key is configured
+and the host advertises that route. Otherwise it sends bounded inline references
+(32 MiB decoded reference bytes combined across all batch siblings), including
+on hosts with authentication disabled.
+An auth-enabled server still requires its valid `MOLD_API_KEY`; a rejected upload
+never triggers an inline retry. The server owns model availability and license
+acceptance: a license already accepted there needs no matching record on this
+client. H3 has no separate acceptance gate.
+
 ## Qwen Image 2.1: references, transparency, WebP stills, turbo
 
 Qwen Image 2.1 edits from up to ten ordered reference images — PNG, JPEG or
@@ -329,7 +338,9 @@ A supplied `--mesh` is a `.glb` or `.obj`, and rides the request as base64.
 On a host that advertises `capabilities.reference_uploads` AND is reached with
 an API key, the CLI takes that host's request-bound upload route instead, and
 refuses by name a mesh larger than the limits that block advertises. A keyless
-host always takes the inline path.
+host takes the inline path. A legacy capability endpoint returning 404/405 also
+keeps inline compatibility; authentication, server, malformed-response and
+network failures stop before mesh transfer rather than silently changing routes.
 
 `--follow` prints a line each time a stage changes state. The lines are
 derived from the snapshots `/:id/events` sends — that endpoint emits whole
