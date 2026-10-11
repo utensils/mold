@@ -1,5 +1,3 @@
-### Fixed
-
-- Prevent native Source Media details from repeatedly scanning the entire library, keep source lists stable during refresh, and avoid reloading originals for unrelated print updates.
-- Open legacy retained images, video and audio even when older metadata does not identify their type, with bounded content inspection and temporary-file cleanup.
-- Keep macOS navigation and sync responsive by saving drafts and comparing/hashing sync files off the UI thread, while preserving final-quit draft durability and source-access revocation.
+- **Responsive native Source Media.** Avoid repeated full-library scans, preserve source lists during refresh, and keep originals open through unrelated print updates.
+- **Open legacy original media.** Inspect retained images, video and audio whose older metadata does not identify their type, with bounded processing and temporary-file cleanup.
+- **Responsive macOS navigation and sync.** Save drafts and compare or hash sync files off the UI thread, while preserving final-quit draft durability and source-access revocation.
