@@ -17,7 +17,11 @@ class StagingBounds(unittest.TestCase):
         self.assertEqual(resources["Router"]["Properties"]["ReservedConcurrentExecutions"], 32)
         self.assertEqual(resources["Router"]["Properties"]["Timeout"], 10)
         self.assertEqual(resources["Logs"]["Properties"]["RetentionInDays"], 1)
-        self.assertTrue(all(r["Type"] not in ("AWS::EC2::Instance", "AWS::S3::Bucket", "AWS::Route53::RecordSet") for r in resources.values()))
+        self.assertTrue(all(r["Type"] not in ("AWS::EC2::Instance", "AWS::Route53::RecordSet") for r in resources.values()))
+        bucket=resources['Ciphertext']['Properties']
+        self.assertTrue(all(bucket['PublicAccessBlockConfiguration'].values()))
+        self.assertEqual(bucket['LifecycleConfiguration']['Rules'][0]['Prefix'],'ciphertext/v3/')
+        self.assertNotIn('*',bucket['CorsConfiguration']['CorsRules'][0]['AllowedOrigins'])
 
     def test_update_refuses_mismatched_manifest_before_any_aws_call(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -38,7 +42,10 @@ class StagingBounds(unittest.TestCase):
     def test_runtime_cannot_write_registration_or_read_legacy_content(self):
         statements = staging.template()["Resources"]["Role"]["Properties"]["Policies"][0]["PolicyDocument"]["Statement"]
         actions = [a for s in statements for a in ([s["Action"]] if isinstance(s["Action"], str) else s["Action"])]
-        self.assertFalse(any(a.startswith(("ssm:", "s3:", "lambda:")) for a in actions))
+        self.assertFalse(any(a.startswith(("ssm:", "lambda:")) for a in actions))
+        objects=next(s for s in statements if 's3:PutObject' in s['Action'])
+        self.assertEqual(objects['Resource']['Fn::Sub'],'${Ciphertext.Arn}/ciphertext/v3/*')
+        self.assertNotIn('s3:ListBucket',actions)
         writes = next(s for s in statements if "dynamodb:PutItem" in s["Action"])
         self.assertNotIn("v3-registration#*", writes["Condition"]["ForAllValues:StringLike"]["dynamodb:LeadingKeys"])
 

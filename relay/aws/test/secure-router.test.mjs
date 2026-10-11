@@ -34,6 +34,7 @@ function fixture(options = {}) {
   };
   const router = createSecureRouter({
     store,
+    storage: options.storage,
     now: () => clock,
     post: async (id, frame) => {
       await options.post?.(id, frame);
@@ -66,6 +67,9 @@ function fixture(options = {}) {
           namespace: host.namespace,
           hostKey: host.binding.signingKey,
           role,
+          ...(options.storage
+            ? { objects: options.objectCapabilities?.[role] ?? 1 }
+            : {}),
         })
       ).statusCode,
       200,
@@ -164,6 +168,113 @@ test("hard cutover refuses v2 admission and routes only pinned, signed v3 peers"
   });
   assert.equal((await f.send("device", { ...frame, v: 2 })).statusCode, 400);
   assert.ok(f.closed.includes("device"));
+});
+test("only active host/device sessions can broker exact ciphertext objects and ACK cleanup preserves retry", async () => {
+  const removed = [];
+  const storage = {
+    origin: "https://test.s3.us-west-2.amazonaws.com",
+    async grant(key, m) {
+      return {
+        putUrl: `${this.origin}/${key}?put`,
+        getUrl: `${this.origin}/${key}?get`,
+        putHeaders: {},
+      };
+    },
+    async head() {
+      return { bytes: 100, sha256: "a".repeat(64) };
+    },
+    async remove(key) {
+      removed.push(key);
+    },
+  };
+  const f = fixture({ storage }),
+    h = identity(),
+    d = identity();
+  await f.register(h);
+  await f.join("host", h);
+  await f.join("device", d, h, "device", f.grant(h, d));
+  const ready = f.delivered.find((x) => x.to === "device" && x.a === "ready");
+  assert.equal(ready.objects.origin, storage.origin);
+  await f.send("host", { a: "accept", v: 3, sid: ready.sid, rid: "device" });
+  const create = {
+    a: "object",
+    v: 3,
+    op: "create",
+    requestId: "1".repeat(32),
+    sid: ready.sid,
+    rid: "device",
+    seq: 0,
+    count: 2,
+    bytes: 100,
+    sha256: "a".repeat(64),
+  };
+  assert.equal((await f.send("device", create)).statusCode, 200);
+  const grant = f.delivered.at(-1);
+  assert.equal(grant.op, "created");
+  const frame = {
+    a: "data",
+    v: 3,
+    sid: ready.sid,
+    rid: "device",
+    seq: 0,
+    o: {
+      id: grant.id,
+      bytes: 100,
+      count: 2,
+      sha256: create.sha256,
+      url: grant.getUrl,
+    },
+  };
+  assert.equal((await f.send("device", frame)).statusCode, 200);
+  assert.equal(f.delivered.at(-1).to, "host");
+  const ack = {
+    a: "ack",
+    v: 3,
+    sid: ready.sid,
+    rid: "device",
+    next: 2,
+    credit: 16,
+    ack_seq: 7,
+  };
+  assert.equal((await f.send("host", ack)).statusCode, 200);
+  assert.equal(removed.length, 1);
+  assert.equal((await f.send("device", frame)).statusCode, 200);
+  assert.deepEqual(f.delivered.at(-1), { to: "device", ...ack });
+  assert.equal(
+    (await f.send("device", { ...create, rid: "other" })).statusCode,
+    403,
+  );
+});
+test("cloud certificates cannot allocate paid storage until the host accepts them", async () => {
+  const storage = {
+    origin: "https://test.s3.us-west-2.amazonaws.com",
+    async remove() {},
+  };
+  const f = fixture({ storage }),
+    h = identity(),
+    d = identity();
+  await f.register(h);
+  await f.join("host", h);
+  await f.join("device", d, h, "device", f.grant(h, d));
+  const ready = f.delivered.find((x) => x.to === "device" && x.a === "ready");
+  assert.equal(
+    (
+      await f.send("device", {
+        a: "object",
+        v: 3,
+        op: "create",
+        requestId: "1".repeat(32),
+        sid: ready.sid,
+        rid: "device",
+        seq: 0,
+        count: 1,
+        bytes: 100,
+        sha256: "a".repeat(64),
+      })
+    ).statusCode,
+    403,
+  );
+  assert.ok(![...f.rows.keys()].some((k) => k.startsWith("v3-objects#")));
 });
 test("wrong grant keys, wrong namespace and replayed admission fail closed", async () => {
   const f = fixture(),
@@ -497,4 +608,59 @@ test("disconnected namespaces retain bounded quota only until their short lease 
   f.advance(91);
   assert.equal((await f.join("admitted", hosts[32])).statusCode, 200);
   assert.equal(Object.keys(f.rows.get("v3-hosts").members).length, 1);
+});
+
+test("object capability requires both peers and cannot be enabled by device alone", async () => {
+  const storage = {
+    origin: "https://test.s3.us-west-2.amazonaws.com",
+    async remove() {},
+  };
+  const f = fixture({ storage, objectCapabilities: { host: 0, device: 1 } }),
+    h = identity(),
+    d = identity();
+  await f.register(h);
+  await f.join("host", h);
+  await f.join("device", d, h, "device", f.grant(h, d));
+  assert.ok(
+    f.delivered
+      .filter((x) => x.a === "ready" || x.a === "open")
+      .every((x) => x.objects === undefined),
+  );
+  const ready = f.delivered.find((x) => x.to === "device" && x.a === "ready");
+  assert.equal(
+    (
+      await f.send("device", {
+        a: "object",
+        v: 3,
+        op: "create",
+        requestId: "1".repeat(32),
+        sid: ready.sid,
+        rid: "device",
+        seq: 0,
+        count: 1,
+        bytes: 100,
+        sha256: "a".repeat(64),
+      })
+    ).statusCode,
+    403,
+  );
+});
+
+test("host cancellation closes cloud membership instead of leaving storage authority alive", async () => {
+  const f = fixture(),
+    h = identity(),
+    d = identity();
+  await f.register(h);
+  await f.join("host", h);
+  await f.join("device", d, h, "device", f.grant(h, d));
+  const ready = f.delivered.find((x) => x.to === "device" && x.a === "ready");
+  await f.send("host", { a: "accept", v: 3, sid: ready.sid, rid: "device" });
+  assert.equal(
+    (await f.send("host", { a: "cancel", v: 3, sid: ready.sid, rid: "device" }))
+      .statusCode,
+    200,
+  );
+  assert.equal(f.rows.has("v3-connection#device"), false);
+  assert.ok(f.closed.includes("device"));
+  assert.equal(f.rows.get(`v3-host#${h.namespace}`).guests.device, undefined);
 });

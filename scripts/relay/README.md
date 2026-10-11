@@ -103,12 +103,15 @@ python3 scripts/tests/relay-diagnostics-test.py
 
 The staging helper has a fixed isolated stack name `mold-relay-v3-uat`; it creates
 only its router Lambda (256 MiB, 10 seconds, concurrency 32), WebSocket API,
-on-demand session table, scoped IAM and one-day logs. It never modifies production
-or creates a content bucket/EC2 host. Use synthetic data and disposable identities.
+on-demand session table, scoped IAM, one-day logs and a private ciphertext-only
+S3 bucket. It never modifies production or creates an EC2 host. Use synthetic
+data and disposable identities. The bucket allows only the exact Studio/native
+and documented local UAT origins, and expires abandoned ciphertext after one day.
 
 ```sh
 python3 scripts/relay/staging.py create --package /private/build/router.zip --output /private/uat-manifest
 python3 scripts/relay/staging.py status --output /private/uat-manifest
+python3 scripts/relay/staging.py configure --output /private/uat-manifest
 python3 scripts/relay/staging.py update --package /private/next-build/router.zip --output /private/uat-manifest
 python3 scripts/relay/deploy.py provision --table mold-relay-v3-uat-sessions --host-key <test-public-key> --principal uat
 python3 scripts/relay/staging.py delete --output /private/uat-manifest

@@ -10,8 +10,10 @@ Noise and host-owned device authorization protect application traffic. See
 URandom Terraform owns Lambda, API Gateway, DynamoDB, DNS/TLS and least-privilege
 roles. Mold owns runtime ZIPs through `scripts/relay/deploy.py`. The frontend has
 log permission only and returns public metadata or redirects to independently
-trusted HTTPS Studio. There is no SSM bearer, plaintext API bridge, content S3
-permission, staged transfer or cloud-served executable shell.
+trusted HTTPS Studio. There is no SSM bearer, plaintext API bridge or cloud-served
+executable shell. The router brokers short-lived S3 grants only for already
+encrypted Noise bytes under `ciphertext/v3/`; see [OPAQUE-OBJECTS.md](OPAQUE-OBJECTS.md).
+It has no access to old plaintext prefixes.
 
 A host's namespace derives from its persistent Ed25519 public identity. Operator
 IAM must register that public key and an explicit stable owner/principal ID:

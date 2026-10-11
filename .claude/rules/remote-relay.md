@@ -23,7 +23,9 @@ and connector. Host/Forwarded headers never establish local authority.
 AWS production stays on Lambda, API Gateway WebSockets and DynamoDB admission
 leases. The frontend returns public discovery metadata, a redirect to the
 independently deployed trusted Studio, or 426. It never proxies plaintext content,
-serves executable client code, receives an API bearer, or stages content in S3.
+serves executable client code or receives an API bearer. Bulk transport may stage
+only existing Noise ciphertext under `ciphertext/v3/`; follow
+`relay/aws/OPAQUE-OBJECTS.md` for grants, bounds, checksum and cleanup.
 AWS resources belong to URandom Terraform; runtime artifacts belong to Mold.
 Never place credentials in Terraform state, command arguments, URLs or logs.
 

@@ -6,11 +6,13 @@ import {
 } from "@aws-sdk/client-apigatewaymanagementapi";
 import { store } from "./aws-store.mjs";
 import { createSecureRouter } from "./secure-router.mjs";
+import { createObjectStorage } from "./object-store.mjs";
 const api = new ApiGatewayManagementApiClient({
   endpoint: process.env.MANAGEMENT_ENDPOINT,
 });
 export const handler = createSecureRouter({
   store,
+  storage: createObjectStorage(),
   post: async (id, frame) => {
     await api.send(
       new PostToConnectionCommand({

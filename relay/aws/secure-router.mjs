@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createObjectBroker, objectEnvelope } from "./opaque-objects.mjs";
 import {
   hex,
   integer,
@@ -39,6 +40,7 @@ export function opaqueFrame(frame) {
     return;
   const result = { a: frame.a, v: 3, sid: frame.sid, rid: frame.rid };
   if (frame.a === "data") {
+    if (frame.o !== undefined) return objectEnvelope(frame);
     if (
       !integer(frame.seq) ||
       typeof frame.d !== "string" ||
@@ -71,8 +73,27 @@ export function createSecureRouter({
   post,
   close,
   checkConnection,
+  storage,
   now = () => Math.floor(Date.now() / 1000),
 }) {
+  const objects = createObjectBroker({ store, storage, now });
+  const objectContext = (connection, rid, direction, sender) => ({
+    namespace: connection.namespace,
+    sid: connection.sid,
+    rid,
+    direction,
+    sender,
+  });
+  async function cancelObjects(connection, rid) {
+    // Storage cleanup must never prevent immediate socket/grant revocation.
+    const outcomes = await Promise.allSettled(
+      ["host", "device"].map((direction) =>
+        objects.cancel(objectContext(connection, rid, direction)),
+      ),
+    );
+    if (outcomes.some((result) => result.status === "rejected"))
+      console.error("Mold secure relay object cleanup", "unavailable");
+  }
   async function update(key, change) {
     for (let attempt = 0; attempt < 32; attempt++) {
       const old = await store.get(key),
@@ -159,6 +180,7 @@ export function createSecureRouter({
       }
     });
     for (const peer of peers) {
+      await cancelObjects(connection, connection.role === "host" ? peer : id);
       try {
         await post(peer, {
           a: "cancel",
@@ -225,6 +247,7 @@ export function createSecureRouter({
       namespace: frame.namespace,
       hostKey: frame.hostKey,
       role: frame.role,
+      objects: frame.objects === 1,
       nonce,
     };
     if (!(await store.cas(connectionKey(id), connection.revision, next)))
@@ -372,6 +395,7 @@ export function createSecureRouter({
         connectionId: id,
         sid: randomUUID(),
         binding,
+        objects: connection.objects,
         principalId: registered.principalId,
         epoch,
         guests: {},
@@ -439,6 +463,10 @@ export function createSecureRouter({
       sid: host.sid,
       binding,
       epoch: host.epoch,
+      objects:
+        connection.role !== "invite" &&
+        connection.objects &&
+        (connection.role === "host" || host.objects === true),
       expiresAt: Math.min(now() + LIVE, cert?.expiresAt ?? Infinity),
       ...(cert ? { grantExpires: cert.expiresAt } : {}),
       ...(authority.grant ? { grant: authority.grant } : {}),
@@ -456,6 +484,9 @@ export function createSecureRouter({
         binding,
         ...(active.grant ? { grant: active.grant } : {}),
         ...(active.invite ? { invite: active.invite } : {}),
+        ...(active.objects && objects.policy
+          ? { objects: objects.policy }
+          : {}),
       });
     await post(id, {
       a: "ready",
@@ -464,6 +495,7 @@ export function createSecureRouter({
       rid: id,
       role: connection.role,
       epoch: host.epoch,
+      ...(active.objects && objects.policy ? { objects: objects.policy } : {}),
     });
     return 200;
   }
@@ -513,7 +545,14 @@ export function createSecureRouter({
   async function activeMessage(id, connection, frame) {
     const key = hostKey(connection.namespace);
     const isHost = connection.role === "host";
-    const safe = opaqueFrame(frame);
+    const isObject = frame.a === "object";
+    const safe =
+      isObject &&
+      typeof frame.sid === "string" &&
+      typeof frame.rid === "string" &&
+      frame.rid.length <= 256
+        ? frame
+        : opaqueFrame(frame);
     // Independent consistent reads overlap network latency. Every message still
     // revalidates fresh host, registration and recipient authority; no cache.
     const [host, registeredValue, peer] = await Promise.all([
@@ -567,6 +606,7 @@ export function createSecureRouter({
           : undefined,
       );
       for (const peer of Object.keys(host.guests ?? {})) {
+        await cancelObjects(connection, peer);
         await store.remove(connectionKey(peer));
         try {
           await close(peer);
@@ -627,6 +667,63 @@ export function createSecureRouter({
     } else {
       if (safe.rid !== id || safe.a === "accept") return 403;
       target = host.connectionId;
+    }
+    const context = objectContext(
+      connection,
+      safe.rid,
+      isHost ? "host" : "device",
+      id,
+    );
+    if (safe.a === "accept") {
+      const accepted = await update(connectionKey(safe.rid), (old) =>
+        old?.state === "active" &&
+        old.sid === host.sid &&
+        old.namespace === connection.namespace &&
+        old.epoch === host.epoch
+          ? { ...old, accepted: true }
+          : undefined,
+      );
+      if (!accepted)
+        return deliver(
+          id,
+          { a: "cancel", v: 3, sid: host.sid, rid: safe.rid },
+          host.sid,
+        );
+    }
+    if (isObject) {
+      if (isHost ? !peer.accepted : !connection.accepted) return 403;
+      if (!connection.objects || (isHost && !peer.objects)) return 403;
+      if (connection.role === "invite" || (isHost && peer.role === "invite"))
+        return 403;
+      const reply = await objects.command(context, safe);
+      if (!reply) return 400;
+      await post(id, reply);
+      return 200;
+    }
+    if (safe.a === "data" && safe.o) {
+      if (isHost ? !peer.accepted : !connection.accepted) return 403;
+      if (!connection.objects || (isHost && !peer.objects)) return 403;
+      if (connection.role === "invite" || (isHost && peer.role === "invite"))
+        return 403;
+      const result = await objects.forward(context, safe);
+      if (result.ack) return deliver(id, result.ack, host.sid);
+      if (result.code) {
+        if (result.code === "conflict" || result.code === "expired") return 409;
+        // Exact reference retry is driven by the unchanged reliable window.
+        return 503;
+      }
+    }
+    if (safe.a === "ack" && connection.objects && (!isHost || peer.objects))
+      await objects.ack(
+        objectContext(connection, safe.rid, isHost ? "device" : "host", target),
+        safe,
+      );
+    if (safe.a === "cancel") {
+      const result = await deliver(target, safe, host.sid);
+      const peerId = isHost ? safe.rid : id;
+      await leave(peerId, host.sid);
+      await close(peerId);
+      return result;
     }
     return deliver(target, safe, host.sid);
   }
