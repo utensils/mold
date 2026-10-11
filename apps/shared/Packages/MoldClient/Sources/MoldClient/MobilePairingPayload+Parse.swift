@@ -97,7 +97,11 @@ extension MobilePairingPayload {
               let version = f["version"] as? NSNumber, CFGetTypeID(version) != CFBooleanGetTypeID(),
               version.doubleValue == 2,
               let base = f["base_url"] as? String,
-              base.range(of: "^https?://", options: [.regularExpression, .caseInsensitive]) != nil,
+              base.utf8.count <= 2048, let origin = URLComponents(string: base),
+              ["http", "https"].contains(origin.scheme?.lowercased() ?? ""),
+              origin.host?.isEmpty == false, origin.user == nil, origin.password == nil,
+              origin.query == nil, origin.fragment == nil, origin.path.isEmpty || origin.path == "/",
+              origin.port.map({ (1...65535).contains($0) }) ?? true,
               let instance = f["instance_id"] as? String,
               let name = f["name"] as? String
         else { throw .unsupported }

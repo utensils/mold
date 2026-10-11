@@ -35,6 +35,15 @@ enum LegacyKeychain {
         static let keychain = Source(read: readItem, delete: deleteItem)
     }
 
+    /// The hard cutover removes obsolete remote credentials even when the
+    /// previous file migration was already marked complete. Retry each launch
+    /// because the OS may refuse deletion while its Keychain is locked.
+    static func discardObsolete(_ hosts: [StoredHost], from source: Source = .keychain,
+                                isFresh: Bool = NativeUAT.fresh.isSet()) {
+        guard !isFresh else { return }
+        for host in hosts where host.host(apiKey: nil).requiresSecurePairing { source.delete(host.id) }
+    }
+
     /// A UAT run does not touch the real Keychain at all.
     ///
     /// `SecretStore` swaps to a throwaway DIRECTORY under `MOLD_NATIVE_FRESH`,

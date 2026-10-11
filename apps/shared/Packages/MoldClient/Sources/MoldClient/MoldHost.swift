@@ -20,6 +20,12 @@ public struct MoldHost: Identifiable, Hashable, Codable, Sendable {
     /// Pinned host keys and a host-signed grant. Absent legacy remote hosts must pair again.
     public var secure: SecureHost?
 
+    /// Retired remote bearers cannot authorize protocol 3. Keep the public
+    /// machine entry for re-pairing, but never load or retain its old secret.
+    public var requiresSecurePairing: Bool {
+        secure == nil && !HTTPBackend.isEmbeddedLoopback(baseURL)
+    }
+
     public init(id: UUID = UUID(), name: String, baseURL: URL, apiKey: String? = nil,
                 connectionEndpoints: [ConnectionEndpoint]? = nil, connectionInstanceID: String? = nil, connectionOriginalURL: URL? = nil,
                 secure: SecureHost? = nil) {

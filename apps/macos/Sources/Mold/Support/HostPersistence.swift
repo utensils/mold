@@ -25,8 +25,18 @@ enum HostPersistence {
         guard let data = defaults.data(forKey: key),
               let stored = decode(data, in: defaults)
         else { return nil }
-        LegacyKeychain.migrateIfNeeded(stored, into: secrets, defaults: defaults)
-        return stored.map { $0.host(apiKey: apiKey(for: $0.id, in: secrets)) }
+        LegacyKeychain.discardObsolete(stored)
+        LegacyKeychain.migrateIfNeeded(stored.filter { !$0.host(apiKey: nil).requiresSecurePairing },
+                                      into: secrets, defaults: defaults)
+        return stored.map { entry in
+            if entry.host(apiKey: nil).requiresSecurePairing {
+                // A locked/corrupt secret store cannot be repaired by deleting
+                // its file. Suppress the bearer now and retry deletion next load.
+                try? secrets.clear(SecretStore.remoteAPIKeyName(for: entry.id))
+                return entry.host(apiKey: nil)
+            }
+            return entry.host(apiKey: apiKey(for: entry.id, in: secrets))
+        }
     }
 
     /// A SAVED but empty list is `[]`, never `nil`.

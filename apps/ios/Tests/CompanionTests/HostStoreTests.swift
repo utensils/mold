@@ -30,6 +30,20 @@ struct HostStoreTests {
         return try MoldJSON.decoder.decode(ServerStatus.self, from: Data(json.utf8))
     }
 
+    @Test func loadingAnOldRemoteMachineErasesItsBearerAndKeepsItsIdentity() throws {
+        let (_, credentials, file) = store()
+        let id = UUID(), origin = URL(string: "https://old-relay.example")!
+        credentials.keys[id] = "retired-bearer"
+        try file.save(HostList(entries: [.init(id: id, name: "halcyon", baseURL: origin)], defaultID: id))
+        let loaded = HostStore(list: file, credentials: credentials, makeBackend: { _ in FakeBackend() })
+        #expect(loaded.hosts.first?.id == id)
+        #expect(loaded.hosts.first?.name == "halcyon")
+        #expect(loaded.hosts.first?.baseURL == origin)
+        #expect(loaded.hosts.first?.apiKey == nil)
+        #expect(credentials.keys[id] == nil)
+        #expect(loaded.defaultMachine == id)
+    }
+
     @Test func addingSavesTheListWithoutTheKeyAndTheKeyToTheKeychain() throws {
         let (hosts, credentials, file) = store()
         let host = try hosts.add(name: "workstation", address: "10.0.0.4", apiKey: "k1", makeDefault: false)

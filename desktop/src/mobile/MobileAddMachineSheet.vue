@@ -12,12 +12,12 @@
  * iOS header, and `useSheetDismiss` for the drag. The machine state stays in
  * MobileApp — this component holds the flow's presentation and nothing else.
  */
-import { ref, toRef } from "vue";
+import { computed, ref, toRef } from "vue";
 import { useOverlayStack } from "@ui/lib/overlayStack";
 import { useMobileBack } from "./useMobileBack";
 import { useSheetDismiss } from "./useSheetDismiss";
 import { useSheetFocus } from "./useSheetFocus";
-import type { DiscoveredHost } from "./hosts";
+import { isNumericLoopbackHost, normalizeRemoteAddress, type DiscoveredHost } from "./hosts";
 
 const props = defineProps<{
   open: boolean;
@@ -48,6 +48,13 @@ const emit = defineEmits<{
 const name = defineModel<string>("name", { required: true });
 const address = defineModel<string>("address", { required: true });
 const apiKey = defineModel<string>("apiKey", { required: true });
+const permitsLocalKey = computed(() => {
+  try {
+    return isNumericLoopbackHost(normalizeRemoteAddress(address.value));
+  } catch {
+    return false;
+  }
+});
 
 useMobileBack(toRef(props, "open"), () => emit("close"));
 const { isTop } = useOverlayStack(toRef(props, "open"), "mobile-add-machine");
@@ -181,7 +188,7 @@ defineExpose({ focusDiscoveredApiKey: () => discoveredApiKeyInput.value?.focus()
             <div class="host-name">{{ selectedDiscovered.name }}</div>
             <div class="host-url">{{ selectedDiscovered.host }}:{{ selectedDiscovered.port }}</div>
           </div>
-          <label class="field"
+          <label v-if="permitsLocalKey" class="field"
             ><span>API key</span
             ><input
               ref="discoveredApiKeyInput"
@@ -196,12 +203,29 @@ defineExpose({ focusDiscoveredApiKey: () => discoveredApiKeyInput.value?.focus()
               data-test="mobile-discovered-api-key"
               required
           /></label>
-          <p class="section-note">This machine requires its own API key.</p>
+          <p class="section-note">
+            {{
+              permitsLocalKey
+                ? "This local engine requires its API key."
+                : "Pair this machine using its encrypted pairing code."
+            }}
+          </p>
           <div class="mobile-inline-actions">
             <button class="secondary-button" type="button" @click="emit('clear-discovered')">
               Choose another
             </button>
-            <button class="primary-button" type="submit">Test and save</button>
+            <button v-if="permitsLocalKey" class="primary-button" type="submit">
+              Test and save
+            </button>
+            <button
+              v-else
+              class="primary-button"
+              type="button"
+              data-test="mobile-discovered-pair"
+              @click="emit('scan-pairing')"
+            >
+              Scan pairing code
+            </button>
           </div>
         </form>
         <form v-else class="mobile-host-form" @submit.prevent="emit('connect-manual')">
@@ -228,10 +252,12 @@ defineExpose({ focusDiscoveredApiKey: () => discoveredApiKeyInput.value?.focus()
               autocapitalize="none"
               autocomplete="url"
               required
-              @keydown.enter.prevent="hostApiKeyInput?.focus()"
+              @keydown.enter.prevent="
+                permitsLocalKey ? hostApiKeyInput?.focus() : emit('connect-manual')
+              "
           /></label>
-          <label class="field"
-            ><span>API key</span
+          <label v-if="permitsLocalKey" class="field"
+            ><span>Local API key</span
             ><input
               ref="hostApiKeyInput"
               v-model="apiKey"
@@ -243,6 +269,10 @@ defineExpose({ focusDiscoveredApiKey: () => discoveredApiKeyInput.value?.focus()
               placeholder="If required"
               autocomplete="off"
           /></label>
+          <p v-if="!permitsLocalKey" class="section-note">
+            Pair remote machines first. An address reconnects a machine already paired with this
+            app.
+          </p>
           <button class="primary-button" type="submit">Test and save</button>
         </form>
       </div>

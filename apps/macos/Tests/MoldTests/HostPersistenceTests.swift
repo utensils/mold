@@ -21,6 +21,19 @@ struct HostPersistenceTests {
         MoldHost(name: name, baseURL: URL(string: "http://\(name):7680")!)
     }
 
+    @Test func oldRemoteBearerIsErasedWithoutForgettingTheMachine() throws {
+        let (defaults, secrets) = try scratch()
+        let machine = host("halcyon")
+        HostPersistence.save([machine], to: defaults)
+        try HostPersistence.setAPIKey("retired-bearer", for: machine.id, in: secrets)
+        let loaded = try #require(HostPersistence.load(from: defaults, secrets: secrets)?.first)
+        #expect(loaded.id == machine.id)
+        #expect(loaded.name == machine.name)
+        #expect(loaded.baseURL == machine.baseURL)
+        #expect(loaded.apiKey == nil)
+        #expect(try secrets.value(for: SecretStore.remoteAPIKeyName(for: machine.id)) == nil)
+    }
+
     /// **Fails today**: `load` answered `nil` for a decoded-empty array, and
     /// `HostStore.seededHosts` reads `nil` as "never saved" and seeds
     /// `MOLD_NATIVE_HOSTS` over it -- so a dev run resurrected on every launch

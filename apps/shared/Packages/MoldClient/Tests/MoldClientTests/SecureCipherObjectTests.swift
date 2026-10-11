@@ -1,0 +1,113 @@
+import Foundation
+import CryptoKit
+import Testing
+@testable import MoldClient
+
+struct SecureCipherObjectTests {
+    @Test func completeCiphertextFramesRoundTripAndStayInsideTheObjectBound() throws {
+        let chunks = (0..<16).map { Data(repeating: UInt8($0), count: 16_320) }
+        let bytes = try SecureCipherObject.pack(chunks)
+        #expect(bytes.count == 261_184)
+        #expect(try SecureCipherObject.unpack(bytes, count: 16, checksum: SecureCipherObject.checksum(bytes)) == chunks)
+        #expect(throws: SecureConnectionError.protocolViolation) { try SecureCipherObject.pack(Array(repeating: Data(repeating: 1, count: 16_384), count: 16)) }
+        let full = Data(repeating: 1, count: 16_384)
+        #expect(SecureCipherObject.canAppend(Array(repeating: full, count: 14), full))
+        #expect(!SecureCipherObject.canAppend(Array(repeating: full, count: 15), full), "Split before a sixteenth full chunk exceeds the byte cap")
+    }
+    @Test func malformedObjectNeverExposesAPartialCiphertextFrame() throws {
+        let bytes = try SecureCipherObject.pack([Data([1, 2]), Data([3, 4])])
+        for bad in [Data(bytes.dropLast()), bytes + Data([0]), Data([0, 0, 0, 0]), Data()] {
+            #expect(throws: SecureConnectionError.protocolViolation) { try SecureCipherObject.unpack(bad, count: 2, checksum: SecureCipherObject.checksum(bad)) }
+        }
+        #expect(throws: SecureConnectionError.protocolViolation) { try SecureCipherObject.unpack(bytes, count: 1, checksum: SecureCipherObject.checksum(bytes)) }
+        #expect(throws: SecureConnectionError.protocolViolation) { try SecureCipherObject.unpack(bytes, count: 2, checksum: String(repeating: "0", count: 64)) }
+    }
+    @Test func storagePolicyPinsOriginAndEverySessionPathSegment() throws {
+        let policy = SecureObjectPolicy(origin: SecureObjectPolicy.productionOrigin)
+        let path = policy.path(namespace: String(repeating: "a", count: 32), sid: "host/id", rid: "device? id", direction: "host", id: String(repeating: "b", count: 32))
+        #expect(path.contains("/host%2Fid/device%3F%20id/host/"))
+        let valid = URL(string: policy.origin.absoluteString + path + "?opaque=signature")!
+        #expect(try policy.validate(valid.absoluteString, path: path) == valid)
+        for value in [valid.absoluteString.replacingOccurrences(of: "https:", with: "http:"),
+                      valid.absoluteString.replacingOccurrences(of: policy.origin.host!, with: "evil.example"),
+                      valid.absoluteString + "#fragment", valid.absoluteString.replacingOccurrences(of: "/host/", with: "/device/"),
+                      valid.absoluteString.replacingOccurrences(of: "https://", with: "https://user@") ] {
+            #expect(throws: SecureConnectionError.protocolViolation) { try policy.validate(value, path: path) }
+        }
+    }
+    @Test func cloudAdvertisementCannotIntroduceAnotherTrustedOrigin() {
+        let offered: [String: Any] = ["version": 1, "origin": "https://evil.example", "maxBytes": 262_144,
+            "maxCount": 16, "maxInFlightBytes": 1_048_576, "maxInFlightObjects": 4]
+        #expect(SecureObjectPolicy.accept(offered, trusted: SecureObjectPolicy.productionOrigin) == nil)
+        var trusted = offered; trusted["origin"] = SecureObjectPolicy.productionOrigin.absoluteString
+        #expect(SecureObjectPolicy.accept(trusted, trusted: SecureObjectPolicy.productionOrigin) != nil)
+        trusted["maxCount"] = 17
+        #expect(SecureObjectPolicy.accept(trusted, trusted: SecureObjectPolicy.productionOrigin) == nil)
+    }
+
+    @Test func allocationMustEchoTheExactBatchAndOnlyAllowSignedUploadHeaders() throws {
+        let batch = try SecureObjectBatch(sequence: 42, chunks: [Data([1, 2, 3])])
+        let policy = SecureObjectPolicy(origin: SecureObjectPolicy.productionOrigin)
+        let namespace = String(repeating: "a", count: 32), id = String(repeating: "b", count: 32)
+        let url = policy.origin.absoluteString + policy.path(namespace: namespace, sid: "host", rid: "device", direction: "device", id: id)
+        let value: [String: Any] = ["sid": "host", "rid": "device", "seq": 42, "count": 1, "bytes": batch.bytes.count,
+            "sha256": batch.checksum, "id": id, "getUrl": url + "?get", "putUrl": url + "?put", "expiresAt": 1200,
+            "putHeaders": ["content-type": "application/octet-stream", "if-none-match": "*",
+                "x-amz-checksum-sha256": try SecureHex.decode(batch.checksum, count: 32).base64EncodedString()]]
+        let grant = try SecureObjectGrant(value, batch: batch, policy: policy, namespace: namespace, sid: "host", rid: "device", now: 1000)
+        #expect(grant.reference.count == 1)
+        for (field, bad): (String, Any) in [("seq", 41), ("count", 2), ("bytes", 999), ("sha256", String(repeating: "0", count: 64)),
+            ("sid", "other"), ("expiresAt", 1000), ("expiresAt", 1331), ("putUrl", "https://evil.example/path"),
+            ("putHeaders", ["content-type": "application/octet-stream", "Authorization": "must-not-send"])] {
+            var invalid = value; invalid[field] = bad
+            #expect(throws: SecureConnectionError.protocolViolation) {
+                try SecureObjectGrant(invalid, batch: batch, policy: policy, namespace: namespace, sid: "host", rid: "device", now: 1000)
+            }
+        }
+    }
+
+    @Test func fullyConsumedObjectIsAcknowledgedWithoutFetchingItsPossiblyDeletedBody() async throws {
+        let host = SecureHost(binding: .init(signingKey: "", noiseKey: "", signature: ""), namespace: String(repeating: "a", count: 32),
+            websocketURL: URL(string: "wss://fixture.invalid")!, grant: .init(id: "", expiresAt: 0, epoch: 0, signature: ""))
+        let connection = try SecureWebSocketConnection(host: host, identity: SecureIdentity())
+        try await connection.checkRetiredObject()
+        await connection.close()
+    }
+
+    @Test func duplicateDisabledBrokerReplyDoesNotInterruptInlineFallback() async throws {
+        let host = SecureHost(binding: .init(signingKey: "", noiseKey: "", signature: ""), namespace: String(repeating: "a", count: 32),
+            websocketURL: URL(string: "wss://fixture.invalid")!, grant: .init(id: "", expiresAt: 0, epoch: 0, signature: ""))
+        let connection = try SecureWebSocketConnection(host: host, identity: SecureIdentity())
+        await connection.checkDuplicateDisabledReply()
+        await connection.close()
+    }
+}
+
+private extension SecureWebSocketConnection {
+    func checkDuplicateDisabledReply() async {
+        do {
+            let _: SecureObjectGrant = try await withCheckedThrowingContinuation { continuation in
+                let requestID = String(repeating: "d", count: 32)
+                let batch = try! SecureObjectBatch(sequence: 0, chunks: [Data([1])])
+                objectRequests[requestID] = ObjectRequest(batch: batch, continuation: continuation, timeout: Task {},
+                    deadline: .now + .seconds(30), nextAttempt: .now)
+                let reply: [String: Any] = ["requestId": requestID, "op": "error", "code": "disabled"]
+                #expect(throws: Never.self) { try receiveObjectReply(reply) }
+                #expect(objectRequests.isEmpty)
+                #expect(throws: Never.self) { try receiveObjectReply(reply) }
+            }
+            Issue.record("A disabled allocation must return its fallback signal")
+        } catch { }
+    }
+
+    func checkRetiredObject() throws {
+        let policy = SecureObjectPolicy(origin: SecureObjectPolicy.productionOrigin)
+        objectPolicy = policy; sid = "host"; rid = "device"
+        for index in 0..<40 { _ = try window.insert(sequence: UInt64(index), data: Data([1])); _ = window.drain(capacity: 16_384) }
+        let id = String(repeating: "b", count: 32)
+        let value: [String: Any] = ["id": id, "bytes": 100, "count": 1, "sha256": String(repeating: "c", count: 64),
+            "url": policy.origin.absoluteString + policy.path(namespace: host.namespace, sid: sid, rid: rid, direction: "host", id: id) + "?expired"]
+        #expect(try receiveObject(sequence: 0, value: value))
+        #expect(objectFetches.isEmpty)
+    }
+}

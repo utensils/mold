@@ -9,7 +9,9 @@ enum SecureAdmission {
         try SecureCrypto.verify(host.binding)
         guard try namespace(host.binding) == host.namespace, host.grant.expiresAt > now,
               host.websocketURL.scheme == "wss", host.websocketURL.user == nil, host.websocketURL.password == nil,
-              host.websocketURL.fragment == nil else { throw SecureConnectionError.authenticationFailed }
+              host.websocketURL.fragment == nil, host.websocketURL.query == nil,
+              host.websocketURL.host?.isEmpty == false, host.websocketURL.absoluteString.utf8.count <= 2048,
+              host.websocketURL.port.map({ (1...65535).contains($0) }) ?? true else { throw SecureConnectionError.authenticationFailed }
         var bytes = Data("MOLD3-GRANT\0".utf8)
         bytes.append(try SecureHex.decode(host.namespace, count: 16))
         bytes.append(try SecureHex.decode(device.signingKey, count: 32))

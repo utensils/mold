@@ -57,6 +57,11 @@ final class HostStore {
 
     private func readKey(_ entry: HostList.Entry) -> String? {
         do {
+            let host = MoldHost(id: entry.id, name: entry.name, baseURL: entry.baseURL, secure: entry.secure)
+            if host.requiresSecurePairing {
+                try credentials.clearAPIKey(for: entry.id)
+                return nil
+            }
             return try credentials.apiKey(for: entry.id)
         } catch {
             // A locked Keychain is not "no key": say so, and keep the machine.

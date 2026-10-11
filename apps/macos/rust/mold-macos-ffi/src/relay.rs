@@ -18,6 +18,13 @@ static CONNECTOR: Mutex<Option<Connector>> = Mutex::new(None);
 // Serialize publication with terminal withdrawal without holding the join mutex.
 static PUBLICATION: Mutex<()> = Mutex::new(());
 
+fn validate_endpoint(endpoint: &str) -> anyhow::Result<()> {
+    mold_relay::aws::validate_aws_endpoint(endpoint, false)?;
+    // Publication applies an additional size limit. Validate with the same
+    // authority before creating a thread, so a rejected start has no survivor.
+    mold_server::ConnectionAddresses::default().set_secure_websocket_url(Some(endpoint))
+}
+
 /// LAN availability is independent of a cloud enrollment/renewal round trip.
 /// The server still refuses to open this listener without authentication.
 #[no_mangle]
@@ -69,7 +76,7 @@ pub unsafe extern "C" fn mold_relay_start(
         let Ok(origin) = managed_origin(origin, host_id) else {
             return 1;
         };
-        if mold_relay::aws::validate_aws_endpoint(endpoint, false).is_err() {
+        if validate_endpoint(endpoint).is_err() {
             return 1;
         }
         let Some(root) = mold_core::Config::mold_dir() else { return 1; };
@@ -277,6 +284,11 @@ pub unsafe extern "C" fn mold_relay_set_public_origin(origin: *const c_char) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn endpoint_is_publishable_before_any_connector_starts() {
+        assert!(validate_endpoint("wss://relay.example/prod").is_ok());
+        assert!(validate_endpoint(&format!("wss://relay.example/{}", "a".repeat(2048))).is_err());
+    }
     #[test]
     fn bounded_stop_keeps_ownership_until_finished_and_allows_restart() {
         let cancel = CancellationToken::new();

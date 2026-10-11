@@ -13,7 +13,8 @@ struct SecureSocketIntegrationTests {
         let identity = try SecureIdentity(secret: SecureHex.decode(fixture.deviceIdentity, count: 64))
         let pins = SecureHost(binding: .init(signingKey: fixture.hostKey, noiseKey: fixture.hostNoiseKey, signature: fixture.hostBindingSignature),
             namespace: fixture.namespace, websocketURL: URL(string: "wss://fixture.invalid")!, grant: fixture.grant)
-        let socket = try await SecureWebSocketConnection.connect(host: pins, identity: identity, endpoint: fixture.websocket)
+        let socket = try await SecureWebSocketConnection.connect(host: pins, identity: identity, endpoint: fixture.websocket,
+            trustedObjectOrigin: fixture.objectOrigin ?? SecureObjectPolicy.productionOrigin)
         let transport = SecureHTTPTransport(connection: socket)
         do {
             let host = MoldHost(name: "Encrypted media fixture", baseURL: fixture.origin, apiKey: fixture.apiKey, secure: pins)
@@ -70,7 +71,8 @@ struct SecureSocketIntegrationTests {
         let identity = try SecureIdentity(secret: SecureHex.decode(fixture.deviceIdentity, count: 64))
         let host = SecureHost(binding: .init(signingKey: fixture.hostKey, noiseKey: fixture.hostNoiseKey, signature: fixture.hostBindingSignature),
             namespace: fixture.namespace, websocketURL: URL(string: "wss://fixture.invalid")!, grant: fixture.grant)
-        let socket = try await SecureWebSocketConnection.connect(host: host, identity: identity, endpoint: fixture.websocket)
+        let socket = try await SecureWebSocketConnection.connect(host: host, identity: identity, endpoint: fixture.websocket,
+            trustedObjectOrigin: fixture.objectOrigin ?? SecureObjectPolicy.productionOrigin)
         let transport = SecureHTTPTransport(connection: socket)
         do {
             var request = URLRequest(url: fixture.origin.appending(path: "api/status"))
@@ -127,5 +129,6 @@ struct SecureSocketIntegrationTests {
         let origin: URL, websocket: URL
         let apiKey: String, deviceIdentity: String, hostKey: String, hostNoiseKey: String, hostBindingSignature: String, namespace: String
         let grant: SecureDeviceGrant
+        let objectOrigin: URL?
     }
 }

@@ -641,6 +641,8 @@ All remote routes use the shared Rust Noise implementation through MoldClient. P
 
 AVPlayer uses an encrypted HEAD/Range resource loader for live and retained video, including seeking. The transport bounds requests to 64 MiB, streams larger responses with consumer-driven credit, and multiplexes up to 32 streams per channel. Native builds and TestFlight archives build the GPU-free `mold-secure` XCFramework from source through `apps/shared/build-secure-framework.sh`; the generated framework is ignored by Git. See [the relay guide](https://utensils.io/mold/deployment/relay) and [the protocol contract](../../relay/aws/SECURE-PROTOCOL.md).
 
+Cloud peers can negotiate short-lived S3 objects containing only existing Noise ciphertext frames. The client independently pins the storage origin and verifies each complete bounded object before decryption; API keys and plaintext never reach storage. LAN and small records remain inline. Upgrading erases retired remote bearers from the secret store and old Keychain entries while preserving machine names and addresses for pairing again.
+
 Library’s **Media Type** toolbar picker shows All Media, Photos, Videos or 3D
 within the current shelf, preserving search and machine filters. Clicking or
 Command/Shift-clicking a visible tile keeps the viewport in place;

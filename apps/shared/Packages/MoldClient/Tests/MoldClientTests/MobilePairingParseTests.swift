@@ -33,4 +33,19 @@ struct MobilePairingParseTests {
             #expect(throws: MobilePairingPayload.ParseError.self) { try MobilePairingPayload.parse(raw) }
         }
     }
+    @Test func pairingAddressesRejectCredentialsPathsQueriesAndFragments() throws {
+        let link = try #require(PairingLinkContractTests.fixtures.links.first).link
+        for invalid in ["http://user:secret@host", "https://host/api", "https://host?token=secret", "https://host#private", "http://host:0"] {
+            var parts = URLComponents(string: link)!
+            var fields = FormURLEncoded.decode(parts.percentEncodedFragment!)
+            fields.removeAll { $0.0 == "base_url" }; fields.append(("base_url", invalid))
+            parts.percentEncodedFragment = fields.map { FormURLEncoded.encode($0.0) + "=" + FormURLEncoded.encode($0.1) }.joined(separator: "&")
+            #expect(throws: MobilePairingPayload.ParseError.unsupported) { try MobilePairingPayload.parse(parts.url!.absoluteString) }
+        }
+        var parts = URLComponents(string: link)!
+        var fields = FormURLEncoded.decode(parts.percentEncodedFragment!)
+        fields.removeAll { $0.0 == "websocket_url" }; fields.append(("websocket_url", "wss://relay.example/prod?token=private"))
+        parts.percentEncodedFragment = fields.map { FormURLEncoded.encode($0.0) + "=" + FormURLEncoded.encode($0.1) }.joined(separator: "&")
+        #expect(throws: MobilePairingPayload.ParseError.unsupported) { try MobilePairingPayload.parse(parts.url!.absoluteString) }
+    }
 }

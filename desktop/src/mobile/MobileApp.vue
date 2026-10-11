@@ -408,6 +408,7 @@ import {
   mobileHostHealthLabel,
   mobileHostMatchesRoute,
   mobileHostTarget,
+  isNumericLoopbackHost,
   mergeMobileHostsByInstanceId,
   normalizeRemoteAddress,
   recordMobileHostAuthorityRejection,
@@ -4731,7 +4732,7 @@ function loadHosts(): MobileHost[] {
         // Each loader already rejects malformed recovery state safely.
       }
     }
-    if (merged.dropped.length > 0) {
+    if (merged.dropped.length > 0 || raw.some((host) => Boolean(host.apiKey))) {
       localStorage.setItem(
         STORAGE_KEY,
         JSON.stringify(normalized.map(({ apiKey: _apiKey, ...host }) => host)),
@@ -4765,6 +4766,11 @@ async function hydrateApiKeys(): Promise<void> {
   await Promise.all(
     hosts.value.map(async (host) => {
       try {
+        if (!isNumericLoopbackHost(host.baseUrl)) {
+          host.apiKey = "";
+          await invoke("keychain_delete_api_key", { hostId: host.id });
+          return;
+        }
         let key = await invoke<string | null>("keychain_get_api_key", { hostId: host.id });
         let migratedAliasKey = false;
         if (!key) {
@@ -4799,6 +4805,11 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
   hostError.value = "";
   try {
     const baseUrl = normalizeRemoteAddress(address ?? hostInput.address);
+    if (!isNumericLoopbackHost(baseUrl) && hostInput.apiKey.trim()) {
+      throw new Error(
+        "Pair this machine with its encrypted pairing code. Remote API keys are no longer accepted.",
+      );
+    }
     const target = { baseUrl, apiKey: hostInput.apiKey.trim() || null };
     const status = await apiJsonTo<ServerStatus>(target, "/api/status");
     const instanceId = status.instance_id?.trim() || undefined;
@@ -4812,7 +4823,9 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
       (host) => host.id === slug && host.instanceId?.trim() !== instanceId,
     );
     const id = existing?.id ?? (conflictingSlug && instanceId ? instanceId : slug);
-    const successfulApiKey = hostInput.apiKey.trim() || existing?.apiKey || "";
+    const successfulApiKey = isNumericLoopbackHost(baseUrl)
+      ? hostInput.apiKey.trim() || existing?.apiKey || ""
+      : "";
     const saved: MobileHost = {
       id,
       name: hostInput.name.trim() || discoveredName || status.hostname || new URL(baseUrl).hostname,
