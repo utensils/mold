@@ -19,8 +19,8 @@ const context: ObjectContext = {
 const policy = {
   version: 1,
   origin,
-  maxBytes: 262144,
-  maxCount: 16,
+  maxBytes: 1048576,
+  maxCount: 64,
   maxInFlightBytes: 1048576,
   maxInFlightObjects: 4,
 };
@@ -88,7 +88,7 @@ it("verifies whole ciphertext objects before yielding any original chunk", async
     unpackObject(packed.bytes, { bytes: 13, count: 1, sha256: packed.sha256 }),
   ).rejects.toThrow();
   await expect(
-    packObject(Array.from({ length: 16 }, () => new Uint8Array(16384))),
+    packObject(Array.from({ length: 64 }, () => new Uint8Array(16384))),
   ).rejects.toThrow();
 });
 it("fetches and verifies once, coalesces ACKs, and acknowledges already-consumed refs without fetching deleted objects", async () => {
@@ -294,7 +294,7 @@ it("uploads only retained ciphertext, binds broker replies, and retransmits the 
   });
   carrier.close();
 });
-it("keeps the valid tail of a full wire window inline when four objects are reserved", async () => {
+it("keeps the full-window tail inline without exceeding the aggregate byte budget", async () => {
   vi.useFakeTimers();
   const sent: Record<string, unknown>[] = [];
   const failed = vi.fn();
@@ -317,11 +317,80 @@ it("keeps the valid tail of a full wire window inline when four objects are rese
     frames.forEach((frame) => carrier.send(frame));
     await vi.advanceTimersByTimeAsync(32);
     await vi.waitFor(() =>
-      expect(sent.filter((frame) => frame.op === "create")).toHaveLength(4),
+      expect(sent.filter((frame) => frame.op === "create")).toHaveLength(1),
     );
     expect(failed).not.toHaveBeenCalled();
     expect(sent.filter((frame) => frame.a === "data")).toEqual(
-      frames.slice(60),
+      frames.slice(63),
+    );
+  } finally {
+    carrier.close();
+  }
+});
+
+it("bounds object count separately from packed byte size", async () => {
+  const full = await packObject(
+    Array.from({ length: 63 }, () => new Uint8Array(16384)),
+  );
+  expect(full.bytes.length).toBe(63 * 16388);
+  await expect(
+    packObject(Array.from({ length: 64 }, () => new Uint8Array(1))),
+  ).resolves.toMatchObject({ bytes: expect.any(Uint8Array) });
+  await expect(
+    packObject(Array.from({ length: 65 }, () => new Uint8Array(1))),
+  ).rejects.toThrow();
+});
+it("reserves aggregate bytes before allocation and releases them only after cumulative ACK", async () => {
+  vi.useFakeTimers();
+  const sent: Record<string, unknown>[] = [];
+  const carrier = new CipherObjectCarrier(
+    context,
+    (frame) => sent.push(frame),
+    () => {},
+    () => 0,
+    () => {},
+  );
+  const frame = (seq: number) => ({
+    a: "data",
+    v: 3,
+    sid: context.sid,
+    rid: context.rid,
+    seq,
+    d: btoa("x".repeat(16384)),
+  });
+  try {
+    // Two partially acknowledged batches occupy 960 KiB, below the four-object cap.
+    for (let seq = 0; seq < 60; seq++) {
+      carrier.send(frame(seq));
+      if (seq === 29) await vi.advanceTimersByTimeAsync(32);
+    }
+    await vi.advanceTimersByTimeAsync(32);
+    await vi.waitFor(() =>
+      expect(sent.filter((f) => f.op === "create")).toHaveLength(2),
+    );
+    await carrier.receive({
+      a: "ack",
+      v: 3,
+      sid: context.sid,
+      rid: context.rid,
+      next: 1,
+    });
+    const tail = Array.from({ length: 4 }, (_, n) => frame(60 + n));
+    tail.forEach((f) => carrier.send(f));
+    await vi.advanceTimersByTimeAsync(32);
+    expect(sent.filter((f) => f.op === "create")).toHaveLength(2);
+    expect(sent.filter((f) => f.a === "data")).toEqual(tail);
+    await carrier.receive({
+      a: "ack",
+      v: 3,
+      sid: context.sid,
+      rid: context.rid,
+      next: 30,
+    });
+    for (let seq = 64; seq < 68; seq++) carrier.send(frame(seq));
+    await vi.advanceTimersByTimeAsync(32);
+    await vi.waitFor(() =>
+      expect(sent.filter((f) => f.op === "create")).toHaveLength(3),
     );
   } finally {
     carrier.close();

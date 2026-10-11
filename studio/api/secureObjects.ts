@@ -3,7 +3,8 @@ import { SECURE_WIRE_WINDOW } from "./secureWire";
 /** Optional S3 carrier for existing Noise bytes; see relay/aws/OPAQUE-OBJECTS.md. */
 export const PRODUCTION_OBJECT_ORIGIN =
   "https://mold-relay-042506291754-us-west-2.s3.us-west-2.amazonaws.com";
-const MAX_BYTES = 262144;
+const MAX_BYTES = 1048576;
+const MAX_COUNT = 64;
 const MAX_PENDING = 1048576;
 const THRESHOLD = 65536;
 const integer = (n: unknown): n is number =>
@@ -44,6 +45,7 @@ type Reference = ObjectDescriptor & { id: string; url: string };
 type Batch = {
   frames: Frame[];
   chunks: Uint8Array[];
+  bytes: number;
   reference?: Frame;
   deadline: number;
   expiry?: ReturnType<typeof setTimeout>;
@@ -65,7 +67,7 @@ export function objectPolicy(
   return p.version === 1 &&
     p.origin === trustedOrigin &&
     p.maxBytes === MAX_BYTES &&
-    p.maxCount === 16 &&
+    p.maxCount === MAX_COUNT &&
     p.maxInFlightBytes === MAX_PENDING &&
     p.maxInFlightObjects === 4
     ? (p as { origin: string })
@@ -104,7 +106,7 @@ export async function packObject(
   const length = chunks.reduce((sum, b) => sum + b.length + 4, 0);
   if (
     !chunks.length ||
-    chunks.length > 16 ||
+    chunks.length > MAX_COUNT ||
     length > MAX_BYTES ||
     chunks.some((b) => !b.length || b.length > 16384)
   )
@@ -129,7 +131,7 @@ function descriptor(value: unknown): ObjectDescriptor {
     o.bytes > MAX_BYTES ||
     !integer(o.count) ||
     o.count < 1 ||
-    o.count > 16 ||
+    o.count > MAX_COUNT ||
     !hex64(o.sha256)
   )
     throw new Error("Invalid ciphertext object bounds.");
@@ -226,13 +228,13 @@ export class CipherObjectCarrier {
     if (
       this.staged.length &&
       (this.stagedBytes + bytes.length + 4 > MAX_BYTES ||
-        this.staged.length === 16 ||
+        this.staged.length === MAX_COUNT ||
         (this.staged.at(-1)!.frame.seq as number) + 1 !== frame.seq)
     )
       this.flush();
     this.staged.push({ frame, bytes });
     this.stagedBytes += bytes.length + 4;
-    if (this.staged.length === 16) this.flush();
+    if (this.staged.length === MAX_COUNT) this.flush();
     else this.timer ??= setTimeout(() => this.guard(() => this.flush()), 32);
   }
 
@@ -341,13 +343,19 @@ export class CipherObjectCarrier {
     this.staged = [];
     this.stagedBytes = 0;
     if (!staged.length) return;
-    // A complete wire window can need a fifth short batch because packed
-    // chunks include length prefixes. Before publishing an object, retained
-    // ciphertext may go inline without allocating more storage or new nonces.
+    // Reserve packed bytes before asynchronous allocation. Length prefixes and
+    // partial ACKs can leave less space than a complete wire window needs; send
+    // the exact retained tail inline without allocating storage or new nonces.
+    const reserved = new Set(this.batches.values());
+    const reservedBytes = [...reserved].reduce(
+      (sum, batch) => sum + batch.bytes,
+      0,
+    );
     if (
       size < THRESHOLD ||
       this.disabled ||
-      new Set(this.batches.values()).size >= 4
+      reserved.size >= 4 ||
+      reservedBytes + size > MAX_PENDING
     ) {
       for (const entry of staged) this.emit(entry.frame);
       return;
@@ -355,6 +363,7 @@ export class CipherObjectCarrier {
     const batch: Batch = {
       frames: staged.map((e) => e.frame),
       chunks: staged.map((e) => e.bytes),
+      bytes: size,
       deadline: Date.now() + 300000,
     };
     for (const f of batch.frames) this.batches.set(f.seq as number, batch);
