@@ -2,8 +2,8 @@
 
 Status: implementation plan, 2026-10-11. The current production relay is a
 trusted TLS proxy, **not end-to-end encrypted**. Reliability fixes do not change
-that security property. This plan supersedes the encryption assumptions in
-`remote-relay.md`; its existing HTTP compatibility requirements remain binding.
+that security property. This plan replaces the retired trusted-proxy design;
+the HTTP semantics and all client surfaces below are the compatibility contract.
 
 ## Verified problem and immediate repair
 
@@ -31,8 +31,8 @@ Do not replay a mutation on another route after an uncertain result.
 The native Remote Access opt-in may open a separate authenticated LAN listener
 using the exact engine router and identity. Its private loopback socket stays
 stable. Publish the actual port, close existing streams on Stop, and withdraw
-Bonjour/catalog entries on shutdown. This is a compatibility repair, not an
-encrypted LAN transport; encrypted sessions below must subsequently cover LAN.
+Bonjour/catalog entries on shutdown. The listener exposes the same pinned encrypted session as the cloud path;
+ordinary remote HTTP API requests refuse with an upgrade instruction.
 
 ## Security boundary
 
@@ -163,11 +163,11 @@ objects before describing the deployed system as E2EE.
 | CLI/MCP/Discord | Shared Rust request/SSE/upload/download adapter; verify every raw HTTP bypass |
 | Native iOS/macOS | Shared transport plus stream/upload/download paths; secure Keychain/storage; AVPlayer resource-loader or bounded local decrypted-file adapter with seeking |
 | Web/Tauri desktop/mobile | Shared API/event/media adapter, WASM secure channel, encrypted uploads, image/GLB decoding and seekable video support |
-| Generic curl/HTTP consumers | Explicit authenticated local loopback bridge on the trusted client; ordinary curl cannot decrypt the secure channel |
+| Generic curl/HTTP consumers | Existing authenticated host loopback API; remote callers use the secure Mold CLI or client library |
 
-A local bridge binds loopback only, has a per-session random capability, applies
-origin/CSRF defenses, never exposes the operator key and closes with its owner.
-It must not become an unauthenticated LAN proxy. Native media adapters cannot
+Ordinary curl cannot decrypt a remote secure session. Local operator HTTP remains
+loopback-only; no general-purpose remote plaintext compatibility bridge is shipped.
+Native media adapters use a scoped local bridge or resource loader and cannot
 silently send the encrypted object URL directly to AVPlayer and claim parity.
 
 ## Browser trust and migration
