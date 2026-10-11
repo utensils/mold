@@ -182,12 +182,12 @@ pub use h3_factory::{
     h3_factory_activation_prerequisites, media_model_matches_h3_authority,
     FrozenH3FactoryAuthority, H3FactoryActivationPrerequisite, H3FactoryArtifactHostInput,
     H3FactoryArtifactHostRole, H3FactoryAttentionInput, H3FactoryAuthorityInput,
-    H3FactoryBlockMemoryInput, H3FactoryComponentAuthority, H3FactoryComponentRole,
-    H3FactoryConditionerPlacement, H3FactoryEndpointAnchor, H3FactoryEndpointInput,
-    H3FactoryEndpointPreprocess, H3FactoryExecutionBudgetEchoInput, H3FactoryPreparedAttemptInput,
-    H3FactoryPreparedRequestInput, H3FactoryPreparedRowsInput, H3FactoryQuantizationAuthority,
-    H3FactoryRawCheckpointInput, H3FactoryTargetBudgetInput, H3FactoryTargetDenoiseCopyPolicy,
-    H3FactoryTargetLoadDropPolicy,
+    H3FactoryBaseSamplerOverride, H3FactoryBlockMemoryInput, H3FactoryComponentAuthority,
+    H3FactoryComponentRole, H3FactoryConditionerPlacement, H3FactoryEndpointAnchor,
+    H3FactoryEndpointInput, H3FactoryEndpointPreprocess, H3FactoryExecutionBudgetEchoInput,
+    H3FactoryPreparedAttemptInput, H3FactoryPreparedRequestInput, H3FactoryPreparedRowsInput,
+    H3FactoryQuantizationAuthority, H3FactoryRawCheckpointInput, H3FactorySamplerKind,
+    H3FactoryTargetBudgetInput, H3FactoryTargetDenoiseCopyPolicy, H3FactoryTargetLoadDropPolicy,
 };
 /// The engine's decision about an RGBA render's alpha channel (Qwen Image 2.1),
 /// and the request rule that makes it.

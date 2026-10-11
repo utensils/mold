@@ -27,7 +27,7 @@ use mold_candle::minimax_h3::{
 
 use crate::h3_factory::H3FactoryTurboAdapterAuthority;
 
-use super::sampler::{H3SamplerKind, H3_TURBO_768P_VIDEO_SHIFT, H3_VIDEO_SHIFT};
+use super::sampler::{H3SamplerKind, H3_AUDIO_SHIFT, H3_TURBO_768P_VIDEO_SHIFT, H3_VIDEO_SHIFT};
 
 /// Environment variable naming the reviewed adapter file.
 pub(crate) const TURBO_ADAPTER_PATH_VARIABLE: &str = "MOLD_H3_TURBO_ADAPTER";
@@ -43,6 +43,11 @@ pub(crate) struct H3TurboTierContract {
     pub(crate) grid_points: u32,
     pub(crate) sampler_kind: H3SamplerKind,
     pub(crate) video_shift: f32,
+    /// Audio flow shift the tier was distilled at. Every Turbo tier keeps the
+    /// family [`H3_AUDIO_SHIFT`] (LightX2V's `audio_flow_shift: 3.0`); the
+    /// DMAD/PDMD distillations move it (DMAD 2, PDMD 2-step 6), which is why it
+    /// is a per-tier contract field rather than a constant.
+    pub(crate) audio_shift: f32,
 }
 
 /// Every reviewed tier's contract.
@@ -62,48 +67,56 @@ pub(crate) const REVIEWED_TURBO_TIERS: &[H3TurboTierContract] = &[
         grid_points: 9,
         sampler_kind: H3SamplerKind::ComfyEuler,
         video_shift: H3_VIDEO_SHIFT,
+        audio_shift: H3_AUDIO_SHIFT,
     },
     H3TurboTierContract {
         tier: H3TurboLoraTier::Fl2v768p4StepV10,
         grid_points: 5,
         sampler_kind: H3SamplerKind::ComfyEuler,
         video_shift: H3_TURBO_768P_VIDEO_SHIFT,
+        audio_shift: H3_AUDIO_SHIFT,
     },
     H3TurboTierContract {
         tier: H3TurboLoraTier::Ref2v4StepV10,
         grid_points: 5,
         sampler_kind: H3SamplerKind::ComfyEuler,
         video_shift: H3_VIDEO_SHIFT,
+        audio_shift: H3_AUDIO_SHIFT,
     },
     H3TurboTierContract {
         tier: H3TurboLoraTier::Fl2v768p4StepV11,
         grid_points: 5,
         sampler_kind: H3SamplerKind::ComfyEuler,
         video_shift: H3_TURBO_768P_VIDEO_SHIFT,
+        audio_shift: H3_AUDIO_SHIFT,
     },
     H3TurboTierContract {
         tier: H3TurboLoraTier::Fl2v768p8StepV10,
         grid_points: 9,
         sampler_kind: H3SamplerKind::ComfyEuler,
         video_shift: H3_TURBO_768P_VIDEO_SHIFT,
+        audio_shift: H3_AUDIO_SHIFT,
     },
     H3TurboTierContract {
         tier: H3TurboLoraTier::Fl2v768p4StepV10Rank21,
         grid_points: 5,
         sampler_kind: H3SamplerKind::ComfyEuler,
         video_shift: H3_TURBO_768P_VIDEO_SHIFT,
+        audio_shift: H3_AUDIO_SHIFT,
     },
     H3TurboTierContract {
         tier: H3TurboLoraTier::Fl2v8StepV10Rank21,
         grid_points: 9,
         sampler_kind: H3SamplerKind::ComfyEuler,
         video_shift: H3_VIDEO_SHIFT,
+        audio_shift: H3_AUDIO_SHIFT,
     },
     H3TurboTierContract {
         tier: H3TurboLoraTier::Ref2v4StepV10Rank21,
         grid_points: 5,
         sampler_kind: H3SamplerKind::ComfyEuler,
         video_shift: H3_VIDEO_SHIFT,
+        audio_shift: H3_AUDIO_SHIFT,
     },
 ];
 
@@ -395,16 +408,19 @@ pub(crate) fn load_reviewed_turbo_runtime(
     if authority.resolved_sampler_kind() != reviewed.sampler_kind
         || authority.grid_points() != reviewed.grid_points
         || authority.video_shift().to_bits() != reviewed.video_shift.to_bits()
+        || authority.audio_shift().to_bits() != reviewed.audio_shift.to_bits()
     {
         bail!(
-            "MiniMax H3 Turbo authority for {} carries {}/{} steps/shift {}, reviewed is {}/{} steps/shift {}",
+            "MiniMax H3 Turbo authority for {} carries {}/{} steps/shifts {}/{}, reviewed is {}/{} steps/shifts {}/{}",
             tier.stable_id(),
             authority.resolved_sampler_kind().as_str(),
             authority.grid_points(),
             authority.video_shift(),
+            authority.audio_shift(),
             reviewed.sampler_kind.as_str(),
             reviewed.grid_points,
-            reviewed.video_shift
+            reviewed.video_shift,
+            reviewed.audio_shift
         )
     }
     let runtime = if device.is_metal() {
@@ -458,6 +474,9 @@ mod tests {
             assert!(contract.sampler_kind.uses_comfy_simple_grid());
             assert!(contract.sampler_kind.uses_euler_update());
             assert!(contract.video_shift.is_finite() && contract.video_shift > 0.0);
+            // Every Turbo tier was distilled at the family audio shift; only
+            // the DMAD/PDMD tiers (#1812) move it.
+            assert_eq!(contract.audio_shift.to_bits(), H3_AUDIO_SHIFT.to_bits());
         }
     }
 
@@ -498,10 +517,11 @@ mod tests {
             assert_eq!(contract.grid_points, grid_points, "{tier:?}");
             assert_eq!(contract.video_shift, video_shift, "{tier:?}");
             // The schedule must build and must not collapse.
-            let schedule = super::super::sampler::H3DualSchedule::new_for_sampler_with_video_shift(
+            let schedule = super::super::sampler::H3DualSchedule::new_for_sampler_with_shifts(
                 usize::try_from(grid_points).unwrap(),
                 contract.sampler_kind,
                 video_shift,
+                contract.audio_shift,
             )
             .unwrap();
             assert_eq!(
@@ -526,6 +546,11 @@ mod tests {
             assert_eq!(
                 resized.video_shift.to_bits(),
                 original.video_shift.to_bits(),
+                "{tier:?}"
+            );
+            assert_eq!(
+                resized.audio_shift.to_bits(),
+                original.audio_shift.to_bits(),
                 "{tier:?}"
             );
             assert_eq!(source.task(), tier.task(), "{tier:?}");
@@ -567,6 +592,7 @@ mod tests {
             // The caller never supplied any of these; they came from the table.
             assert_eq!(authority.grid_points(), reviewed.grid_points);
             assert_eq!(authority.video_shift(), reviewed.video_shift);
+            assert_eq!(authority.audio_shift(), reviewed.audio_shift);
             assert_eq!(authority.resolved_sampler_kind(), reviewed.sampler_kind);
             assert_eq!(authority.tier_stable_id(), tier.stable_id());
             assert_eq!(authority.resident_device_bytes(), 1_956_118_528);

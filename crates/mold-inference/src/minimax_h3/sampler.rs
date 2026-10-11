@@ -7,6 +7,9 @@
 //! only replace their two latent tensors after the selected paired update
 //! succeeds. Official BF16 uses first-order Euler; the compact Comfy layout
 //! uses the deterministic RES multistep rule from its released workflow.
+//! Distilled tiers select Comfy Euler or Comfy LCM over the same Comfy grid;
+//! LCM is the one integrator that re-noises, from a seeded per-step stream.
+//! Video and audio flow shifts are both schedule parameters.
 //!
 //! `grid_points` deliberately includes the terminal zero. The official default
 //! is 50 grid points and thus 49 transformer evaluations, not 50 evaluations.
@@ -38,9 +41,6 @@ pub(crate) const H3_AUDIO_SHIFT: f32 = 3.0;
 ///
 /// Every 544p-trained reviewed tier keeps [`H3_VIDEO_SHIFT`].
 pub(crate) const H3_TURBO_768P_VIDEO_SHIFT: f32 = 6.0;
-/// Only meaningful for the RES-multistep carried-audio helpers, which is why a
-/// non-default video shift is refused for that integrator below.
-const H3_COMFY_AUDIO_SCALE: f32 = H3_VIDEO_SHIFT / H3_AUDIO_SHIFT;
 pub(crate) const H3_VISUAL_CONDITION_TIMESTEP: f32 = 0.999;
 pub(crate) const H3_CLEAN_TIMESTEP: f32 = 1.0;
 
@@ -59,6 +59,15 @@ pub(crate) enum H3SamplerKind {
     /// published Turbo reference workflow selects. It is therefore exactly the
     /// existing Comfy grid paired with the existing first-order integrator.
     ComfyEuler,
+    /// ComfyUI's `lcm` sampler over the same `BasicScheduler("simple")` grid:
+    /// every step jumps to the clean estimate and, unless the next sigma is
+    /// terminal, re-noises it with FRESH Gaussian noise at that sigma
+    /// (`comfy/k_diffusion/sampling.py:1083-1113`). The DMAD distillations
+    /// are sampled this way; `Yzmblog/DMAD@9a9f664e dmad_h3/sampling.py:63-98`
+    /// is the same rule. It is the only H3 integrator that consumes noise
+    /// after initialization, so a sampler of this kind must be built with
+    /// [`H3DualSampler::with_noise_seed`].
+    ComfyLcm,
 }
 
 impl H3SamplerKind {
@@ -67,6 +76,7 @@ impl H3SamplerKind {
             Self::OfficialEuler => "official-euler",
             Self::ComfyResMultistep => "comfy-res-multistep",
             Self::ComfyEuler => "comfy-euler",
+            Self::ComfyLcm => "comfy-lcm",
         }
     }
 
@@ -75,6 +85,7 @@ impl H3SamplerKind {
             Self::OfficialEuler,
             Self::ComfyResMultistep,
             Self::ComfyEuler,
+            Self::ComfyLcm,
         ]
         .into_iter()
         .find(|kind| kind.as_str() == value)
@@ -83,12 +94,21 @@ impl H3SamplerKind {
     /// True when the sigma grid comes from Comfy's discrete 1000-entry table
     /// rather than the official continuous linspace.
     pub(crate) const fn uses_comfy_simple_grid(self) -> bool {
-        matches!(self, Self::ComfyResMultistep | Self::ComfyEuler)
+        matches!(
+            self,
+            Self::ComfyResMultistep | Self::ComfyEuler | Self::ComfyLcm
+        )
     }
 
     /// True when the coupled update is the first-order data-ward Euler rule.
     pub(crate) const fn uses_euler_update(self) -> bool {
         matches!(self, Self::OfficialEuler | Self::ComfyEuler)
+    }
+
+    /// True when the integrator re-noises between evaluations and therefore
+    /// needs a deterministic per-step noise stream.
+    pub(crate) const fn consumes_step_noise(self) -> bool {
+        matches!(self, Self::ComfyLcm)
     }
 }
 
@@ -150,6 +170,11 @@ pub(crate) struct H3DualScheduleStep {
     pub audio: H3FlowStep,
     pub row_timesteps: H3RowTimesteps,
     total_evaluations: usize,
+    /// The two flow shifts the owning schedule was built with. Only the Comfy
+    /// carried-audio helpers read them; they are copied here so a sampler can
+    /// never pair one schedule's descriptors with another schedule's scale.
+    video_shift: f32,
+    audio_shift: f32,
 }
 
 impl H3DualScheduleStep {
@@ -168,6 +193,12 @@ impl H3DualScheduleStep {
             completed_evaluations: self.evaluation_index + 1,
             total_evaluations: self.total_evaluations,
         }
+    }
+
+    /// ComfyUI `ModelSamplingAV.audio_scale` (`comfy/model_sampling.py:353-357`):
+    /// `shift / audio_shift`, the factor the packed latent carries audio at.
+    fn comfy_audio_scale(self) -> f32 {
+        self.video_shift / self.audio_shift
     }
 }
 
@@ -271,6 +302,7 @@ pub(crate) struct H3DualSchedule {
     video: H3ModalitySchedule,
     audio: H3ModalitySchedule,
     video_shift: f32,
+    audio_shift: f32,
 }
 
 impl H3DualSchedule {
@@ -291,47 +323,69 @@ impl H3DualSchedule {
             video,
             audio,
             video_shift: H3_VIDEO_SHIFT,
+            audio_shift: H3_AUDIO_SHIFT,
         })
     }
 
     pub fn new_for_sampler(grid_points: usize, kind: H3SamplerKind) -> Result<Self> {
-        Self::new_for_sampler_with_video_shift(grid_points, kind, H3_VIDEO_SHIFT)
+        Self::new_for_sampler_with_shifts(grid_points, kind, H3_VIDEO_SHIFT, H3_AUDIO_SHIFT)
     }
 
-    /// Build the schedule for one sampler kind at an explicit video shift.
+    /// Build the schedule for one sampler kind at an explicit video shift and
+    /// the family audio shift ([`H3_AUDIO_SHIFT`]).
     ///
-    /// Only the Turbo tiers vary the shift: the 768p 4-step checkpoint is
-    /// documented at `--video-shift 6` while every other reviewed tier stays at
-    /// [`H3_VIDEO_SHIFT`]. Audio keeps [`H3_AUDIO_SHIFT`] throughout.
+    /// Kept as the wrapper every pre-existing caller uses; it is exactly
+    /// [`Self::new_for_sampler_with_shifts`] at audio shift 3.
     pub fn new_for_sampler_with_video_shift(
         grid_points: usize,
         kind: H3SamplerKind,
         video_shift: f32,
     ) -> Result<Self> {
+        Self::new_for_sampler_with_shifts(grid_points, kind, video_shift, H3_AUDIO_SHIFT)
+    }
+
+    /// Build the schedule for one sampler kind at explicit video AND audio
+    /// shifts.
+    ///
+    /// ComfyUI's `ModelSamplingMiniMaxH3` node sets both coherently
+    /// (`comfy_extras/nodes_minimax_h3.py:367-408`): the video shift drives the
+    /// `simple` sigma table and the audio shift re-maps each video sigma onto
+    /// the audio stream. Distilled tiers move either one — the 768p Turbo
+    /// tiers train video at 6, FastH3 V2 at 10/3, DMAD at 12/2 and PDMD 2-step
+    /// at 12/6 — so both are schedule parameters rather than constants.
+    ///
+    /// The official continuous grid is the released 12/3 contract and has no
+    /// per-tier shift at all, so it refuses anything else.
+    pub fn new_for_sampler_with_shifts(
+        grid_points: usize,
+        kind: H3SamplerKind,
+        video_shift: f32,
+        audio_shift: f32,
+    ) -> Result<Self> {
+        if !audio_shift.is_finite() || audio_shift <= 0.0 {
+            bail!("MiniMax H3 schedule audio shift must be finite and positive, got {audio_shift}");
+        }
         if !kind.uses_comfy_simple_grid() {
             if video_shift.to_bits() != H3_VIDEO_SHIFT.to_bits() {
                 bail!(
                     "MiniMax H3 official schedule has no per-tier video shift; refused {video_shift}"
                 );
             }
+            if audio_shift.to_bits() != H3_AUDIO_SHIFT.to_bits() {
+                bail!(
+                    "MiniMax H3 official schedule has no per-tier audio shift; refused {audio_shift}"
+                );
+            }
             return Self::new(grid_points);
-        }
-        if kind == H3SamplerKind::ComfyResMultistep
-            && video_shift.to_bits() != H3_VIDEO_SHIFT.to_bits()
-        {
-            // `H3_COMFY_AUDIO_SCALE` is baked from the default shift and is
-            // read by the carried-audio helpers this integrator uses, so a
-            // shifted RES-multistep grid would silently mis-scale audio.
-            bail!(
-                "MiniMax H3 Comfy RES multistep is pinned to video shift {H3_VIDEO_SHIFT}; refused {video_shift}"
-            );
         }
         let video = H3ModalitySchedule::new_comfy_simple(grid_points, video_shift)?;
         let audio = H3ModalitySchedule {
             // The released model derives native audio sigma from the already
-            // rounded video-table sigma, rather than independently sampling a
-            // shift-3 table. Preserve that f32 inversion/reapplication order,
-            // inverting whichever video shift built the grid.
+            // rounded video-table sigma, rather than independently sampling an
+            // audio-shift table: ComfyUI's `time_shift_sigma`
+            // (`comfy/ldm/minimax/model.py:36-39`) inverts the video shift to
+            // the shared base grid and re-applies the audio shift, in that f32
+            // order (`model.py:609-613`, `:653-656`).
             sigmas: video
                 .sigmas
                 .iter()
@@ -341,7 +395,7 @@ impl H3DualSchedule {
                         return 0.0;
                     }
                     let base = sigma / (video_shift + sigma * (1.0 - video_shift));
-                    H3_AUDIO_SHIFT * base / (1.0 + (H3_AUDIO_SHIFT - 1.0) * base)
+                    audio_shift * base / (1.0 + (audio_shift - 1.0) * base)
                 })
                 .collect(),
         };
@@ -353,12 +407,18 @@ impl H3DualSchedule {
             video,
             audio,
             video_shift,
+            audio_shift,
         })
     }
 
     /// The video shift this grid was built with.
     pub fn video_shift(&self) -> f32 {
         self.video_shift
+    }
+
+    /// The audio shift this grid was built with.
+    pub fn audio_shift(&self) -> f32 {
+        self.audio_shift
     }
 
     pub fn official_default() -> Self {
@@ -407,6 +467,8 @@ impl H3DualSchedule {
                 audio_reference: H3_CLEAN_TIMESTEP,
             },
             total_evaluations: self.video.evaluations(),
+            video_shift: self.video_shift,
+            audio_shift: self.audio_shift,
         }
     }
 }
@@ -626,28 +688,186 @@ fn comfy_audio_carried_velocity(
     step: H3DualScheduleStep,
 ) -> Result<Tensor> {
     // Comfy's ModelSamplingAV carries audio on the video sigma coordinate and
-    // converts the model's native d(audio)/d(sigma_a) back to d(carry)/d(sigma_v).
+    // converts the model's native d(audio)/d(sigma_a) back to d(carry)/d(sigma_v)
+    // (`comfy/ldm/minimax/model.py:638-641`). The scale is the schedule's own
+    // `video_shift / audio_shift` (`comfy/model_sampling.py:353-357`), never a
+    // family constant, so a 10/3 or 12/2 grid carries audio at its own ratio.
     // Keep this expression in F32, matching its released wrapper.
+    let scale = step.comfy_audio_scale();
     native_sample
         .to_dtype(DType::F32)?
-        .affine(f64::from(H3_COMFY_AUDIO_SCALE - 1.0), 0.0)?
-        .add(&native_velocity.to_dtype(DType::F32)?.affine(
-            f64::from(1.0 + (H3_COMFY_AUDIO_SCALE - 1.0) * step.audio.sigma),
-            0.0,
-        )?)
+        .affine(f64::from(scale - 1.0), 0.0)?
+        .add(
+            &native_velocity
+                .to_dtype(DType::F32)?
+                .affine(f64::from(1.0 + (scale - 1.0) * step.audio.sigma), 0.0)?,
+        )
         .map_err(Into::into)
 }
 
 fn comfy_audio_native_sample(carried: &Tensor, step: H3DualScheduleStep) -> Result<Tensor> {
     let native_scale = if step.video.next_sigma == 0.0 {
-        // lim sigma_a/sigma_v as the shared base grid approaches zero.
-        H3_AUDIO_SHIFT / H3_VIDEO_SHIFT
+        // lim sigma_a/sigma_v as the shared base grid approaches zero, which is
+        // `1 / audio_scale` (`comfy/model_base.py:2177-2178`).
+        step.audio_shift / step.video_shift
     } else {
         step.audio.next_sigma / step.video.next_sigma
     };
     carried
         .affine(f64::from(native_scale), 0.0)
         .map_err(Into::into)
+}
+
+/// One modality's ComfyUI `lcm` update.
+///
+/// `sample_lcm` (`comfy/k_diffusion/sampling.py:1083-1113`) sets `x =
+/// denoised` and, when the next sigma is positive, `x =
+/// model_sampling.noise_scaling(sigma', noise, x)`, which for the flow (CONST)
+/// parameterization is `sigma' * noise + (1 - sigma') * x0`
+/// (`comfy/model_sampling.py:94-97`, `noise_scale` 1). The terminal step
+/// returns the clean estimate itself, without noise.
+///
+/// ## Why per-modality re-noise is exactly Comfy's packed update
+///
+/// Comfy samples H3's packed AV latent on the VIDEO sigma: audio is carried as
+/// `c = k * a` with `k = sigma_v / sigma_a` (`comfy/ldm/minimax/model.py:
+/// 604-614`, `comfy/model_base.py:2171-2178`). Write both sigmas over the
+/// shared base grid `b`: `sigma_s = s*b / (1 + (s-1)*b)`, so
+/// `1 - sigma_s = (1-b) / (1 + (s-1)*b)`, and let `r = s_v / s_a` (the
+/// `audio_scale`).
+///
+/// 1. The carried clean estimate is `r * x0_a`. The carried velocity
+///    (`model.py:638-641`) gives `x0_c = c + sigma_v*((r-1)*a + (1+(r-1)*sigma_a)*v)`;
+///    the identities `k + (r-1)*sigma_v = r` and
+///    `sigma_v*(1+(r-1)*sigma_a) = r*sigma_a` (both follow from the two shift
+///    formulas over the same `b`) reduce it to `r*(a + sigma_a*v) = r*x0_a`.
+/// 2. The packed re-noise at `sigma_v'` is `c' = sigma_v'*eps + (1-sigma_v')*r*x0_a`;
+///    the next model call un-carries it by `sigma_a'/sigma_v'` (the carry the
+///    DiT undoes), giving `a' = sigma_a'*eps + (sigma_a'/sigma_v')*(1-sigma_v')*r*x0_a`.
+/// 3. `(sigma_a'/sigma_v') * (1-sigma_v') * r
+///    = (s_a/s_v) * (1+(s_v-1)b)/(1+(s_a-1)b) * (1-b)/(1+(s_v-1)b) * (s_v/s_a)
+///    = (1-b)/(1+(s_a-1)b) = 1 - sigma_a'`.
+///
+/// So `a' = sigma_a'*eps + (1-sigma_a')*x0_a`: the audio re-noise is the plain
+/// flow re-noise at audio's OWN next sigma, with the same standard-normal
+/// draw, and at the terminal step `x0_c / r = x0_a`. Nothing about the carry
+/// survives, which is also why the LCM path needs no carried-audio state.
+/// The identity holds in exact arithmetic; Comfy's own packed f32 evaluation
+/// differs from it by rounding only (1 ulp on the DMAD fixture).
+fn lcm_update(
+    sample: &Tensor,
+    velocity: &Tensor,
+    noise: Option<&Tensor>,
+    step: H3FlowStep,
+) -> Result<Tensor> {
+    let decreasing = step.sigma.is_finite()
+        && step.next_sigma.is_finite()
+        && step.sigma > 0.0
+        && step.next_sigma >= 0.0
+        && step.next_sigma < step.sigma;
+    if !decreasing {
+        bail!(
+            "MiniMax H3 LCM step needs finite decreasing sigmas, got {} -> {}",
+            step.sigma,
+            step.next_sigma
+        );
+    }
+    let x0 = denoised_from_velocity(sample, velocity, step)?;
+    let next = if step.next_sigma == 0.0 {
+        if noise.is_some() {
+            bail!("MiniMax H3 LCM terminal step must not consume noise");
+        }
+        x0
+    } else {
+        let noise = noise.ok_or_else(|| {
+            anyhow::anyhow!(
+                "MiniMax H3 LCM step to sigma {} needs fresh noise",
+                step.next_sigma
+            )
+        })?;
+        if noise.dims() != sample.dims() {
+            bail!(
+                "MiniMax H3 LCM noise shape {:?} does not match the latent {:?}",
+                noise.dims(),
+                sample.dims()
+            );
+        }
+        // `sigma * noise + (1 - sigma) * latent`, both terms in F32 like the
+        // Comfy sampler state; `1 - sigma'` is an f32 scalar subtraction.
+        noise
+            .to_dtype(DType::F32)?
+            .affine(f64::from(step.next_sigma), 0.0)?
+            .add(&x0.affine(f64::from(1.0 - step.next_sigma), 0.0)?)?
+    };
+    next.to_dtype(sample.dtype()).map_err(Into::into)
+}
+
+/// Domain separator for the LCM re-noise stream, so its draws can never
+/// replay the request's initial-noise stream (`pipeline.rs` `H3RequestNoise`,
+/// which seeds `StdRng` with the bare request seed).
+const H3_LCM_STEP_NOISE_DOMAIN: u64 = 0x6833_6c63_6d5f_6e7a; // "h3lcm_nz"
+
+fn splitmix64(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+/// Deterministic per-step noise for integrators that re-noise.
+///
+/// One fresh `StdRng` per coupled evaluation, seeded from the request seed,
+/// the evaluation index, and a domain separator; it draws the VIDEO tensor
+/// first and then the AUDIO tensor, element by element, exactly the way the
+/// pipeline draws its initial noise (`StandardNormal` f32 on the host, then
+/// moved to the latent's device). A replayed request therefore re-noises
+/// identically on every backend, and the noise for evaluation `i` does not
+/// depend on how many elements any other evaluation drew.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct H3StepNoise {
+    seed: u64,
+}
+
+impl H3StepNoise {
+    pub(crate) const fn new(seed: u64) -> Self {
+        Self { seed }
+    }
+
+    fn step_seed(self, evaluation_index: usize) -> u64 {
+        splitmix64(
+            splitmix64(self.seed ^ H3_LCM_STEP_NOISE_DOMAIN).wrapping_add(evaluation_index as u64),
+        )
+    }
+
+    /// Draw `(video, audio)` noise for one evaluation, video first.
+    pub(crate) fn draw(
+        self,
+        evaluation_index: usize,
+        video_shape: &[usize],
+        audio_shape: &[usize],
+        device: &candle_core::Device,
+    ) -> Result<(Tensor, Tensor)> {
+        use rand::SeedableRng;
+        use rand_distr::Distribution;
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(self.step_seed(evaluation_index));
+        let mut draw = |shape: &[usize]| -> Result<Tensor> {
+            let elements = shape.iter().try_fold(1usize, |total, dim| {
+                total
+                    .checked_mul(*dim)
+                    .ok_or_else(|| anyhow::anyhow!("MiniMax H3 LCM noise shape overflows"))
+            })?;
+            let values = (0..elements)
+                .map(|_| rand_distr::StandardNormal.sample(&mut rng))
+                .collect::<Vec<f32>>();
+            Tensor::from_vec(values, shape, &candle_core::Device::Cpu)?
+                .to_device(device)
+                .map_err(Into::into)
+        };
+        let video = draw(video_shape)?;
+        let audio = draw(audio_shape)?;
+        Ok((video, audio))
+    }
 }
 
 /// Stateful synchronized sampler for the video/audio pair.
@@ -658,9 +878,13 @@ pub(crate) struct H3DualSampler {
     current_audio_carried: Option<Tensor>,
     previous_video_sigma: Option<f32>,
     next_evaluation_index: usize,
+    step_noise: Option<H3StepNoise>,
 }
 
 impl H3DualSampler {
+    /// A sampler for a deterministic integrator. A noise-consuming kind
+    /// ([`H3SamplerKind::consumes_step_noise`]) built this way refuses its
+    /// first non-terminal step rather than inventing noise.
     pub(crate) fn new(kind: H3SamplerKind) -> Self {
         Self {
             kind,
@@ -669,6 +893,19 @@ impl H3DualSampler {
             current_audio_carried: None,
             previous_video_sigma: None,
             next_evaluation_index: 0,
+            step_noise: None,
+        }
+    }
+
+    /// A sampler that also owns the request's deterministic re-noise stream.
+    ///
+    /// Every pipeline builds its sampler this way with the request seed; the
+    /// deterministic kinds never read the stream, so this is byte-identical to
+    /// [`Self::new`] for them.
+    pub(crate) fn with_noise_seed(kind: H3SamplerKind, seed: u64) -> Self {
+        Self {
+            step_noise: Some(H3StepNoise::new(seed)),
+            ..Self::new(kind)
         }
     }
 
@@ -689,6 +926,17 @@ impl H3DualSampler {
         }
         if self.kind.uses_euler_update() {
             let next = euler_step_pair(
+                video_sample,
+                audio_sample,
+                video_velocity,
+                audio_velocity,
+                step,
+            )?;
+            self.next_evaluation_index += 1;
+            return Ok(next);
+        }
+        if self.kind.consumes_step_noise() {
+            let next = self.lcm_step_pair(
                 video_sample,
                 audio_sample,
                 video_velocity,
@@ -735,6 +983,47 @@ impl H3DualSampler {
         self.next_evaluation_index += 1;
         Ok((next_video, next_audio))
     }
+
+    /// Both modalities' LCM updates, each at its own next sigma (see
+    /// [`lcm_update`] for why that IS Comfy's packed update). Noise is drawn
+    /// only for a non-terminal step, video first, and both updates are
+    /// computed before either is returned.
+    fn lcm_step_pair(
+        &self,
+        video_sample: &Tensor,
+        audio_sample: &Tensor,
+        video_velocity: &Tensor,
+        audio_velocity: &Tensor,
+        step: H3DualScheduleStep,
+    ) -> Result<(Tensor, Tensor)> {
+        // The shared base grid reaches zero for both modalities together.
+        if (step.video.next_sigma == 0.0) != (step.audio.next_sigma == 0.0) {
+            bail!("MiniMax H3 LCM video and audio schedules disagree about the terminal step");
+        }
+        let noise = if step.video.next_sigma == 0.0 {
+            None
+        } else {
+            let stream = self.step_noise.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "MiniMax H3 {} sampler needs the request's noise seed",
+                    self.kind.as_str()
+                )
+            })?;
+            Some(stream.draw(
+                step.evaluation_index,
+                video_sample.dims(),
+                audio_sample.dims(),
+                video_sample.device(),
+            )?)
+        };
+        let (video_noise, audio_noise) = match &noise {
+            Some((video, audio)) => (Some(video), Some(audio)),
+            None => (None, None),
+        };
+        let next_video = lcm_update(video_sample, video_velocity, video_noise, step.video)?;
+        let next_audio = lcm_update(audio_sample, audio_velocity, audio_noise, step.audio)?;
+        Ok((next_video, next_audio))
+    }
 }
 
 #[cfg(test)]
@@ -743,9 +1032,10 @@ mod tests {
     use serde::Deserialize;
 
     use super::{
-        euler_step, euler_step_pair, unique_consecutive, H3DualSampler, H3DualSchedule, H3FlowStep,
-        H3SamplerKind, H3StepCount, H3_AUDIO_SHIFT, H3_CLEAN_TIMESTEP, H3_DEFAULT_GRID_POINTS,
-        H3_TURBO_768P_VIDEO_SHIFT, H3_VIDEO_SHIFT, H3_VISUAL_CONDITION_TIMESTEP,
+        euler_step, euler_step_pair, lcm_update, unique_consecutive, H3DualSampler, H3DualSchedule,
+        H3FlowStep, H3SamplerKind, H3StepCount, H3StepNoise, H3_AUDIO_SHIFT, H3_CLEAN_TIMESTEP,
+        H3_DEFAULT_GRID_POINTS, H3_TURBO_768P_VIDEO_SHIFT, H3_VIDEO_SHIFT,
+        H3_VISUAL_CONDITION_TIMESTEP,
     };
 
     #[derive(Debug, Deserialize)]
@@ -1187,17 +1477,19 @@ mod tests {
     }
 
     #[test]
-    fn a_non_default_video_shift_is_refused_where_it_would_be_unsound() {
-        // RES multistep reads `H3_COMFY_AUDIO_SCALE`, which is baked from the
-        // default shift, so a shifted grid is refused rather than mis-scaled.
-        let error = H3DualSchedule::new_for_sampler_with_video_shift(
-            5,
-            H3SamplerKind::ComfyResMultistep,
-            H3_TURBO_768P_VIDEO_SHIFT,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("RES multistep"), "{error}");
+    fn non_default_shifts_build_comfy_grids_and_never_the_official_one() {
+        // The carried-audio scale is derived from the schedule since #1812, so
+        // RES multistep accepts any reviewed video shift (FastH3 V2 is 10/3).
+        for shift in [H3_TURBO_768P_VIDEO_SHIFT, 10.0] {
+            let schedule = H3DualSchedule::new_for_sampler_with_video_shift(
+                9,
+                H3SamplerKind::ComfyResMultistep,
+                shift,
+            )
+            .unwrap();
+            assert_eq!(schedule.video_shift(), shift);
+            assert_eq!(schedule.audio_shift(), H3_AUDIO_SHIFT);
+        }
 
         // The official continuous grid has no per-tier shift at all.
         let error = H3DualSchedule::new_for_sampler_with_video_shift(
@@ -1208,16 +1500,426 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("no per-tier video shift"), "{error}");
+        let error = H3DualSchedule::new_for_sampler_with_shifts(
+            5,
+            H3SamplerKind::OfficialEuler,
+            H3_VIDEO_SHIFT,
+            2.0,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("no per-tier audio shift"), "{error}");
 
-        // And a nonsense shift never builds a grid.
-        for shift in [0.0f32, -1.0, f32::NAN] {
+        // And a nonsense shift never builds a grid, on either axis.
+        for shift in [0.0f32, -1.0, f32::NAN, f32::INFINITY] {
             assert!(H3DualSchedule::new_for_sampler_with_video_shift(
                 5,
                 H3SamplerKind::ComfyEuler,
                 shift
             )
             .is_err());
+            assert!(H3DualSchedule::new_for_sampler_with_shifts(
+                5,
+                H3SamplerKind::ComfyLcm,
+                H3_VIDEO_SHIFT,
+                shift
+            )
+            .is_err());
         }
+    }
+
+    fn bits(values: &[f32]) -> Vec<u32> {
+        values.iter().map(|value| value.to_bits()).collect()
+    }
+
+    /// The pre-existing constructors are wrappers, not parallel builders: every
+    /// one of them is bit-identical to the explicit-shift constructor at the
+    /// family audio shift, for every kind and every reviewed grid length.
+    #[test]
+    fn legacy_constructors_are_exact_wrappers_over_explicit_shifts() {
+        for kind in [
+            H3SamplerKind::OfficialEuler,
+            H3SamplerKind::ComfyResMultistep,
+            H3SamplerKind::ComfyEuler,
+            H3SamplerKind::ComfyLcm,
+        ] {
+            for grid_points in [2usize, 3, 5, 8, 9, 21, 50] {
+                let explicit = H3DualSchedule::new_for_sampler_with_shifts(
+                    grid_points,
+                    kind,
+                    H3_VIDEO_SHIFT,
+                    H3_AUDIO_SHIFT,
+                )
+                .unwrap();
+                assert_eq!(
+                    H3DualSchedule::new_for_sampler(grid_points, kind).unwrap(),
+                    explicit
+                );
+                assert_eq!(
+                    H3DualSchedule::new_for_sampler_with_video_shift(
+                        grid_points,
+                        kind,
+                        H3_VIDEO_SHIFT
+                    )
+                    .unwrap(),
+                    explicit
+                );
+                assert_eq!(explicit.audio_shift(), H3_AUDIO_SHIFT);
+            }
+        }
+        // The derived comfy carry scale at the family shifts is the 4.0 the
+        // retired compile-time constant held, bit for bit.
+        let step = H3DualSchedule::new_for_sampler(5, H3SamplerKind::ComfyResMultistep)
+            .unwrap()
+            .steps()
+            .next()
+            .unwrap();
+        assert_eq!(step.comfy_audio_scale().to_bits(), 4.0f32.to_bits());
+        assert_eq!(
+            (step.audio_shift / step.video_shift).to_bits(),
+            0.25f32.to_bits()
+        );
+    }
+
+    /// DMAD 4-step: `lcm` + `simple`, video 12 / audio 2. Bits captured by
+    /// running ComfyUI's `ModelSamplingDiscreteFlow` table, `simple_scheduler`
+    /// (`comfy/samplers.py:645-652`), and `time_shift_sigma`
+    /// (`comfy/ldm/minimax/model.py:36-39`) in torch f32; the decimals are the
+    /// plan's `[1, .972973, .923077, .8, 0]` / `[1, .857143, .666667, .4, 0]`.
+    #[test]
+    fn dmad_four_step_lcm_grid_matches_comfy_float32_bits() {
+        let schedule =
+            H3DualSchedule::new_for_sampler_with_shifts(5, H3SamplerKind::ComfyLcm, 12.0, 2.0)
+                .unwrap();
+        assert_eq!(
+            bits(schedule.video_sigmas()),
+            [0x3f800000, 0x3f7914c2, 0x3f6c4ec5, 0x3f4ccccd, 0x00000000]
+        );
+        assert_eq!(
+            bits(schedule.audio_sigmas()),
+            [0x3f800000, 0x3f5b6db6, 0x3f2aaaaa, 0x3eccccce, 0x00000000]
+        );
+        assert_close(
+            schedule.audio_sigmas(),
+            &[1.0, 0.857_143, 0.666_667, 0.4, 0.0],
+            1e-6,
+        );
+        assert_eq!(schedule.counts().transformer_evaluations, 4);
+        assert_eq!(schedule.audio_shift(), 2.0);
+    }
+
+    /// PDMD 2-step: Euler + `simple`, video 12 / audio 6, from the same f32
+    /// capture. PDMD's own sampler is plain Euler on `shift(linspace)`
+    /// (`ZeamoxWang/pdmd@6b6e1063 inference/sample_diffsynth.py:130`), which
+    /// the Comfy table reproduces at 3 grid points.
+    #[test]
+    fn pdmd_two_step_euler_grid_matches_comfy_float32_bits() {
+        let schedule =
+            H3DualSchedule::new_for_sampler_with_shifts(3, H3SamplerKind::ComfyEuler, 12.0, 6.0)
+                .unwrap();
+        assert_eq!(
+            bits(schedule.video_sigmas()),
+            [0x3f800000, 0x3f6c4ec5, 0x00000000]
+        );
+        assert_eq!(
+            bits(schedule.audio_sigmas()),
+            [0x3f800000, 0x3f5b6db7, 0x00000000]
+        );
+        assert_close(schedule.video_sigmas(), &[1.0, 0.923_077, 0.0], 1e-6);
+        assert_close(schedule.audio_sigmas(), &[1.0, 0.857_143, 0.0], 1e-6);
+        assert_eq!(schedule.counts().transformer_evaluations, 2);
+    }
+
+    /// FastH3 V2: `res_multistep` + `simple` at video 10 / audio 3 over 9 grid
+    /// points. Sigma bits and the coupled update are a torch-f32 transcription
+    /// of ComfyUI `res_multistep` (`comfy/k_diffusion/sampling.py:1462-1528`,
+    /// eta 0) over the packed latent with `ModelSamplingAV`'s carried audio
+    /// (`comfy/model_sampling.py:338-357`, `comfy/ldm/minimax/model.py:604-643`,
+    /// `comfy/model_base.py:2171-2178`); the same script reproduces
+    /// `comfy_res_multistep_matches_pinned_float32_reference`'s 12/3 pins.
+    #[test]
+    fn fasth3_res_multistep_matches_comfy_float32_reference_at_shift_ten_three() {
+        let schedule = H3DualSchedule::new_for_sampler_with_shifts(
+            9,
+            H3SamplerKind::ComfyResMultistep,
+            10.0,
+            3.0,
+        )
+        .unwrap();
+        assert_eq!(
+            bits(schedule.video_sigmas()),
+            [
+                0x3f800000, 0x3f7c64f5, 0x3f77bdef, 0x3f71826a, 0x3f68ba2f, 0x3f5b6db7, 0x3f44ec4f,
+                0x3f169697, 0x00000000,
+            ]
+        );
+        assert_eq!(
+            bits(schedule.audio_sigmas()),
+            [
+                0x3f800000, 0x3f745d19, 0x3f666664, 0x3f555557, 0x3f3fffff, 0x3f24924a, 0x3f000001,
+                0x3e99999b, 0x00000000,
+            ]
+        );
+
+        let device = Device::Cpu;
+        let mut video = Tensor::new(&[0.25f32, -0.5, 1.0], &device).unwrap();
+        let mut audio = video.clone();
+        let velocities = [
+            [0.1f32, -0.2, 0.3],
+            [-0.4, 0.5, -0.6],
+            [0.7, -0.8, 0.9],
+            [-1.0, 1.1, -1.2],
+            [0.3, 0.2, -0.1],
+            [-0.6, -0.5, 0.4],
+            [0.9, 0.8, -0.7],
+            [-1.2, -1.1, 1.0],
+        ];
+        let expected_video = [
+            [0.251_408_46f32, -0.502_816_9, 1.004_225_4],
+            [0.238_161_25, -0.485_361_25, 0.982_561_2],
+            [0.273_514_93, -0.526_456_3, 1.029_397_6],
+            [0.197_043_18, -0.441_623_96, 0.936_204_55],
+            [0.264_859_23, -0.466_574_13, 0.974_456_55],
+            [0.143_059_42, -0.571_531_3, 1.054_941_5],
+            [0.636_463_8, -0.140_646_31, 0.684_251_5],
+            [-0.069_418_61, -0.787_705_2, 1.272_486_8],
+        ];
+        let expected_audio = [
+            [0.254_545_48f32, -0.509_090_96, 1.013_636_6],
+            [0.214_785_72, -0.456_7, 0.948_614_3],
+            [0.310_965_2, -0.568_349_1, 1.075_733_1],
+            [0.127_640_8, -0.365_145_42, 0.852_650_1],
+            [0.260_040_55, -0.408_277_4, 0.922_360_2],
+            [0.074_822_9, -0.586_749_55, 1.063_100_2],
+            [0.591_744_96, -0.145_527_45, 0.681_528_6],
+            [0.231_744_89, -0.475_527_5, 0.981_528_64],
+        ];
+        let mut sampler = H3DualSampler::new(H3SamplerKind::ComfyResMultistep);
+        for (index, step) in schedule.steps().enumerate() {
+            assert_eq!(step.comfy_audio_scale(), 10.0f32 / 3.0);
+            let velocity = Tensor::new(&velocities[index], &device).unwrap();
+            (video, audio) = sampler
+                .step_pair(&video, &audio, &velocity, &velocity, step)
+                .unwrap();
+            assert_close(
+                &video.to_vec1::<f32>().unwrap(),
+                &expected_video[index],
+                8.0 * f32::EPSILON,
+            );
+            assert_close(
+                &audio.to_vec1::<f32>().unwrap(),
+                &expected_audio[index],
+                8.0 * f32::EPSILON,
+            );
+        }
+    }
+
+    /// The LCM rule on synthetic tensors at the DMAD 12/2 grid, against a
+    /// hand-computable oracle: `x0 = x + sigma * v`, then
+    /// `sigma' * eps + (1 - sigma') * x0` per modality, x0 itself at the
+    /// terminal step. The expected values come from the same torch-f32
+    /// capture, which also evaluated Comfy's PACKED carried-audio form and
+    /// agreed with these per-modality values to 1.5e-7 (step 1) and exactly
+    /// (terminal step 3).
+    #[test]
+    fn lcm_update_matches_the_per_modality_comfy_oracle() {
+        let device = Device::Cpu;
+        let schedule =
+            H3DualSchedule::new_for_sampler_with_shifts(5, H3SamplerKind::ComfyLcm, 12.0, 2.0)
+                .unwrap();
+        let steps: Vec<_> = schedule.steps().collect();
+        let video = Tensor::new(&[0.25f32, -0.5, 1.0, 0.125], &device).unwrap();
+        let audio = Tensor::new(&[-0.75f32, 0.5, 0.0625, 2.0], &device).unwrap();
+        let video_velocity = Tensor::new(&[0.1f32, -0.2, 0.3, -0.4], &device).unwrap();
+        let audio_velocity = Tensor::new(&[-0.6f32, 0.7, 0.05, -1.5], &device).unwrap();
+        let video_noise = Tensor::new(&[1.5f32, -0.25, 0.75, -2.0], &device).unwrap();
+        let audio_noise = Tensor::new(&[-1.0f32, 0.5, 1.25, 0.3], &device).unwrap();
+
+        let next_video =
+            lcm_update(&video, &video_velocity, Some(&video_noise), steps[1].video).unwrap();
+        let next_audio =
+            lcm_update(&audio, &audio_velocity, Some(&audio_noise), steps[1].audio).unwrap();
+        assert_close(
+            &next_video.to_vec1::<f32>().unwrap(),
+            &[1.411_330_6, -0.284_199_6, 0.791_684_03, -1.866_476],
+            2.0 * f32::EPSILON,
+        );
+        assert_close(
+            &next_audio.to_vec1::<f32>().unwrap(),
+            &[-1.088_095_2, 0.7, 0.868_452_3, 0.438_095_33],
+            2.0 * f32::EPSILON,
+        );
+
+        // Terminal: the clean estimate, with no noise accepted.
+        let last = steps[3];
+        let terminal_video = lcm_update(&video, &video_velocity, None, last.video).unwrap();
+        let terminal_audio = lcm_update(&audio, &audio_velocity, None, last.audio).unwrap();
+        assert_close(
+            &terminal_video.to_vec1::<f32>().unwrap(),
+            &[0.33, -0.66, 1.24, -0.195],
+            2.0 * f32::EPSILON,
+        );
+        assert_close(
+            &terminal_audio.to_vec1::<f32>().unwrap(),
+            &[-0.99, 0.78, 0.0825, 1.4],
+            2.0 * f32::EPSILON,
+        );
+        assert!(lcm_update(&video, &video_velocity, Some(&video_noise), last.video).is_err());
+        assert!(lcm_update(&video, &video_velocity, None, steps[1].video).is_err());
+
+        // The half-precision latent keeps its dtype; the blend runs in F32.
+        let half = video.to_dtype(DType::BF16).unwrap();
+        let next = lcm_update(&half, &video_velocity, Some(&video_noise), steps[1].video).unwrap();
+        assert_eq!(next.dtype(), DType::BF16);
+    }
+
+    #[test]
+    fn lcm_step_noise_is_seeded_per_step_and_draws_video_then_audio() {
+        let device = Device::Cpu;
+        let video_shape = [1usize, 3, 4];
+        let audio_shape = [1usize, 5];
+        let draw = |seed: u64, index: usize| {
+            let (video, audio) = H3StepNoise::new(seed)
+                .draw(index, &video_shape, &audio_shape, &device)
+                .unwrap();
+            (
+                video.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+                audio.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            )
+        };
+        // Same seed and step: identical, on every call.
+        assert_eq!(draw(42, 1), draw(42, 1));
+        // A different step or seed: different noise.
+        assert_ne!(draw(42, 1), draw(42, 2));
+        assert_ne!(draw(42, 1), draw(43, 1));
+
+        // Video is drawn first: a video-only draw is the prefix of the stream,
+        // and the audio continues it.
+        let (video, audio) = draw(7, 0);
+        let (combined, _) = H3StepNoise::new(7)
+            .draw(0, &[17], &[0], &device)
+            .map(|(v, a)| (v.to_vec1::<f32>().unwrap(), a))
+            .unwrap();
+        assert_eq!(&combined[..12], video.as_slice());
+        assert_eq!(&combined[12..], audio.as_slice());
+
+        // The stream is not the request's initial-noise stream (a bare
+        // `StdRng::seed_from_u64(seed)`), so re-noise never replays it.
+        use rand::SeedableRng;
+        use rand_distr::Distribution;
+        let mut initial = rand::rngs::StdRng::seed_from_u64(7);
+        let first: Vec<f32> = (0..12)
+            .map(|_| rand_distr::StandardNormal.sample(&mut initial))
+            .collect();
+        assert_ne!(first, video);
+    }
+
+    #[test]
+    fn lcm_sampler_renoises_from_the_seeded_stream_and_ends_clean() {
+        let device = Device::Cpu;
+        let schedule =
+            H3DualSchedule::new_for_sampler_with_shifts(5, H3SamplerKind::ComfyLcm, 12.0, 2.0)
+                .unwrap();
+        let video = Tensor::new(&[[0.25f32, -0.5], [1.0, 0.125]], &device).unwrap();
+        let audio = Tensor::new(&[[-0.75f32, 0.5, 0.0625]], &device).unwrap();
+        let video_velocity = Tensor::new(&[[0.1f32, -0.2], [0.3, -0.4]], &device).unwrap();
+        let audio_velocity = Tensor::new(&[[-0.6f32, 0.7, 0.05]], &device).unwrap();
+
+        // Without a seed the first non-terminal step is refused.
+        let first = schedule.steps().next().unwrap();
+        let error = H3DualSampler::new(H3SamplerKind::ComfyLcm)
+            .step_pair(&video, &audio, &video_velocity, &audio_velocity, first)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("noise seed"), "{error}");
+
+        let run = |seed: u64| {
+            let mut sampler = H3DualSampler::with_noise_seed(H3SamplerKind::ComfyLcm, seed);
+            let (mut v, mut a) = (video.clone(), audio.clone());
+            let mut trace = Vec::new();
+            for step in schedule.steps() {
+                // Expected: the oracle update with this step's stream draw.
+                let noise = (step.video.next_sigma > 0.0).then(|| {
+                    H3StepNoise::new(seed)
+                        .draw(step.evaluation_index, v.dims(), a.dims(), &device)
+                        .unwrap()
+                });
+                let expected_video = lcm_update(
+                    &v,
+                    &video_velocity,
+                    noise.as_ref().map(|(n, _)| n),
+                    step.video,
+                )
+                .unwrap();
+                let expected_audio = lcm_update(
+                    &a,
+                    &audio_velocity,
+                    noise.as_ref().map(|(_, n)| n),
+                    step.audio,
+                )
+                .unwrap();
+                (v, a) = sampler
+                    .step_pair(&v, &a, &video_velocity, &audio_velocity, step)
+                    .unwrap();
+                assert_eq!(
+                    v.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+                    expected_video
+                        .flatten_all()
+                        .unwrap()
+                        .to_vec1::<f32>()
+                        .unwrap()
+                );
+                assert_eq!(
+                    a.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+                    expected_audio
+                        .flatten_all()
+                        .unwrap()
+                        .to_vec1::<f32>()
+                        .unwrap()
+                );
+                trace.push(v.flatten_all().unwrap().to_vec1::<f32>().unwrap());
+            }
+            trace
+        };
+        assert_eq!(run(9), run(9));
+        assert_ne!(run(9), run(10));
+        // The final step is noise-free, so it is x0 of its own input.
+        let schedule_steps: Vec<_> = schedule.steps().collect();
+        assert_eq!(schedule_steps.last().unwrap().video.next_sigma, 0.0);
+    }
+
+    #[test]
+    fn deterministic_kinds_ignore_the_noise_seed() {
+        let device = Device::Cpu;
+        let sample = Tensor::new(&[0.25f32, -0.5, 1.0], &device).unwrap();
+        let velocity = Tensor::new(&[0.1f32, -0.2, 0.3], &device).unwrap();
+        for kind in [
+            H3SamplerKind::OfficialEuler,
+            H3SamplerKind::ComfyResMultistep,
+            H3SamplerKind::ComfyEuler,
+        ] {
+            assert!(!kind.consumes_step_noise());
+            let schedule = H3DualSchedule::new_for_sampler(5, kind).unwrap();
+            let mut plain = H3DualSampler::new(kind);
+            let mut seeded = H3DualSampler::with_noise_seed(kind, 123);
+            let (mut a, mut b) = (
+                (sample.clone(), sample.clone()),
+                (sample.clone(), sample.clone()),
+            );
+            for step in schedule.steps() {
+                a = plain
+                    .step_pair(&a.0, &a.1, &velocity, &velocity, step)
+                    .unwrap();
+                b = seeded
+                    .step_pair(&b.0, &b.1, &velocity, &velocity, step)
+                    .unwrap();
+                assert_eq!(a.0.to_vec1::<f32>().unwrap(), b.0.to_vec1::<f32>().unwrap());
+                assert_eq!(a.1.to_vec1::<f32>().unwrap(), b.1.to_vec1::<f32>().unwrap());
+            }
+        }
+        assert!(H3SamplerKind::ComfyLcm.consumes_step_noise());
+        assert!(H3SamplerKind::ComfyLcm.uses_comfy_simple_grid());
+        assert!(!H3SamplerKind::ComfyLcm.uses_euler_update());
     }
 
     #[test]
@@ -1226,9 +1928,14 @@ mod tests {
             H3SamplerKind::OfficialEuler,
             H3SamplerKind::ComfyResMultistep,
             H3SamplerKind::ComfyEuler,
+            H3SamplerKind::ComfyLcm,
         ] {
             assert_eq!(H3SamplerKind::parse(kind.as_str()), Some(kind));
         }
+        assert_eq!(
+            H3SamplerKind::parse("comfy-lcm"),
+            Some(H3SamplerKind::ComfyLcm)
+        );
         assert_eq!(
             H3SamplerKind::parse("comfy-euler"),
             Some(H3SamplerKind::ComfyEuler)
@@ -1471,6 +2178,53 @@ mod tests {
         };
 
         let (cpu_video, cpu_audio) = run(&cpu);
+        let (cuda_video, cuda_audio) = run(&cuda);
+        assert_close(&cuda_video, &cpu_video, 1e-6);
+        assert_close(&cuda_audio, &cpu_audio, 1e-6);
+    }
+
+    /// The LCM sampler draws its re-noise on the host and moves it to the
+    /// latent's device, so a CUDA render re-noises with the same values as a
+    /// CPU one and the whole 4-step DMAD trajectory agrees across backends.
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore)]
+    fn lcm_trajectory_matches_cpu_and_cuda() {
+        let Ok(cuda) = Device::new_cuda(0) else {
+            return;
+        };
+        let schedule =
+            H3DualSchedule::new_for_sampler_with_shifts(5, H3SamplerKind::ComfyLcm, 12.0, 2.0)
+                .unwrap();
+        let run = |device: &Device| {
+            let mut video = Tensor::new(&[[0.125f32, -1.75], [3.5, 0.031_25]], device).unwrap();
+            let mut audio = Tensor::new(&[[-0.5f32, 2.25, -4.0]], device).unwrap();
+            let video_velocity = Tensor::new(&[[0.75f32, -0.125], [1.25, -3.0]], device).unwrap();
+            let audio_velocity = Tensor::new(&[[1.5f32, -2.0, 0.0625]], device).unwrap();
+            let mut sampler = H3DualSampler::with_noise_seed(H3SamplerKind::ComfyLcm, 2024);
+            for step in schedule.steps() {
+                (video, audio) = sampler
+                    .step_pair(&video, &audio, &video_velocity, &audio_velocity, step)
+                    .unwrap();
+            }
+            (
+                video
+                    .to_device(&Device::Cpu)
+                    .unwrap()
+                    .flatten_all()
+                    .unwrap()
+                    .to_vec1::<f32>()
+                    .unwrap(),
+                audio
+                    .to_device(&Device::Cpu)
+                    .unwrap()
+                    .flatten_all()
+                    .unwrap()
+                    .to_vec1::<f32>()
+                    .unwrap(),
+            )
+        };
+        let (cpu_video, cpu_audio) = run(&Device::Cpu);
         let (cuda_video, cuda_audio) = run(&cuda);
         assert_close(&cuda_video, &cpu_video, 1e-6);
         assert_close(&cuda_audio, &cpu_audio, 1e-6);
