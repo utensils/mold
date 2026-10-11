@@ -414,6 +414,50 @@ struct ChatMessageResponse {
     content: String,
 }
 
+/// Select messages for one bounded attempt, identically for API and local engines.
+pub fn messages_for_attempt(
+    prompt: &str,
+    config: &ExpandConfig,
+    attempt: ExpansionAttempt,
+) -> Vec<(String, String)> {
+    let family_override = config.family_overrides.get(&config.model_family);
+    if config.operation == PromptTransformOperation::Remix {
+        build_remix_messages_with_context_for_task(
+            prompt,
+            &config.model_family,
+            config.variations,
+            config.task,
+            Some((attempt.start, attempt.total)),
+            family_override,
+            config.style.as_deref(),
+            &config.remix_dimensions,
+            config.context.as_ref(),
+        )
+    } else if attempt.total > 1 {
+        build_batch_messages_with_context_for_task(
+            prompt,
+            &config.model_family,
+            config.variations,
+            config.task,
+            Some((attempt.start, attempt.total)),
+            config.batch_prompt.as_deref(),
+            family_override,
+            config.style.as_deref(),
+            config.context.as_ref(),
+        )
+    } else {
+        build_single_messages_for_task(
+            prompt,
+            &config.model_family,
+            config.task,
+            config.system_prompt.as_deref(),
+            family_override,
+            config.style.as_deref(),
+            config.context.as_ref(),
+        )
+    }
+}
+
 /// Expander that calls an OpenAI-compatible API endpoint.
 pub struct ApiExpander {
     endpoint: String,
@@ -434,44 +478,7 @@ impl ApiExpander {
 impl PromptExpander for ApiExpander {
     fn expand(&self, prompt: &str, config: &ExpandConfig) -> Result<ExpandResult> {
         let expanded = expand_exact_with(config, |attempt_config, attempt| {
-            let family_override = attempt_config
-                .family_overrides
-                .get(&attempt_config.model_family);
-            let messages = if attempt_config.operation == PromptTransformOperation::Remix {
-                build_remix_messages_with_context_for_task(
-                    prompt,
-                    &attempt_config.model_family,
-                    attempt_config.variations,
-                    attempt_config.task,
-                    Some((attempt.start, attempt.total)),
-                    family_override,
-                    attempt_config.style.as_deref(),
-                    &attempt_config.remix_dimensions,
-                    config.context.as_ref(),
-                )
-            } else if attempt.total > 1 {
-                build_batch_messages_with_context_for_task(
-                    prompt,
-                    &attempt_config.model_family,
-                    attempt_config.variations,
-                    attempt_config.task,
-                    Some((attempt.start, attempt.total)),
-                    attempt_config.batch_prompt.as_deref(),
-                    family_override,
-                    attempt_config.style.as_deref(),
-                    config.context.as_ref(),
-                )
-            } else {
-                build_single_messages_for_task(
-                    prompt,
-                    &attempt_config.model_family,
-                    attempt_config.task,
-                    attempt_config.system_prompt.as_deref(),
-                    family_override,
-                    attempt_config.style.as_deref(),
-                    config.context.as_ref(),
-                )
-            };
+            let messages = messages_for_attempt(prompt, attempt_config, attempt);
 
             let chat_messages: Vec<ChatMessage> = messages
                 .into_iter()
@@ -924,6 +931,37 @@ impl ExpandSettings {
 mod tests {
     use super::*;
     use crate::expand_prompts::build_batch_messages_with_context;
+
+    #[test]
+    fn message_selection_preserves_single_batch_and_remix_contracts() {
+        let mut config = ExpandConfig {
+            system_prompt: Some("single-marker {WORD_LIMIT}".into()),
+            batch_prompt: Some("batch-marker {N}".into()),
+            ..ExpandConfig::default()
+        };
+        let single =
+            messages_for_attempt("a fox", &config, ExpansionAttempt { start: 1, total: 1 });
+        assert!(single[0].1.contains("single-marker"));
+        let batch = messages_for_attempt("a fox", &config, ExpansionAttempt { start: 5, total: 5 });
+        assert!(batch[0].1.contains("batch-marker"));
+        assert!(!batch[0].1.contains("single-marker"));
+        config.operation = PromptTransformOperation::Remix;
+        config.remix_dimensions = vec![RemixDimension::Lighting];
+        let remix = messages_for_attempt("a fox", &config, ExpansionAttempt { start: 1, total: 1 });
+        let expected = build_remix_messages_with_context_for_task(
+            "a fox",
+            &config.model_family,
+            1,
+            config.task,
+            Some((1, 1)),
+            None,
+            None,
+            &config.remix_dimensions,
+            None,
+        );
+        assert_eq!(remix, expected);
+        assert_ne!(remix, single);
+    }
 
     // ── prompt-Ignored families ──────────────────────────────────────────
 

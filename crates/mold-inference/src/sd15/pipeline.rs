@@ -470,10 +470,9 @@ impl SD15Engine {
             .map(|(adapter, w)| super::lora::Sd15LoraSpec {
                 adapter: adapter.as_ref(),
                 scale: w.scale,
-                path_hash: super::lora::lora_path_hash(&w.path),
             })
             .collect();
-        super::lora::wrap_backend_with_lora(inner, &specs, &self.base.progress, None)
+        super::lora::wrap_backend_with_lora(inner, &specs, &self.base.progress)
     }
 
     /// VAE load with the same single-file vs diffusers branch as

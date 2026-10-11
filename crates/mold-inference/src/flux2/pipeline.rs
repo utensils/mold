@@ -39,6 +39,7 @@ use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
 use crate::engine_base::EngineBase;
 use crate::image::{build_output_metadata, encode_image};
+use crate::lora::fingerprint_stack as flux2_lora_fingerprint;
 use crate::progress::{ProgressCallback, ProgressReporter};
 
 // ---------------------------------------------------------------------------
@@ -223,9 +224,9 @@ pub(crate) struct RetainedFlux2Transformer {
     ordinal: usize,
     /// The working dtype the linears were materialized at.
     dtype: DType,
-    /// `(path hash, scale bits)` per adapter, in request order — the FLUX.1
+    /// `(file revision, scale bits)` per adapter, in request order — the FLUX.1
     /// `LoraFingerprint` keying, order-sensitive because the merge is.
-    lora_fingerprint: Vec<(u64, u64)>,
+    lora_fingerprint: Vec<crate::lora::LoraFingerprint>,
     /// The resolved architecture. An engine resolves its config once, so this
     /// cannot normally move; it is here so that a checkpoint swapped under a
     /// live engine cannot be rendered with the previous one's geometry.
@@ -237,7 +238,7 @@ impl RetainedFlux2Transformer {
         &self,
         ordinal: usize,
         dtype: DType,
-        loras: &[(u64, u64)],
+        loras: &[crate::lora::LoraFingerprint],
         config_hash: u64,
     ) -> bool {
         self.ordinal == ordinal
@@ -245,23 +246,6 @@ impl RetainedFlux2Transformer {
             && self.config_hash == config_hash
             && self.lora_fingerprint == loras
     }
-}
-
-/// `(path hash, scale bits)` per adapter, in request order.
-///
-/// Scales are compared by BITS, not by value: two `f64`s that differ in the
-/// last bit merge different weights, and `to_bits` is also what the FLUX.1
-/// fingerprint compares.
-fn flux2_lora_fingerprint(loras: &[LoraWeight]) -> Vec<(u64, u64)> {
-    loras
-        .iter()
-        .map(|weight| {
-            (
-                super::lora::lora_path_hash(&weight.path),
-                weight.scale.to_bits(),
-            )
-        })
-        .collect()
 }
 
 /// Resolve a FLUX.2 architecture from the checkpoint, then from its name.
@@ -1013,7 +997,6 @@ impl Flux2Engine {
                     .map(|(adapter, w)| super::lora::Flux2LoraSpec {
                         adapter: adapter.as_ref(),
                         scale: w.scale,
-                        path_hash: super::lora::lora_path_hash(&w.path),
                     })
                     .collect();
                 let gguf_vb = super::lora::gguf_lora_var_builder_flux2(
@@ -1021,7 +1004,6 @@ impl Flux2Engine {
                     &specs,
                     device,
                     &self.base.progress,
-                    None,
                 )?;
                 return Ok((
                     Flux2TransformerWrapper::Quantized(
@@ -1123,7 +1105,6 @@ impl Flux2Engine {
                     .map(|(adapter, w)| super::lora::Flux2LoraSpec {
                         adapter: adapter.as_ref(),
                         scale: w.scale,
-                        path_hash: super::lora::lora_path_hash(&w.path),
                     })
                     .collect();
                 super::lora::wrap_backend_with_lora(
@@ -1131,7 +1112,6 @@ impl Flux2Engine {
                     &specs,
                     super::lora::Flux2KeySpace::Diffusers,
                     &self.base.progress,
-                    None,
                 )?
             } else {
                 backend
@@ -1209,7 +1189,6 @@ impl Flux2Engine {
                     .map(|(adapter, w)| super::lora::Flux2LoraSpec {
                         adapter: adapter.as_ref(),
                         scale: w.scale,
-                        path_hash: super::lora::lora_path_hash(&w.path),
                     })
                     .collect();
                 let wrapped = super::lora::wrap_backend_with_lora(
@@ -1217,7 +1196,6 @@ impl Flux2Engine {
                     &specs,
                     super::lora::Flux2KeySpace::Diffusers,
                     &self.base.progress,
-                    None,
                 )?;
                 (
                     candle_nn::VarBuilder::from_backend(wrapped, gpu_dtype, device.clone()),
@@ -2490,7 +2468,10 @@ impl Flux2Engine {
                 device_bytes: xformer_resident_size,
                 ordinal: self.base.gpu_ordinal,
                 dtype: gpu_dtype,
-                lora_fingerprint,
+                lora_fingerprint: crate::lora::fence_fingerprint(
+                    lora_fingerprint,
+                    flux2_lora_fingerprint(&self.pending_loras),
+                ),
                 config_hash,
             });
             self.base
@@ -3236,6 +3217,31 @@ impl InferenceEngine for Flux2Engine {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audit_resident_lora_fingerprint_changes_after_file_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("adapter.safetensors");
+        std::fs::write(&path, b"old").unwrap();
+        let stack = [mold_core::LoraWeight {
+            path: path.to_string_lossy().into_owned(),
+            scale: 1.0,
+            expert: None,
+        }];
+        let before = flux2_lora_fingerprint(&stack);
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&replacement, b"new-adapter").unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        assert!(
+            before != flux2_lora_fingerprint(&stack),
+            "replacement must invalidate resident weights"
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            flux2_lora_fingerprint(&stack) != flux2_lora_fingerprint(&stack),
+            "unobservable adapters must not be reusable"
+        );
+    }
+
     use super::*;
     use crate::encoders::variant_resolution::Qwen3Size;
     use crate::engine::LoadStrategy;
@@ -3694,7 +3700,9 @@ mod tests {
 
         let cfg = tiny_cfg(false);
         let config_hash = flux2_config_hash(&cfg);
-        let loras = vec![(11u64, 22u64)];
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let fingerprint = |scale| crate::lora::LoraFingerprint::new(file.path(), scale);
+        let loras = vec![fingerprint(1.0)];
         let retained = RetainedFlux2Transformer {
             transformer: super::super::transformer::Flux2TransformerWrapper::Quantized(
                 tiny_transformer(&cfg),
@@ -3720,11 +3728,16 @@ mod tests {
             "an unadapted request must not render through a merged transformer"
         );
         assert!(
-            !retained.matches(1, DType::BF16, &[(11, 23)], config_hash),
+            !retained.matches(1, DType::BF16, &[fingerprint(0.5)], config_hash),
             "a changed scale is a different merge"
         );
         assert!(
-            !retained.matches(1, DType::BF16, &[(11, 22), (33, 44)], config_hash),
+            !retained.matches(
+                1,
+                DType::BF16,
+                &[fingerprint(1.0), fingerprint(0.5)],
+                config_hash
+            ),
             "a second adapter is a different merge"
         );
         assert!(

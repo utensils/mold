@@ -15,7 +15,7 @@
 //! — 400 modules, nothing outside the blocks.
 //!
 //! Two things make Wan cheap to support: the kohya `.lora_down`/`.lora_up`
-//! suffixes are already in [`crate::flux::lora::classify_lora_key`], and after
+//! suffixes are already in [`crate::lora::classify_lora_key`], and after
 //! the `diffusion_model.` prefix comes off, **the LoRA stem equals the
 //! checkpoint path** — `blocks.0.self_attn.q` is exactly what
 //! `WanAttention::load` reads. No rename table, unlike the DiT's
@@ -55,7 +55,7 @@ use anyhow::{bail, Context, Result};
 use candle_core::{safetensors::MmapedSafetensors, DType, Device, Tensor};
 use mold_core::LoraWeight;
 
-use crate::flux::lora::{classify_lora_key, LoraDirection};
+use crate::lora::{classify_lora_key, LoraDirection};
 use crate::wan::model::transformer::WanLinear;
 
 /// Prefix every shipped Wan LoRA puts on its keys.
@@ -230,7 +230,7 @@ impl WanLoraRegistry {
                 };
             } else if let Some(stem) = name.strip_suffix(".alpha") {
                 if let Some(stem) = canonical_stem(stem) {
-                    if let Some(value) = crate::flux::lora::read_alpha_scalar(tensor) {
+                    if let Some(value) = crate::lora::read_alpha_scalar(tensor) {
                         alphas.insert(stem, value);
                     }
                 }

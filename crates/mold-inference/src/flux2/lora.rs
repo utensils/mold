@@ -39,29 +39,15 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, Tensor};
 
 #[cfg(test)]
-use crate::flux::lora::{classify_lora_key, LoraDirection};
-use crate::flux::lora::{get_or_load_adapter, LoraAdapter, LoraDeltaCache};
+use crate::lora::{classify_lora_key, LoraDirection};
+use crate::lora::{get_or_load_adapter, LoraAdapter};
 use crate::progress::ProgressReporter;
-
-// ---------------------------------------------------------------------------
-// Public path-hash helper — used by the pipeline to seed `LoraSpec`s.
-// ---------------------------------------------------------------------------
-
-/// Stable hash of a LoRA file path. Mirrors the FLUX helper of the same name —
-/// we keep an independent copy to avoid taking a dependency on `flux::pipeline`
-/// internals.
-pub(crate) fn lora_path_hash(path: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    path.hash(&mut hasher);
-    hasher.finish()
-}
 
 // ---------------------------------------------------------------------------
 // Target descriptors
@@ -495,7 +481,7 @@ struct Flux2LoraPatch {
     b: Tensor,
     effective_scale: f64,
     target: Flux2LoraTarget,
-    lora_path_hash: u64,
+
     /// Filled in lazily at patch-build time when the target is `Splat` with
     /// `row_size == 0` (sentinel for "split B equally into thirds by
     /// component index in `row_offset`"). Stored as the resolved
@@ -503,13 +489,10 @@ struct Flux2LoraPatch {
     resolved_rows: Option<(usize, usize)>,
 }
 
-/// A loaded LoRA + its scale + a stable hash of its file path. The hash
-/// is the per-LoRA cache-key component so a multi-LoRA stack keeps each
-/// adapter's delta independently cacheable.
+/// A loaded adapter and its requested scale.
 pub(crate) struct Flux2LoraSpec<'a> {
     pub adapter: &'a LoraAdapter,
     pub scale: f64,
-    pub path_hash: u64,
 }
 
 fn resolve_rows(target: &Flux2LoraTarget, b_rows: usize) -> Option<(usize, usize)> {
@@ -566,7 +549,7 @@ fn build_patches(
                     b: layer.b.clone(),
                     effective_scale,
                     target,
-                    lora_path_hash: spec.path_hash,
+
                     resolved_rows,
                 });
             }
@@ -576,16 +559,8 @@ fn build_patches(
 }
 
 // ---------------------------------------------------------------------------
-// Delta computation + cache + apply
+// Delta computation and application
 // ---------------------------------------------------------------------------
-
-#[derive(Hash, Eq, PartialEq, Clone)]
-struct DeltaCacheKey {
-    tensor_name: String,
-    patch_index: usize,
-    lora_path_hash: u64,
-    scale_bits: u64,
-}
 
 fn compute_delta(patch: &Flux2LoraPatch, target_dev: &Device) -> candle_core::Result<Tensor> {
     let a = patch.a.to_dtype(DType::F32)?.to_device(target_dev)?;
@@ -697,7 +672,6 @@ fn apply_patch_f32(
 struct Flux2LoraBackend {
     inner: Box<dyn candle_nn::var_builder::SimpleBackend>,
     patches: HashMap<String, Vec<Flux2LoraPatch>>,
-    delta_cache: Option<Arc<Mutex<LoraDeltaCache>>>,
 }
 
 impl Flux2LoraBackend {
@@ -712,21 +686,7 @@ impl Flux2LoraBackend {
             return Ok(tensor);
         };
         let mut merged = tensor.to_dtype(DType::F32)?;
-        for (patch_idx, patch) in layer_patches.iter().enumerate() {
-            let cache_key = DeltaCacheKey {
-                tensor_name: name.to_string(),
-                patch_index: patch_idx,
-                lora_path_hash: patch.lora_path_hash,
-                scale_bits: patch.effective_scale.to_bits(),
-            };
-            // We piggyback on the FLUX `LoraDeltaCache` storage. The FLUX cache
-            // is keyed on `flux::lora::LoraCacheKey`, not ours — so we cannot
-            // share entries across families. To avoid pulling that struct's
-            // fields out of pub(crate), keep the cache private to this
-            // backend by allocating our own small CPU map. The `delta_cache`
-            // argument is currently *unused* on the Flux.2 path; we accept it
-            // for API parity with FLUX so future refactors can unify both.
-            let _ = (&self.delta_cache, &cache_key); // silence warning when cache is unused
+        for patch in layer_patches {
             let delta_full = compute_delta(patch, dev)?;
             let m = apply_patch_f32(&merged, &delta_full, patch)?;
             merged = m;
@@ -776,7 +736,6 @@ pub(crate) fn wrap_backend_with_lora(
     specs: &[Flux2LoraSpec<'_>],
     space: Flux2KeySpace,
     progress: &ProgressReporter,
-    delta_cache: Option<Arc<Mutex<LoraDeltaCache>>>,
 ) -> Result<Box<dyn candle_nn::var_builder::SimpleBackend>> {
     if specs.is_empty() {
         bail!("wrap_backend_with_lora called with no LoraSpecs");
@@ -790,11 +749,7 @@ pub(crate) fn wrap_backend_with_lora(
         n = specs.len(),
     ));
 
-    Ok(Box::new(Flux2LoraBackend {
-        inner,
-        patches,
-        delta_cache,
-    }))
+    Ok(Box::new(Flux2LoraBackend { inner, patches }))
 }
 
 /// Build a quantized `VarBuilder` from a GGUF file with LoRA deltas applied.
@@ -808,7 +763,6 @@ pub(crate) fn gguf_lora_var_builder_flux2(
     specs: &[Flux2LoraSpec<'_>],
     device: &Device,
     progress: &ProgressReporter,
-    _delta_cache: Option<Arc<Mutex<LoraDeltaCache>>>,
 ) -> Result<mold_candle::quantized::VarBuilder> {
     use candle_core::quantized::QTensor;
 
@@ -917,7 +871,7 @@ pub(crate) fn load_lora_adapters(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flux::lora::LoraLayer;
+    use crate::lora::LoraLayer;
     use safetensors::tensor::TensorView;
 
     // ── map_kohya_*_key — leaf coverage for Flux.2 ──────────────────────
@@ -1165,7 +1119,7 @@ mod tests {
             target: Flux2LoraTarget::Direct {
                 candle_key: "x".into(),
             },
-            lora_path_hash: 0,
+
             resolved_rows: None,
         };
         let merged = apply_patch_f32(&base, &delta, &patch).unwrap();
@@ -1205,7 +1159,7 @@ mod tests {
                     row_offset: component,
                     row_size: 0,
                 },
-                lora_path_hash: 0,
+
                 resolved_rows: None,
             };
             patch.resolved_rows = resolve_rows(&patch.target, 3 * h);
@@ -1229,7 +1183,7 @@ mod tests {
         let b = Tensor::full(scale_b, (6, 2), &dev).unwrap();
         let mut layers = HashMap::new();
         layers.insert(layer.to_string(), LoraLayer { a, b, alpha: None });
-        LoraAdapter { layers, rank: 2 }
+        LoraAdapter::from_layers(layers, 2)
     }
 
     #[test]
@@ -1238,7 +1192,6 @@ mod tests {
         let specs = [Flux2LoraSpec {
             adapter: &adapter,
             scale: 0.7,
-            path_hash: 0xCAFE,
         }];
 
         // BFL: one fused target.
@@ -1291,12 +1244,11 @@ mod tests {
                     alpha: None,
                 },
             );
-            LoraAdapter { layers, rank: 2 }
+            LoraAdapter::from_layers(layers, 2)
         };
         let specs = [Flux2LoraSpec {
             adapter: &adapter,
             scale: 1.0,
-            path_hash: 1,
         }];
 
         let (patches, skipped) = build_patches(&specs, Flux2KeySpace::Bfl);
@@ -1345,7 +1297,7 @@ mod tests {
             b: Tensor::full(1.0f32, (4, 2), &dev).unwrap(),
             effective_scale: 1.0,
             target,
-            lora_path_hash: 0,
+
             resolved_rows,
         };
         let delta = Tensor::full(2.0f32, (4, 4), &dev).unwrap();
@@ -1416,7 +1368,7 @@ mod tests {
             b: Tensor::full(1.0f32, (4, 2), &dev).unwrap(),
             effective_scale: 1.0,
             target,
-            lora_path_hash: 0,
+
             resolved_rows,
         };
         // Four rows — exactly one slab of a 12-row fused tensor, and exactly
@@ -1482,7 +1434,6 @@ mod tests {
         let specs = [Flux2LoraSpec {
             adapter: &adapter,
             scale: 1.0,
-            path_hash: 1,
         }];
         let (patches, _) = build_patches(&specs, Flux2KeySpace::Diffusers);
         let bucket = &patches["transformer_blocks.0.attn.to_v.weight"];
@@ -1512,7 +1463,6 @@ mod tests {
         let specs = [Flux2LoraSpec {
             adapter: &adapter,
             scale: 0.5,
-            path_hash: 0,
         }];
         let (patches, _) = build_patches(&specs, Flux2KeySpace::Bfl);
         let bucket = &patches["double_blocks.0.img_attn.proj.weight"];
@@ -1531,19 +1481,15 @@ mod tests {
             Flux2LoraSpec {
                 adapter: &a1,
                 scale: 1.0,
-                path_hash: 0xAA,
             },
             Flux2LoraSpec {
                 adapter: &a2,
                 scale: 1.0,
-                path_hash: 0xBB,
             },
         ];
         let (patches, _) = build_patches(&specs, Flux2KeySpace::Bfl);
         let bucket = &patches["double_blocks.0.img_attn.qkv.weight"];
         assert_eq!(bucket.len(), 2);
-        assert_eq!(bucket[0].lora_path_hash, 0xAA);
-        assert_eq!(bucket[1].lora_path_hash, 0xBB);
     }
 
     // ── End-to-end via SimpleBackend wrapper ────────────────────────────
@@ -1609,11 +1555,10 @@ mod tests {
             "lora_unet_double_blocks_0_img_attn_qkv".to_string(),
             LoraLayer { a, b, alpha: None },
         );
-        let adapter = LoraAdapter { layers, rank: 2 };
+        let adapter = LoraAdapter::from_layers(layers, 2);
         let specs = [Flux2LoraSpec {
             adapter: &adapter,
             scale: 1.0,
-            path_hash: 0xFEED,
         }];
 
         // Build the inner mmap-backed backend. We use candle's
@@ -1660,9 +1605,8 @@ mod tests {
         let inner: Box<dyn candle_nn::var_builder::SimpleBackend> = Box::new(MmapBackend { st });
 
         let progress = ProgressReporter::default();
-        let wrapped =
-            wrap_backend_with_lora(inner, &specs, Flux2KeySpace::Diffusers, &progress, None)
-                .expect("wrap");
+        let wrapped = wrap_backend_with_lora(inner, &specs, Flux2KeySpace::Diffusers, &progress)
+            .expect("wrap");
 
         // For each diffusers candle key, fetch and inspect the merged tensor.
         for k in [
@@ -1704,11 +1648,10 @@ mod tests {
             "lora_unet_double_blocks_0_img_attn_qkv".to_string(),
             LoraLayer { a, b, alpha: None },
         );
-        let adapter = LoraAdapter { layers, rank: 2 };
+        let adapter = LoraAdapter::from_layers(layers, 2);
         let specs = [Flux2LoraSpec {
             adapter: &adapter,
             scale: 1.0,
-            path_hash: 0,
         }];
 
         let st =
@@ -1751,8 +1694,8 @@ mod tests {
         }
         let inner: Box<dyn candle_nn::var_builder::SimpleBackend> = Box::new(MmapBackend { st });
         let progress = ProgressReporter::default();
-        let wrapped = wrap_backend_with_lora(inner, &specs, Flux2KeySpace::Bfl, &progress, None)
-            .expect("wrap");
+        let wrapped =
+            wrap_backend_with_lora(inner, &specs, Flux2KeySpace::Bfl, &progress).expect("wrap");
 
         // B@A: (6,2) @ (2,8) of all-ones with B=0.5, A=1 → entry value = 2 * 0.5 * 1 = 1.
         // Merged tensor = base(1.0) + delta(1.0) = 2.0.
@@ -1797,14 +1740,5 @@ mod tests {
                 "diffusion_model.double_blocks.0.img_attn.qkv"
             ))
         );
-    }
-
-    #[test]
-    fn lora_path_hash_is_deterministic() {
-        let h1 = lora_path_hash("/a/b/c.safetensors");
-        let h2 = lora_path_hash("/a/b/c.safetensors");
-        let h3 = lora_path_hash("/a/b/d.safetensors");
-        assert_eq!(h1, h2);
-        assert_ne!(h1, h3);
     }
 }

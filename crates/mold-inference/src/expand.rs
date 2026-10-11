@@ -12,10 +12,7 @@ use std::path::{Path, PathBuf};
 use tokenizers::Tokenizer;
 
 use mold_core::expand::{ExpandConfig, ExpandResult, PromptExpander};
-use mold_core::expand_prompts::{
-    build_batch_messages_with_context_for_task, build_remix_messages_with_context_for_task,
-    build_single_messages_for_task, format_chatml,
-};
+use mold_core::expand_prompts::format_chatml;
 
 use crate::device::{
     discover_gpus, expand_vram_threshold, memory_status_string, preflight_memory_check,
@@ -712,45 +709,7 @@ impl LocalExpander {
 impl PromptExpander for LocalExpander {
     fn expand(&self, prompt: &str, config: &ExpandConfig) -> Result<ExpandResult> {
         let expanded = mold_core::expand::expand_exact_with(config, |attempt_config, attempt| {
-            let family_override = attempt_config
-                .family_overrides
-                .get(&attempt_config.model_family);
-            let messages = if attempt_config.operation == mold_core::PromptTransformOperation::Remix
-            {
-                build_remix_messages_with_context_for_task(
-                    prompt,
-                    &attempt_config.model_family,
-                    attempt_config.variations,
-                    attempt_config.task,
-                    Some((attempt.start, attempt.total)),
-                    family_override,
-                    attempt_config.style.as_deref(),
-                    &attempt_config.remix_dimensions,
-                    config.context.as_ref(),
-                )
-            } else if attempt.total > 1 {
-                build_batch_messages_with_context_for_task(
-                    prompt,
-                    &attempt_config.model_family,
-                    attempt_config.variations,
-                    attempt_config.task,
-                    Some((attempt.start, attempt.total)),
-                    attempt_config.batch_prompt.as_deref(),
-                    family_override,
-                    attempt_config.style.as_deref(),
-                    config.context.as_ref(),
-                )
-            } else {
-                build_single_messages_for_task(
-                    prompt,
-                    &attempt_config.model_family,
-                    attempt_config.task,
-                    attempt_config.system_prompt.as_deref(),
-                    family_override,
-                    attempt_config.style.as_deref(),
-                    config.context.as_ref(),
-                )
-            };
+            let messages = mold_core::expand::messages_for_attempt(prompt, attempt_config, attempt);
 
             let prompt_text = format_chatml(&messages, attempt_config.thinking);
             let output = self.generate_text(&prompt_text, attempt_config)?;

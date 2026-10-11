@@ -130,7 +130,6 @@ fn sd3_lora_var_builder<'a>(
         .map(|(adapter, w)| sd3_lora::LoraSpec {
             adapter: adapter.as_ref(),
             scale: w.scale,
-            path_hash: sd3_lora::lora_path_hash(&w.path),
         })
         .collect();
 
@@ -175,7 +174,6 @@ fn sd3_gguf_lora_var_builder(
         .map(|(adapter, w)| sd3_lora::LoraSpec {
             adapter: adapter.as_ref(),
             scale: w.scale,
-            path_hash: sd3_lora::lora_path_hash(&w.path),
         })
         .collect();
 
@@ -1553,6 +1551,10 @@ impl InferenceEngine for SD3Engine {
     fn unload(&mut self) {
         self.base.unload();
         clear_cache(&self.prompt_cache);
+        self.lora_delta_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {
@@ -1641,6 +1643,48 @@ mod tests {
             text_tokenizer: None,
             decoder: None,
         }
+    }
+
+    #[test]
+    fn audit_unload_releases_cached_lora_deltas() {
+        let mut engine = SD3Engine::new(
+            "sd3.5-large:bf16".into(),
+            sd3_model_paths(
+                "unused".into(),
+                "unused".into(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            false,
+            false,
+            None,
+            LoadStrategy::Sequential,
+            0,
+            false,
+            None,
+        );
+        let key = crate::lora::LoraCacheKey {
+            tensor_name: "qkv.weight".into(),
+            source_layer: "to_q".into(),
+            adapter_identity: crate::lora::AdapterIdentity::Synthetic(1),
+            scale_bits: 1.0f64.to_bits(),
+        };
+        engine
+            .lora_delta_cache
+            .lock()
+            .unwrap()
+            .insert(
+                key.clone(),
+                &Tensor::ones(1, DType::F32, &Device::Cpu).unwrap(),
+            )
+            .unwrap();
+        assert!(engine.lora_delta_cache.lock().unwrap().get(&key).is_some());
+        InferenceEngine::unload(&mut engine);
+        assert!(engine.lora_delta_cache.lock().unwrap().get(&key).is_none());
     }
 
     #[test]

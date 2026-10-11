@@ -63,7 +63,7 @@
 //!
 //! Suffix detection (Diffusers / PEFT canonical / Kohya / OneTrainer /
 //! PEFT default-adapter / Mochi-edge) is delegated to
-//! [`crate::flux::lora::classify_lora_key`].
+//! [`crate::lora::classify_lora_key`].
 //!
 //! On-disk LoRAs in the wild: none of the mold maintainers have a
 //! verified Qwen-Image LoRA on disk at time of writing. A real-LoRA
@@ -72,24 +72,13 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, Tensor};
 
-use crate::flux::lora::{get_or_load_adapter, LoraAdapter, LoraDeltaCache};
+use crate::lora::{get_or_load_adapter, LoraAdapter};
 use crate::progress::ProgressReporter;
-
-// ---------------------------------------------------------------------------
-// Path-hash helper.
-// ---------------------------------------------------------------------------
-
-pub(crate) fn lora_path_hash(path: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    path.hash(&mut hasher);
-    hasher.finish()
-}
 
 // ---------------------------------------------------------------------------
 // Target descriptors.
@@ -138,7 +127,7 @@ fn strip_known_prefixes(stem: &str) -> &str {
 /// to one or more candle targets. Returns an empty `Vec` for stems we
 /// don't recognise — the caller logs and skips.
 ///
-/// [`classify_lora_key`]: crate::flux::lora::classify_lora_key
+/// [`classify_lora_key`]: crate::lora::classify_lora_key
 pub(crate) fn map_qwen_image_lora_key(raw_stem: &str) -> Vec<QwenImageLoraTarget> {
     // ── Kohya / sd-scripts: `lora_unet_<flattened-with-underscores>` ──
     if let Some(rest) = raw_stem.strip_prefix("lora_unet_") {
@@ -327,22 +316,15 @@ struct QwenImageLoraPatch {
     b: Tensor,
     effective_scale: f64,
     target: QwenImageLoraTarget,
-    /// Stable hash of the source LoRA path; used as part of the delta
-    /// cache key so two LoRAs at the same scale on the same tensor
-    /// don't collide. Currently retained for future delta caching;
-    /// tests rely on the field being populated.
-    #[allow(dead_code)]
-    lora_path_hash: u64,
     /// Resolved `(offset, size)` for `Splat` targets. Filled at patch-
     /// build time once `B`'s row count is known.
     resolved_rows: Option<(usize, usize)>,
 }
 
-/// A loaded LoRA + its scale + a stable hash of its file path.
+/// A loaded adapter and its requested scale.
 pub(crate) struct QwenImageLoraSpec<'a> {
     pub adapter: &'a LoraAdapter,
     pub scale: f64,
-    pub path_hash: u64,
 }
 
 fn resolve_rows(target: &QwenImageLoraTarget, b_rows: usize) -> Option<(usize, usize)> {
@@ -396,7 +378,7 @@ fn build_patches(
                         b: layer.b.clone(),
                         effective_scale,
                         target,
-                        lora_path_hash: spec.path_hash,
+
                         resolved_rows,
                     });
             }
@@ -450,11 +432,6 @@ fn apply_patch_f32(
 struct QwenImageLoraBackend {
     inner: Box<dyn candle_nn::var_builder::SimpleBackend>,
     patches: HashMap<String, Vec<QwenImageLoraPatch>>,
-    // Reserved for future delta caching (mirrors flux2/zimage's API for
-    // consistency when refactoring; currently unused — Qwen-Image's
-    // transformer rebuild cadence is low enough that re-computing
-    // `B @ A` on each construction is cheap).
-    _delta_cache: Option<Arc<Mutex<LoraDeltaCache>>>,
 }
 
 impl QwenImageLoraBackend {
@@ -511,7 +488,6 @@ pub(crate) fn wrap_backend_with_lora(
     inner: Box<dyn candle_nn::var_builder::SimpleBackend>,
     specs: &[QwenImageLoraSpec<'_>],
     progress: &ProgressReporter,
-    delta_cache: Option<Arc<Mutex<LoraDeltaCache>>>,
 ) -> Result<Box<dyn candle_nn::var_builder::SimpleBackend>> {
     if specs.is_empty() {
         bail!("wrap_backend_with_lora called with no LoraSpecs");
@@ -525,11 +501,7 @@ pub(crate) fn wrap_backend_with_lora(
         n = specs.len(),
     ));
 
-    Ok(Box::new(QwenImageLoraBackend {
-        inner,
-        patches,
-        _delta_cache: delta_cache,
-    }))
+    Ok(Box::new(QwenImageLoraBackend { inner, patches }))
 }
 
 /// Re-quantise a merged (CPU, F32) tensor back to its original GGML dtype
@@ -568,7 +540,6 @@ pub(crate) fn gguf_lora_var_builder(
     specs: &[QwenImageLoraSpec<'_>],
     device: &Device,
     progress: &ProgressReporter,
-    _delta_cache: Option<Arc<Mutex<LoraDeltaCache>>>,
 ) -> Result<mold_candle::quantized::VarBuilder> {
     use candle_core::quantized::{gguf_file, QTensor};
 
@@ -684,7 +655,7 @@ pub(crate) fn gguf_lora_var_builder(
 }
 
 /// Build [`QwenImageLoraSpec`]s by loading every adapter through the
-/// shared parsed-LoRA cache (`crate::flux::lora::get_or_load_adapter`).
+/// shared parsed-LoRA cache (`crate::lora::get_or_load_adapter`).
 /// Returns the `Arc`s so the caller can hold them for the lifetime of
 /// the spec slice.
 pub(crate) fn load_lora_adapters(
@@ -710,7 +681,7 @@ pub(crate) fn load_lora_adapters(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flux::lora::LoraLayer;
+    use crate::lora::LoraLayer;
     use safetensors::tensor::TensorView;
 
     /// The merged weight must land on the checkpoint's device, not on the CPU.
@@ -1037,7 +1008,7 @@ mod tests {
             target: QwenImageLoraTarget::Direct {
                 candle_key: "x".into(),
             },
-            lora_path_hash: 0,
+
             resolved_rows: None,
         };
         let merged = apply_patch_f32(&base, &delta, &patch).unwrap();
@@ -1074,7 +1045,7 @@ mod tests {
                     row_offset: component,
                     row_size: 0,
                 },
-                lora_path_hash: 0,
+
                 resolved_rows: None,
             };
             patch.resolved_rows = resolve_rows(&patch.target, 3 * h);
@@ -1105,7 +1076,7 @@ mod tests {
                 row_offset: 0,
                 row_size: 0,
             },
-            lora_path_hash: 0,
+
             resolved_rows: None,
         };
         patch.resolved_rows = resolve_rows(&patch.target, 3 * h);
@@ -1122,7 +1093,7 @@ mod tests {
         let b = Tensor::full(1.0f32, (b_rows, 2), &dev).unwrap();
         let mut layers = HashMap::new();
         layers.insert(layer.to_string(), LoraLayer { a, b, alpha: None });
-        LoraAdapter { layers, rank: 2 }
+        LoraAdapter::from_layers(layers, 2)
     }
 
     #[test]
@@ -1131,7 +1102,6 @@ mod tests {
         let specs = [QwenImageLoraSpec {
             adapter: &adapter,
             scale: 0.7,
-            path_hash: 0xCAFE,
         }];
         let (patches, skipped) = build_patches(&specs);
         assert_eq!(skipped, 0);
@@ -1161,7 +1131,6 @@ mod tests {
         let specs = [QwenImageLoraSpec {
             adapter: &adapter,
             scale: 0.5,
-            path_hash: 0,
         }];
         let (patches, _) = build_patches(&specs);
         let bucket = &patches["transformer_blocks.0.attn.to_out.0.weight"];
@@ -1182,11 +1151,10 @@ mod tests {
             "lora_unet_garbage_42_unknown".to_string(),
             LoraLayer { a, b, alpha: None },
         );
-        let adapter = LoraAdapter { layers, rank: 2 };
+        let adapter = LoraAdapter::from_layers(layers, 2);
         let specs = [QwenImageLoraSpec {
             adapter: &adapter,
             scale: 1.0,
-            path_hash: 0,
         }];
         let (patches, skipped) = build_patches(&specs);
         assert!(patches.is_empty());
@@ -1195,7 +1163,7 @@ mod tests {
 
     /// Multi-LoRA stacking: two specs targeting the same tensor produce
     /// two patches in the same bucket, each tagged with its own
-    /// `lora_path_hash` so the delta cache keys don't collide.
+    /// requested strength and input order.
     #[test]
     fn build_patches_two_specs_stack_on_same_target() {
         let a1 = synthetic_kohya_adapter("lora_unet_transformer_blocks_0_attn_to_q", 4);
@@ -1204,19 +1172,15 @@ mod tests {
             QwenImageLoraSpec {
                 adapter: &a1,
                 scale: 1.0,
-                path_hash: 0xAA,
             },
             QwenImageLoraSpec {
                 adapter: &a2,
                 scale: 1.0,
-                path_hash: 0xBB,
             },
         ];
         let (patches, _) = build_patches(&specs);
         let bucket = &patches["transformer_blocks.0.attn.to_q.weight"];
         assert_eq!(bucket.len(), 2);
-        assert_eq!(bucket[0].lora_path_hash, 0xAA);
-        assert_eq!(bucket[1].lora_path_hash, 0xBB);
     }
 
     /// Dual-emit FF: a single LoRA layer creates two patch buckets (one
@@ -1228,7 +1192,6 @@ mod tests {
         let specs = [QwenImageLoraSpec {
             adapter: &adapter,
             scale: 1.0,
-            path_hash: 0,
         }];
         let (patches, _) = build_patches(&specs);
         assert!(patches.contains_key("transformer_blocks.0.ff.net.0.proj.weight"));
@@ -1292,11 +1255,10 @@ mod tests {
             "lora_unet_transformer_blocks_0_attn_qkv".to_string(),
             LoraLayer { a, b, alpha: None },
         );
-        let adapter = LoraAdapter { layers, rank: 2 };
+        let adapter = LoraAdapter::from_layers(layers, 2);
         let specs = [QwenImageLoraSpec {
             adapter: &adapter,
             scale: 1.0,
-            path_hash: 0xFEED,
         }];
 
         let st =
@@ -1340,7 +1302,7 @@ mod tests {
         let inner: Box<dyn candle_nn::var_builder::SimpleBackend> = Box::new(MmapBackend { st });
 
         let progress = ProgressReporter::default();
-        let wrapped = wrap_backend_with_lora(inner, &specs, &progress, None).expect("wrap");
+        let wrapped = wrap_backend_with_lora(inner, &specs, &progress).expect("wrap");
 
         for k in [
             "transformer_blocks.0.attn.to_q.weight",
@@ -1379,11 +1341,10 @@ mod tests {
             "lora_unet_transformer_blocks_0_attn_to_q".to_string(),
             LoraLayer { a, b, alpha: None },
         );
-        let adapter = LoraAdapter { layers, rank: 2 };
+        let adapter = LoraAdapter::from_layers(layers, 2);
         let specs = [QwenImageLoraSpec {
             adapter: &adapter,
             scale: 1.0,
-            path_hash: 0,
         }];
 
         let st =
@@ -1426,7 +1387,7 @@ mod tests {
         }
         let inner: Box<dyn candle_nn::var_builder::SimpleBackend> = Box::new(MmapBackend { st });
         let progress = ProgressReporter::default();
-        let wrapped = wrap_backend_with_lora(inner, &specs, &progress, None).expect("wrap");
+        let wrapped = wrap_backend_with_lora(inner, &specs, &progress).expect("wrap");
 
         // B@A entry = 2 * 0.5 * 1 = 1. Merged = base(1) + delta(1) = 2.
         let t = wrapped
@@ -1466,11 +1427,10 @@ mod tests {
                 "lora_unet_transformer_blocks_0_ff_net_0_proj".to_string(),
                 LoraLayer { a, b, alpha: None },
             );
-            let adapter = LoraAdapter { layers, rank: 2 };
+            let adapter = LoraAdapter::from_layers(layers, 2);
             let specs = [QwenImageLoraSpec {
                 adapter: &adapter,
                 scale: 1.0,
-                path_hash: 0,
             }];
 
             let st = unsafe {
@@ -1515,7 +1475,7 @@ mod tests {
             let inner: Box<dyn candle_nn::var_builder::SimpleBackend> =
                 Box::new(MmapBackend { st });
             let progress = ProgressReporter::default();
-            let wrapped = wrap_backend_with_lora(inner, &specs, &progress, None).expect("wrap");
+            let wrapped = wrap_backend_with_lora(inner, &specs, &progress).expect("wrap");
 
             // B@A entry = 2. base(0) + 2 = 2.
             let t = wrapped
@@ -1546,11 +1506,10 @@ mod tests {
         let specs = [QwenImageLoraSpec {
             adapter: &adapter,
             scale: 1.0,
-            path_hash: 0,
         }];
         let inner: Box<dyn candle_nn::var_builder::SimpleBackend> = Box::new(tensors);
         let progress = ProgressReporter::default();
-        let wrapped = wrap_backend_with_lora(inner, &specs, &progress, None).expect("wrap");
+        let wrapped = wrap_backend_with_lora(inner, &specs, &progress).expect("wrap");
         let t = wrapped
             .get_unchecked(
                 "vae.decoder.up_blocks.0.resnets.0.conv1.weight",
@@ -1585,16 +1544,15 @@ mod tests {
             "lora_unet_transformer_blocks_0_attn_to_q".to_string(),
             LoraLayer { a, b, alpha: None },
         );
-        let adapter = LoraAdapter { layers, rank: 2 };
+        let adapter = LoraAdapter::from_layers(layers, 2);
         let specs = [QwenImageLoraSpec {
             adapter: &adapter,
             scale: 1.0,
-            path_hash: 0,
         }];
 
         let inner: Box<dyn candle_nn::var_builder::SimpleBackend> = Box::new(tensors);
         let progress = ProgressReporter::default();
-        let wrapped = wrap_backend_with_lora(inner, &specs, &progress, None).expect("wrap");
+        let wrapped = wrap_backend_with_lora(inner, &specs, &progress).expect("wrap");
 
         let t = wrapped
             .get_unchecked("transformer_blocks.0.attn.to_q.weight", DType::F32, &dev)
@@ -1611,22 +1569,13 @@ mod tests {
         let empty: HashMap<String, Tensor> = HashMap::new();
         let inner: Box<dyn candle_nn::var_builder::SimpleBackend> = Box::new(empty);
         let progress = ProgressReporter::default();
-        match wrap_backend_with_lora(inner, &[], &progress, None) {
+        match wrap_backend_with_lora(inner, &[], &progress) {
             Ok(_) => panic!("expected error for empty spec list"),
             Err(e) => assert!(
                 e.to_string().contains("no LoraSpecs"),
                 "expected 'no LoraSpecs' message, got: {e}",
             ),
         }
-    }
-
-    #[test]
-    fn lora_path_hash_is_deterministic_and_distinguishes() {
-        let h1 = lora_path_hash("/a/b/c.safetensors");
-        let h2 = lora_path_hash("/a/b/c.safetensors");
-        let h3 = lora_path_hash("/a/b/d.safetensors");
-        assert_eq!(h1, h2);
-        assert_ne!(h1, h3);
     }
 
     /// Real-LoRA smoke test placeholder. Qwen-Image LoRAs in the wild

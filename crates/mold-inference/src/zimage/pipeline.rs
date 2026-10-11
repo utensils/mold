@@ -720,7 +720,6 @@ impl ZImageEngine {
                     .map(|(adapter, w)| super::lora::ZImageLoraSpec {
                         adapter: adapter.as_ref(),
                         scale: w.scale,
-                        path_hash: super::lora::lora_path_hash(&w.path),
                     })
                     .collect();
                 let vb = super::lora::gguf_lora_var_builder(
@@ -774,11 +773,9 @@ impl ZImageEngine {
                 .map(|(adapter, w)| super::lora::ZImageLoraSpec {
                     adapter: adapter.as_ref(),
                     scale: w.scale,
-                    path_hash: super::lora::lora_path_hash(&w.path),
                 })
                 .collect();
-            let wrapped =
-                super::lora::wrap_backend_with_lora(inner, &specs, &self.base.progress, None)?;
+            let wrapped = super::lora::wrap_backend_with_lora(inner, &specs, &self.base.progress)?;
             let vb = candle_nn::VarBuilder::from_backend(wrapped, dtype, device.clone());
             Ok(ZImageTransformer::Dense(Box::new(
                 MoldZImageTransformer2DModel::new(cfg, vb)?,

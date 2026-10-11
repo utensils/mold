@@ -25,8 +25,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use candle_core::{DType, Device};
 
-use crate::flux::lora::{LoraAdapter, LoraSpec};
+use crate::flux::lora::LoraSpec;
 use crate::flux::lora_bypass::{build_registry_with, BypassTarget, LoraRegistry};
+use crate::lora::LoraAdapter;
 
 use super::transformer::QwenImage21TransformerConfig;
 
@@ -238,68 +239,14 @@ pub(crate) struct Qwen21LoraEntry {
     pub scale: f64,
 }
 
-impl Qwen21LoraEntry {
-    fn path_hash(&self) -> u64 {
-        crate::flux2::lora::lora_path_hash(&self.path.to_string_lossy())
-    }
-}
+pub(crate) use crate::lora::LoraFingerprint as Qwen21LoraFingerprint;
 
-/// One adapter's identity in an installed stack: path hash, scale BITS and
-/// [`file_identity`].
-pub(crate) type Qwen21LoraFingerprint = (u64, u64, u64);
-
-/// Identity of an installed stack: path hash, scale BITS and file identity
-/// per adapter, in order (the `LoraFingerprint` rule every family's residency
-/// reads, plus the file). The path alone is not an identity: a retrained
-/// adapter written over the same path at the same scale would otherwise
-/// match the stack already in the bypass slots and keep rendering the stale
-/// weights.
+/// Revision and scale per adapter, in request order. Missing metadata is never reusable.
 pub(crate) fn fingerprint(entries: &[Qwen21LoraEntry]) -> Vec<Qwen21LoraFingerprint> {
     entries
         .iter()
-        .map(|entry| {
-            (
-                entry.path_hash(),
-                entry.scale.to_bits(),
-                file_identity(&entry.path),
-            )
-        })
+        .map(|entry| Qwen21LoraFingerprint::new(&entry.path, entry.scale))
         .collect()
-}
-
-/// A cheap identity for the bytes at `path`, from metadata alone: length,
-/// modification time and — on Unix — device, inode and status-change time.
-/// `ctime` is the part a writer cannot forge (it is stamped by the kernel on
-/// every write, and no syscall sets it), and the inode catches a file
-/// replaced by rename. Hashing the content instead would read a multi-GB
-/// adapter on every request just to learn that nothing changed. An unreadable
-/// file answers 0; loading it fails right after, so that value is never
-/// installed.
-fn file_identity(path: &Path) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return 0;
-    };
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    metadata.len().hash(&mut hasher);
-    metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|since| since.as_nanos())
-        .hash(&mut hasher);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        (
-            metadata.dev(),
-            metadata.ino(),
-            metadata.ctime(),
-            metadata.ctime_nsec(),
-        )
-            .hash(&mut hasher);
-    }
-    hasher.finish()
 }
 
 /// Load an adapter, giving every layer the alpha PEFT would scale it by
@@ -308,9 +255,11 @@ fn file_identity(path: &Path) -> u64 {
 /// files store it — under rsLoRA's `sqrt(r)` rule when the metadata declares
 /// it. A DoRA adapter is refused before any tensor is read.
 pub(crate) fn load_adapter(path: &Path) -> Result<LoraAdapter> {
+    let before = crate::lora::FileRevision::read(path);
     let header = read_header(path)?;
     refuse_dora(path, &header)?;
     let mut adapter = LoraAdapter::load(path)?;
+    adapter.fence_revision(before)?;
     if let Some(metadata) = &header.metadata {
         for (stem, layer) in adapter.layers.iter_mut() {
             let rank = layer.a.dim(0)?;
@@ -362,7 +311,6 @@ pub(crate) fn build_registry(
         .map(|(adapter, entry)| LoraSpec {
             adapter,
             scale: entry.scale,
-            path_hash: entry.path_hash(),
         })
         .collect();
     build_registry_with(
@@ -1274,7 +1222,7 @@ mod viggle_file_tests {
             let scale = LoraMetadataScale::read(&path).unwrap().unwrap();
             assert_eq!(scale.alpha, Some(rank as f64));
             assert_eq!(scale.rank, Some(rank as f64));
-            let adapter = crate::flux::lora::LoraAdapter::load(&path).unwrap();
+            let adapter = crate::lora::LoraAdapter::load(&path).unwrap();
             assert_eq!(adapter.layers.len(), 227);
             let mapped = map_adapter(adapter.layers.keys().map(String::as_str)).unwrap();
             assert!(mapped.iter().all(|(_, targets)| targets.len() == 1));
