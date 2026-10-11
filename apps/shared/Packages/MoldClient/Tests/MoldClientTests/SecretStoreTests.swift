@@ -224,10 +224,7 @@ struct SecretStoreTests {
 
     // MARK: - The engine's own key
 
-    /// `SecretStore::local_server_api_key`'s precedence, exactly
-    /// (`secrets.rs:103-119`): a non-empty `MOLD_API_KEY` is the operator's
-    /// override, then whatever this install already minted, then a fresh UUID
-    /// that is stored before it is returned.
+    /// Explicit operator configuration wins; otherwise the Mold home owns the key.
     @Test func theEngineKeyIsMintedOnceAndPersists() throws {
         let (store, dir) = try scratch()
         let first = try store.localEngineAPIKey(home: dir, environment: [:])
@@ -242,6 +239,18 @@ struct SecretStoreTests {
         #expect(try store.localEngineAPIKey(home: dir, environment: ["MOLD_API_KEY": "operator"]) == "operator")
         // Empty is not an override -- it is an unset variable spelled out.
         #expect(try store.localEngineAPIKey(home: dir, environment: ["MOLD_API_KEY": ""]) == "stored")
+    }
+
+    @Test func explicitKeyFilesAndListsSelectOneClientCredential() throws {
+        let (store, home) = try scratch()
+        let file = home.appending(path: "operator-keys")
+        try Data("# owners\n\n first-key \nsecond-key\n".utf8).write(to: file)
+        #expect(try store.localEngineAPIKey(home: home, environment: ["MOLD_API_KEY": "@" + file.path]) == "first-key")
+        #expect(try store.localEngineAPIKey(home: home, environment: ["MOLD_API_KEY": " , first-key,second-key"]) == "first-key")
+        #expect(!FileManager.default.fileExists(atPath: home.appending(path: "secure/operator.key").path))
+        #expect(throws: SecretStoreError.self) {
+            try store.localEngineAPIKey(home: home, environment: ["MOLD_API_KEY": "@" + file.path + ".missing"])
+        }
     }
 
     @Test func hostingShellsShareHomeAuthorityAndKeepTheirLegacySecrets() throws {

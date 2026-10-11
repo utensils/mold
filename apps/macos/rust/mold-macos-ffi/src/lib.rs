@@ -18,7 +18,8 @@ use std::sync::Arc;
 mod relay;
 mod relay_lifetime;
 pub use relay::{
-    mold_relay_is_alive, mold_relay_is_ready, mold_secure_host_namespace, mold_relay_set_public_origin, mold_relay_start, mold_relay_stop,
+    mold_relay_is_alive, mold_relay_is_ready, mold_relay_set_public_origin, mold_relay_start,
+    mold_relay_stop, mold_secure_host_namespace,
 };
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -158,7 +159,15 @@ unsafe fn bootstrap(
     }
     if let Some(key) = unsafe { str_arg(api_key) } {
         if !key.is_empty() {
-            unsafe { std::env::set_var("MOLD_API_KEY", key) };
+            // The Swift client uses one normalized key; retain an explicit
+            // @file/CSV configuration so the server still accepts the full set.
+            let explicit = std::env::var("MOLD_API_KEY").ok();
+            unsafe {
+                std::env::set_var(
+                    "MOLD_API_KEY",
+                    mold_secure::operator_key::server_configuration(explicit.as_deref(), key),
+                )
+            };
         }
     }
     // Set unconditionally and NOT taken from the caller: the embedded engine
@@ -715,21 +724,11 @@ mod managed_relay_tests {
         let origin = CString::new("https://host.example.com").unwrap();
         unsafe {
             assert_ne!(
-                super::mold_relay_start(
-                    endpoint.as_ptr(),
-                    host.as_ptr(),
-                    0,
-                    origin.as_ptr()
-                ),
+                super::mold_relay_start(endpoint.as_ptr(), host.as_ptr(), 0, origin.as_ptr()),
                 0
             );
             assert_ne!(
-                super::mold_relay_start(
-                    std::ptr::null(),
-                    host.as_ptr(),
-                    7680,
-                    origin.as_ptr()
-                ),
+                super::mold_relay_start(std::ptr::null(), host.as_ptr(), 7680, origin.as_ptr()),
                 0
             );
             assert_ne!(super::mold_relay_set_public_origin(endpoint.as_ptr()), 0);

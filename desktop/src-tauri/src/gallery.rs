@@ -2621,6 +2621,7 @@ mod tests {
             conn: tokio::sync::Mutex::new(Conn::Off),
             local_server: tokio::sync::Mutex::new(LocalServer::Off),
             local_api_key: "desktop-test-key".into(),
+            original_operator_configuration: None,
             secrets: crate::secrets::SecretStore::new(dir.path().to_path_buf()),
         })
     }
