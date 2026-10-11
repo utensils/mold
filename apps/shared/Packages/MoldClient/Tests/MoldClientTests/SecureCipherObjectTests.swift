@@ -146,6 +146,7 @@ private extension SecureWebSocketConnection {
         try await receiveFrame(["connectionId":"fixture","requestId":"fixture","message":"Internal server error"])
         #expect(pending[1]?.bytes == ciphertext && pending[1]?.tries == 1)
         #expect(failure == nil)
+        #expect(!Self.isGatewayBusy(["connectionId":" ", "requestId":"fixture", "message":"Internal server error"]))
         #expect(!Self.isGatewayBusy(["connectionId":"é", "requestId":"fixture", "message":"Internal server error"]))
         #expect(!Self.isGatewayBusy(["connectionId":"fixture", "requestId":"fixture", "message":"Internal server error", "v":2]))
         await #expect(throws: SecureConnectionError.protocolViolation) { try await receiveFrame(["message":"Internal server error"]) }

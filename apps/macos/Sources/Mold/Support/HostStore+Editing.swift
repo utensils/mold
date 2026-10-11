@@ -86,7 +86,15 @@ extension HostStore {
         failures.removeAll { $0.host == id }
     }
 
-    func remove(_ host: MoldHost) {
+    @discardableResult
+    func remove(_ host: MoldHost, in secrets: SecretStore = .shared) -> Bool {
+        guard hosts.contains(where: { $0.id == host.id }) else { return false }
+        do {
+            try HostPersistence.forget(host, in: secrets)
+        } catch {
+            report(error, on: host.id, doing: "remove its key")
+            return false
+        }
         Task { await HTTPBackend.disconnect(host: host.id) }
         hosts.removeAll { $0.id == host.id }
         forget(host.id)
@@ -100,12 +108,8 @@ extension HostStore {
         PendingBatch.forgetAll(on: host.id)
         PendingChain.forgetAll(on: host.id)
         reconcileEventStreams()
-        do {
-            try HostPersistence.forget(host)
-        } catch {
-            report(error, on: host.id, doing: "remove its key")
-        }
         persist()
+        return true
     }
 
     /// One machine's key, written because the person supplied or cleared one.

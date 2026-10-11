@@ -75,6 +75,26 @@ struct HostStoreLifecycleTests {
         #expect(hosts.failures.isEmpty)
     }
 
+    @Test func failedCredentialRemovalKeepsTheMachineAndItsWatcher() throws {
+        let workstation = machine()
+        let hosts = HostStore(hosts: [workstation]) { FakeBackend(host: $0) }
+        hosts.defaultMachine = workstation.id
+        hosts.reachability[workstation.id] = .unknown
+        hosts.watchers[workstation.id] = Task {}
+        let blocked = FileManager.default.temporaryDirectory.appending(path: "mold-secret-denied-\(UUID())")
+        try Data([0]).write(to: blocked)
+        defer { try? FileManager.default.removeItem(at: blocked) }
+        let secrets = SecretStore(directory: blocked)
+
+        #expect(!hosts.remove(workstation, in: secrets))
+        #expect(hosts.host(workstation.id) == workstation)
+        #expect(hosts.defaultMachine == workstation.id)
+        #expect(hosts.watchers[workstation.id] != nil)
+        #expect(hosts.reachability[workstation.id] == .unknown)
+        #expect(hosts.failures.count == 1)
+        hosts.watchers.removeValue(forKey: workstation.id)?.cancel()
+    }
+
     /// **Fails today**: a machine whose address changed keeps the old box's
     /// fleet identity, so the next authority frame matches and the "this is a
     /// different library" repair never fires.

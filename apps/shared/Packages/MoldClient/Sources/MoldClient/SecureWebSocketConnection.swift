@@ -365,7 +365,7 @@ actor SecureWebSocketConnection: SecureRecordConnection {
               frame["message"] as? String == "Internal server error" else { return false }
         return ["connectionId", "requestId"].allSatisfy { key in
             guard let value = frame[key] as? String else { return false }
-            return (1...128).contains(value.utf8.count) && value.utf8.allSatisfy { (32...126).contains($0) }
+            return (1...128).contains(value.utf8.count) && value.utf8.allSatisfy { (33...126).contains($0) }
         }
     }
     static func number(_ value: Any?) -> UInt64? {
