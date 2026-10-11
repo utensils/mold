@@ -68,3 +68,18 @@ describe("shell inventory observation", () => {
     expect(restored.ledger.isUnread(["origin|b.png"])).toBe(true);
   });
 });
+
+it("persists visit acknowledgements while preserving media outside the visit", () => {
+  const store = useLibraryUnread();
+  store.ledger.observe([], ["origin"]);
+  store.ledger.observe(
+    [["origin|shown.png"], ["origin|hidden.png"], ["origin|later.png"]],
+    ["origin"],
+  );
+  store.finishVisit(["origin|shown.png"]);
+  setActivePinia(createPinia());
+  const restored = useLibraryUnread();
+  expect(restored.ledger.isUnread(["origin|shown.png"])).toBe(false);
+  expect(restored.ledger.isUnread(["origin|hidden.png"])).toBe(true);
+  expect(restored.ledger.isUnread(["origin|later.png"])).toBe(true);
+});

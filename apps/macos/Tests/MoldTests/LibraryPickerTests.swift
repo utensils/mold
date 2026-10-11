@@ -54,4 +54,65 @@ struct LibraryPickerTests {
         let entries = [entry("z.png"), entry("a.png")]
         #expect(LibraryPicker.rows(entries, query: "").map(\.print.filename) == ["z.png", "a.png"])
     }
+    @Test func allMachinesIncludesBothHostsAndSearchesCopies() {
+        let first = host("alpha"), second = host("beta")
+        var merged = LibraryEntry(host: first, print: print("shared.png"))
+        merged.copies = [LibraryEntry(host: second, print: print("shared.png"))]
+        #expect(LibraryPicker.rows([merged], query: "beta").count == 1)
+        let selected = LibraryPicker.rows([merged], query: "", machineID: second.id)
+        #expect(selected.first?.hostID == second.id)
+        #expect(selected.first?.copies.isEmpty == true)
+    }
+
+    @Test func removedMachinesCannotRemainActionTargets() {
+        let first = host("alpha"), second = host("beta")
+        var merged = LibraryEntry(host: first, print: print("shared.png"))
+        merged.copies = [LibraryEntry(host: second, print: print("shared.png"))]
+        let rows = LibraryPicker.rows([merged], query: "", availableHosts: [second.id])
+        #expect(rows.first?.hostID == second.id)
+    }
+
+    @Test func sheetFitsSmallScreensAndGrowsOnDesktop() {
+        let small = LibraryPicker.sheetSize(available: CGSize(width: 800, height: 600))
+        #expect(small.width <= 768 && small.height <= 568)
+        let large = LibraryPicker.sheetSize(available: CGSize(width: 1800, height: 1100))
+        #expect(large.width >= 1000 && large.height >= 700)
+    }
+
+    @Test func hiddenReplicaProtectsLogicalPrintBeforeHostProjection() {
+        let first = host("alpha"), second = host("beta")
+        var hidden = GalleryPrint.Mutable(print("shared.png"))
+        hidden.collections = ["private"]
+        var merged = LibraryEntry(host: first, print: hidden.build())
+        merged.copies = [LibraryEntry(host: second, print: print("shared.png"))]
+        #expect(LibraryPicker.rows([merged], query: "", machineID: second.id,
+            hiddenCollectionIDs: [first.id: ["private"]]).isEmpty)
+    }
+
+    @Test func allMachinesPrefersReachableCopyWithoutHidingOfflineInventory() {
+        let offline = host("offline"), online = host("online")
+        var merged = LibraryEntry(host: offline, print: print("shared.png"))
+        let reachable = LibraryEntry(host: online, print: print("shared.png"))
+        merged.copies = [reachable]
+        let rows = LibraryPicker.rows([merged], query: "", reachableHosts: [online.id])
+        #expect(rows.first?.id == reachable.id)
+        #expect(rows.first?.copies.map(\.hostID) == [offline.id])
+        let scoped = LibraryPicker.rows([merged], query: "", machineID: offline.id,
+                                        reachableHosts: [online.id])
+        #expect(scoped.first?.hostID == offline.id)
+        #expect(scoped.first?.copies.isEmpty == true)
+        let unavailable = LibraryPicker.rows([merged], query: "", reachableHosts: [])
+        #expect(unavailable.first?.hostID == offline.id)
+        #expect(unavailable.count == 1)
+    }
+
+    @Test func defaultPickerMinimumIsSpaciousButClampedToScreen() {
+        let desktop = LibraryPicker.minimumSheetSize(available: CGSize(width: 1800, height: 1100))
+        #expect(desktop.width >= 960)
+        #expect(desktop.height >= 640)
+        let compact = LibraryPicker.minimumSheetSize(available: CGSize(width: 800, height: 600))
+        #expect(compact.width <= 768)
+        #expect(compact.height <= 568)
+    }
+
 }

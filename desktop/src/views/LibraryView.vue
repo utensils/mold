@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { LibraryVisit } from "@studio/lib/libraryUnreadLedger";
+import { unreadCopyKeys } from "../stores/gallery";
 import { useSourceMediaVisibility } from "@studio/lib/sourceMediaVisibility";
 import SourceMediaBrowser from "@studio/components/SourceMediaBrowser.vue";
 import {
@@ -212,6 +214,23 @@ function setScope(next: LibraryScope) {
 const entries = computed<MergedPrint[]>(() =>
   inTrash.value ? gallery.trashFiltered : gallery.filtered,
 );
+
+// Keep New visible until departure, using only projections actually visited.
+const libraryVisit = new LibraryVisit();
+watch(
+  [entries, scope, openCollection],
+  () => {
+    if (
+      inTrash.value ||
+      scope.value === "sources" ||
+      (inCollections.value && !openCollection.value)
+    )
+      return;
+    libraryVisit.capture(entries.value.map(unreadCopyKeys));
+  },
+  { immediate: true },
+);
+onBeforeUnmount(() => gallery.markVisitViewed(libraryVisit.finish()));
 
 // Physical owners come from the already visibility-filtered projection.
 const sourceOwners = computed<SourceMediaOwner[]>(() =>

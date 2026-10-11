@@ -1,3 +1,4 @@
+import AppKit
 import MoldClient
 import MoldStyle
 import SwiftUI
@@ -29,25 +30,70 @@ struct LibraryPickerSheet: View {
     @State var query = ""
     /// Not `private`, same reason -- a tile sets and reads this.
     @State var selected: PrintID?
-    @State private var isFetching = false
+    @State var isFetching = false
+    @State var machineID: MoldHost.ID?
+    @State var preview: LibraryEntry?
+    @State var fetchError: String?
+    @State private var fetchTask: Task<Void, Never>?
+
+    private var availableSize: CGSize {
+        NSApp.keyWindow?.screen?.visibleFrame.size
+            ?? NSScreen.main?.visibleFrame.size ?? CGSize(width: 1200, height: 900)
+    }
+
+    private var sheetSize: CGSize { LibraryPicker.sheetSize(available: availableSize) }
+    private var minimumSize: CGSize { LibraryPicker.minimumSheetSize(available: availableSize) }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("Choose a Picture").font(.headline)
-                Spacer()
-                TextField("Search", text: $query)
+            VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Choose from Library").font(.headline)
+                    Text("Pictures from your connected machines").font(.caption).foregroundStyle(.secondary)
+                }
+                HStack {
+                Picker("Machine", selection: $machineID) {
+                    Text("All Machines").tag(nil as MoldHost.ID?)
+                    ForEach(hosts.hosts) { host in Text(host.name).tag(Optional(host.id)) }
+                }
+                .frame(maxWidth: 200)
+                TextField("Search pictures", text: $query)
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 220)
+                    .frame(minWidth: 120, maxWidth: .infinity)
                     .accessibilityLabel("Search pictures")
+                }
             }
             .padding(12)
             Divider()
             grid
+            if let fetchError {
+                Text(fetchError).font(.callout).foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(12)
+            }
             Divider()
             footer
         }
-        .frame(width: 680, height: 520)
+        .frame(minWidth: minimumSize.width, idealWidth: sheetSize.width,
+               maxWidth: sheetSize.width, minHeight: minimumSize.height,
+               idealHeight: sheetSize.height, maxHeight: sheetSize.height)
+        .onDisappear { fetchTask?.cancel() }
+        .sheet(item: $preview) { entry in
+            VStack(spacing: 12) {
+                Text(entry.print.displayName).font(.headline).lineLimit(1)
+                if let host = hosts.host(entry.hostID) {
+                    LibraryThumbnail(entry: entry, host: host, edge: 640, continuous: true)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                HStack {
+                    Text(entry.hostBadge(compact: false)).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Done") { preview = nil }.keyboardShortcut(.cancelAction)
+                    Button("Use Picture") { selected = entry.id; preview = nil; use() }
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding(20).frame(width: min(720, sheetSize.width), height: min(720, sheetSize.height))
+        }
         .task {
             guard library.items.isEmpty, !library.isLoading else { return }
             await library.refresh()
@@ -56,35 +102,48 @@ struct LibraryPickerSheet: View {
 
     private var footer: some View {
         HStack {
-            Text(LibraryPickerSheet.caption(count: rows.count))
+            if isFetching { ProgressView().controlSize(.small) }
+            Text(isFetching ? "Preparing picture…" : LibraryPickerSheet.caption(count: rows.count))
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Spacer()
             Button("Cancel") { dismiss() }
                 .keyboardShortcut(.cancelAction)
-            Button("Use", action: use)
+            Button("Use Picture", action: use)
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
-                .disabled(selected == nil || isFetching)
+                .disabled(!rows.contains { $0.id == selected } || isFetching)
         }
         .padding(12)
     }
 
     /// Not `private`: `LibraryPickerSheet+Grid` draws one tile per row.
-    var rows: [LibraryEntry] { LibraryPicker.rows(library.items, query: query) }
+    var rows: [LibraryEntry] {
+        LibraryPicker.rows(library.items, query: query, machineID: machineID,
+                           availableHosts: Set(hosts.hosts.map(\.id)),
+                           reachableHosts: Set(hosts.hosts.filter { hosts.isUp($0) }.map(\.id)),
+                           hiddenCollectionIDs: library.hiddenCollectionIDs)
+    }
 
     /// Not `private`: a double-clicked tile calls this directly.
     func use() {
-        guard let selected, let entry = rows.first(where: { $0.id == selected }) else { return }
+        guard !isFetching, let selected, rows.contains(where: { $0.id == selected }) else { return }
         isFetching = true
-        Task {
+        fetchError = nil
+        fetchTask = Task {
             defer { isFetching = false }
             do {
-                pick(try await PictureSource.bytes(
+                let picture = try await PictureSource.bytes(
                     of: .print(selected), accepting: accepting,
-                    hosts: hosts, library: library))
+                    hosts: hosts, library: library)
+                try Task.checkCancellation()
+                guard rows.contains(where: { $0.id == selected }) else { return }
+                pick(picture)
                 dismiss()
+            } catch is CancellationError {
+                return
             } catch {
+                fetchError = error.localizedDescription
                 hosts.report(error, on: selected.host, doing: "fetch that picture")
             }
         }

@@ -37,26 +37,37 @@ extension LibraryPane {
             version: attachmentVersion, cursor: selection, viewed: viewing,
             scope: navigation.scope, destination: destination)
         let fence = DraftAttachmentFence(controller: generate, reuse: reuseStore)
-        Task { await finishAttachment(entry, as: kind, transaction: transaction, fence: fence) }
+        let routes = attachmentRoutes(for: entry)
+        Task { await finishAttachment(entry, as: kind, transaction: transaction, fence: fence, routes: routes) }
     }
 
     private func finishAttachment(
         _ entry: LibraryEntry, as kind: LibraryAttachmentKind,
-        transaction: LibraryAttachmentTransaction, fence: DraftAttachmentFence
+        transaction: LibraryAttachmentTransaction, fence: DraftAttachmentFence,
+        routes: LibraryAttachmentRoutes
     ) async {
-        guard let data = await actions.data(for: entry) else { return }
-        guard attachmentIsCurrent(transaction, entry: entry, fence: fence) else { return }
+        guard attachmentIsCurrent(transaction, entry: entry, fence: fence, routes: routes),
+              let data = await actions.data(for: entry) else { return }
+        guard attachmentIsCurrent(transaction, entry: entry, fence: fence, routes: routes) else { return }
         let picked: ImportedPicture
+        let typedReference: GenerationReference?
         do {
             picked = try await PictureImport.conforming(
                 data, name: entry.print.filename, accepting: PictureImport.engineReadable)
+            if kind == .reference, attachmentContext?.recipe.capabilities.generationReferences?.mode.isVisible == true {
+                typedReference = try await Task.detached(priority: .userInitiated) {
+                    try GenerationReferenceImporter.image(picked)
+                }.value
+            } else {
+                typedReference = nil
+            }
         } catch {
-            if attachmentIsCurrent(transaction, entry: entry, fence: fence) {
+            if attachmentIsCurrent(transaction, entry: entry, fence: fence, routes: routes) {
                 hosts.report(error, on: entry.hostID, doing: "use that picture")
             }
             return
         }
-        guard attachmentIsCurrent(transaction, entry: entry, fence: fence),
+        guard attachmentIsCurrent(transaction, entry: entry, fence: fence, routes: routes),
               let initialContext = attachmentContext
         else { return }
         if generate.modelName == nil {
@@ -76,12 +87,21 @@ extension LibraryPane {
             guard attachmentOffer.canUseAsSource else { return }
             DraftPictureAttachment.useAsSource(picked, in: &draft, recipe: context.recipe)
         case .reference:
-            let layout = ImageConditioningWells.layout(
-                recipe: context.recipe, model: context.model, media: draft.media)
-            guard let capability = layout.references,
-                  capability.hasRoom(for: draft.media.editImages.count) else { return }
-            DraftPictureAttachment.addReference(
-                picked, to: &draft, capability: capability, recipe: context.recipe)
+            guard attachmentOffer.canAddReference else { return }
+            if let typedReference {
+                do {
+                    try DraftPictureAttachment.addTypedReference(typedReference, to: &draft, recipe: context.recipe)
+                } catch {
+                    hosts.report(error, on: context.host.id, doing: "add that reference")
+                    return
+                }
+            } else {
+                let layout = ImageConditioningWells.layout(
+                    recipe: context.recipe, model: context.model, media: draft.media)
+                guard let capability = layout.references else { return }
+                DraftPictureAttachment.addReference(
+                    picked, to: &draft, capability: capability, recipe: context.recipe)
+            }
         }
         generate.draft = draft
         reuseStore.clear()
@@ -90,16 +110,26 @@ extension LibraryPane {
 
     private func attachmentIsCurrent(
         _ transaction: LibraryAttachmentTransaction, entry: LibraryEntry,
-        fence: DraftAttachmentFence
+        fence: DraftAttachmentFence, routes: LibraryAttachmentRoutes
     ) -> Bool {
         // The machine's own row: a tile may be a copy presented under a
         // machine filter, which is not itself a row of `items`.
         let live = library.entry(entry.id)
         let sourceIsUp = hosts.host(entry.hostID).map(hosts.isUp) == true
-        return live?.print == entry.print && transaction.permits(
+        guard let source = routes.source,
+              PictureSource.isCurrent(entry, origin: source, instance: routes.sourceInstance,
+                                      hosts: hosts, library: library) else { return false }
+        return routes == attachmentRoutes(for: entry)
+            && live?.print == entry.print && transaction.permits(
             version: attachmentVersion, cursor: selection, viewed: viewing,
             scope: navigation.scope, destination: destination,
             draftIsCurrent: fence.permits(generate, reuse: reuseStore),
             liveEntry: live, sourceIsUp: sourceIsUp)
     }
+
+    private func attachmentRoutes(for entry: LibraryEntry) -> LibraryAttachmentRoutes {
+        LibraryAttachmentRoutes.capture(source: entry.hostID,
+                                        destination: attachmentDestinationHost, hosts: hosts)
+    }
+
 }

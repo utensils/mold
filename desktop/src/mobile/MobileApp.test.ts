@@ -10494,6 +10494,58 @@ describe("MobileApp gallery", () => {
     expect(tile.find("[data-test='new-badge']").exists()).toBe(false);
   });
 
+  it("acknowledges Library New labels on tab departure without individual viewing", async () => {
+    // `print.timestamp` is a clock getter; read it ONCE so the seeded
+    // baseline, the served print, and the expected seen-at stamp cannot
+    // straddle a second boundary (the 2026-09-02 iOS CI flake). Freezing is
+    // safe here only because this test makes no submission, so the stamp
+    // need not stay ahead of the clock for age-bounded gallery recovery.
+    const stamp = print.timestamp;
+    localStorage.setItem(
+      "mold.mobile.library-seen-at.v1",
+      JSON.stringify({ "studio-id": stamp - 1 }),
+    );
+    localStorage.setItem("mold.mobile.library-visited.v1", "true");
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") {
+        return Promise.resolve([
+          {
+            ...print,
+            timestamp: stamp,
+            filename: "new-upscaled.png",
+            format: "png",
+            metadata: {
+              ...print.metadata,
+              upscale_model: "real-esrgan-x4plus",
+              generation_width: 384,
+              generation_height: 256,
+            },
+          },
+        ]);
+      }
+      return durableApiFallback(path, init, callTarget);
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await flushPromises();
+
+    const tile = wrapper.get("[data-test='gallery-item']");
+    expect(tile.get("[data-test='new-badge']").text()).toBe("New");
+    expect(tile.get("[data-test='upscaled-badge']").text()).toBe("Upscaled");
+    expect(JSON.parse(localStorage.getItem("mold.mobile.library-seen-at.v1") ?? "{}")).toEqual({
+      "studio-id": stamp - 1,
+    });
+    expect(localStorage.getItem("mold.mobile.libraryUnread.v1")).not.toBeNull();
+    await wrapper.get("[data-test='mobile-tab-generate']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-test='new-badge']").exists()).toBe(false);
+  });
   it("uses a still gallery print as the selected model's source image", async () => {
     const still = { ...print, filename: "source print.png", format: "png" as const };
     apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {

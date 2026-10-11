@@ -18,6 +18,13 @@ final class LibraryStore {
     @ObservationIgnored private let readDefaults: UserDefaults
     @ObservationIgnored var unreadCountChanged: ((Int) -> Void)?
 
+    func finishVisit(_ ids: Set<PrintID>) {
+        guard !ids.isEmpty else { return }
+        unreadMedia.markSeen(ids)
+        unreadMedia.save(to: readDefaults)
+        unreadCountChanged?(unreadCount)
+    }
+
     func markViewed(_ id: PrintID) {
         if let entry = pool.first(where: { $0.everyCopy.contains { $0.id == id } }) { unreadMedia.view(entry) }
         else { unreadMedia.view(id) }

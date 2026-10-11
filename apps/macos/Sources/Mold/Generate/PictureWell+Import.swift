@@ -17,6 +17,7 @@ extension PictureWell {
         case .chooseFile, .replacePicture, .replacePhoto:
             choose()
         case .chooseFromLibrary, .replaceFromLibrary:
+            librarySession = PictureImportSession.begin(controller: controller, replacing: &importTask)
             showsLibrary = true
         case .paste:
             start { intake.paste() }
@@ -40,9 +41,11 @@ extension PictureWell {
     /// in flight: "a newer pick always wins" has to hold for every door, and a
     /// drop's import can still be running when the sheet answers.
     func deliver(_ picked: ImportedPicture) {
+        guard let librarySession, librarySession.isCurrent else { return }
         importTask?.cancel()
         importTask = nil
         pick(picked)
+        librarySession.advance()
         importFailure = nil
     }
 
@@ -51,6 +54,8 @@ extension PictureWell {
     }
 
     private func choose() {
+        importTask?.cancel()
+        importTask = nil
         let urls = PictureSource.choose(allowsMultiple: allowsMultiple)
         guard !urls.isEmpty else { return }
         start { intake.files(urls) }
@@ -66,6 +71,7 @@ extension PictureWell {
     private var intake: PictureIntake {
         PictureIntake(
             accepting: accepting, hosts: hosts, library: library,
-            deliver: pick, report: { importFailure = $0 })
+            deliver: pick, report: { importFailure = $0 },
+            session: PictureImportSession(controller: controller))
     }
 }

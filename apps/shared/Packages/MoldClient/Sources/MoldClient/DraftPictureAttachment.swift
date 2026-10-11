@@ -31,6 +31,20 @@ public enum DraftPictureAttachment {
         draft.media.lastExclusiveWrite = .references
         draft.followLastReference(recipe: recipe)
     }
+    /// Commit a prepared typed image atomically. Both result and gallery reuse
+    /// share the same admission rule, and a refused append leaves the draft intact.
+    public static func addTypedReference(
+        _ reference: GenerationReference, to draft: inout RenderDraft, recipe: GenerationRecipe
+    ) throws {
+        var next = draft
+        next.media.appendGenerationReference(reference)
+        if let error = next.media.generationReferenceError(
+            capabilities: recipe.capabilities, allowIncomplete: true) {
+            throw MoldClientError.unreachable(error)
+        }
+        draft = next
+    }
+
     public static func replaceReference(
         _ picked: ImportedPicture, at index: Int, in draft: inout RenderDraft,
         recipe: GenerationRecipe?

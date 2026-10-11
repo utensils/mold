@@ -60,6 +60,8 @@ public struct LibraryUnreadLedger: Codable, Equatable, Sendable {
     public mutating func view(_ entry: LibraryEntry) { unread.subtract(entry.everyCopy.map(\.id)) }
     public mutating func markSeen(_ entries: [LibraryEntry]) { unread.subtract(entries.flatMap(\.everyCopy).map(\.id)) }
 
+    public mutating func markSeen(_ ids: Set<PrintID>) { unread.subtract(ids) }
+
     public static let key = "library.unreadMedia.v1"
     public static func load(from defaults: UserDefaults) -> Self {
         defaults.data(forKey: key).flatMap { try? MoldJSON.decoder.decode(Self.self, from: $0) } ?? Self()
@@ -75,5 +77,21 @@ public struct LibraryUnreadLedger: Codable, Equatable, Sendable {
             let present = $0.filter { hosts.contains($0.host) }
             return present.isEmpty ? nil : Set(present)
         }
+    }
+}
+
+/// IDs captured from displayed Library projections, scoped to one window visit.
+/// Opening a viewer does not end the visit; leaving the Library does.
+public struct LibraryVisit: Sendable {
+    private var copies: Set<PrintID> = []
+    public init() {}
+    public mutating func capture(_ entries: [LibraryEntry], scope: LibraryScope = .all) {
+        guard !scope.isTrash else { return }
+        for entry in entries { copies.formUnion(entry.everyCopy.map(\.id)) }
+    }
+    public mutating func finish() -> Set<PrintID> {
+        let captured = copies
+        copies.removeAll(keepingCapacity: true)
+        return captured
     }
 }

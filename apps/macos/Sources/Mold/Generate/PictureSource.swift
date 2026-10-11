@@ -58,16 +58,43 @@ enum PictureSource {
         case let .file(url):
             return try await PictureImport.load(url, accepting: accepting)
         case let .print(id):
-            guard let entry = library.entry(id) else {
+            guard let entry = library.entry(id), let origin = hosts.host(id.host) else {
                 throw MoldClientError.malformedResponse
             }
             guard let backend = hosts.backend(for: id.host) else {
                 throw MoldClientError.malformedResponse
             }
+            let instance = hosts.instanceID(of: id.host)
+            guard isCurrent(entry, origin: origin, instance: instance, hosts: hosts, library: library) else {
+                throw MoldClientError.malformedResponse
+            }
             let trashed = entry.print.trashedAt != nil
             let data = try await backend.media(entry.print.filename, trashed: trashed)
-            return try await PictureImport.conforming(
+            try Task.checkCancellation()
+            guard isCurrent(entry, origin: origin, instance: instance, hosts: hosts, library: library) else {
+                throw MoldClientError.malformedResponse
+            }
+            let picture = try await PictureImport.conforming(
                 data, name: entry.print.filename, accepting: accepting)
+            try Task.checkCancellation()
+            guard isCurrent(entry, origin: origin, instance: instance, hosts: hosts, library: library) else {
+                throw MoldClientError.malformedResponse
+            }
+            return picture
         }
     }
+
+    /// A library attachment never follows a changed route or another copy
+    /// while its bytes are in flight. Visibility applies to the logical row.
+    static func isCurrent(
+        _ entry: LibraryEntry, origin: MoldHost, instance: String?,
+        hosts: HostStore, library: LibraryStore
+    ) -> Bool {
+        guard hosts.host(origin.id) == origin, hosts.instanceID(of: origin.id) == instance,
+              let current = library.entry(entry.id), current.print == entry.print else { return false }
+        return LibraryPicker.rows(library.items, query: "", machineID: origin.id,
+            availableHosts: Set(hosts.hosts.map(\.id)),
+            hiddenCollectionIDs: library.hiddenCollectionIDs).contains { $0.id == entry.id }
+    }
+
 }
