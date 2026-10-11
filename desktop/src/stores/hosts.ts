@@ -1343,7 +1343,6 @@ export const useHostsStore = defineStore("hosts", {
                     apiKey: target.apiKey,
                     instanceId: previousInstanceId,
                     isCurrent,
-                    secureContext: false,
                     read: (baseUrl) =>
                       apiJsonTo<ServerStatus>({ ...target, baseUrl }, "/api/status"),
                   }).then(async (resolved) => {

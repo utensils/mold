@@ -92,7 +92,9 @@ GetConnection before evicting a peer; retry a live peer once with exact bytes.
 Diagnostics report scoped aggregate reasons and fleet metrics without raw logs,
 message bodies, keys or credentials.
 
-Route selection favors verified LAN, then Tailscale, then cloud. Start lower
+Route selection favors verified LAN, then Tailscale, then cloud. HTTPS browser
+origins must not pre-filter encrypted LAN WebSockets: the browser enforces its
+local-network permission and mixed-content rules; refusals fall back to cloud. Start lower
 priority probes after bounded delays; the first valid best-priority route wins
 without waiting for same-priority peers. Cancel losers and fence stale completions
 after route replacement/removal. Advertise only interfaces the actual secure

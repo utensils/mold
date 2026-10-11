@@ -90,12 +90,9 @@ export class SecureChannel {
       url.search
     )
       throw new Error("Invalid secure connection address.");
-    if (
-      url.protocol === "ws:" &&
-      typeof location !== "undefined" &&
-      location.protocol === "https:"
-    )
-      throw new Error("This browser requires the secure proxy for this host.");
+    // Noise authenticates and encrypts every route. Let the browser enforce
+    // local-network permission and mixed-content policy; callers can then use
+    // the encrypted cloud route if its WebSocket constructor refuses LAN.
     url.searchParams.set("v", "3");
     this.ready = new Promise((resolve, reject) => {
       this.resolveReady = resolve;

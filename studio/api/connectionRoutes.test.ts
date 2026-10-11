@@ -35,6 +35,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 it("rejects unsafe origins and unbounded candidate lists", () => {
@@ -53,7 +54,6 @@ it("returns a proven LAN route without waiting for the relay head start", async 
     await selectConnectionRoute({
       endpoints,
       expectedInstanceId: "host",
-      secureContext: false,
     }),
   ).toBe(endpoints[0]!.url);
   expect(mock.fetch).toHaveBeenCalledTimes(1);
@@ -68,7 +68,6 @@ it("never accepts a different instance or an unpaired route", async () => {
     selectConnectionRoute({
       endpoints: [endpoints[0]!],
       expectedInstanceId: "host",
-      secureContext: false,
     }),
   ).rejects.toThrow("not reachable");
   mock.profile.mockResolvedValue(null);
@@ -76,20 +75,31 @@ it("never accepts a different instance or an unpaired route", async () => {
     selectConnectionRoute({
       endpoints: [endpoints[0]!],
       expectedInstanceId: "host",
-      secureContext: false,
     }),
   ).rejects.toThrow("not reachable");
   expect(mock.fetch).toHaveBeenCalledTimes(1);
 });
-it("honors browser mixed-content limits without ever trying plaintext LAN HTTP", async () => {
+it("probes the pinned encrypted LAN route from HTTPS Studio", async () => {
+  vi.stubGlobal("location", { protocol: "https:" });
   expect(
     await selectConnectionRoute({
       endpoints,
       expectedInstanceId: "host",
-      secureContext: true,
     }),
-  ).toBe(endpoints[1]!.url);
+  ).toBe(endpoints[0]!.url);
   expect(mock.fetch).toHaveBeenCalledTimes(1);
+});
+it("falls back to the encrypted relay when the browser refuses local access", async () => {
+  vi.stubGlobal("location", { protocol: "https:" });
+  mock.fetch.mockImplementation(async (url: string) => {
+    if (url.startsWith(endpoints[0]!.url))
+      throw new DOMException("Blocked", "SecurityError");
+    return new Response(JSON.stringify({ instance_id: "host" }));
+  });
+  expect(
+    await selectConnectionRoute({ endpoints, expectedInstanceId: "host" }),
+  ).toBe(endpoints[1]!.url);
+  expect(mock.fetch).toHaveBeenCalledTimes(2);
 });
 it("keeps an explicit refusal authoritative instead of roaming", async () => {
   const error = Object.assign(new Error("Revoked"), { status: 403 });
@@ -101,7 +111,6 @@ it("keeps an explicit refusal authoritative instead of roaming", async () => {
       apiKey: null,
       instanceId: "host",
       read,
-      secureContext: false,
     }),
   ).rejects.toBe(error);
   expect(read).toHaveBeenCalledTimes(1);
@@ -119,7 +128,6 @@ it("fences a late health result after its machine was removed", async () => {
     baseUrl: endpoints[0]!.url,
     apiKey: null,
     read,
-    secureContext: false,
   });
   await vi.waitFor(() => expect(read).toHaveBeenCalled());
   forgetConnectionRoutes("removed");

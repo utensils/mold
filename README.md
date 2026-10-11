@@ -417,8 +417,8 @@ use.
 Model checksums are verified when files are downloaded. Complete installed models queue and switch without full checksum scans, including after restart. To check existing bytes explicitly, run `mold info MODEL --verify`. Normal loading still checks file sizes and formats; it does not guarantee detection of same-size corruption.
 
 The [public website privacy policy](https://utensils.io/mold/privacy) describes
-Google Analytics on the documentation website. Analytics loads automatically
-without a popup; this integration is not included in Mold apps or servers.
+the documentation site and Studio. Neither loads third-party analytics scripts;
+Studio keeps its encrypted pairing credentials in browser storage.
 
 Native iOS and macOS Libraries offer All Media, Photos, Videos and 3D filters
 within each shelf. iOS Select supports finger sweeps across a range, including
@@ -431,8 +431,9 @@ Saved machines advertise only routes their encrypted listener actually serves.
 Native clients prefer LAN and retain the same pinned host identity when moving
 to the Lambda WebSocket relay. Stopping Remote Access closes active sessions.
 Headless servers configure `MOLD_PUBLIC_URL` and `MOLD_SECURE_WEBSOCKET_URL`;
-the private engine remains on loopback. HTTPS browsers may use WSS because of
-browser mixed-content restrictions. Operator credentials stay on the host and
+the private engine remains on loopback. HTTPS Studio tries encrypted LAN first;
+allow local network access when the browser asks. Browsers that block local
+WebSockets use the encrypted WSS relay. Operator credentials stay on the host and
 are never supplied by the connector on behalf of a paired client.
 
 Native iOS queue cards use concise curated model names and open full job details

@@ -5191,7 +5191,6 @@ async function probeHost(host: MobileHost): Promise<void> {
         host.connected !== false &&
         host.apiKey === credential &&
         (hostProbes.get(host.id)?.epoch === epoch || !hostProbes.has(host.id)),
-      secureContext: false,
       read: (baseUrl) =>
         apiJsonTo<ServerStatus>({ ...mobileHostTarget(host), baseUrl }, "/api/status", {
           signal: controller.signal,

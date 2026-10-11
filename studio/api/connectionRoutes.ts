@@ -84,18 +84,14 @@ async function boundedJSON(response: Response): Promise<unknown> {
 export async function selectConnectionRoute(options: {
   endpoints: readonly ConnectionEndpoint[];
   expectedInstanceId: string;
-  secureContext?: boolean;
   signal?: AbortSignal | undefined;
 }): Promise<string> {
   if (!options.expectedInstanceId)
     throw new Error("A saved machine identity is required.");
   options.signal?.throwIfAborted();
-  const secure =
-    options.secureContext ??
-    (typeof location !== "undefined" && location.protocol === "https:");
-  const endpoints = parseConnectionEndpoints(options.endpoints).filter(
-    (e) => !secure || e.url.startsWith("https:"),
-  );
+  // relayFetch sends authenticated Noise over WebSocket, not plaintext HTTP.
+  // The browser itself enforces local-network permission/mixed-content rules.
+  const endpoints = parseConnectionEndpoints(options.endpoints);
   const priority = { lan: 0, tailscale: 1, relay: 2 };
   const first = Math.min(...endpoints.map((e) => priority[e.kind]));
   const controller = new AbortController();
@@ -194,7 +190,6 @@ export async function connectionHealth<
   instanceId?: string | null | undefined;
   read: (baseUrl: string) => Promise<T>;
   signal?: AbortSignal | undefined;
-  secureContext?: boolean;
   isCurrent?: () => boolean;
 }): Promise<{ value: T; baseUrl: string }> {
   const revision = revisions.get(options.hostId) ?? 0;
@@ -235,9 +230,6 @@ export async function connectionHealth<
         endpoints: profile.endpoints,
         expectedInstanceId,
         signal: options.signal,
-        ...(options.secureContext !== undefined
-          ? { secureContext: options.secureContext }
-          : {}),
       });
     } catch {
       assertCurrent(); /* The originally pinned route can still answer. */
@@ -255,9 +247,6 @@ export async function connectionHealth<
       endpoints: profile.endpoints,
       expectedInstanceId,
       signal: options.signal,
-      ...(options.secureContext !== undefined
-        ? { secureContext: options.secureContext }
-        : {}),
     });
     assertCurrent();
     if (winner === url) throw error;

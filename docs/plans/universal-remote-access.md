@@ -22,7 +22,7 @@ They prefer usable direct routes and retain healthy routes briefly to avoid
 oscillation. Health/reconnect resolves a route before subsequent operations;
 there is no automatic mutation replay. Existing durable IDs and read-stream
 reconciliation recover admitted work. An authenticated refusal remains visible.
-HTTPS browsers skip HTTP routes they cannot access due to mixed-content rules.
+HTTPS browsers try the pinned encrypted LAN WebSocket first; browser permission or mixed-content refusals fall back to the encrypted cloud route.
 
 Before forwarding a key or one-use token to an alternative origin, a separate
 credential-free bounded probe verifies the expected identity and a fresh
