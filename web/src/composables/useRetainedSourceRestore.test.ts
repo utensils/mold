@@ -2,7 +2,9 @@ import { afterEach, expect, it, vi } from "vitest";
 import { effectScope, nextTick, ref } from "vue";
 import { useRetainedSourceRestore } from "./useRetainedSourceRestore";
 import {
+  automatedReuseApply,
   clearRetainedSourceReuseIntent,
+  retainedSourceReuseState,
   setRetainedSourceReuseIntent,
 } from "../lib/retainedSourceReuse";
 import { restoreRetainedDraftMedia } from "@studio/lib/retainedDraftMedia";
@@ -156,5 +158,48 @@ it("lets a hand-attached input retire a failed retained restore", async () => {
   await nextTick();
 
   expect(restore.error.value).toBeNull();
+  // Giving up the archive: nothing archived is relayed beside the new input.
+  expect(retainedSourceReuseState.value).toBeNull();
+  scope.stop();
+});
+
+it("does not let an automated restore retire a real failure", async () => {
+  vi.mocked(restoreRetainedDraftMedia).mockRejectedValueOnce(
+    new Error("relay failed"),
+  );
+  setRetainedSourceReuseIntent({
+    filename: "old.png",
+    origin: { baseUrl: "http://host", apiKey: null },
+    inventory,
+  });
+  const attached = ref(0);
+  const scope = effectScope();
+  const restore = scope.run(() =>
+    useRetainedSourceRestore({
+      loaded: ref(true),
+      read: () => ({}),
+      layout: () => ({
+        web: true,
+        boundary: false,
+        sourceMode: "single",
+        h3: false,
+      }),
+      attachedMedia: () => attached.value,
+      apply: vi.fn(),
+      onError: vi.fn(),
+    }),
+  )!;
+  await nextTick();
+  await Promise.resolve();
+  expect(restore.error.value).toBe("relay failed");
+
+  // The Library's own stash fallback filling a well is not a person's choice.
+  automatedReuseApply(() => {
+    attached.value = 1;
+  });
+  await nextTick();
+
+  expect(restore.error.value).toBe("relay failed");
+  expect(retainedSourceReuseState.value).not.toBeNull();
   scope.stop();
 });

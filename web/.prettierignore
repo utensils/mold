@@ -4,3 +4,4 @@ coverage/
 .vite/
 .bun/
 ../studio/lib/generated/generationProfileV1.ts
+../studio/lib/generated/modelPresentationV1.ts

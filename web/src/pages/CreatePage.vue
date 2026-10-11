@@ -141,6 +141,7 @@ import {
   retainedSourceMediaMembersForRequest,
 } from "@studio/api/gallerySourceMedia";
 import {
+  automatedReuseApply,
   clearRetainedSourceReuseIntent,
   retainedSourceReuseIsCurrent,
   retainedSourceReuseSnapshot,
@@ -1850,17 +1851,19 @@ async function restoreReusedIdentityPhoto(metadata: OutputMetadata) {
     identityRestoreNotice.value = IDENTITY_PHOTO_UNAVAILABLE;
     return;
   }
-  form.state.value = {
-    ...form.state.value,
-    identityImage: {
-      kind: "upload",
-      filename: restored.filename || descriptor.filename,
-      base64: restored.base64,
-      width: restored.width ?? null,
-      height: restored.height ?? null,
-      mime: restored.mime ?? null,
-    },
-  };
+  automatedReuseApply(() => {
+    form.state.value = {
+      ...form.state.value,
+      identityImage: {
+        kind: "upload",
+        filename: restored.filename || descriptor.filename,
+        base64: restored.base64,
+        width: restored.width ?? null,
+        height: restored.height ?? null,
+        mime: restored.mime ?? null,
+      },
+    };
+  });
 }
 // The disclosure is about THIS descriptor; a photo the user attaches
 // afterwards retires it.
@@ -1943,7 +1946,9 @@ async function restoreReusedH3BoundaryMedia() {
     }
   }
   if (committed > 0) {
-    form.state.value = { ...form.state.value, h3Authoring: authoring };
+    automatedReuseApply(() => {
+      form.state.value = { ...form.state.value, h3Authoring: authoring };
+    });
   }
   if (outcome.failed.length > 0) {
     toast(

@@ -15239,8 +15239,20 @@ it("lets a hand-attached input retire a failed retained restore", async () => {
   await flushPromises();
   const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
 
+  const authority = (
+    wrapper.vm as unknown as {
+      retainedSourceAuthority: {
+        begin: () => number;
+        setIfCurrent: (version: number, value: unknown) => boolean;
+        snapshot: () => unknown;
+      };
+    }
+  ).retainedSourceAuthority;
+  authority.setIfCurrent(authority.begin(), { filename: "print.png" });
   liveForm.sourceImage = "MINE";
   await flushPromises();
 
   expect(vm.retainedRestoreError).toBeNull();
+  // Giving up the archive: nothing archived is relayed beside the new input.
+  expect(authority.snapshot()).toBeNull();
 });

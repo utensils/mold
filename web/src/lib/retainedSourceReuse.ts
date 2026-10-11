@@ -59,3 +59,20 @@ export function clearRetainedSourceReuseIntent(): void {
   version += 1;
   retainedSourceReuseState.value = null;
 }
+
+let automatedApplies = 0;
+/** Run a form write made by a restore rather than a person. A hand-attached
+ * input after a failed restore gives up the archive; an automated restore
+ * (the Library's stash fallback, a retained patch) must never count as one. */
+export function automatedReuseApply<T>(write: () => T): T {
+  automatedApplies += 1;
+  try {
+    return write();
+  } finally {
+    automatedApplies -= 1;
+  }
+}
+
+export function isAutomatedReuseApply(): boolean {
+  return automatedApplies > 0;
+}

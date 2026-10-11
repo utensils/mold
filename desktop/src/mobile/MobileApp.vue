@@ -1251,8 +1251,10 @@ watch(
   (count, previous) => {
     if (count < previous && !authoritativeReuseApply) invalidateRetainedSourceReuse();
     // A failed restore blocks until deliberate recovery; attaching an input
-    // by hand is that recovery (desktop's GenerateView follows the same rule).
-    else if (count > previous && !authoritativeReuseApply) retainedRestoreError.value = null;
+    // by hand is that recovery and gives up the archive with it (desktop's
+    // GenerateView follows the same rule).
+    else if (count > previous && !authoritativeReuseApply && retainedRestoreError.value)
+      invalidateRetainedSourceReuse();
   },
 );
 let sourceUseEpoch = 0;

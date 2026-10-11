@@ -161,6 +161,7 @@ import {
   type RetainedSourceMediaInventory,
 } from "@studio/api/gallerySourceMedia";
 import {
+  automatedReuseApply,
   beginRetainedSourceReuseIntent,
   retainedSourceReuseIsCurrent,
   setRetainedSourceReuseIntentIfCurrent,
@@ -2124,16 +2125,18 @@ async function restoreLibrarySource(
   const sha256 = item.metadata.source_image_sha256;
   const stored = await restoreGenerationSourceMedia(sha256).catch(() => null);
   if (stored && stillOwnsEmptySource()) {
-    form.state.value.imageAttachments = [
-      {
-        kind: stored.kind ?? "upload",
-        filename: stored.filename,
-        base64: stored.base64,
-        width: stored.width ?? undefined,
-        height: stored.height ?? undefined,
-        mime: stored.mime ?? undefined,
-      },
-    ];
+    automatedReuseApply(() => {
+      form.state.value.imageAttachments = [
+        {
+          kind: stored.kind ?? "upload",
+          filename: stored.filename,
+          base64: stored.base64,
+          width: stored.width ?? undefined,
+          height: stored.height ?? undefined,
+          mime: stored.mime ?? undefined,
+        },
+      ];
+    });
     await restoreCanvas(stored.base64);
     // The source is back, so "did not retain … Reattach it" would contradict
     // the filled well; only a missing key is still worth saying.
@@ -2167,16 +2170,18 @@ async function restoreLibrarySource(
       const base64 = await blobToBase64(blob);
       if (!stillOwnsEmptySource()) return;
       const dimensions = imageDimensionsFromBase64(base64);
-      form.state.value.imageAttachments = [
-        {
-          kind: "gallery",
-          filename,
-          base64,
-          width: dimensions?.width,
-          height: dimensions?.height,
-          mime: blob.type || undefined,
-        },
-      ];
+      automatedReuseApply(() => {
+        form.state.value.imageAttachments = [
+          {
+            kind: "gallery",
+            filename,
+            base64,
+            width: dimensions?.width,
+            height: dimensions?.height,
+            mime: blob.type || undefined,
+          },
+        ];
+      });
       await restoreCanvas(base64);
       return;
     } catch {
@@ -2223,17 +2228,19 @@ async function restoreLibraryIdentity(
     slot.filename !== wanted.filename
   )
     return;
-  form.state.value = {
-    ...form.state.value,
-    identityImage: {
-      kind: "upload",
-      filename: restored.filename || slot.filename,
-      base64: restored.base64,
-      width: restored.width ?? null,
-      height: restored.height ?? null,
-      mime: restored.mime ?? null,
-    },
-  };
+  automatedReuseApply(() => {
+    form.state.value = {
+      ...form.state.value,
+      identityImage: {
+        kind: "upload",
+        filename: restored.filename || slot.filename,
+        base64: restored.base64,
+        width: restored.width ?? null,
+        height: restored.height ?? null,
+        mime: restored.mime ?? null,
+      },
+    };
+  });
 }
 
 async function onReuse(item: GalleryImage) {

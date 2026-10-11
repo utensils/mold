@@ -4,6 +4,9 @@ import {
   type RetainedDraftLayout,
 } from "@studio/lib/retainedDraftMedia";
 import {
+  automatedReuseApply,
+  clearRetainedSourceReuseIntent,
+  isAutomatedReuseApply,
   retainedSourceReuseState,
   retainedSourceReuseSnapshot,
   retainedSourceReuseIsCurrent,
@@ -68,7 +71,7 @@ export function useRetainedSourceRestore(options: {
           isCurrent,
         });
         if (!result || !isCurrent()) return;
-        options.apply(result.patch);
+        automatedReuseApply(() => options.apply(result.patch));
         setRetainedSourceReuseIntentIfCurrent(snapshot.version, {
           ...intent,
           inventory: result.inventory,
@@ -88,8 +91,23 @@ export function useRetainedSourceRestore(options: {
     { immediate: true },
   );
   if (options.attachedMedia)
-    watch(options.attachedMedia, (count, previous) => {
-      if (count > previous) error.value = null;
-    });
+    watch(
+      options.attachedMedia,
+      (count, previous) => {
+        // A hand attach after a failure gives up the archive with the error,
+        // so no archived role (a mask paired with the old source) is relayed
+        // beside the input the person chose instead.
+        if (
+          count > previous &&
+          error.value !== null &&
+          !isAutomatedReuseApply()
+        ) {
+          error.value = null;
+          clearRetainedSourceReuseIntent();
+        }
+      },
+      // Synchronous, so the automated marker is still set when it reads it.
+      { flush: "sync" },
+    );
   return { error, pending };
 }

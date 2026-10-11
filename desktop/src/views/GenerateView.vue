@@ -4076,6 +4076,10 @@ watch(
       if (restored) preserveRestoredSourceCanvas(restored.base64);
       composer.setRetainedSourceIfCurrent(version, { ...handoff, inventory: result.inventory });
       await nextTick();
+      // The retained patch has landed; from here on a removal is the
+      // person's own and must retire the archive (the fallback below can
+      // take seconds, and it checks the epoch and which wells are empty).
+      authoritativeReuseApply = false;
       if (fallback && composer.isRetainedSourceCurrent(version) && epoch === restoreEpoch)
         await restoreReuseFallback(fallback, epoch);
     } catch (error) {
@@ -4468,9 +4472,11 @@ watch(
   (count, previous) => {
     if (count < previous && !authoritativeReuseApply) invalidateRetainedRestore();
     // A failed restore blocks until deliberate recovery; attaching an input
-    // by hand is that recovery. The retained authority stays for whatever
-    // roles are still empty, so the submit-time relay can still fill them.
-    else if (count > previous && !authoritativeReuseApply) retainedRestoreError.value = null;
+    // by hand is that recovery, and it gives up the archive with it — an
+    // archived role (the mask paired with the old source) must never be
+    // relayed beside the input the person chose instead.
+    else if (count > previous && !authoritativeReuseApply && retainedRestoreError.value)
+      invalidateRetainedRestore();
   },
 );
 

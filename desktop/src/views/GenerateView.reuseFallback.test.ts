@@ -273,6 +273,10 @@ describe("GenerateView Reuse settings media fallback", () => {
     await flushPromises();
 
     expect(card().props("disabled")).toBe(false);
+    // The hand-attached input replaces the archive's answer: nothing archived
+    // (a paired mask, say) may be relayed beside it at submit.
+    expect(composer.retainedSource).toBeNull();
+    expect(composer.isRetainedSourceCurrent(version)).toBe(false);
   });
 
   it("releases the composer when the decline lands before Create mounts", async () => {
@@ -285,5 +289,36 @@ describe("GenerateView Reuse settings media fallback", () => {
 
     expect(wrapper.findComponent({ name: "ComposerCard" }).props("disabled")).toBe(false);
     expect(form.sourceImage).toBe("STASHED");
+  });
+
+  // The fallback lookup can take seconds (cold gallery, a remote fetch). A
+  // removal the person makes meanwhile is theirs and retires the archive;
+  // it must not be swallowed as part of the automated restore.
+  it("honours a removal made while the fallback lookup runs", async () => {
+    const form = useGenerateFormStore().form;
+    let finishStash!: (value: string | null) => void;
+    sourceStashGet.mockReturnValue(
+      new Promise<string | null>((resolve) => {
+        finishStash = resolve;
+      }),
+    );
+    const { composer, version } = reuseFromLibrary();
+    mount(GenerateView, { shallow: true, attachTo: document.body });
+    await flushPromises();
+    form.controlImage = "CONTROL";
+    await flushPromises();
+    composer.setRetainedSourceIfCurrent(version, {
+      filename: "print.png",
+      origin,
+      inventory: { availability: "available", members: [] },
+      metadata,
+    });
+    await flushPromises();
+
+    form.controlImage = null;
+    await flushPromises();
+    expect(composer.isRetainedSourceCurrent(version)).toBe(false);
+    finishStash(null);
+    await flushPromises();
   });
 });
