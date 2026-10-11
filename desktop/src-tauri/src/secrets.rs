@@ -122,26 +122,19 @@ impl SecretStore {
             .collect()
     }
 
-    /// Stable credential for the desktop-owned LAN server. An explicit
-    /// `MOLD_API_KEY` remains the highest-precedence operator override;
-    /// otherwise the generated UUID survives app updates and relaunches in the
-    /// owner-only secrets file.
-    pub fn local_server_api_key(&self) -> anyhow::Result<String> {
+    /// Per-home owner credential, shared with the native host and headless
+    /// server. Preserve the old app-local key as a migration candidate only.
+    pub fn local_server_api_key(&self, home: &std::path::Path) -> anyhow::Result<String> {
         if let Some(key) = std::env::var("MOLD_API_KEY")
             .ok()
             .filter(|key| !key.is_empty())
         {
             return Ok(key);
         }
-        if let Some(key) = self
+        let legacy = self
             .get(DESKTOP_LOCAL_API_KEY)?
-            .filter(|key| !key.is_empty())
-        {
-            return Ok(key);
-        }
-        let key = uuid::Uuid::new_v4().to_string();
-        self.set(DESKTOP_LOCAL_API_KEY, &key)?;
-        Ok(key)
+            .filter(|key| !key.is_empty());
+        Ok(mold_secure::operator_key::resolve(home, legacy.as_deref())?.to_string())
     }
 
     fn loaded<'a>(path: &PathBuf, guard: &'a mut Option<Loaded>) -> &'a mut Loaded {
@@ -262,10 +255,10 @@ mod tests {
         std::env::remove_var("MOLD_API_KEY");
         let dir = tempfile::tempdir().unwrap();
         let first = SecretStore::new(dir.path().to_path_buf())
-            .local_server_api_key()
+            .local_server_api_key(dir.path())
             .unwrap();
         let second = SecretStore::new(dir.path().to_path_buf())
-            .local_server_api_key()
+            .local_server_api_key(dir.path())
             .unwrap();
         assert_eq!(first, second);
         assert!(!first.is_empty());
@@ -274,11 +267,39 @@ mod tests {
     #[test]
     fn environment_overrides_the_persisted_local_server_key() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let (store, _dir) = store();
+        let (store, dir) = store();
         store.set(DESKTOP_LOCAL_API_KEY, "stored").unwrap();
         std::env::set_var("MOLD_API_KEY", "operator-key");
-        assert_eq!(store.local_server_api_key().unwrap(), "operator-key");
+        assert_eq!(
+            store.local_server_api_key(dir.path()).unwrap(),
+            "operator-key"
+        );
         std::env::remove_var("MOLD_API_KEY");
+    }
+
+    #[test]
+    fn hosting_apps_converge_on_home_key_and_keep_legacy_credentials() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_API_KEY");
+        let home = tempfile::tempdir().unwrap();
+        let (tauri, _tauri_dir) = store();
+        let (other, _other_dir) = store();
+        tauri
+            .set(DESKTOP_LOCAL_API_KEY, "tauri-existing-key")
+            .unwrap();
+        other
+            .set(DESKTOP_LOCAL_API_KEY, "other-existing-key")
+            .unwrap();
+        let first = tauri.local_server_api_key(home.path()).unwrap();
+        assert_eq!(other.local_server_api_key(home.path()).unwrap(), first);
+        assert_eq!(
+            other.get(DESKTOP_LOCAL_API_KEY).unwrap().as_deref(),
+            Some("other-existing-key")
+        );
+        assert_eq!(
+            tauri.get(DESKTOP_LOCAL_API_KEY).unwrap().as_deref(),
+            Some("tauri-existing-key")
+        );
     }
 
     #[test]

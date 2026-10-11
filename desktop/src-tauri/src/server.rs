@@ -106,30 +106,12 @@ impl EngineHandle {
     }
 }
 
-/// Reserve a port on `bind` by binding to :0 and reading the assignment.
-///
-/// TOCTOU caveat: the listener is dropped before `run_server` rebinds it.
-/// Upstream fix tracked as U1 (`run_server_with_listener`) in
-/// desktop/docs/architecture.md.
-pub fn allocate_port(bind: &str) -> anyhow::Result<u16> {
-    let probe = std::net::TcpListener::bind((bind, 0))?;
-    Ok(probe.local_addr()?.port())
-}
+#[path = "server_port.rs"]
+mod port;
+pub use port::allocate_port;
 
-/// Prefer the conventional LAN port. If something other than Mold owns it,
-/// fall back to an ephemeral port that mDNS will advertise.
-pub fn available_server_port(bind: &str) -> anyhow::Result<u16> {
-    available_server_port_for(bind, WELL_KNOWN_PORT)
-}
-
-fn available_server_port_for(bind: &str, preferred: u16) -> anyhow::Result<u16> {
-    match std::net::TcpListener::bind((bind, preferred)) {
-        Ok(listener) => {
-            drop(listener);
-            Ok(preferred)
-        }
-        Err(_) => allocate_port(bind),
-    }
+pub fn available_server_port(bind: &str) -> std::io::Result<u16> {
+    port::available_server_port_for(bind, WELL_KNOWN_PORT)
 }
 
 fn queue_size() -> usize {
@@ -293,34 +275,6 @@ pub async fn accepts_api_key(base_url: &str, api_key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn allocates_distinct_nonzero_ports() {
-        let a = allocate_port("127.0.0.1").unwrap();
-        let b = allocate_port("127.0.0.1").unwrap();
-        assert_ne!(a, 0);
-        assert_ne!(b, 0);
-        // Not guaranteed distinct by the OS, but freshly-released ephemeral
-        // ports are not immediately reused on macOS/Linux.
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn prefers_well_known_port_when_available() {
-        let preferred = allocate_port("127.0.0.1").unwrap();
-        let port = available_server_port_for("127.0.0.1", preferred).unwrap();
-        assert_eq!(port, preferred);
-    }
-
-    #[test]
-    fn falls_back_when_well_known_port_is_occupied() {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let occupied = listener.local_addr().unwrap().port();
-        let port = available_server_port_for("127.0.0.1", occupied).unwrap();
-        assert_ne!(port, occupied);
-        assert_ne!(port, 0);
-        drop(listener);
-    }
 
     #[test]
     fn queue_size_defaults_and_honors_env() {

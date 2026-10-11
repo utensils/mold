@@ -159,7 +159,15 @@ pub fn run() {
                 }
             }
             app.manage(settings_store);
-            let local_api_key = secrets.local_server_api_key()?;
+            let home = mold_core::Config::mold_dir()
+                .ok_or_else(|| anyhow::anyhow!("Cannot resolve the Mold home for its owner credential"))?;
+            let local_api_key = if saved_home_unavailable {
+                // Recovery UI must not recreate an absent external drive. No
+                // engine starts in this state; changing the home relaunches.
+                String::new()
+            } else {
+                secrets.local_server_api_key(&home)?
+            };
             // mold-server reads auth from the environment when the server
             // thread starts. Resolve and export the persistent key first.
             std::env::set_var("MOLD_API_KEY", &local_api_key);

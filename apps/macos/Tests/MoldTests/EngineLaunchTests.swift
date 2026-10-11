@@ -40,6 +40,23 @@ struct EngineLaunchTests {
         #expect(second.apiKey == first.apiKey)
     }
 
+    @Test func anotherHostingShellKeepsTheSameHomeCredential() throws {
+        let directory = scratch()
+        let env = environment(directory)
+        let firstStore = SecretStore(directory: scratch())
+        let nextStore = SecretStore(directory: scratch())
+        try firstStore.set("tauri-owner-key", for: SecretStore.localEngineKeyName)
+        try nextStore.set("native-owner-key", for: SecretStore.localEngineKeyName)
+        let first = try EngineLaunchPlan.resolve(
+            home: MoldHome.resolve(environment: env), secrets: firstStore,
+            logDirectory: "/tmp", environment: env)
+        let next = try EngineLaunchPlan.resolve(
+            home: MoldHome.resolve(environment: env), secrets: nextStore,
+            logDirectory: "/tmp", environment: env)
+        #expect(first.apiKey == next.apiKey)
+        #expect(try nextStore.value(for: SecretStore.localEngineKeyName) == "native-owner-key")
+    }
+
     @Test func anOperatorsOwnKeyWins() throws {
         let directory = scratch()
         let env = environment(directory, ["MOLD_API_KEY": "operator-key"])
