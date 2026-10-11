@@ -27,6 +27,7 @@ const decode = (value: unknown): Uint8Array => {
 export class SecureWire {
   private next = 0;
   private outgoing = 0;
+  private acknowledged = 0;
   private credit = WINDOW;
   private ackSerial = 0;
   private lastAckSerial = -1;
@@ -66,7 +67,8 @@ export class SecureWire {
       for (let offset = 0; offset < bytes.length; offset += 16384) {
         while (
           !this.failure &&
-          (this.credit === 0 || this.pending.size >= WINDOW)
+          (this.outgoing >= this.acknowledged + this.credit ||
+            this.pending.size >= WINDOW)
         )
           await new Promise<void>((resolve, reject) =>
             this.wake.push({ resolve, reject }),
@@ -82,7 +84,6 @@ export class SecureWire {
           seq: this.outgoing++,
           d: encode(bytes.subarray(offset, offset + 16384)),
         };
-        this.credit--;
         this.pending.set(frame.seq as number, {
           frame,
           time: Date.now(),
@@ -136,7 +137,10 @@ export class SecureWire {
         )
           throw new Error("Invalid relay acknowledgement.");
         if (frame.ack_seq <= this.lastAckSerial) return;
+        if (frame.next < this.acknowledged)
+          throw new Error("Relay acknowledgement moved backwards.");
         this.lastAckSerial = frame.ack_seq;
+        this.acknowledged = frame.next;
         for (const sequence of this.pending.keys())
           if (sequence < frame.next) this.pending.delete(sequence);
         this.credit = frame.credit;

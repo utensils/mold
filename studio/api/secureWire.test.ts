@@ -3,6 +3,50 @@ import { SecureWire, PacketReader, type WireFrame } from "./secureWire";
 
 afterEach(() => vi.useRealTimers());
 describe("opaque relay byte delivery", () => {
+  it("applies advertised credit relative to the acknowledged sequence, including outstanding frames", async () => {
+    const sent: WireFrame[] = [];
+    const wire = new SecureWire(
+      "sid",
+      "rid",
+      (frame) => sent.push(frame),
+      () => {},
+    );
+    try {
+      await Promise.all(
+        Array.from({ length: 4 }, () => wire.write(new Uint8Array([1]))),
+      );
+      wire.receive({
+        a: "ack",
+        v: 3,
+        sid: "sid",
+        rid: "rid",
+        next: 1,
+        credit: 3,
+        ack_seq: 0,
+      });
+      let completed = false;
+      const pending = wire.write(new Uint8Array([2])).then(() => {
+        completed = true;
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(completed).toBe(false);
+      expect(sent).toHaveLength(4);
+      wire.receive({
+        a: "ack",
+        v: 3,
+        sid: "sid",
+        rid: "rid",
+        next: 4,
+        credit: 16,
+        ack_seq: 1,
+      });
+      await pending;
+      expect(sent.at(-1)).toMatchObject({ seq: 4 });
+    } finally {
+      wire.close();
+    }
+  });
   it("starts retry budgets when ciphertext is transmitted, after bounded object preparation", async () => {
     vi.useFakeTimers();
     const send = vi.fn();
