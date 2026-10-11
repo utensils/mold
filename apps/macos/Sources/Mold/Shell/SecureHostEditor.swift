@@ -23,8 +23,9 @@ struct SecureHostEditor: View {
                     .fixedSize(horizontal: false, vertical: true)
                 TextField("Pairing link", text: $code, axis: .vertical)
                     .lineLimit(3...5).textFieldStyle(.roundedBorder).disabled(working)
-                if existing != nil {
-                    Text("This saved connection needs a new pairing code after the encryption upgrade.").font(.callout)
+                if let payload = try? MobilePairingPayload.parse(code) {
+                    Text("\(payload.mode.title): \(payload.mode.explanation)").font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             if let failure { Text(failure).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }

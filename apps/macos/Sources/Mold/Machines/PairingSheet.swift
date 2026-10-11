@@ -8,9 +8,15 @@ import SwiftUI
 /// it closes rather than needing an `invalidate()` somewhere.
 struct PairingSheet: View {
     @Environment(PairingStore.self) private var pairing
+    @Environment(RemotePairingStore.self) private var remote
     @Environment(\.dismiss) private var dismiss
     let host: MoldHost
     var showsDone = true
+    @State private var mode: HostConnectionMode = .secure
+    @State private var directAddress = ""
+    @State private var codeBaseURL: URL?
+    @State private var preparationFailure: String?
+    @State private var codeGeneration = 0
 
     enum SheetState: Equatable {
         case waiting
@@ -34,10 +40,11 @@ struct PairingSheet: View {
     /// sheet inside the two-minute window shows the code a phone may already
     /// be scanning, rather than killing it (M7 UAT: a seeded fixture session
     /// was being replaced by a request the fixture then refused).
-    static func needsFreshCode(session: PairingSession?, sessionHost: MoldHost.ID?, host: MoldHost.ID, now: Date) -> Bool {
+    static func needsFreshCode(session: PairingSession?, sessionHost: MoldHost.ID?, host: MoldHost.ID, now: Date, mode: HostConnectionMode = .secure) -> Bool {
         guard let session, sessionHost == host else { return true }
-        guard let invitation = session.secureInvitation else { return true }
-        let expiresAt = invitation.invite.expiresAt
+        guard (session.mode ?? .secure) == mode else { return true }
+        let expiry = mode == .regular ? session.expiresAt : session.secureInvitation?.invite.expiresAt
+        guard let expiresAt = expiry else { return true }
         return Countdown.resolve(expiresAt: expiresAt, now: now) == .expired
     }
 
@@ -77,13 +84,27 @@ struct PairingSheet: View {
     /// sheet draws only its own, so switching machines mid-flow shows
     /// "waiting" rather than a code for somewhere else.
     private var state: SheetState {
-        let session = pairing.sessionHost == host.id ? pairing.session : nil
-        return Self.resolve(session, failure: pairing.sessionFailure[host.id], baseURL: host.baseURL, name: host.name)
+        let session = pairing.sessionHost == host.id && (pairing.session?.mode ?? .secure) == mode ? pairing.session : nil
+        return Self.resolve(session, failure: preparationFailure ?? pairing.sessionFailure[host.id], baseURL: codeBaseURL ?? host.baseURL, name: host.name)
     }
 
     var body: some View {
         VStack(spacing: 16) {
             Text("Pair “\(host.name)”").font(.headline)
+            Picker("Connection", selection: $mode) {
+                ForEach(HostConnectionMode.allCases, id: \.self) { Text($0.title).tag($0) }
+            }.pickerStyle(.segmented)
+            Text(mode.explanation).font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if mode == .regular && host.id != MoldEngine.localHostID {
+                TextField("Direct HTTP or HTTPS address", text: $directAddress)
+                    .textFieldStyle(.roundedBorder).onSubmit { Task { await createCode() } }
+                Button("Create Regular Code") { Task { await createCode() } }
+            }
+            if mode == .regular && host.id == MoldEngine.localHostID {
+                Text("Regular enables authenticated direct access on this Mac. You can turn it off in Remote Access settings.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             switch state {
             case .waiting:
                 ProgressView().frame(width: 220, height: 220)
@@ -95,7 +116,7 @@ struct PairingSheet: View {
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
-                    Button("Try Again") { Task { await pairing.createSession(on: host.id) } }
+                    Button("Try Again") { Task { await createCode() } }
                 }
                 .frame(width: 220, height: 220)
             case let .code(payload):
@@ -116,11 +137,47 @@ struct PairingSheet: View {
         }
         .padding(24)
         .frame(width: 320)
-        .task {
-            guard Self.needsFreshCode(
-                session: pairing.session, sessionHost: pairing.sessionHost, host: host.id, now: .now)
-            else { return }
-            await pairing.createSession(on: host.id)
+        .task(id: mode) {
+            preparationFailure = nil
+            if directAddress.isEmpty && DirectHostAddress.isValid(host.baseURL) { directAddress = host.baseURL.absoluteString }
+            guard Self.needsFreshCode(session: pairing.session, sessionHost: pairing.sessionHost,
+                                      host: host.id, now: .now, mode: mode) else { return }
+            await createCode()
+        }
+    }
+
+    private func createCode() async {
+        preparationFailure = nil
+        codeGeneration += 1
+        let generation = codeGeneration
+        let selectedMode = mode
+        do {
+            if selectedMode == .regular {
+                let address: URL
+                if host.id == MoldEngine.localHostID { address = try await remote.prepareRegular(host) }
+                else {
+                    guard let entered = URL(string: directAddress), DirectHostAddress.isValid(entered) else {
+                        preparationFailure = "Enter this machine’s direct HTTP or HTTPS address. Mold proxy always uses Secure."
+                        return
+                    }
+                    address = entered
+                }
+                try Task.checkCancellation()
+                guard generation == codeGeneration, mode == selectedMode else { return }
+                codeBaseURL = address
+                await pairing.createSession(on: host.id, mode: .regular, directURL: address)
+            } else if host.id == MoldEngine.localHostID {
+                let ready = try await remote.prepare(host)
+                try Task.checkCancellation()
+                guard generation == codeGeneration, mode == selectedMode else { return }
+                codeBaseURL = ready.baseURL
+            } else {
+                codeBaseURL = host.baseURL
+                await pairing.createSession(on: host.id)
+            }
+        } catch {
+            guard !Task.isCancelled, generation == codeGeneration, mode == selectedMode else { return }
+            preparationFailure = error.failureSentence
         }
     }
 
@@ -154,7 +211,7 @@ struct PairingSheet: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if expired {
-                Button("New Code") { Task { await pairing.createSession(on: host.id) } }
+                Button("New Code") { Task { await createCode() } }
             }
         }
     }

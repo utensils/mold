@@ -10,6 +10,13 @@ Native Xcode builds keep Swift package checkouts in their own
 Do not clear developer-global SwiftPM caches to repair a build. Keep that local
 artifact path aligned with Sparkle tool discovery in `make-appcast.sh`.
 
+Native pairing defaults to Secure and offers explicit Regular direct HTTP(S) access.
+The proxy always remains encrypted. Regular has its own persisted opt-in and listener;
+stopping proxy access must not disable Regular, and disabling Regular must not remove
+host identity or grants. Produce a Regular QR only after the listener reports its actual
+bound direct origin. Mode changes require a new pairing or a distinct Regular credential;
+never prefill or probe with the former Secure key. Preserve one physical machine record.
+
 Active Library sync progress replaces the recurring-session countdown banner.
 Expose one Stop Sync control during transfers, including their finishing phase.
 

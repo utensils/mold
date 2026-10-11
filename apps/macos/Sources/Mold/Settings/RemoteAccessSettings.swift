@@ -62,6 +62,10 @@ struct RemoteAccessSettings: View {
                     Section("This Mac") {
                         Text("Pair another device to connect directly on your local network, with the encrypted Mold proxy available when you’re away. Only paired devices can access this Mac.")
                             .foregroundStyle(.secondary)
+                        Toggle("Allow Regular Direct Connections", isOn: Binding(
+                            get: { remote.regularEnabled }, set: { remote.setRegularEnabled($0) }))
+                        Text("Regular uses HTTP or HTTPS with a separate API key. The Mold proxy always stays encrypted.")
+                            .foregroundStyle(.secondary)
                         if remote.canStopRemoteAccess {
                             Button("Stop Remote Access") { Task { await remote.disable() } }
                                 .disabled(remote.isStopping)

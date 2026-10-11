@@ -103,4 +103,13 @@ extension PairingTests {
             token: nil, expiresAt: nil, authRequired: false, instanceId: "i", hostname: "workstation")
         #expect(PairingSheet.needsFreshCode(session: keyless, sessionHost: workstation.id, host: workstation.id, now: now))
     }
+    @Test func switchingPairingModeNeverReusesTheOtherModesCode() {
+        let host = machine()
+        var regular = PairingSession(token: nil, expiresAt: 4_000_000_000, authRequired: true, instanceId: "i", hostname: "GPU")
+        regular.mode = .regular; regular.pairingToken = String(repeating: "a", count: 64)
+        regular.baseUrl = "https://gpu.example.com"
+        #expect(!PairingSheet.needsFreshCode(session: regular, sessionHost: host.id, host: host.id, now: .now, mode: .regular))
+        #expect(PairingSheet.needsFreshCode(session: regular, sessionHost: host.id, host: host.id, now: .now, mode: .secure))
+    }
+
 }
