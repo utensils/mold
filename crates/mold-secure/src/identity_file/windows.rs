@@ -182,8 +182,9 @@ pub(super) fn create_file(path: &Path) -> io::Result<File> {
 pub(super) fn open(path: &Path, directory: bool) -> io::Result<File> {
     let rights = READ_CONTROL | FILE_READ_ATTRIBUTES | if directory { 0 } else { GENERIC_READ };
     // MoveFileEx makes a renamed file visible before closing its DELETE handle.
-    // Sharing delete permits that committed read and atomic state replacement;
-    // it grants no ACL access and still refuses in-place writers. Keep the
+    // Sharing delete permits that committed read without granting ACL access
+    // or allowing in-place writers. Replacing an existing destination still
+    // requires its readers to close under MoveFileEx's Windows semantics. Keep the
     // containing directory pinned against rename while validating/reading.
     // https://devblogs.microsoft.com/oldnewthing/20211022-00/?p=105822
     let sharing = FILE_SHARE_READ | if directory { 0 } else { FILE_SHARE_DELETE };
@@ -329,14 +330,16 @@ mod tests {
     }
 
     #[test]
-    fn active_validated_reader_allows_atomic_replace_but_not_in_place_write() {
+    fn active_validated_reader_refuses_modification_until_closed() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("private/state");
         write_private_file(&path, b"original", false).unwrap();
         let mut reader = open(&path, false).unwrap();
         validate(&reader, false).unwrap();
         // The read handle still denies in-place modification of its validated
-        // bytes, even though replacement can install another protected file.
+        // bytes. Classic Windows rename also refuses an open destination; it
+        // does not promise POSIX replacement with surviving old readers.
+        // https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/1d2673a8-8fb9-4868-920a-775ccaa30cf8
         let writer = unsafe {
             CreateFileW(
                 wide(&path).as_ptr(),
@@ -353,10 +356,18 @@ mod tests {
             panic!("validated reader must refuse in-place writes");
         }
         assert_eq!(io::Error::last_os_error().raw_os_error(), Some(32));
-        write_private_file(&path, b"replacement", true).unwrap();
+        let refused = write_private_file(&path, b"replacement", true).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
         let mut previous = Vec::new();
         reader.read_to_end(&mut previous).unwrap();
         assert_eq!(previous, b"original");
+        assert_eq!(&*read_private_file(&path, 32).unwrap(), b"original");
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
+        drop(reader);
+        write_private_file(&path, b"replacement", true).unwrap();
         assert_eq!(&*read_private_file(&path, 32).unwrap(), b"replacement");
     }
 }

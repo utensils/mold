@@ -13,6 +13,6 @@
 - **Complete pairing removal.** Forgetting a machine clears its encrypted pairing
   and native media credentials before removing its saved entry, with retryable
   errors if secure storage is unavailable.
-- **Reliable Windows identity storage.** Concurrent startup and atomic credential
-  updates preserve the host's private identity without transient file-sharing
-  failures or weakening owner-only access.
+- **Reliable Windows identity storage.** Concurrent startup reads the same private
+  host identity while it is installed, without transient file-sharing failures
+  or weakening owner-only access.
