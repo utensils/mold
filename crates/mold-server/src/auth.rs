@@ -7,6 +7,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use hmac::{Hmac, Mac};
+use mold_secure_client::ConnectionMode;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -24,10 +25,15 @@ type HmacSha256 = Hmac<Sha256>;
 /// Shared auth state — `None` means authentication is disabled.
 pub type AuthState = Option<Arc<ApiKeySet>>;
 
+/// Server wiring only; a request header can never opt into direct API access.
+#[derive(Clone, Copy)]
+pub(crate) struct RegularApiAllowed;
+
 /// Set of valid API keys loaded from `MOLD_API_KEY`.
 pub struct ApiKeySet {
     pub(crate) secure: Option<Arc<crate::secure_pairing::SecurePairing>>,
     secure_mutations: Mutex<()>,
+    regular_invites: crate::regular_pairing::Invitations,
     operator_keys: HashSet<String>,
     gallery_signing_secret: [u8; GALLERY_SIGNING_SECRET_BYTES],
     paired_clients: Mutex<HashMap<[u8; 32], PairedClientAccess>>,
@@ -42,12 +48,14 @@ struct PairedClientAccess {
     client_kind: String,
     created_at_ms: i64,
     last_used_at_ms: Option<i64>,
+    mode: ConnectionMode,
+    cancel: tokio_util::sync::CancellationToken,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AuthenticationKind {
     Operator,
-    PairedClient,
+    PairedClient(ConnectionMode),
 }
 
 impl ApiKeySet {
@@ -67,6 +75,7 @@ impl ApiKeySet {
         Ok(Self {
             secure: None,
             secure_mutations: Mutex::new(()),
+            regular_invites: Default::default(),
             operator_keys: keys,
             gallery_signing_secret,
             paired_clients: Mutex::new(paired_clients),
@@ -83,6 +92,7 @@ impl ApiKeySet {
         Self {
             secure: None,
             secure_mutations: Mutex::new(()),
+            regular_invites: Default::default(),
             operator_keys: keys,
             gallery_signing_secret,
             paired_clients: Mutex::new(HashMap::new()),
@@ -144,7 +154,7 @@ impl ApiKeySet {
                 }
             }
         }
-        Some(AuthenticationKind::PairedClient)
+        Some(AuthenticationKind::PairedClient(client.mode))
     }
 
     fn audit_identity(&self, candidate: &str) -> String {
@@ -216,6 +226,7 @@ impl ApiKeySet {
                 client_kind: client.client_kind,
                 created_at_ms: client.created_at_ms,
                 last_used_at_ms: client.last_used_at_ms,
+                mode: client.mode,
             })
             .collect::<Vec<_>>();
         clients.sort_by_key(|client| std::cmp::Reverse(client.created_at_ms));
@@ -238,10 +249,89 @@ impl ApiKeySet {
             }
             self.paired_clients
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .retain(|_, client| client.id != id);
+                .unwrap_or_else(|p| p.into_inner())
+                .retain(|_, client| {
+                    if client.id == id {
+                        client.cancel.cancel();
+                        false
+                    } else {
+                        true
+                    }
+                });
         }
         Ok(revoked)
+    }
+
+    pub(crate) fn issue_regular_pairing(&self, origin: &str) -> anyhow::Result<(String, u64)> {
+        anyhow::ensure!(
+            self.metadata_db.is_some(),
+            "pairing requires a metadata database"
+        );
+        self.regular_invites.issue(
+            mold_secure_client::regular_origin(origin)?,
+            unix_timestamp(),
+        )
+    }
+
+    pub(crate) fn claim_regular_pairing(
+        &self,
+        token: &str,
+        name: &str,
+        kind: &str,
+    ) -> anyhow::Result<(String, String)> {
+        let _mutation = self
+            .secure_mutations
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let invitation = self
+            .regular_invites
+            .get(token, unix_timestamp())
+            .ok_or_else(|| anyhow::anyhow!("invalid or expired regular invitation"))?;
+        let db = self
+            .metadata_db
+            .as_ref()
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("pairing requires a metadata database"))?;
+        let mut clients = self
+            .paired_clients
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        anyhow::ensure!(clients.len() < 4096, "paired client capacity reached");
+        let mut random = [0u8; 32];
+        getrandom::fill(&mut random)?;
+        let key = format!("mold_regular_{}", crate::connections::hex(&random));
+        let client = mold_db::paired_clients::PairedClient {
+            id: uuid::Uuid::new_v4().to_string(),
+            server_instance_id: self.server_instance_id.to_string(),
+            name: normalized_client_name(name),
+            client_kind: normalized_client_kind(kind),
+            credential_hash: Sha256::digest(key.as_bytes()).into(),
+            created_at_ms: unix_timestamp_ms(),
+            last_used_at_ms: None,
+        };
+        mold_db::regular_clients::RegularClients::new(db).insert(&client)?;
+        self.regular_invites.consume(token);
+        clients.insert(
+            client.credential_hash,
+            PairedClientAccess {
+                id: client.id,
+                name: client.name,
+                client_kind: client.client_kind,
+                created_at_ms: client.created_at_ms,
+                last_used_at_ms: None,
+                mode: ConnectionMode::Regular,
+                cancel: Default::default(),
+            },
+        );
+        Ok((key, invitation.origin))
+    }
+
+    fn cancellation(&self, key: &str) -> Option<tokio_util::sync::CancellationToken> {
+        self.paired_clients
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&<[u8; 32]>::from(Sha256::digest(key.as_bytes())))
+            .map(|v| v.cancel.clone())
     }
 
     pub(crate) fn claim_secure_pairing(
@@ -307,6 +397,8 @@ impl ApiKeySet {
             client_kind: normalized_client_kind(client_kind),
             created_at_ms: unix_timestamp_ms(),
             last_used_at_ms: None,
+            mode: ConnectionMode::Secure,
+            cancel: Default::default(),
         };
         mold_db::secure_devices::SecureDevices::new(db).insert(
             &mold_db::paired_clients::PairedClient {
@@ -379,6 +471,7 @@ pub(crate) struct PairedClientSummary {
     pub(crate) client_kind: String,
     pub(crate) created_at_ms: i64,
     pub(crate) last_used_at_ms: Option<i64>,
+    pub(crate) mode: ConnectionMode,
 }
 
 fn load_paired_clients(
@@ -388,7 +481,13 @@ fn load_paired_clients(
     let Some(db) = metadata_db.as_ref() else {
         return HashMap::new();
     };
-    // Protocol-1 tokens have no device key binding and are deliberately retired.
+    let regular = match mold_db::regular_clients::RegularClients::new(db).list(server_instance_id) {
+        Ok(ids) => ids.into_iter().collect::<HashSet<_>>(),
+        Err(error) => {
+            warn!(%error, "failed to load regular paired clients");
+            return HashMap::new();
+        }
+    };
     let secure = match mold_db::secure_devices::SecureDevices::new(db).list(server_instance_id) {
         Ok(devices) => devices
             .into_iter()
@@ -402,8 +501,16 @@ fn load_paired_clients(
     match mold_db::paired_clients::PairedClients::new(db).list(server_instance_id) {
         Ok(clients) => clients
             .into_iter()
-            .filter(|client| secure.contains(&(client.id.clone(), client.credential_hash)))
+            .filter(|client| {
+                secure.contains(&(client.id.clone(), client.credential_hash))
+                    != regular.contains(&client.id)
+            })
             .map(|client| {
+                let mode = if regular.contains(&client.id) {
+                    ConnectionMode::Regular
+                } else {
+                    ConnectionMode::Secure
+                };
                 (
                     client.credential_hash,
                     PairedClientAccess {
@@ -412,6 +519,8 @@ fn load_paired_clients(
                         client_kind: client.client_kind,
                         created_at_ms: client.created_at_ms,
                         last_used_at_ms: client.last_used_at_ms,
+                        mode,
+                        cancel: Default::default(),
                     },
                 )
             })
@@ -479,7 +588,8 @@ struct AuthError {
 /// - Comma-separated: `MOLD_API_KEY=key1,key2,key3`
 /// - File reference: `MOLD_API_KEY=@/path/to/keys.txt` (one key per line)
 ///
-/// Returns `None` when the variable is unset or empty (auth disabled).
+/// When unset, read existing per-home operator authority. An untouched home or
+/// an explicitly empty variable keeps authentication disabled.
 pub fn load_api_keys() -> anyhow::Result<AuthState> {
     load_api_keys_with_db(Arc::new(None), Arc::new(String::new()))
 }
@@ -513,7 +623,16 @@ pub(crate) fn load_api_keys_with_db(
 pub(crate) fn load_operator_keys() -> anyhow::Result<Option<HashSet<String>>> {
     let raw = match std::env::var("MOLD_API_KEY") {
         Ok(v) if !v.is_empty() => v,
-        _ => return Ok(None),
+        Ok(_) => return Ok(None),
+        Err(std::env::VarError::NotPresent) => {
+            let Some(home) = mold_core::Config::mold_dir() else {
+                return Ok(None);
+            };
+            return Ok(
+                mold_secure::operator_key::read(&home)?.map(|key| HashSet::from([key.to_string()]))
+            );
+        }
+        Err(_) => anyhow::bail!("MOLD_API_KEY must be valid UTF-8"),
     };
 
     let keys = if let Some(path) = raw.strip_prefix('@') {
@@ -555,7 +674,7 @@ pub async fn require_api_key(request: Request, next: Next) -> Response {
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .is_some_and(|peer| peer.0.ip().is_loopback());
-    if !local {
+    if !local && request.extensions().get::<RegularApiAllowed>().is_none() {
         if is_browser_bootstrap_read(request.method(), request.uri().path()) {
             return (
                 StatusCode::SEE_OTHER,
@@ -650,6 +769,16 @@ pub async fn require_api_key(request: Request, next: Next) -> Response {
         request.headers_mut().remove("x-mold-secure-control");
         return next.run(request).await;
     }
+    if request.uri().path() == "/api/pairing/regular/claim" {
+        if request
+            .extensions()
+            .get::<mold_secure::RequestContext>()
+            .is_some()
+        {
+            return unauthorized("regular pairing requires a direct connection");
+        }
+        return next.run(request).await;
+    }
     if request.uri().path() == "/api/pairing/claim"
         && request
             .extensions()
@@ -687,6 +816,18 @@ pub async fn require_api_key(request: Request, next: Next) -> Response {
         Some(value) => {
             let candidate = value.to_str().unwrap_or("").to_string();
             if let Some(kind) = key_set.authenticate(&candidate) {
+                let context = request.extensions().get::<mold_secure::RequestContext>();
+                if matches!(
+                    kind,
+                    AuthenticationKind::PairedClient(ConnectionMode::Secure)
+                ) && context.is_none()
+                    || matches!(
+                        kind,
+                        AuthenticationKind::PairedClient(ConnectionMode::Regular)
+                    ) && context.is_some()
+                {
+                    return unauthorized("paired credential does not match connection mode");
+                }
                 if let Some(secure) = &key_set.secure {
                     let hash: [u8; 32] = Sha256::digest(candidate.as_bytes()).into();
                     let context = request.extensions().get::<mold_secure::RequestContext>();
@@ -707,7 +848,32 @@ pub async fn require_api_key(request: Request, next: Next) -> Response {
                 if kind == AuthenticationKind::Operator {
                     request.extensions_mut().insert(PairingAuthority);
                 }
-                next.run(request).await
+                let cancel = key_set.cancellation(&candidate);
+                if let Some(cancel) = cancel {
+                    let response = tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => return unauthorized("paired access was revoked"),
+                        response = next.run(request) => response,
+                    };
+                    let (parts, body) = response.into_parts();
+                    use futures::StreamExt;
+                    let stream = futures::stream::unfold(
+                        (body.into_data_stream(), cancel, false),
+                        |(mut body, cancel, done)| async move {
+                            if done {
+                                return None;
+                            }
+                            tokio::select! {
+                                biased;
+                                _ = cancel.cancelled() => Some((Err(std::io::Error::other("paired access was revoked")), (body, cancel, true))),
+                                chunk = body.next() => chunk.map(|chunk| (chunk.map_err(std::io::Error::other), (body, cancel, false))),
+                            }
+                        },
+                    );
+                    Response::from_parts(parts, axum::body::Body::from_stream(stream))
+                } else {
+                    next.run(request).await
+                }
             } else {
                 warn!("rejected request with invalid API key");
                 unauthorized("invalid API key")
@@ -915,6 +1081,140 @@ mod tests {
     use super::*;
     use crate::test_support::env_lock;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn regular_direct_requires_explicit_listener_policy_and_normal_authentication() {
+        use axum::{body::Body, http::Request, routing::get, Extension, Router};
+        let auth = Some(Arc::new(ApiKeySet::new(HashSet::from(["operator".into()]))));
+        let router = Router::new()
+            .route("/api/status", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(require_api_key))
+            .layer(Extension(auth))
+            .layer(Extension(axum::extract::ConnectInfo(
+                "203.0.113.8:1234".parse::<std::net::SocketAddr>().unwrap(),
+            )));
+        let request = |key| {
+            Request::builder()
+                .uri("/api/status")
+                .header("x-api-key", key)
+                .body(Body::empty())
+                .unwrap()
+        };
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(request("operator"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UPGRADE_REQUIRED
+        );
+        let explicit = router.layer(Extension(RegularApiAllowed));
+        assert_eq!(
+            explicit
+                .clone()
+                .oneshot(request("operator"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            explicit.oneshot(request("wrong")).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[test]
+    fn shared_home_operator_is_read_without_enabling_an_untouched_home() {
+        let _lock = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let old_home = std::env::var_os("MOLD_HOME");
+        let old_key = std::env::var_os("MOLD_API_KEY");
+        struct Restore(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (name, value) in [("MOLD_HOME", &self.0), ("MOLD_API_KEY", &self.1)] {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(old_home, old_key);
+        std::env::set_var("MOLD_HOME", home.path());
+        std::env::remove_var("MOLD_API_KEY");
+        assert!(load_operator_keys().unwrap().is_none());
+        assert!(!home.path().join("secure").exists());
+        mold_secure::operator_key::resolve(home.path(), Some("first-shell-key")).unwrap();
+        assert_eq!(
+            load_operator_keys().unwrap().unwrap(),
+            HashSet::from(["first-shell-key".into()])
+        );
+        let db_path = home.path().join("mold.db");
+        let db = mold_db::MetadataDb::open(&db_path).unwrap();
+        let client = mold_db::paired_clients::PairedClient {
+            id: "phone".into(),
+            server_instance_id: "host".into(),
+            name: "Phone".into(),
+            client_kind: "iphone".into(),
+            credential_hash: Sha256::digest(b"paired-phone-key").into(),
+            created_at_ms: 1,
+            last_used_at_ms: None,
+        };
+        let binding = mold_secure::Identity::generate().unwrap().public_binding();
+        mold_db::secure_devices::SecureDevices::new(&db)
+            .insert(
+                &client,
+                &mold_db::secure_devices::SecureDevice {
+                    client_id: client.id.clone(),
+                    server_instance_id: client.server_instance_id.clone(),
+                    grant_id: "ab".repeat(16),
+                    signing_key: binding.signing_key,
+                    noise_key: binding.noise_key,
+                    credential_hash: client.credential_hash,
+                    expires_at: unix_timestamp() + 3600,
+                    epoch: 0,
+                },
+            )
+            .unwrap();
+        let first = load_api_keys_with_db(Arc::new(Some(db)), Arc::new("host".into()))
+            .unwrap()
+            .unwrap();
+        let host_pin = first.secure.as_ref().unwrap().public_fields();
+        assert!(first.contains("paired-phone-key"));
+        drop(first);
+        mold_secure::operator_key::resolve(home.path(), Some("different-shell-key")).unwrap();
+        let second = load_api_keys_with_db(
+            Arc::new(Some(mold_db::MetadataDb::open(&db_path).unwrap())),
+            Arc::new("host".into()),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(second.contains("first-shell-key"));
+        assert!(!second.contains("different-shell-key"));
+        assert!(second.contains("paired-phone-key"));
+        assert_eq!(second.secure.as_ref().unwrap().public_fields(), host_pin);
+        assert_eq!(second.paired_clients().len(), 1);
+        drop(second);
+        std::env::set_var("MOLD_API_KEY", "explicit-override");
+        assert_eq!(
+            load_operator_keys().unwrap().unwrap(),
+            HashSet::from(["explicit-override".into()])
+        );
+        std::env::remove_var("MOLD_API_KEY");
+        mold_secure::identity_file::write_private_file(
+            &home.path().join("secure/operator.key"),
+            b"bad\nkey",
+            true,
+        )
+        .unwrap();
+        assert!(
+            load_operator_keys().is_err(),
+            "malformed shared authority must not disable authentication"
+        );
+    }
 
     #[test]
     fn parse_single_key() {

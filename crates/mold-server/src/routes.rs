@@ -884,6 +884,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/pairing/sessions", post(create_pairing_session))
         .route("/api/pairing/claim", post(claim_pairing_session))
         .route(
+            "/api/pairing/regular/claim",
+            post(claim_regular_pairing_session),
+        )
+        .route(
             "/api/pairing/secure/check",
             get(crate::secure_pairing::check),
         )
@@ -9980,6 +9984,21 @@ pub(crate) struct PairingClaimRequest {
     pub(crate) client_kind: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PairingSessionRequest {
+    #[serde(default)]
+    mode: mold_secure_client::ConnectionMode,
+    direct_url: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegularPairingClaimRequest {
+    token: String,
+    client_name: Option<String>,
+    client_kind: Option<String>,
+}
+
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub(crate) struct PairingClaimResponse {
     #[serde(flatten)]
@@ -9997,6 +10016,7 @@ pub(crate) struct PairedClientResponse {
     pub(crate) client_kind: String,
     pub(crate) created_at_ms: i64,
     pub(crate) last_used_at_ms: Option<i64>,
+    pub(crate) mode: String,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -10029,7 +10049,8 @@ async fn create_pairing_session(
     State(state): State<AppState>,
     auth_state: Option<Extension<crate::auth::AuthState>>,
     authority: Option<Extension<crate::auth::PairingAuthority>>,
-) -> Result<impl IntoResponse, ApiError> {
+    request: Option<Json<PairingSessionRequest>>,
+) -> Result<Response, ApiError> {
     let key_set = auth_state
         .and_then(|Extension(state)| state)
         .ok_or_else(|| {
@@ -10045,6 +10066,45 @@ async fn create_pairing_session(
             "PAIRING_OPERATOR_REQUIRED",
             StatusCode::FORBIDDEN,
         ));
+    }
+    if let Some(Json(request)) = request {
+        if request.mode == mold_secure_client::ConnectionMode::Regular {
+            if !state.connection_addresses.regular_api_available() {
+                return Err(ApiError::with_code(
+                    "enable Regular direct access before pairing",
+                    "REGULAR_ACCESS_DISABLED",
+                    StatusCode::FORBIDDEN,
+                ));
+            }
+            let origin = mold_secure_client::regular_origin(
+                request.direct_url.as_deref().unwrap_or_default(),
+            )
+            .map_err(|_| {
+                ApiError::with_code(
+                    "Regular pairing requires an explicit direct HTTP(S) origin",
+                    "INVALID_DIRECT_ORIGIN",
+                    StatusCode::BAD_REQUEST,
+                )
+            })?;
+            let (token, expires_at) = key_set.issue_regular_pairing(&origin).map_err(|_| {
+                ApiError::with_code(
+                    "Regular pairing is unavailable",
+                    "PAIRING_UNAVAILABLE",
+                    StatusCode::SERVICE_UNAVAILABLE,
+                )
+            })?;
+            return Ok(([(header::CACHE_CONTROL,"no-store")],Json(serde_json::json!({
+                "mode":"regular","base_url":origin,"pairing_token":token,"expires_at":expires_at,
+                "instance_id":state.instance_id.as_str(),"hostname":pairing_hostname(),
+            }))).into_response());
+        }
+        if request.direct_url.is_some() {
+            return Err(ApiError::with_code(
+                "direct_url requires Regular mode",
+                "INVALID_DIRECT_ORIGIN",
+                StatusCode::BAD_REQUEST,
+            ));
+        }
     }
     let secure = key_set.secure.as_ref().ok_or_else(|| {
         ApiError::with_code(
@@ -10076,7 +10136,37 @@ async fn create_pairing_session(
             instance_id: (*state.instance_id).clone(),
             hostname: pairing_hostname(),
         }),
-    ))
+    )
+        .into_response())
+}
+
+async fn claim_regular_pairing_session(
+    State(state): State<AppState>,
+    auth_state: Option<Extension<crate::auth::AuthState>>,
+    context: Option<Extension<mold_secure::RequestContext>>,
+    Json(request): Json<RegularPairingClaimRequest>,
+) -> Result<Response, ApiError> {
+    let invalid = || {
+        ApiError::with_code(
+            "Regular invitation is invalid, expired, or unavailable",
+            "PAIRING_INVITE_INVALID",
+            StatusCode::UNAUTHORIZED,
+        )
+    };
+    if !state.connection_addresses.regular_api_available() || context.is_some() {
+        return Err(invalid());
+    }
+    let key_set = auth_state
+        .and_then(|Extension(state)| state)
+        .ok_or_else(invalid)?;
+    let (api_key, base_url) = key_set
+        .claim_regular_pairing(
+            &request.token,
+            request.client_name.as_deref().unwrap_or("Mold device"),
+            request.client_kind.as_deref().unwrap_or("mobile"),
+        )
+        .map_err(|_| invalid())?;
+    Ok(([(header::CACHE_CONTROL,"no-store")],Json(serde_json::json!({"mode":"regular","api_key":api_key,"base_url":base_url,"instance_id":state.instance_id.as_str(),"hostname":pairing_hostname()}))).into_response())
 }
 
 /// Redeem a signed invitation inside its authenticated Noise channel.
@@ -10173,6 +10263,11 @@ async fn list_paired_clients(
                 client_kind: client.client_kind,
                 created_at_ms: client.created_at_ms,
                 last_used_at_ms: client.last_used_at_ms,
+                mode: match client.mode {
+                    mold_secure_client::ConnectionMode::Regular => "regular",
+                    mold_secure_client::ConnectionMode::Secure => "secure",
+                }
+                .into(),
             })
             .collect(),
     }))
@@ -12974,6 +13069,7 @@ mod tests {
             State(state.clone()),
             Some(Extension(auth.clone())),
             Some(Extension(crate::auth::PairingAuthority)),
+            None,
         )
         .await
         .unwrap()
@@ -13055,11 +13151,14 @@ mod tests {
     }
     #[tokio::test]
     async fn insecure_pairing_is_unavailable_without_authenticated_host() {
-        assert!(
-            create_pairing_session(State(AppState::for_tests()), Some(Extension(None)), None)
-                .await
-                .is_err()
-        );
+        assert!(create_pairing_session(
+            State(AppState::for_tests()),
+            Some(Extension(None)),
+            None,
+            None
+        )
+        .await
+        .is_err());
         assert!(claim_pairing_session(
             State(AppState::for_tests()),
             Some(Extension(None)),
