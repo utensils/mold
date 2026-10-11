@@ -29,6 +29,17 @@
 //! `A.dim(0) == B.dim(1)`, the tensor count, the header identity, the file
 //! size, and the full content digest all stay exact.
 //!
+//! A **per-module-alpha** adapter ([`H3TurboLoraShape::PerModuleAlpha`]) is a
+//! rank-reduced export in the kohya "dynamic resize" lineage (Kijai's
+//! MiniMax-H3-experimental DMAD/PDMD builds): the per-module rank is read
+//! from the header exactly as for a dynamic file, but every module ALSO
+//! carries an `alpha` scalar (BF16 or F32) whose value equals that module's
+//! own rank, so the runtime scale `alpha / rank` is COMPUTED per module and
+//! must resolve to exactly `1.0`. The resize ran over the FUSED Q/K/V matrix,
+//! so its `lora_B` is dense rather than block-diagonal and the rank ceiling
+//! is `min(in_features, out_features)` of the fused projection. The forward
+//! is unchanged — `(x @ Aᵀ) @ Bᵀ` never assumed block-diagonal structure.
+//!
 //! This module parses, authenticates, and validates. It performs no tensor
 //! loading and no forward computation, and it registers no engine, capability,
 //! catalog entry, or download.
@@ -87,6 +98,19 @@ pub const H3_TURBO_LORA_LIGHTX2V_SOURCE_REVISION: &str = "05ef678438e84933c40613
 pub const H3_TURBO_LORA_DRBAPH_REPOSITORY: &str = "drbaph/MiniMax-H3-Turbo-Lora-ComfyUI";
 /// Pinned drbaph revision. Files there sit at the repository ROOT.
 pub const H3_TURBO_LORA_DRBAPH_SOURCE_REVISION: &str = "be8eb3ea3466cbb7def202ffec0d2fdc054256ac";
+/// Repository publishing Kijai's rank-reduced DMAD / PDMD distill adapters
+/// ([`H3TurboLoraShape::PerModuleAlpha`]). Files sit under `loras/`.
+pub const H3_TURBO_LORA_KIJAI_REPOSITORY: &str = "Kijai/MiniMax-H3-experimental";
+/// Pinned Kijai revision (full commit sha from the HF model API).
+pub const H3_TURBO_LORA_KIJAI_SOURCE_REVISION: &str = "d8023be02fefbb3633b0cd335c3879f91177299d";
+/// Published `__metadata__.converted_layout` of a per-module-alpha export.
+pub const H3_TURBO_LORA_KIJAI_CONVERTED_LAYOUT: &str = "comfyui_minimax_h3";
+/// Published `__metadata__.conversion` of a per-module-alpha export. It is
+/// the file's own statement that its keys and factor layouts were converted
+/// to the ComfyUI checkpoint mold loads (fused contiguous q|k|v, swapped
+/// SwiGLU `fc1` halves) and that its scale was folded into `lora_B`, so it is
+/// CHECKED exactly rather than merely read.
+pub const H3_TURBO_LORA_KIJAI_CONVERSION: &str = "qkv block-diag fused (contiguous q|k|v); mlp.fc1 swiglu halves swapped; alpha folded into lora_B; scale 1.0 baked as a flat multiplier";
 /// Every ComfyUI-layout adapter key is namespaced under this prefix; the
 /// remainder is a base-checkpoint tensor name.
 pub const H3_TURBO_LORA_KEY_PREFIX: &str = "diffusion_model.";
@@ -147,6 +171,7 @@ const ALPHA_SUFFIX: &str = ".alpha";
 /// presence means a merged or quantized checkpoint was supplied in place of one.
 const BASE_SIDECAR_SUFFIXES: [&str; 2] = [".weight_scale", ".comfy_quant"];
 const ALPHA_BYTES: u64 = 4;
+const BF16_ALPHA_BYTES: u64 = 2;
 /// Upper bound on `num_layers + token_refiner_num_layers` any expectation may
 /// describe. The published geometry is 52; the bound only has to keep
 /// caller-supplied arithmetic away from overflow.
@@ -162,6 +187,27 @@ const STRUCTURE_IDENTITY_DOMAIN: &[u8] = b"mold.minimax-h3.turbo-lora-structure.
 /// [`STRUCTURE_IDENTITY_DOMAIN`].
 const STRUCTURE_IDENTITY_DOMAIN_DYNAMIC: &[u8] =
     b"mold.minimax-h3.turbo-lora-structure.dynamic.v1\0";
+/// Separate domain for the per-module-alpha structure digest, for the same
+/// reason the dynamic one is separate: it hashes per-module ranks, their
+/// alphas, and the baked scale, and must never collide with either other
+/// shape's digest.
+const STRUCTURE_IDENTITY_DOMAIN_PER_MODULE_ALPHA: &[u8] =
+    b"mold.minimax-h3.turbo-lora-structure.per-module-alpha.v1\0";
+/// `__metadata__` keys a per-module-alpha export carries, and nothing else.
+/// The set is CLOSED: a training-rank, alpha, resize, or fusion declaration
+/// belongs to another shape and means the wrong file was supplied.
+const METADATA_CONVERTED_LAYOUT_KEY: &str = "converted_layout";
+const METADATA_CONVERSION_KEY: &str = "conversion";
+/// kohya resize bookkeeping. `ss_network_dim` / `ss_network_alpha` must read
+/// `Dynamic`; `ss_training_comment` is free text (it records the resize's
+/// Frobenius threshold), and the pinned header identity already fixes it.
+const METADATA_SS_NETWORK_DIM_KEY: &str = "ss_network_dim";
+const METADATA_SS_NETWORK_ALPHA_KEY: &str = "ss_network_alpha";
+const METADATA_SS_TRAINING_COMMENT_KEY: &str = "ss_training_comment";
+const METADATA_SS_DYNAMIC: &str = "Dynamic";
+/// Storage dtypes a per-module-alpha `alpha` scalar may use. Kijai ships
+/// BF16, which represents every integer rank up to 256 exactly.
+const PER_MODULE_ALPHA_DTYPES: [&str; 2] = ["BF16", "F32"];
 /// `__metadata__` key carrying the scale a resized adapter already multiplied
 /// into `lora_B`. It is REQUIRED on a rank-dynamic file and must parse as a
 /// float: drbaph's own v1.1 exports declare an English sentence here, which is
@@ -211,6 +257,15 @@ pub enum H3TurboLoraShape {
         source: H3TurboLoraTier,
         baked_scale: f32,
     },
+    /// Rank-reduced export with a per-module rank read from the header AND a
+    /// per-module `alpha` scalar equal to that rank, so `alpha / rank` is
+    /// computed per module and must be exactly `1.0`. The resize ran over the
+    /// fused Q/K/V matrix, so `lora_B` is dense and the rank ceiling is
+    /// `min(in, out)` of the FUSED projection. There is no source tier: the
+    /// file does not name the adapter it was reduced from. `baked_scale` is
+    /// the declared `__metadata__.baked_scale` the file is checked against,
+    /// never a factor applied at forward time.
+    PerModuleAlpha { baked_scale: f32 },
 }
 
 impl H3TurboLoraShape {
@@ -219,9 +274,13 @@ impl H3TurboLoraShape {
     ///
     /// A resized file keeps `__metadata__.training_rank "128"`; comparing that
     /// against a per-module rank would refuse every one of them.
-    pub fn source_training_rank(&self) -> usize {
+    ///
+    /// `None` for [`Self::PerModuleAlpha`], which neither declares a training
+    /// rank nor names a source to inherit one from; its ranks are bounded by
+    /// the projection geometry alone.
+    pub fn source_training_rank(&self) -> Option<usize> {
         match self {
-            Self::Uniform { training_rank, .. } => *training_rank,
+            Self::Uniform { training_rank, .. } => Some(*training_rank),
             // Deliberately one level deep: `validate` refuses a Dynamic tier
             // whose source is itself Dynamic, so this arm must not recurse —
             // and must not invent a bound either. Answering
@@ -229,12 +288,13 @@ impl H3TurboLoraShape {
             // shape build fixtures and derive module tables against a
             // fabricated rank ceiling on the paths that skip `validate`.
             Self::Dynamic { source, .. } => match source.shape() {
-                Self::Uniform { training_rank, .. } => training_rank,
-                Self::Dynamic { .. } => unreachable!(
-                    "validate refuses a resized adapter whose source is itself resized; \
+                Self::Uniform { training_rank, .. } => Some(training_rank),
+                Self::Dynamic { .. } | Self::PerModuleAlpha { .. } => unreachable!(
+                    "validate refuses a resized adapter whose source is not rank-uniform; \
                      see H3TurboLoraExpectation::validate"
                 ),
             },
+            Self::PerModuleAlpha { .. } => None,
         }
     }
 
@@ -243,7 +303,9 @@ impl H3TurboLoraShape {
     pub fn training_alpha(&self) -> Option<f32> {
         match self {
             Self::Uniform { training_alpha, .. } => Some(*training_alpha),
-            Self::Dynamic { .. } => None,
+            // A per-module-alpha export has one alpha PER MODULE, equal to
+            // that module's rank, and no single training alpha for the file.
+            Self::Dynamic { .. } | Self::PerModuleAlpha { .. } => None,
         }
     }
 
@@ -256,37 +318,48 @@ impl H3TurboLoraShape {
             } => training_alpha / *training_rank as f32,
             // Already inside `lora_B`; multiplying again would square it.
             Self::Dynamic { .. } => 1.0,
+            // Every module's `alpha` equals its own rank, so `alpha / rank`
+            // is exactly one. Assembly COMPUTES it per module and refuses any
+            // module that does not resolve to this.
+            Self::PerModuleAlpha { .. } => 1.0,
         }
     }
 
-    /// Tensors per module: `lora_A`, `lora_B`, and — uniform only — `alpha`.
+    /// Tensors per module: `lora_A`, `lora_B`, and — except for a resized
+    /// export — `alpha`.
     pub const fn tensors_per_module(&self) -> usize {
         match self {
-            Self::Uniform { .. } => 3,
+            Self::Uniform { .. } | Self::PerModuleAlpha { .. } => 3,
             Self::Dynamic { .. } => 2,
         }
     }
 
-    /// The `__metadata__.qkv_fusion` declaration a file of this shape carries.
-    pub const fn qkv_fusion(&self) -> &'static str {
+    /// The `__metadata__.qkv_fusion` declaration a file of this shape
+    /// carries, or `None` for a per-module-alpha export, which declares none
+    /// (its fused `lora_B` is dense) and is refused if it does.
+    pub const fn qkv_fusion(&self) -> Option<&'static str> {
         match self {
-            Self::Uniform { .. } => H3_TURBO_LORA_UNIFORM_QKV_FUSION,
-            Self::Dynamic { .. } => H3_TURBO_LORA_DYNAMIC_QKV_FUSION,
+            Self::Uniform { .. } => Some(H3_TURBO_LORA_UNIFORM_QKV_FUSION),
+            Self::Dynamic { .. } => Some(H3_TURBO_LORA_DYNAMIC_QKV_FUSION),
+            Self::PerModuleAlpha { .. } => None,
         }
     }
 
-    /// The declared scale a resized file must carry in its `__metadata__`.
+    /// The declared scale a resized or per-module-alpha file must carry in
+    /// its `__metadata__`.
     pub const fn baked_scale(&self) -> Option<f32> {
         match self {
             Self::Uniform { .. } => None,
-            Self::Dynamic { baked_scale, .. } => Some(*baked_scale),
+            Self::Dynamic { baked_scale, .. } | Self::PerModuleAlpha { baked_scale } => {
+                Some(*baked_scale)
+            }
         }
     }
 
     /// The Uniform tier a resized file was derived from.
     pub const fn source_tier(&self) -> Option<H3TurboLoraTier> {
         match self {
-            Self::Uniform { .. } => None,
+            Self::Uniform { .. } | Self::PerModuleAlpha { .. } => None,
             Self::Dynamic { source, .. } => Some(*source),
         }
     }
@@ -294,7 +367,123 @@ impl H3TurboLoraShape {
     pub const fn is_dynamic(&self) -> bool {
         matches!(self, Self::Dynamic { .. })
     }
+
+    pub const fn is_per_module_alpha(&self) -> bool {
+        matches!(self, Self::PerModuleAlpha { .. })
+    }
+
+    /// Whether the per-module rank is read from the file rather than pinned:
+    /// true for both rank-reduced shapes. This is the predicate a
+    /// "rank-reduced" acquisition label has to agree with.
+    pub const fn has_per_module_rank(&self) -> bool {
+        matches!(self, Self::Dynamic { .. } | Self::PerModuleAlpha { .. })
+    }
 }
+
+/// The source pins of one published adapter that is not (yet) an
+/// [`H3TurboLoraTier`]. A tier arm declaring such an adapter reads every
+/// per-file fact from one of these, so the pins live in exactly one place,
+/// and [`Self::expectation`] is the contract that tier's
+/// [`H3TurboLoraTier::expectation`] must equal.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct H3TurboLoraPublishedPin {
+    pub repository: &'static str,
+    pub revision: &'static str,
+    /// Repository-relative path at [`Self::revision`].
+    pub repository_path: &'static str,
+    pub task: H3TransformerTask,
+    pub shape: H3TurboLoraShape,
+    pub file_bytes: u64,
+    /// The published file's own LFS SHA-256.
+    pub content_sha256: &'static str,
+    /// JSON header length, excluding the eight-byte length prefix.
+    pub header_len: u64,
+    /// SHA-256 of the length prefix followed by the exact JSON header bytes.
+    pub header_identity_sha256: &'static str,
+    /// [`H3TurboLoraInspection::structure_identity_sha256`] of the published
+    /// file, pinned so a validator change that would move it is caught.
+    pub structure_identity_sha256: &'static str,
+    /// Basename of the checked-in golden header under
+    /// `testdata/minimax_h3/turbo/`.
+    pub header_fixture: &'static str,
+}
+
+impl H3TurboLoraPublishedPin {
+    /// The file's basename: the on-disk key mold-core flattens adapters to.
+    pub fn file_name(&self) -> &'static str {
+        self.repository_path
+            .rsplit_once('/')
+            .map_or(self.repository_path, |(_, name)| name)
+    }
+
+    /// The exact contract a file of this pin must satisfy.
+    pub fn expectation(&self) -> H3TurboLoraExpectation {
+        H3TurboLoraExpectation {
+            config: H3TransformerConfig::default(),
+            task: self.task,
+            shape: self.shape,
+            file_bytes: Some(self.file_bytes),
+            content_sha256: Some(self.content_sha256.to_owned()),
+            header_len: Some(self.header_len),
+            header_identity_sha256: Some(self.header_identity_sha256.to_owned()),
+            source_repository: self.repository.to_owned(),
+            source_revision: self.revision.to_owned(),
+        }
+    }
+}
+
+/// Kijai DMAD 4-step distill adapter, rank-reduced to an average rank of 39.
+/// Overlays the compact FL2VA checkpoint.
+pub const H3_TURBO_LORA_KIJAI_DMAD_4STEP: H3TurboLoraPublishedPin = H3TurboLoraPublishedPin {
+    repository: H3_TURBO_LORA_KIJAI_REPOSITORY,
+    revision: H3_TURBO_LORA_KIJAI_SOURCE_REVISION,
+    repository_path: "loras/minimax_h3_DMAD_4step_full_lora_avg_rank_39_bf16.safetensors",
+    task: H3TransformerTask::T2VaFl2Va,
+    shape: H3TurboLoraShape::PerModuleAlpha { baked_scale: 1.0 },
+    file_bytes: 366_647_000,
+    content_sha256: "ddfdd94f4c9a0f32bf3649bb8e98ca20db572e4db6bcd9cca546a5b33ea32d11",
+    header_len: 75_056,
+    header_identity_sha256: "74971e9ce7b56ca419d6e47386aa0d7bf8c19d34212035bc9c713f8c7c7e9228",
+    structure_identity_sha256: "cda15230905d7e7cd52d771752cc4b74c632c3029f71c3f4e1ff9669960064a7",
+    header_fixture: "kijai-dmad-4step-r39.header",
+};
+
+/// Kijai PDMD 2-step distill adapter, rank-reduced to an average rank of 38.
+pub const H3_TURBO_LORA_KIJAI_PDMD_2STEP: H3TurboLoraPublishedPin = H3TurboLoraPublishedPin {
+    repository: H3_TURBO_LORA_KIJAI_REPOSITORY,
+    revision: H3_TURBO_LORA_KIJAI_SOURCE_REVISION,
+    repository_path: "loras/minimax_h3_pdmd_2step_lora_avg_rank_38_bf16.safetensors",
+    task: H3TransformerTask::T2VaFl2Va,
+    shape: H3TurboLoraShape::PerModuleAlpha { baked_scale: 1.0 },
+    file_bytes: 381_015_376,
+    content_sha256: "a17f3eb45ab16be56fce79a522604a8ec1ce41d732022ad398c5908b230eec55",
+    header_len: 75_176,
+    header_identity_sha256: "bd205e79c03b6a3af719b26d4b06d9a3957e9e3576fb38831e153f1055850187",
+    structure_identity_sha256: "62cdcc5237d7f14e7daa9307d09a3892e3826dc56ddcee381a724a61db499726",
+    header_fixture: "kijai-pdmd-2step-r38.header",
+};
+
+/// Kijai PDMD 4-step distill adapter, rank-reduced to an average rank of 57.
+pub const H3_TURBO_LORA_KIJAI_PDMD_4STEP: H3TurboLoraPublishedPin = H3TurboLoraPublishedPin {
+    repository: H3_TURBO_LORA_KIJAI_REPOSITORY,
+    revision: H3_TURBO_LORA_KIJAI_SOURCE_REVISION,
+    repository_path: "loras/minimax_h3_pdmd_4step_lora_avg_rank_57_bf16.safetensors",
+    task: H3TransformerTask::T2VaFl2Va,
+    shape: H3TurboLoraShape::PerModuleAlpha { baked_scale: 1.0 },
+    file_bytes: 558_735_392,
+    content_sha256: "b5c62eb228a4f604890566ad698713703ed221302e0df1c067725c39f11efc37",
+    header_len: 75_384,
+    header_identity_sha256: "76286d05ac5664890bba39bf9f252894036ab3baab4ffe87fa82548ec58b073d",
+    structure_identity_sha256: "1da7f4f8866c795ecbc7c71274544b08be757c10c76735e6bd61522a4871feb1",
+    header_fixture: "kijai-pdmd-4step-r57.header",
+};
+
+/// Every reviewed per-module-alpha pin, in a stable order.
+pub const H3_TURBO_LORA_KIJAI_PINS: [H3TurboLoraPublishedPin; 3] = [
+    H3_TURBO_LORA_KIJAI_DMAD_4STEP,
+    H3_TURBO_LORA_KIJAI_PDMD_2STEP,
+    H3_TURBO_LORA_KIJAI_PDMD_4STEP,
+];
 
 /// One of the eight reviewed published Turbo adapters. Detection never uses a
 /// filename: the independently parsed header must agree with this authority,
@@ -625,8 +814,9 @@ pub struct H3TurboLoraExpectation {
 impl H3TurboLoraExpectation {
     /// The rank the adapter was TRAINED at — the source rank for a resized
     /// file, which is also the upper bound every per-module rank must sit
-    /// inside.
-    pub fn training_rank(&self) -> usize {
+    /// inside. `None` for a per-module-alpha export, which declares no
+    /// training rank and whose ranks are bounded by geometry alone.
+    pub fn training_rank(&self) -> Option<usize> {
         self.shape.source_training_rank()
     }
 
@@ -692,7 +882,7 @@ impl H3TurboLoraExpectation {
             // adapter of its OWN task. Chaining resizes would leave no pinned
             // source rank to bound the per-module ranks against, and crossing
             // tasks would let a ref2v resize claim an FL2VA source.
-            if source.shape().is_dynamic() {
+            if source.shape().has_per_module_rank() {
                 return Err(failure(
                     H3TurboLoraErrorCode::ConfigMismatch,
                     format!(
@@ -711,12 +901,24 @@ impl H3TurboLoraExpectation {
                 ));
             }
         }
+        if let H3TurboLoraShape::PerModuleAlpha { baked_scale } = self.shape {
+            if !baked_scale.is_finite() || baked_scale <= 0.0 {
+                return Err(failure(
+                    H3TurboLoraErrorCode::ConfigMismatch,
+                    format!("H3 Turbo baked scale {baked_scale} must be finite and positive"),
+                ));
+            }
+        }
         let training_rank = self.training_rank();
-        if training_rank == 0 || training_rank > MAX_TURBO_TRAINING_RANK {
-            return Err(failure(
-                H3TurboLoraErrorCode::ConfigMismatch,
-                format!("H3 Turbo training rank {training_rank} is outside 1..={MAX_TURBO_TRAINING_RANK}"),
-            ));
+        if let Some(training_rank) = training_rank {
+            if training_rank == 0 || training_rank > MAX_TURBO_TRAINING_RANK {
+                return Err(failure(
+                    H3TurboLoraErrorCode::ConfigMismatch,
+                    format!(
+                        "H3 Turbo training rank {training_rank} is outside 1..={MAX_TURBO_TRAINING_RANK}"
+                    ),
+                ));
+            }
         }
         if let Some(training_alpha) = self.training_alpha() {
             if !training_alpha.is_finite() || training_alpha <= 0.0 {
@@ -734,8 +936,10 @@ impl H3TurboLoraExpectation {
         }
         // Both counts and the widest rank must be representable.
         self.tensor_count()?;
-        for kind in H3TurboLoraModuleKind::ALL {
-            kind.checked_rank(training_rank)?;
+        if let Some(training_rank) = training_rank {
+            for kind in H3TurboLoraModuleKind::ALL {
+                kind.checked_rank(training_rank)?;
+            }
         }
         Ok(())
     }
@@ -966,12 +1170,15 @@ pub struct H3TurboLoraInspection {
     pub header_identity_sha256: String,
     pub tensor_count: usize,
     /// The rank the adapter was TRAINED at — the SOURCE rank for a resized
-    /// adapter, whose own per-module ranks live on each module.
-    pub training_rank: usize,
-    /// `None` for a resized adapter, which carries no alpha tensors.
+    /// adapter, whose own per-module ranks live on each module. `None` for a
+    /// per-module-alpha adapter, which declares no training rank.
+    pub training_rank: Option<usize>,
+    /// `None` for a resized adapter, which carries no alpha tensors, and for
+    /// a per-module-alpha one, whose alphas live on each module.
     pub training_alpha: Option<f32>,
     /// The effective runtime scale: the one `alpha / rank` every module of a
-    /// uniform adapter agreed on, or `1.0` for a resized one.
+    /// uniform or per-module-alpha adapter agreed on, or `1.0` for a resized
+    /// one.
     pub scale: f32,
     pub payload_bytes: u64,
     pub metadata: BTreeMap<String, String>,
@@ -1614,10 +1821,15 @@ fn validate_turbo_metadata(
             format!("H3 Turbo metadata {key:?} declares {declared:?}, expected {expected:?}"),
         )
     };
+    if let H3TurboLoraShape::PerModuleAlpha { baked_scale } = expectation.shape {
+        return validate_per_module_alpha_metadata(metadata, baked_scale);
+    }
     // A resized file keeps the rank it was resized FROM, so this compares
     // against the SOURCE rank; comparing it to a per-module rank would refuse
     // every resized adapter published.
-    let training_rank = expectation.training_rank();
+    let training_rank = expectation
+        .training_rank()
+        .expect("only a per-module-alpha shape lacks a training rank, and it returned above");
     if let Some(declared) = metadata.get("training_rank") {
         let parsed = declared.trim().parse::<usize>().map_err(|error| {
             failure(
@@ -1643,6 +1855,9 @@ fn validate_turbo_metadata(
                 source_shape.training_alpha().unwrap_or(f32::NAN),
                 source_shape.effective_scale(),
             )
+        }
+        H3TurboLoraShape::PerModuleAlpha { .. } => {
+            unreachable!("a per-module-alpha shape returned above")
         }
     };
     for (key, expected) in [
@@ -1725,12 +1940,94 @@ fn validate_turbo_metadata(
         ("target_format", H3_TURBO_LORA_TARGET_FORMAT),
         ("source_format", H3_TURBO_LORA_SOURCE_FORMAT),
         ("base_model", H3_TURBO_LORA_BASE_MODEL),
-        ("qkv_fusion", expectation.shape.qkv_fusion()),
+        (
+            "qkv_fusion",
+            expectation
+                .shape
+                .qkv_fusion()
+                .expect("uniform and dynamic shapes both declare a qkv fusion"),
+        ),
     ] {
         if let Some(declared) = metadata.get(key) {
             if declared != expected {
                 return Err(mismatch(key, declared, expected.to_owned()));
             }
+        }
+    }
+    Ok(())
+}
+
+/// The `__metadata__` of a per-module-alpha export is a CLOSED set.
+///
+/// `baked_scale`, `converted_layout`, and `conversion` are required and exact
+/// — the conversion string is the file's own statement that its fused Q/K/V
+/// and SwiGLU `fc1` layouts were converted to the ComfyUI checkpoint mold
+/// overlays. The kohya `ss_*` resize bookkeeping is accepted (`Dynamic` for
+/// dim/alpha; the comment is free text the pinned header identity fixes).
+/// Any OTHER key — a `training_rank`, `resized_from`, `qkv_fusion`, … — is a
+/// declaration belonging to another shape and is refused by name.
+fn validate_per_module_alpha_metadata(
+    metadata: &BTreeMap<String, String>,
+    baked_scale: f32,
+) -> H3TurboLoraResult<()> {
+    let invalid = |message: String| failure(H3TurboLoraErrorCode::InvalidMetadata, message);
+    for key in metadata.keys() {
+        if ![
+            METADATA_BAKED_SCALE_KEY,
+            METADATA_CONVERTED_LAYOUT_KEY,
+            METADATA_CONVERSION_KEY,
+            METADATA_SS_NETWORK_DIM_KEY,
+            METADATA_SS_NETWORK_ALPHA_KEY,
+            METADATA_SS_TRAINING_COMMENT_KEY,
+        ]
+        .contains(&key.as_str())
+        {
+            return Err(invalid(format!(
+                "H3 Turbo per-module-alpha adapter declares unexpected metadata {key:?}"
+            )));
+        }
+    }
+    let Some(declared) = metadata.get(METADATA_BAKED_SCALE_KEY) else {
+        return Err(invalid(format!(
+            "H3 Turbo per-module-alpha adapter must declare a numeric {METADATA_BAKED_SCALE_KEY:?} of {baked_scale}"
+        )));
+    };
+    let parsed = declared.trim().parse::<f32>().map_err(|error| {
+        invalid(format!(
+            "H3 Turbo metadata {METADATA_BAKED_SCALE_KEY:?} declares {declared:?}, which is not a float: {error}"
+        ))
+    })?;
+    if parsed.to_bits() != baked_scale.to_bits() {
+        return Err(invalid(format!(
+            "H3 Turbo metadata {METADATA_BAKED_SCALE_KEY:?} declares {declared:?}, expected \"{baked_scale}\""
+        )));
+    }
+    for (key, expected, required) in [
+        (
+            METADATA_CONVERTED_LAYOUT_KEY,
+            H3_TURBO_LORA_KIJAI_CONVERTED_LAYOUT,
+            true,
+        ),
+        (
+            METADATA_CONVERSION_KEY,
+            H3_TURBO_LORA_KIJAI_CONVERSION,
+            true,
+        ),
+        (METADATA_SS_NETWORK_DIM_KEY, METADATA_SS_DYNAMIC, false),
+        (METADATA_SS_NETWORK_ALPHA_KEY, METADATA_SS_DYNAMIC, false),
+    ] {
+        match metadata.get(key) {
+            Some(declared) if declared != expected => {
+                return Err(invalid(format!(
+                    "H3 Turbo metadata {key:?} declares {declared:?}, expected {expected:?}"
+                )));
+            }
+            None if required => {
+                return Err(invalid(format!(
+                    "H3 Turbo per-module-alpha adapter must declare {key:?} = {expected:?}"
+                )));
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -1752,19 +2049,37 @@ fn read_turbo_alphas(
         if !name.ends_with(ALPHA_SUFFIX) {
             continue;
         }
-        if tensor.dtype != H3_TURBO_LORA_ALPHA_DTYPE || !tensor.shape.is_empty() {
+        // A uniform export stores F32 alphas only; a per-module-alpha export
+        // may store BF16 (Kijai's) or F32.
+        let per_module_alpha = expectation.shape.is_per_module_alpha();
+        let dtype_ok = if per_module_alpha {
+            PER_MODULE_ALPHA_DTYPES.contains(&tensor.dtype.as_str())
+        } else {
+            tensor.dtype == H3_TURBO_LORA_ALPHA_DTYPE
+        };
+        if !dtype_ok || !tensor.shape.is_empty() {
+            let allowed = if per_module_alpha {
+                PER_MODULE_ALPHA_DTYPES.join(" or ")
+            } else {
+                H3_TURBO_LORA_ALPHA_DTYPE.to_owned()
+            };
             return Err(failure(
                 H3TurboLoraErrorCode::DTypeMismatch,
                 format!(
-                    "H3 Turbo alpha {name:?} must be a rank-0 {H3_TURBO_LORA_ALPHA_DTYPE} scalar, found {} {:?}",
+                    "H3 Turbo alpha {name:?} must be a rank-0 {allowed} scalar, found {} {:?}",
                     tensor.dtype, tensor.shape
                 ),
             ));
         }
+        let width = if tensor.dtype == "BF16" {
+            BF16_ALPHA_BYTES
+        } else {
+            ALPHA_BYTES
+        };
         debug_assert_eq!(
             tensor.data_offsets[1] - tensor.data_offsets[0],
-            ALPHA_BYTES,
-            "header parsing already bound a rank-0 F32 to four bytes"
+            width,
+            "header parsing already bound a rank-0 scalar to its dtype width"
         );
         file.seek(SeekFrom::Start(data_start + tensor.data_offsets[0]))
             .map_err(|error| {
@@ -1774,13 +2089,18 @@ fn read_turbo_alphas(
                 )
             })?;
         let mut raw = [0u8; ALPHA_BYTES as usize];
-        file.read_exact(&mut raw).map_err(|error| {
-            failure(
-                H3TurboLoraErrorCode::Io,
-                format!("failed to read H3 Turbo alpha {name:?}: {error}"),
-            )
-        })?;
-        let alpha = f32::from_le_bytes(raw);
+        file.read_exact(&mut raw[..width as usize])
+            .map_err(|error| {
+                failure(
+                    H3TurboLoraErrorCode::Io,
+                    format!("failed to read H3 Turbo alpha {name:?}: {error}"),
+                )
+            })?;
+        let alpha = if width == BF16_ALPHA_BYTES {
+            half::bf16::from_le_bytes([raw[0], raw[1]]).to_f32()
+        } else {
+            f32::from_le_bytes(raw)
+        };
         if !alpha.is_finite() || alpha <= 0.0 {
             return Err(failure(
                 H3TurboLoraErrorCode::AlphaMismatch,
@@ -1836,8 +2156,20 @@ pub(super) struct ExpectedModule {
     pub(super) in_features: usize,
     pub(super) out_features: usize,
     /// The exact `alpha` scalar a uniform module must carry; `None` for a
-    /// resized adapter, whose alphas were baked into `lora_B`.
+    /// resized adapter, whose alphas were baked into `lora_B`, and for a
+    /// per-module-alpha adapter, whose alpha is the module's own rank (see
+    /// [`Self::alpha_equals_rank`]).
     pub(super) alpha: Option<f32>,
+    /// A per-module-alpha module carries an `alpha` tensor whose value must
+    /// equal the rank its own `lora_A` declares.
+    pub(super) alpha_equals_rank: bool,
+}
+
+impl ExpectedModule {
+    /// Whether this module must carry an `alpha` tensor at all.
+    fn expects_alpha(&self) -> bool {
+        self.alpha.is_some() || self.alpha_equals_rank
+    }
 }
 
 /// Derive the exact expected module set from the shared block-linear target
@@ -1896,9 +2228,38 @@ pub(super) fn expected_turbo_modules(
                 H3TurboLoraModuleScope::TokenRefinerBlock(target.index)
             }
         };
+        // A per-module-alpha module was reduced from the FUSED matrix — its
+        // `lora_B` is dense, not three stacked projection factors — so its
+        // only ceiling is the exact-SVD rank of the fused projection itself.
+        // It declares no source rank to bound it further.
+        let Some(training_rank) = expectation.training_rank() else {
+            let previous = expected.insert(
+                format!("{H3_TURBO_LORA_KEY_PREFIX}{}", target.module),
+                ExpectedModule {
+                    scope,
+                    kind,
+                    base_weight_name: target.weight_name,
+                    rank: ExpectedRank::AtMost(target.in_features.min(target.out_features)),
+                    in_features: target.in_features,
+                    out_features: target.out_features,
+                    alpha: None,
+                    alpha_equals_rank: true,
+                },
+            );
+            if previous.is_some() {
+                return Err(failure(
+                    H3TurboLoraErrorCode::ConfigMismatch,
+                    format!(
+                        "H3 block linear authority yielded duplicate target {:?}",
+                        target.module
+                    ),
+                ));
+            }
+            continue;
+        };
         // Both shapes derive the rank axis from the SAME source rank; only
         // whether it is a pin or a ceiling differs.
-        let source_rank = kind.checked_rank(expectation.training_rank())?;
+        let source_rank = kind.checked_rank(training_rank)?;
         // A resized module is an EXACT compact SVD of one base weight, so its
         // rank can never exceed the smaller side of that weight either — per
         // PROJECTION for the fused Q/K/V module, whose `lora_A` stacks three
@@ -1923,12 +2284,16 @@ pub(super) fn expected_turbo_modules(
                     H3TurboLoraShape::Dynamic { .. } => {
                         ExpectedRank::AtMost(source_rank.min(exact_svd_rank))
                     }
+                    H3TurboLoraShape::PerModuleAlpha { .. } => {
+                        unreachable!("a per-module-alpha shape has no training rank")
+                    }
                 },
                 in_features: target.in_features,
                 out_features: target.out_features,
                 alpha: expectation
                     .training_alpha()
                     .map(|training_alpha| kind.alpha(training_alpha)),
+                alpha_equals_rank: false,
             },
         );
         if previous.is_some() {
@@ -1994,7 +2359,7 @@ fn classify_turbo_tensors(
         };
         // A resized adapter's scale is already inside `lora_B`; an alpha
         // tensor beside it would be a second, contradictory scale authority.
-        if slot == 2 && module_expected.alpha.is_none() {
+        if slot == 2 && !module_expected.expects_alpha() {
             return Err(failure(
                 H3TurboLoraErrorCode::AlphaMismatch,
                 format!(
@@ -2007,7 +2372,12 @@ fn classify_turbo_tensors(
         } else {
             H3_TURBO_LORA_WEIGHT_DTYPE
         };
-        if tensor.dtype != expected_dtype {
+        // A per-module-alpha export may store its alpha scalars as BF16.
+        let dtype_ok = tensor.dtype == expected_dtype
+            || (slot == 2
+                && module_expected.alpha_equals_rank
+                && PER_MODULE_ALPHA_DTYPES.contains(&tensor.dtype.as_str()));
+        if !dtype_ok {
             return Err(failure(
                 H3TurboLoraErrorCode::DTypeMismatch,
                 format!(
@@ -2093,6 +2463,64 @@ fn assemble_turbo_modules(
             ));
         };
         let (rank, alpha, alpha_tensor, scale) = match module_expected.alpha {
+            None if module_expected.alpha_equals_rank => {
+                // Rank is the file's own, read off `lora_A` and cross-checked
+                // against `lora_B`, exactly as for a resized module.
+                let rank = lora_a.shape[0];
+                let paired = lora_b.shape[1];
+                if rank != paired {
+                    return Err(failure(
+                        H3TurboLoraErrorCode::ShapeMismatch,
+                        format!(
+                            "H3 Turbo module {module_key:?} has lora_A rank {rank} ({:?} shape {:?}) but lora_B rank {paired} ({:?} shape {:?})",
+                            lora_a.name, lora_a.shape, lora_b.name, lora_b.shape
+                        ),
+                    ));
+                }
+                if !module_expected.rank.accepts(rank) {
+                    return Err(failure(
+                        H3TurboLoraErrorCode::ShapeMismatch,
+                        format!(
+                            "H3 Turbo module {module_key:?} has rank {rank}, expected {}",
+                            module_expected.rank.describe()
+                        ),
+                    ));
+                }
+                let Some(alpha_tensor) = alpha_slot else {
+                    return Err(failure(
+                        H3TurboLoraErrorCode::MissingModule,
+                        format!("H3 Turbo module {module_key:?} is missing its alpha tensor"),
+                    ));
+                };
+                let alpha = *alphas.get(&alpha_tensor.name).ok_or_else(|| {
+                    failure(
+                        H3TurboLoraErrorCode::AlphaMismatch,
+                        format!("H3 Turbo module {module_key:?} has no readable alpha scalar"),
+                    )
+                })?;
+                // The alpha is the module's OWN rank, never a file-wide value.
+                if alpha != rank as f32 {
+                    return Err(failure(
+                        H3TurboLoraErrorCode::AlphaMismatch,
+                        format!(
+                            "H3 Turbo module {module_key:?} declares alpha {alpha}, expected its rank {rank}"
+                        ),
+                    ));
+                }
+                // Computed, never assumed: the forward multiplies by exactly
+                // this, and it must be the one scale the shape declares.
+                let scale = alpha / rank as f32;
+                if scale != expectation.scale() {
+                    return Err(failure(
+                        H3TurboLoraErrorCode::ScaleMismatch,
+                        format!(
+                            "H3 Turbo module {module_key:?} resolves scale {scale}, expected {}",
+                            expectation.scale()
+                        ),
+                    ));
+                }
+                (rank, Some(alpha), Some(alpha_tensor), scale)
+            }
             Some(expected_alpha) => {
                 let Some(alpha_tensor) = alpha_slot else {
                     return Err(failure(
@@ -2226,10 +2654,17 @@ fn turbo_structure_identity(
     match shape {
         H3TurboLoraShape::Uniform { .. } => digest.update(STRUCTURE_IDENTITY_DOMAIN),
         H3TurboLoraShape::Dynamic { .. } => digest.update(STRUCTURE_IDENTITY_DOMAIN_DYNAMIC),
+        H3TurboLoraShape::PerModuleAlpha { .. } => {
+            digest.update(STRUCTURE_IDENTITY_DOMAIN_PER_MODULE_ALPHA)
+        }
     }
     digest.update((modules.len() as u64).to_le_bytes());
-    if let H3TurboLoraShape::Dynamic { baked_scale, .. } = shape {
-        digest.update(baked_scale.to_bits().to_le_bytes());
+    match shape {
+        H3TurboLoraShape::Uniform { .. } => {}
+        H3TurboLoraShape::Dynamic { baked_scale, .. }
+        | H3TurboLoraShape::PerModuleAlpha { baked_scale } => {
+            digest.update(baked_scale.to_bits().to_le_bytes());
+        }
     }
     for (name, module) in modules {
         digest.update(name.as_bytes());
@@ -2353,6 +2788,17 @@ pub(super) mod fixtures {
         }
     }
 
+    /// A per-module-alpha expectation over the same tiny geometry, with the
+    /// published Kijai shape (`baked_scale` 1.0) and provenance.
+    pub(in crate::minimax_h3) fn per_module_alpha_expectation() -> H3TurboLoraExpectation {
+        H3TurboLoraExpectation {
+            shape: H3_TURBO_LORA_KIJAI_DMAD_4STEP.shape,
+            source_repository: H3_TURBO_LORA_KIJAI_REPOSITORY.to_owned(),
+            source_revision: H3_TURBO_LORA_KIJAI_SOURCE_REVISION.to_owned(),
+            ..expectation()
+        }
+    }
+
     /// The per-module ranks a synthetic rank-dynamic adapter carries.
     ///
     /// Deliberately VARIED, and deliberately reproducible without reading the
@@ -2403,7 +2849,7 @@ pub(super) mod fixtures {
         let (expected, _) = expected_turbo_modules(expectation).unwrap();
         let dynamic_ranks = expectation
             .shape
-            .is_dynamic()
+            .has_per_module_rank()
             .then(|| dynamic_module_ranks(expectation));
         let mut entries = BTreeMap::<String, (&'static str, Vec<usize>, Option<f32>)>::new();
         for (module_key, module) in &expected {
@@ -2411,6 +2857,13 @@ pub(super) mod fixtures {
                 Some(ranks) => ranks[module_key],
                 None => module.rank.bound(),
             };
+            // A per-module-alpha export stores alpha == rank as a BF16 scalar.
+            if module.alpha_equals_rank {
+                entries.insert(
+                    format!("{module_key}{ALPHA_SUFFIX}"),
+                    ("BF16", Vec::new(), Some(rank as f32)),
+                );
+            }
             entries.insert(
                 format!("{module_key}{LORA_A_SUFFIX}"),
                 (
@@ -2441,6 +2894,9 @@ pub(super) mod fixtures {
             let elements = shape.iter().product::<usize>();
             let start = data.len() as u64;
             match alpha {
+                Some(value) if dtype == "BF16" => {
+                    data.extend_from_slice(&half::bf16::from_f32(value).to_bits().to_le_bytes())
+                }
                 Some(value) => data.extend_from_slice(&value.to_le_bytes()),
                 None => {
                     for index in 0..elements {
@@ -2459,9 +2915,41 @@ pub(super) mod fixtures {
             );
         }
         let mut metadata = Map::new();
+        if let H3TurboLoraShape::PerModuleAlpha { baked_scale } = expectation.shape {
+            // Kijai's exact key set: no training/format declarations at all.
+            for (key, value) in [
+                (METADATA_BAKED_SCALE_KEY, format!("{baked_scale:?}")),
+                (
+                    METADATA_CONVERTED_LAYOUT_KEY,
+                    H3_TURBO_LORA_KIJAI_CONVERTED_LAYOUT.to_owned(),
+                ),
+                (
+                    METADATA_CONVERSION_KEY,
+                    H3_TURBO_LORA_KIJAI_CONVERSION.to_owned(),
+                ),
+                (METADATA_SS_NETWORK_DIM_KEY, METADATA_SS_DYNAMIC.to_owned()),
+                (
+                    METADATA_SS_NETWORK_ALPHA_KEY,
+                    METADATA_SS_DYNAMIC.to_owned(),
+                ),
+                (
+                    METADATA_SS_TRAINING_COMMENT_KEY,
+                    "Dynamic resize with sv_fro: 0.95 from 384; ".to_owned(),
+                ),
+            ] {
+                metadata.insert(key.into(), Value::String(value));
+            }
+            header.insert("__metadata__".into(), Value::Object(metadata));
+            return (Value::Object(header), data);
+        }
         metadata.insert(
             "training_rank".into(),
-            Value::String(expectation.training_rank().to_string()),
+            Value::String(
+                expectation
+                    .training_rank()
+                    .expect("uniform and dynamic shapes declare a training rank")
+                    .to_string(),
+            ),
         );
         match expectation.shape {
             H3TurboLoraShape::Uniform { training_alpha, .. } => {
@@ -2487,6 +2975,7 @@ pub(super) mod fixtures {
                     Value::String(source.file_name().to_owned()),
                 );
             }
+            H3TurboLoraShape::PerModuleAlpha { .. } => unreachable!("returned above"),
         }
         metadata.insert(
             "target_format".into(),
@@ -2534,6 +3023,15 @@ pub(super) mod fixtures {
         pinned_for(dynamic_expectation())
     }
 
+    /// The same, over the per-module-alpha shape.
+    pub(in crate::minimax_h3) fn pinned_per_module_alpha() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        H3TurboLoraExpectation,
+    ) {
+        pinned_for(per_module_alpha_expectation())
+    }
+
     fn pinned_for(
         expectation: H3TurboLoraExpectation,
     ) -> (
@@ -2570,6 +3068,68 @@ pub(in crate::minimax_h3) fn published_dynamic_header_modules(
     let parsed = parse_turbo_header(prefix, &blob[8..], tier.file_bytes()).unwrap();
     let (expected, seen) = classify_turbo_tensors(&parsed, &expectation).unwrap();
     assemble_turbo_modules(&expected, seen, &BTreeMap::new(), &expectation).unwrap()
+}
+
+/// Absolute path of a published pin's checked-in golden header.
+#[cfg(test)]
+pub(in crate::minimax_h3) fn published_pin_header_fixture_path(
+    pin: &H3TurboLoraPublishedPin,
+) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("testdata/minimax_h3/turbo")
+        .join(pin.header_fixture)
+}
+
+/// The validated modules of one published PER-MODULE-ALPHA pin, read from its
+/// checked-in golden header alone.
+///
+/// Everything the header carries is validated for real — metadata, the
+/// 624-tensor count, the key space, dtypes, in/out features, the rank
+/// ceiling, `lora_A`/`lora_B` rank agreement. The one fact the header cannot
+/// carry is each `alpha` VALUE (it lives in the payload), so this stands in
+/// `alpha = rank` for the assembly; the alpha-equals-rank refusal is
+/// exercised by the synthetic mutations and the real-file test.
+#[cfg(test)]
+pub(in crate::minimax_h3) fn published_pin_header_modules(
+    pin: &H3TurboLoraPublishedPin,
+) -> (TurboHeaderSummary, BTreeMap<String, H3TurboLoraModule>) {
+    let expectation = pin.expectation();
+    expectation.validate().unwrap();
+    let blob = std::fs::read(published_pin_header_fixture_path(pin)).unwrap();
+    let mut prefix = [0u8; 8];
+    prefix.copy_from_slice(&blob[..8]);
+    let parsed = parse_turbo_header(prefix, &blob[8..], pin.file_bytes).unwrap();
+    validate_turbo_metadata(&parsed.metadata, &expectation).unwrap();
+    let (expected, seen) = classify_turbo_tensors(&parsed, &expectation).unwrap();
+    let alphas = seen
+        .values()
+        .filter_map(|slots| match slots {
+            [Some(lora_a), _, Some(alpha)] => Some((alpha.name.clone(), lora_a.shape[0] as f32)),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    let modules = assemble_turbo_modules(&expected, seen, &alphas, &expectation).unwrap();
+    (
+        TurboHeaderSummary {
+            header_len: parsed.header_len,
+            header_identity_sha256: parsed.header_identity_sha256,
+            tensor_count: parsed.tensors.len(),
+            payload_bytes: parsed.file_len - parsed.header_len - 8,
+            metadata: parsed.metadata,
+        },
+        modules,
+    )
+}
+
+/// What a header-only validation of a published pin derived.
+#[cfg(test)]
+#[derive(Debug)]
+pub(in crate::minimax_h3) struct TurboHeaderSummary {
+    pub(in crate::minimax_h3) header_len: u64,
+    pub(in crate::minimax_h3) header_identity_sha256: String,
+    pub(in crate::minimax_h3) tensor_count: usize,
+    pub(in crate::minimax_h3) payload_bytes: u64,
+    pub(in crate::minimax_h3) metadata: BTreeMap<String, String>,
 }
 
 #[cfg(test)]
@@ -2680,9 +3240,16 @@ mod tests {
     /// fails here, and so does a tier whose fixture was never committed.
     #[test]
     fn every_checked_in_header_fixture_is_claimed_by_a_tier() {
+        // A published pin that is not yet a tier claims its own fixture; once
+        // a tier arm reads its facts from that pin, the two name one file.
         let claimed = H3TurboLoraTier::ALL
             .into_iter()
             .map(|tier| tier.header_fixture_path())
+            .chain(
+                H3_TURBO_LORA_KIJAI_PINS
+                    .iter()
+                    .map(published_pin_header_fixture_path),
+            )
             .collect::<std::collections::BTreeSet<_>>();
         let directory =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/minimax_h3/turbo");
@@ -2819,6 +3386,9 @@ mod tests {
                         !parsed.metadata.contains_key("training_alpha"),
                         "{tier:?} still declares training_alpha"
                     );
+                }
+                H3TurboLoraShape::PerModuleAlpha { .. } => {
+                    unreachable!("no shipped tier is per-module-alpha yet")
                 }
             }
             assert_eq!(
@@ -2985,12 +3555,17 @@ mod tests {
             assert_eq!(
                 expectation.tensor_count().unwrap(),
                 match tier.shape() {
-                    H3TurboLoraShape::Uniform { .. } => H3_TURBO_LORA_TENSOR_COUNT,
+                    H3TurboLoraShape::Uniform { .. } | H3TurboLoraShape::PerModuleAlpha { .. } => {
+                        H3_TURBO_LORA_TENSOR_COUNT
+                    }
                     H3TurboLoraShape::Dynamic { .. } => H3_TURBO_LORA_DYNAMIC_TENSOR_COUNT,
                 },
                 "{tier:?}"
             );
-            assert_eq!(expectation.training_rank(), H3_TURBO_LORA_TRAINING_RANK);
+            assert_eq!(
+                expectation.training_rank(),
+                Some(H3_TURBO_LORA_TRAINING_RANK)
+            );
             assert_eq!(expectation.task, tier.task());
             assert_eq!(
                 expectation.content_sha256.as_deref(),
@@ -3365,7 +3940,7 @@ mod tests {
         assert_eq!(inspection.tensor_count, expectation.tensor_count().unwrap());
         assert_eq!(inspection.shape, expectation.shape);
         // `training_rank` is the SOURCE's, and the runtime scale is one.
-        assert_eq!(inspection.training_rank, H3_TURBO_LORA_TRAINING_RANK);
+        assert_eq!(inspection.training_rank, Some(H3_TURBO_LORA_TRAINING_RANK));
         assert_eq!(inspection.training_alpha, None);
         assert_eq!(inspection.scale, 1.0);
         assert_eq!(inspection.payload_bytes, data.len() as u64);
@@ -3557,7 +4132,7 @@ mod tests {
             let expectation = dynamic_expectation();
             assert_eq!(
                 expectation.shape.qkv_fusion(),
-                H3_TURBO_LORA_DYNAMIC_QKV_FUSION
+                Some(H3_TURBO_LORA_DYNAMIC_QKV_FUSION)
             );
             let (mut header, data) = fixture_adapter(&expectation);
             header["__metadata__"][key] = serde_json::json!(wrong);
@@ -3642,7 +4217,10 @@ mod tests {
             assert_eq!(shape.effective_scale(), 1.0, "{baked_scale}");
             assert_eq!(shape.training_alpha(), None, "{baked_scale}");
             assert_eq!(shape.tensors_per_module(), 2, "{baked_scale}");
-            assert_eq!(shape.source_training_rank(), H3_TURBO_LORA_TRAINING_RANK);
+            assert_eq!(
+                shape.source_training_rank(),
+                Some(H3_TURBO_LORA_TRAINING_RANK)
+            );
         }
         for tier in H3TurboLoraTier::ALL {
             if !tier.shape().is_dynamic() {
@@ -4333,5 +4911,542 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code, H3TurboLoraErrorCode::TaskAuthorityMismatch);
+    }
+
+    // ----------------------------------------------- per-module-alpha shape
+
+    /// Overwrite one rank-0 scalar in a laid-out fixture's data.
+    fn write_scalar(header: &mut Value, data: &mut [u8], name: &str, dtype: &str, value: f32) {
+        let start = header[name]["data_offsets"][0].as_u64().unwrap() as usize;
+        assert_eq!(header[name]["dtype"], dtype, "{name}");
+        match dtype {
+            "BF16" => data[start..start + 2]
+                .copy_from_slice(&half::bf16::from_f32(value).to_bits().to_le_bytes()),
+            "F32" => data[start..start + 4].copy_from_slice(&value.to_le_bytes()),
+            other => panic!("{other}"),
+        }
+    }
+
+    /// Re-lay a mutated fixture and restore every alpha to its module's rank,
+    /// so a mutation is refused for ITS reason rather than for zeroed alphas.
+    fn relayout_restoring_alphas(header: &mut Value) -> Vec<u8> {
+        let mut data = relayout(header);
+        let names = header
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|name| name.ends_with(ALPHA_SUFFIX))
+            .cloned()
+            .collect::<Vec<_>>();
+        for name in names {
+            let module = name.strip_suffix(ALPHA_SUFFIX).unwrap();
+            let lora_a = format!("{module}{LORA_A_SUFFIX}");
+            let rank = header[&lora_a]["shape"][0].as_u64().unwrap() as f32;
+            let dtype = header[&name]["dtype"].as_str().unwrap().to_owned();
+            write_scalar(header, &mut data, &name, &dtype, rank);
+        }
+        data
+    }
+
+    #[test]
+    fn a_per_module_alpha_shape_computes_a_unit_scale_and_declares_no_source() {
+        let shape = H3_TURBO_LORA_KIJAI_DMAD_4STEP.shape;
+        assert!(shape.is_per_module_alpha());
+        assert!(shape.has_per_module_rank());
+        assert!(!shape.is_dynamic());
+        assert_eq!(shape.effective_scale(), 1.0);
+        assert_eq!(shape.tensors_per_module(), 3);
+        assert_eq!(shape.training_alpha(), None);
+        assert_eq!(shape.source_training_rank(), None);
+        assert_eq!(shape.source_tier(), None);
+        assert_eq!(shape.baked_scale(), Some(1.0));
+        assert_eq!(shape.qkv_fusion(), None);
+        // Neither existing shape answers the new predicates.
+        for tier in H3TurboLoraTier::ALL {
+            assert!(!tier.shape().is_per_module_alpha(), "{tier:?}");
+            assert_eq!(
+                tier.shape().has_per_module_rank(),
+                tier.shape().is_dynamic(),
+                "{tier:?}"
+            );
+        }
+        // A bad baked scale is refused before any file is touched.
+        let mut expectation = fixtures::per_module_alpha_expectation();
+        expectation.shape = H3TurboLoraShape::PerModuleAlpha { baked_scale: 0.0 };
+        assert_eq!(
+            expectation.validate().unwrap_err().code,
+            H3TurboLoraErrorCode::ConfigMismatch
+        );
+    }
+
+    /// The rank ceiling is the FUSED projection's `min(in, out)` — never the
+    /// per-projection ceiling a dynamic file gets, and never a training rank.
+    #[test]
+    fn the_per_module_alpha_rank_ceiling_is_the_fused_projection_geometry() {
+        for config in [H3TransformerConfig::default(), fixture_config()] {
+            let expectation = H3TurboLoraExpectation {
+                config,
+                ..fixtures::per_module_alpha_expectation()
+            };
+            let (expected, _) = expected_turbo_modules(&expectation).unwrap();
+            for (key, module) in &expected {
+                assert_eq!(
+                    module.rank,
+                    ExpectedRank::AtMost(module.in_features.min(module.out_features)),
+                    "{key}"
+                );
+                assert_eq!(module.alpha, None, "{key}");
+                assert!(module.alpha_equals_rank, "{key}");
+            }
+        }
+        // On the shipped geometry the fused Q/K/V ceiling is the hidden size.
+        let (expected, _) =
+            expected_turbo_modules(&H3_TURBO_LORA_KIJAI_DMAD_4STEP.expectation()).unwrap();
+        let qkv = &expected["diffusion_model.blocks.0.attn.qkv_proj"];
+        assert_eq!(qkv.rank, ExpectedRank::AtMost(5_376));
+    }
+
+    #[test]
+    fn a_per_module_alpha_synthetic_adapter_validates_alpha_equal_to_rank() {
+        let expectation = fixtures::per_module_alpha_expectation();
+        let ranks = fixtures::dynamic_module_ranks(&expectation);
+        let (header, data) = fixture_adapter(&expectation);
+        let inspection = inspect_against(&header, &data, &expectation).unwrap();
+        assert_eq!(inspection.tensor_count, 3 * inspection.module_count());
+        assert_eq!(inspection.shape, expectation.shape);
+        assert_eq!(inspection.training_rank, None);
+        assert_eq!(inspection.training_alpha, None);
+        assert_eq!(inspection.scale, 1.0);
+        let mut observed = BTreeSet::new();
+        for (key, module) in &inspection.modules {
+            assert_eq!(module.rank, ranks[key], "{key}");
+            assert_eq!(module.alpha, Some(ranks[key] as f32), "{key}");
+            assert_eq!(module.scale, 1.0, "{key}");
+            assert_eq!(module.alpha_tensor.as_ref().unwrap().dtype, "BF16", "{key}");
+            observed.insert(module.rank);
+        }
+        assert!(observed.len() > 2, "{observed:?} is not a varied rank set");
+
+        // Same factors, different shape: never the same structure identity.
+        let dynamic = fixtures::dynamic_expectation();
+        let dynamic_digest = turbo_structure_identity(&inspection.modules, &dynamic.shape);
+        assert_ne!(inspection.structure_identity_sha256, dynamic_digest);
+        // And the digest binds the baked scale.
+        let other = turbo_structure_identity(
+            &inspection.modules,
+            &H3TurboLoraShape::PerModuleAlpha { baked_scale: 0.5 },
+        );
+        assert_ne!(inspection.structure_identity_sha256, other);
+    }
+
+    #[test]
+    fn a_per_module_alpha_accepts_f32_alphas() {
+        let expectation = fixtures::per_module_alpha_expectation();
+        let (mut header, _) = fixture_adapter(&expectation);
+        let names = header
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|name| name.ends_with(ALPHA_SUFFIX))
+            .cloned()
+            .collect::<Vec<_>>();
+        for name in &names {
+            header[name]["dtype"] = serde_json::json!("F32");
+        }
+        let data = relayout_restoring_alphas(&mut header);
+        let inspection = inspect_against(&header, &data, &expectation).unwrap();
+        assert!(inspection
+            .modules
+            .values()
+            .all(|module| module.alpha == Some(module.rank as f32)));
+    }
+
+    #[test]
+    fn a_per_module_alpha_in_another_dtype_is_refused() {
+        let expectation = fixtures::per_module_alpha_expectation();
+        let (mut header, _) = fixture_adapter(&expectation);
+        header["diffusion_model.blocks.0.mlp.fc2.alpha"]["dtype"] = serde_json::json!("F16");
+        let data = relayout(&mut header);
+        let error = inspect_against(&header, &data, &expectation).unwrap_err();
+        assert_eq!(error.code, H3TurboLoraErrorCode::DTypeMismatch);
+    }
+
+    #[test]
+    fn a_per_module_alpha_that_differs_from_its_rank_is_refused() {
+        let expectation = fixtures::per_module_alpha_expectation();
+        let ranks = fixtures::dynamic_module_ranks(&expectation);
+        let name = "diffusion_model.blocks.1.mlp.fc1";
+        let (mut header, mut data) = fixture_adapter(&expectation);
+        write_scalar(
+            &mut header,
+            &mut data,
+            &format!("{name}{ALPHA_SUFFIX}"),
+            "BF16",
+            ranks[name] as f32 + 1.0,
+        );
+        let error = inspect_against(&header, &data, &expectation).unwrap_err();
+        assert_eq!(error.code, H3TurboLoraErrorCode::AlphaMismatch);
+        assert!(error.message.contains(name), "{}", error.message);
+
+        // A non-positive alpha is refused before it could resolve a scale.
+        let (mut header, mut data) = fixture_adapter(&expectation);
+        write_scalar(
+            &mut header,
+            &mut data,
+            &format!("{name}{ALPHA_SUFFIX}"),
+            "BF16",
+            0.0,
+        );
+        let error = inspect_against(&header, &data, &expectation).unwrap_err();
+        assert_eq!(error.code, H3TurboLoraErrorCode::AlphaMismatch);
+    }
+
+    #[test]
+    fn a_per_module_alpha_adapter_with_a_wrong_tensor_count_is_refused() {
+        let expectation = fixtures::per_module_alpha_expectation();
+        // A missing alpha, and a resized-style file with no alphas at all,
+        // are both named by their count before any shape.
+        let (mut header, _) = fixture_adapter(&expectation);
+        header
+            .as_object_mut()
+            .unwrap()
+            .remove("diffusion_model.blocks.0.attn.out_proj.alpha")
+            .unwrap();
+        let data = relayout_restoring_alphas(&mut header);
+        let error = inspect_against(&header, &data, &expectation).unwrap_err();
+        assert_eq!(error.code, H3TurboLoraErrorCode::TensorCountMismatch);
+
+        // A resized file is refused by its metadata first; given Kijai's
+        // metadata, it is refused by its (alpha-less) count.
+        let (mut dynamic_header, dynamic_data) = fixture_adapter(&fixtures::dynamic_expectation());
+        let error = inspect_against(&dynamic_header, &dynamic_data, &expectation).unwrap_err();
+        assert_eq!(error.code, H3TurboLoraErrorCode::InvalidMetadata);
+        dynamic_header["__metadata__"] = fixture_adapter(&expectation).0["__metadata__"].clone();
+        let error = inspect_against(&dynamic_header, &dynamic_data, &expectation).unwrap_err();
+        assert_eq!(error.code, H3TurboLoraErrorCode::TensorCountMismatch);
+
+        // An extra tensor is refused the same way.
+        let (mut header, _) = fixture_adapter(&expectation);
+        header.as_object_mut().unwrap().insert(
+            "diffusion_model.blocks.0.attn.out_proj.extra".into(),
+            serde_json::json!({"dtype": "BF16", "shape": [], "data_offsets": [0, 0]}),
+        );
+        let data = relayout_restoring_alphas(&mut header);
+        let error = inspect_against(&header, &data, &expectation).unwrap_err();
+        assert_eq!(error.code, H3TurboLoraErrorCode::TensorCountMismatch);
+    }
+
+    /// The alpha slot of one module is taken by a second alpha-like key: the
+    /// count is right, the module has no alpha, and it is refused by name.
+    #[test]
+    fn a_per_module_alpha_module_missing_its_alpha_is_refused_at_the_right_count() {
+        let expectation = fixtures::per_module_alpha_expectation();
+        let (mut header, _) = fixture_adapter(&expectation);
+        rename_key(
+            &mut header,
+            "diffusion_model.blocks.0.attn.out_proj.alpha",
+            "diffusion_model.blocks.0.attn.out_proj.lora_mid.weight",
+        );
+        let data = relayout_restoring_alphas(&mut header);
+        let error = inspect_against(&header, &data, &expectation).unwrap_err();
+        assert_eq!(error.code, H3TurboLoraErrorCode::UnknownModule);
+    }
+
+    #[test]
+    fn a_per_module_alpha_adapter_carrying_a_base_sidecar_is_refused() {
+        let expectation = fixtures::per_module_alpha_expectation();
+        for sidecar in BASE_SIDECAR_SUFFIXES {
+            let (mut header, data) = fixture_adapter(&expectation);
+            // Same count, same byte layout: only the key changes.
+            rename_key(
+                &mut header,
+                "diffusion_model.blocks.0.mlp.fc2.alpha",
+                &format!("diffusion_model.blocks.0.mlp.fc2{sidecar}"),
+            );
+            let error = inspect_against(&header, &data, &expectation).unwrap_err();
+            assert_eq!(
+                error.code,
+                H3TurboLoraErrorCode::BaseContractConflict,
+                "{sidecar}"
+            );
+        }
+        // A base weight in place of an adapter tensor is a conflict too.
+        let (mut header, data) = fixture_adapter(&expectation);
+        rename_key(
+            &mut header,
+            "diffusion_model.blocks.0.mlp.fc2.alpha",
+            "diffusion_model.blocks.0.mlp.fc2.weight",
+        );
+        let error = inspect_against(&header, &data, &expectation).unwrap_err();
+        assert_eq!(error.code, H3TurboLoraErrorCode::BaseContractConflict);
+    }
+
+    #[test]
+    fn a_per_module_alpha_rank_above_the_fused_ceiling_is_refused() {
+        let expectation = fixtures::per_module_alpha_expectation();
+        // `out_proj` is 256 -> 256 on the fixture geometry, so 257 is over.
+        let name = "diffusion_model.blocks.0.attn.out_proj";
+        let (mut header, _) = fixture_adapter(&expectation);
+        header[format!("{name}{LORA_A_SUFFIX}")]["shape"] = serde_json::json!([257, 256]);
+        header[format!("{name}{LORA_B_SUFFIX}")]["shape"] = serde_json::json!([256, 257]);
+        let data = relayout_restoring_alphas(&mut header);
+        let error = inspect_against(&header, &data, &expectation).unwrap_err();
+        assert_eq!(error.code, H3TurboLoraErrorCode::ShapeMismatch);
+
+        // A/B ranks that disagree are refused too.
+        let (mut header, _) = fixture_adapter(&expectation);
+        header[format!("{name}{LORA_A_SUFFIX}")]["shape"] = serde_json::json!([7, 256]);
+        header[format!("{name}{LORA_B_SUFFIX}")]["shape"] = serde_json::json!([256, 9]);
+        let data = relayout_restoring_alphas(&mut header);
+        let error = inspect_against(&header, &data, &expectation).unwrap_err();
+        assert_eq!(error.code, H3TurboLoraErrorCode::ShapeMismatch);
+
+        // The fused Q/K/V module (256 -> 768 here) is bounded by min(in, out)
+        // of the FUSED matrix — B is dense, not three stacked factors — so
+        // 256 sits exactly on the ceiling and 257 is over it.
+        let qkv = "diffusion_model.blocks.0.attn.qkv_proj";
+        for (rank, accepted) in [(256usize, true), (257, false)] {
+            let (mut header, _) = fixture_adapter(&expectation);
+            header[format!("{qkv}{LORA_A_SUFFIX}")]["shape"] = serde_json::json!([rank, 256]);
+            header[format!("{qkv}{LORA_B_SUFFIX}")]["shape"] = serde_json::json!([768, rank]);
+            let data = relayout_restoring_alphas(&mut header);
+            let result = inspect_against(&header, &data, &expectation);
+            if accepted {
+                assert_eq!(result.unwrap().modules[qkv].rank, rank);
+            } else {
+                assert_eq!(
+                    result.unwrap_err().code,
+                    H3TurboLoraErrorCode::ShapeMismatch
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn per_module_alpha_metadata_is_a_closed_exact_set() {
+        let expectation = fixtures::per_module_alpha_expectation();
+        let refuse = |mutate: &dyn Fn(&mut Value)| {
+            let (mut header, data) = fixture_adapter(&expectation);
+            mutate(&mut header["__metadata__"]);
+            let error = inspect_against(&header, &data, &expectation).unwrap_err();
+            assert_eq!(error.code, H3TurboLoraErrorCode::InvalidMetadata);
+            error.message
+        };
+        // Wrong, non-numeric, and missing baked scale.
+        assert!(
+            refuse(&|m| m[METADATA_BAKED_SCALE_KEY] = serde_json::json!("0.0625"))
+                .contains(METADATA_BAKED_SCALE_KEY)
+        );
+        refuse(&|m| m[METADATA_BAKED_SCALE_KEY] = serde_json::json!("one"));
+        refuse(&|m| {
+            m.as_object_mut().unwrap().remove(METADATA_BAKED_SCALE_KEY);
+        });
+        // Missing or different conversion facts.
+        refuse(&|m| {
+            m.as_object_mut()
+                .unwrap()
+                .remove(METADATA_CONVERTED_LAYOUT_KEY);
+        });
+        refuse(&|m| m[METADATA_CONVERTED_LAYOUT_KEY] = serde_json::json!("diffusers"));
+        refuse(&|m| {
+            m.as_object_mut().unwrap().remove(METADATA_CONVERSION_KEY);
+        });
+        refuse(&|m| m[METADATA_CONVERSION_KEY] = serde_json::json!("qkv split"));
+        refuse(&|m| m[METADATA_SS_NETWORK_DIM_KEY] = serde_json::json!("64"));
+        refuse(&|m| m[METADATA_SS_NETWORK_ALPHA_KEY] = serde_json::json!("32"));
+        // Any declaration belonging to another shape.
+        for key in [
+            "training_rank",
+            "training_alpha",
+            METADATA_RESIZED_FROM_KEY,
+            "qkv_fusion",
+            "base_model",
+        ] {
+            assert!(
+                refuse(&|m| m[key] = serde_json::json!("1")).contains(key),
+                "{key}"
+            );
+        }
+        // The ss_* bookkeeping is optional.
+        let (mut header, data) = fixture_adapter(&expectation);
+        let metadata = header["__metadata__"].as_object_mut().unwrap();
+        for key in [
+            METADATA_SS_NETWORK_DIM_KEY,
+            METADATA_SS_NETWORK_ALPHA_KEY,
+            METADATA_SS_TRAINING_COMMENT_KEY,
+        ] {
+            metadata.remove(key);
+        }
+        inspect_against(&header, &data, &expectation).unwrap();
+    }
+
+    /// Uniform and dynamic expectations still refuse a Kijai file: the shapes
+    /// stay exact and disjoint.
+    #[test]
+    fn existing_shapes_refuse_a_per_module_alpha_file() {
+        let (header, data) = fixture_adapter(&fixtures::per_module_alpha_expectation());
+        // Kijai's metadata names neither a resize source nor a training
+        // rank, and its baked scale is not the dynamic tier's.
+        let error = inspect_against(&header, &data, &fixtures::dynamic_expectation()).unwrap_err();
+        assert_eq!(error.code, H3TurboLoraErrorCode::InvalidMetadata);
+        // A uniform expectation reads the BF16 alpha as a dtype mismatch.
+        let error = inspect_fixture(&header, &data).unwrap_err();
+        assert_eq!(error.code, H3TurboLoraErrorCode::DTypeMismatch);
+    }
+
+    #[test]
+    fn per_module_alpha_authentication_binds_the_content_digest() {
+        let (_directory, path, pinned) = fixtures::pinned_per_module_alpha();
+        let contract = authenticate_h3_turbo_lora_adapter_against(
+            &path,
+            &pinned,
+            H3TurboLoraTier::Fl2v8StepV10,
+            &H3ComfyNeverCancel,
+        )
+        .unwrap();
+        assert_eq!(contract.scale(), 1.0);
+        assert_eq!(
+            contract.content_sha256(),
+            pinned.content_sha256.as_deref().unwrap()
+        );
+        assert!(contract.inspection().shape.is_per_module_alpha());
+    }
+
+    /// Every pin is recomputed from its checked-in golden header and the
+    /// whole header-carried contract is validated against it.
+    #[test]
+    fn kijai_pins_are_recomputed_from_the_checked_in_headers() {
+        let mut names = BTreeSet::new();
+        let mut digests = BTreeSet::new();
+        let mut structures = BTreeSet::new();
+        for pin in &H3_TURBO_LORA_KIJAI_PINS {
+            let blob = std::fs::read(published_pin_header_fixture_path(pin)).unwrap();
+            let prefix = u64::from_le_bytes(blob[..8].try_into().unwrap());
+            assert_eq!(prefix, pin.header_len, "{pin:?}");
+            assert_eq!(blob.len() as u64, 8 + pin.header_len, "{pin:?}");
+            assert_eq!(
+                sha256_hex(Sha256::digest(&blob)),
+                pin.header_identity_sha256,
+                "{pin:?}"
+            );
+            let (summary, modules) = published_pin_header_modules(pin);
+            assert_eq!(summary.header_len, pin.header_len);
+            assert_eq!(summary.header_identity_sha256, pin.header_identity_sha256);
+            assert_eq!(summary.tensor_count, H3_TURBO_LORA_TENSOR_COUNT, "{pin:?}");
+            assert_eq!(
+                pin.file_bytes,
+                8 + pin.header_len + summary.payload_bytes,
+                "{pin:?}"
+            );
+            assert_eq!(summary.metadata[METADATA_BAKED_SCALE_KEY], "1.0");
+            assert_eq!(modules.len(), H3_TURBO_LORA_MODULE_COUNT, "{pin:?}");
+            let ranks = modules.values().map(|m| m.rank).collect::<BTreeSet<_>>();
+            assert!(ranks.len() > 10, "{pin:?} ranks {ranks:?}");
+            assert!(*ranks.first().unwrap() >= 2, "{pin:?}");
+            assert!(*ranks.last().unwrap() <= 128, "{pin:?}");
+            // Alpha scalars are BF16 rank-0 tensors, one per module.
+            for module in modules.values() {
+                let alpha = module.alpha_tensor.as_ref().unwrap();
+                assert_eq!(alpha.dtype, "BF16", "{}", module.name);
+                assert_eq!(alpha.data_offsets[1] - alpha.data_offsets[0], 2);
+                assert_eq!(module.scale, 1.0);
+            }
+            assert_eq!(
+                turbo_structure_identity(&modules, &pin.shape),
+                pin.structure_identity_sha256,
+                "{pin:?}"
+            );
+            assert_eq!(pin.repository, H3_TURBO_LORA_KIJAI_REPOSITORY);
+            assert_eq!(pin.revision, H3_TURBO_LORA_KIJAI_SOURCE_REVISION);
+            assert_eq!(pin.task, H3TransformerTask::T2VaFl2Va);
+            assert_eq!(
+                pin.shape,
+                H3TurboLoraShape::PerModuleAlpha { baked_scale: 1.0 }
+            );
+            assert_eq!(
+                pin.repository_path,
+                format!("{H3_TURBO_LORA_DIRECTORY}/{}", pin.file_name())
+            );
+            assert!(names.insert(pin.file_name()));
+            assert!(digests.insert(pin.content_sha256));
+            assert!(structures.insert(pin.structure_identity_sha256));
+            assert_eq!(pin.content_sha256.len(), 64);
+            // The pin's expectation is exactly the contract it records.
+            let expectation = pin.expectation();
+            expectation.validate().unwrap();
+            assert_eq!(
+                expectation.tensor_count().unwrap(),
+                H3_TURBO_LORA_TENSOR_COUNT
+            );
+            assert_eq!(expectation.scale(), 1.0);
+            assert_eq!(expectation.training_rank(), None);
+            // Never collides with a shipped tier's artifact.
+            for tier in H3TurboLoraTier::ALL {
+                assert_ne!(tier.content_sha256(), pin.content_sha256);
+                assert_ne!(tier.file_name(), pin.file_name());
+            }
+        }
+        assert_eq!(
+            H3_TURBO_LORA_KIJAI_SOURCE_REVISION,
+            "d8023be02fefbb3633b0cd335c3879f91177299d"
+        );
+    }
+
+    /// A pinned per-module-alpha expectation refuses the other published
+    /// shapes' golden headers by their count or pins, never by luck.
+    #[test]
+    fn a_kijai_pin_refuses_a_header_it_was_not_pinned_to() {
+        let pin = H3_TURBO_LORA_KIJAI_PDMD_2STEP;
+        let blob = std::fs::read(published_pin_header_fixture_path(
+            &H3_TURBO_LORA_KIJAI_PDMD_4STEP,
+        ))
+        .unwrap();
+        let mut prefix = [0u8; 8];
+        prefix.copy_from_slice(&blob[..8]);
+        let parsed = parse_turbo_header(
+            prefix,
+            &blob[8..],
+            H3_TURBO_LORA_KIJAI_PDMD_4STEP.file_bytes,
+        )
+        .unwrap();
+        // The header identity and length belong to another file.
+        assert_ne!(parsed.header_identity_sha256, pin.header_identity_sha256);
+        assert_ne!(parsed.header_len, pin.header_len);
+    }
+
+    /// Opt-in real-weight check. Downloads are untrusted data; this only
+    /// reads them through the same validator a pull would use.
+    ///
+    /// Ignored by default; run with `--ignored` it PANICS when
+    /// `MOLD_TEST_H3_KIJAI_LORA_DIR` is unset rather than passing silently.
+    #[test]
+    #[ignore = "requires MOLD_TEST_H3_KIJAI_LORA_DIR holding the three Kijai adapters"]
+    fn published_kijai_adapters_authenticate_against_their_pins() {
+        let directory = std::env::var("MOLD_TEST_H3_KIJAI_LORA_DIR")
+            .expect("MOLD_TEST_H3_KIJAI_LORA_DIR must be set to run this test");
+        for pin in &H3_TURBO_LORA_KIJAI_PINS {
+            let path = std::path::Path::new(&directory).join(pin.file_name());
+            // `Fl2v8StepV10` only stands in for the tier identity wave 2
+            // registers; every checked fact comes from the pin.
+            let contract = authenticate_h3_turbo_lora_adapter_against(
+                &path,
+                &pin.expectation(),
+                H3TurboLoraTier::Fl2v8StepV10,
+                &H3ComfyNeverCancel,
+            )
+            .unwrap_or_else(|error| panic!("{}: {error}", pin.file_name()));
+            assert_eq!(contract.content_sha256(), pin.content_sha256);
+            let inspection = contract.inspection();
+            assert_eq!(
+                inspection.structure_identity_sha256,
+                pin.structure_identity_sha256
+            );
+            assert_eq!(inspection.scale, 1.0);
+            for module in inspection.modules.values() {
+                // Read from the payload: every alpha IS its module's rank.
+                assert_eq!(module.alpha, Some(module.rank as f32), "{}", module.name);
+                assert_eq!(module.scale, 1.0, "{}", module.name);
+            }
+        }
     }
 }
