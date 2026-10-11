@@ -1778,9 +1778,18 @@ observer refused a text-only render after it had finished because the
 condition-VAE phase legitimately reports zero workspace when no frame is
 encoded (`private_runtime_observer.rs`, `observation_zero_fields`).
 
+**Device memory.** A second pair of text-only renders (seed 4242, a dim
+lighthouse-stairwell prompt; both coherent, quiet wind ambience at mean
+-40 dB) ran concurrently with 1 Hz `nvidia-smi` sampling, each on its own
+GPU and scratch server: FastH3 peaked at 31,148 MiB device memory used
+(denoise 399 s) and DMAD 4-step at 21,266 MiB (denoise 216 s). These are
+whole-GPU peaks of a warm server process, not per-phase attributions; the
+FastH3 server had served two earlier FastH3 renders. Why FastH3 holds about
+10 GB more than the LoRA tier at the same shape was not profiled.
+
 Not done in this campaign: a same-seed A/B of the Kijai rank-reduced DMAD/PDMD
 adapters against their upstream full-rank files (`ZhengmingYu/DMAD`,
-`pdmd2026/pdmd_{2,4}NFE_lora`), VRAM high-water sampling, 768x768 renders,
+`pdmd2026/pdmd_{2,4}NFE_lora`), per-phase VRAM attribution, 768x768 renders,
 and any Metal run.
 
 ## Public FL2VA endpoint admission correction (2026-10-04)

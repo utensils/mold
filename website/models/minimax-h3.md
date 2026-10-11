@@ -368,7 +368,10 @@ than BF16 (0.771 GB instead of 1.541 GB). So although the file is 1.158 GB
 larger, the weights Mold loads are about 0.77 GB smaller than the base
 transformer's, and there is no resident adapter as on a Turbo tag. Device
 memory is admitted with the same per-request estimate as every other compact
-FL2VA tag; the qualification record holds measured times and VRAM.
+FL2VA tag. On one L40S at 1344x768x124 text-only it denoised in about 395 s
+(8 evaluations) and the server process peaked at 31.1 GB of device memory
+(1 Hz `nvidia-smi`), against 21.3 GB for the DMAD 4-step tier on the same
+prompt; the qualification record holds the full campaign.
 
 ## Download size and sources
 
