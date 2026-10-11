@@ -92,7 +92,7 @@ any application permission.
 
 ## Reliable ciphertext envelopes
 
-The v2 sequence/ACK mechanics remain, with version 3 envelopes. `data` has
+`data` has
 `{a:"data",v:3,sid,rid,seq,d}` where d is canonical base64 of at most 16384 bytes.
 For optional bulk transport, data carries `o` instead of `d` and preserves all
 original sequence slots; see [OPAQUE-OBJECTS.md](OPAQUE-OBJECTS.md).
@@ -100,6 +100,15 @@ original sequence slots; see [OPAQUE-OBJECTS.md](OPAQUE-OBJECTS.md).
 `seq`; `accept` and `cancel` have no additional fields. Unexpected fields are
 not forwarded. Send `{a:"heartbeat",v:3}` within each 90-second lease; the reply
 includes sid. An invite/grant expiration can shorten that lease.
+
+API Gateway may reject an invocation before the router runs and emit exactly
+`{connectionId,message:"Internal server error",requestId}`. Both identifiers
+must be 1–128 printable ASCII bytes. Once the reliable wire exists, clients
+treat this bounded service diagnostic as lost delivery: it neither acknowledges
+bytes nor grants credit, and existing deadlines retry only retained ciphertext
+or the same object request. Before admission, report a temporarily busy proxy.
+Extra fields, protocol-version fields and other malformed envelopes still fail
+closed. Never replay an application mutation in response to this diagnostic.
 
 Buffer, reorder and deduplicate outer frames **before** passing bytes into
 Noise. Retries resend the identical sequence and ciphertext. Never re-encrypt

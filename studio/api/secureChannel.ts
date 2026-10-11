@@ -196,6 +196,23 @@ export class SecureChannel {
 
   private receive(frame: Record<string, unknown>): void {
     if (this.failed) return;
+    if (
+      frame.message === "Internal server error" &&
+      Object.keys(frame).length === 3 &&
+      [frame.connectionId, frame.requestId].every(
+        (value) =>
+          typeof value === "string" && /^[\x21-\x7e]{1,128}$/.test(value),
+      )
+    ) {
+      // API Gateway can reject an invocation before our router executes. Treat
+      // that bounded envelope as delivery loss: the reliable wire/object layer
+      // retains and retries the exact ciphertext under its existing deadline.
+      // Never recreate or replay an HTTP request in response to this message.
+      if (this.wire) return;
+      throw new Error(
+        "The secure proxy is temporarily busy. Try connecting again.",
+      );
+    }
     if (frame.v !== 3)
       throw new Error(
         "This proxy requires the current secure protocol. Upgrade the host and pair again.",
