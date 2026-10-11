@@ -29,6 +29,8 @@ The [Download page](/download) has every app with its requirements. In short:
   there is not yet a public App Store listing.
 - **Android:** download the signed
   [APK](https://github.com/utensils/mold/releases/latest/download/Mold-android.apk)
+  (or the
+  [nightly APK](https://github.com/utensils/mold/releases/download/latest/Mold-android.apk))
   directly to an Android 7.0 or newer device and follow the
   [Android guide](/guide/android#download-and-install) for the one-time
   sideload permission.
