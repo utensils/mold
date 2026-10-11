@@ -32,7 +32,12 @@ struct LibraryPickerSheet: View {
     @State var selected: PrintID?
     @State var isFetching = false
     @State var machineID: MoldHost.ID?
-    @State var preview: LibraryEntry?
+    struct PreviewSelection: Identifiable {
+        let entry: LibraryEntry
+        let authority: InputMediaPreviewAuthority
+        var id: PrintID { entry.id }
+    }
+    @State var preview: PreviewSelection?
     @State var fetchError: String?
     @State private var fetchTask: Task<Void, Never>?
 
@@ -77,22 +82,17 @@ struct LibraryPickerSheet: View {
                maxWidth: sheetSize.width, minHeight: minimumSize.height,
                idealHeight: sheetSize.height, maxHeight: sheetSize.height)
         .onDisappear { fetchTask?.cancel() }
-        .sheet(item: $preview) { entry in
-            VStack(spacing: 12) {
-                Text(entry.print.displayName).font(.headline).lineLimit(1)
-                if let host = hosts.host(entry.hostID) {
-                    LibraryThumbnail(entry: entry, host: host, edge: 640, continuous: true)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-                HStack {
-                    Text(entry.hostBadge(compact: false)).foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Done") { preview = nil }.keyboardShortcut(.cancelAction)
-                    Button("Use Picture") { selected = entry.id; preview = nil; use() }
-                        .buttonStyle(.borderedProminent)
-                }
-            }
-            .padding(20).frame(width: min(720, sheetSize.width), height: min(720, sheetSize.height))
+        .sheet(item: $preview) { selection in
+            let entry = selection.entry
+            let authority = selection.authority
+            InputMediaViewer(title: entry.print.displayName, identity: "\(entry.id)", load: {
+                guard authority.isCurrent(host: hosts.host(entry.hostID), instance: hosts.instanceID(of: entry.hostID)) else { throw CancellationError() }
+                let route = authority.host
+                let file = try await hosts.backend(for: route).mediaPreviewFile(entry.print.filename, trashed: false)
+                guard authority.isCurrent(host: hosts.host(entry.hostID), instance: hosts.instanceID(of: entry.hostID)),
+                      rows.contains(where: { $0.id == entry.id }) else { throw CancellationError() }
+                return file
+            }, isCurrent: { rows.contains(where: { $0.id == entry.id }) && authority.isCurrent(host: hosts.host(entry.hostID), instance: hosts.instanceID(of: entry.hostID)) })
         }
         .task {
             guard library.items.isEmpty, !library.isLoading else { return }
@@ -123,6 +123,11 @@ struct LibraryPickerSheet: View {
                            availableHosts: Set(hosts.hosts.map(\.id)),
                            reachableHosts: Set(hosts.hosts.filter { hosts.isUp($0) }.map(\.id)),
                            hiddenCollectionIDs: library.hiddenCollectionIDs)
+    }
+
+    func showPreview(_ entry: LibraryEntry) {
+        guard let route = hosts.host(entry.hostID) else { return }
+        preview = PreviewSelection(entry: entry, authority: .init(host: route, instance: hosts.instanceID(of: entry.hostID)))
     }
 
     /// Not `private`: a double-clicked tile calls this directly.

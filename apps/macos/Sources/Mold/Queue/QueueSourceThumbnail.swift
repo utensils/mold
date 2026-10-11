@@ -5,10 +5,12 @@ import SwiftUI
 /// The owning server's retained input, including work submitted by another client.
 struct QueueSourceThumbnail: View {
     @Environment(HostStore.self) private var hosts
+    @Environment(QueueStore.self) private var queue
     let entry: QueueEntry
     let host: MoldHost
     var size: CGFloat = 48
     var detailed = false
+    @State private var showingInputs = false
     @State private var previews: [QueueInputPreview] = []
     @State private var image: NSImage?
     @State private var compactLabel = "Source"
@@ -36,6 +38,13 @@ struct QueueSourceThumbnail: View {
                 ForEach(previews) { preview in
                     VStack(alignment: .leading, spacing: 4) {
                         Text(preview.input.label).font(.headline)
+                        InputMediaViewButton(title: preview.input.label, identity: "\(String(describing: hosts.host(host.id)))|\(hosts.instanceID(of: host.id) ?? "unknown")|\(entry.id)|\(preview.input.index ?? -1)", load: {
+                            guard let index = preview.input.index, let route = hosts.host(host.id), queue.entries(on: host.id).contains(where: { $0.id == entry.id }) else { throw MoldClientError.malformedResponse }
+                            let instance = hosts.instanceID(of: host.id)
+                            let file = try await hosts.backend(for: route).queueInputOriginal(id: entry.id, index: index)
+                            guard hosts.host(host.id) == route, hosts.instanceID(of: host.id) == instance, queue.entries(on: host.id).contains(where: { $0.id == entry.id }) else { throw CancellationError() }
+                            return file
+                        }, isCurrent: { queue.entries(on: host.id).contains(where: { $0.id == entry.id }) })
                         if let bytes = preview.bytes, let image = NSImage(data: bytes) {
                             Image(nsImage: image).resizable().scaledToFit()
                                 .frame(maxWidth: 320, maxHeight: 320)
@@ -67,9 +76,20 @@ struct QueueSourceThumbnail: View {
                         .accessibilityHidden(compactCount <= 1)
                 }
                 .frame(width: max(size, 80), alignment: .leading)
-                .opacity(image == nil ? 0 : 1)
-                .accessibilityHidden(image == nil)
+                .opacity(compactCount == 0 ? 0 : 1)
+                .accessibilityHidden(compactCount == 0)
             }
+        }
+        .contextMenu {
+            if compactCount > 0 { Button("View inputs") { showingInputs = true } }
+        }
+        .onTapGesture { if !detailed, compactCount > 0 { showingInputs = true } }
+        .sheet(isPresented: $showingInputs) {
+            NavigationStack {
+                ScrollView { QueueSourceThumbnail(entry: entry, host: host, size: 120, detailed: true).padding() }
+                    .navigationTitle("Submitted inputs")
+                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showingInputs = false } } }
+            }.frame(minWidth: 480, minHeight: 420)
         }
         .task(id: identity) {
             failed = false

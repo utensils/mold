@@ -52,6 +52,20 @@ struct GenerationReferencesGroup: View {
         .onDisappear { importTask?.cancel() }
     }
 
+    private func viewReference(_ reference: GenerationReference, index: Int) async throws -> SourceMediaFile {
+        if let data = reference.media.data { return try await InputMediaPreview.file(base64: data) }
+        guard let authority = reuse.pending(for: draft), let restored = reuse.restored,
+              let route = reuse.hosts.host(authority.origin) else { throw MoldClientError.malformedResponse }
+        let fence = reuse.currentFence
+        let instance = reuse.hosts.instanceID(of: route.id)
+        let file = try await InputMediaPreview.retainedFile(reference: reference, index: index,
+            references: draft.media.generationReferences, original: restored.media.generationReferences,
+            members: authority.members, filename: authority.filename, backend: reuse.hosts.backend(for: route))
+        guard reuse.isCurrent(fence), reuse.hosts.host(route.id) == route,
+              reuse.hosts.instanceID(of: route.id) == instance else { throw CancellationError() }
+        return file
+    }
+
     private var imageAddWell: some View {
         let session = ReferenceImportSession(controller: controller, recipe: recipe, media: draft.media)
         return PictureWell(
@@ -68,6 +82,9 @@ struct GenerationReferencesGroup: View {
                 PictureWell(
                     rows: GenerateMenus.referenceAdd(canPaste: PicturePaste.hasPicture),
                     picture: reference.media.data ?? reuse.preview(for: reference, in: draft),
+                    originalIdentity: "\(reuse.currentFence)|\(String(describing: reuse.authority))|\(reference)",
+                    originalLoader: { try await viewReference(reference, index: index) },
+                    originalIsCurrent: { draft.media.generationReferences.indices.contains(index) && draft.media.generationReferences[index] == reference && (reference.media.data != nil || reuse.pending(for: draft) != nil) },
                     size: GenerationReferenceLayout.previewSize(count: draft.media.generationReferences.count),
                     label: "Replace image reference \(index + 1)",
                     pick: { attachPicture($0, replacing: index, expected: reference, session: session) })
@@ -82,6 +99,11 @@ struct GenerationReferencesGroup: View {
                     Button(reuse.previewFailures.contains(reference) ? "Retry preview" : "Load preview") {
                         Task { await reuse.loadPreviews(in: draft) }
                     }.font(.caption)
+                }
+                if reference.kind != "image" {
+                    InputMediaViewButton(title: reference.name, identity: "\(reuse.currentFence)|\(String(describing: reuse.authority))|\(index)|\(reference)",
+                        load: { try await viewReference(reference, index: index) },
+                        isCurrent: { draft.media.generationReferences.indices.contains(index) && draft.media.generationReferences[index] == reference && (reference.media.data != nil || reuse.pending(for: draft) != nil) })
                 }
                 HStack(spacing: GenerationReferenceLayout.actionGap) {
                     if reference.kind != "image" {
@@ -114,6 +136,9 @@ struct GenerationReferencesGroup: View {
             PictureWell(
                 rows: GenerateMenus.referenceAdd(canPaste: PicturePaste.hasPicture),
                 picture: expected.flatMap { $0.media.data ?? reuse.preview(for: $0, in: draft) },
+                originalIdentity: "\(reuse.currentFence)|\(String(describing: reuse.authority))|\(String(describing: expected))",
+                originalLoader: expected.map { ref in { try await viewReference(ref, index: index ?? -1) } },
+                originalIsCurrent: { expected == draft.media.generationReferences.first(where: { $0.role == role }) && (expected?.media.data != nil || reuse.pending(for: draft) != nil) },
                 size: ReferenceStrip.thumbnailSize, caption: role.rawValue.capitalized,
                 label: "\(role.rawValue.capitalized) camera view",
                 pick: { attachPicture($0, replacing: index, role: role,

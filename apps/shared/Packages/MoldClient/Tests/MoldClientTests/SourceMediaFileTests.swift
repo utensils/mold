@@ -57,3 +57,16 @@ extension SourceMediaFileTests {
         await #expect(throws: CancellationError.self) { try await task.value }
     }
 }
+
+extension SourceMediaFileTests {
+    @Test func queueOriginalUsesBoundedPrivateStreamingAndRequiresIndex() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SourceOriginalProtocol.self]
+        let backend = HTTPBackend(host: MoldHost(name: "Fixture", baseURL: URL(string: "http://fixture/prefix")!),
+                                  session: URLSession(configuration: configuration))
+        let file = try await backend.queueInputOriginal(id: "job #1", index: 2)
+        #expect(try Data(contentsOf: file.url) == Data([1, 2, 3]))
+        await #expect(throws: (any Error).self) { try await backend.queueInputOriginal(id: "oversized", index: 2) }
+        await #expect(throws: MoldClientError.self) { try await backend.queueInputOriginal(id: "job", index: -1) }
+    }
+}

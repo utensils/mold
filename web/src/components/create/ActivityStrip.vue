@@ -321,11 +321,14 @@ const active = computed(
         v-else-if="row.kind === 'print' && row.print.workStarted"
         class="activity__running"
       >
-        <button
-          type="button"
+        <div
+          role="button"
+          tabindex="0"
           class="activity__open"
           :data-test="`activity-running-${row.print.id}`"
           @click="emit('open', row.print)"
+          @keydown.enter.self.prevent="emit('open', row.print)"
+          @keydown.space.self.prevent="emit('open', row.print)"
         >
           <QueueSourceThumbnail
             :target="sourceTarget(row.print.hostId ?? ORIGIN_HOST_ID)"
@@ -379,7 +382,7 @@ const active = computed(
           <span v-else class="activity__pct activity__pct--stage">{{
             row.print.progress.stage
           }}</span>
-        </button>
+        </div>
         <button
           v-if="expanded && row.print.serverId && !row.print.chain"
           type="button"

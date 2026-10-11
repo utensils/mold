@@ -31,6 +31,10 @@ struct PictureWell: View {
     /// a well that only previews what it loaded itself drew the placeholder
     /// over a picture that was really there.
     var picture: String?
+    var original: String?
+    var originalIdentity: String?
+    var originalLoader: (() async throws -> SourceMediaFile)?
+    var originalIsCurrent: () -> Bool = { true }
     /// The glyph for an empty well. Every well that can be picked INTO names
     /// its own, ON PURPOSE -- the source still and the strip's add well sit
     /// side by side. The default is for a well that always holds a picture and
@@ -74,6 +78,7 @@ struct PictureWell: View {
     /// Not `private`: `PictureWell+Shape` draws with these and
     /// `PictureWell+Import` owns the doors and the single-flight import behind
     /// them -- both extensions in files of their own.
+    @State var showsOriginal = false
     @State var targeted = false
     @State var preview: NSImage?
     @State var showsLibrary = false
@@ -89,6 +94,16 @@ struct PictureWell: View {
     var body: some View {
         VStack(spacing: WellCaption.spacing) {
             square
+            if let encoded = original ?? picture {
+                InputMediaViewButton(title: label, identity: originalIdentity ?? encoded, load: {
+                    if let originalLoader { return try await originalLoader() }
+                    return try await InputMediaPreview.file(base64: encoded)
+                }, isCurrent: { originalIsCurrent() && (original ?? picture) == encoded })
+                .font(.caption)
+            } else if let originalLoader {
+                InputMediaViewButton(title: label, identity: originalIdentity ?? label, load: originalLoader, isCurrent: originalIsCurrent)
+                    .font(.caption)
+            }
             if let caption { WellCaption.text(caption) }
             if let importFailure {
                 Text(importFailure)
@@ -103,7 +118,7 @@ struct PictureWell: View {
         clickable
             // The click menu and the contextual menu are the SAME list, and
             // the drop is the third door onto the same pipeline.
-            .rowActionMenu(rows, perform: route)
+            .rowActionMenu(GenerateMenus.inspectable(rows, hasOriginal: picture != nil || originalLoader != nil), perform: route)
             .dropDestination(for: PictureDrop.self) { drops, _ in
                 handle(allowsMultiple ? drops : Array(drops.prefix(1)))
                 return true
@@ -111,9 +126,18 @@ struct PictureWell: View {
             .help(help ?? label)
             .accessibilityLabel(label)
             // Decoded off the main actor -- a 50 MB still is a visible stall.
+            .onChange(of: originalIdentity) { _, _ in showsOriginal = false }
+            .onChange(of: original ?? picture) { _, _ in showsOriginal = false }
             .task(id: picture) { preview = await PicturePreview.decode(picture) }
             .task { seedLibraryPickerIfRequested() }
             .onDisappear { importTask?.cancel(); librarySession = nil }
+            .sheet(isPresented: $showsOriginal) {
+                InputMediaViewer(title: label, identity: label, load: {
+                    if let originalLoader { return try await originalLoader() }
+                    guard let encoded = original ?? picture else { throw MoldClientError.malformedResponse }
+                    return try await InputMediaPreview.file(base64: encoded)
+                }, isCurrent: { originalIsCurrent() && (picture != nil || originalLoader != nil) })
+            }
             .sheet(isPresented: $showsLibrary) {
                 LibraryPickerSheet(accepting: accepting, pick: deliver)
             }

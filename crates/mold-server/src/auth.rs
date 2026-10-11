@@ -1245,6 +1245,7 @@ mod tests {
             "/api/queue/private-job/input-thumbnail",
             "/api/queue/private-job/inputs",
             "/api/queue/private-job/input-thumbnail?index=1",
+            "/api/queue/private-job/input-original?index=1",
             "/api/gallery/source-media/private.png/member/thumbnail",
             "/api/shutdown",
             "/secrets.json",
@@ -1264,6 +1265,17 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
         }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/api/queue/private-job/input-original?index=1")
+                    .header("x-api-key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
         for path in ["/", "/create", "/assets/index-a.js"] {
             let response = app
                 .clone()

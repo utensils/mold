@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import OriginalMediaButton from "@studio/components/OriginalMediaButton.vue";
 import { computed, ref, watch } from "vue";
 import { inputImageFacts } from "@studio/lib/inputImage";
 import { useMobileBack } from "./useMobileBack";
@@ -974,6 +975,7 @@ function applyMask(mask: string): void {
           tabindex="-1"
           @change="pickMask"
         />
+        <OriginalMediaButton :data="form.maskImage" mime-type="image/png" label="Mask" />
         <img
           v-if="form.maskImage"
           class="mobile-source-preview is-mask"
@@ -1031,6 +1033,11 @@ function applyMask(mask: string): void {
           Choose control photo
         </button>
         <template v-else>
+          <OriginalMediaButton
+            :data="form.controlImage"
+            mime-type="image/png"
+            label="Control image"
+          />
           <img
             class="mobile-source-preview"
             :src="base64ToDataUrl(form.controlImage)"

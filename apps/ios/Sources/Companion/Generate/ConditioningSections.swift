@@ -144,7 +144,8 @@ struct RefineSection: View {
                     Button(generate.draft.media.maskImage == nil ? "Paint Where to Change…" : "Edit the Mask…") {
                         editingMask = true
                     }
-                    if generate.draft.media.maskImage != nil {
+                    if let mask = generate.draft.media.maskImage {
+                        InputMediaViewButton(title: "Mask", identity: mask, load: { try await InputMediaPreview.file(base64: mask) }, isCurrent: { generate.draft.media.maskImage == mask })
                         Button("Clear the Mask", role: .destructive) { generate.draft.media.maskImage = nil }
                     }
                 }

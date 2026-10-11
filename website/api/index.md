@@ -8,6 +8,9 @@ clients, and custom integrations on one generation contract.
 
 | Method   | Path                                                | Auth          | Description                                                                                                                                                                                                                                                                                                  |
 | -------- | --------------------------------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `GET`    | `/api/queue/:id/inputs`                             | key           | Ordered path-free sealed submitted input descriptors                                                                                                                                                                                                                                                         |
+| `GET`    | `/api/queue/:id/input-thumbnail?index=N`            | key           | Exact submitted image member as a private 320-pixel preview                                                                                                                                                                                                                                                  |
+| `GET`    | `/api/queue/:id/input-original?index=N`             | key           | Exact full-sized submitted image, WAV or MP4; explicit index required, 64 MiB bound                                                                                                                                                                                                                          |
 | `GET`    | `/api/gallery/sync-checkpoint`                      | key           | Read-only per-print archive and retained-input revisions for incremental mirror verification                                                                                                                                                                                                                 |
 | `GET`    | `/api/queue/:id/transfer/reservation`               | key           | Recover a pending destination-bound transfer identity                                                                                                                                                                                                                                                        |
 | `POST`   | `/api/queue/:id/transfer/reserve`                   | key           | Reserve queued, paused, or held source work before rendering starts                                                                                                                                                                                                                                          |
@@ -2618,3 +2621,18 @@ archive still needs one full authenticated scan with the existing encrypted
 format. Warm manifest reads and previews avoid repeated decrypt/render work;
 selected-member reads avoid materializing other inputs. Nothing is cached as
 plaintext on disk.
+
+## Inspect submitted queue media
+
+Get `/api/queue/:id/inputs` and use the returned zero-based manifest `index` with
+`GET /api/queue/:id/input-original?index=N`. The authenticated endpoint returns
+that exact sealed conditioning member at its submitted resolution. A submission
+may have fitted an authoring image; this endpoint does not recover an earlier
+upload. Keyframe records return the embedded image rather than the JSON envelope.
+The response detects PNG/JPEG/WebP, WAV or MP4 from bytes, carries the media content
+type and `Cache-Control: private, no-store`, and never resolves a client path or
+provenance filename. Missing or invalid indexes return 400. Missing jobs/members,
+unsupported media and members exceeding the 64 MiB inspection budget return 404.
+Audio and video may be inspectable even when `preview` is false. Older servers
+without this endpoint cannot provide full-sized queue inspection; clients must
+show unavailable rather than enlarging a thumbnail as an original.

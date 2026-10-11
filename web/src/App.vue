@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import OriginalMediaHost from "@studio/components/OriginalMediaHost.vue";
 import { startLibraryUnreadObserver } from "./stores/libraryUnread";
 import { originApiTarget } from "./lib/originAuth";
 
@@ -215,6 +216,7 @@ const notifications = useNotifications();
 <template>
   <HeldQueueTransferDialog :controller="queueTransfer" />
   <div class="app-frame">
+    <OriginalMediaHost />
     <AppNav />
     <div
       v-if="liveSummary && route.path !== '/queue'"

@@ -1,3 +1,4 @@
+import { originalMediaBlob } from "@studio/api/originalMedia";
 import { originAuthenticatedFetch as fetch } from "./originAuth";
 import {
   resolveRelayMedia,
@@ -155,12 +156,14 @@ async function fetchAuthedObjectUrl(
 export async function fetchGalleryBlob(
   host: HostEntry,
   filename: string,
+  signal?: AbortSignal,
 ): Promise<Blob> {
   const res = await fetch(`${hostMediaBase(host)}${mediaPath(filename)}`, {
     headers: authHeaders(host),
+    ...(signal ? { signal } : {}),
   });
   if (!res.ok) throw new Error(`GET media failed: ${res.status}`);
-  return res.blob();
+  return signal ? originalMediaBlob(res) : res.blob();
 }
 
 /** Fetch the exact gallery poster/waveform without first listing the gallery.

@@ -11,6 +11,10 @@ enum GenerateMenus {
     /// One row of a Generate menu -- the app's one menu model.
     typealias Row = RowAction<GenerateAction>
 
+    static func inspectable(_ rows: [Row], hasOriginal: Bool) -> [Row] {
+        hasOriginal ? [GenerateAction.viewInput.row] + rows : rows
+    }
+
     /// A finished result: the big one on the canvas and every strip tile.
     ///
     /// Save / Copy / Show in Library are `ResultBar`'s own three; the two

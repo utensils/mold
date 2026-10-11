@@ -282,3 +282,12 @@ The image Library picker keeps machine filters in a full-width ordinary content 
 **Native read recovery and shared policies.** `QueueTransferSource` distinguishes eligible, present-but-ineligible, and authoritatively missing sources; only a 404 with a verified prior destination may report an original removed. Transport, authorization and server failures never become missing. Thumbnail coalescing tracks individual waiter tokens and releases each exactly once; only the final cancellation stops shared work. Generation followers clear their owned task on every exit, retain admitted batches through failed reads, and reread on foreground reconnect without resubmission; stale tasks cannot clear or replace a successor. Finite admission tasks are separate from progress followers: backgrounding must retain late accepted ownership without opening streams, and explicit Stop intent must cancel a late accepted batch without reviving it. Stop Everything includes all pending admissions; preserve the ledger if late cancellation fails. Queue source-preview bytes live in one 32 MiB LRU store; four read lanes and a per-response budget bound pending work, while ordered descriptors and retry state survive eviction. Fence keys by full host route/credential identity, server instance and job.
 
 `SourceMediaDisplay` and `SourceMediaLoading` in Foundation-only MoldClient own shared filtering, preferred-copy selection, inventory/original publication checks and stale-error suppression. Both apps supply current route, instance, revision and access checks; keep platform image/player/navigation presentation local. Never publish a revoked or cancelled read, including its error. Library new/unread behavior uses `LibraryUnreadLedger`; active video geometry uses `VideoViewport`.
+
+**Input inspection.** The shared Well has a separate accessible View control;
+typed references, masks, queue input details, Library picker tiles and From Share
+use the same read-only InputMediaViewer. Viewing never attaches, consumes a share,
+fits, reorders or acknowledges a Library print. Prefer authoring original bytes;
+retained descriptors require their exact verified ordered member. Queue views
+inspect full-sized submitted pixels, which may already be fitted. Private files
+and players belong only to the selected presentation and are released/revoked on
+close, cancellation, attachment replacement and machine authority changes.

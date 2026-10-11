@@ -7,6 +7,7 @@ public protocol MoldQueueBackend: Sendable {
     /// One job in full, settings included -- `GET /api/queue` cannot answer
     /// this (`routes.rs:6817-6828`).
     func queueJob(id: String) async throws -> QueueJobDetail
+    func queueInputOriginal(id: String, index: Int) async throws -> SourceMediaFile
     func queueInputs(id: String) async throws -> [QueueInput]
     func queueInputThumbnail(id: String, index: Int?) async throws -> Data
     func queueInputThumbnail(id: String) async throws -> Data
@@ -56,6 +57,9 @@ public extension MoldQueueBackend {
     func sealTransfer(_ request: QueueTransferReservationRequest) async throws { throw MoldClientError.malformedResponse }
     func releaseTransfer(_ request: QueueTransferReservationRequest) async throws { throw MoldClientError.malformedResponse }
 
+    func queueInputOriginal(id: String, index: Int) async throws -> SourceMediaFile {
+        throw MoldClientError.http(status: 404, code: nil, message: "This machine does not offer full-sized queue inputs.")
+    }
     func queueInputs(id: String) async throws -> [QueueInput] {
         [QueueInput(label: "Source", preview: true)]
     }

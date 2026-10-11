@@ -23,6 +23,7 @@ struct BoundaryFrameWells: View {
     private func frame(first: Bool, caps: RecipeCapabilities) -> some View {
         Well(title: first ? "First frame" : "Last frame",
              image: BoundaryFramePolicy.image(first: first, draft: generate.draft, capabilities: caps),
+             original: first && BoundaryFramePolicy.resolve(capabilities: caps) == "h3-endpoints" ? generate.draft.media.sourceImageOriginal : nil,
              side: side, accepting: PictureImport.identityReadable,
              set: { BoundaryFramePolicy.set(first: first, picture: $0, draft: &generate.draft, capabilities: caps, recipe: generate.recipe) },
              clear: { BoundaryFramePolicy.set(first: first, picture: nil, draft: &generate.draft, capabilities: caps, recipe: generate.recipe) })

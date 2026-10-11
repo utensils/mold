@@ -21,6 +21,7 @@ struct PictureWells: View {
                     HStack(alignment: .top, spacing: 10) {
                         if readsSource {
                             Well(title: String(localized: "Start from"), image: generate.draft.media.sourceImage,
+                                 original: generate.draft.media.sourceImageOriginal,
                                  side: side, accepting: PictureImport.engineReadable,
                                  set: { DraftPictureAttachment.useAsSource($0, in: &generate.draft, recipe: generate.recipe) },
                                  clear: clearSource)

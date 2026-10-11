@@ -32,6 +32,7 @@ struct SourceImageWell: View {
         PictureWell(
             rows: items,
             picture: draft.media.sourceImage,
+            original: draft.media.sourceImageOriginal,
             placeholder: Self.placeholderGlyph,
             caption: caption,
             label: "Source picture",

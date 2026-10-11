@@ -23,7 +23,9 @@ struct TypedReferenceWells: View {
                         HStack(alignment: .top, spacing: 10) {
                             ForEach(named.roles, id: \.self) { role in
                                 let reference = generate.draft.media.generationReferences.first { $0.role == role }
-                                Well(title: role.rawValue.capitalized, image: reference?.media.data, side: side,
+                                Well(title: role.rawValue.capitalized, image: reference?.media.data,
+                                     originalIdentity: "\(retainedIdentity)|\(String(describing: reference))",
+                                     originalLoader: reference.map { ref in { try await viewReference(ref) } }, side: side,
                                      accepting: PictureImport.identityReadable,
                                      set: { picture in attachImage(picture, role: role) },
                                      clear: { generate.draft.media.generationReferences.removeAll { $0.role == role } })
@@ -70,12 +72,17 @@ struct TypedReferenceWells: View {
     @ViewBuilder private func referenceWell(_ reference: GenerationReference, index: Int) -> some View {
         VStack(spacing: 4) {
             if reference.kind == "image" {
-                Well(title: reference.name, image: reference.media.data, side: side, accepting: PictureImport.identityReadable,
+                Well(title: reference.name, image: reference.media.data,
+                     originalIdentity: "\(retainedIdentity)|\(String(describing: reference))",
+                     originalLoader: { try await viewReference(reference, index: index) }, side: side, accepting: PictureImport.identityReadable,
                      number: index + 1, set: { attachImage($0, replacing: index) },
                      clear: { generate.draft.media.removeGenerationReference(at: index) })
             } else {
                 Text(reference.name).font(.caption).frame(maxWidth: side * 1.5)
                 Text(reference.kind.capitalized).font(.caption).foregroundStyle(.secondaryText)
+                InputMediaViewButton(title: reference.name, identity: "\(retainedIdentity)|\(String(describing: reference))",
+                    load: { try await viewReference(reference, index: index) },
+                    isCurrent: { generate.draft.media.generationReferences.contains(reference) })
                 Button { openFiles(replacing: reference, at: index) } label: {
                     Text("Replace…").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
                 }
@@ -97,6 +104,18 @@ struct TypedReferenceWells: View {
         }
     }
 
+    private var retainedIdentity: String {
+        guard let authority = generate.retainedReuse.snapshot() else { return "unavailable" }
+        return "\(authority.filename)|\(authority.route)|\(authority.instance ?? "unknown")"
+    }
+    private func viewReference(_ reference: GenerationReference, index selectedIndex: Int? = nil) async throws -> SourceMediaFile {
+        guard let index = selectedIndex ?? generate.draft.media.generationReferences.firstIndex(of: reference),
+              generate.draft.media.generationReferences.indices.contains(index),
+              generate.draft.media.generationReferences[index] == reference else { throw CancellationError() }
+        if let data = reference.media.data { return try await InputMediaPreview.file(base64: data) }
+        return try await generate.retainedReuse.originalFile(reference: reference, index: index,
+            references: generate.draft.media.generationReferences)
+    }
     private func count(_ kind: String) -> Int { generate.draft.media.generationReferences.filter { $0.kind == kind }.count }
     private func attachImage(_ picture: ImportedPicture, role: GenerationImageReferenceRole? = nil, replacing: Int? = nil) {
         do {

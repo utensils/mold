@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import OriginalMediaButton from "@studio/components/OriginalMediaButton.vue";
 import AuthedMedia from "../gallery/AuthedMedia.vue";
 import { galleryMediaPath } from "../../lib/gallery/media";
-import { readGalleryMediaBase64 } from "../../lib/gallery/sourceMedia";
+import { readGalleryMediaBase64, readGalleryMediaBlob } from "../../lib/gallery/sourceMedia";
 import { inputImageFacts, normalizeInputImage } from "@studio/lib/inputImage";
 import { fileToBase64, isStillImageGalleryItem } from "../../lib/image";
 import {
@@ -586,6 +587,13 @@ async function emitGallerySelection(entries: readonly MergedPrint[]) {
                   }}
                 </span>
               </button>
+              <div class="absolute bottom-0 left-0 right-0">
+                <OriginalMediaButton
+                  :label="tile.entry.item.filename"
+                  :authority="`${tile.entry.sourceKey}:${tile.entry.item.filename}:${gallery.targetOf(tile.entry.sourceKey)?.baseUrl}:${gallery.targetOf(tile.entry.sourceKey)?.apiKey}:${gallery.hostFor(tile.entry.sourceKey)?.instanceId}:${open}`"
+                  :load="(signal) => readGalleryMediaBlob(tile.entry, gallery, signal)"
+                />
+              </div>
             </li>
           </ul>
           <div

@@ -1,5 +1,6 @@
 import { mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
+import OriginalMediaHost from "./OriginalMediaHost.vue";
 import ImageDropWell from "./ImageDropWell.vue";
 
 describe("ImageDropWell", () => {
@@ -159,4 +160,22 @@ describe("ImageDropWell alpha bed", () => {
     expect(img.exists()).toBe(true);
     expect(img.classes()).toContain("ms-alpha-bed");
   });
+});
+
+it("keeps original inspection available when attachment mutation is disabled", async () => {
+  const host = mount(OriginalMediaHost);
+  const wrapper = mount(ImageDropWell, {
+    props: { image: "aGVsbG8=", disabled: true },
+    global: { stubs: { Teleport: true } },
+  });
+  const viewer = wrapper
+    .findAll("button")
+    .find((button) => button.text() === "View original")!;
+  expect(viewer.attributes("disabled")).toBeUndefined();
+  await viewer.trigger("click");
+  expect(host.find('[role="dialog"]').exists()).toBe(true);
+  expect(wrapper.emitted("file")).toBeUndefined();
+  expect(wrapper.emitted("clear")).toBeUndefined();
+  wrapper.unmount();
+  host.unmount();
 });

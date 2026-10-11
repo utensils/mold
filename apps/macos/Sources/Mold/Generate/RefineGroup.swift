@@ -26,6 +26,9 @@ struct RefineGroup: View {
         VStack(alignment: .leading, spacing: 10) {
             fitSection
             maskSection
+            if let mask = draft.media.maskImage {
+                InputMediaViewButton(title: "Mask", identity: mask, load: { try await InputMediaPreview.file(base64: mask) }, isCurrent: { draft.media.maskImage == mask })
+            }
             controlNetSection
         }
         .task(id: draft.media.maskImage) { await loadMaskPreview() }

@@ -23,6 +23,7 @@ struct BoundaryFrameWells: View {
             PictureWell(
                 rows: GenerateMenus.referenceAdd(canPaste: PicturePaste.hasPicture),
                 picture: BoundaryFramePolicy.image(first: first, draft: draft, capabilities: recipe.capabilities),
+             original: first && BoundaryFramePolicy.resolve(capabilities: recipe.capabilities) == "h3-endpoints" ? draft.media.sourceImageOriginal : nil,
                 label: first ? "First frame" : "Last frame",
                 pick: { picked in
                     guard session.isCurrent(controller: controller, media: draft.media) else { return }

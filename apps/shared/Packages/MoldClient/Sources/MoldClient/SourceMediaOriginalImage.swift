@@ -12,19 +12,19 @@ public struct SourceMediaOriginalImage: @unchecked Sendable {
             try Task.checkCancellation()
             guard let source = CGImageSourceCreateWithURL(original.url as CFURL,
                     [kCGImageSourceShouldCache: false] as CFDictionary),
-                  let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                  let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+                  let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+                  let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
+                  width > 0, height > 0 else { throw MoldClientError.malformedResponse }
+            try SourceMediaOriginal.checkDecodedDimensions(width: Double(width), height: Double(height))
+            guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                     kCGImageSourceCreateThumbnailFromImageAlways: true,
-                    kCGImageSourceThumbnailMaxPixelSize: 4096,
+                    kCGImageSourceThumbnailMaxPixelSize: max(width, height),
                     kCGImageSourceCreateThumbnailWithTransform: true,
                     kCGImageSourceShouldCacheImmediately: true
                   ] as CFDictionary) else { throw MoldClientError.malformedResponse }
             try Task.checkCancellation()
-            let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
-            let dimensions: String?
-            if let width = properties?[kCGImagePropertyPixelWidth], let height = properties?[kCGImagePropertyPixelHeight] {
-                let reduced = ((width as? NSNumber)?.intValue ?? 0) > 4096 || ((height as? NSNumber)?.intValue ?? 0) > 4096
-                dimensions = "\(width) × \(height) pixels" + (reduced ? " · Reduced for display" : "")
-            } else { dimensions = nil }
+            let dimensions: String? = "\(width) × \(height) pixels"
             return Self(image: image, dimensions: dimensions)
         }
         return try await withTaskCancellationHandler {

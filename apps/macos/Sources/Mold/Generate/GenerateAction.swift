@@ -18,6 +18,7 @@ enum GenerateAction: Hashable, CaseIterable {
     case addAsReference
 
     // The source well.
+    case viewInput
     case chooseFile
     case chooseFromLibrary
     case paste
@@ -65,6 +66,7 @@ enum GenerateAction: Hashable, CaseIterable {
         case .showInLibrary: "Show in Library"
         case .useAsSourceImage: "Use as Source Image"
         case .addAsReference: "Add as Reference"
+        case .viewInput: "View Original"
         case .chooseFile: "Choose File…"
         case .chooseFromLibrary: "Choose from Library…"
         // A slot that already holds a picture is REPLACED, from either door.

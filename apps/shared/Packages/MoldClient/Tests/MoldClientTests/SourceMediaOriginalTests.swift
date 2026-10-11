@@ -18,11 +18,11 @@ struct SourceMediaOriginalTests {
         return file
     }
 
-    @Test func extensionlessImageIsInspectedAndDecodedWithinDisplayLimit() async throws {
+    @Test func extensionlessImageRetainsFullPixelGeometry() async throws {
         let file = try png(width: 5_000)
         let result = try await SourceMediaOriginal.inspect(file)
         #expect(result.kind == .image)
-        #expect(try #require(result.image).image.width <= 4_096)
+        #expect(try #require(result.image).image.width == 5_000)
         #expect(result.image?.dimensions?.contains("5000") == true)
     }
 

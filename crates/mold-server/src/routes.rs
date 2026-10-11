@@ -396,6 +396,7 @@ use crate::queue::clean_error_message;
         crate::queue_transfer_reservation::abort_destination,
         get_queue_job_preview,
         crate::queue_input_thumbnail::get,
+        crate::queue_input_thumbnail::original,
         crate::queue_input_thumbnail::list,
         crate::gallery_source_thumbnail::get,
         patch_queue_job,
@@ -1022,6 +1023,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/queue/:id/inputs",
             get(crate::queue_input_thumbnail::list),
+        )
+        .route(
+            "/api/queue/:id/input-original",
+            get(crate::queue_input_thumbnail::original),
         )
         .route(
             "/api/queue/:id/input-thumbnail",

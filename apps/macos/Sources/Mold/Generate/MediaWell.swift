@@ -56,7 +56,13 @@ struct MediaWell: View {
                     .truncationMode(.middle)
                 Spacer(minLength: 0)
             }
+            .onTapGesture { choose() }
             .help(attachment.map { "Replace \($0.name), or drop a different file here" } ?? "Choose a file, or drop one here")
+            if let attached = attachment {
+                InputMediaViewButton(title: attached.name, identity: attached.base64,
+                    load: { try await InputMediaPreview.file(base64: attached.base64) },
+                    isCurrent: { attachment == attached })
+            }
             if attachment != nil {
                 Button {
                     attachment = nil
@@ -74,7 +80,6 @@ struct MediaWell: View {
             RoundedRectangle(cornerRadius: Chrome.fieldRadius, style: .continuous)
                 .fill(targeted ? Chrome.wellFillTargeted : Chrome.wellFill)
         )
-        .onTapGesture { choose() }
         .dropDestination(for: URL.self) { urls, _ in
             guard let url = urls.first else { return false }
             load(url)
