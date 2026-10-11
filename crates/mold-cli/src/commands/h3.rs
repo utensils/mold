@@ -2,7 +2,7 @@
 //!
 //! This module deliberately owns only payload-free request construction and
 //! local user-media inspection. It does not activate, advertise, resolve, or
-//! download the compliance-gated H3 model family. Runtime activation remains
+//! download H3 models. Runtime admission remains
 //! authoritative in `mold-core` and the server.
 
 use anyhow::{Context, Result};
@@ -78,8 +78,7 @@ impl FromStr for ReferenceArg {
         }
         if path == "-" {
             return Err(
-                "--reference requires a file path: an H3 reference streams through an \
-                 authenticated upload session, and an ordered reference group is read from disk"
+                "--reference requires a file path: reference media is probed and read from disk; stdin is unsupported"
                     .to_string(),
             );
         }
@@ -152,7 +151,6 @@ pub(crate) fn prepare_authoring(
     legacy_image: Option<&str>,
     last_frame: Option<&Path>,
     references: &[ReferenceArg],
-    reference_client: Option<&mold_core::MoldClient>,
 ) -> Result<PreparedAuthoring> {
     let is_h3 = minimax_h3::is_family(family);
     let has_h3_authoring = duration_seconds.is_some()
@@ -239,10 +237,6 @@ pub(crate) fn prepare_authoring(
                     "MiniMax H3 Ref2VA requires at least one ordered --reference KIND=PATH"
                 );
             }
-            anyhow::ensure!(
-                reference_client.is_some_and(mold_core::MoldClient::has_api_key),
-                "MiniMax H3 reference preparation requires a configured, valid MOLD_API_KEY"
-            );
         }
     }
 
@@ -977,7 +971,6 @@ mod tests {
             None,
             Some(&last),
             &[],
-            None,
         )
         .unwrap();
         assert_eq!(prepared.frames, Some(124));
@@ -1030,7 +1023,6 @@ mod tests {
                 None,
                 None,
                 &[],
-                None,
             )
             .unwrap();
             // A square source stays square, at the largest square the
@@ -1054,7 +1046,6 @@ mod tests {
             None,
             None,
             &[],
-            None,
         )
         .unwrap();
         assert_eq!(
@@ -1086,7 +1077,6 @@ mod tests {
             None,
             Some(&last),
             &[],
-            None,
         )
         .unwrap_err();
         assert!(error.to_string().contains("must be PNG or JPEG"));
@@ -1136,9 +1126,8 @@ mod tests {
     }
 
     #[test]
-    fn ref2va_auth_preflight_wins_before_reference_file_access() {
+    fn ref2va_without_api_key_still_prepares_local_reference_files() {
         let missing = PathBuf::from("/definitely/not/opened/reference.png");
-        let client = mold_core::MoldClient::new("http://127.0.0.1:9");
         let error = prepare_authoring(
             minimax_h3::REF2VA_COMFY,
             minimax_h3::FAMILY,
@@ -1154,10 +1143,9 @@ mod tests {
                 kind: ReferenceKind::Image,
                 path: missing,
             }],
-            Some(&client),
         )
-        .expect_err("a missing API key must fail before touching the path");
-        assert!(error.to_string().contains("MOLD_API_KEY"));
-        assert!(!error.to_string().contains("opened no-follow"));
+        .expect_err("an unreadable reference must report its file error, not require a key");
+        assert!(error.to_string().contains("opened no-follow"));
+        assert!(!error.to_string().contains("MOLD_API_KEY"));
     }
 }

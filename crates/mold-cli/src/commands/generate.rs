@@ -203,13 +203,10 @@ fn refuse_no_save_on_a_local_render(no_save: bool) -> Result<()> {
 /// Turning an unreachable host into a hard error here would take that fallback
 /// away from exactly the requests that need it most.
 ///
-/// Every OTHER failure is a refusal, and that distinction is the whole point. A
-/// reachable server that predates `/api/capabilities`, or whose response cannot
-/// be decoded, answers this probe with a 404 or a parse error — and then
-/// ACCEPTS the generate request while dropping the very fields we asked about.
-/// Treating that like an unreachable host is the silent accept-and-ignore all
-/// over again, so it is read as "identity unsupported" instead and refused
-/// through the same named message. `MoldClient::is_connection_error` is the
+/// Every OTHER failure is a refusal. A missing endpoint means an older server
+/// could silently drop additive fields, so it is reported as unsupported.
+/// Authentication, server and decoding errors retain their original cause;
+/// they are never misreported as an unsupported model capability. `MoldClient::is_connection_error` is the
 /// existing authority for which failures mean "server unreachable, fall back to
 /// local"; this reuses it rather than inventing a second rule.
 async fn require_remote_identity_capabilities(
@@ -224,7 +221,10 @@ async fn require_remote_identity_capabilities(
         Err(error) if mold_core::MoldClient::is_connection_error(&error) => return Ok(()),
         // Reachable, but it could not tell us — which is exactly how an older
         // server answers. Absence is NO.
-        Err(_) => mold_core::ServerCapabilities::default(),
+        Err(error) if mold_core::client::is_missing_endpoint_error(&error) => {
+            mold_core::ServerCapabilities::default()
+        }
+        Err(error) => return Err(error),
     };
     crate::commands::identity::ensure_server_understands_identity(
         request,
@@ -246,7 +246,8 @@ async fn require_remote_identity_capabilities(
 /// from the local core decision. A model the server does not list falls back
 /// to the shared core decision (admission will answer for it). An
 /// unreachable server is left to the local fallback, where the local recipe
-/// decides; a reachable server that cannot list its models is read as older.
+/// decides. Only a missing models endpoint is treated as older; authentication,
+/// server and decoding failures retain their original cause.
 pub(crate) async fn require_remote_transparency_contract(
     client: &MoldClient,
     request: &GenerateRequest,
@@ -257,7 +258,8 @@ pub(crate) async fn require_remote_transparency_contract(
     let models = match client.list_models_extended().await {
         Ok(models) => Some(models),
         Err(error) if MoldClient::is_connection_error(&error) => return Ok(()),
-        Err(_) => None,
+        Err(error) if mold_core::client::is_missing_endpoint_error(&error) => None,
+        Err(error) => return Err(error),
     };
     remote_transparency_decision(models.as_deref(), request, client.host())
         .map_err(anyhow::Error::msg)
@@ -1323,11 +1325,6 @@ pub async fn run(
     let is_h3 = family
         .as_deref()
         .is_some_and(mold_core::minimax_h3::is_family);
-    if is_h3 && !reference_uploads.is_empty() && batch != 1 {
-        anyhow::bail!(
-            "MiniMax H3 uploaded references require batch 1: an upload session binds one request, so Batch N needs one session per sibling"
-        );
-    }
     if is_h3
         && references.as_ref().is_some_and(|references| {
             references.iter().any(|reference| {
@@ -1336,9 +1333,7 @@ pub async fn run(
         })
         && reference_uploads.is_empty()
     {
-        anyhow::bail!(
-            "MiniMax H3 reference descriptors require authenticated streaming upload sources"
-        );
+        anyhow::bail!("MiniMax H3 reference descriptors require their original file sources");
     }
     let effective_frames = if predict_duration {
         None
@@ -1932,7 +1927,8 @@ pub async fn run(
             // generation.
             req.seed = Some(base_seed);
             reference_session =
-                bind_remote_reference_uploads(ctx.client(), &mut req, reference_uploads).await?;
+                bind_remote_reference_uploads(ctx.client(), &mut req, reference_uploads, batch)
+                    .await?;
         }
     }
 
@@ -2610,6 +2606,7 @@ async fn bind_remote_reference_uploads(
     client: &MoldClient,
     request: &mut GenerateRequest,
     uploads: Vec<ReferenceUpload>,
+    batch: u32,
 ) -> Result<Option<ReferenceUploadLease>> {
     let descriptors = request
         .references
@@ -2624,6 +2621,28 @@ async fn bind_remote_reference_uploads(
     }
     mold_core::minimax_h3::validate_reference_descriptors(&descriptors)
         .map_err(anyhow::Error::new)?;
+    // An API key identifies upload leases, not model-license acceptance.
+    // Keyless hosts accept bounded inline media; admission still owns auth and
+    // licenses. Never retry an authentication or upload failure as inline.
+    let upload_available = if client.has_api_key() {
+        match client.server_capabilities().await {
+            Ok(capabilities) => capabilities.reference_uploads.available,
+            Err(error) if mold_core::client::is_missing_endpoint_error(&error) => false,
+            Err(error) => return Err(error),
+        }
+    } else {
+        false
+    };
+    if !upload_available {
+        let references = tokio::task::spawn_blocking(move || {
+            inline_reference_files(descriptors, uploads, batch)
+        })
+        .await??;
+        request.references = Some(references);
+        return Ok(None);
+    }
+    anyhow::ensure!(batch == 1,
+        "MiniMax H3 uploaded references require --batch 1: an upload session binds one request, so Batch N needs one session per sibling");
     let sources = uploads
         .into_iter()
         .map(|upload| ReferenceUploadSource::open_file(upload.file))
@@ -2631,6 +2650,57 @@ async fn bind_remote_reference_uploads(
     let lease = client.bind_reference_uploads_v2(request, sources).await?;
     *request = lease.request().clone();
     Ok(Some(lease))
+}
+
+/// Read only the already-opened, no-follow files and bind their exact content.
+/// Checking length before allocation and capping each read also covers files
+/// that grow after preparation. No partially converted request escapes on error.
+fn inline_reference_files(
+    mut references: Vec<GenerationReference>,
+    uploads: Vec<ReferenceUpload>,
+    batch: u32,
+) -> Result<Vec<GenerationReference>> {
+    use sha2::{Digest as _, Sha256};
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    anyhow::ensure!(batch > 0, "--batch must be at least 1");
+    // Siblings are admitted in one JSON request. Bound their aggregate bytes
+    // before cloning or base64 encoding, not just each sibling's media.
+    let mut remaining = mold_core::minimax_h3::MAX_INLINE_REFERENCE_BYTES / batch as usize;
+    for (reference, mut upload) in references.iter_mut().zip(uploads) {
+        let length = upload.file.metadata()?.len();
+        anyhow::ensure!(length > 0 && length <= remaining as u64,
+            "inline references across the batch must total at most 32 MiB; reduce --batch, choose smaller files, or use a host with authenticated reference uploads");
+        upload.file.seek(SeekFrom::Start(0))?;
+        let mut data = Vec::with_capacity(length as usize);
+        upload
+            .file
+            .take(remaining as u64 + 1)
+            .read_to_end(&mut data)?;
+        anyhow::ensure!(
+            data.len() <= remaining,
+            "inline references must total at most 32 MiB; a reference grew during preparation"
+        );
+        let digest = format!("{:x}", Sha256::digest(&data));
+        anyhow::ensure!(
+            reference
+                .provenance()
+                .sha256
+                .as_deref()
+                .is_some_and(|expected| expected.eq_ignore_ascii_case(&digest)),
+            "reference file changed after preparation; retry from the original media"
+        );
+        remaining -= data.len();
+        let media = match reference {
+            GenerationReference::Image { media, .. }
+            | GenerationReference::NamedImage { media, .. }
+            | GenerationReference::Video { media, .. }
+            | GenerationReference::Audio { media, .. }
+            | GenerationReference::Mesh { media, .. } => media,
+        };
+        *media = GenerationReferenceAuthority::Inline { data };
+    }
+    mold_core::minimax_h3::validate_references(&references).map_err(anyhow::Error::new)?;
+    Ok(references)
 }
 
 fn has_remote_reference_handles(request: &GenerateRequest) -> bool {
@@ -5378,11 +5448,17 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        for response in [
-            ResponseTemplate::new(404),
-            ResponseTemplate::new(500),
+        for (response, expected) in [
+            (
+                ResponseTemplate::new(404),
+                "more than one identity photograph",
+            ),
+            (ResponseTemplate::new(500), "500"),
             // Reachable and 200, but not a capabilities document.
-            ResponseTemplate::new(200).set_body_string("not json"),
+            (
+                ResponseTemplate::new(200).set_body_string("not json"),
+                "decoding",
+            ),
         ] {
             let server = MockServer::start().await;
             Mock::given(method("GET"))
@@ -5396,11 +5472,7 @@ mod tests {
                 .await
                 .expect_err("a server that cannot answer must not be sent the request")
                 .to_string();
-            assert!(error.contains(&server.uri()), "{error}");
-            assert!(
-                error.contains("more than one identity photograph"),
-                "{error}"
-            );
+            assert!(error.contains(expected), "{error}");
         }
     }
 
@@ -5468,6 +5540,289 @@ mod tests {
         // Dropping the server asserts the `expect(0)`.
     }
 
+    #[tokio::test]
+    async fn h3_keyless_references_are_inline_without_upload_requests() {
+        use sha2::{Digest as _, Sha256};
+        let server = wiremock::MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reference.png");
+        let bytes = b"reference bytes";
+        std::fs::write(&path, bytes).unwrap();
+        let original = descriptor("reference.png", &format!("{:x}", Sha256::digest(bytes)));
+        let mut request = h3_request(mold_core::minimax_h3::REF2VA_COMFY);
+        request.references = Some(vec![original.clone()]);
+        let lease = bind_remote_reference_uploads(
+            &MoldClient::new(&server.uri()),
+            &mut request,
+            vec![ReferenceUpload {
+                file: std::fs::File::open(path).unwrap(),
+            }],
+            3,
+        )
+        .await
+        .unwrap();
+        assert!(lease.is_none());
+        let reference = &request.references.as_ref().unwrap()[0];
+        assert_eq!(reference.provenance(), original.provenance());
+        assert!(
+            matches!(reference.media(), GenerationReferenceAuthority::Inline { data } if data == bytes)
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn h3_inline_reference_refuses_changed_file_without_mutating_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reference.png");
+        std::fs::write(&path, b"changed").unwrap();
+        let mut request = h3_request(mold_core::minimax_h3::REF2VA_COMFY);
+        request.references = Some(vec![descriptor("reference.png", &"a".repeat(64))]);
+        let error = bind_remote_reference_uploads(
+            &MoldClient::new("http://127.0.0.1:9"),
+            &mut request,
+            vec![ReferenceUpload {
+                file: std::fs::File::open(path).unwrap(),
+            }],
+            1,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("changed"));
+        assert!(matches!(
+            request.references.unwrap()[0].media(),
+            GenerationReferenceAuthority::Descriptor
+        ));
+    }
+
+    #[tokio::test]
+    async fn h3_inline_reference_rejects_over_budget_before_reading() {
+        let file = tempfile::tempfile().unwrap();
+        file.set_len(mold_core::minimax_h3::MAX_INLINE_REFERENCE_BYTES as u64 + 1)
+            .unwrap();
+        let mut request = h3_request(mold_core::minimax_h3::REF2VA_COMFY);
+        request.references = Some(vec![descriptor("reference.png", &"a".repeat(64))]);
+        let error = bind_remote_reference_uploads(
+            &MoldClient::new("http://127.0.0.1:9"),
+            &mut request,
+            vec![ReferenceUpload { file }],
+            1,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("32 MiB"));
+    }
+
+    #[tokio::test]
+    async fn h3_preflight_preserves_authentication_and_server_errors() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        for status in [401, 403, 429, 500] {
+            let server = MockServer::start().await;
+            for endpoint in ["/api/capabilities", "/api/models"] {
+                Mock::given(method("GET"))
+                    .and(path(endpoint))
+                    .respond_with(
+                        ResponseTemplate::new(status).set_body_string("specific host refusal"),
+                    )
+                    .mount(&server)
+                    .await;
+            }
+            let client = MoldClient::new(&server.uri());
+            let error = require_remote_identity_capabilities(&client, &multi_photo_request())
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains(&status.to_string()),
+                "{status}: {error}"
+            );
+            let mut request = h3_request(mold_core::minimax_h3::FL2VA_COMFY);
+            request.transparent_background = Some(true);
+            let error = require_remote_transparency_contract(&client, &request)
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains(&status.to_string()),
+                "{status}: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn h3_keyed_client_uses_inline_when_host_uploads_unavailable() {
+        use sha2::{Digest as _, Sha256};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(mold_core::ServerCapabilities::default()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reference.png");
+        std::fs::write(&path, b"reference").unwrap();
+        let mut request = h3_request(mold_core::minimax_h3::REF2VA_COMFY);
+        request.references = Some(vec![descriptor(
+            "reference.png",
+            &format!("{:x}", Sha256::digest(b"reference")),
+        )]);
+        assert!(bind_remote_reference_uploads(
+            &MoldClient::with_api_key(&server.uri(), "key".into()),
+            &mut request,
+            vec![ReferenceUpload {
+                file: std::fs::File::open(path).unwrap()
+            }],
+            2
+        )
+        .await
+        .unwrap()
+        .is_none());
+        assert!(matches!(
+            request.references.unwrap()[0].media(),
+            GenerationReferenceAuthority::Inline { .. }
+        ));
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn h3_reference_capability_refusals_never_fall_back_inline() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        for response in [
+            ResponseTemplate::new(401),
+            ResponseTemplate::new(403),
+            ResponseTemplate::new(500),
+            ResponseTemplate::new(200).set_body_string("not json"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/capabilities"))
+                .respond_with(response)
+                .expect(1)
+                .mount(&server)
+                .await;
+            let mut request = h3_request(mold_core::minimax_h3::REF2VA_COMFY);
+            request.references = Some(vec![descriptor("reference.png", &"a".repeat(64))]);
+            bind_remote_reference_uploads(
+                &MoldClient::with_api_key(&server.uri(), "key".into()),
+                &mut request,
+                vec![ReferenceUpload {
+                    file: tempfile::tempfile().unwrap(),
+                }],
+                1,
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(
+                request.references.unwrap()[0].media(),
+                GenerationReferenceAuthority::Descriptor
+            ));
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn h3_inline_admission_preserves_server_auth_and_license_refusals() {
+        use sha2::{Digest as _, Sha256};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        for status in [401, 451] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/api/generate/stream"))
+                .respond_with(
+                    ResponseTemplate::new(status).set_body_string("host admission refused"),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("reference.png");
+            std::fs::write(&path, b"reference").unwrap();
+            let mut request = h3_request(mold_core::minimax_h3::REF2VA_COMFY);
+            request.references = Some(vec![descriptor(
+                "reference.png",
+                &format!("{:x}", Sha256::digest(b"reference")),
+            )]);
+            let client = MoldClient::new(&server.uri());
+            bind_remote_reference_uploads(
+                &client,
+                &mut request,
+                vec![ReferenceUpload {
+                    file: std::fs::File::open(path).unwrap(),
+                }],
+                1,
+            )
+            .await
+            .unwrap();
+            let error = generate_remote_for_test(&client, &request)
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains(&status.to_string()),
+                "{error:#}"
+            );
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(requests.len(), 1);
+            let sent: serde_json::Value = requests[0].body_json().unwrap();
+            assert_eq!(sent["references"][0]["media"]["authority"], "inline");
+            assert_eq!(sent["references"][0]["media"]["data"], "cmVmZXJlbmNl");
+        }
+    }
+
+    #[tokio::test]
+    async fn h3_inline_batch_budget_is_checked_before_loading_or_cloning() {
+        let mut request = h3_request(mold_core::minimax_h3::REF2VA_COMFY);
+        request.references = Some(vec![descriptor("reference.png", &"a".repeat(64))]);
+        let file = tempfile::tempfile().unwrap();
+        file.set_len(17 * 1024 * 1024).unwrap();
+        let error = bind_remote_reference_uploads(
+            &MoldClient::new("http://127.0.0.1:9"),
+            &mut request,
+            vec![ReferenceUpload { file }],
+            2,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("reduce --batch"));
+        assert!(matches!(
+            request.references.unwrap()[0].media(),
+            GenerationReferenceAuthority::Descriptor
+        ));
+    }
+
+    #[tokio::test]
+    async fn h3_uploaded_batch_is_refused_before_creating_a_session() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let mut capabilities = mold_core::ServerCapabilities::default();
+        capabilities.reference_uploads.available = true;
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(capabilities))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut request = h3_request(mold_core::minimax_h3::REF2VA_COMFY);
+        request.references = Some(vec![descriptor("reference.png", &"a".repeat(64))]);
+        let error = bind_remote_reference_uploads(
+            &MoldClient::with_api_key(&server.uri(), "key".into()),
+            &mut request,
+            vec![ReferenceUpload {
+                file: tempfile::tempfile().unwrap(),
+            }],
+            2,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("--batch 1"));
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
     async fn mount_reference_v2_authority(server: &wiremock::MockServer) {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, ResponseTemplate};
@@ -5491,7 +5846,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/capabilities"))
             .respond_with(ResponseTemplate::new(200).set_body_json(capabilities))
-            .expect(1)
+            .expect(2)
             .mount(server)
             .await;
         Mock::given(method("GET"))
@@ -5597,6 +5952,7 @@ mod tests {
                         .unwrap(),
                 },
             ],
+            1,
         )
         .await
         .unwrap();
@@ -5644,6 +6000,7 @@ mod tests {
             vec![ReferenceUpload {
                 file: mold_core::secure_file::open_regular_file_no_follow(&path).unwrap(),
             }],
+            1,
         )
         .await
         .unwrap_err();

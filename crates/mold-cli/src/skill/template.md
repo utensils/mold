@@ -79,6 +79,10 @@ auto` to preserve useful alpha and remove opaque backgrounds, `on` to
 
 1. Run read-only discovery first. Do not assume the local binary and a remote
    host expose the same models or features.
+   Typed H3 references use authenticated upload sessions when a configured key
+   and advertised upload support are present; otherwise they use bounded inline
+   data, with the server still enforcing authentication. Never reinterpret a 401
+   or license refusal as a reason to retry without authentication. Remote license acceptance belongs to that host.
 2. Preserve the user's exact prompt and requested model unless they ask for
    creative expansion or substitution.
 3. For async work, retain the returned job or batch ID and poll that identity.

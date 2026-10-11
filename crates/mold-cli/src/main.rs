@@ -1864,8 +1864,9 @@ Examples:
 
         /// Ordered reference image, repeatable in semantic order. A bare PATH
         /// is an image; MiniMax H3 Ref2VA also takes video=PATH and
-        /// audio=PATH, whose files use authenticated, request-bound streaming
-        /// upload and are never placed inline in JSON.
+        /// audio=PATH. A configured API key and advertised upload support select
+        /// request-bound streaming; otherwise references use bounded inline media.
+        /// Auth-enabled servers still require a valid API key.
         #[arg(long, value_name = "PATH", help_heading = "Reference images")]
         reference: Vec<commands::h3::ReferenceArg>,
 
