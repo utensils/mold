@@ -102,6 +102,23 @@ pub const DRBAPH_TURBO_LORA_REVISION: &str = "be8eb3ea3466cbb7def202ffec0d2fdc05
 /// tag carrying it is [`FL2VA_FASTH3_V2_INT8`].
 pub const FASTVIDEO_FASTH3_REPO: &str = "FastVideo/FastVideo-FastH3-Comfy";
 pub const FASTVIDEO_FASTH3_REVISION: &str = "ec1e3aa374a91c57b0b94a1623b7e657c0498cf2";
+/// Third-party repository publishing Kijai's rank-reduced DMAD / PDMD
+/// distill adapters.
+///
+/// The fourth non-MiniMaxAI/non-Comfy-Org source mold pins, and like the
+/// others only ADAPTERS come from it: the base stack every tag executes on
+/// still resolves to [`COMFY_REPO`] and [`OFFICIAL_REPO`]. Files sit under
+/// `loras/`. Each reviewed file is a rank-reduced build of an upstream
+/// full-rank distill LoRA (DMAD: `ZhengmingYu/DMAD`; PDMD:
+/// `pdmd2026/pdmd_{2,4}NFE_lora`) with a per-module rank (average 39 / 38 /
+/// 57) and one `alpha` per module equal to that module's rank, so the runtime
+/// scale is exactly `1.0`. That makes them a lossy approximation of the
+/// published distillation. Only the three files in
+/// [`REVIEWED_TURBO_MANIFEST_TIERS`] are reviewed; everything else in the
+/// repository (experimental checkpoints, other ranks) is excluded. The MiniMax
+/// H3 Community License still governs the base checkpoint a tag executes on.
+pub const KIJAI_EXPERIMENTAL_REPO: &str = "Kijai/MiniMax-H3-experimental";
+pub const KIJAI_EXPERIMENTAL_REVISION: &str = "d8023be02fefbb3633b0cd335c3879f91177299d";
 pub const LICENSE_SHA256: &str = MINIMAX_H3_LICENSE_SHA256;
 
 pub const FL2VA_OFFICIAL: &str = "minimax-h3-fl2va:official-bf16";
@@ -142,6 +159,16 @@ pub const REF2VA_COMFY_TURBO_4STEP_R21: &str =
 /// the `comfy-pruned-int8` prefix because the transformer it names is not
 /// Comfy-Org's.
 pub const FL2VA_FASTH3_V2_INT8: &str = "minimax-h3-fl2va:fasth3-v2-int8";
+/// DMAD 4-step distillation (Kijai's rank-reduced build) on the FL2VA compact
+/// base. Sampled with Comfy's `lcm` re-noise update on the simple grid at
+/// video/audio shift 12/2 (`ZhengmingYu/DMAD` README).
+pub const FL2VA_COMFY_DMAD_4STEP: &str = "minimax-h3-fl2va:comfy-pruned-int8-dmad-4step";
+/// PDMD 2-NFE distillation (Kijai's rank-reduced build): plain Euler on the
+/// shifted linspace at video/audio shift 12/6 (`pdmd2026/pdmd_2NFE_lora`).
+pub const FL2VA_COMFY_PDMD_2STEP: &str = "minimax-h3-fl2va:comfy-pruned-int8-pdmd-2step";
+/// PDMD 4-NFE distillation (Kijai's rank-reduced build): plain Euler at
+/// video/audio shift 12/3 (`pdmd2026/pdmd_4NFE_lora`).
+pub const FL2VA_COMFY_PDMD_4STEP: &str = "minimax-h3-fl2va:comfy-pruned-int8-pdmd-4step";
 /// Pruned NVFP4 compact transformers. Deliberately absent from
 /// [`REVIEWED_COMPACT_MODELS`]: they download, verify, inventory, and remove
 /// like any other pinned model, but mold has no engine arm for the weight
@@ -164,6 +191,9 @@ pub const REVIEWED_COMPACT_MODELS: &[&str] = &[
     FL2VA_COMFY_TURBO_8STEP_R21,
     REF2VA_COMFY_TURBO_4STEP_R21,
     FL2VA_FASTH3_V2_INT8,
+    FL2VA_COMFY_DMAD_4STEP,
+    FL2VA_COMFY_PDMD_2STEP,
+    FL2VA_COMFY_PDMD_4STEP,
 ];
 
 /// Exact-identity membership test for [`REVIEWED_COMPACT_MODELS`]. This is
@@ -193,6 +223,22 @@ const UNIFORM_TURBO_ADAPTER_SHAPE: &str = "Diffusers PEFT LoRA; rank 128; 208 mo
 /// set is the same 208 either way — a resize changes ranks, never targets.
 const RESIZED_TURBO_ADAPTER_SHAPE: &str =
     "SVD-resized PEFT LoRA; dynamic per-module rank (avg 21); baked scale; 208 modules";
+/// Shape sentences for Kijai's rank-reduced distill adapters: a per-module
+/// rank read from the header, one `alpha` per module equal to that rank (so
+/// the scale is exactly 1.0), and a dense fused Q/K/V `lora_B`. One sentence
+/// per tier because the average rank is the fact a user compares.
+const PER_MODULE_ALPHA_DMAD_4STEP_ADAPTER_SHAPE: &str =
+    "Rank-reduced LoRA; per-module rank (avg 39) with per-module alpha; scale 1.0; 208 modules";
+const PER_MODULE_ALPHA_PDMD_2STEP_ADAPTER_SHAPE: &str =
+    "Rank-reduced LoRA; per-module rank (avg 38) with per-module alpha; scale 1.0; 208 modules";
+const PER_MODULE_ALPHA_PDMD_4STEP_ADAPTER_SHAPE: &str =
+    "Rank-reduced LoRA; per-module rank (avg 57) with per-module alpha; scale 1.0; 208 modules";
+/// Every per-module-alpha shape sentence.
+const PER_MODULE_ALPHA_TURBO_ADAPTER_SHAPES: [&str; 3] = [
+    PER_MODULE_ALPHA_DMAD_4STEP_ADAPTER_SHAPE,
+    PER_MODULE_ALPHA_PDMD_2STEP_ADAPTER_SHAPE,
+    PER_MODULE_ALPHA_PDMD_4STEP_ADAPTER_SHAPE,
+];
 
 /// The manifest-facing contract of one reviewed Turbo LoRA tier.
 ///
@@ -210,7 +256,8 @@ pub struct TurboManifestTier {
     /// Human-facing tier label ("Turbo 8-step").
     pub display_label: &'static str,
     /// Repository publishing this tier's adapter: [`COMFY_REPO`],
-    /// [`LIGHTX2V_REPO`], or [`DRBAPH_TURBO_LORA_REPO`]. The base stack is
+    /// [`LIGHTX2V_REPO`], [`DRBAPH_TURBO_LORA_REPO`], or
+    /// [`KIJAI_EXPERIMENTAL_REPO`]. The base stack is
     /// unaffected — a Turbo tag is the compact stack of its own task plus
     /// this one file.
     pub adapter_hf_repo: &'static str,
@@ -219,8 +266,8 @@ pub struct TurboManifestTier {
     /// fetched from an unpinned `main`.
     pub adapter_hf_revision: &'static str,
     /// Repository-relative adapter path at [`Self::adapter_hf_revision`].
-    /// Comfy-Org publishes under `loras/`; lightx2v and drbaph publish at
-    /// their repository roots.
+    /// Comfy-Org and Kijai publish under `loras/`; lightx2v and drbaph
+    /// publish at their repository roots.
     pub adapter_hf_filename: &'static str,
     pub adapter_size_bytes: u64,
     pub adapter_sha256: &'static str,
@@ -346,6 +393,42 @@ pub const REVIEWED_TURBO_MANIFEST_TIERS: &[TurboManifestTier] = &[
         adapter_size_bytes: 326_935_264,
         adapter_sha256: "2c6abb194cff3e26c2295c87892913adf0c92d8f784f305238246759f9b333d0",
         adapter_shape_label: RESIZED_TURBO_ADAPTER_SHAPE,
+        steps: 5,
+    },
+    TurboManifestTier {
+        model: FL2VA_COMFY_DMAD_4STEP,
+        tier_stable_id: "minimax-h3.turbo-lora.fl2v-dmad-4step.kijai-bf16.avg-rank-39.v1",
+        display_label: "DMAD 4-step (rank-reduced)",
+        adapter_hf_repo: KIJAI_EXPERIMENTAL_REPO,
+        adapter_hf_revision: KIJAI_EXPERIMENTAL_REVISION,
+        adapter_hf_filename: "loras/minimax_h3_DMAD_4step_full_lora_avg_rank_39_bf16.safetensors",
+        adapter_size_bytes: 366_647_000,
+        adapter_sha256: "ddfdd94f4c9a0f32bf3649bb8e98ca20db572e4db6bcd9cca546a5b33ea32d11",
+        adapter_shape_label: PER_MODULE_ALPHA_DMAD_4STEP_ADAPTER_SHAPE,
+        steps: 5,
+    },
+    TurboManifestTier {
+        model: FL2VA_COMFY_PDMD_2STEP,
+        tier_stable_id: "minimax-h3.turbo-lora.fl2v-pdmd-2step.kijai-bf16.avg-rank-38.v1",
+        display_label: "PDMD 2-step (rank-reduced)",
+        adapter_hf_repo: KIJAI_EXPERIMENTAL_REPO,
+        adapter_hf_revision: KIJAI_EXPERIMENTAL_REVISION,
+        adapter_hf_filename: "loras/minimax_h3_pdmd_2step_lora_avg_rank_38_bf16.safetensors",
+        adapter_size_bytes: 381_015_376,
+        adapter_sha256: "a17f3eb45ab16be56fce79a522604a8ec1ce41d732022ad398c5908b230eec55",
+        adapter_shape_label: PER_MODULE_ALPHA_PDMD_2STEP_ADAPTER_SHAPE,
+        steps: 3,
+    },
+    TurboManifestTier {
+        model: FL2VA_COMFY_PDMD_4STEP,
+        tier_stable_id: "minimax-h3.turbo-lora.fl2v-pdmd-4step.kijai-bf16.avg-rank-57.v1",
+        display_label: "PDMD 4-step (rank-reduced)",
+        adapter_hf_repo: KIJAI_EXPERIMENTAL_REPO,
+        adapter_hf_revision: KIJAI_EXPERIMENTAL_REVISION,
+        adapter_hf_filename: "loras/minimax_h3_pdmd_4step_lora_avg_rank_57_bf16.safetensors",
+        adapter_size_bytes: 558_735_392,
+        adapter_sha256: "b5c62eb228a4f604890566ad698713703ed221302e0df1c067725c39f11efc37",
+        adapter_shape_label: PER_MODULE_ALPHA_PDMD_4STEP_ADAPTER_SHAPE,
         steps: 5,
     },
 ];
@@ -1312,6 +1395,7 @@ pub fn repo_revision(repo: &str) -> Option<&'static str> {
         LIGHTX2V_REPO => Some(LIGHTX2V_REVISION),
         DRBAPH_TURBO_LORA_REPO => Some(DRBAPH_TURBO_LORA_REVISION),
         FASTVIDEO_FASTH3_REPO => Some(FASTVIDEO_FASTH3_REVISION),
+        KIJAI_EXPERIMENTAL_REPO => Some(KIJAI_EXPERIMENTAL_REVISION),
         _ => None,
     }
 }
@@ -1412,6 +1496,9 @@ pub fn resolve_model_name(input: &str) -> Option<&'static str> {
         value if value == FL2VA_COMFY_TURBO_8STEP_R21 => Some(FL2VA_COMFY_TURBO_8STEP_R21),
         value if value == REF2VA_COMFY_TURBO_4STEP_R21 => Some(REF2VA_COMFY_TURBO_4STEP_R21),
         value if value == FL2VA_FASTH3_V2_INT8 => Some(FL2VA_FASTH3_V2_INT8),
+        value if value == FL2VA_COMFY_DMAD_4STEP => Some(FL2VA_COMFY_DMAD_4STEP),
+        value if value == FL2VA_COMFY_PDMD_2STEP => Some(FL2VA_COMFY_PDMD_2STEP),
+        value if value == FL2VA_COMFY_PDMD_4STEP => Some(FL2VA_COMFY_PDMD_4STEP),
         _ => None,
     }
 }
@@ -3815,6 +3902,8 @@ pub(crate) fn manifests() -> Vec<ModelManifest> {
                 },
                 if tier.adapter_shape_label == RESIZED_TURBO_ADAPTER_SHAPE {
                     ", lossy SVD-resized"
+                } else if PER_MODULE_ALPHA_TURBO_ADAPTER_SHAPES.contains(&tier.adapter_shape_label) {
+                    ", lossy"
                 } else {
                     ""
                 },
@@ -4137,6 +4226,9 @@ mod tests {
             FL2VA_COMFY_TURBO_4STEP_768P_R21,
             FL2VA_COMFY_TURBO_8STEP_R21,
             REF2VA_COMFY_TURBO_4STEP_R21,
+            FL2VA_COMFY_DMAD_4STEP,
+            FL2VA_COMFY_PDMD_2STEP,
+            FL2VA_COMFY_PDMD_4STEP,
         ] {
             assert_eq!(
                 source_fit_dimensions(model, 1024, 1024),
@@ -5309,6 +5401,9 @@ mod tests {
             FL2VA_COMFY_TURBO_4STEP_768P_R21,
             FL2VA_COMFY_TURBO_8STEP_R21,
             REF2VA_COMFY_TURBO_4STEP_R21,
+            FL2VA_COMFY_DMAD_4STEP,
+            FL2VA_COMFY_PDMD_2STEP,
+            FL2VA_COMFY_PDMD_4STEP,
         ] {
             for &(width, height) in REVIEWED_COMPACT_CANVASES {
                 assert!(
@@ -5628,6 +5723,24 @@ mod tests {
                 Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
                 REF2VA_MODES,
             ),
+            (
+                FL2VA_COMFY_DMAD_4STEP,
+                Task::Fl2va,
+                Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
+                FL2VA_MODES,
+            ),
+            (
+                FL2VA_COMFY_PDMD_2STEP,
+                Task::Fl2va,
+                Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
+                FL2VA_MODES,
+            ),
+            (
+                FL2VA_COMFY_PDMD_4STEP,
+                Task::Fl2va,
+                Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
+                FL2VA_MODES,
+            ),
         ];
         let mut observed_modes = Vec::new();
         for (model, task, layout, modes) in cases {
@@ -5699,6 +5812,9 @@ mod tests {
                 FL2VA_COMFY_TURBO_8STEP_R21,
                 REF2VA_COMFY_TURBO_4STEP_R21,
                 FL2VA_FASTH3_V2_INT8,
+                FL2VA_COMFY_DMAD_4STEP,
+                FL2VA_COMFY_PDMD_2STEP,
+                FL2VA_COMFY_PDMD_4STEP,
             ])
         );
         assert!(advertised
@@ -5720,6 +5836,9 @@ mod tests {
         let fl_turbo_4_768p_r21 = find_manifest(FL2VA_COMFY_TURBO_4STEP_768P_R21).unwrap();
         let fl_turbo_8_r21 = find_manifest(FL2VA_COMFY_TURBO_8STEP_R21).unwrap();
         let ref_turbo_4_r21 = find_manifest(REF2VA_COMFY_TURBO_4STEP_R21).unwrap();
+        let fl_dmad_4 = find_manifest(FL2VA_COMFY_DMAD_4STEP).unwrap();
+        let fl_pdmd_2 = find_manifest(FL2VA_COMFY_PDMD_2STEP).unwrap();
+        let fl_pdmd_4 = find_manifest(FL2VA_COMFY_PDMD_4STEP).unwrap();
         let fl_nvfp4 = find_manifest(FL2VA_COMFY_NVFP4).unwrap();
         let ref_nvfp4 = find_manifest(REF2VA_COMFY_NVFP4).unwrap();
         assert!(!fl_nvfp4.hidden);
@@ -5735,6 +5854,9 @@ mod tests {
         assert!(!fl_turbo_4_768p_r21.hidden);
         assert!(!fl_turbo_8_r21.hidden);
         assert!(!ref_turbo_4_r21.hidden);
+        assert!(!fl_dmad_4.hidden);
+        assert!(!fl_pdmd_2.hidden);
+        assert!(!fl_pdmd_4.hidden);
         for manifest in [
             fl_official,
             ref_official,
@@ -5747,6 +5869,9 @@ mod tests {
             fl_turbo_4_768p_r21,
             fl_turbo_8_r21,
             ref_turbo_4_r21,
+            fl_dmad_4,
+            fl_pdmd_2,
+            fl_pdmd_4,
             fl_nvfp4,
             ref_nvfp4,
         ] {
@@ -5843,6 +5968,9 @@ mod tests {
                 FL2VA_COMFY_TURBO_8STEP_R21,
                 REF2VA_COMFY_TURBO_4STEP_R21,
                 FL2VA_FASTH3_V2_INT8,
+                FL2VA_COMFY_DMAD_4STEP,
+                FL2VA_COMFY_PDMD_2STEP,
+                FL2VA_COMFY_PDMD_4STEP,
             ])
         );
 
@@ -5882,6 +6010,8 @@ mod tests {
         for lookalike in [
             "minimax-h3-fl2va:comfy-pruned-int8-turbo-2step",
             "minimax-h3-ref2va:comfy-pruned-int8-turbo-8step",
+            "minimax-h3-ref2va:comfy-pruned-int8-dmad-4step",
+            "minimax-h3-fl2va:comfy-pruned-int8-pdmd-8step",
             "minimax-h3",
         ] {
             assert_eq!(turbo_tier_for_model(lookalike), None, "{lookalike}");
@@ -6009,14 +6139,14 @@ mod tests {
         }
     }
 
-    /// Every reviewed adapter comes from one of exactly three reviewed
-    /// repositories, and they publish at different depths: Comfy-Org under
-    /// `loras/`, lightx2v and drbaph at their repository roots. Nothing else
+    /// Every reviewed adapter comes from one of exactly four reviewed
+    /// repositories, and they publish at different depths: Comfy-Org and
+    /// Kijai under `loras/`, lightx2v and drbaph at their repository roots. Nothing else
     /// may appear here without a `repo_revision` arm, and no two tiers may
     /// collide on a repository path, an on-disk basename, a digest, a stable
     /// id, or a tag.
     #[test]
-    fn turbo_adapter_sources_are_exactly_the_three_reviewed_repositories() {
+    fn turbo_adapter_sources_are_exactly_the_four_reviewed_repositories() {
         let mut repo_paths = std::collections::BTreeSet::new();
         let mut basenames = std::collections::BTreeSet::new();
         let mut digests = std::collections::BTreeSet::new();
@@ -6069,6 +6199,25 @@ mod tests {
                         "{}",
                         tier.model
                     );
+                }
+                KIJAI_EXPERIMENTAL_REPO => {
+                    assert_eq!(
+                        tier.adapter_hf_revision, KIJAI_EXPERIMENTAL_REVISION,
+                        "{}",
+                        tier.model
+                    );
+                    assert!(
+                        tier.adapter_hf_filename.starts_with("loras/"),
+                        "{} Kijai adapter is not under loras/",
+                        tier.model
+                    );
+                    // Only the rank-reduced FL2VA distills come from Kijai.
+                    assert!(
+                        PER_MODULE_ALPHA_TURBO_ADAPTER_SHAPES.contains(&tier.adapter_shape_label),
+                        "{}",
+                        tier.model
+                    );
+                    assert_eq!(task_for_model(tier.model), Some(Task::Fl2va));
                 }
                 other => panic!(
                     "{} pins an unreviewed adapter repository {other}",
@@ -6144,14 +6293,28 @@ mod tests {
             repo_revision(DRBAPH_TURBO_LORA_REPO),
             Some(DRBAPH_TURBO_LORA_REVISION)
         );
-        // All three repositories are actually exercised, so the match arms
+        assert_eq!(KIJAI_EXPERIMENTAL_REPO, "Kijai/MiniMax-H3-experimental");
+        assert_eq!(
+            KIJAI_EXPERIMENTAL_REVISION,
+            "d8023be02fefbb3633b0cd335c3879f91177299d"
+        );
+        assert_eq!(
+            repo_revision(KIJAI_EXPERIMENTAL_REPO),
+            Some(KIJAI_EXPERIMENTAL_REVISION)
+        );
+        // All four repositories are actually exercised, so the match arms
         // above cannot pass vacuously if a source is dropped from the table.
         assert_eq!(
             REVIEWED_TURBO_MANIFEST_TIERS
                 .iter()
                 .map(|tier| tier.adapter_hf_repo)
                 .collect::<std::collections::BTreeSet<_>>(),
-            std::collections::BTreeSet::from([COMFY_REPO, LIGHTX2V_REPO, DRBAPH_TURBO_LORA_REPO])
+            std::collections::BTreeSet::from([
+                COMFY_REPO,
+                LIGHTX2V_REPO,
+                DRBAPH_TURBO_LORA_REPO,
+                KIJAI_EXPERIMENTAL_REPO
+            ])
         );
     }
 
@@ -6164,6 +6327,7 @@ mod tests {
     fn the_distilled_lora_shape_names_the_tier_it_actually_describes() {
         let mut seen_uniform = false;
         let mut seen_resized = false;
+        let mut seen_per_module_alpha = false;
         for tier in REVIEWED_TURBO_MANIFEST_TIERS {
             let manifest = find_manifest(tier.model).unwrap();
             let adapter = manifest
@@ -6222,13 +6386,39 @@ mod tests {
                         manifest.description
                     );
                 }
+                label if PER_MODULE_ALPHA_TURBO_ADAPTER_SHAPES.contains(&label) => {
+                    seen_per_module_alpha = true;
+                    assert_eq!(
+                        tier.adapter_hf_repo, KIJAI_EXPERIMENTAL_REPO,
+                        "{}",
+                        tier.model
+                    );
+                    assert!(
+                        contract.shape.contains("per-module alpha"),
+                        "{}",
+                        tier.model
+                    );
+                    assert!(contract.shape.contains("scale 1.0"), "{}", tier.model);
+                    assert!(!contract.shape.contains("rank 128"), "{}", tier.model);
+                    assert!(
+                        tier.display_label.contains("rank-reduced"),
+                        "{}",
+                        tier.model
+                    );
+                    assert!(
+                        manifest.description.contains("with the reviewed, lossy "),
+                        "{} description does not disclose the rank reduction: {}",
+                        tier.model,
+                        manifest.description
+                    );
+                }
                 other => panic!("{} declares an unreviewed shape {other}", tier.model),
             }
             // Both shapes describe the same 208-module target set; only the
             // per-module rank and the baked scale differ.
             assert!(contract.shape.contains("208 modules"), "{}", tier.model);
         }
-        assert!(seen_uniform && seen_resized);
+        assert!(seen_uniform && seen_resized && seen_per_module_alpha);
     }
 
     /// `file_revision` is the only thing standing between an adapter path and
@@ -6259,6 +6449,14 @@ mod tests {
         assert_eq!(
             file_revision(DRBAPH_TURBO_LORA_REPO, drbaph.adapter_hf_filename),
             Some(DRBAPH_TURBO_LORA_REVISION)
+        );
+        let kijai = REVIEWED_TURBO_MANIFEST_TIERS
+            .iter()
+            .find(|tier| tier.model == FL2VA_COMFY_PDMD_2STEP)
+            .unwrap();
+        assert_eq!(
+            file_revision(KIJAI_EXPERIMENTAL_REPO, kijai.adapter_hf_filename),
+            Some(KIJAI_EXPERIMENTAL_REVISION)
         );
         // A Comfy-Org path that merely LOOKS like a lightx2v adapter is not
         // one: the tier lookup keys on the pair, so this falls back to the
@@ -7070,6 +7268,10 @@ mod tests {
         assert_eq!(
             source_revision("drbaph-resized-loras"),
             DRBAPH_TURBO_LORA_REVISION
+        );
+        assert_eq!(
+            source_revision("kijai-experimental-loras"),
+            KIJAI_EXPERIMENTAL_REVISION
         );
         assert_eq!(
             conformance["numerical_authority"]["precision"],

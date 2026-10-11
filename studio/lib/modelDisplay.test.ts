@@ -105,6 +105,21 @@ describe("modelDisplayName", () => {
         name: "minimax-h3-fl2va:fasth3-v2-int8",
       }),
     ).toBe("MiniMax H3 FL2VA FastH3 V2 8-step (FastVideo)");
+    expect(
+      modelDisplayName({
+        name: "minimax-h3-fl2va:comfy-pruned-int8-dmad-4step",
+      }),
+    ).toBe("MiniMax H3 FL2VA DMAD 4-step (rank-reduced)");
+    expect(
+      modelDisplayName({
+        name: "minimax-h3-fl2va:comfy-pruned-int8-pdmd-2step",
+      }),
+    ).toBe("MiniMax H3 FL2VA PDMD 2-step (rank-reduced)");
+    expect(
+      modelDisplayName({
+        name: "minimax-h3-fl2va:comfy-pruned-int8-pdmd-4step",
+      }),
+    ).toBe("MiniMax H3 FL2VA PDMD 4-step (rank-reduced)");
   });
 
   it("resolves a wire model id through the model inventory", () => {

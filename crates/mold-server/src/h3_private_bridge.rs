@@ -3205,9 +3205,12 @@ mod tests {
                 mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP_768P,
                 mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_R21,
                 mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP_R21,
+                mold_core::minimax_h3::FL2VA_COMFY_DMAD_4STEP,
+                mold_core::minimax_h3::FL2VA_COMFY_PDMD_2STEP,
+                mold_core::minimax_h3::FL2VA_COMFY_PDMD_4STEP,
             ]),
             "the FL2VA partition advertises exactly the FL2VA Turbo tags, \
-             including the two SVD-resized rank-21 tiers"
+             including the two SVD-resized rank-21 tiers and the DMAD/PDMD distills"
         );
         assert!(
             !advertised.contains(mold_core::minimax_h3::REF2VA_COMFY_TURBO_4STEP),

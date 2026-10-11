@@ -3176,6 +3176,9 @@ mod tests {
             contract::FL2VA_COMFY_TURBO_8STEP_768P,
             contract::FL2VA_COMFY_TURBO_4STEP_768P_R21,
             contract::FL2VA_COMFY_TURBO_8STEP_R21,
+            contract::FL2VA_COMFY_DMAD_4STEP,
+            contract::FL2VA_COMFY_PDMD_2STEP,
+            contract::FL2VA_COMFY_PDMD_4STEP,
             // The first Ref2VA Turbo tag in this list: a resized tier keys
             // storage on the Ref2VA partition exactly as its full-rank source
             // does, so the two authorities must still agree on the OTHER task.

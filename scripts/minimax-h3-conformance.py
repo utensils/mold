@@ -73,6 +73,10 @@ EXPECTED_REVISIONS = {
     # full-weight DMD distillation in the Comfy INT8 ConvRot layout, runnable
     # on the FL2VA compact stack.
     "fasth3-checkpoints": "ec1e3aa374a91c57b0b94a1623b7e657c0498cf2",
+    # Third-party rank-reduced DMAD / PDMD distill LoRA adapters (Kijai builds,
+    # per-module rank with alpha == rank, lossy): runnable on the FL2VA
+    # compact stack.
+    "kijai-experimental-loras": "d8023be02fefbb3633b0cd335c3879f91177299d",
     "sglang": "0c3a76fa0a5bfab410b645f4143e7e8e3cc25c77",
     "vllm-omni": "3d7fc3b9ba3cac88d579d4dc35b78b0b641675fc",
 }

@@ -2189,7 +2189,8 @@ fn fixed_guidance_note(
     ))
 }
 
-/// The sentence explaining a Turbo tier's fixed step count.
+/// The sentence explaining a distilled tier's fixed step count (Turbo, DMAD, or
+/// PDMD — the wording is family-neutral because the tier families differ).
 ///
 /// A reviewed Turbo tier's `steps` is terminal-inclusive — the published
 /// N-step schedule has N denoise intervals and therefore N+1 sampler grid
@@ -2199,7 +2200,7 @@ fn fixed_turbo_steps_note(tier: &crate::minimax_h3::TurboManifestTier) -> String
     let intervals = tier.steps.saturating_sub(1);
     let points = tier.steps;
     format!(
-        "Fixed by the {intervals}-step Turbo tier: {points} terminal-inclusive sampler grid points ({intervals} denoise intervals)."
+        "Fixed by the {intervals}-step distilled tier: {points} terminal-inclusive sampler grid points ({intervals} denoise intervals)."
     )
 }
 
@@ -5520,6 +5521,9 @@ mod tests {
             (crate::minimax_h3::FL2VA_COMFY_TURBO_8STEP_R21, 9),
             (crate::minimax_h3::REF2VA_COMFY_TURBO_4STEP_R21, 5),
             (crate::minimax_h3::FL2VA_FASTH3_V2_INT8, 9),
+            (crate::minimax_h3::FL2VA_COMFY_DMAD_4STEP, 5),
+            (crate::minimax_h3::FL2VA_COMFY_PDMD_2STEP, 3),
+            (crate::minimax_h3::FL2VA_COMFY_PDMD_4STEP, 5),
         ] {
             // Fixed for every DISTILLED identity — a Turbo adapter or a
             // distilled base tier — never only for a Turbo tag.
@@ -5821,6 +5825,9 @@ mod tests {
             crate::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_R21,
             crate::minimax_h3::FL2VA_COMFY_TURBO_8STEP_R21,
             crate::minimax_h3::REF2VA_COMFY_TURBO_4STEP_R21,
+            crate::minimax_h3::FL2VA_COMFY_DMAD_4STEP,
+            crate::minimax_h3::FL2VA_COMFY_PDMD_2STEP,
+            crate::minimax_h3::FL2VA_COMFY_PDMD_4STEP,
         ] {
             let profile = resolve_generation_profile(input(model, "minimax-h3"));
             let recipe = profile.default_recipe().unwrap();
@@ -5947,7 +5954,7 @@ mod tests {
         assert_eq!(
             steps.note.as_deref(),
             Some(
-                "Fixed by the 8-step Turbo tier: 9 terminal-inclusive sampler grid points \
+                "Fixed by the 8-step distilled tier: 9 terminal-inclusive sampler grid points \
                  (8 denoise intervals)."
             )
         );
@@ -5962,7 +5969,7 @@ mod tests {
         assert_eq!(
             steps.note.as_deref(),
             Some(
-                "Fixed by the 4-step Turbo tier: 5 terminal-inclusive sampler grid points \
+                "Fixed by the 4-step distilled tier: 5 terminal-inclusive sampler grid points \
                  (4 denoise intervals)."
             )
         );
@@ -5990,6 +5997,34 @@ mod tests {
             eight_768p_steps.note.as_deref(),
             eight.default_recipe().unwrap().steps.note.as_deref()
         );
+
+        // The note is family-neutral: a DMAD / PDMD distill is not a Turbo
+        // adapter, and the 2-step PDMD tier is the shortest schedule shipped.
+        let two = resolve_generation_profile(input(
+            crate::minimax_h3::FL2VA_COMFY_PDMD_2STEP,
+            "minimax-h3",
+        ));
+        let two_steps = &two.default_recipe().unwrap().steps;
+        assert_eq!(two_steps.mode, ControlMode::Fixed);
+        assert_eq!(two_steps.default, 3);
+        assert_eq!(
+            two_steps.note.as_deref(),
+            Some(
+                "Fixed by the 2-step distilled tier: 3 terminal-inclusive sampler grid points \
+                 (2 denoise intervals)."
+            )
+        );
+        for four_step in [
+            crate::minimax_h3::FL2VA_COMFY_DMAD_4STEP,
+            crate::minimax_h3::FL2VA_COMFY_PDMD_4STEP,
+        ] {
+            let distilled = resolve_generation_profile(input(four_step, "minimax-h3"));
+            assert_eq!(
+                distilled.default_recipe().unwrap().steps.note,
+                steps.note,
+                "{four_step}"
+            );
+        }
 
         // A resize changes weights, never the schedule, so a rank-21 tier
         // carries its SOURCE tier's step count and therefore its sentence —

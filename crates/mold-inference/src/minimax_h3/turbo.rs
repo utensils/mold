@@ -10,9 +10,10 @@
 //! (`mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS`) name a tier and
 //! pin its adapter file inside the model's own manifest, together with the
 //! repository and revision that tier's adapter is published at — each tier's
-//! OWN pinned source, which today is Comfy-Org's `loras/` re-hosts or the
+//! OWN pinned source, which today is Comfy-Org's `loras/` re-hosts, the
 //! repository root of `lightx2v/Minimax-h3-Turbo` or
-//! `drbaph/MiniMax-H3-Turbo-Lora-ComfyUI`. The historical
+//! `drbaph/MiniMax-H3-Turbo-Lora-ComfyUI`, or the `loras/` directory of
+//! `Kijai/MiniMax-H3-experimental` (the DMAD / PDMD distills). The historical
 //! `MOLD_H3_TURBO_ADAPTER` (path) + `MOLD_H3_TURBO_TIER` (tier id) pair
 //! remains a capture-scope UAT override honored only under the
 //! `h3-private-uat` feature; ordinary builds refuse a set pair outright so
@@ -52,11 +53,24 @@ pub(crate) struct H3TurboTierContract {
 
 /// Every reviewed tier's contract.
 ///
-/// All eight tiers select `KSamplerSelect: euler` over Comfy's
+/// All eight Turbo tiers select `KSamplerSelect: euler` over Comfy's
 /// `BasicScheduler("simple")` grid in their published reference workflows. Only
 /// the 768p-trained tiers move the video shift; which of those three shifts are
 /// transcribed upstream and which one mold infers is recorded on
 /// [`H3_TURBO_768P_VIDEO_SHIFT`] itself.
+///
+/// The three DMAD / PDMD distill tiers carry their own upstream recipes:
+///
+/// - DMAD 4-step is `lcm` + `simple` at video/audio shift 12/2, CFG 1
+///   (`huggingface.co/ZhengmingYu/DMAD` README; `Yzmblog/DMAD@9a9f664e
+///   dmad_h3/sampling.py:63-98`, which its README states is bit-identical to
+///   ComfyUI's `sample_lcm`), so it is [`H3SamplerKind::ComfyLcm`].
+/// - PDMD is plain Euler on `shift(linspace(1, 0, nfe + 1))`
+///   (`ZeamoxWang/pdmd@6b6e1063 inference/sample_diffsynth.py:130`), which is
+///   exactly Comfy's simple grid + Euler, so it is [`H3SamplerKind::ComfyEuler`].
+///   The 2-NFE checkpoint runs audio at shift 6 and the 4-NFE one at 3, both
+///   at video shift 12 (`inference/run_bf16.py:28-30`;
+///   `pdmd2026/pdmd_{2,4}NFE_lora` READMEs).
 ///
 /// An SVD-resized tier repeats its SOURCE's triple exactly. A resize changes
 /// weights, never the schedule they were distilled for, so a row that differed
@@ -118,7 +132,35 @@ pub(crate) const REVIEWED_TURBO_TIERS: &[H3TurboTierContract] = &[
         video_shift: H3_VIDEO_SHIFT,
         audio_shift: H3_AUDIO_SHIFT,
     },
+    H3TurboTierContract {
+        tier: H3TurboLoraTier::Fl2vDmad4StepKijaiR39,
+        grid_points: 5,
+        sampler_kind: H3SamplerKind::ComfyLcm,
+        video_shift: H3_VIDEO_SHIFT,
+        audio_shift: H3_DMAD_AUDIO_SHIFT,
+    },
+    H3TurboTierContract {
+        tier: H3TurboLoraTier::Fl2vPdmd2StepKijaiR38,
+        grid_points: 3,
+        sampler_kind: H3SamplerKind::ComfyEuler,
+        video_shift: H3_VIDEO_SHIFT,
+        audio_shift: H3_PDMD_2STEP_AUDIO_SHIFT,
+    },
+    H3TurboTierContract {
+        tier: H3TurboLoraTier::Fl2vPdmd4StepKijaiR57,
+        grid_points: 5,
+        sampler_kind: H3SamplerKind::ComfyEuler,
+        video_shift: H3_VIDEO_SHIFT,
+        audio_shift: H3_AUDIO_SHIFT,
+    },
 ];
+
+/// DMAD 4-step audio flow shift (`ZhengmingYu/DMAD` README: shift 12 video /
+/// 2 audio).
+const H3_DMAD_AUDIO_SHIFT: f32 = 2.0;
+/// PDMD 2-NFE audio flow shift (`ZeamoxWang/pdmd@6b6e1063
+/// inference/run_bf16.py:28-30`; `pdmd2026/pdmd_2NFE_lora` README).
+const H3_PDMD_2STEP_AUDIO_SHIFT: f32 = 6.0;
 
 /// Look one contract up by its stable id. This is the lookup the frozen
 /// factory authority uses, so the authority and the runtime can never disagree
@@ -171,6 +213,9 @@ pub(crate) const fn short_tier_alias(tier: H3TurboLoraTier) -> &'static str {
         H3TurboLoraTier::Fl2v768p4StepV10Rank21 => "fl2v-4step-768p-r21",
         H3TurboLoraTier::Fl2v8StepV10Rank21 => "fl2v-8step-r21",
         H3TurboLoraTier::Ref2v4StepV10Rank21 => "ref2v-4step-r21",
+        H3TurboLoraTier::Fl2vDmad4StepKijaiR39 => "dmad-4step",
+        H3TurboLoraTier::Fl2vPdmd2StepKijaiR38 => "pdmd-2step",
+        H3TurboLoraTier::Fl2vPdmd4StepKijaiR57 => "pdmd-4step",
     }
 }
 
@@ -469,14 +514,37 @@ mod tests {
         for tier in H3TurboLoraTier::ALL {
             let contract = turbo_tier_contract(tier).unwrap();
             assert_eq!(contract.tier, tier);
-            // Every Turbo workflow selects euler over the Comfy simple grid.
-            assert_eq!(contract.sampler_kind, H3SamplerKind::ComfyEuler);
+            // Every tier samples on the Comfy simple grid.
             assert!(contract.sampler_kind.uses_comfy_simple_grid());
-            assert!(contract.sampler_kind.uses_euler_update());
             assert!(contract.video_shift.is_finite() && contract.video_shift > 0.0);
-            // Every Turbo tier was distilled at the family audio shift; only
-            // the DMAD/PDMD tiers (#1812) move it.
-            assert_eq!(contract.audio_shift.to_bits(), H3_AUDIO_SHIFT.to_bits());
+            assert!(contract.audio_shift.is_finite() && contract.audio_shift > 0.0);
+            match tier {
+                // DMAD re-noises with Comfy's `lcm` at audio shift 2.
+                H3TurboLoraTier::Fl2vDmad4StepKijaiR39 => {
+                    assert_eq!(contract.sampler_kind, H3SamplerKind::ComfyLcm);
+                    assert!(contract.sampler_kind.consumes_step_noise());
+                    assert_eq!(contract.video_shift.to_bits(), 12.0f32.to_bits());
+                    assert_eq!(contract.audio_shift.to_bits(), 2.0f32.to_bits());
+                }
+                // PDMD is plain Euler; the 2-NFE checkpoint moves audio to 6.
+                H3TurboLoraTier::Fl2vPdmd2StepKijaiR38 => {
+                    assert_eq!(contract.sampler_kind, H3SamplerKind::ComfyEuler);
+                    assert_eq!(contract.video_shift.to_bits(), 12.0f32.to_bits());
+                    assert_eq!(contract.audio_shift.to_bits(), 6.0f32.to_bits());
+                }
+                H3TurboLoraTier::Fl2vPdmd4StepKijaiR57 => {
+                    assert_eq!(contract.sampler_kind, H3SamplerKind::ComfyEuler);
+                    assert_eq!(contract.video_shift.to_bits(), 12.0f32.to_bits());
+                    assert_eq!(contract.audio_shift.to_bits(), 3.0f32.to_bits());
+                }
+                // Every Turbo workflow selects euler over the Comfy simple
+                // grid at the family audio shift.
+                _ => {
+                    assert_eq!(contract.sampler_kind, H3SamplerKind::ComfyEuler);
+                    assert!(contract.sampler_kind.uses_euler_update());
+                    assert_eq!(contract.audio_shift.to_bits(), H3_AUDIO_SHIFT.to_bits());
+                }
+            }
         }
     }
 
@@ -511,7 +579,12 @@ mod tests {
             ),
             (H3TurboLoraTier::Fl2v8StepV10Rank21, 9, H3_VIDEO_SHIFT),
             (H3TurboLoraTier::Ref2v4StepV10Rank21, 5, H3_VIDEO_SHIFT),
+            // DMAD / PDMD: 4, 2 and 4 transformer evaluations.
+            (H3TurboLoraTier::Fl2vDmad4StepKijaiR39, 5, H3_VIDEO_SHIFT),
+            (H3TurboLoraTier::Fl2vPdmd2StepKijaiR38, 3, H3_VIDEO_SHIFT),
+            (H3TurboLoraTier::Fl2vPdmd4StepKijaiR57, 5, H3_VIDEO_SHIFT),
         ];
+        assert_eq!(expected.len(), H3TurboLoraTier::ALL.len());
         for (tier, grid_points, video_shift) in expected {
             let contract = turbo_tier_contract(tier).unwrap();
             assert_eq!(contract.grid_points, grid_points, "{tier:?}");
@@ -574,6 +647,9 @@ mod tests {
         assert!(error.contains("fl2v-4step-768p-v1.1"), "{error}");
         assert!(error.contains("fl2v-8step-r21"), "{error}");
         assert!(error.contains("ref2v-4step-r21"), "{error}");
+        assert!(error.contains("dmad-4step"), "{error}");
+        assert!(error.contains("pdmd-2step"), "{error}");
+        assert!(error.contains("pdmd-4step"), "{error}");
     }
 
     #[test]
@@ -654,6 +730,25 @@ mod tests {
                 "{} shape label disagrees with the runtime tier shape",
                 manifest_tier.model
             );
+            // The same biconditional for the per-module-alpha shape, and for
+            // the rank-reduced predicate both reduced shapes share: a label
+            // claiming a per-module rank must be exactly a reduced file.
+            assert_eq!(
+                tier.shape().is_per_module_alpha(),
+                manifest_tier
+                    .adapter_shape_label
+                    .starts_with("Rank-reduced"),
+                "{} shape label disagrees with the runtime tier shape",
+                manifest_tier.model
+            );
+            assert_eq!(
+                tier.shape().has_per_module_rank(),
+                manifest_tier
+                    .adapter_shape_label
+                    .contains("per-module rank"),
+                "{} shape label disagrees with the runtime tier shape",
+                manifest_tier.model
+            );
             let contract = turbo_tier_contract(tier).unwrap();
             assert_eq!(contract.grid_points, manifest_tier.steps);
         }
@@ -680,6 +775,19 @@ mod tests {
         assert_eq!(
             mold_candle::minimax_h3::H3_TURBO_LORA_DRBAPH_SOURCE_REVISION,
             mold_core::minimax_h3::DRBAPH_TURBO_LORA_REVISION
+        );
+        assert_eq!(
+            mold_candle::minimax_h3::H3_TURBO_LORA_KIJAI_REPOSITORY,
+            mold_core::minimax_h3::KIJAI_EXPERIMENTAL_REPO
+        );
+        assert_eq!(
+            mold_candle::minimax_h3::H3_TURBO_LORA_KIJAI_SOURCE_REVISION,
+            mold_core::minimax_h3::KIJAI_EXPERIMENTAL_REVISION
+        );
+        // Every runtime tier is registered as a manifest tag.
+        assert_eq!(
+            mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS.len(),
+            H3TurboLoraTier::ALL.len()
         );
     }
 

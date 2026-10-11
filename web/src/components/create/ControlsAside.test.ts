@@ -1090,7 +1090,7 @@ const DISTILLED_NOTE =
 const H3_GUIDANCE_NOTE =
   "MiniMax H3 does not use classifier-free guidance; guidance is fixed at 0.";
 const H3_TURBO_STEPS_NOTE =
-  "Fixed by the 8-step Turbo tier: 9 terminal-inclusive sampler grid points (8 denoise intervals).";
+  "Fixed by the 8-step distilled tier: 9 terminal-inclusive sampler grid points (8 denoise intervals).";
 const H3_BASE_STEPS_NOTE =
   "Floor is the undistilled tier's smallest reviewed schedule: 21 terminal-inclusive sampler grid points (ComfyUI's default; the released default is 50). Fewer flash once per latent frame \u2014 pick a Turbo tag for a 4- or 8-step render.";
 

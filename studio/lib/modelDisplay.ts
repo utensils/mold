@@ -46,6 +46,12 @@ const MINIMAX_H3_DISPLAY_NAMES: Readonly<Record<string, string>> = {
     "MiniMax H3 Ref2VA Turbo 4-step (rank 21)",
   "minimax-h3-fl2va:fasth3-v2-int8":
     "MiniMax H3 FL2VA FastH3 V2 8-step (FastVideo)",
+  "minimax-h3-fl2va:comfy-pruned-int8-dmad-4step":
+    "MiniMax H3 FL2VA DMAD 4-step (rank-reduced)",
+  "minimax-h3-fl2va:comfy-pruned-int8-pdmd-2step":
+    "MiniMax H3 FL2VA PDMD 2-step (rank-reduced)",
+  "minimax-h3-fl2va:comfy-pruned-int8-pdmd-4step":
+    "MiniMax H3 FL2VA PDMD 4-step (rank-reduced)",
 };
 
 /**

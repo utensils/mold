@@ -7512,6 +7512,9 @@ mod tests {
             contract::FL2VA_COMFY_TURBO_4STEP_768P_R21,
             contract::FL2VA_COMFY_TURBO_8STEP_R21,
             contract::REF2VA_COMFY_TURBO_4STEP_R21,
+            contract::FL2VA_COMFY_DMAD_4STEP,
+            contract::FL2VA_COMFY_PDMD_2STEP,
+            contract::FL2VA_COMFY_PDMD_4STEP,
             contract::REF2VA_COMFY,
             "minimax-h3-fl2va:comfy-pruned-int8-turbo-2step",
         ] {

@@ -37,14 +37,15 @@ const AUTHORIZATION_SOURCE_SHA256: &str =
 const CLAIM_MARKER: &str = "mold.minimax-h3.private-uat-transformer-capture.v1";
 const MODEL_REVISION: &str = "bfc8ed0353f5a9733be73e6b2c98ec0948195b86";
 const LICENSE_SHA256: &str = "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44";
-// Repinned by #1812, which added the third-party `fasth3-checkpoints` source
-// (FastVideo's FastH3 V2 distilled transformer) to the reviewed capture
-// manifest. Previously repinned by the rank-21 Turbo tags PR (#1555,
+// Repinned by #1812, which added two third-party sources to the reviewed
+// capture manifest: `kijai-experimental-loras` (the DMAD/PDMD distill tiers)
+// and `fasth3-checkpoints` (FastVideo's FastH3 V2 distilled transformer).
+// Previously repinned by the rank-21 Turbo tags PR (#1555,
 // `drbaph-resized-loras`), after #1544 added `lightx2v-turbo-adapters`, after
 // #1319 added `nvfp4-checkpoints`, and after #985 moved the H3 frame ceiling
 // 362 -> 345. The adapter authenticates the manifest by digest before it
 // touches a weight, so a stale pin refuses every capture run.
-const MANIFEST_SHA256: &str = "8f24484a9ea9752b5469f42a98c5b0ca9397867d812a2d3be6eaf14196587cc8";
+const MANIFEST_SHA256: &str = "66e0cebc9cd9d3d372ed4f0bb64538e19dae94ccd99848f031d5663c14d2b61c";
 const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_AUTHORIZATION_BYTES: u64 = 64 * 1024;
 
