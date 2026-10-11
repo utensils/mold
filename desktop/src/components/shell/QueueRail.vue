@@ -39,7 +39,9 @@ function sourceHost(row: QueueRow) {
 }
 function sourceTarget(row: QueueRow) {
   const host = sourceHost(row);
-  return host?.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : null;
+  return host?.baseUrl
+    ? { baseUrl: host.baseUrl, apiKey: host.apiKey, connectionMode: host.connectionMode }
+    : null;
 }
 function sourceJobId(row: QueueRow) {
   return row.kind === "shared" ? row.shared.id : (row.print.recoveredJobId ?? row.print.id ?? "");

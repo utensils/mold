@@ -1,3 +1,4 @@
+import { CONNECTION_MODE_HEADER, directOrigin } from "./connectionMode";
 import { SecureChannel } from "./secureChannel";
 import {
   deviceIdentity,
@@ -240,7 +241,30 @@ async function channelFor(
   });
 }
 
-/** Every remote Mold request is encrypted. Loopback is the embedded engine boundary. */
+/** Also used before media hands an ordinary URL to a platform player. */
+export function assertRegularRequest(
+  url: URL,
+  headers: Headers,
+  profile: SecureHostProfile | null,
+): void {
+  directOrigin(url.origin);
+  if (
+    profile?.endpoints.some(
+      (endpoint) => endpoint.url === url.origin && endpoint.kind === "relay",
+    )
+  )
+    throw new Error("The proxy always requires a Secure connection.");
+  const bearer = headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+  if (
+    profile?.apiKey &&
+    (headers.get("x-api-key") === profile.apiKey || bearer === profile.apiKey)
+  )
+    throw new Error(
+      "A Secure credential cannot be used for a Regular connection. Pair again in Regular mode.",
+    );
+}
+
+/** Secure is the default. Regular HTTP requires an explicit direct selection. */
 export async function relayFetch(
   input: RequestInfo | URL,
   init?: RequestInit,
@@ -249,18 +273,37 @@ export async function relayFetch(
   const url = secureRequestUrl(input);
   const api = url.pathname.startsWith("/api/") || url.pathname === "/health";
   if (!api) return globalThis.fetch(input, init);
-  const profile = await secureHostForOrigin(url.origin);
+  const request = new Request(input instanceof Request ? input : url, init);
+  const headers = new Headers(request.headers);
+  const selection = headers.get(CONNECTION_MODE_HEADER);
+  if (selection && selection !== "regular" && selection !== "secure")
+    throw new Error("Unknown connection mode.");
+  headers.delete(CONNECTION_MODE_HEADER);
+  const mode = selection ?? "secure";
+  const profile = await secureHostForOrigin(url.origin, mode !== "regular");
+  if (mode === "regular") {
+    assertRegularRequest(url, headers, profile);
+    headers.delete("x-mold-secure-peer");
+    return globalThis.fetch(
+      new Request(url, {
+        method: request.method,
+        headers,
+        body: request.body,
+        signal: request.signal,
+        credentials: "omit",
+        redirect: "error",
+        ...(request.body ? { duplex: "half" } : {}),
+      } as RequestInit),
+    );
+  }
   if (!profile && isLoopbackOrigin(url))
     return globalThis.fetch(
-      input instanceof Request ? new Request(url, input) : url,
-      init,
+      new Request(new Request(url, request), { headers }),
     );
   if (!profile)
     throw new Error(
       "This machine needs secure pairing. Create a new pairing code in its settings.",
     );
-  const request = new Request(input instanceof Request ? input : url, init);
-  const headers = new Headers(request.headers);
   headers.set("x-api-key", profile.apiKey);
   headers.delete("authorization");
   headers.delete("cookie");

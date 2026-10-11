@@ -879,7 +879,7 @@ function inspectSelectedQueueRender(source: SelectedQueuePreviewSource | undefin
     preview: null,
   };
   stopSelectedQueuePreview = watchSelectedQueuePreview(
-    { baseUrl: host.baseUrl, apiKey: host.apiKey },
+    { baseUrl: host.baseUrl, apiKey: host.apiKey, connectionMode: host.connectionMode },
     source.jobId,
     (preview) => {
       if (
@@ -1128,7 +1128,17 @@ const preparedStaleReasons = computed(() => {
     hostTargets: new Map(
       hosts.all.flatMap((host) =>
         host.baseUrl
-          ? [[host.id, { baseUrl: host.baseUrl, apiKey: host.apiKey, kind: host.kind }] as const]
+          ? [
+              [
+                host.id,
+                {
+                  baseUrl: host.baseUrl,
+                  apiKey: host.apiKey,
+                  connectionMode: host.connectionMode,
+                  kind: host.kind,
+                },
+              ] as const,
+            ]
           : [],
       ),
     ),
@@ -1144,7 +1154,17 @@ function currentHostSnapshot() {
     hostTargets: new Map(
       hosts.all.flatMap((host) =>
         host.baseUrl
-          ? [[host.id, { baseUrl: host.baseUrl, apiKey: host.apiKey, kind: host.kind }] as const]
+          ? [
+              [
+                host.id,
+                {
+                  baseUrl: host.baseUrl,
+                  apiKey: host.apiKey,
+                  connectionMode: host.connectionMode,
+                  kind: host.kind,
+                },
+              ] as const,
+            ]
           : [],
       ),
     ),
@@ -3904,7 +3924,11 @@ async function loadPromptHistory() {
         hostId: host.id,
         hostLabel: host.label,
         fetchable: host.status === "ready" && Boolean(host.baseUrl),
-        source: { baseUrl: host.baseUrl ?? "", apiKey: host.apiKey },
+        source: {
+          baseUrl: host.baseUrl ?? "",
+          apiKey: host.apiKey,
+          connectionMode: host.connectionMode,
+        },
       })),
       (target) => fetchHistoryFrom(target),
     );

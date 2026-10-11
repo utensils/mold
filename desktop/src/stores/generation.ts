@@ -750,7 +750,11 @@ export const useGenerationStore = defineStore("generation", {
       );
       if (!record) return;
       if (!host?.baseUrl || host.status !== "ready") return;
-      const target = { baseUrl: host.baseUrl, apiKey: host.apiKey };
+      const target = {
+        baseUrl: host.baseUrl,
+        apiKey: host.apiKey,
+        connectionMode: host.connectionMode,
+      };
       const existing = durableHostStreams.get(hostId);
       if (
         existing &&
@@ -829,7 +833,11 @@ export const useGenerationStore = defineStore("generation", {
             this.applyDurableRecord(record);
           }
           if (matching.length > 0) {
-            const target = { baseUrl: host.baseUrl, apiKey: host.apiKey };
+            const target = {
+              baseUrl: host.baseUrl,
+              apiKey: host.apiKey,
+              connectionMode: host.connectionMode,
+            };
             const trackers = matching.map((record) => record.tracker);
             for (const trackerChunk of chunkGenerationBatchTrackers(trackers, hostId)) {
               const request = buildGenerationBatchStatusRequest(trackerChunk, hostId);
@@ -935,7 +943,11 @@ export const useGenerationStore = defineStore("generation", {
         job.retryable = false;
         throw new Error("The original machine is not connected with the same identity.");
       }
-      const target = { baseUrl: host.baseUrl, apiKey: host.apiKey };
+      const target = {
+        baseUrl: host.baseUrl,
+        apiKey: host.apiKey,
+        connectionMode: host.connectionMode,
+      };
       job.retrying = true;
       job.retryable = false;
       try {
@@ -1011,7 +1023,7 @@ export const useGenerationStore = defineStore("generation", {
         if (!host?.baseUrl) return false;
         try {
           await apiFetchTo(
-            { baseUrl: host.baseUrl, apiKey: host.apiKey },
+            { baseUrl: host.baseUrl, apiKey: host.apiKey, connectionMode: host.connectionMode },
             `/api/queue/${encodeURIComponent(job.id)}${current.cancelOnlyHeldChildIndexes?.includes(childIndex) ? "?only_held=true" : ""}`,
             { method: "DELETE" },
           );
@@ -1138,7 +1150,11 @@ export const useGenerationStore = defineStore("generation", {
       // exact host returns; never mirror from a replacement at the same URL.
       if (hasPendingMirror && !host?.baseUrl) return;
       if (host?.baseUrl) {
-        const target = { baseUrl: host.baseUrl, apiKey: host.apiKey };
+        const target = {
+          baseUrl: host.baseUrl,
+          apiKey: host.apiKey,
+          connectionMode: host.connectionMode,
+        };
         for (const job of completed) {
           const result = job.result!;
           for (const filename of [result.original_filename, result.filename].filter(
@@ -1216,7 +1232,7 @@ export const useGenerationStore = defineStore("generation", {
           candidate.instanceId === record.tracker.expectedInstanceId,
       );
       const target = host?.baseUrl
-        ? { baseUrl: host.baseUrl, apiKey: host.apiKey }
+        ? { baseUrl: host.baseUrl, apiKey: host.apiKey, connectionMode: host.connectionMode }
         : (() => {
             const mapping = durableJobIds.get(record.tracker.clientBatchId);
             const firstClientId = mapping?.values().next().value as number | undefined;

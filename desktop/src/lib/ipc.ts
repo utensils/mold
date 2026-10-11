@@ -1,3 +1,9 @@
+import {
+  CONNECTION_MODE_HEADER,
+  forgetConnectionMode,
+  type ConnectionMode,
+} from "@studio/api/connectionMode";
+import { forgetRegularConnection } from "@studio/api/directConnection";
 import type { SecureBinding, SecureHostProfile } from "@studio/api/secureCrypto";
 import { listSecureHosts, forgetSecureHost } from "@studio/api/secureStore";
 import { relayFetch } from "@studio/api/relayTransport";
@@ -89,6 +95,7 @@ export interface LocalGallerySnapshot {
 
 /** A remote host the app has connected to before (most recent first). */
 export interface SavedHost {
+  connectionMode?: ConnectionMode | undefined;
   /** URL-derived slug; its API key lives at secret `remote-api-key.<id>`. */
   id: string;
   name: string | null;
@@ -230,6 +237,8 @@ export const ipc = {
   async forgetRemoteHost(id: string): Promise<SavedHost[]> {
     const saved = (await ipc.appSettingsGet()).savedHosts.find((host) => host.id === id);
     if (saved) {
+      await forgetRegularConnection(saved.url);
+      forgetConnectionMode(saved.url);
       for (const profile of await listSecureHosts()) {
         if (
           profile.origins.includes(saved.url.replace(/\/$/, "")) ||
@@ -241,10 +250,17 @@ export const ipc = {
     if (!inTauri()) return [];
     return invoke<SavedHost[]>("forget_remote_host", { id });
   },
-  async testRemoteHost(url: string, apiKey: string | null): Promise<HostTest> {
+  async testRemoteHost(
+    url: string,
+    apiKey: string | null,
+    connectionMode?: ConnectionMode,
+  ): Promise<HostTest> {
     try {
       const response = await relayFetch(`${url.replace(/\/$/, "")}/api/status`, {
-        headers: apiKey ? { "x-api-key": apiKey } : {},
+        headers: {
+          ...(apiKey ? { "x-api-key": apiKey } : {}),
+          ...(connectionMode ? { [CONNECTION_MODE_HEADER]: connectionMode } : {}),
+        },
         signal: AbortSignal.timeout(10000),
       });
       if (!response.ok) throw new Error(`This machine returned ${response.status}.`);

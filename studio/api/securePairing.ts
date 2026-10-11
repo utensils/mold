@@ -10,15 +10,15 @@ import {
 import { deviceIdentity, saveSecureHost } from "./secureStore";
 import { parseConnectionEndpoints } from "./connectionRoutes";
 import type {
-  MobilePairingPayload,
-  PairingClaim,
+  SecureMobilePairingPayload,
+  SecurePairingClaim,
   PairingClientIdentity,
 } from "./pairing";
 
 export async function claimSecurePairing(
-  payload: MobilePairingPayload,
+  payload: SecureMobilePairingPayload,
   client: PairingClientIdentity,
-): Promise<PairingClaim> {
+): Promise<SecurePairingClaim> {
   await loadSecureCrypto();
   const invitation = checkInvite(payload, payload.invite, payload.invite_seed);
   let identity: Identity | undefined;
@@ -88,7 +88,7 @@ export async function claimSecurePairing(
       throw new Error(
         "This pairing code could not be redeemed. Create a fresh code on the host.",
       );
-    const claim = JSON.parse(text) as PairingClaim;
+    const claim = JSON.parse(text) as SecurePairingClaim;
     if (
       claim.instance_id !== payload.instance_id ||
       !claim.api_key?.startsWith("mold_pair_")

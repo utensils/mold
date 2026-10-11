@@ -54,7 +54,11 @@ export function useQueueInspection(
       throw new Error(
         "Reconnect to the original machine before changing this job.",
       );
-    return { baseUrl: host.url, apiKey: host.apiKey ?? null };
+    return {
+      baseUrl: host.url,
+      apiKey: host.apiKey ?? null,
+      connectionMode: host.connectionMode,
+    };
   }
   async function inspect(
     row: FleetActiveWork,

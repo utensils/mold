@@ -1,3 +1,4 @@
+import { CONNECTION_MODE_HEADER } from "@studio/api/connectionMode";
 import { connectionHealth } from "@studio/api/connectionRoutes";
 import {
   listStoredHosts,
@@ -76,8 +77,13 @@ export interface DiscoveryPeer {
   is_this_machine: boolean;
 }
 
-function authHeaders(key?: string): Record<string, string> {
-  return key ? { "x-api-key": key } : {};
+function authHeaders(host: HostEntry): Record<string, string> {
+  return {
+    ...(host.apiKey ? { "x-api-key": host.apiKey } : {}),
+    ...(host.connectionMode
+      ? { [CONNECTION_MODE_HEADER]: host.connectionMode }
+      : {}),
+  };
 }
 
 async function getJson<T>(
@@ -86,7 +92,7 @@ async function getJson<T>(
   signal?: AbortSignal,
 ): Promise<T> {
   const res = await fetch(`${host.url}${path}`, {
-    headers: authHeaders(host.apiKey),
+    headers: authHeaders(host),
     signal,
   });
   if (!res.ok) {
@@ -103,7 +109,7 @@ async function send(
   body?: unknown,
   allowNotFound = true,
 ): Promise<void> {
-  const headers: Record<string, string> = { ...authHeaders(host.apiKey) };
+  const headers: Record<string, string> = { ...authHeaders(host) };
   if (body !== undefined) headers["content-type"] = "application/json";
   const res = await fetch(`${host.url}${path}`, {
     method,
@@ -136,6 +142,7 @@ export async function hostStatus(host: HostEntry, signal?: AbortSignal) {
       !!current &&
       (current.url === initial.url || current.url === host.url) &&
       current.apiKey === initial.apiKey &&
+      current.connectionMode === initial.connectionMode &&
       current.instanceId === initial.instanceId &&
       current.connected !== false
     );
@@ -144,6 +151,7 @@ export async function hostStatus(host: HostEntry, signal?: AbortSignal) {
     hostId: host.id,
     baseUrl: host.url,
     apiKey: host.apiKey,
+    connectionMode: host.connectionMode,
     instanceId: host.instanceId,
     signal,
     isCurrent,
@@ -163,7 +171,11 @@ export function hostDevices(
   signal?: AbortSignal,
 ): Promise<DeviceListResponse> {
   return listDevices(
-    { baseUrl: host.url, apiKey: host.apiKey ?? null },
+    {
+      baseUrl: host.url,
+      apiKey: host.apiKey ?? null,
+      connectionMode: host.connectionMode,
+    },
     signal,
   );
 }
@@ -174,7 +186,11 @@ export function setHostDeviceEnabled(
   enabled: boolean,
 ): Promise<DeviceInfo> {
   return setDeviceEnabled(
-    { baseUrl: host.url, apiKey: host.apiKey ?? null },
+    {
+      baseUrl: host.url,
+      apiKey: host.apiKey ?? null,
+      connectionMode: host.connectionMode,
+    },
     deviceId,
     enabled,
   );
@@ -187,7 +203,11 @@ export function hostDiscoveryPeers(host: HostEntry, signal?: AbortSignal) {
 /** The studio `ApiTarget` for a web host entry: the explicit-target helpers
  * in `@studio/api/*` take this shape and send the key as `x-api-key`. */
 export function hostApiTarget(host: HostEntry): ApiTarget {
-  return { baseUrl: host.url, apiKey: host.apiKey ?? null };
+  return {
+    baseUrl: host.url,
+    apiKey: host.apiKey ?? null,
+    connectionMode: host.connectionMode,
+  };
 }
 
 /** One host's gallery (`GET /api/gallery[?view=trash]`), with its
@@ -318,7 +338,7 @@ export async function hostModelDownload(
   const path = catalog
     ? `/api/catalog/${encodeURIComponent(id)}/download`
     : "/api/downloads";
-  const headers = authHeaders(host.apiKey);
+  const headers = authHeaders(host);
   if (!catalog) headers["content-type"] = "application/json";
   const res = await fetch(`${host.url}${path}`, {
     method: "POST",

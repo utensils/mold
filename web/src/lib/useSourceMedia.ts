@@ -43,7 +43,11 @@ export function webSourceOwner(item: GalleryImage): SourceMediaOwner | null {
     filename: item.filename,
     title: item.title || item.metadata.title || item.filename,
     hostLabel: hosted.hostLabel || host.name,
-    target: { baseUrl: host.url, apiKey: host.apiKey ?? null },
+    target: {
+      baseUrl: host.url,
+      apiKey: host.apiKey ?? null,
+      connectionMode: host.connectionMode,
+    },
     ...(host.instanceId ? { instanceId: host.instanceId } : {}),
     ...(item.media_version ? { revision: item.media_version } : {}),
   };

@@ -50,6 +50,7 @@ export function useLiveActivity(routing: HostRouting) {
             target: {
               baseUrl: host.url,
               apiKey: host.apiKey ?? null,
+              connectionMode: host.connectionMode,
             },
           };
           const epoch = (epochs[host.id] ?? 0) + 1;

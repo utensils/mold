@@ -243,7 +243,9 @@ async function installModel(modelId: string, displayName: string) {
   const host = planModelInstall(readyHosts, [], { inventoryKnown }).targets[0]?.host ?? null;
   close();
   try {
-    const target = host?.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : currentTarget();
+    const target = host?.baseUrl
+      ? { baseUrl: host.baseUrl, apiKey: host.apiKey, connectionMode: host.connectionMode }
+      : currentTarget();
     // Attach the snapshot-first stream before enqueueing so a cached,
     // near-instant pull still produces a visible terminal event.
     await downloads.subscribe(host ?? undefined);

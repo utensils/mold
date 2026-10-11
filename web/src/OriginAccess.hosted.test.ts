@@ -85,7 +85,7 @@ it("switches through a fresh gate without forgetting either pairing", async () =
   await wrapper.get('[data-test="studio"] button').trigger("click");
   expect(studioPrimary()).toBeNull();
   expect(wrapper.find('[data-test="studio"]').exists()).toBe(false);
-  expect(wrapper.findAll("option")).toHaveLength(2);
+  expect(wrapper.findAll("#saved-machine option")).toHaveLength(2);
   expect(mocks.reload).toHaveBeenCalledTimes(1);
   wrapper.unmount();
   const nextDocument = mount(OriginAccess);
@@ -290,5 +290,5 @@ it("keeps the fresh hosted document at the gate when only remembered machines ex
   expect(wrapper.find('[data-test="studio"]').exists()).toBe(false);
   expect(mocks.fetch).not.toHaveBeenCalled();
   expect(mocks.reload).not.toHaveBeenCalled();
-  expect(wrapper.findAll("option")).toHaveLength(2);
+  expect(wrapper.findAll("#saved-machine option")).toHaveLength(2);
 });

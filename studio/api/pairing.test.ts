@@ -42,7 +42,7 @@ describe("parseMobilePairingPayload", () => {
   it("accepts the versioned one-time pairing envelope", () => {
     expect(parseMobilePairingPayload(JSON.stringify(payload))).toMatchObject({
       base_url: "http://studio.local:7680",
-      host_key: payload.host_key,
+      host_key: fixtures.links[0]!.payload.host_key,
     });
   });
 
@@ -108,5 +108,37 @@ describe("the shared pairing-link contract (pairing.fixtures.json)", () => {
 
   it.each(fixtures.rejected)("refuses %s", (raw) => {
     expect(() => parseMobilePairingPayload(raw)).toThrow(/pairing code/);
+  });
+});
+
+describe("Regular pairing", () => {
+  const regular = {
+    type: "mold.mobile-pairing",
+    version: 2,
+    mode: "regular",
+    base_url: "http://203.0.113.7:7680",
+    instance_id: "host-instance",
+    name: "Headless",
+    pairing_token: "a".repeat(64),
+    expires_at: 4000000000,
+  };
+  it("round-trips an explicit Regular invitation without any secure fields", () => {
+    const parsed = parseMobilePairingPayload(JSON.stringify(regular));
+    expect(parsed).toEqual(regular);
+    expect(parseMobilePairingPayload(mobilePairingUrl(parsed))).toEqual(
+      regular,
+    );
+  });
+  it("rejects mixed authority and proxy addresses", () => {
+    for (const extra of [
+      { base_url: "https://x.mold-link.urandom.io" },
+      { host_key: "a".repeat(64) },
+      { endpoints: [{ kind: "relay", url: "https://proxy.example" }] },
+      { websocket_url: "wss://proxy.example" },
+    ]) {
+      expect(() =>
+        parseMobilePairingPayload(JSON.stringify({ ...regular, ...extra })),
+      ).toThrow(/pairing code/);
+    }
   });
 });

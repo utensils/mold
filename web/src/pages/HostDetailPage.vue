@@ -336,7 +336,11 @@ async function onToggleDevice(deviceId: string, enabled: boolean) {
   mutatingDeviceIds.value = new Set(mutatingDeviceIds.value).add(deviceId);
   try {
     const accepted = await setDeviceEnabled(
-      { baseUrl: entry.url, apiKey: entry.apiKey ?? null },
+      {
+        baseUrl: entry.url,
+        apiKey: entry.apiKey ?? null,
+        connectionMode: entry.connectionMode,
+      },
       deviceId,
       enabled,
     );
@@ -372,7 +376,11 @@ async function onUnpinWork(workId: string) {
   if (!entry) return;
   try {
     await setQueueDevicePin(
-      { baseUrl: entry.url, apiKey: entry.apiKey ?? null },
+      {
+        baseUrl: entry.url,
+        apiKey: entry.apiKey ?? null,
+        connectionMode: entry.connectionMode,
+      },
       workId,
       null,
     );
@@ -918,7 +926,11 @@ function startHostSession() {
   );
   deviceEventsAbort = new AbortController();
   subscribeToDeviceSnapshots(
-    { baseUrl: entry.url, apiKey: entry.apiKey ?? null },
+    {
+      baseUrl: entry.url,
+      apiKey: entry.apiKey ?? null,
+      connectionMode: entry.connectionMode,
+    },
     deviceEventsAbort.signal,
     () => {
       if (!isCurrentSession(entry, epoch) || signal.aborted) return;
@@ -1271,7 +1283,13 @@ onBeforeUnmount(() => {
         </CardSurface>
         <QueueCard
           :target="
-            host ? { baseUrl: host.url, apiKey: host.apiKey ?? null } : null
+            host
+              ? {
+                  baseUrl: host.url,
+                  apiKey: host.apiKey ?? null,
+                  connectionMode: host.connectionMode,
+                }
+              : null
           "
           :instance-id="poll.status.value?.instance_id"
           :entries="queue"
@@ -1381,7 +1399,13 @@ onBeforeUnmount(() => {
         :transfer-host-id="hostId"
         :model="inspectedModel"
         :input-target="
-          host ? { baseUrl: host.url, apiKey: host.apiKey ?? null } : null
+          host
+            ? {
+                baseUrl: host.url,
+                apiKey: host.apiKey ?? null,
+                connectionMode: host.connectionMode,
+              }
+            : null
         "
         :input-instance-id="poll.status.value?.instance_id"
         :input-online="online && !poll.stale.value"

@@ -103,7 +103,7 @@ describe("E2EE-only remote requests", () => {
     expect(
       await (await relayFetch("http://127.0.0.1:7680/api/status")).text(),
     ).toBe("local");
-    expect(mocks.lookup).toHaveBeenCalledWith("http://127.0.0.1:7680");
+    expect(mocks.lookup).toHaveBeenCalledWith("http://127.0.0.1:7680", true);
   });
   it("keeps an explicitly paired loopback host on Noise", async () => {
     const fetch = vi.fn();
@@ -322,4 +322,61 @@ describe("pairing-change channel isolation", () => {
       expect(mocks.connect).toHaveBeenCalledTimes(2);
     },
   );
+});
+
+describe("explicit Regular transport", () => {
+  it("carries a regular credential directly, strips the selector and refuses redirects", async () => {
+    const fetch = vi.fn(async (_request: Request) => new Response("regular"));
+    vi.stubGlobal("fetch", fetch);
+    await relayFetch("http://203.0.113.1:7680/api/status", {
+      headers: {
+        "x-api-key": "regular-key",
+        "x-mold-connection-mode": "regular",
+      },
+    });
+    const request = fetch.mock.calls[0]![0] as Request;
+    expect(request.headers.get("x-api-key")).toBe("regular-key");
+    expect(request.headers.has("x-mold-connection-mode")).toBe(false);
+    expect(request.redirect).toBe("error");
+    expect(mocks.connect).not.toHaveBeenCalled();
+  });
+  it("never sends a known secure credential in Regular mode", async () => {
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    mocks.lookup.mockResolvedValue({ apiKey: "secure-key", endpoints: [] });
+    await expect(
+      relayFetch("http://host.test/api/status", {
+        headers: {
+          "x-api-key": "secure-key",
+          "x-mold-connection-mode": "regular",
+        },
+      }),
+    ).rejects.toThrow(/secure credential/i);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it("never enables Regular requests through the managed proxy", async () => {
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    await expect(
+      relayFetch("https://a.mold-link.urandom.io/api/status", {
+        headers: { "x-mold-connection-mode": "regular" },
+      }),
+    ).rejects.toThrow(/proxy/i);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
+it("does not transmit a secure key through Bearer authentication in Regular mode", async () => {
+  const fetch = vi.fn();
+  vi.stubGlobal("fetch", fetch);
+  mocks.lookup.mockResolvedValue({ apiKey: "secure-key", endpoints: [] });
+  await expect(
+    relayFetch("http://host.test/api/status", {
+      headers: {
+        authorization: "Bearer secure-key",
+        "x-mold-connection-mode": "regular",
+      },
+    }),
+  ).rejects.toThrow(/secure credential/i);
+  expect(fetch).not.toHaveBeenCalled();
 });

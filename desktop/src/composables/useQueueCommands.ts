@@ -539,7 +539,7 @@ export function useQueueCommands(): QueueCommands {
       const host = hosts.all.find((host) => host.id === (job.hostId ?? "local"));
       if (host?.status === "ready" && host.baseUrl && host.instanceId && job.id)
         void startQueueDownloadRecovery(
-          { baseUrl: host.baseUrl, apiKey: host.apiKey },
+          { baseUrl: host.baseUrl, apiKey: host.apiKey, connectionMode: host.connectionMode },
           host.instanceId,
           job.id,
           host.label,

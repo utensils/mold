@@ -954,7 +954,9 @@ export const useGalleryStore = defineStore("gallery", {
         return bucket.authorityTarget;
       }
       const host = this.hostFor(sourceKey);
-      return host?.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : null;
+      return host?.baseUrl
+        ? { baseUrl: host.baseUrl, apiKey: host.apiKey, connectionMode: host.connectionMode }
+        : null;
     },
     /**
      * The same answer as {@link targetOf}, except that a bucket which cannot

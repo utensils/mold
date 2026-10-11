@@ -158,7 +158,13 @@ export const useHostStatusStore = defineStore("hostStatus", {
       void sseStream("/api/resources/stream", {
         signal: resourceAbort.signal,
         ...(this.displayingRemote && host?.baseUrl
-          ? { target: { baseUrl: host.baseUrl, apiKey: host.apiKey } }
+          ? {
+              target: {
+                baseUrl: host.baseUrl,
+                apiKey: host.apiKey,
+                connectionMode: host.connectionMode,
+              },
+            }
           : {}),
         onEvent: (event, data) => {
           if (event !== "snapshot") return;

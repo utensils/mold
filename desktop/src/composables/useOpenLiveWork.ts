@@ -20,7 +20,9 @@ export function useOpenLiveWork() {
   return openLiveWorkWith<OutputMetadata>({
     targetFor: (hostId) => {
       const host = hosts.all.find((candidate) => candidate.id === hostId);
-      return host?.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : null;
+      return host?.baseUrl
+        ? { baseUrl: host.baseUrl, apiKey: host.apiKey, connectionMode: host.connectionMode }
+        : null;
     },
     go: (to) => router.push(to).then(() => undefined),
     fail: (message) => toasts.push(message, "error"),

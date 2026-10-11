@@ -1,3 +1,4 @@
+import type { ConnectionMode } from "../api/connectionMode";
 /*
  * Why reviewed prompt work no longer matches the form — ONE rule for every
  * surface.
@@ -26,13 +27,18 @@ export interface StaleRouteSnapshot {
   label: string;
   kind?: string | null;
   instanceId?: string | null;
-  target: { baseUrl: string; apiKey?: string | null };
+  target: {
+    baseUrl: string;
+    apiKey?: string | null;
+    connectionMode?: ConnectionMode | undefined;
+  };
 }
 
 /** What the registry says about that machine right now. */
 export interface StaleHostTarget {
   baseUrl: string;
   apiKey?: string | null;
+  connectionMode?: ConnectionMode | undefined;
   kind?: string | null;
   instanceId?: string | null;
 }
@@ -155,6 +161,8 @@ export function preparedExpansionStaleReasons(
         (batch.route.target.baseUrl ?? null) ||
         (currentTarget.apiKey ?? null) !==
           (batch.route.target.apiKey ?? null) ||
+        (currentTarget.connectionMode ?? "secure") !==
+          (batch.route.target.connectionMode ?? "secure") ||
         (currentTarget.kind ?? null) !== (batch.route.kind ?? null) ||
         knownInstanceIdsDiffer(
           batch.route.instanceId,

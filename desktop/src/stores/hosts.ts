@@ -1,3 +1,6 @@
+import { rememberConnectionMode, type ConnectionMode } from "@studio/api/connectionMode";
+import { registerRegularConnection, forgetRegularConnection } from "@studio/api/directConnection";
+import { secureHostForOrigin } from "@studio/api/secureStore";
 import { connectionHealth, forgetConnectionRoutes } from "@studio/api/connectionRoutes";
 import { hostRoutingLoad } from "@studio/lib/hostRouting";
 import { defineStore } from "pinia";
@@ -86,6 +89,7 @@ function withSettingsLock<T>(fn: () => Promise<T>): Promise<T> {
 
 /** An additional live connection beyond the primary one. */
 export interface ExtraHost {
+  connectionMode?: ConnectionMode | undefined;
   id: string;
   label: string;
   url: string;
@@ -99,6 +103,7 @@ export interface ExtraHost {
 
 /** Unified host row for the sidebar, the selector, and routing. */
 export interface HostView {
+  connectionMode?: ConnectionMode | undefined;
   id: string;
   label: string;
   kind: "local" | "remote";
@@ -254,7 +259,7 @@ function hostRoute(host: HostView, capabilities?: ServerCapabilities): HostRoute
     hostId: host.id,
     label: host.label,
     kind: host.kind,
-    target: { baseUrl: host.baseUrl, apiKey: host.apiKey },
+    target: { baseUrl: host.baseUrl, apiKey: host.apiKey, connectionMode: host.connectionMode },
     instanceId: host.instanceId,
     referenceUploads: capabilities?.reference_uploads ?? null,
     ...(capabilities?.durable_media ? { durableMedia: capabilities.durable_media } : {}),
@@ -331,6 +336,7 @@ export const useHostsStore = defineStore("hosts", {
         kind: "local",
         baseUrl: conn.info.baseUrl,
         apiKey: conn.info.apiKey,
+        connectionMode: "regular",
         status:
           conn.status === "ready" ? "ready" : conn.status === "starting" ? "connecting" : "error",
         stale: t?.stale ?? false,
@@ -378,6 +384,7 @@ export const useHostsStore = defineStore("hosts", {
           kind: "remote",
           baseUrl: extra.url,
           apiKey: extra.apiKey,
+          connectionMode: extra.connectionMode,
           status: extra.status,
           stale: t?.stale ?? false,
           primary: false,
@@ -432,7 +439,17 @@ export const useHostsStore = defineStore("hosts", {
             const key = await ipc.secretGet(`remote-api-key.${id}`);
             const live = this.extras.find((h) => h.id === id)!;
             live.apiKey = key;
-            const test = await ipc.testRemoteHost(saved.url, key);
+            const profile = await secureHostForOrigin(saved.url, false);
+            // Older Regular entries store an ordinary key separately. Secure
+            // pairings keep theirs only in the encrypted profile store.
+            const mode = saved.connectionMode ?? (key && !profile ? "regular" : "secure");
+            live.connectionMode = mode;
+            if (mode === "regular") await registerRegularConnection(saved.url, key);
+            else {
+              await forgetRegularConnection(saved.url);
+              rememberConnectionMode(saved.url, "secure");
+            }
+            const test = await ipc.testRemoteHost(saved.url, key, mode);
             // Seed the sticky hostname from the probe so the row is labeled by
             // the server's name (not the raw URL) before the first poll.
             if (test.hostname) this.hostnames[id] = test.hostname;
@@ -459,7 +476,12 @@ export const useHostsStore = defineStore("hosts", {
       this.startPolling();
     },
     /** Connect an additional host (validates first) and remember it. */
-    async connect(rawUrl: string, apiKey: string | null, name: string | null): Promise<HostView> {
+    async connect(
+      rawUrl: string,
+      apiKey: string | null,
+      name: string | null,
+      connectionMode: ConnectionMode = "secure",
+    ): Promise<HostView> {
       const url = normalizeHostUrl(rawUrl);
       const id = hostIdFromUrl(url);
       // The host name "local" is reserved for the built-in engine. Check the
@@ -476,12 +498,18 @@ export const useHostsStore = defineStore("hosts", {
       if (
         existing?.status === "ready" &&
         !existing.stale &&
-        (apiKey === null || existing.apiKey === apiKey)
+        (apiKey === null || existing.apiKey === apiKey) &&
+        (existing.connectionMode ?? "secure") === connectionMode
       )
         return existing;
 
-      const test = await ipc.testRemoteHost(url, apiKey);
+      const test = await ipc.testRemoteHost(url, apiKey, connectionMode);
       if (!test.ok) throw new Error(test.error ?? "Connection failed.");
+      if (connectionMode === "regular") await registerRegularConnection(url, apiKey);
+      else {
+        await forgetRegularConnection(url);
+        rememberConnectionMode(url, "secure");
+      }
       const instanceId = test.instanceId ?? null;
 
       // Same physical server reached by a different address (hostname vs IP vs
@@ -503,14 +531,16 @@ export const useHostsStore = defineStore("hosts", {
             const keyChanged = apiKey !== null && live.apiKey !== apiKey;
             const urlChanged = live.url !== url;
             const needsRevival = twin.status !== "ready" || twin.stale;
-            const authorityChanged = keyChanged || urlChanged;
+            const authorityChanged =
+              keyChanged || urlChanged || (live.connectionMode ?? "secure") !== connectionMode;
             if (authorityChanged) forgetConnectionRoutes(twin.id);
             if (authorityChanged || needsRevival) {
               // Fence a status/capability response started under the retired
               // address or credential before mutating the live authority.
               this.refreshGenerations[twin.id] = (this.refreshGenerations[twin.id] ?? 0) + 1;
             }
-            if (apiKey) live.apiKey = apiKey;
+            if (apiKey || live.connectionMode !== connectionMode) live.apiKey = apiKey;
+            live.connectionMode = connectionMode;
             if (authorityChanged) {
               // Even a probe that proves the same instance cannot make queue,
               // model, or capability data read under another URL/key current.
@@ -521,7 +551,7 @@ export const useHostsStore = defineStore("hosts", {
               live.status = "connecting";
               live.error = null;
               live.instanceId = instanceId;
-              await this.persist(twin.id, url, name, instanceId);
+              await this.persist(twin.id, url, name, instanceId, connectionMode);
               void this.refreshAfterCurrent();
             } else if (needsRevival) {
               live.status = "ready";
@@ -566,13 +596,14 @@ export const useHostsStore = defineStore("hosts", {
         label: name ?? test.hostname ?? url.replace(/^https?:\/\//, ""),
         url,
         apiKey,
+        connectionMode,
         status: retiredExistingAuthority ? "connecting" : "ready",
         error: null,
         instanceId,
       });
       if (test.hostname) this.hostnames[id] = test.hostname;
       if (apiKey) await ipc.secretSet(`remote-api-key.${id}`, apiKey);
-      await this.persist(id, url, name, instanceId);
+      await this.persist(id, url, name, instanceId, connectionMode);
       void this.refreshAfterCurrent();
       return this.all.find((h) => h.id === id)!;
     },
@@ -734,7 +765,13 @@ export const useHostsStore = defineStore("hosts", {
         });
       const identitySignature = () =>
         JSON.stringify(
-          this.all.map((host) => [host.id, host.baseUrl, host.apiKey, host.instanceId]),
+          this.all.map((host) => [
+            host.id,
+            host.baseUrl,
+            host.apiKey,
+            host.connectionMode,
+            host.instanceId,
+          ]),
         );
       const availabilitySignature = () =>
         JSON.stringify({
@@ -873,7 +910,11 @@ export const useHostsStore = defineStore("hosts", {
             else options.signal?.addEventListener("abort", abortFromCaller, { once: true });
             const started = performance.now();
             try {
-              const target = { baseUrl: host.baseUrl!, apiKey: host.apiKey };
+              const target = {
+                baseUrl: host.baseUrl!,
+                apiKey: host.apiKey,
+                connectionMode: host.connectionMode,
+              };
               const submission = generationHostSubmissionPolicy(
                 selection === null
                   ? { kind: "auto" }
@@ -1304,13 +1345,18 @@ export const useHostsStore = defineStore("hosts", {
           if (!host.baseUrl) return;
           const generation = (this.refreshGenerations[host.id] ?? 0) + 1;
           this.refreshGenerations[host.id] = generation;
-          const target = { baseUrl: host.baseUrl, apiKey: host.apiKey };
+          const target = {
+            baseUrl: host.baseUrl,
+            apiKey: host.apiKey,
+            connectionMode: host.connectionMode,
+          };
           const isCurrent = () => {
             const current = this.all.find((candidate) => candidate.id === host.id);
             return (
               this.refreshGenerations[host.id] === generation &&
               current?.baseUrl === host.baseUrl &&
-              current.apiKey === host.apiKey
+              current.apiKey === host.apiKey &&
+              current.connectionMode === host.connectionMode
             );
           };
           const retireRejectedAuthority = (error: unknown): boolean => {
@@ -1341,6 +1387,7 @@ export const useHostsStore = defineStore("hosts", {
                     hostId: host.id,
                     baseUrl: target.baseUrl,
                     apiKey: target.apiKey,
+                    connectionMode: target.connectionMode,
                     instanceId: previousInstanceId,
                     isCurrent,
                     read: (baseUrl) =>
@@ -1629,7 +1676,13 @@ export const useHostsStore = defineStore("hosts", {
       this.pollTimer = null;
     },
     /** Remember the host across launches (MRU list + reconnect set). */
-    async persist(id: string, url: string, name: string | null, instanceId: string | null = null) {
+    async persist(
+      id: string,
+      url: string,
+      name: string | null,
+      instanceId: string | null = null,
+      connectionMode?: ConnectionMode,
+    ) {
       await withSettingsLock(async () => {
         const settings = await ipc.appSettingsGet();
         // A nameless reconnect must not wipe a previously discovered name or a
@@ -1643,6 +1696,7 @@ export const useHostsStore = defineStore("hosts", {
             url,
             lastUsedMs: Date.now(),
             instanceId: instanceId ?? prior?.instanceId ?? null,
+            connectionMode: connectionMode ?? prior?.connectionMode,
           },
           ...settings.savedHosts.filter((h) => h.id !== id),
         ].slice(0, MAX_SAVED_HOSTS);

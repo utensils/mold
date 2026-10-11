@@ -355,6 +355,7 @@ export async function listSecureHosts(): Promise<SecureHostProfile[]> {
 }
 export async function secureHostForOrigin(
   origin: string,
+  register = true,
 ): Promise<SecureHostProfile | null> {
   const profile =
     (await listSecureHosts()).find((profile) =>
@@ -362,7 +363,7 @@ export async function secureHostForOrigin(
     ) ?? null;
   if (profile) {
     assertSecureHostCurrent(profile);
-    await registerPlatform(profile);
+    if (register) await registerPlatform(profile);
     assertSecureHostCurrent(profile);
   }
   return profile;

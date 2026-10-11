@@ -69,7 +69,11 @@ const queueTransfer = provideHeldQueueTransfer(
               id: host.id,
               label: host.label,
               instanceId: host.instanceId,
-              target: { baseUrl: host.baseUrl, apiKey: host.apiKey ?? null },
+              target: {
+                baseUrl: host.baseUrl,
+                apiKey: host.apiKey ?? null,
+                connectionMode: host.connectionMode,
+              },
               ready: host.status === "ready" && !host.stale,
               gpuCount: host.routingLoad?.gpuCount,
               queueDepth: host.queueDepth,

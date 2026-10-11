@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { claimSecurePairing } from "./securePairing";
-import type { MobilePairingPayload } from "./pairing";
+import type { SecureMobilePairingPayload } from "./pairing";
 const mock = vi.hoisted(() => ({ connect: vi.fn(), save: vi.fn() }));
 const identity = vi.hoisted(() => ({
   close: vi.fn(),
@@ -28,7 +28,7 @@ const payload = {
   instance_id: "host",
   namespace: "pinned",
   invite: {},
-} as MobilePairingPayload;
+} as SecureMobilePairingPayload;
 beforeEach(() => {
   vi.stubGlobal("location", { protocol: "https:" });
   mock.connect.mockResolvedValue({

@@ -105,9 +105,10 @@ describe("queue api", () => {
 
     const listing = await fetchQueue();
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/queue?limit=2", {
-      signal: undefined,
-    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/queue?limit=2",
+      expect.objectContaining({ signal: undefined }),
+    );
     expect(listing.entries[0].target_gpu).toBe(1);
     expect(listing.page).toBeUndefined();
   });
@@ -176,7 +177,11 @@ describe("queue api", () => {
 
     expect(fetchMock).toHaveBeenCalledWith("/api/queue/srv-1", {
       method: "PATCH",
-      headers: { "content-type": "application/json" },
+      headers: new Headers({
+        "content-type": "application/json",
+        "x-mold-connection-mode": "regular",
+      }),
+      redirect: "error",
       body: JSON.stringify({ target_gpu: null }),
       signal: undefined,
     });
@@ -259,10 +264,12 @@ describe("auto-chained long video", () => {
     await createChainJob(chainRequest(), undefined, "create-op");
     expect(fetchMock).toHaveBeenLastCalledWith("/api/chain-jobs", {
       method: "POST",
-      headers: {
+      headers: new Headers({
         "content-type": "application/json",
+        "x-mold-connection-mode": "regular",
         "x-mold-operation-id": "create-op",
-      },
+      }),
+      redirect: "error",
       body: JSON.stringify(chainRequest()),
     });
 
@@ -284,7 +291,11 @@ describe("auto-chained long video", () => {
     await cancelChainJob("job/1");
     expect(fetchMock).toHaveBeenLastCalledWith(
       "/api/chain-jobs/job%2F1/cancel",
-      { method: "POST", headers: {} },
+      {
+        method: "POST",
+        headers: new Headers({ "x-mold-connection-mode": "regular" }),
+        redirect: "error",
+      },
     );
 
     expect(chainJobEventsUrl("job/1")).toBe("/api/chain-jobs/job%2F1/events");

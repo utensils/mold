@@ -1,4 +1,6 @@
+import { CONNECTION_MODE_HEADER } from "./connectionMode";
 import {
+  assertRegularRequest,
   isLoopbackOrigin,
   relayFetch,
   secureRequestUrl,
@@ -79,7 +81,12 @@ export async function secureMediaUrl(
 ): Promise<string | null> {
   signal?.throwIfAborted();
   const url = secureRequestUrl(input);
-  const profile = await secureHostForOrigin(url.origin);
+  const mode = new Headers(headers).get(CONNECTION_MODE_HEADER) ?? "secure";
+  const profile = await secureHostForOrigin(url.origin, mode !== "regular");
+  if (mode === "regular") {
+    assertRegularRequest(url, new Headers(headers), profile);
+    return null;
+  }
   if (!profile && isLoopbackOrigin(url)) return null;
   if (!profile)
     throw new Error("Pair this machine securely to play its media.");
@@ -98,6 +105,7 @@ export async function secureMediaUrl(
   signal?.throwIfAborted();
   const capability = crypto.randomUUID();
   const requestHeaders = new Headers(headers);
+  requestHeaders.set(CONNECTION_MODE_HEADER, "secure");
   requestHeaders.delete("x-api-key");
   requestHeaders.delete("authorization");
   requestHeaders.delete("cookie");

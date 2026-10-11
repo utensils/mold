@@ -21,7 +21,11 @@ export function freezeGenerationRoute(
     ...route,
     hostId: primary.id,
     label: primary.name,
-    target: { baseUrl: primary.url },
+    target: {
+      baseUrl: primary.url,
+      connectionMode: primary.connectionMode ?? "secure",
+      ...(primary.apiKey ? { apiKey: primary.apiKey } : {}),
+    },
     instanceId: primary.instanceId,
   };
 }
@@ -41,7 +45,11 @@ export function generationJobTarget(job: {
   if (hosted && origin) {
     const primary = studioPrimary();
     if (!expected || primary?.instanceId !== expected) return undefined;
-    return { baseUrl: primary.url };
+    return {
+      baseUrl: primary.url,
+      connectionMode: primary.connectionMode ?? "secure",
+      ...(primary.apiKey ? { apiKey: primary.apiKey } : {}),
+    };
   }
   const host = !origin ? getHost(job.hostId!) : null;
   if (host && expected && host.instanceId !== expected) return undefined;
@@ -51,7 +59,11 @@ export function generationJobTarget(job: {
       hosted &&
       (!job.target.baseUrl || job.target.baseUrl === window.location.origin)
     )
-      return { baseUrl: host!.url };
+      return {
+        baseUrl: host!.url,
+        connectionMode: host!.connectionMode,
+        ...(host!.apiKey ? { apiKey: host!.apiKey } : {}),
+      };
     if (
       !job.target.apiKey &&
       (!job.target.baseUrl || job.target.baseUrl === window.location.origin)
@@ -65,9 +77,14 @@ export function generationJobTarget(job: {
     const local = originApiTarget();
     return {
       baseUrl: local.baseUrl,
+      connectionMode: local.connectionMode,
       ...(local.apiKey ? { apiKey: local.apiKey } : {}),
     };
   }
   if (!host) return undefined;
-  return { baseUrl: host.url, ...(host.apiKey ? { apiKey: host.apiKey } : {}) };
+  return {
+    baseUrl: host.url,
+    connectionMode: host.connectionMode,
+    ...(host.apiKey ? { apiKey: host.apiKey } : {}),
+  };
 }

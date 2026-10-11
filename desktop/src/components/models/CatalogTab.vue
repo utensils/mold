@@ -498,7 +498,9 @@ useInfiniteScrollSentinel(sentinel, loading, hasMore, loadMore, MAX_AUTO_PAGES);
 
 /** Returns false when the user declined the host's licence terms. */
 async function queueOnHost(entry: CatalogEntry, host: HostView | null): Promise<boolean> {
-  const target = host?.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : undefined;
+  const target = host?.baseUrl
+    ? { baseUrl: host.baseUrl, apiKey: host.apiKey, connectionMode: host.connectionMode }
+    : undefined;
   // Attach the snapshot-first stream before enqueueing so a cached,
   // near-instant pull still produces a visible terminal event and refresh.
   await downloads.subscribe(host ?? undefined);
