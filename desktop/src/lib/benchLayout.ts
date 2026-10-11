@@ -20,7 +20,8 @@
 export const MIN_CANVAS_HEIGHT = 320;
 
 /**
- * Height the composer occupies before it has been measured: one prompt row
- * plus one control row plus the card's padding.
+ * Height the composer occupies before it has been measured: the resize
+ * handle, the prompt at its opening height (`PROMPT_HEIGHT_INITIAL`, three
+ * lines), one control row and the card's padding.
  */
-export const COMPOSER_FALLBACK_HEIGHT = 114;
+export const COMPOSER_FALLBACK_HEIGHT = 168;

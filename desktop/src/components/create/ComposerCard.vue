@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import PromptEditor from "@studio/components/PromptEditor.vue";
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { promptPlaceholder } from "@studio/lib/promptRequirement";
 import { promptTransformBlockedReason } from "@studio/lib/promptTransform";
 import {
@@ -22,7 +22,15 @@ import { promptInputForForm } from "../../lib/promptRecipe";
 import type { GenerateRequest } from "../../lib/api/types";
 import type { ApiTarget } from "../../lib/api/client";
 import { MAX_BATCH_SIZE } from "../../lib/generateForm";
-import { autoGrowRows } from "../../lib/autogrow";
+import {
+  PROMPT_HEIGHT_INITIAL,
+  PROMPT_HEIGHT_STEP,
+  availablePromptHeight,
+  draggedPromptHeight,
+  loadPromptHeight,
+  resolvePromptHeight,
+  savePromptHeight,
+} from "../../lib/promptEditorHeight";
 import { PromptCycler, caretOnFirstLine, caretOnLastLine } from "@studio/lib/promptCycler";
 import type { PromptAuthoringSource } from "@studio/lib/promptProvenance";
 import { primaryModifierPressed, shortcutLabel } from "../../lib/platform";
@@ -33,7 +41,7 @@ import { primaryModifierPressed, shortcutLabel } from "../../lib/platform";
  * Make N, Write more for me — then Generate. Style is the ONE style picker and is
  * supplied through the `style` slot, so this component stays presentational.
  * Advisory text never shares a row with controls. Owns the prompt textarea and its editing affordances — ⌘↵
- * generate, ⌘E expand, ↑/↓ shell-style prompt history, autogrow. The view
+ * generate, ⌘E expand, ↑/↓ shell-style prompt history, and its resize handle. The view
  * keeps all orchestration; this component only surfaces intent.
  */
 const props = withDefaults(
@@ -179,14 +187,59 @@ watch(
   { immediate: true },
 );
 
-function growPrompt() {
-  if (promptEl.value) autoGrowRows(promptEl.value, 3);
+// The prompt opens three lines tall and the handle above it resizes it,
+// growing upward from the bottom-anchored composer. The saved height is the
+// person's; a short window only clamps what is drawn.
+const preferredPromptHeight = ref(loadPromptHeight());
+const viewportHeight = ref(window.innerHeight);
+const promptRoom = computed(() => availablePromptHeight(viewportHeight.value));
+const promptHeight = computed(() =>
+  resolvePromptHeight(preferredPromptHeight.value, promptRoom.value),
+);
+function setPromptHeight(next: number) {
+  preferredPromptHeight.value = resolvePromptHeight(next, promptRoom.value);
+  savePromptHeight(preferredPromptHeight.value);
 }
-watch(promptText, () => void nextTick(growPrompt), { flush: "post" });
+function onViewportResize() {
+  viewportHeight.value = window.innerHeight;
+}
+let dragStart: { y: number; height: number } | null = null;
+function onHandlePointerDown(event: PointerEvent) {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  dragStart = { y: event.clientY, height: promptHeight.value };
+  (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+}
+function onHandlePointerMove(event: PointerEvent) {
+  if (!dragStart) return;
+  setPromptHeight(
+    draggedPromptHeight(dragStart.height, event.clientY - dragStart.y, promptRoom.value),
+  );
+}
+function onHandlePointerUp(event: PointerEvent) {
+  dragStart = null;
+  (event.currentTarget as HTMLElement).releasePointerCapture?.(event.pointerId);
+}
+function onHandleKeydown(event: KeyboardEvent) {
+  const delta =
+    event.key === "ArrowUp"
+      ? PROMPT_HEIGHT_STEP
+      : event.key === "ArrowDown"
+        ? -PROMPT_HEIGHT_STEP
+        : 0;
+  if (delta) {
+    event.preventDefault();
+    setPromptHeight(promptHeight.value + delta);
+  } else if (event.key === "Home") {
+    event.preventDefault();
+    setPromptHeight(PROMPT_HEIGHT_INITIAL);
+  }
+}
 onMounted(() => {
-  growPrompt();
+  window.addEventListener("resize", onViewportResize);
   promptEl.value?.focus();
 });
+onBeforeUnmount(() => window.removeEventListener("resize", onViewportResize));
 
 function cycleHistory(direction: "prev" | "next"): boolean {
   const replacement = direction === "prev" ? cycler.prev(promptText.value) : cycler.next();
@@ -204,7 +257,6 @@ function onPromptInput(event: Event) {
   const value = (event.target as HTMLTextAreaElement).value;
   cycler.reset();
   promptText.value = value;
-  growPrompt();
   emit("prompt-authored", value, "typed");
 }
 
@@ -246,34 +298,56 @@ defineExpose({ focus, expand, record, isEditingPrompt: () => promptEditorOpen.va
 <template>
   <div data-test="composer-card" class="ms-composer">
     <div class="ms-composer__card">
+      <div
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Prompt height"
+        :aria-valuenow="Math.round(promptHeight)"
+        :aria-valuemax="Math.round(promptRoom)"
+        tabindex="0"
+        title="Drag to make the prompt taller or shorter · double-click to reset"
+        class="prompt-resize-handle"
+        data-test="prompt-resize-handle"
+        @pointerdown="onHandlePointerDown"
+        @pointermove="onHandlePointerMove"
+        @pointerup="onHandlePointerUp"
+        @pointercancel="onHandlePointerUp"
+        @dblclick="setPromptHeight(PROMPT_HEIGHT_INITIAL)"
+        @keydown="onHandleKeydown"
+      >
+        <span class="prompt-resize-handle__grip" aria-hidden="true" />
+      </div>
       <div class="ms-composer__prompt-row">
         <textarea
           ref="promptEl"
           :value="promptText"
           data-selectable
-          rows="1"
           aria-label="Prompt"
           :placeholder="invitation"
-          class="ms-composer__input"
+          class="ms-composer__input prompt-input"
+          :style="{ height: `${promptHeight}px` }"
           @keydown="onKeydown"
           @input="onPromptInput"
         />
-        <EstimateBadge
-          class="ms-composer__estimate"
-          :request="estimateRequest"
-          :target="estimateTarget"
-          :estimate="estimateGeneration"
-        />
+        <div class="prompt-side">
+          <EstimateBadge
+            class="ms-composer__estimate"
+            :request="estimateRequest"
+            :target="estimateTarget"
+            :estimate="estimateGeneration"
+          />
+          <button
+            v-if="form.recipeCapabilities?.promptMode !== 'ignored'"
+            type="button"
+            class="prompt-editor-opener"
+            data-test="edit-prompt"
+            title="Open the prompt in a full-window editor"
+            @click="promptEditorOpen = true"
+          >
+            Edit prompt
+          </button>
+        </div>
       </div>
-      <button
-        v-if="form.recipeCapabilities?.promptMode !== 'ignored'"
-        type="button"
-        class="prompt-editor-opener"
-        data-test="edit-prompt"
-        @click="promptEditorOpen = true"
-      >
-        Edit prompt
-      </button>
       <div class="ms-composer__controls">
         <!-- The Style chip IS the picker (StylePicker.vue, filled by the view);
              it opens its menu in place rather than being a door to a second
@@ -520,14 +594,53 @@ defineExpose({ focus, expand, record, isEditingPrompt: () => promptEditorOpen.va
 </style>
 
 <style scoped>
+.prompt-resize-handle {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 12px;
+  margin-bottom: -6px;
+  cursor: ns-resize;
+  touch-action: none;
+  border-radius: var(--mold-radius-2) var(--mold-radius-2) 0 0;
+}
+.prompt-resize-handle__grip {
+  width: 38px;
+  height: 4px;
+  border-radius: 999px; /* literal: pill */
+  background: var(--mold-border);
+  transition: background var(--mold-dur-quick) var(--mold-ease-out);
+}
+.prompt-resize-handle:hover .prompt-resize-handle__grip,
+.prompt-resize-handle:focus-visible .prompt-resize-handle__grip {
+  background: var(--mold-text-dim);
+}
+.prompt-resize-handle:focus-visible {
+  outline: 2px solid var(--mold-blue);
+  outline-offset: -2px;
+}
+/* A multi-line prompt reads from the top; the estimate and the editor door
+   stay pinned to its first line rather than floating to a baseline. */
+.ms-composer__prompt-row {
+  align-items: flex-start;
+}
+.prompt-input {
+  resize: none;
+  overflow-y: auto;
+}
+.prompt-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  flex: none;
+}
 .prompt-editor-opener {
-  align-self: flex-start;
   display: inline-flex;
   align-items: center;
   width: fit-content;
-  min-height: 36px;
-  padding: 6px 10px;
-  margin: 4px 12px;
+  min-height: 26px;
+  padding: 3px 8px;
   font: inherit;
   font-size: var(--mold-fs-xs);
   color: var(--mold-text-dim);
