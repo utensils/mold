@@ -37,6 +37,12 @@ Ed25519 public key). First trust comes from QR/fingerprint approval, never cloud
 metadata or a silently accepted replacement key. Canonical signatures use exact
 domain-separated binary bytes; never sign a JSON serialization.
 
+The checked-in browser WASM is generated on `x86_64-unknown-linux-gnu` with
+Rust 1.98.0 and the locked wasm-bindgen CLI. Other hosts consume that artifact;
+native Rust/Apple builds remain cross-platform. Keep the exact-byte CI check.
+See `crates/mold-secure/README.md` for regeneration and why compiler-host identity
+is part of the reproducible build contract.
+
 The server alone creates `$MOLD_HOME/secure/host.identity` (64 bytes). Connector
 and clients use shared private-file helpers: owner-only POSIX permissions or a
 protected current-user-only Windows DACL, bounded reads, no symlinks/reparse

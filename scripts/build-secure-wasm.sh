@@ -14,7 +14,7 @@ if ! command -v wasm-bindgen >/dev/null || [[ "$(wasm-bindgen --version)" != "wa
 fi
 # Panic locations and generated Rust paths otherwise encode the builder's
 # checkout, registry and installed rust-src paths into the shipped WASM.
-# Keep byte verification portable between macOS development and Linux CI.
+# Keep bytes stable across canonical Linux checkout and installation paths.
 # Keep the default aligned with the secure-protocol CI compiler.
 wasm_toolchain="${MOLD_WASM_TOOLCHAIN:-1.98.0}"
 if [[ "$(rustc +"$wasm_toolchain" --version)" != "rustc 1.98.0 "* ]]; then
@@ -22,7 +22,15 @@ if [[ "$(rustc +"$wasm_toolchain" --version)" != "rustc 1.98.0 "* ]]; then
   exit 1
 fi
 wasm_sysroot=$(rustc +"$wasm_toolchain" --print sysroot)
-wasm_rust_revision=$(rustc +"$wasm_toolchain" -vV | sed -n 's/^commit-hash: //p')
+wasm_rust_info=$(rustc +"$wasm_toolchain" -vV)
+wasm_rust_host=$(printf '%s\n' "$wasm_rust_info" | sed -n 's/^host: //p')
+if [[ "$wasm_rust_host" != x86_64-unknown-linux-gnu ]]; then
+  echo "Browser crypto artifacts require the canonical x86_64-unknown-linux-gnu builder." >&2
+  echo "On x86_64 Linux, install Rust 1.98.0 with target wasm32-unknown-unknown and wasm-bindgen-cli $version (--locked), then run this script." >&2
+  echo "Other hosts consume the checked-in artifacts; native Apple builds remain supported. See crates/mold-secure/README.md." >&2
+  exit 1
+fi
+wasm_rust_revision=$(printf '%s\n' "$wasm_rust_info" | sed -n 's/^commit-hash: //p')
 wasm_flags=(
   --cfg 'getrandom_backend="wasm_js"'
   "--remap-path-prefix=$PWD=/mold"

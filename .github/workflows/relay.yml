@@ -13,6 +13,7 @@ on:
       - "scripts/relay/**"
       - "scripts/tests/relay-*-test.py"
       - "scripts/tests/secure-framework-portability.sh"
+      - "scripts/tests/secure-wasm-builder-test.py"
       - "apps/shared/build-secure-framework.sh"
       - "apps/shared/scripts/isolate-rust-staticlib.sh"
       - "package.json"
@@ -32,6 +33,7 @@ on:
       - "scripts/relay/**"
       - "scripts/tests/relay-*-test.py"
       - "scripts/tests/secure-framework-portability.sh"
+      - "scripts/tests/secure-wasm-builder-test.py"
       - "apps/shared/build-secure-framework.sh"
       - "apps/shared/scripts/isolate-rust-staticlib.sh"
       - "package.json"
@@ -59,6 +61,7 @@ jobs:
       - run: python3 scripts/tests/relay-diagnostics-test.py
       - run: python3 scripts/tests/relay-staging-test.py
       - run: bash scripts/tests/secure-framework-portability.sh
+      - run: python3 scripts/tests/secure-wasm-builder-test.py
       - run: python3 scripts/relay/deploy.py --build-only --output "$RUNNER_TEMP/relay-packages"
       - run: |
           node -e 'import(process.env.RUNNER_TEMP + "/relay-packages/router/index.mjs")'
