@@ -19,6 +19,20 @@ let platformRegister:
   | undefined;
 let platformForget: ((profile: SecureHostProfile) => Promise<void>) | undefined;
 const platformTasks = new Map<string, Promise<void>>();
+const authorityGenerations = new Map<string, number>();
+const profileGenerations = new WeakMap<SecureHostProfile, number>();
+const forgetting = new Map<string, number>();
+const generation = (namespace: string) =>
+  authorityGenerations.get(namespace) ?? 0;
+
+/** A profile snapshot cannot outlive removal, including an in-flight lookup. */
+export function assertSecureHostCurrent(profile: SecureHostProfile): void {
+  if (
+    forgetting.has(profile.namespace) ||
+    profileGenerations.get(profile) !== generation(profile.namespace)
+  )
+    throw new Error("This pairing changed while connecting. Connect again.");
+}
 function serializePlatform(
   namespace: string,
   operation: () => Promise<void>,
@@ -43,27 +57,32 @@ export function configureSecurePlatform(
   registered.clear();
 }
 async function registerPlatform(profile: SecureHostProfile): Promise<void> {
+  const authority = generation(profile.namespace);
+  const current = () =>
+    !forgetting.has(profile.namespace) &&
+    generation(profile.namespace) === authority;
   if (
+    !current() ||
     !platformRegister ||
     registered.get(profile.namespace) === JSON.stringify(profile)
   )
     return;
   await serializePlatform(profile.namespace, async () => {
+    if (!current()) return;
     const sealed = await get<Sealed>(`host:${profile.namespace}`);
     if (!sealed || !platformRegister) return;
     const plain = await open(`host:${profile.namespace}`, sealed);
-    let current: SecureHostProfile;
+    let stored: SecureHostProfile;
     try {
-      current = JSON.parse(
-        new TextDecoder().decode(plain),
-      ) as SecureHostProfile;
+      stored = JSON.parse(new TextDecoder().decode(plain)) as SecureHostProfile;
     } finally {
       plain.fill(0);
     }
     // A queued registration cannot recreate a forgotten or replaced grant.
-    if (JSON.stringify(current) !== JSON.stringify(profile)) return;
+    if (JSON.stringify(stored) !== JSON.stringify(profile)) return;
     const identity = await deviceIdentity();
     try {
+      if (!current()) return;
       await platformRegister(profile, identity);
       registered.set(profile.namespace, JSON.stringify(profile));
     } finally {
@@ -81,7 +100,12 @@ const updates =
   typeof BroadcastChannel !== "undefined"
     ? new BroadcastChannel("mold-secure-v3")
     : null;
-updates?.addEventListener("message", () => {
+updates?.addEventListener("message", ({ data }: MessageEvent) => {
+  if (
+    typeof data?.namespace === "string" &&
+    (data.authority === "removed" || data.authority === "replaced")
+  )
+    authorityGenerations.set(data.namespace, generation(data.namespace) + 1);
   registered.clear();
   changed();
 });
@@ -116,21 +140,38 @@ async function get<T>(key: string): Promise<T | undefined> {
       reject(new Error("Could not read secure device storage."));
   });
 }
-async function put<T>(key: string, value: T, onlyIfAbsent = false): Promise<T> {
+async function put<T>(
+  key: string,
+  value: T,
+  onlyIfAbsent = false,
+  allowed?: (previous: T | undefined) => boolean,
+): Promise<T> {
   const database = await db();
   return new Promise((resolve, reject) => {
     const transaction = database.transaction("secrets", "readwrite");
     const store = transaction.objectStore("secrets");
     let selected = value;
+    let refused = false;
     const request = store.get(key);
     request.onsuccess = () => {
+      if (allowed && !allowed(request.result as T | undefined)) {
+        refused = true;
+        transaction.abort();
+        return;
+      }
       if (onlyIfAbsent && request.result !== undefined)
         selected = request.result as T;
       else store.put(value, key);
     };
     transaction.oncomplete = () => resolve(selected);
     transaction.onerror = transaction.onabort = () =>
-      reject(new Error("Could not save secure device storage."));
+      reject(
+        new Error(
+          refused
+            ? "This pairing changed while connecting. Connect again."
+            : "Could not save secure device storage.",
+        ),
+      );
   });
 }
 async function wrappingKey(): Promise<CryptoKey> {
@@ -211,6 +252,9 @@ export async function deviceIdentity(): Promise<Identity> {
 export async function saveSecureHost(
   profile: SecureHostProfile,
 ): Promise<void> {
+  const key = `host:${profile.namespace}`;
+  const authority = generation(profile.namespace);
+  const previous = await get<Sealed>(key);
   const identity = await deviceIdentity();
   try {
     checkHost(profile);
@@ -235,13 +279,28 @@ export async function saveSecureHost(
     )
       throw new Error("Invalid secure host address.");
   }
-  const key = `host:${profile.namespace}`;
   const encoded = new TextEncoder().encode(JSON.stringify(profile));
   try {
-    await put(key, await seal(key, encoded));
+    await put(
+      key,
+      await seal(key, encoded),
+      false,
+      (stored) =>
+        !forgetting.has(profile.namespace) &&
+        generation(profile.namespace) === authority &&
+        stored?.revision === previous?.revision &&
+        stored?.iv.join() === previous?.iv.join(),
+    );
+    authorityGenerations.set(
+      profile.namespace,
+      generation(profile.namespace) + 1,
+    );
     changed();
     await registerPlatform(profile);
-    updates?.postMessage("changed");
+    updates?.postMessage({
+      namespace: profile.namespace,
+      authority: "replaced",
+    });
   } finally {
     encoded.fill(0);
   }
@@ -264,13 +323,16 @@ export async function listSecureHosts(): Promise<SecureHostProfile[]> {
     const result: SecureHostProfile[] = [];
     for (const key of keys) {
       if (typeof key !== "string" || !key.startsWith("host:")) continue;
+      const authority = generation(key.slice("host:".length));
       const sealed = await get<Sealed>(key);
       if (!sealed) continue;
       const plain = await open(key, sealed);
       try {
-        result.push(
-          JSON.parse(new TextDecoder().decode(plain)) as SecureHostProfile,
-        );
+        const profile = JSON.parse(
+          new TextDecoder().decode(plain),
+        ) as SecureHostProfile;
+        profileGenerations.set(profile, authority);
+        result.push(profile);
       } finally {
         plain.fill(0);
       }
@@ -289,34 +351,51 @@ export async function secureHostForOrigin(
     (await listSecureHosts()).find((profile) =>
       profile.origins.includes(origin),
     ) ?? null;
-  if (profile) await registerPlatform(profile);
+  if (profile) {
+    assertSecureHostCurrent(profile);
+    await registerPlatform(profile);
+    assertSecureHostCurrent(profile);
+  }
   return profile;
 }
 
 export async function forgetSecureHost(namespace: string): Promise<void> {
-  await serializePlatform(namespace, async () => {
-    const removed = (await listSecureHosts()).find(
-      (profile) => profile.namespace === namespace,
-    );
-    if (removed) await platformForget?.(removed);
-    const database = await db();
-    await new Promise<void>((resolve, reject) => {
-      const transaction = database.transaction("secrets", "readwrite");
-      transaction.objectStore("secrets").delete(`host:${namespace}`);
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = transaction.onabort = () =>
-        reject(new Error("Could not remove secure pairing."));
-    });
-    if (removed && typeof window !== "undefined")
-      window.dispatchEvent(
-        new CustomEvent("mold:secure-host-forgotten", {
-          detail: { origins: removed.origins },
-        }),
+  // Fence snapshots synchronously, before queued native removal can suspend.
+  authorityGenerations.set(namespace, generation(namespace) + 1);
+  forgetting.set(namespace, (forgetting.get(namespace) ?? 0) + 1);
+  registered.delete(namespace);
+  try {
+    await serializePlatform(namespace, async () => {
+      const removed = (await listSecureHosts()).find(
+        (profile) => profile.namespace === namespace,
       );
-    registered.delete(namespace);
-    changed();
-    updates?.postMessage("removed");
-  });
+      if (removed) await platformForget?.(removed);
+      const database = await db();
+      await new Promise<void>((resolve, reject) => {
+        const transaction = database.transaction("secrets", "readwrite");
+        transaction.objectStore("secrets").delete(`host:${namespace}`);
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = transaction.onabort = () =>
+          reject(new Error("Could not remove secure pairing."));
+      });
+      if (removed && typeof window !== "undefined")
+        window.dispatchEvent(
+          new CustomEvent("mold:secure-host-forgotten", {
+            detail: { origins: removed.origins },
+          }),
+        );
+      registered.delete(namespace);
+      changed();
+      updates?.postMessage({ namespace, authority: "removed" });
+    });
+  } finally {
+    const remaining = forgetting.get(namespace)! - 1;
+    if (remaining) forgetting.set(namespace, remaining);
+    else forgetting.delete(namespace);
+    // A failed native removal retains the persisted pairing, but callers must
+    // acquire a fresh snapshot instead of reviving work started before Forget.
+    profiles = undefined;
+  }
 }
 
 /** Forget every route for this pinned installation, including a changed LAN address. */
@@ -405,7 +484,7 @@ async function updateStoredProfile(
   });
   if (updated) {
     profiles = undefined;
-    updates?.postMessage("changed");
+    updates?.postMessage({ namespace, authority: "unchanged" });
   }
   return updated;
 }

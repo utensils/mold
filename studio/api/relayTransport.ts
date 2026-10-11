@@ -3,6 +3,7 @@ import {
   deviceIdentity,
   secureHostForOrigin,
   renewSecureHostGrant,
+  assertSecureHostCurrent,
 } from "./secureStore";
 import {
   checkGrant,
@@ -88,6 +89,7 @@ async function channelFor(
   signal: AbortSignal,
 ): Promise<SecureChannel> {
   signal.throwIfAborted();
+  assertSecureHostCurrent(profile);
   const key = `${profile.namespace}|${origin}`;
   // Renewal preserves authority; a replacement grant or host pin does not.
   const authority = JSON.stringify([
@@ -121,6 +123,7 @@ async function channelFor(
       const identity = await deviceIdentity();
       try {
         controller.signal.throwIfAborted();
+        assertSecureHostCurrent(profile);
         const websocket = secureWebsocketFor(profile, origin);
         const channel = await SecureChannel.connect({
           host: profile,
@@ -137,6 +140,7 @@ async function channelFor(
           controller.signal.throwIfAborted();
         }
         try {
+          assertSecureHostCurrent(profile);
           if (profile.grant.expiresAt - Date.now() / 1000 < 7 * 86400) {
             const response = await channel.fetch(
               new Request(new URL("/api/pairing/secure/renew", origin), {
@@ -179,6 +183,7 @@ async function channelFor(
               );
             profile.grant = grant;
           }
+          assertSecureHostCurrent(profile);
           return channel;
         } catch (error) {
           channel.close();
@@ -264,9 +269,9 @@ export async function relayFetch(
     signal: request.signal,
     ...(request.body ? { duplex: "half" } : {}),
   } as RequestInit);
-  return (await channelFor(profile, url.origin, request.signal)).fetch(
-    encrypted,
-  );
+  const channel = await channelFor(profile, url.origin, request.signal);
+  assertSecureHostCurrent(profile);
+  return channel.fetch(encrypted);
 }
 
 if (typeof window !== "undefined")

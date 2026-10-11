@@ -1,11 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => {
   vi.resetModules();
-  return { lookup: vi.fn(), connect: vi.fn(), fetch: vi.fn() };
+  return {
+    lookup: vi.fn(),
+    connect: vi.fn(),
+    fetch: vi.fn(),
+    current: vi.fn(),
+    identity: vi.fn(),
+  };
 });
 vi.mock("./secureStore", () => ({
   secureHostForOrigin: mocks.lookup,
-  deviceIdentity: async () => ({ close() {}, free() {} }),
+  deviceIdentity: mocks.identity,
+  assertSecureHostCurrent: mocks.current,
 }));
 vi.mock("./secureChannel", () => ({
   SecureChannel: { connect: mocks.connect },
@@ -20,6 +27,8 @@ beforeEach(() => {
   configureSecureRequestAdapter(undefined);
   clearRelayInfoCache();
   vi.clearAllMocks();
+  mocks.current.mockImplementation(() => {});
+  mocks.identity.mockResolvedValue({ close() {}, free() {} });
   mocks.lookup.mockResolvedValue(null);
   mocks.connect.mockResolvedValue({
     closed: false,
@@ -175,5 +184,88 @@ describe("E2EE-only remote requests", () => {
     await secondResult;
     expect(connectionSignal.aborted).toBe(true);
     expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
+  it("closes a connection completed after its pairing was forgotten without dispatching", async () => {
+    mocks.lookup.mockResolvedValue({
+      namespace: "host",
+      endpoints: [],
+      grant: { expiresAt: 4000000000 },
+      apiKey: "secret",
+    });
+    let finish!: (value: unknown) => void;
+    mocks.connect.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const pending = relayFetch("https://host.example/api/queue", {
+      method: "POST",
+      body: "job",
+    });
+    const rejected = expect(pending).rejects.toThrow("pairing changed");
+    await vi.waitFor(() => expect(mocks.connect).toHaveBeenCalledOnce());
+    mocks.current.mockImplementation(() => {
+      throw new Error("pairing changed");
+    });
+    const close = vi.fn();
+    finish({ closed: false, close, fetch: mocks.fetch });
+    await rejected;
+    expect(close).toHaveBeenCalled();
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
+  it("refuses to connect after Forget races an asynchronous identity read", async () => {
+    mocks.lookup.mockResolvedValue({
+      namespace: "host",
+      endpoints: [],
+      grant: { expiresAt: 4000000000 },
+      apiKey: "secret",
+    });
+    let finish!: (value: unknown) => void;
+    mocks.identity.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const pending = relayFetch("https://host.example/api/queue", {
+      method: "POST",
+      body: "job",
+    });
+    const rejected = expect(pending).rejects.toThrow("pairing changed");
+    await vi.waitFor(() => expect(mocks.identity).toHaveBeenCalledOnce());
+    mocks.current.mockImplementation(() => {
+      throw new Error("pairing changed");
+    });
+    const close = vi.fn();
+    finish({ close, free() {} });
+    await rejected;
+    expect(close).toHaveBeenCalledOnce();
+    expect(mocks.connect).not.toHaveBeenCalled();
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
+  it("refuses stale authority before reusing an already-connected channel", async () => {
+    mocks.lookup.mockResolvedValue({
+      namespace: "host",
+      endpoints: [],
+      grant: { expiresAt: 4000000000 },
+      apiKey: "secret",
+    });
+    mocks.fetch.mockImplementation(async () => new Response("ok"));
+    await relayFetch("https://host.example/api/status");
+    mocks.current.mockImplementation(() => {
+      throw new Error("pairing changed");
+    });
+    await expect(
+      relayFetch("https://host.example/api/queue", {
+        method: "POST",
+        body: "job",
+      }),
+    ).rejects.toThrow("pairing changed");
+    expect(mocks.fetch).toHaveBeenCalledOnce();
+    expect(mocks.connect).toHaveBeenCalledOnce();
   });
 });

@@ -22,6 +22,7 @@ import {
   forgetSecureHost,
   updateSecureHostRoutes,
   renewSecureHostGrant,
+  assertSecureHostCurrent,
 } from "./secureStore";
 beforeAll(() => vi.stubGlobal("crypto", webcrypto));
 const original = (namespace: string) =>
@@ -211,5 +212,145 @@ it("registers changed native routes even when the device grant is unchanged", as
     await forgetSecureHost(profile.namespace);
   } finally {
     configureSecurePlatform(undefined);
+  }
+});
+
+it.each([false, true])(
+  "refuses pending authority while Forget retires a %s warm registration",
+  async (warm) => {
+    configureSecurePlatform(undefined);
+    const profile = original(`pending-forget-${warm}`);
+    await saveSecureHost(profile);
+    let finish!: () => void;
+    const paused = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const remove = vi.fn(() => paused);
+    const register = vi.fn();
+    configureSecurePlatform(register, remove);
+    try {
+      if (warm) await secureHostForOrigin(profile.origins[0]!);
+      const forgetting = forgetSecureHost(profile.namespace);
+      await vi.waitFor(() => expect(remove).toHaveBeenCalledOnce());
+      const pending = secureHostForOrigin(profile.origins[0]!);
+      const rejected = expect(pending).rejects.toThrow(/pairing changed/i);
+      await Promise.resolve();
+      finish();
+      await forgetting;
+      await rejected;
+      expect(register).toHaveBeenCalledTimes(warm ? 1 : 0);
+      expect(await secureHostForOrigin(profile.origins[0]!)).toBeNull();
+    } finally {
+      finish();
+      configureSecurePlatform(undefined);
+    }
+  },
+);
+
+it("invalidates existing snapshots only for the forgotten namespace", async () => {
+  const removed = original("snapshot-removed");
+  const kept = {
+    ...original("snapshot-kept"),
+    origins: ["https://other.test"],
+  };
+  await saveSecureHost(removed);
+  await saveSecureHost(kept);
+  const old = (await secureHostForOrigin(removed.origins[0]!))!;
+  const unrelated = (await secureHostForOrigin(kept.origins[0]!))!;
+  await forgetSecureHost(removed.namespace);
+  expect(() => assertSecureHostCurrent(old)).toThrow(/pairing changed/i);
+  expect(() => assertSecureHostCurrent(unrelated)).not.toThrow();
+  await forgetSecureHost(kept.namespace);
+});
+
+it.each(["save", "route", "renew"])(
+  "does not let a pending %s recreate a forgotten pairing",
+  async (operation) => {
+    const profile = original(`pending-${operation}-forget`);
+    await saveSecureHost(profile);
+    const encrypt = crypto.subtle.encrypt.bind(crypto.subtle);
+    let finish!: () => void;
+    let began!: () => void;
+    const paused = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      began = resolve;
+    });
+    const spy = vi
+      .spyOn(crypto.subtle, "encrypt")
+      .mockImplementationOnce(async (...args) => {
+        began();
+        await paused;
+        return encrypt(...args);
+      });
+    try {
+      const saving =
+        operation === "save"
+          ? saveSecureHost({ ...profile, apiKey: "replacement" })
+          : operation === "route"
+            ? updateSecureHostRoutes(
+                profile.namespace,
+                profile.grant.signature,
+                [],
+                ["https://old.test"],
+              )
+            : renewSecureHostGrant(profile, {
+                ...profile.grant,
+                signature: "renewed",
+              });
+      const completed =
+        operation === "save"
+          ? expect(saving).rejects.toThrow(/pairing changed/i)
+          : saving;
+      await started;
+      await forgetSecureHost(profile.namespace);
+      finish();
+      await completed;
+      expect(await secureHostForOrigin(profile.origins[0]!)).toBeNull();
+    } finally {
+      finish();
+      spy.mockRestore();
+    }
+  },
+);
+
+it("invalidates another tab's removed authority without invalidating renewals or other hosts", async () => {
+  const profile = original("cross-tab-removed");
+  const kept = {
+    ...original("cross-tab-kept"),
+    origins: ["https://other.test"],
+  };
+  await saveSecureHost(profile);
+  await saveSecureHost(kept);
+  const old = (await secureHostForOrigin(profile.origins[0]!))!;
+  const unrelated = (await secureHostForOrigin(kept.origins[0]!))!;
+  const other = new BroadcastChannel("mold-secure-v3");
+  try {
+    other.postMessage({ namespace: profile.namespace, authority: "unchanged" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(() => assertSecureHostCurrent(old)).not.toThrow();
+    await new Promise<void>((resolve, reject) => {
+      const request = indexedDB.open("mold-secure-v3", 1);
+      request.onsuccess = () => {
+        const transaction = request.result.transaction("secrets", "readwrite");
+        transaction.objectStore("secrets").delete(`host:${profile.namespace}`);
+        transaction.oncomplete = () => {
+          request.result.close();
+          resolve();
+        };
+        transaction.onerror = reject;
+      };
+      request.onerror = reject;
+    });
+    other.postMessage({ namespace: profile.namespace, authority: "removed" });
+    await vi.waitFor(() =>
+      expect(() => assertSecureHostCurrent(old)).toThrow(/pairing changed/i),
+    );
+    expect(() => assertSecureHostCurrent(unrelated)).not.toThrow();
+    expect(await secureHostForOrigin(profile.origins[0]!)).toBeNull();
+  } finally {
+    other.close();
+    await forgetSecureHost(kept.namespace);
   }
 });
