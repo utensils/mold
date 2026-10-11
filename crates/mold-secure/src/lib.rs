@@ -1,4 +1,4 @@
-//! Shared E2EE primitives and records. No network, application keys or inference.
+//! Shared E2EE primitives, records and private host bootstrap. No network or inference.
 //! The fixed Noise protocol is implemented by snow, not a custom key schedule.
 mod authorization;
 #[cfg(not(target_arch = "wasm32"))]

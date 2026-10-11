@@ -4431,6 +4431,7 @@ dependencies = [
  "mold-ai-core",
  "mold-ai-db",
  "mold-ai-inference",
+ "mold-ai-secure",
  "mold-ai-secure-client",
  "mold-ai-server",
  "notify-rust",
