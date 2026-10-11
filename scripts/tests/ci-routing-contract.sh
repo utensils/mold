@@ -45,7 +45,8 @@ active_file() {
       return
       ;;
   esac
-  local cached="$active_cache_dir/$(printf '%s' "$file" | tr '/' '%')"
+  local cached
+  cached="$active_cache_dir/$(printf '%s' "$file" | tr '/' '%')"
   if [[ ! -f "$cached" ]]; then
     sed -e 's/^[[:space:]]*#.*$//' "$file" > "$cached"
   fi

@@ -66,9 +66,9 @@ if [[ -z "$output" ]]; then
   exit 2
 fi
 
-stamp="$state_dir/failed-once"
-if [[ ! -e "$stamp" ]]; then
-  : > "$stamp"
+# Fail the first base attempt only. Base and source run concurrently, so a
+# shared check-then-create stamp could fail both and make this test flaky.
+if [[ "$output" == *.base.png ]] && mkdir "$state_dir/failed-once" 2>/dev/null; then
   echo 'server error: generation error: DriverError(CUDA_ERROR_INVALID_VALUE, "invalid argument")' >&2
   exit 1
 fi
@@ -91,7 +91,7 @@ if [[ -s "$run_dir/errors.jsonl" || -s "$run_dir/FAILED_CASES.tsv" ]]; then
   exit 1
 fi
 
-if [[ "$(jq -r 'select(.status | startswith("retry:")) | .model' "$run_dir/results.jsonl")" != "flux-transient:q8" ]]; then
+if [[ "$(jq -r 'select(.status | startswith("retry:")) | [.model, .case] | join(":")' "$run_dir/results.jsonl")" != "flux-transient:q8:base" ]]; then
   echo "expected retry status to be recorded" >&2
   exit 1
 fi

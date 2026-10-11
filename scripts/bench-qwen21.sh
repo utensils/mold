@@ -197,7 +197,7 @@ bench21_record() {
 # in execution order, every one "planned". The real run records exactly these
 # rows (status filled in), so the two can be diffed by cardinality.
 bench21_emit_plan() {
-  local line case_name model width height guidance negative gate i
+  local case_name model width height guidance negative gate i
   while IFS='|' read -r case_name model width height guidance negative gate; do
     bench21_record "$case_name" "$model" "$width" "$height" "$guidance" "$negative" \
       warmup 0 planned '{}'
@@ -267,7 +267,7 @@ bench21_summary() {
 
 # bench21_check_gates <summary-json>: prints each failure, returns non-zero on any.
 bench21_check_gates() {
-  local summary="$1" failures=0 line case_name model width height guidance negative gate median
+  local summary="$1" failures=0 case_name model width height guidance negative gate median
   while IFS='|' read -r case_name model width height guidance negative gate; do
     [[ -n "$gate" ]] || continue
     median="$(jq -r --arg c "$case_name" '.[] | select(.case == $c) | .denoise_s_median // "null"' <<<"$summary")"

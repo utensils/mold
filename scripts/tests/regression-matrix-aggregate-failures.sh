@@ -132,7 +132,6 @@ MOLD_BIN="$tmp/bin/fake-mold" \
 MOLD_FAKE_STATE="$tmp/state" \
 MOLD_REGRESSION_OUT="$tmp/run" \
 MOLD_REGRESSION_RUN_ID=aggregate \
-MOLD_REGRESSION_BATCH=2 \
 MOLD_REGRESSION_TIMEOUT_IMAGE=10 \
 "$repo_root/scripts/regression-matrix.sh" > "$tmp/stdout" 2> "$tmp/stderr"
 status=$?
@@ -167,6 +166,11 @@ if [[ ! -s "$failed_cases" ]]; then
 fi
 
 jq -e 'select(.status == "failed:23" and .case == "lora1" and (.stderr_tail | contains("intentional lora1 failure")))' "$errors" > /dev/null
+jq -se '
+  (map(select(.status == "start")) | length) == 4 and
+  (map(select(.status == "ok")) | length) == 3 and
+  (map(select(.status == "failed:23")) | length) == 1
+' "$tmp/run/aggregate/results.jsonl" > /dev/null
 grep -F $'flux-schnell:q8	flux	lora1	failed:23' "$failed_cases" > /dev/null
 
 min_timeout="$(<"$tmp/state/min-timeout")"

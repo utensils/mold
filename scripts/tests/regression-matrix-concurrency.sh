@@ -99,18 +99,26 @@ PATH="$tmp/bin:$PATH" \
 MOLD_BIN="$tmp/bin/fake-mold" \
 MOLD_FAKE_STATE="$tmp/state" \
 MOLD_REGRESSION_OUT="$tmp/run" \
-MOLD_REGRESSION_RUN_ID=batch \
-MOLD_REGRESSION_BATCH=4 \
+MOLD_REGRESSION_RUN_ID=concurrent \
 MOLD_REGRESSION_TIMEOUT_IMAGE=10 \
 "$repo_root/scripts/regression-matrix.sh" > "$tmp/stdout" 2> "$tmp/stderr"
 
 max_concurrency="$(<"$tmp/state/max")"
-if (( max_concurrency < 4 )); then
+if (( max_concurrency != 4 )); then
   echo "expected four matrix cases to be queued concurrently, saw $max_concurrency" >&2
   echo "--- stdout ---" >&2
   cat "$tmp/stdout" >&2
   echo "--- stderr ---" >&2
   cat "$tmp/stderr" >&2
+  exit 1
+fi
+
+jq -se '
+  (map(select(.status == "start")) | length) == 4 and
+  (map(select(.status == "ok")) | length) == 4
+' "$tmp/run/concurrent/results.jsonl" > /dev/null
+if (( $(<"$tmp/state/current") != 0 )); then
+  echo "matrix returned before every case finished" >&2
   exit 1
 fi
 
