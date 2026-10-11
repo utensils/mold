@@ -9,10 +9,10 @@ a staging result. Account profile is `dev.urandom.io`, region `us-west-2`.
 - [x] Mold PR: <https://github.com/utensils/mold/pull/1867>. Cloud checkpoint
       `1122a2c6b` adds the broker and host-accept gate; later commits must preserve its tests.
 - [x] Infrastructure PR: <https://github.com/urandomio/infra/pull/2>, reviewed
-      checkpoint `aa6e69890f83ff6358a6d5c3f0f459f1011e4403`.
+      checkpoint `e8afa524dab8ff4bf4fb4a51352745ab4de7a501`.
 - [x] Full Terraform plan is confined to `module.mold_relay`: 20 updates and
       one deletion, no creation/replacement or unrelated mutation. The deletion is
-      the retired frontend asynchronous invocation policy. Regenerate at final head.
+      the retired frontend asynchronous invocation configuration. Regenerate at final head.
 - [x] Cost Explorer allocation keys `BillingGroup`, `Project`, `Service`,
       `Environment`, `ManagedBy` are Active. Module tests check all supported tags,
       including explicit CloudFormation child tags. Shared Route53 zone costs remain
@@ -20,8 +20,8 @@ a staging result. Account profile is `dev.urandom.io`, region `us-west-2`.
 - [x] Staging stack `mold-relay-v3-uat` uses WSS
       `wss://4dp9o267oi.execute-api.us-west-2.amazonaws.com/uat` and isolated bucket
       `mold-relay-v3-uat-042506291754-us-west-2`. No EC2 or production DNS change.
-- [x] Reviewed stage broker hash after host-accept and tombstone hardening:
-      `lu3cLfotZYdQVCN2DICUm8TIMoJPDWK38nur6dgU0eI=`. Record superseding hashes here
+- [x] Reviewed stage broker hash after host-accept, tombstone, atomic allocation and bounded quota compression:
+      `7NuM/cdc7x3Ntp3hbROcXHuhAmjlOfqHqE7ByGDpsgc=`. Record superseding hashes here
       before using newer evidence. Production hashes are **not yet assigned**.
 - [x] Staged carrier checks: invalid checksum rejected; signed exact PUT/GET
       succeeds; conditional duplicate cannot overwrite; path segments encode exactly
@@ -31,6 +31,20 @@ a staging result. Account profile is `dev.urandom.io`, region `us-west-2`.
       and `_mold/objects/`; recheck after old writes stop. DynamoDB had 11 known
       legacy metadata rows, and exactly two owned old SSM parameters. No secret
       values or host media were read or printed.
+
+- [x] App associations PR <https://github.com/utensils/utensils.github.io/pull/48>
+      merged as `b63df2f8bb033e8124a666d86cffc4684e6b446a`. Build/deploy run
+      `38172992429` passed; both live HTTPS `.well-known` records contain the
+      reviewed iOS bundle IDs and verified Android release certificate.
+- [x] Isolated actual Tauri desktop paired to the private-interface fixture
+      `192.168.1.142:53372`, showed "on your network", and reconnected with the
+      saved pairing after quit/relaunch. This verifies desktop LAN behavior;
+      it is not evidence that the installed production host has been upgraded.
+
+- [x] The uninterrupted 200 MiB debug-client transfer completed with exact bytes
+      and bounded memory. [Cost evidence](relay-cost-evidence.md) records its
+      UTC interval, code hash, measured cloud counts and official regional rates.
+      Optimized-build and compact-storage measurements are still separate checks.
 
 ## Required release gate
 
@@ -51,7 +65,9 @@ a staging result. Account profile is `dev.urandom.io`, region `us-west-2`.
       non-loopback browser HTML redirects to fixed HTTPS Studio without forwarding
       incoming path/query. The secure WebSocket route remains available separately.
 - [ ] New client builds are available/installed before removing their old cloud
-      path. No compatibility switch or plaintext fallback remains in the release.
+      path. Include the signed/native apps, headless CLI archives and exact-digest
+      Docker images used by RunPod provisioning; an older image cannot consume
+      the new one-time secure bootstrap. No compatibility switch or plaintext fallback remains in the release.
 - [ ] Halcyon's persistent server-owned identity is read through the secure
       helper, its public fingerprint is independently checked, and the actual public
       key is operator-registered with its intended principal in production. Never use
