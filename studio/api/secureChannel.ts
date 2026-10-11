@@ -174,13 +174,19 @@ export class SecureChannel {
   }
 
   private send(frame: Record<string, unknown>): void {
-    if (
-      this.failed ||
-      this.socket.readyState !== WebSocket.OPEN ||
-      this.socket.bufferedAmount > 131072
-    )
+    if (this.failed || this.socket.readyState !== WebSocket.OPEN)
       throw new Error("Secure connection is not accepting data.");
-    this.socket.send(JSON.stringify(frame));
+    const encoded = JSON.stringify(frame);
+    // One valid sixteen-frame window occupies ~350 KiB after base64 and JSON.
+    // The browser may enqueue that entire burst before its socket flushes.
+    // Retain a hard bound for a stalled socket, including the next frame.
+    if (
+      this.socket.bufferedAmount +
+        new TextEncoder().encode(encoded).byteLength >
+      512 * 1024
+    )
+      throw new Error("Secure connection send buffer is full.");
+    this.socket.send(encoded);
     if (frame.a === "data" && typeof frame.seq === "number")
       this.wire?.markSent(
         frame.seq,

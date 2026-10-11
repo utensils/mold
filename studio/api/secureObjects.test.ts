@@ -176,6 +176,63 @@ it("rejects corrupt, oversized, cross-session and out-of-window objects before d
   expect(delivered).not.toHaveBeenCalled();
   carrier.close();
 });
+it("replays the ACK when a late GET sees a tombstone only after every referenced frame was consumed", async () => {
+  const packed = await packObject([new Uint8Array([1])]);
+  let finish!: (response: Response) => void;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          finish = resolve;
+        }),
+    ),
+  );
+  let next = 0;
+  const emitted = vi.fn();
+  const delivered = vi.fn();
+  const carrier = new CipherObjectCarrier(
+    context,
+    emitted,
+    delivered,
+    () => next,
+    () => {},
+  );
+  const frame = {
+    a: "data",
+    v: 3,
+    sid: context.sid,
+    rid: context.rid,
+    seq: 0,
+    o: {
+      id,
+      bytes: packed.bytes.length,
+      count: 1,
+      sha256: packed.sha256,
+      url: url(),
+    },
+  };
+  const pending = carrier.receive(frame);
+  next = 1;
+  const ack = {
+    a: "ack",
+    v: 3,
+    sid: context.sid,
+    rid: context.rid,
+    next,
+    credit: 16,
+    ack_seq: 7,
+  };
+  carrier.send(ack);
+  finish(
+    new Response(new Uint8Array(0), { headers: { "content-length": "0" } }),
+  );
+  await expect(pending).resolves.toBeUndefined();
+  expect(delivered).not.toHaveBeenCalled();
+  expect(emitted).toHaveBeenLastCalledWith(ack);
+  carrier.close();
+});
+
 it("uploads only retained ciphertext, binds broker replies, and retransmits the same object reference", async () => {
   vi.useFakeTimers();
   const sent: Record<string, unknown>[] = [];

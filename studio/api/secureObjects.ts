@@ -287,10 +287,21 @@ export class CipherObjectCarrier {
     )
       throw new Error("Ciphertext object receive budget exceeded.");
     this.downloadingBytes += o.bytes;
-    const task = this.download(frame.seq, o).finally(() => {
-      this.downloads.delete(key);
-      this.downloadingBytes -= o.bytes;
-    });
+    const task = this.download(frame.seq, o)
+      .catch((error: unknown) => {
+        // An overlapping retry may finish after another copy was consumed and
+        // the broker cleared its bytes. Only a fully acknowledged range is stale.
+        if (!this.abort.signal.aborted && end <= this.receiveNext()) {
+          if (this.ack) this.flushAck();
+          else if (this.lastAck) this.emit(this.lastAck);
+          return;
+        }
+        throw error;
+      })
+      .finally(() => {
+        this.downloads.delete(key);
+        this.downloadingBytes -= o.bytes;
+      });
     this.downloads.set(key, { signature, task });
     return task;
   }

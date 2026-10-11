@@ -16,6 +16,7 @@ import {
 } from "./lib/secureStudio";
 import { addHost, listStoredHosts } from "./lib/hostRegistry";
 import App from "./App.vue";
+import { takeInitialPairingLink } from "./lib/initialPairing";
 import {
   ORIGIN_ACCESS_CHANGE_KEY,
   originAuthenticatedFetch,
@@ -24,7 +25,7 @@ import {
 } from "./lib/originAuth";
 const hosted = standaloneStudio();
 if (hosted) configureSecureOrigin(() => studioPrimary()?.url ?? null);
-const invitation = ref("");
+const invitation = ref(takeInitialPairingLink());
 const remembered = ref(listStoredHosts());
 const selected = ref(studioPrimary()?.id ?? remembered.value[0]?.id ?? "");
 const ready = ref(false);
@@ -112,11 +113,6 @@ function changeKey() {
 }
 provide(ORIGIN_ACCESS_CHANGE_KEY, changeKey);
 onMounted(() => {
-  const fragment = location.hash;
-  if (hosted && fragment.includes("invite_seed=")) {
-    invitation.value = `https://utensils.io/mold/pair/${fragment}`;
-    history.replaceState(null, "", location.pathname);
-  }
   void connect();
 });
 </script>

@@ -12,6 +12,7 @@ import MachinesPage from "./pages/MachinesPage.vue";
 import HostDetailPage from "./pages/HostDetailPage.vue";
 import SettingsPage from "./pages/SettingsPage.vue";
 import NotFoundPage from "./pages/NotFoundPage.vue";
+import { captureInitialPairingLink } from "./lib/initialPairing";
 
 // Five browser workspaces retain existing deep links; retired URLs are unknown.
 export const routes: RouteRecordRaw[] = [
@@ -30,6 +31,7 @@ export const routes: RouteRecordRaw[] = [
   { path: "/:pathMatch(.*)*", name: "not-found", component: NotFoundPage },
 ];
 
+captureInitialPairingLink();
 export const router = createRouter({
   history:
     import.meta.env.VITE_STANDALONE_STUDIO === "1"

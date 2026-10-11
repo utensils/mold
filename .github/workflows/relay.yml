@@ -91,4 +91,4 @@ jobs:
           MOLD_WASM_TOOLCHAIN: 1.98.0
         run: bash scripts/build-secure-wasm.sh --check
       - name: Browser cryptography, multiplexing, storage and media regressions
-        run: bunx vitest run --config studio/vitest.config.ts studio/api/secureCrypto.test.ts studio/api/secureMux.test.ts studio/api/secureWire.test.ts studio/api/secureObjects.test.ts studio/api/secureStore.test.ts studio/api/secureMediaWorker.test.ts studio/api/relayTransport.test.ts studio/api/connectionRoutes.test.ts studio/api/pairing.test.ts
+        run: bunx vitest run --config studio/vitest.config.ts studio/api/secureCrypto.test.ts studio/api/secureMux.test.ts studio/api/secureWire.test.ts studio/api/secureChannel.test.ts studio/api/secureObjects.test.ts studio/api/secureStore.test.ts studio/api/secureMediaWorker.test.ts studio/api/relayTransport.test.ts studio/api/connectionRoutes.test.ts studio/api/pairing.test.ts
