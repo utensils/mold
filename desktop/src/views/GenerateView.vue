@@ -3382,15 +3382,13 @@ function sourcePreprocessingNeedsRoute(draft: ReturnType<typeof cloneGenerateFor
 const promptMissing = computed(
   () => promptRequired(promptInputForForm(form)) && !form.prompt.trim(),
 );
-const h3RequireFirstFrame = computed(
-  () =>
-    effectiveGenerationRecipe(selectedEntry.value, form.pipeline)?.capabilities.source_image ===
-      "required" ||
-    selectedEntry.value?.source_image === "required" ||
-    form.sourceImageCapability === "required",
-);
 const h3AuthoringError = computed(() =>
-  minimaxH3AuthoringError(form.family, form.model, form.h3Authoring, h3RequireFirstFrame.value),
+  minimaxH3AuthoringError(
+    form.family,
+    form.model,
+    form.h3Authoring,
+    caps.value.requiresSourceImage,
+  ),
 );
 
 /**

@@ -359,6 +359,10 @@ exact header and tensor inventory. It is stored under the tag's own model
 directory, never over the Comfy-Org transformer, so a machine that already has
 any compact FL2VA tag installed downloads only those 22.128 GB. The MiniMax H3
 Community License governs these weights like every other H3 artifact.
+An installed FastH3 model advertises its own runtime recipe, including optional
+boundary frames, fixed nine sampler grid points, and zero guidance. Its
+installation check uses its substituted transformer and the shared components;
+it does not require the ordinary FL2VA transformer as well.
 
 The file carries two things Comfy-Org's does not. Its 50 video-sparse-attention
 gates (`to_gate_compress`, 1.928 GB) are authenticated with the rest of the
@@ -372,6 +376,13 @@ FL2VA tag. On one L40S at 1344x768x124 text-only it denoised in about 395 s
 (8 evaluations) and the server process peaked at 31.1 GB of device memory
 (1 Hz `nvidia-smi`), against 21.3 GB for the DMAD 4-step tier on the same
 prompt; the qualification record holds the full campaign.
+
+Veda sparse attention remains deferred: it needs a separate Rust predictor and
+attention implementation plus numerical and performance qualification. The
+FastH3 tag above does not enable that acceleration. PDD Acc is separate work
+tracked in [#1540](https://github.com/utensils/mold/issues/1540); the remaining
+packs and acceleration work are tracked in
+[#1812](https://github.com/utensils/mold/issues/1812).
 
 ## Download size and sources
 
@@ -493,6 +504,9 @@ The current compact implementation supports this request profile:
   mold run minimax-h3-fl2va:comfy-pruned-int8-turbo-8step "a lighthouse keeper climbs the spiral stairs at dusk, wind howling" --seed 7
   ```
 
+- web, desktop, mobile, and native apps follow the selected machine’s recipe
+  for whether a start frame is optional or required. A saved draft from an older
+  machine cannot override a newer recipe’s text-only support.
 - queued jobs retain exact first/last endpoint roles through durable storage
   and server restart; the same queue behavior applies to FL2VA Turbo tiers
 - MP4 output with synchronized generated audio

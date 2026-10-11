@@ -466,7 +466,7 @@ export function baseGenerationCapabilities(
       ? "optional"
       : "unsupported";
   const sourceImageCapability = resolveSourceImageCapability(
-    advertisedSourceImage,
+    profileCaps?.source_image ?? advertisedSourceImage,
     familySourceImage,
   );
   // The reference contract, resolved ONCE: the advertised block decides (a
