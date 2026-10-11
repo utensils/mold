@@ -14,8 +14,9 @@
 //! [`REVIEWED_COMPACT_TRANSFORMERS`] whose size and SHA-256 pins agree. A
 //! Turbo tag's manifest carries its base stack's Transformer row, so it
 //! resolves to the base selection exactly as before, and every pre-existing
-//! storage, qualification, and frozen identity stays byte-identical.
-//! Registering the FastH3 manifest tag (wave 2) needs no change here.
+//! storage, qualification, and frozen identity stays byte-identical. The
+//! FastH3 manifest tag (`mold_core::minimax_h3::FL2VA_FASTH3_V2_INT8`) names
+//! the FastVideo file in its own Transformer row and selects it here.
 
 use anyhow::{anyhow, bail, Result};
 use mold_candle::minimax_h3::{
@@ -268,27 +269,11 @@ fn transformer_row(manifest: &'static ModelManifest) -> Result<&'static ModelFil
     Ok(file)
 }
 
-/// A leaked copy of the FL2VA base manifest whose Transformer row is the
-/// FastH3 V2 file — the shape wave 2's FastH3 manifest tag will have. Wave 1
-/// registers no FastH3 identity, so the copy borrows a resolvable FL2VA name
-/// (the 8-step Turbo tag, whose base files share the FL2VA storage bucket):
-/// `manifest_contract` keys task and layout on the NAME, and the transformer
-/// row is all selection reads beyond that.
+/// The registered FastH3 V2 manifest: the FL2VA compact stack whose
+/// Transformer row names FastVideo's distilled DiT.
 #[cfg(test)]
 pub(crate) fn test_fasth3_manifest() -> &'static ModelManifest {
-    let mut manifest = find_manifest(contract::FL2VA_COMFY).unwrap().clone();
-    manifest.name = contract::FL2VA_COMFY_TURBO_8STEP.to_owned();
-    let artifact = H3ComfyPublishedArtifact::FastH3V2Fl2VaPrunedInt8ConvRot;
-    let row = manifest
-        .files
-        .iter_mut()
-        .find(|file| file.component == ModelComponent::Transformer)
-        .unwrap();
-    row.hf_repo = contract::FASTVIDEO_FASTH3_REPO.to_owned();
-    row.hf_filename = H3_FASTH3_V2_INT8_SOURCE_PATH.to_owned();
-    row.size_bytes = artifact.file_bytes();
-    row.sha256 = Some(artifact.content_sha256());
-    Box::leak(Box::new(manifest))
+    find_manifest(contract::FL2VA_FASTH3_V2_INT8).expect("the FastH3 tag is registered")
 }
 
 #[cfg(test)]
@@ -309,11 +294,15 @@ mod tests {
         );
     }
 
-    /// Every reviewed identity today — both bases and every Turbo tag —
-    /// resolves to its task's base selection, so nothing pre-existing moves.
+    /// Every reviewed identity that is not a distilled base tier — both bases
+    /// and every Turbo tag — resolves to its task's base selection, so
+    /// nothing pre-existing moves.
     #[test]
     fn every_reviewed_compact_model_selects_its_task_base() {
-        for model in contract::REVIEWED_COMPACT_MODELS {
+        for model in contract::REVIEWED_COMPACT_MODELS
+            .iter()
+            .filter(|model| contract::distilled_base_tier_for_model(model).is_none())
+        {
             let task = contract::task_for_model(model).unwrap();
             let selection = H3CompactTransformerSelection::for_model(model).unwrap();
             assert_eq!(
@@ -343,7 +332,21 @@ mod tests {
     #[test]
     fn a_manifest_naming_the_fasth3_file_selects_the_fasth3_artifact() {
         let manifest = test_fasth3_manifest();
+        assert_eq!(manifest.name, contract::FL2VA_FASTH3_V2_INT8);
         let selection = H3CompactTransformerSelection::for_manifest(manifest).unwrap();
+        // Selecting by the registered tag is the same answer, and mold-core's
+        // tier row pins exactly mold-candle's published artifact.
+        assert_eq!(
+            H3CompactTransformerSelection::for_model(contract::FL2VA_FASTH3_V2_INT8).unwrap(),
+            selection
+        );
+        let tier =
+            contract::distilled_base_tier_for_model(contract::FL2VA_FASTH3_V2_INT8).unwrap();
+        let artifact = H3ComfyPublishedArtifact::FastH3V2Fl2VaPrunedInt8ConvRot;
+        assert_eq!(tier.transformer_hf_filename, H3_FASTH3_V2_INT8_SOURCE_PATH);
+        assert_eq!(tier.transformer_size_bytes, artifact.file_bytes());
+        assert_eq!(tier.transformer_sha256, artifact.content_sha256());
+        assert_eq!(candle_task(tier.task), artifact.task());
         assert_eq!(selection.task(), Task::Fl2va);
         assert_eq!(
             selection.published_artifact(),

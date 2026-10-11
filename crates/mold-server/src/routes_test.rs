@@ -12832,6 +12832,7 @@ mod tests {
             OFFICIAL_REPO, REF2VA_COMFY, REF2VA_COMFY_NVFP4, REF2VA_COMFY_TURBO_4STEP,
             REF2VA_COMFY_TURBO_4STEP_R21, REF2VA_OFFICIAL,
         };
+        use mold_core::minimax_h3::{FASTVIDEO_FASTH3_REPO, FL2VA_FASTH3_V2_INT8};
         // Both compact task partitions execute since #825, so their answer
         // depends only on how this binary was compiled; the pinned layouts
         // below are unrunnable everywhere.
@@ -12914,6 +12915,15 @@ mod tests {
                     COMFY_REPO,
                     ref2va.0,
                     ref2va.1
+                ),
+                // FastH3 V2 substitutes the TRANSFORMER itself, so its row
+                // names the distilled DiT's own repository.
+                (
+                    FL2VA_FASTH3_V2_INT8,
+                    false,
+                    FASTVIDEO_FASTH3_REPO,
+                    fl2va.0,
+                    fl2va.1
                 ),
                 (
                     FL2VA_OFFICIAL,

@@ -609,8 +609,9 @@ fn effective_generation_steps(
         if mold_core::minimax_h3::layout_for_model(model)
             != Some(mold_core::minimax_h3::Layout::OfficialBf16)
         {
-            return mold_core::minimax_h3::turbo_tier_for_model(model)
-                .map(|tier| tier.steps)
+            // A distilled identity — Turbo adapter or distilled base tier
+            // (FastH3 V2) — runs exactly its own schedule.
+            return mold_core::minimax_h3::fixed_steps_for_model(model)
                 .unwrap_or(mold_core::minimax_h3::COMFY_DEFAULT_STEPS);
         }
         model_cfg
@@ -6439,6 +6440,7 @@ mod tests {
             (mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP_768P, 9),
             (mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_R21, 5),
             (mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP_R21, 9),
+            (mold_core::minimax_h3::FL2VA_FASTH3_V2_INT8, 9),
         ] {
             let model_cfg = config.resolved_model_config(model);
             assert_eq!(
@@ -6528,6 +6530,7 @@ mod tests {
                 false,
             ),
             (mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP_R21, 9, false),
+            (mold_core::minimax_h3::FL2VA_FASTH3_V2_INT8, 9, false),
         ] {
             let mut stale = config.resolved_model_config(model);
             stale.default_steps = Some(30);
@@ -6625,6 +6628,7 @@ mod tests {
             mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP_768P,
             mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_R21,
             mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP_R21,
+            mold_core::minimax_h3::FL2VA_FASTH3_V2_INT8,
         ] {
             assert_eq!(
                 effective_dimensions(

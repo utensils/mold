@@ -98,7 +98,7 @@ use crate::attention::{AttentionBackend, AttentionChunkPolicy};
 // Feature-independent: the envelope validators below name this in their
 // signatures in every build, matching how the type itself is defined.
 use crate::engine::GenerationReferenceBinding;
-use crate::h3_factory::H3FactoryTurboAdapterAuthority;
+use crate::h3_factory::{H3FactoryBaseSamplerOverride, H3FactoryTurboAdapterAuthority};
 #[cfg(feature = "mp4")]
 use crate::h3_factory::H3PrivateFl2VaFactoryAuthority;
 use crate::progress::ProgressReporter;
@@ -322,6 +322,27 @@ impl H3PrivateRuntimeEnvelopeRecord {
         self.validate_for_task_with_reviewed_steps(task, reviewed_steps)
     }
 
+    /// The step authority a FROZEN quantization authority carries: its
+    /// task-checked Turbo adapter, else a reviewed distilled base tier's
+    /// exact grid points (FastH3 V2), else the undistilled range. The two
+    /// distillations never compose.
+    pub(crate) fn validate_for_task_with_distillation(
+        &self,
+        task: Task,
+        turbo: Option<&H3FactoryTurboAdapterAuthority>,
+        base_sampler: Option<&H3FactoryBaseSamplerOverride>,
+    ) -> Result<()> {
+        match (turbo, base_sampler) {
+            (_, None) => self.validate_for_task_with_adapter(task, turbo),
+            (None, Some(base_sampler)) => {
+                self.validate_for_task_with_reviewed_steps(task, Some(base_sampler.grid_points()))
+            }
+            (Some(_), Some(_)) => bail!(
+                "private H3 distilled base tier and Turbo adapter step authorities cannot both apply"
+            ),
+        }
+    }
+
     /// Apply a step count whose task scoping the CALLER has already
     /// established. Only two callers qualify: the adapter form above, which
     /// has just matched the tier's reviewed task, and the compiled public
@@ -430,10 +451,22 @@ impl H3PrivateRuntimeEnvelopeRecord {
         request: &H3FactoryPreparedRequestInput,
         turbo: Option<&H3FactoryTurboAdapterAuthority>,
     ) -> Result<()> {
+        self.validate_prepared_with_distillation(request, turbo, None)
+    }
+
+    /// [`Self::validate_prepared_with_adapter`] for a frozen authority that may
+    /// carry a distilled base tier instead of a Turbo adapter.
+    #[cfg(feature = "mp4")]
+    fn validate_prepared_with_distillation(
+        &self,
+        request: &H3FactoryPreparedRequestInput,
+        turbo: Option<&H3FactoryTurboAdapterAuthority>,
+        base_sampler: Option<&H3FactoryBaseSamplerOverride>,
+    ) -> Result<()> {
         // The request's own task selects the conditioning contract, and the
         // adapter must have been reviewed for that same task before its step
         // count is applied.
-        self.validate_for_task_with_adapter(request.task, turbo)?;
+        self.validate_for_task_with_distillation(request.task, turbo, base_sampler)?;
         // Name every differing axis: one bare mismatch sentence made a
         // wrong-tier step count, an off-canvas size, and an over-cap prompt
         // all read identically, which is undebuggable from a client.
@@ -1839,6 +1872,23 @@ pub(crate) fn admitted_h3_route(model: &str) -> Result<H3AdmittedRoute> {
     })
 }
 
+/// The reviewed distilled base tier's sampling contract an admitted identity
+/// carries, fenced against the DiT its route selected: a substituted
+/// transformer requires its tier's override, and a task-base transformer
+/// (base and Turbo tags) carries none.
+pub(crate) fn private_h3_base_sampler_for_route(
+    admitted_model: &str,
+    transformer: H3CompactTransformerSelection,
+) -> Result<Option<H3FactoryBaseSamplerOverride>> {
+    let base_sampler = H3FactoryBaseSamplerOverride::for_model(admitted_model)?;
+    if base_sampler.is_some() == transformer.is_task_base() {
+        bail!(
+            "private H3 admission paired {admitted_model} with a transformer outside its distilled tier"
+        )
+    }
+    Ok(base_sampler)
+}
+
 /// Preserve the complete cause chain at the durable admission boundary.
 /// Context alone identifies the failed stage but cannot explain its failure.
 #[cfg(feature = "mp4")]
@@ -2214,6 +2264,15 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     timeline.enter(admission_phase::ADAPTER);
     let turbo_adapter =
         super::turbo::resolve_turbo_authority_for_request(admitted_model, paths.models_root)?;
+    // A distilled base tier (FastH3 V2) brings its own sampling contract with
+    // its substituted DiT: read from the reviewed tier row by the admitted
+    // identity and fenced against the transformer selection, so the frozen
+    // identity, the envelope's exact step count, and the integrator all name
+    // the same distillation.
+    let base_sampler = private_h3_base_sampler_for_route(admitted_model, admitted_transformer)?;
+    if turbo_adapter.is_some() && base_sampler.is_some() {
+        bail!("private H3 distilled base tier and Turbo adapter cannot both apply")
+    }
     timeline.enter(admission_phase::QUALIFICATION);
     #[cfg(not(feature = "h3"))]
     let private_compute_capability = compute_capability
@@ -2229,7 +2288,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         &attention_qualification_sha256,
     )?;
     #[cfg(feature = "h3")]
-    let runtime_qualification = public_runtime_qualification(
+    let runtime_qualification = public_runtime_qualification_with_distillation(
         &artifact_report,
         (request.width, request.height),
         request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
@@ -2241,6 +2300,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         attention.kernel().identity(),
         &attention_qualification_sha256,
         turbo_adapter.as_ref(),
+        base_sampler.as_ref(),
         admitted_task,
         // The request's own ordered set, which the contract validation above
         // already accepted. Ref2VA's conditioning envelope is a function of
@@ -2269,9 +2329,10 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     // would reject every Turbo attempt. The row ceilings were already asked
     // before the artifact pass; this is the authenticated backstop over every
     // axis, the compiled precheck's ceilings included.
-    runtime_qualification.validate_prepared_envelope_with_turbo(
+    runtime_qualification.validate_prepared_envelope_with_distillation(
         &admission_request.request,
         turbo_adapter.as_ref(),
+        base_sampler.as_ref(),
     )?;
     let seed = admission_request.seed;
     request.seed = Some(seed);
@@ -2384,7 +2445,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
                 qwen_policy_sha256: qwen_policy_identity.into(),
                 pruned_adaln_table_sha256,
                 turbo_adapter: turbo_adapter.clone(),
-                base_sampler: None,
+                base_sampler: base_sampler.clone(),
             },
             prepared_attempt: None,
             execution_budget_echo: None,
@@ -3290,6 +3351,14 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     // FL2VA constant, so a frozen Ref2VA attempt reaches its own validators.
     let frozen_route = validate_frozen_reopen_route(request, frozen_factory, &owner_fence)?;
     let mode = frozen_route.mode;
+    // The frozen distilled base tier must be exactly the one the request's own
+    // identity and selected DiT imply — a FastH3 attempt never reopens on the
+    // Comfy-Org DiT's sampling contract, nor the reverse.
+    if private_h3_base_sampler_for_route(&request.model, frozen_route.transformer)?.as_ref()
+        != frozen_factory.quantization().base_sampler_override()
+    {
+        bail!("private H3 reopened distilled base tier differs from admission evidence")
+    }
     // The same per-task source admission resolved: the frozen FL2VA route
     // reopens the reviewed record file, the frozen Ref2VA route re-mints the
     // compiled capture-scope profile (deterministic, so the identity fence
@@ -3374,7 +3443,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         &attention_qualification_sha256,
     )?;
     #[cfg(feature = "h3")]
-    let runtime_qualification = public_runtime_qualification(
+    let runtime_qualification = public_runtime_qualification_with_distillation(
         &artifact_report,
         (request.width, request.height),
         request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
@@ -3387,6 +3456,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         &attention_qualification_sha256,
         // Whatever admission froze, not a fresh environment read.
         frozen_factory.quantization().turbo_adapter(),
+        frozen_factory.quantization().base_sampler_override(),
         // The FROZEN task, and the same ordered set admission derived its
         // envelope from. The identity fence a few lines below compares the
         // re-minted record against what admission froze, so a substituted
@@ -3515,8 +3585,11 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     let seed = prepared_attempt.seed();
     let prepared = prepared_attempt.into_factory_inputs();
     prepared.revalidate()?;
-    runtime_qualification
-        .validate_prepared_envelope_with_turbo(prepared.prepared_request_input(), frozen_turbo)?;
+    runtime_qualification.validate_prepared_envelope_with_distillation(
+        prepared.prepared_request_input(),
+        frozen_turbo,
+        frozen_factory.quantization().base_sampler_override(),
+    )?;
     let enriched_factory = frozen_factory.with_private_prepared_attempt(
         prepared.factory_attempt_input().clone(),
         prepared.budget_echo_input().clone(),
@@ -4512,9 +4585,10 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
             owner,
             consumption_binding,
         } = *self;
-        runtime_envelope.validate_prepared_with_adapter(
+        runtime_envelope.validate_prepared_with_distillation(
             prepared.prepared_request_input(),
             authority.quantization().turbo_adapter(),
+            authority.quantization().base_sampler_override(),
         )?;
         let observed_envelope = runtime_envelope_observation(prepared.prepared_request_input())?;
         let observed_compute_capability = match attention.device() {
@@ -5412,9 +5486,21 @@ impl H3PrivateRuntimeQualificationAuthority {
         request: &H3FactoryPreparedRequestInput,
         turbo: Option<&H3FactoryTurboAdapterAuthority>,
     ) -> Result<()> {
+        self.validate_prepared_envelope_with_distillation(request, turbo, None)
+    }
+
+    /// The same backstop, with a distilled base tier's exact step count when
+    /// the attempt carries one.
+    #[cfg(feature = "mp4")]
+    fn validate_prepared_envelope_with_distillation(
+        &self,
+        request: &H3FactoryPreparedRequestInput,
+        turbo: Option<&H3FactoryTurboAdapterAuthority>,
+        base_sampler: Option<&H3FactoryBaseSamplerOverride>,
+    ) -> Result<()> {
         self.record
             .envelope
-            .validate_prepared_with_adapter(request, turbo)
+            .validate_prepared_with_distillation(request, turbo, base_sampler)
     }
 
     pub(crate) fn revalidate(&self) -> Result<()> {
@@ -6670,9 +6756,48 @@ pub fn h3_capture_bound_report(
         .collect()
 }
 
-#[cfg(feature = "h3")]
+/// [`public_runtime_qualification_with_distillation`] without a distilled
+/// base tier — the shape every pre-#1812 caller (and test) names.
+#[cfg(all(feature = "h3", test))]
 #[allow(clippy::too_many_arguments)]
 fn public_runtime_qualification(
+    artifact: &H3PrivateArtifactQualificationReport,
+    canvas: (u32, u32),
+    frames: u32,
+    steps: u32,
+    device_id: &str,
+    device_ordinal: usize,
+    compute_capability: Option<(u16, u16)>,
+    attention_runtime_identity_sha256: &str,
+    attention_kernel_identity: &str,
+    attention_qualification_sha256: &str,
+    turbo: Option<&H3FactoryTurboAdapterAuthority>,
+    task: Task,
+    references: &[mold_core::GenerationReference],
+    mode: Mode,
+) -> Result<H3PrivateRuntimeQualificationAuthority> {
+    public_runtime_qualification_with_distillation(
+        artifact,
+        canvas,
+        frames,
+        steps,
+        device_id,
+        device_ordinal,
+        compute_capability,
+        attention_runtime_identity_sha256,
+        attention_kernel_identity,
+        attention_qualification_sha256,
+        turbo,
+        None,
+        task,
+        references,
+        mode,
+    )
+}
+
+#[cfg(feature = "h3")]
+#[allow(clippy::too_many_arguments)]
+fn public_runtime_qualification_with_distillation(
     artifact: &H3PrivateArtifactQualificationReport,
     // The request's own canvas and clip length.
     // `validate_public_runtime_profile_with_turbo` refuses them below unless
@@ -6694,6 +6819,9 @@ fn public_runtime_qualification(
     attention_kernel_identity: &str,
     attention_qualification_sha256: &str,
     turbo: Option<&H3FactoryTurboAdapterAuthority>,
+    // A reviewed distilled base tier (FastH3 V2) fixes the step count exactly
+    // as a Turbo adapter does; the two never compose.
+    base_sampler: Option<&H3FactoryBaseSamplerOverride>,
     // The partition this record authorizes, and — for Ref2VA — the ordered
     // reference set its conditioning envelope is derived from. FL2VA carries
     // none and its envelope also depends on the validated endpoint mode.
@@ -6713,7 +6841,12 @@ fn public_runtime_qualification(
             )
         }
     }
-    let turbo_steps = turbo.map(H3FactoryTurboAdapterAuthority::grid_points);
+    if turbo.is_some() && base_sampler.is_some() {
+        bail!("private H3 distilled base tier and Turbo adapter step authorities cannot both apply")
+    }
+    let turbo_steps = turbo
+        .map(H3FactoryTurboAdapterAuthority::grid_points)
+        .or_else(|| base_sampler.map(H3FactoryBaseSamplerOverride::grid_points));
     let (schema, decision, canonical_model, task_name) = public_runtime_profile_identities(task);
     if !matches!(compute_capability, Some((8, 9)) | None)
         || artifact.canonical_model != canonical_model
@@ -8580,6 +8713,91 @@ mod tests {
                 "{steps}: {error}"
             );
         }
+    }
+
+    /// The FastH3 V2 distilled base tier routes through the FL2VA partition on
+    /// its OWN DiT, carries its reviewed sampling override, and fixes the
+    /// envelope step axis at exactly its 9 grid points.
+    #[test]
+    fn the_fasth3_route_carries_its_distilled_base_tier_and_exact_steps() {
+        let route = admitted_h3_route(contract::FL2VA_FASTH3_V2_INT8).unwrap();
+        assert_eq!(route.admitted_model, contract::FL2VA_FASTH3_V2_INT8);
+        assert_eq!(route.partition_model, contract::FL2VA_COMFY);
+        assert_eq!(route.task, Task::Fl2va);
+        assert_eq!(
+            route.transformer.published_artifact(),
+            mold_candle::minimax_h3::H3ComfyPublishedArtifact::FastH3V2Fl2VaPrunedInt8ConvRot
+        );
+        assert!(!route.transformer.is_task_base());
+
+        let base_sampler =
+            private_h3_base_sampler_for_route(route.admitted_model, route.transformer)
+                .unwrap()
+                .expect("FastH3 carries its distilled tier");
+        assert_eq!(base_sampler.grid_points(), 9);
+        assert_eq!(base_sampler.video_shift(), 10.0);
+        assert_eq!(base_sampler.audio_shift(), 3.0);
+        assert_eq!(
+            base_sampler.sampler_kind().as_str(),
+            H3SamplerKind::ComfyResMultistep.as_str()
+        );
+        // Base and Turbo tags carry none, and a mismatched pairing fails
+        // closed in both directions.
+        for model in [contract::FL2VA_COMFY, contract::FL2VA_COMFY_TURBO_8STEP] {
+            let route = admitted_h3_route(model).unwrap();
+            assert_eq!(
+                private_h3_base_sampler_for_route(model, route.transformer).unwrap(),
+                None,
+                "{model}"
+            );
+        }
+        assert!(private_h3_base_sampler_for_route(
+            contract::FL2VA_FASTH3_V2_INT8,
+            H3CompactTransformerSelection::base_for_task(Task::Fl2va)
+        )
+        .is_err());
+        assert!(
+            private_h3_base_sampler_for_route(contract::FL2VA_COMFY, route.transformer).is_err()
+        );
+
+        // The step axis: exactly 9, never the base range.
+        reviewed_envelope(9)
+            .validate_for_task_with_distillation(Task::Fl2va, None, Some(&base_sampler))
+            .unwrap();
+        for wrong in [
+            contract::COMPACT_BASE_MIN_STEPS,
+            contract::COMPACT_MAX_STEPS,
+            5,
+            8,
+            10,
+        ] {
+            let error = reviewed_envelope(wrong)
+                .validate_for_task_with_distillation(Task::Fl2va, None, Some(&base_sampler))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("renders exactly 9 steps"), "{wrong}: {error}");
+        }
+        // Without the override the same 9-point envelope is out of range.
+        assert!(reviewed_envelope(9)
+            .validate_for_task_with_distillation(Task::Fl2va, None, None)
+            .is_err());
+        // A Turbo adapter and a distilled base tier never compose.
+        let turbo = H3FactoryTurboAdapterAuthority::for_reviewed_tier(
+            contract::turbo_tier_for_model(contract::FL2VA_COMFY_TURBO_8STEP)
+                .unwrap()
+                .tier_stable_id,
+            &"a".repeat(64),
+            &"b".repeat(64),
+            1,
+            1,
+            1,
+        )
+        .unwrap();
+        let error = reviewed_envelope(9)
+            .validate_for_task_with_distillation(Task::Fl2va, Some(&turbo), Some(&base_sampler))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cannot both apply"), "{error}");
     }
 
     /// The undistilled envelope's floor is the smallest REVIEWED schedule,

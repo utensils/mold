@@ -299,6 +299,10 @@ impl ModelManifest {
                 .iter()
                 .find(|tier| tier.model == self.name)
                 .map(|tier| tier.display_label)
+                .or_else(|| {
+                    crate::minimax_h3::distilled_base_tier_for_model(&self.name)
+                        .map(|tier| tier.display_label)
+                })
                 .unwrap_or_else(|| match crate::minimax_h3::layout_for_model(&self.name) {
                     Some(Layout::OfficialBf16) => "BF16",
                     Some(Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq) => "NVFP4",
@@ -9920,6 +9924,10 @@ mod tests {
             assert!(title.contains(tier.display_label), "{title}");
             assert!(!title.contains("downloadable"), "{title}");
         }
+        assert_eq!(
+            model_display_name(crate::minimax_h3::FL2VA_FASTH3_V2_INT8).as_deref(),
+            Some("MiniMax H3 FL2VA FastH3 V2 8-step (FastVideo)")
+        );
         assert_eq!(model_display_name("hf:someone/custom-title"), None);
     }
 
@@ -10507,7 +10515,9 @@ mod tests {
         // q5, q4, q3, q2) on the shared conditioner/VAE, and +3 turbo tags
         // (bf16, int8-conv, q8) that stack the Viggle 6-step adapter on those
         // base files.
-        assert_eq!(known_manifests().len(), 222);
+        // MiniMax H3 FastH3 V2 (#1812): +1 distilled base tier, the FL2VA
+        // compact stack with FastVideo's distilled transformer substituted.
+        assert_eq!(known_manifests().len(), 223);
     }
 
     /// Every reviewed H3 Turbo adapter lands in the one family `loras/`

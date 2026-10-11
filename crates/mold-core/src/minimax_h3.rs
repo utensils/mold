@@ -98,8 +98,8 @@ pub const DRBAPH_TURBO_LORA_REVISION: &str = "be8eb3ea3466cbb7def202ffec0d2fdc05
 /// tier executes the FL2VA task face and its conditioner, both VAEs, and every
 /// config still resolve to [`COMFY_REPO`] and [`OFFICIAL_REPO`]. The pinned
 /// file and its header facts live in mold-candle's
-/// `H3ComfyPublishedArtifact::FastH3V2Fl2VaPrunedInt8ConvRot`. No manifest tag
-/// names this repository yet; registering one is data on top of this pin.
+/// `H3ComfyPublishedArtifact::FastH3V2Fl2VaPrunedInt8ConvRot`; the manifest
+/// tag carrying it is [`FL2VA_FASTH3_V2_INT8`].
 pub const FASTVIDEO_FASTH3_REPO: &str = "FastVideo/FastVideo-FastH3-Comfy";
 pub const FASTVIDEO_FASTH3_REVISION: &str = "ec1e3aa374a91c57b0b94a1623b7e657c0498cf2";
 pub const LICENSE_SHA256: &str = MINIMAX_H3_LICENSE_SHA256;
@@ -135,6 +135,13 @@ pub const FL2VA_COMFY_TURBO_8STEP_R21: &str = "minimax-h3-fl2va:comfy-pruned-int
 /// tier of the Ref2VA partition.
 pub const REF2VA_COMFY_TURBO_4STEP_R21: &str =
     "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21";
+/// FastVideo's FastH3 V2 8-step: a distilled BASE tier, not an adapter. The
+/// whole FL2VA compact stack with ONE substitution — [`FASTVIDEO_FASTH3_REPO`]'s
+/// full-weight DMD-distilled INT8 ConvRot DiT in place of Comfy-Org's — and
+/// its own fixed schedule ([`REVIEWED_DISTILLED_BASE_TIERS`]). The tag drops
+/// the `comfy-pruned-int8` prefix because the transformer it names is not
+/// Comfy-Org's.
+pub const FL2VA_FASTH3_V2_INT8: &str = "minimax-h3-fl2va:fasth3-v2-int8";
 /// Pruned NVFP4 compact transformers. Deliberately absent from
 /// [`REVIEWED_COMPACT_MODELS`]: they download, verify, inventory, and remove
 /// like any other pinned model, but mold has no engine arm for the weight
@@ -156,6 +163,7 @@ pub const REVIEWED_COMPACT_MODELS: &[&str] = &[
     FL2VA_COMFY_TURBO_4STEP_768P_R21,
     FL2VA_COMFY_TURBO_8STEP_R21,
     REF2VA_COMFY_TURBO_4STEP_R21,
+    FL2VA_FASTH3_V2_INT8,
 ];
 
 /// Exact-identity membership test for [`REVIEWED_COMPACT_MODELS`]. This is
@@ -342,6 +350,80 @@ pub const REVIEWED_TURBO_MANIFEST_TIERS: &[TurboManifestTier] = &[
     },
 ];
 
+/// The manifest-facing contract of one reviewed distilled BASE tier: a
+/// full-weight transformer substitution on its task's compact stack, with
+/// the fixed schedule its distillation was trained for.
+///
+/// Unlike a [`TurboManifestTier`] there is no adapter — the tier IS a
+/// different DiT file — so the conditioner, both VAEs and every config stay
+/// byte-identical to the base stack (`compact_shared_files`) and only the
+/// Transformer row moves. The sampler triple is mirrored by mold-inference's
+/// `H3FactoryBaseSamplerOverride`; a contract test there pins the two.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DistilledBaseManifestTier {
+    pub model: &'static str,
+    /// Human-facing tier label ("FastH3 V2 8-step (FastVideo)").
+    pub display_label: &'static str,
+    /// The task partition this transformer executes (its face's conditioner,
+    /// presentation, and VAEs).
+    pub task: Task,
+    pub transformer_hf_repo: &'static str,
+    pub transformer_hf_revision: &'static str,
+    pub transformer_hf_filename: &'static str,
+    pub transformer_size_bytes: u64,
+    pub transformer_sha256: &'static str,
+    /// Terminal-inclusive mold steps: published transformer evaluations + 1.
+    pub steps: u32,
+    /// The integrator's stable id (mold-inference `H3SamplerKind::as_str`).
+    pub sampler: &'static str,
+    pub video_shift: f32,
+    pub audio_shift: f32,
+}
+
+/// Reviewed distilled base tiers (#1812). FastH3 V2's operating point is
+/// FastVideo's own (`FastVideo/FastVideo-FastH3-Comfy@ec1e3aa3` README and the
+/// FastVideo-FastH3-8-Step-V2-NVFP4-Comfy README): 8 steps of
+/// `res_multistep` on the `simple` schedule, `MiniMaxH3SigmaShift` 10 for
+/// video and 3 for audio, cfg 1 (mold guidance 0). 8 steps is 9
+/// terminal-inclusive grid points.
+pub const REVIEWED_DISTILLED_BASE_TIERS: &[DistilledBaseManifestTier] =
+    &[DistilledBaseManifestTier {
+        model: FL2VA_FASTH3_V2_INT8,
+        display_label: "FastH3 V2 8-step (FastVideo)",
+        task: Task::Fl2va,
+        transformer_hf_repo: FASTVIDEO_FASTH3_REPO,
+        transformer_hf_revision: FASTVIDEO_FASTH3_REVISION,
+        transformer_hf_filename:
+            "diffusion_models/fastvideo_fasth3_8step_v2_pruned_int8_convrot.safetensors",
+        transformer_size_bytes: 22_128_378_696,
+        transformer_sha256: "0922785978dc9bfe1adf27d8b291b0ca763f9f165f882e6cb297c72fbb6deda8",
+        steps: 9,
+        sampler: "comfy-res-multistep",
+        video_shift: 10.0,
+        audio_shift: 3.0,
+    }];
+
+/// Resolve the reviewed distilled base tier a model identity selects, if any.
+pub fn distilled_base_tier_for_model(model: &str) -> Option<&'static DistilledBaseManifestTier> {
+    let canonical = resolve_model_name(model)?;
+    REVIEWED_DISTILLED_BASE_TIERS
+        .iter()
+        .find(|tier| tier.model == canonical)
+}
+
+/// The EXACT grid-point count a distilled identity renders — a Turbo tag's
+/// adapter schedule or a distilled base tier's own — or `None` for an
+/// undistilled tag, which takes the adjustable reviewed range instead.
+///
+/// The one "is this step control fixed" authority: admission's floor, both
+/// generation-profile builders, and the private runtime envelope read it, so
+/// a distilled schedule is never confused with "has a Turbo adapter".
+pub fn fixed_steps_for_model(model: &str) -> Option<u32> {
+    turbo_tier_for_model(model)
+        .map(|tier| tier.steps)
+        .or_else(|| distilled_base_tier_for_model(model).map(|tier| tier.steps))
+}
+
 /// The compact base identity one task executes as. Kept as an exhaustive
 /// `Task` match — never a constant — so a reviewed Turbo tier of either task
 /// partitions to its own base.
@@ -371,6 +453,13 @@ pub fn base_compact_model(model: &str) -> Option<&'static str> {
         .any(|tier| tier.model == canonical)
     {
         return Some(base_compact_model_for_task(task_for_model(canonical)?));
+    }
+    // A distilled base tier substitutes the DiT, never the partition: it
+    // executes its task's engine partition (Qwen support, VAEs, conditioner
+    // cache key, factory canonical model) and the transformer selection is
+    // what reads the substituted file.
+    if let Some(tier) = distilled_base_tier_for_model(canonical) {
+        return Some(base_compact_model_for_task(tier.task));
     }
     Some(canonical)
 }
@@ -442,10 +531,7 @@ pub const COMPACT_BASE_MIN_STEPS: u32 = COMFY_DEFAULT_STEPS;
 /// builders, and the private runtime envelope all read this rather than
 /// restating a floor each.
 pub fn steps_floor_for_model(model: &str) -> u32 {
-    match turbo_tier_for_model(model) {
-        Some(tier) => tier.steps,
-        None => COMPACT_BASE_MIN_STEPS,
-    }
+    fixed_steps_for_model(model).unwrap_or(COMPACT_BASE_MIN_STEPS)
 }
 
 pub const DEFAULT_WIDTH: u32 = 1344;
@@ -1287,6 +1373,15 @@ pub fn layout_for_model(model: &str) -> Option<Layout> {
         // A Turbo tag overlays a reviewed LoRA on the *same* compact INT8
         // checkpoint; nothing about the weight layout changes.
         Some(Layout::ComfyPrunedInt8ConvrotNvfp4Awq)
+    } else if REVIEWED_DISTILLED_BASE_TIERS
+        .iter()
+        .any(|tier| tier.model == canonical)
+    {
+        // A distilled base tier's DiT is a different FILE in the same
+        // curve-AdaLN INT8 ConvRot weight layout, beside the same NVFP4-AWQ
+        // conditioner; its third-party source is per-tag provenance
+        // (`manifest_contract`), not a layout.
+        Some(Layout::ComfyPrunedInt8ConvrotNvfp4Awq)
     } else {
         None
     }
@@ -1315,6 +1410,7 @@ pub fn resolve_model_name(input: &str) -> Option<&'static str> {
         }
         value if value == FL2VA_COMFY_TURBO_8STEP_R21 => Some(FL2VA_COMFY_TURBO_8STEP_R21),
         value if value == REF2VA_COMFY_TURBO_4STEP_R21 => Some(REF2VA_COMFY_TURBO_4STEP_R21),
+        value if value == FL2VA_FASTH3_V2_INT8 => Some(FL2VA_FASTH3_V2_INT8),
         _ => None,
     }
 }
@@ -2918,6 +3014,14 @@ pub fn manifest_contract(manifest: &ModelManifest) -> Option<ManifestContract<'_
             COMFY_IMPLEMENTATION_REVISION,
         ),
     };
+    // A distilled base tier keeps the compact layout but its transformer —
+    // the one artifact that distinguishes it — is third-party, so the source
+    // is that tier's. The implementation reference stays Comfy-Org's, as for
+    // the NVFP4 layout.
+    let (source_repo, source_revision) = match distilled_base_tier_for_model(&manifest.name) {
+        Some(tier) => (tier.transformer_hf_repo, tier.transformer_hf_revision),
+        None => (source_repo, source_revision),
+    };
     Some(ManifestContract {
         manifest_name: &manifest.name,
         task,
@@ -3720,6 +3824,37 @@ pub(crate) fn manifests() -> Vec<ModelManifest> {
             hidden: false,
         }
     }));
+    // A distilled base tier is its task's compact stack with the Transformer
+    // row substituted. `compact_shared_files` is the same single authority the
+    // base stack reads, so the conditioner, VAEs and configs dedupe onto the
+    // one shared copy; the transformer is model-specific storage under the
+    // tag's own directory.
+    manifests.extend(REVIEWED_DISTILLED_BASE_TIERS.iter().map(|tier| {
+        let mut files = vec![file(
+            tier.transformer_hf_repo,
+            tier.transformer_hf_filename,
+            ModelComponent::Transformer,
+            tier.transformer_size_bytes,
+            tier.transformer_sha256,
+        )];
+        files.extend(compact_shared_files(tier.task));
+        ModelManifest {
+            name: tier.model.to_string(),
+            family: FAMILY.to_string(),
+            description: format!(
+                "MiniMax H3 {} {} distilled transformer (INT8-convrot, {} grid points) + Comfy NVFP4-AWQ conditioner and VAEs (downloadable; CUDA or Apple Metal)",
+                match tier.task {
+                    Task::Fl2va => "FL2VA",
+                    Task::Ref2va => "Ref2VA",
+                },
+                tier.display_label,
+                tier.steps,
+            ),
+            files,
+            defaults: defaults_with_steps(tier.steps),
+            hidden: false,
+        }
+    }));
     manifests
 }
 
@@ -3905,7 +4040,7 @@ mod tests {
         );
     }
 
-    fn request() -> GenerateRequest {
+    pub(super) fn request() -> GenerateRequest {
         GenerateRequest {
             mesh_workflow: None,
             offload: None,
@@ -5562,6 +5697,7 @@ mod tests {
                 FL2VA_COMFY_TURBO_4STEP_768P_R21,
                 FL2VA_COMFY_TURBO_8STEP_R21,
                 REF2VA_COMFY_TURBO_4STEP_R21,
+                FL2VA_FASTH3_V2_INT8,
             ])
         );
         assert!(advertised
@@ -5705,6 +5841,7 @@ mod tests {
                 FL2VA_COMFY_TURBO_4STEP_768P_R21,
                 FL2VA_COMFY_TURBO_8STEP_R21,
                 REF2VA_COMFY_TURBO_4STEP_R21,
+                FL2VA_FASTH3_V2_INT8,
             ])
         );
 
@@ -7010,6 +7147,222 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing {path} in {manifest_name}"));
             assert_eq!(pin(id)["relative_path"], path);
             assert_eq!(pin(id)["sha256"].as_str(), artifact.sha256);
+        }
+    }
+}
+/// FastVideo's FastH3 V2 distilled BASE tier (#1812): a full-weight
+/// transformer substitution on the FL2VA compact stack, not an adapter.
+#[cfg(test)]
+mod fasth3_tier_tests {
+    use super::*;
+    use crate::manifest::{find_manifest, storage_path};
+
+    fn tier() -> &'static DistilledBaseManifestTier {
+        distilled_base_tier_for_model(FL2VA_FASTH3_V2_INT8).expect("FastH3 is a reviewed tier")
+    }
+
+    #[test]
+    fn the_fasth3_tag_is_a_reviewed_runnable_fl2va_identity() {
+        assert_eq!(FL2VA_FASTH3_V2_INT8, "minimax-h3-fl2va:fasth3-v2-int8");
+        assert_eq!(
+            resolve_model_name(FL2VA_FASTH3_V2_INT8),
+            Some(FL2VA_FASTH3_V2_INT8)
+        );
+        assert_eq!(
+            resolve_model_name("  MINIMAX_H3-FL2VA:FASTH3-V2-INT8 "),
+            Some(FL2VA_FASTH3_V2_INT8)
+        );
+        assert!(is_reviewed_compact_model(FL2VA_FASTH3_V2_INT8));
+        assert_eq!(task_for_model(FL2VA_FASTH3_V2_INT8), Some(Task::Fl2va));
+        // The weight layout is the compact INT8 ConvRot one — same loader,
+        // same conditioner, same VAEs.
+        assert_eq!(
+            layout_for_model(FL2VA_FASTH3_V2_INT8),
+            Some(Layout::ComfyPrunedInt8ConvrotNvfp4Awq)
+        );
+        // It executes the FL2VA engine partition; the transformer selection
+        // (mold-inference) is what substitutes the DiT.
+        assert_eq!(base_compact_model(FL2VA_FASTH3_V2_INT8), Some(FL2VA_COMFY));
+        assert!(uses_reviewed_compact_envelope(FAMILY, FL2VA_FASTH3_V2_INT8));
+        assert!(turbo_tier_for_model(FL2VA_FASTH3_V2_INT8).is_none());
+        assert_eq!(
+            capability_contract_for_model(FL2VA_FASTH3_V2_INT8)
+                .unwrap()
+                .generation
+                .modes,
+            capabilities(Task::Fl2va).modes
+        );
+        // Lookalikes stay unknown.
+        for lookalike in [
+            "minimax-h3-ref2va:fasth3-v2-int8",
+            "minimax-h3-fl2va:fasth3-v2",
+            "minimax-h3-fl2va:fasth3-v2-int8-turbo-8step",
+        ] {
+            assert_eq!(resolve_model_name(lookalike), None, "{lookalike}");
+            assert!(distilled_base_tier_for_model(lookalike).is_none());
+        }
+        for model in REVIEWED_COMPACT_MODELS {
+            if *model != FL2VA_FASTH3_V2_INT8 {
+                assert!(distilled_base_tier_for_model(model).is_none(), "{model}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_fasth3_tier_pins_fastvideo_upstream_operating_point() {
+        // FastVideo/FastVideo-FastH3-Comfy@ec1e3aa3 README: 8 steps,
+        // res_multistep + simple, MiniMaxH3SigmaShift video 10 / audio 3,
+        // cfg 1 (mold guidance 0). 8 steps = 9 terminal-inclusive points.
+        let tier = tier();
+        assert_eq!(tier.model, FL2VA_FASTH3_V2_INT8);
+        assert_eq!(tier.display_label, "FastH3 V2 8-step (FastVideo)");
+        assert_eq!(tier.task, Task::Fl2va);
+        assert_eq!(tier.transformer_hf_repo, FASTVIDEO_FASTH3_REPO);
+        assert_eq!(tier.transformer_hf_revision, FASTVIDEO_FASTH3_REVISION);
+        assert_eq!(
+            tier.transformer_hf_filename,
+            "diffusion_models/fastvideo_fasth3_8step_v2_pruned_int8_convrot.safetensors"
+        );
+        assert_eq!(tier.transformer_size_bytes, 22_128_378_696);
+        assert_eq!(
+            tier.transformer_sha256,
+            "0922785978dc9bfe1adf27d8b291b0ca763f9f165f882e6cb297c72fbb6deda8"
+        );
+        assert_eq!(tier.steps, 9);
+        assert_eq!(tier.sampler, "comfy-res-multistep");
+        assert_eq!(tier.video_shift, 10.0);
+        assert_eq!(tier.audio_shift, 3.0);
+    }
+
+    #[test]
+    fn the_fasth3_tag_takes_exactly_its_distilled_schedule() {
+        assert_eq!(fixed_steps_for_model(FL2VA_FASTH3_V2_INT8), Some(9));
+        assert_eq!(steps_floor_for_model(FL2VA_FASTH3_V2_INT8), 9);
+        // Every pre-existing tag answers exactly as before.
+        for tier in REVIEWED_TURBO_MANIFEST_TIERS {
+            assert_eq!(fixed_steps_for_model(tier.model), Some(tier.steps));
+            assert_eq!(steps_floor_for_model(tier.model), tier.steps);
+        }
+        for model in [FL2VA_COMFY, REF2VA_COMFY, FL2VA_OFFICIAL, "minimax-h3"] {
+            assert_eq!(fixed_steps_for_model(model), None, "{model}");
+            assert_eq!(steps_floor_for_model(model), COMPACT_BASE_MIN_STEPS);
+        }
+
+        let mut req = super::tests::request();
+        req.model = FL2VA_FASTH3_V2_INT8.into();
+        req.steps = 9;
+        assert_eq!(
+            validate_request_contract(&req, Task::Fl2va).unwrap(),
+            Mode::TextToAudioVideo
+        );
+        req.source_image = Some(vec![1]);
+        assert_eq!(
+            validate_request_contract(&req, Task::Fl2va).unwrap(),
+            Mode::FirstFrameToAudioVideo
+        );
+        req.steps = 8;
+        let error = validate_request_contract(&req, Task::Fl2va).unwrap_err();
+        assert_eq!(error.code, "MINIMAX_H3_GRID_POINTS");
+        assert!(error.message.contains("at least 9"), "{}", error.message);
+    }
+
+    #[test]
+    fn the_fasth3_manifest_reuses_the_compact_graph_and_owns_only_its_transformer() {
+        let base = find_manifest(FL2VA_COMFY).unwrap();
+        let fasth3 = find_manifest(FL2VA_FASTH3_V2_INT8).unwrap();
+        assert_eq!(fasth3.family, FAMILY);
+        assert!(!fasth3.hidden);
+        assert_eq!(fasth3.defaults.steps, 9);
+        assert_eq!(fasth3.defaults.guidance, 0.0);
+        assert_eq!(fasth3.defaults.width, DEFAULT_WIDTH);
+        assert_eq!(fasth3.defaults.height, DEFAULT_HEIGHT);
+        assert_eq!(fasth3.defaults.frames, Some(REVIEWED_COMPACT_FRAMES));
+        assert!(
+            fasth3.description.contains("FastH3"),
+            "{}",
+            fasth3.description
+        );
+        assert!(fasth3.description.contains("FastVideo"));
+
+        let non_transformer = |manifest: &ModelManifest| {
+            manifest
+                .files
+                .iter()
+                .filter(|file| file.component != ModelComponent::Transformer)
+                .map(|file| {
+                    (
+                        file.hf_repo.clone(),
+                        file.hf_filename.clone(),
+                        file.size_bytes,
+                        file.sha256,
+                        storage_path(manifest, file),
+                    )
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        // Byte-identical shared graph: an installed compact FL2VA stack makes
+        // this pull exactly one file.
+        assert_eq!(non_transformer(base), non_transformer(fasth3));
+        assert!(!fasth3
+            .files
+            .iter()
+            .any(|file| file.component == ModelComponent::DistilledLora));
+
+        let transformers = fasth3
+            .files
+            .iter()
+            .filter(|file| file.component == ModelComponent::Transformer)
+            .collect::<Vec<_>>();
+        let [transformer] = transformers.as_slice() else {
+            panic!("FastH3 pins exactly one transformer")
+        };
+        let tier = tier();
+        assert_eq!(transformer.hf_repo, FASTVIDEO_FASTH3_REPO);
+        assert_eq!(transformer.hf_filename, tier.transformer_hf_filename);
+        assert_eq!(transformer.size_bytes, tier.transformer_size_bytes);
+        assert_eq!(transformer.sha256, Some(tier.transformer_sha256));
+        assert_eq!(
+            file_revision(FASTVIDEO_FASTH3_REPO, &transformer.hf_filename),
+            Some(FASTVIDEO_FASTH3_REVISION)
+        );
+        // Model-specific storage: its own directory, never the base's.
+        assert_eq!(storage_identity(FL2VA_FASTH3_V2_INT8), FL2VA_FASTH3_V2_INT8);
+        let base_transformer = base
+            .files
+            .iter()
+            .find(|file| file.component == ModelComponent::Transformer)
+            .unwrap();
+        assert_ne!(
+            storage_path(fasth3, transformer),
+            storage_path(base, base_transformer)
+        );
+        let artifact = artifact_contract(fasth3, transformer).unwrap();
+        assert_eq!(artifact.role, ArtifactRole::TaskTransformer);
+        assert_eq!(artifact.dtype, "int8-convrot-pruned");
+        assert_eq!(artifact.compatible_tasks, &[Task::Fl2va]);
+        assert_eq!(artifact.identity.source_repo, FASTVIDEO_FASTH3_REPO);
+        assert_eq!(artifact.identity.source_revision, FASTVIDEO_FASTH3_REVISION);
+    }
+
+    #[test]
+    fn the_fasth3_manifest_contract_names_fastvideo_as_its_source() {
+        let fasth3 = find_manifest(FL2VA_FASTH3_V2_INT8).unwrap();
+        let contract = manifest_contract(fasth3).unwrap();
+        assert_eq!(contract.task, Task::Fl2va);
+        assert_eq!(contract.layout, Layout::ComfyPrunedInt8ConvrotNvfp4Awq);
+        assert_eq!(contract.source_repo, FASTVIDEO_FASTH3_REPO);
+        assert_eq!(contract.source_revision, FASTVIDEO_FASTH3_REVISION);
+        // The implementation reference stays ComfyUI's: FastVideo publishes
+        // the transformer only, in comfy-kitchen's quantization schema.
+        assert_eq!(contract.implementation_repo, COMFY_IMPLEMENTATION_REPO);
+        assert_eq!(
+            contract.implementation_revision,
+            COMFY_IMPLEMENTATION_REVISION
+        );
+        // Every pre-existing compact tag still reports Comfy-Org.
+        for model in [FL2VA_COMFY, REF2VA_COMFY, FL2VA_COMFY_TURBO_8STEP] {
+            let manifest = find_manifest(model).unwrap();
+            assert_eq!(manifest_contract(manifest).unwrap().source_repo, COMFY_REPO);
         }
     }
 }

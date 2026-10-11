@@ -2161,6 +2161,30 @@ Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`, `minimax-h3-fl2va:comf
 
 Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cdaaa03fa4497e89ac64ff169219acf`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
+### `minimax-h3-fl2va:fasth3-v2-int8`
+
+Schema 1 · hash `38eb0c95a6b02291a04f18989194de8f5edc4eb896bf7d1d6b5eaf376bdbc7ba` · default recipe `default`
+
+Models: `minimax-h3-fl2va:fasth3-v2-int8`.
+
+#### Default (`default`)
+
+- Resolution: dynamic; alignment `32`; minimum `256x256`; maximum `1032192` pixels; axis limit `2016`; aspect range `0.25–4`.
+- Defaults: `1344x768`, 9 steps, guidance 0.
+- Steps: 9–9 by 1; guidance: 0–0 by 0.1 (Fixed).
+- Temporal: frames 107–345 on `17n+5` (default 124); FPS fixed 24; duration limit 15s.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `7:4` | `1344x768` (recommended) |
+| `20:11` | `1280x704` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `1:1` | `768x768` (recommended), `960x960` (recommended) |
+| `4:7` | `768x1344` (recommended) |
+| `11:20` | `704x1280` (recommended) |
+
+Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cdaaa03fa4497e89ac64ff169219acf`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
 ### `minimax-h3-fl2va:official-bf16`
 
 Schema 1 · hash `26cd3bcd429e49d13b79f0911f6c54c42fe0d5edee3b476a903d9c8e9bb7fbf1` · default recipe `default`
