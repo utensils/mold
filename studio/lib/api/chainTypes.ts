@@ -1,10 +1,10 @@
+import type { OutputFormat } from "../generated/generationProfileV1";
 /**
  * Canonical chain / sequence wire types shared by every surface.
  *
  * These mirror the Rust types in `mold-core` (`chain.rs`, `chain_job.rs`)
- * exactly; the per-surface `types.ts` files re-export from here rather than
- * keeping divergent copies (desktop's `ChainLimits` was missing
- * `supports_sequence` before this module existed). `ChainRequest` seeds are
+ * with additive compatibility for older hosts; per-surface `types.ts` files
+ * re-export from here rather than keeping divergent copies. `ChainRequest` seeds are
  * JSON numbers; full-range u64 values in job metadata, retakes, amendments,
  * and TOML projections use decimal strings where noted below.
  */
@@ -51,35 +51,6 @@ export interface ChainRequestWire {
   output_mode?: "one-shot" | "sequence" | null;
 }
 
-export interface ChainValidationStage {
-  prompt: string;
-  frames: number;
-  output_frames: number;
-  transition: ChainTransition;
-  fade_frames?: number | null;
-  has_source_image: boolean;
-  has_negative_prompt: boolean;
-}
-
-/** Read-only server normalization returned by
- * `POST /api/generate/chain/validate`. */
-export interface ChainValidationResponse {
-  model: string;
-  width: number;
-  height: number;
-  fps: number;
-  motion_tail_frames: number;
-  stage_count: number;
-  estimated_total_frames: number;
-  estimated_duration_ms: number;
-  stages: ChainValidationStage[];
-  warnings: string[];
-  vram_estimate?: {
-    worst_case_bytes: number;
-    fits: boolean;
-  } | null;
-}
-
 /**
  * Per-clip provenance recorded into a stitched chain output's gallery
  * metadata (`OutputMetadata.chain.stages`) — the durable record of what each
@@ -108,33 +79,22 @@ export interface ChainOutputMetadata {
 /** `mold.chain.v1` TOML projection echoed by the server (`ChainJobDetail.script`). */
 export interface ChainScriptChain {
   model: string;
-  motion_tail_frames?: number;
-  width?: number;
-  height?: number;
-  fps?: number;
-  seed?: string | null;
-  steps?: number;
-  guidance?: number;
-  strength?: number;
+  width: number;
+  height: number;
+  fps: number;
+  seed?: number | null;
+  steps: number;
+  guidance: number;
+  strength: number;
+  motion_tail_frames: number;
+  output_format: OutputFormat;
   enable_audio?: boolean | null;
 }
 
-export interface ChainScriptStage {
-  prompt: string;
-  frames?: number;
-  transition?: ChainTransition;
-  fade_frames?: number | null;
-  negative_prompt?: string | null;
-  source_image_path?: string | null;
-  source_image_b64?: string | null;
-  seed_offset?: string | null;
-  loras?: Array<{ path: string; scale: number; name?: string | null }>;
-}
-
 export interface ChainScript {
-  schema?: string;
+  schema: string;
   chain: ChainScriptChain;
-  stages: ChainScriptStage[];
+  stage: ChainStageWire[];
 }
 
 export type ChainJobState =
@@ -213,23 +173,6 @@ export interface ChainAmendRecord {
   preserved_stages: number;
 }
 
-/** `POST /api/chain-jobs/:id/amend` — full edited stage list; the server
- * recomputes the preserved prefix itself and re-renders only dirty stages. */
-export interface AmendRequest {
-  stages: ChainStageWire[];
-  motion_tail_frames?: number | null;
-  fps?: number | null;
-  seed?: string | null;
-  steps?: number | null;
-  guidance?: number | null;
-  strength?: number | null;
-  enable_audio?: boolean | null;
-}
-
-export interface AmendResponse extends ChainJobSummary {
-  preserved_stages: number;
-}
-
 export type ChainJobEvent =
   | { type: "snapshot"; job: ChainJobDetail }
   | { type: "stage_start"; stage_idx: number }
@@ -250,19 +193,3 @@ export type ChainJobEvent =
       gallery_filename?: string | null;
     }
   | { type: "state_changed"; state: ChainJobState; error?: string | null };
-
-export interface ChainLimits {
-  model: string;
-  frames_per_clip_cap: number;
-  fps?: number | null;
-  frames_per_clip_runtime_seconds?: number | null;
-  frames_per_clip_recommended: number;
-  max_stages: number;
-  max_total_frames: number;
-  fade_frames_max: number;
-  transition_modes: string[];
-  quantization_family: string;
-  supports_audio: boolean;
-  supports_sequence: boolean;
-  sequence_unsupported_reason?: string | null;
-}

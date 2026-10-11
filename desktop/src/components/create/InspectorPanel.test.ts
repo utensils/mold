@@ -14,7 +14,6 @@ import PanelResizeHandle from "../shell/PanelResizeHandle.vue";
 import TemplatesPanel from "../generate/TemplatesPanel.vue";
 import LoraStack from "../generate/LoraStack.vue";
 import StarterList from "./StarterList.vue";
-import { aspectIdFor } from "../../lib/resolutions";
 import { buildRequest, newGenerateForm, type GenerateForm } from "../../lib/generateForm";
 import { useGenerateFormStore } from "../../stores/generateForm";
 import { useModelStore } from "../../stores/models";
@@ -545,7 +544,7 @@ describe("InspectorPanel — shape + resolution projection", () => {
     expect(wrapper.findComponent(ShapePicker).props("modelValue")).toBe("1:1");
     wrapper.findComponent(ShapePicker).vm.$emit("update:modelValue", "16:9");
     await flushPromises();
-    expect(aspectIdFor(form.width, form.height)).toBe("wide");
+    expect(wrapper.findComponent(ShapePicker).props("modelValue")).toBe("16:9");
     expect(form.width % 16).toBe(0);
     expect(form.height % 16).toBe(0);
   });

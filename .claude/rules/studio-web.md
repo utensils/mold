@@ -138,3 +138,29 @@ phone widths squeeze long license descriptions into single-word columns.
 Source browser media/machine/text filters apply to exact usages before grouping, preview selection and reuse. Reopening restores all fresh previously discovered inventories, not only the initial 25 owners. Original viewer composition reuses ModalPanel; selected originals have a separate 16 MiB memory-only LRU (two inflight), the same owner invalidation and 60-second freshness, a 64 MiB read limit, and a pre-decode 32 MP/8192-side PNG/JPEG/WebP header gate. Close/authority changes cancel reads and revoke URLs; owner navigation is distinct from independent source reuse.
 
 Source discovery runs automatically while the browser is open: a small first page of 25 owners appears before background batches of at most 100, with two requests in flight. Progress reports checked library items; source cards still page independently at 48. Closing cancels pending discovery, and fresh cached inventories restore on reopening.
+
+**Frontend quality gates and shared authoring policies:** `bun run check:dead-code`
+combines Knip's test-inclusive files/exports/types/dependencies analysis with the
+production module graph in `scripts/frontend-production-graph.mjs`. Tests are never
+production roots. The Studio public barrel and build plugin are named roots;
+true fixtures, test setup, vocabulary/performance contracts and token tooling have
+exact-path exceptions with reasons. The graph checks modules, not individual export
+liveness; a helper used only by tests inside an otherwise-live module still needs
+review. Do not treat passing Knip as evidence that such a helper ships.
+`studio/lib/api/serverTypes.ts` owns common HTTP fragments; desktop's
+`lib/api/legacyTypes.ts` alone admits local/synthesized rows without a version or
+with `video_frames`/`video_fps`. Keep server shapes tied to Rust serde, including
+`ChainScript.stage` and numeric script seeds.
+
+Video, continuation and conditioning-audio file picks share `MediaFileReader`:
+reject empty files and files over 64 MiB before encoding, surface readable inline
+errors, and preserve the prior attachment on failure. Mobile additionally checks
+its 45 MiB combined decoded-media budget both before and after asynchronous reads.
+Each field has a monotonic read epoch; clearing, changing model/pipeline and
+unmounting retire pending picks. Model/pipeline invalidation runs synchronously,
+before an already-settled encoding promise can commit in the same turn.
+Raw video/audio bytes never enter the image
+normalization path. `SourceCanvasController` owns desktop/mobile still transitions:
+manual/restored canvas survives remount, recipe changes and boundary removal;
+a deliberate replacement may re-arm source dimensions. Shells bind form state and
+keep their own presentation behavior.

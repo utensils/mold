@@ -28,9 +28,9 @@ final class ThumbnailLoader {
     /// Which save run owns `saving`: a cancelled run's last word must not
     /// clear the progress of the run that replaced it.
     @ObservationIgnored private var saveRun = 0
-    /// How many callers wait on each in-flight load; when the last one is
+    /// Each caller owns one waiter token; when the last one is
     /// cancelled (a viewer page swiped past), the download is too.
-    @ObservationIgnored private var waiters: [String: Int] = [:]
+    @ObservationIgnored private var waiters: [String: Set<UUID>] = [:]
 
     /// The only sizes machines serve (`/api/gallery/thumbnail?size=`): any
     /// other is refused with a 422, which drew every tile empty.
@@ -89,25 +89,26 @@ final class ThumbnailLoader {
             task = Task { await work() }
             inflight[key] = task
         }
-        waiters[key, default: 0] += 1
+        let waiter = UUID()
+        waiters[key, default: []].insert(waiter)
         let image = await withTaskCancellationHandler {
             await task.value
         } onCancel: {
-            Task { @MainActor [weak self] in self?.abandon(key, task) }
+            Task { @MainActor [weak self] in self?.release(key, task, waiter: waiter, cancelled: true) }
         }
-        let left = max(0, (waiters[key] ?? 1) - 1)
-        waiters[key] = left == 0 ? nil : left
-        if left == 0, inflight[key] == task { inflight[key] = nil }
-        if let image, !task.isCancelled {
+        release(key, task, waiter: waiter, cancelled: false)
+        guard !Task.isCancelled, !task.isCancelled else { return nil }
+        if let image {
             memory.setObject(image, forKey: key as NSString, cost: Int(image.size.width * image.size.height * 4))
         }
-        return task.isCancelled ? nil : image
+        return image
     }
 
     /// The last caller waiting on a load gave up: stop downloading.
-    private func abandon(_ key: String, _ task: Task<UIImage?, Never>) {
-        guard inflight[key] == task, (waiters[key] ?? 0) <= 1 else { return }
-        task.cancel()
+    private func release(_ key: String, _ task: Task<UIImage?, Never>, waiter: UUID, cancelled: Bool) {
+        guard inflight[key] == task, waiters[key]?.remove(waiter) != nil else { return }
+        guard waiters[key]?.isEmpty == true else { return }
+        if cancelled { task.cancel() }
         inflight[key] = nil
         waiters[key] = nil
     }

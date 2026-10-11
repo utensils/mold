@@ -4,6 +4,13 @@ import SwiftUI
 /// The grid and its footer caption, split from `LibraryPickerSheet.swift`
 /// purely for size.
 extension LibraryPickerSheet {
+    enum PictureAction: Hashable { case use, preview }
+
+    static func pictureActions(isFetching: Bool) -> [RowAction<PictureAction>] {
+        [RowAction(kind: .use, title: "Use Picture", isDisabled: isFetching),
+         RowAction(kind: .preview, title: "Preview Picture")]
+    }
+
     /// "1 picture" / "N pictures" -- pure, so the footer's wording is tested
     /// with no view.
     static func caption(count: Int) -> String {
@@ -68,10 +75,11 @@ extension LibraryPickerSheet {
                 // consume the gesture and a double-click could never land.
                 .onTapGesture(count: 2) { selected = entry.id; use() }
                 .onTapGesture { selected = entry.id }
-                .contextMenu {
-                    Button("Use Picture") { selected = entry.id; use() }
-                        .disabled(isFetching)
-                    Button("Preview Picture") { preview = entry }
+                .rowActionMenu(Self.pictureActions(isFetching: isFetching)) { action in
+                    switch action {
+                    case .use: selected = entry.id; use()
+                    case .preview: preview = entry
+                    }
                 }
                 .accessibilityAction(named: "Use Picture") { selected = entry.id; use() }
                 .help("Click to select, double-click to use, or press Space to preview.")

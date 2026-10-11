@@ -33,7 +33,6 @@ START_AFTER_MODEL="${MOLD_REGRESSION_START_AFTER_MODEL:-}"
 START_AFTER_CASE="${MOLD_REGRESSION_START_AFTER_CASE:-}"
 MIXED_JOBS="${MOLD_REGRESSION_MIXED_JOBS:-12}"
 MIXED_PARALLEL="${MOLD_REGRESSION_MIXED_PARALLEL:-6}"
-MATRIX_BATCH="${MOLD_REGRESSION_BATCH:-4}"
 INCLUDE_OVER_BUDGET="${MOLD_REGRESSION_INCLUDE_OVER_BUDGET:-0}"
 
 if [[ -n "$START_AFTER_MODEL" || -n "$START_AFTER_CASE" ]]; then
@@ -253,6 +252,9 @@ queue_case() {
   if ! case_selected "$model" "$case_name"; then
     return 0
   fi
+  # Submit the full matrix before collecting failures. The server owns GPU
+  # admission; batching here would hide queue interactions and stop later cases
+  # from exercising the server when an earlier case fails.
   execute_case "$@" &
   MATRIX_ACTIVE=$((MATRIX_ACTIVE + 1))
 }

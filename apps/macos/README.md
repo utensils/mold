@@ -877,7 +877,7 @@ Library Settings accepts a sync interval from one minute to one day. Interrupted
 
 When another connected machine can generate, **Move to…** is available on queued, paused, and held jobs until the source machine begins rendering. The prompt, seed, settings, and retained reference media move together. The destination must accept the job before the original is removed. Older servers support Held-only moves. Jobs that depend on machine-local LoRAs or workflows are refused without moving them.
 
-If a connection is interrupted during a move, retry the same destination so Mold can check whether it already accepted the job. The source remains reserved while that result is unknown, preventing duplicate rendering. A confirmed destination rejection releases the original only after the destination records that this transfer cannot be admitted later.
+If a connection is interrupted during a move, retry the same destination so Mold can check whether it already accepted the job. The source remains reserved while that result is unknown, preventing duplicate rendering. A confirmed destination rejection releases the original only after the destination records that this transfer cannot be admitted later. A failed source lookup keeps the move unresolved. Only a confirmed missing original with a verified destination counts as removed; a job that has already started on the source is reported as no longer eligible.
 
 ### Continuous Library rows
 

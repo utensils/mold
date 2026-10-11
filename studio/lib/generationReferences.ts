@@ -1,3 +1,5 @@
+import type { MeshReferenceCoordinates } from "./generated/generationProfileV1";
+
 /** Shared wire contract for MiniMax H3 ordered heterogeneous references. */
 
 export type GenerationReferenceAuthority =
@@ -76,10 +78,7 @@ export type GenerationReference =
       kind: "mesh";
       format: "glb" | "obj";
       byte_length: number;
-      coordinates: {
-        up_axis: "y" | "z";
-        meters_per_unit: number;
-      };
+      coordinates: MeshReferenceCoordinates;
     });
 
 export interface GenerationReferenceMetadata {
@@ -104,10 +103,7 @@ export interface GenerationReferenceMetadata {
   sample_count?: number | null;
   mesh_format?: "glb" | "obj" | null;
   byte_length?: number | null;
-  coordinates?: {
-    up_axis: "y" | "z";
-    meters_per_unit: number;
-  } | null;
+  coordinates?: MeshReferenceCoordinates | null;
   prepared_shape?: GenerationReferencePreparedShape | null;
   /** The crop an image reference carried; absent for every other reference. */
   crop?: GenerationReferenceCrop | null;

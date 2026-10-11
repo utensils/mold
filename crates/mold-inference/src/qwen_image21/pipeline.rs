@@ -1355,7 +1355,8 @@ impl QwenImage21Engine {
                 &lora_entries,
                 (&loaded.device, loaded.dtype),
             )?;
-            self.active_lora = wanted_lora;
+            self.active_lora =
+                crate::lora::fence_fingerprint(wanted_lora, lora_fingerprint(&lora_entries));
         }
         let reference_encoders_on_card = Self::reference_encoders_on_card(loaded);
         let adapter_bytes = super::text_encoder_residency::lora_stack_bytes(

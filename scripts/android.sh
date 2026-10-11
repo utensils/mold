@@ -21,7 +21,8 @@ STUDIO_APP="${MOLD_ANDROID_STUDIO_APP:-$ANDROID_ROOT/Android Studio.app}"
 if [[ -n "${MOLD_ANDROID_JAVA_HOME:-}" ]]; then
   export JAVA_HOME="$MOLD_ANDROID_JAVA_HOME"
 elif command -v java >/dev/null; then
-  export JAVA_HOME="$(cd "$(dirname "$(realpath "$(command -v java)")")/.." && pwd)"
+  JAVA_HOME="$(cd "$(dirname "$(realpath "$(command -v java)")")/.." && pwd)"
+  export JAVA_HOME
 elif [[ -d "$STUDIO_APP/Contents/jbr/Contents/Home" ]]; then
   export JAVA_HOME="$STUDIO_APP/Contents/jbr/Contents/Home"
 fi

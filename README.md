@@ -98,6 +98,12 @@ it leaves every API route available. NixOS: `services.mold.webUi.enable = false;
 
 Models download automatically on first use. Generated media is saved locally
 with prompt, model, seed, and generation metadata.
+LoRA reuse tracks adapter file revisions as well as strengths; replacing an
+adapter invalidates cached weights. FLUX and SD3 retain at most 256 MiB of
+derived LoRA deltas per engine and release that cache when unloaded.
+Web, desktop and mobile reject empty video/audio attachments and files above
+64 MiB before encoding, with inline errors that preserve the prior attachment.
+Mobile also enforces a 45 MiB combined media budget.
 Framewise video upscale also needs the host codec bridge: Nix packages and
 CUDA containers include it, while raw binary installs must provide `ffmpeg`
 and `ffprobe` on `PATH` before the server advertises that feature.
@@ -420,6 +426,10 @@ in anonymous route proofs. Plain HTTP still requires a trusted network.
 Native iOS queue cards use concise curated model names and open full job details
 on tap, with state-aware per-job controls. Generate exposes searchable per-machine
 Prompt History with prompt-only recall.
+The companion resumes following accepted work after a temporary connection
+failure without submitting it again. Queue previews have bounded memory and
+concurrency, and both native apps require a definitive source lookup before
+reporting that a moved job's original was removed.
 
 Native iOS keeps **Cancel**, **Retry**, and **Pause/Resume** in queue-row swipe actions, with **Move to…** on eligible queued, paused, and held cards and a read-only **Details** swipe when no recovery or pause action applies. Cancel remains available while source images and batch settings load; Retry appears when the current job supports recovery. Native iOS, macOS, web and Tauri job details expose the machine's saved failure diagnostic with copyable job identity. Errors explain known model, verification and graphics-device failures in plain English; technical details remain available for troubleshooting. Held cancellation rechecks the owning machine and job. Current Mold servers enforce held-only cancellation, preventing stale Held actions from stopping a render. Update older machines for this safeguard.
 

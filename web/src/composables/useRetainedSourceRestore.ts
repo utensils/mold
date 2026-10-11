@@ -1,0 +1,79 @@
+import { onScopeDispose, ref, watch, type Ref } from "vue";
+import {
+  restoreRetainedDraftMedia,
+  type RetainedDraftLayout,
+} from "@studio/lib/retainedDraftMedia";
+import {
+  retainedSourceReuseState,
+  retainedSourceReuseSnapshot,
+  retainedSourceReuseIsCurrent,
+  setRetainedSourceReuseIntentIfCurrent,
+} from "../lib/retainedSourceReuse";
+
+/** Materializes one Library handover after the model contract is known.
+ * Owns cancellation and status; the composer owns its typed form and canvas. */
+export function useRetainedSourceRestore(options: {
+  loaded: Ref<boolean>;
+  read: () => object;
+  layout: () => RetainedDraftLayout;
+  apply: (patch: Record<string, unknown>) => void;
+  onError: (message: string) => void;
+}) {
+  const error = ref<string | null>(null);
+  const pending = ref(false);
+  let disposed = false;
+  let materializingVersion: number | null = null;
+  const abort = new AbortController();
+  onScopeDispose(() => {
+    disposed = true;
+    abort.abort();
+  });
+  watch(
+    [retainedSourceReuseState, options.loaded],
+    async ([intent, loaded]) => {
+      if (!intent) {
+        error.value = null;
+        pending.value = false;
+        return;
+      }
+      if (!loaded) {
+        pending.value = true;
+        return;
+      }
+      const snapshot = retainedSourceReuseSnapshot();
+      if (!snapshot || materializingVersion === snapshot.version) return;
+      materializingVersion = snapshot.version;
+      const isCurrent = () =>
+        !disposed && retainedSourceReuseIsCurrent(snapshot.version);
+      error.value = null;
+      pending.value = true;
+      try {
+        const result = await restoreRetainedDraftMedia({
+          ...intent,
+          read: options.read,
+          layout: options.layout(),
+          signal: abort.signal,
+          isCurrent,
+        });
+        if (!result || !isCurrent()) return;
+        options.apply(result.patch);
+        setRetainedSourceReuseIntentIfCurrent(snapshot.version, {
+          ...intent,
+          inventory: result.inventory,
+        });
+      } catch (cause) {
+        if (isCurrent()) {
+          error.value =
+            cause instanceof Error
+              ? cause.message
+              : "The original inputs could not be restored. Reuse this print again or reattach them.";
+          options.onError(error.value);
+        }
+      } finally {
+        if (isCurrent()) pending.value = false;
+      }
+    },
+    { immediate: true },
+  );
+  return { error, pending };
+}

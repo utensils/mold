@@ -44,6 +44,13 @@ struct ActiveBatch: Equatable, Codable {
     let startedAt: Date
 }
 
+/// Admission has a finite background lifetime, separate from progress sockets.
+/// Stop intent survives cancellation if the server has already accepted work.
+struct PendingAdmission {
+    let task: Task<Void, Never>
+    var stopped = false
+}
+
 // Submitting and following (the Mac's `GenerateController+Run`, for a phone).
 extension GenerateController {
     func generate() {
@@ -57,7 +64,7 @@ extension GenerateController {
         let prompt = draft.prompt
         // Decided now, before the task: a second press right after this one
         // still queues, however the two tasks interleave.
-        let followNow = !run.isBusy
+        let followNow = activeBatch == nil && !run.isBusy
         if followNow { run = .submitting }
         saveDraft()
 
@@ -69,8 +76,11 @@ extension GenerateController {
             UIApplication.shared.endBackgroundTask(background)
             background = .invalid
         }
+        let token = UUID()
+        if followNow { currentAdmissionID = token }
         let task = Task { [weak self] in
             defer {
+                self?.finishAdmission(token)
                 if background != .invalid { UIApplication.shared.endBackgroundTask(background) }
             }
             do {
@@ -96,12 +106,19 @@ extension GenerateController {
                     UIApplication.shared.endBackgroundTask(background)
                     background = .invalid
                 }
-                guard followNow else { self.queued.append(active); return }
-                self.activeBatch = active
-                await self.follow(accepted, active: active, backend: backend)
+                if self.admissions[token]?.stopped == true {
+                    self.cancelStoppedAdmission(active, host: host, backend: backend)
+                    return
+                }
+                if self.currentAdmissionID == token { self.currentAdmissionID = nil }
+                if self.activeBatch == nil, self.currentAdmissionID == nil {
+                    self.activeBatch = active
+                    self.run = .running(accepted, nil)
+                    self.startFollowing(initial: accepted, acceptingBackend: backend)
+                } else { self.queued.append(active) }
             } catch {
-                guard !Task.isCancelled, let self else { return }
-                if followNow {
+                guard !Task.isCancelled, let self, self.admissions[token]?.stopped == false else { return }
+                if self.currentAdmissionID == token {
                     let sentence: String?
                     if case let .http(_, code, _)? = error as? MoldClientError {
                         sentence = RetainedSourceMedia.refusalSentence(for: code)
@@ -112,10 +129,30 @@ extension GenerateController {
                 }
             }
         }
-        if followNow { runTask = task }
+        admissions[token] = PendingAdmission(task: task)
+    }
+
+    private func finishAdmission(_ token: UUID) {
+        admissions[token] = nil
+        guard currentAdmissionID == token else { return }
+        currentAdmissionID = nil
+        followNext()
+    }
+
+    private func cancelStoppedAdmission(_ active: ActiveBatch, host: MoldHost, backend: any MoldBackend) {
+        // A fresh task can send cancellation even when the admission task was
+        // cancelled. Keep the ledger until the machine confirms that request.
+        Task { [weak self] in
+            do {
+                try await backend.cancelBatch(id: active.id)
+                self?.ledger.remove(active.clientBatchId)
+                self?.settled?(active, .idle)
+            } catch { self?.hosts.report(host, doing: String(localized: "stop that render"), error) }
+        }
     }
 
     func follow(_ initial: BatchStatus, active: ActiveBatch, backend: any MoldBackend) async {
+        guard !Task.isCancelled, !followingSuspended, activeBatch == active else { return }
         // Settled while nobody was watching (the app was away): say so now.
         if BatchOutcome(settling: initial) != nil { return settle(initial, active: active) }
         run = .running(initial, nil)
@@ -123,15 +160,17 @@ extension GenerateController {
         defer { preview.cancel() }
         do {
             for try await status in backend.batchEvents(id: initial.id) {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, activeBatch == active else { return }
                 settle(status, active: active)
                 if status.isAtRest { return }
             }
             // The stream ended without a settled frame: READ it once, never
             // re-submit to find out.
-            settle(try await backend.batchStatus(id: initial.id), active: active)
+            let status = try await backend.batchStatus(id: initial.id)
+            guard !Task.isCancelled, activeBatch == active else { return }
+            settle(status, active: active)
         } catch {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, activeBatch == active else { return }
             // A dropped stream does not mean the work stopped.
             run = .failed(String(localized: "Lost contact while rendering. The job may still be running — check the Queue."))
             settled?(active, run)
@@ -144,7 +183,7 @@ extension GenerateController {
                 if let self, case let .running(status, _) = self.run,
                    let job = status.children.first(where: { $0.state.isLive })?.jobId ?? status.children.first?.jobId,
                    let progress = try? await backend.jobPreview(jobId: job),
-                   case let .running(current, _) = self.run {
+                   !Task.isCancelled, case let .running(current, _) = self.run, current.id == status.id {
                     self.run = .running(current, progress)
                 }
                 try? await Task.sleep(for: .milliseconds(700))
@@ -168,43 +207,69 @@ extension GenerateController {
         }
     }
 
-    /// The next queued batch takes the canvas once this one has settled.
+    /// The next admitted batch is followed once the current one settles.
     func followNext() {
-        guard !queued.isEmpty, !run.isBusy || activeBatch == nil else { return }
-        let next = queued.removeFirst()
-        guard let host = hosts.host(next.host) else { return }
-        let backend = hosts.backend(for: host)
-        activeBatch = next
-        runTask = Task { [weak self] in
-            guard let status = try? await backend.batchStatus(id: next.id) else { return }
-            await self?.follow(status, active: next, backend: backend)
-        }
+        guard !queued.isEmpty, activeBatch == nil else { return }
+        activeBatch = queued.removeFirst()
+        startFollowing()
     }
 
-    /// The app is going away: stop listening (iOS would freeze the socket
-    /// and it would look alive while saying nothing), but keep the batch --
-    /// the machine keeps rendering, and `resumeFollowing` picks it up.
-    func suspendFollowing() {
-        runTask?.cancel()
+    private func finishFollowing(_ token: UUID) {
+        guard followingID == token else { return }
+        followingID = nil
         runTask = nil
     }
 
-    /// Back in the foreground: read where the batch on screen got to, then
-    /// settle it or follow it again. Never re-submits.
-    func resumeFollowing() {
-        guard runTask == nil, let active = activeBatch, let host = hosts.host(active.host) else { return }
-        let backend = hosts.backend(for: host)
+    private func startFollowing(initial: BatchStatus? = nil, acceptingBackend: (any MoldBackend)? = nil) {
+        // Initial progress belongs to the accepting route, even if the user
+        // edited this host's address or key while admission was in flight.
+        guard !followingSuspended, let active = activeBatch,
+              let backend = acceptingBackend ?? hosts.backend(for: active.host) else { return }
+        let token = UUID()
+        followingID = token
         runTask = Task { [weak self] in
-            guard let status = try? await backend.batchStatus(id: active.id) else { return }
-            await self?.follow(status, active: active, backend: backend)
+            defer { self?.finishFollowing(token) }
+            do {
+                let status: BatchStatus
+                if let initial { status = initial }
+                else { status = try await backend.batchStatus(id: active.id) }
+                guard !Task.isCancelled, self?.followingID == token, self?.activeBatch == active else { return }
+                await self?.follow(status, active: active, backend: backend)
+            } catch {
+                guard !Task.isCancelled, let self, self.followingID == token, self.activeBatch == active else { return }
+                self.run = .failed(String(localized: "Lost contact while rendering. The job may still be running — check the Queue."))
+            }
         }
+    }
+
+    /// Keep the admitted batch while iOS suspends sockets in the background.
+    func suspendFollowing() {
+        followingSuspended = true
+        runTask?.cancel()
+        followingID = nil
+        runTask = nil
+    }
+
+    /// A foreground/reconnect read follows the existing batch, never resubmits.
+    func resumeFollowing() {
+        followingSuspended = false
+        guard runTask == nil else { return }
+        startFollowing()
     }
 
     /// Stops the render on screen, on its machine. Queued batches keep their
     /// place; "Stop Everything" cancels them too.
     func stop(everything: Bool = false) {
         let targets = [activeBatch].compactMap(\.self) + (everything ? queued : [])
+        let pending = everything ? Array(admissions.keys) : [currentAdmissionID].compactMap(\.self)
+        for token in pending {
+            admissions[token]?.stopped = true
+            admissions[token]?.task.cancel()
+        }
+        currentAdmissionID = nil
         runTask?.cancel()
+        followingID = nil
+        runTask = nil
         run = .idle
         activeBatch = nil
         if everything { queued = [] }

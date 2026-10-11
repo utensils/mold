@@ -63,6 +63,29 @@ describe("PlacementPanel", () => {
     ]);
   });
 
+  it("preserves an existing stable device pin from the server wire", async () => {
+    const wrapper = await mountPanel({
+      family: "flux",
+      component: "vae",
+      placement: {
+        text_encoders: { kind: "auto" },
+        advanced: {
+          transformer: { kind: "auto" },
+          vae: { kind: "device", id: "gpu-stable" },
+        },
+      },
+    });
+    const select = wrapper.get<HTMLSelectElement>(
+      "[data-test='component-placement-select']",
+    );
+    expect(select.element.value).toBe("device:gpu-stable");
+    await select.setValue("device:gpu-stable");
+    const value = wrapper
+      .emitted("update:modelValue")!
+      .at(-1)![0] as import("../types").DevicePlacement;
+    expect(value.advanced?.vae).toEqual({ kind: "device", id: "gpu-stable" });
+  });
+
   it("maps component pins to advanced placement fields", async () => {
     const wrapper = await mountPanel({ family: "flux", component: "clip_g" });
     await wrapper

@@ -37,6 +37,7 @@ pub mod img_utils;
 pub mod ip_adapter;
 pub mod latent_preview;
 pub mod loader;
+mod lora;
 pub mod ltx2;
 pub mod ltx_video;
 pub mod metal_memory;

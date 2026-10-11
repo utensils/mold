@@ -125,7 +125,7 @@ function chainJobDetail(): Record<string, unknown> {
     stages: [0, 1, 2].map((idx) => ({ idx, state: "pending" })),
     script: {
       chain: { model: "ltx-2-19b-distilled:fp8" },
-      stages: [{ frames: 97 }, { frames: 97 }, { frames: 97 }],
+      stage: [{ frames: 97 }, { frames: 97 }, { frames: 97 }],
     },
   };
 }

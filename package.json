@@ -14,7 +14,7 @@
     "fmt": "prettier --write studio",
     "fmt:check": "prettier --check studio",
     "check:architecture": "bash scripts/tests/frontend-architecture.sh",
-    "check:dead-code": "knip",
+    "check:dead-code": "knip && bun run check:production-graph",
     "test:studio": "vitest run --config studio/vitest.config.ts",
     "test:web": "cd web && bun run test",
     "test:desktop": "cd desktop && bun run test",
@@ -22,7 +22,8 @@
     "build:desktop": "cd desktop && bun run build",
     "build:mobile": "cd desktop && bun run build:mobile",
     "check:frontend": "bun run check:architecture && bun run test:studio && bun run test:web && bun run test:desktop && bun run build:web && bun run build:desktop",
-    "test:android:identity-picker": "bun scripts/android-identity-picker-smoke.mjs"
+    "test:android:identity-picker": "bun scripts/android-identity-picker-smoke.mjs",
+    "check:production-graph": "node --test scripts/tests/frontend-production-graph.test.mjs && node scripts/frontend-production-graph.mjs"
   },
   "dependencies": {
     "@microsoft/fetch-event-source": "2.0.1",

@@ -1176,7 +1176,8 @@ mod tests {
     /// not one key's worth.
     #[test]
     fn the_registry_reports_the_device_bytes_its_adapters_hold() {
-        use crate::flux::lora::{LoraAdapter, LoraLayer, LoraSpec};
+        use crate::flux::lora::LoraSpec;
+        use crate::lora::{LoraAdapter, LoraLayer};
         use std::collections::HashMap as HM;
 
         let device = Device::Cpu;
@@ -1188,7 +1189,7 @@ mod tests {
 
         let h = 16;
         let rank = 4;
-        let make = |scale: f64, path_hash: u64| {
+        let make = |scale: f64| {
             let a = Tensor::zeros((rank, h), DType::F32, &device).unwrap();
             let b = Tensor::zeros((h, rank), DType::F32, &device).unwrap();
             let mut layers = HashMap::new();
@@ -1196,20 +1197,18 @@ mod tests {
                 "transformer.transformer_blocks.0.attn.to_q".to_string(),
                 LoraLayer { a, b, alpha: None },
             );
-            (LoraAdapter { layers, rank }, scale, path_hash)
+            (LoraAdapter::from_layers(layers, rank), scale)
         };
-        let (first, first_scale, first_hash) = make(0.5, 0xAB);
-        let (second, second_scale, second_hash) = make(0.75, 0xCD);
+        let (first, first_scale) = make(0.5);
+        let (second, second_scale) = make(0.75);
         let specs = [
             LoraSpec {
                 adapter: &first,
                 scale: first_scale,
-                path_hash: first_hash,
             },
             LoraSpec {
                 adapter: &second,
                 scale: second_scale,
-                path_hash: second_hash,
             },
         ];
         let mut linear_out_dims = HM::new();
@@ -1227,7 +1226,8 @@ mod tests {
 
     #[test]
     fn test_build_registry_double_block_qkv_into_fused_slice() {
-        use crate::flux::lora::{LoraAdapter, LoraLayer, LoraSpec};
+        use crate::flux::lora::LoraSpec;
+        use crate::lora::{LoraAdapter, LoraLayer};
         use std::collections::HashMap as HM;
         // Synthesize a diffusers-shaped LoRA touching the double-block
         // image-attention Q projection. After build_registry the result
@@ -1242,11 +1242,10 @@ mod tests {
             "transformer.transformer_blocks.0.attn.to_q".to_string(),
             LoraLayer { a, b, alpha: None },
         );
-        let adapter = LoraAdapter { layers, rank: 4 };
+        let adapter = LoraAdapter::from_layers(layers, 4);
         let specs = [LoraSpec {
             adapter: &adapter,
             scale: 0.5,
-            path_hash: 0xAB,
         }];
         let mut linear_out_dims = HM::new();
         linear_out_dims.insert("double_blocks.0.img_attn.qkv.weight".to_string(), 3 * h);
@@ -1261,7 +1260,8 @@ mod tests {
 
     #[test]
     fn test_build_registry_single_block_mlp_lands_after_qkv() {
-        use crate::flux::lora::{LoraAdapter, LoraLayer, LoraSpec};
+        use crate::flux::lora::LoraSpec;
+        use crate::lora::{LoraAdapter, LoraLayer};
         use std::collections::HashMap as HM;
         // single_blocks.linear1 fuses [Q, K, V, MLP]. Verify that an
         // MLP-targeting LoRA gets a FusedSlice that starts at 3*h and
@@ -1277,11 +1277,10 @@ mod tests {
             "transformer.single_transformer_blocks.0.proj_mlp".to_string(),
             LoraLayer { a, b, alpha: None },
         );
-        let adapter = LoraAdapter { layers, rank: 4 };
+        let adapter = LoraAdapter::from_layers(layers, 4);
         let specs = [LoraSpec {
             adapter: &adapter,
             scale: 1.0,
-            path_hash: 0xCD,
         }];
         let mut linear_out_dims = HM::new();
         linear_out_dims.insert("single_blocks.0.linear1.weight".to_string(), 3 * h + mlp);
@@ -1295,7 +1294,8 @@ mod tests {
 
     #[test]
     fn test_build_registry_direct_target_no_fused_slice() {
-        use crate::flux::lora::{LoraAdapter, LoraLayer, LoraSpec};
+        use crate::flux::lora::LoraSpec;
+        use crate::lora::{LoraAdapter, LoraLayer};
         use std::collections::HashMap as HM;
         // FF MLP `ff.net.0.proj` is a Direct target — adapter must
         // attach without a fused slice and the registry must still
@@ -1310,11 +1310,10 @@ mod tests {
             "transformer.transformer_blocks.0.ff.net.0.proj".to_string(),
             LoraLayer { a, b, alpha: None },
         );
-        let adapter = LoraAdapter { layers, rank: 4 };
+        let adapter = LoraAdapter::from_layers(layers, 4);
         let specs = [LoraSpec {
             adapter: &adapter,
             scale: 0.25,
-            path_hash: 0xEF,
         }];
         let registry = build_registry(&specs, &HM::new(), &device, DType::F32).unwrap();
         let stack = registry.adapters_for("double_blocks.0.img_mlp.0.weight");
@@ -1510,7 +1509,8 @@ mod tests {
     /// gate, rows `[h, 2h)` to proj, `down` shared (`comfy/lora.py:331-333`).
     #[test]
     fn rows_targets_split_a_fused_lora_onto_separate_halves() {
-        use crate::flux::lora::{LoraAdapter, LoraLayer, LoraSpec};
+        use crate::flux::lora::LoraSpec;
+        use crate::lora::{LoraAdapter, LoraLayer};
 
         let (dim, hidden, rank) = (8, 6, 2);
         let (down, up) = make_lora_pair(2 * hidden, rank, dim, 3.0);
@@ -1523,11 +1523,10 @@ mod tests {
                 alpha: Some(1.0),
             },
         );
-        let adapter = LoraAdapter { layers, rank };
+        let adapter = LoraAdapter::from_layers(layers, rank);
         let specs = [LoraSpec {
             adapter: &adapter,
             scale: 0.8,
-            path_hash: 1,
         }];
         let registry = build_registry_with(
             &specs,
@@ -1583,7 +1582,8 @@ mod tests {
     /// fused linear writes only its own half of the output.
     #[test]
     fn rows_targets_place_a_split_lora_on_its_half_of_a_fused_linear() {
-        use crate::flux::lora::{LoraAdapter, LoraLayer, LoraSpec};
+        use crate::flux::lora::LoraSpec;
+        use crate::lora::{LoraAdapter, LoraLayer};
 
         let (dim, hidden, rank) = (8, 4, 2);
         let (down, up) = make_lora_pair(hidden, rank, dim, 9.0);
@@ -1596,11 +1596,10 @@ mod tests {
                 alpha: None,
             },
         );
-        let adapter = LoraAdapter { layers, rank };
+        let adapter = LoraAdapter::from_layers(layers, rank);
         let specs = [LoraSpec {
             adapter: &adapter,
             scale: 1.0,
-            path_hash: 2,
         }];
         let mut dims = HashMap::new();
         dims.insert("gate_up".to_string(), 2 * hidden);
@@ -1644,7 +1643,8 @@ mod tests {
     /// out-of-range row request is an error rather than a panic.
     #[test]
     fn mapper_errors_and_bad_rows_abort_the_build() {
-        use crate::flux::lora::{LoraAdapter, LoraLayer, LoraSpec};
+        use crate::flux::lora::LoraSpec;
+        use crate::lora::{LoraAdapter, LoraLayer};
 
         let (down, up) = make_lora_pair(4, 2, 8, 1.0);
         let mut layers = HashMap::new();
@@ -1656,11 +1656,10 @@ mod tests {
                 alpha: None,
             },
         );
-        let adapter = LoraAdapter { layers, rank: 2 };
+        let adapter = LoraAdapter::from_layers(layers, 2);
         let specs = [LoraSpec {
             adapter: &adapter,
             scale: 1.0,
-            path_hash: 3,
         }];
         let refused = build_registry_with(
             &specs,

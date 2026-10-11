@@ -21,22 +21,25 @@ public struct QueueInputPreview: Sendable, Identifiable {
 
 public extension MoldQueueBackend {
     /// Load each member independently: a missing preview does not hide later references.
-    func queueInputPreviews(id: String, firstOnly: Bool = false, cached: [QueueInputPreview] = []) async throws -> [QueueInputPreview] {
+    func queueInputPreviews(id: String, firstOnly: Bool = false, cached: [QueueInputPreview] = [], maximumBytes: Int = .max) async throws -> [QueueInputPreview] {
         let inputs = try await queueInputs(id: id)
         guard inputs.count <= 256, Set(inputs.map(\.id)).count == inputs.count, inputs.allSatisfy({ ($0.index ?? 0) >= 0 && $0.label.utf8.count <= 1024 }) else { throw MoldClientError.malformedResponse }
         var previews: [QueueInputPreview] = []
         var foundImage = false
+        var remaining = max(0, maximumBytes)
         for input in inputs {
             try Task.checkCancellation()
-            let bytes: Data?
+            var bytes: Data?
             if let existing = cached.first(where: { $0.input == input })?.bytes {
                 bytes = existing
-            } else if input.preview && (!firstOnly || !foundImage) {
+            } else if input.preview && remaining > 0 && (!firstOnly || !foundImage) {
                 do { bytes = try await queueInputThumbnail(id: id, index: input.index) }
                 catch is CancellationError { throw CancellationError() }
                 catch { bytes = nil }
             } else { bytes = nil }
             try Task.checkCancellation()
+            if let loaded = bytes, loaded.count > remaining { bytes = nil }
+            remaining -= bytes?.count ?? 0
             if bytes != nil { foundImage = true }
             if input.index == nil && bytes == nil { continue }
             previews.append(QueueInputPreview(input: input, bytes: bytes))

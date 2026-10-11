@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { triangleGlb } from "@studio/lib/glbFixture";
 import type { GenerateRequestWire, GalleryImage } from "../types";
 import type { HostRoute } from "../lib/hostRouting";
-import { GENERATION_REQUEST_MEDIA_FIELDS } from "../lib/generationRequestMedia";
+import { GENERATION_MEDIA_AUTHORITY_FIELDS } from "@studio/lib/generationMedia";
 import type {
   GenerationBatchStatus,
   GenerationBatchStatusResponse,
@@ -750,7 +750,7 @@ describe("web durable generation lifecycle", () => {
       keyframes: [{ frame: 0, image: "keyframe" }],
     }) as unknown as Record<string, unknown>;
 
-    for (const field of GENERATION_REQUEST_MEDIA_FIELDS) {
+    for (const field of GENERATION_MEDIA_AUTHORITY_FIELDS) {
       expect(redacted).not.toHaveProperty(field);
     }
     expect(redacted).not.toHaveProperty("source_image_name");
@@ -1427,7 +1427,7 @@ describe("web durable generation lifecycle", () => {
    * fence could only refuse work the server would have taken, so the server's
    * own typed admission refusal is the single authority.
    */
-  it.each(GENERATION_REQUEST_MEDIA_FIELDS)(
+  it.each(GENERATION_MEDIA_AUTHORITY_FIELDS)(
     "admits a media-bearing %s request unchanged",
     (field) => {
       const valueByField: Record<string, unknown> = {

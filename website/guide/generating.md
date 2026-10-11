@@ -533,6 +533,13 @@ Wuerstchen and legacy LTX-Video are not yet wired; attaching a LoRA there
 returns a 422 `VALIDATION_ERROR` with the supported-family list.
 :::
 
+FLUX, Flux.2, Qwen-Image, and Qwen Image 2.1 only reuse resident LoRA
+weights while the adapter file revision, strength, and stack order are unchanged.
+Replacing an adapter at the same path invalidates that reuse; unavailable file
+metadata also forces a reload. FLUX and SD3 retain up to 256 MiB of computed
+LoRA deltas per engine, released when the engine unloads. Larger or evicted
+deltas are recomputed as needed.
+
 ## Inline Preview
 
 Display generated images in the terminal:
@@ -760,3 +767,13 @@ canvas.
 Fit to canvas remains available when only a last frame is attached. Boundary
 frames use Crop to fill by default; both attached endpoints are fitted to the
 chosen canvas on submission while the composer keeps the original pictures.
+
+### Video and audio uploads in Studio
+
+The web and Tauri desktop/mobile composers accept nonempty video and
+conditioning-audio files up to 64 MiB each. The Tauri phone composer also applies a
+45 MiB combined decoded-media budget across the request. Failed or oversized picks
+show an inline error and preserve the previous attachment. Choosing a new file,
+clearing the input, switching model/pipeline or leaving the screen cancels the old
+pick's ability to update the form. These limits concern local file selection;
+server capability and admission limits still apply when generating.

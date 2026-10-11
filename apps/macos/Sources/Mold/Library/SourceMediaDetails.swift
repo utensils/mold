@@ -18,12 +18,11 @@ struct SourceMediaDetails: View {
     @State private var error: String?
     @State private var pixels: String?
     @State private var inspectedKind: SourceMediaOriginal.Kind?
-    @State private var inspectedKey: SourceOriginalKey?
+    @State private var inspectedKey: SourceMediaOriginalKey?
     @State private var retry = 0
     @State private var limit = 48
     private var usages: [SourceMediaCatalog.Row] {
-        let access = library.sourceAccess
-        return source.usages.filter { access.allows($0.authority, detail: !gallery) && (!gallery || library.sourceMediaCatalog.contains($0)) }
+        source.visibleUsages(access: library.sourceAccess, catalog: library.sourceMediaCatalog, gallery: gallery)
     }
     private var current: SourceMediaCatalog.Row? { usages.first { $0.id == (selected ?? initial) } }
 
@@ -87,7 +86,7 @@ struct SourceMediaDetails: View {
         .onDisappear(perform: clear)
         .onExitCommand { dismiss() }
     }
-    private var loadKey: SourceOriginalKey {
+    private var loadKey: SourceMediaOriginalKey {
         .init(row: current, revision: current.map { library.sourceMediaCatalog.contentRevision(for: $0.owner.id) } ?? 0, retry: retry)
     }
     private func clear() { player?.pause(); player?.replaceCurrentItem(with: nil); player = nil; image = nil; file = nil; pixels = nil; inspectedKind = nil; inspectedKey = nil }
@@ -99,14 +98,12 @@ struct SourceMediaDetails: View {
         let instance = hosts.instanceIDs[row.owner.hostID]
         let key = loadKey
         do {
-            let original = try await hosts.backend(for: route).retainedSourceMediaFile(for: row.owner.print.filename, member: row.member)
-            guard !Task.isCancelled, key == loadKey, current?.authority == row.authority,
-                  hosts.host(row.owner.hostID) == route, hosts.instanceIDs[row.owner.hostID] == instance,
-                  library.allowsSource(row.authority, detail: !gallery) else { return }
-            let inspected = try await SourceMediaOriginal.inspect(original)
-            guard !Task.isCancelled, key == loadKey, current?.authority == row.authority,
-                  hosts.host(row.owner.hostID) == route, hosts.instanceIDs[row.owner.hostID] == instance,
-                  library.allowsSource(row.authority, detail: !gallery) else { return }
+            guard let loaded = try await SourceMediaLoading.original(row: row, backend: hosts.backend(for: route), isCurrent: {
+                key == loadKey && current?.authority == row.authority
+                    && hosts.host(row.owner.hostID) == route && hosts.instanceIDs[row.owner.hostID] == instance
+                    && library.allowsSource(row.authority, detail: !gallery)
+            }) else { return }
+            let original = loaded.file, inspected = loaded.inspection
             inspectedKind = inspected.kind; inspectedKey = key
             if let decoded = inspected.image {
                 image = NSImage(cgImage: decoded.image, size: .zero)
@@ -114,10 +111,4 @@ struct SourceMediaDetails: View {
             } else { file = original; player = AVPlayer(url: inspected.url) }
         } catch { if !Task.isCancelled { self.error = error.localizedDescription } }
     }
-}
-
-private struct SourceOriginalKey: Hashable {
-    let row: SourceMediaCatalog.Row?
-    let revision: Int
-    let retry: Int
 }

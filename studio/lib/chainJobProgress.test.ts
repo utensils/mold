@@ -24,8 +24,19 @@ function detail(overrides: Partial<ChainJobDetail> = {}): ChainJobDetail {
       { idx: 1, state: "pending", seed: "43", frames_emitted: null },
     ],
     script: {
-      chain: { model: "ltx-2-19b-distilled:fp8" },
-      stages: [
+      schema: "mold.chain.v1",
+      chain: {
+        model: "ltx-2-19b-distilled:fp8",
+        width: 768,
+        height: 512,
+        fps: 24,
+        steps: 8,
+        guidance: 1,
+        strength: 1,
+        motion_tail_frames: 25,
+        output_format: "mp4",
+      },
+      stage: [
         { prompt: "one", frames: 97 },
         { prompt: "two", frames: 97 },
       ],

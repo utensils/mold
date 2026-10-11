@@ -32,6 +32,8 @@ describe the result, then choose a model. Tap **Model** to search installed
 models and recipes; **Get More Models…** opens model management directly.
 The prompt stays in one scrollable form as the keyboard and text size change;
 Generate stays visible above the phone tabs. The composer never shows running or finished media: tap the queue count to open live progress and supported previews in Queue. Background queue updates keep attachment browsing open. The prompt has one Expand action.
+After a dropped connection, foreground reconnection rereads admitted batches and resumes progress without submitting them again.
+Backgrounding pauses progress streams while an in-flight upload/admission keeps its finite background allowance. Accepted batches remain tracked for foreground recovery. Stop before acceptance cancels the request and, if a late response confirms acceptance, sends cancellation for that admitted batch; an unconfirmed cancellation remains in the recovery ledger.
 The model search sheet keeps a Close action visible when its keyboard is open.
 More Options gives Shape, Steps, Batch and Length their own rows, including at
 large accessibility text sizes. Clip and 3-D drafts restore their kind after
@@ -309,7 +311,7 @@ collision. Temporary files stay alive until system delivery finishes.
 
 Local validation and qualification limits: [native acceptance record](../../docs/uat/native-authoring-media.md).
 
-Queue rows show the owning machine’s sealed conditioning images across models. Job Details shows every ordered reference separately with its role, including identity photos, named views, masks, control images and boundary frames. Audio/video references are listed by kind; unavailable previews are disclosed. Inputs remain separate from live denoise previews and are fetched through authenticated routes, including work submitted from another device. Older servers retain their singular source preview.
+Queue rows show the owning machine’s sealed conditioning images across models. Job Details shows every ordered reference separately with its role, including identity photos, named views, masks, control images and boundary frames. Audio/video references are listed by kind; unavailable previews are disclosed. Inputs remain separate from live denoise previews and are fetched through authenticated routes, including work submitted from another device. Older servers retain their singular source preview. Source previews share a 32 MiB memory budget and at most four concurrent reads. Eviction keeps ordered input labels and allows previews to load again when needed.
 
 Library New badges and unread counts are saved on each client independently. Newly discovered media stays new while browsing Library. Viewing an individual print clears its New label immediately; leaving Library acknowledges the eligible prints shown by the projections visited there. Hidden or filtered-out prints, Trash, and arrivals after departure remain unread. Counts and badges deduplicate merged copies and exclude hidden collections and Trash. Existing read status is preserved during upgrade, and a newly connected machine establishes a historical baseline; subsequent arrivals require viewing or a Library visit. Native iOS also badges its Images navigation. Native app-icon counts follow the same local history, subject to the existing badge preference or permission. iOS refreshes while active and opportunistically in the background; the server has no push.
 
@@ -365,7 +367,7 @@ Reordering and Empty Queue reserve the jobs they affect until the machine listin
 
 When another connected machine can generate, **Move to…** is available on queued, paused, and held jobs until the source machine begins rendering. The prompt, seed, settings, and retained reference media move together. The destination must accept the job before the original is removed. Older servers support Held-only moves. Jobs that depend on machine-local LoRAs or workflows are refused without moving them.
 
-If a connection is interrupted during a move, retry the same destination so Mold can check whether it already accepted the job. The source remains reserved while that result is unknown, preventing duplicate rendering. A confirmed destination rejection releases the original only after the destination records that this transfer cannot be admitted later.
+If a connection is interrupted during a move, retry the same destination so Mold can check whether it already accepted the job. The source remains reserved while that result is unknown, preventing duplicate rendering. A confirmed destination rejection releases the original only after the destination records that this transfer cannot be admitted later. A failed source lookup keeps the move unresolved. Only a confirmed missing original with a verified destination counts as removed; a job that has already started on the source is reported as no longer eligible.
 
 ### Continuous Library rows
 

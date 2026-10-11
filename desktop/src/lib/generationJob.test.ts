@@ -99,6 +99,7 @@ describe("chain Job adapters", () => {
 
   it("adapts full and metadata-only chain completions to CompleteEvent", () => {
     const metadata = {
+      version: "fixture",
       prompt: request.prompt,
       model: request.model,
       seed: 99,
@@ -125,7 +126,6 @@ describe("chain Job adapters", () => {
       generation_time_ms: 12_345,
       filename: "chain-99.mp4",
       metadata,
-      script: {} as SseChainCompleteEvent["script"],
     } satisfies SseChainCompleteEvent;
 
     expect(chainCompleteToComplete(event, request)).toEqual({

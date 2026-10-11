@@ -20,6 +20,93 @@ private struct MirrorResult: Sendable {
 }
 
 
+/// Each stage receives the captured authority it needs and returns its own result.
+/// Only LibraryStore publishes progress, issues and the final report.
+private enum MirrorDiscovery {
+    case ready(MirrorSources)
+    case stopped([String])
+}
+
+private struct MirrorSources {
+    let candidates: [LibraryEntry]
+    let targets: [MirrorTarget]
+    let machines: [MoldHost.ID: (MoldHost, any MoldBackend)]
+    let collections: [MoldHost.ID: [String: Collection]]
+    let checkpoints: [MoldHost.ID: GallerySyncCheckpoint]
+    let unresolvedCollections: Set<String>
+    let failures: [String]
+}
+
+private enum MirrorPreparation {
+    case ready(MirrorDestination)
+    case unavailable(String)
+}
+
+private struct MirrorDestination {
+    let host: MoldHost
+    let backend: any MoldBackend
+    let prints: [String: GalleryPrint]
+    let trashNames: Set<String>
+    let checkpoint: GallerySyncCheckpoint?
+    let records: [String: LocalSyncRecord]
+    let pendingOrganization: PendingSyncOrganization?
+    let collectionNames: [String: String]
+    let createdCollections: Int
+    let failedCollectionSlugs: Set<String>
+    let failures: [String]
+}
+
+private struct MirrorCopy {
+    let target: MirrorTarget
+    let filename: String
+}
+
+private struct MirrorWorkPlan {
+    let items: [MirrorWorkItem]
+    let cachedCopies: [MirrorCopy]
+    let keptRemoved: Int
+}
+
+private struct MirrorWorkItem: Sendable {
+    let index: Int
+    let target: MirrorTarget
+    let filename: String
+    let occupied: Bool
+    let cachedFilename: String?
+
+    func perform(to destination: any MoldBackend, knownPrints: [String: GalleryPrint],
+                 pending: PendingSyncOrganization?, destinationInstance: String?) async -> (Int, MirrorResult) {
+        if let cachedFilename {
+            return (index, await repairCachedSources(target, to: destination, as: cachedFilename))
+        }
+        return (index, await mirror(target, to: destination, as: filename, occupied: occupied,
+                                   knownPrints: knownPrints, pending: pending,
+                                   destinationInstance: destinationInstance))
+    }
+}
+
+private struct MirrorAssignments {
+    let collectionNames: [String: String]
+    let collectionFiles: [String: [String]]
+    let titles: [GalleryTitleAssignment]
+    let favorites: [String]
+    let tags: [String: [String]]
+}
+
+private struct MirrorCopies {
+    let successful: [MirrorCopy]
+    let records: [String: LocalSyncRecord]
+    let assignments: MirrorAssignments
+    let transferred: Int
+    let alreadyLocal: Int
+    let failures: [String]
+}
+
+private struct MirrorOrganization {
+    let failedFiles: Set<String>
+    let failures: [String]
+}
+
 private func targetVersioned(_ print: GalleryPrint) -> Bool {
     print.mediaVersion != nil && print.canonicalMetadataJSON != nil
 }
@@ -375,7 +462,7 @@ extension LibraryStore {
         localSaveAlertPresented = false
         let visibilityGeneration = collectionVisibility.generation
         defer { localSaveTask = nil }
-        var candidates = selection.filter(Self.canSaveLocally)
+        let candidates = selection.filter(Self.canSaveLocally)
         guard syncAll || !candidates.isEmpty else { return }
         guard let local = hosts.host(MoldEngine.localHostID), hosts.isUp(local) else {
             localSaveReport = "Start This Mac’s engine to save remote prints in its Library."
@@ -392,6 +479,52 @@ extension LibraryStore {
             localSaveStopRequested = false
         }
 
+        let sources: MirrorSources
+        switch await discoverMirrorSources(candidates, local: local, syncAll: syncAll) {
+        case let .ready(value): sources = value
+        case let .stopped(failures):
+            localSaveReport = "Sync stopped before any prints were copied."
+            localSaveFailures = failures + ["Save stopped. Remaining prints were not transferred."]
+            localSaveAlertPresented = true
+            return
+        }
+        let prepared: MirrorDestination
+        switch await prepareMirrorDestination(sources, local: local, syncAll: syncAll,
+                                              visibilityGeneration: visibilityGeneration) {
+        case let .ready(value): prepared = value
+        case let .unavailable(message):
+            localSaveReport = message
+            localSaveFailures = sources.failures
+            localSaveAlertPresented = true
+            return
+        }
+        let plan = await planMirrorWork(sources, destination: prepared, syncAll: syncAll)
+        let copies = await copyMirrorWork(plan, sources: sources, prepared: prepared, syncAll: syncAll)
+        let organization = await organizeMirrorCopies(copies.assignments, destination: prepared.backend)
+        var failures = copies.failures + organization.failures
+        if copies.transferred > 0 || !copies.assignments.collectionFiles.isEmpty || prepared.createdCollections > 0 {
+            if let collections = try? await prepared.backend.collections() {
+                collectionsPerHost[prepared.host.id] = collections
+            }
+        }
+        // End suppression before the final read. An unrelated client may
+        // import while collections load; the read then catches it, and later
+        // events apply normally.
+        localSaveSuppressImports = false
+        localSaveProgress = "Refreshing This Mac’s Library…"
+        await refresh(on: prepared.host.id)
+        await reconcileCollectionVisibility()
+        if syncAll && !plan.items.isEmpty {
+            failures += await verifyMirrorCopies(sources: sources, prepared: prepared,
+                plan: plan, copies: copies, organization: organization)
+        }
+        publishMirrorReport(selectedCount: selection.count, syncAll: syncAll,
+            sources: sources, prepared: prepared, plan: plan, copies: copies, failures: failures)
+    }
+
+    private func discoverMirrorSources(_ initialCandidates: [LibraryEntry], local: MoldHost,
+                                       syncAll: Bool) async -> MirrorDiscovery {
+        var candidates = initialCandidates
         var failures: [String] = []
         var sourcePrints: [MoldHost.ID: [String: GalleryPrint]] = [:]
         var sourceMachines: [MoldHost.ID: (MoldHost, any MoldBackend)] = [:]
@@ -444,13 +577,7 @@ extension LibraryStore {
             }
         }
 
-        if Task.isCancelled || localSaveStopRequested {
-            localSaveReport = "Sync stopped before any prints were copied."
-            failures.append("Save stopped. Remaining prints were not transferred.")
-            localSaveFailures = failures
-            localSaveAlertPresented = true
-            return
-        }
+        if Task.isCancelled || localSaveStopRequested { return .stopped(failures) }
 
         if syncAll { localSaveProgress = "Preparing \(candidates.count.formatted()) prints…" }
 
@@ -483,15 +610,22 @@ extension LibraryStore {
                                         }, collections: names))
         }
 
+        return .ready(MirrorSources(candidates: candidates, targets: targets,
+            machines: sourceMachines, collections: sourceCollections, checkpoints: sourceCheckpoints,
+            unresolvedCollections: unresolvedCollections, failures: failures))
+    }
+
+    private func prepareMirrorDestination(_ sources: MirrorSources, local: MoldHost, syncAll: Bool,
+                                          visibilityGeneration: UUID) async -> MirrorPreparation {
+        let targets = sources.targets
+        let sourceCollections = sources.collections
+        var failures: [String] = []
         let destination = hosts.backend(for: local)
         let localPrints: [GalleryPrint]
         do {
             localPrints = try await syncListing(on: local, from: destination)
         } catch {
-            localSaveReport = "Couldn’t read This Mac’s Library: \(error.sentence)"
-            localSaveFailures = failures
-            localSaveAlertPresented = true
-            return
+            return .unavailable("Couldn’t read This Mac’s Library: \(error.sentence)")
         }
         let localTrashNames: Set<String>
         if syncAll {
@@ -499,16 +633,13 @@ extension LibraryStore {
                 let prints = try await syncListing(on: local, from: destination, trash: true)
                 localTrashNames = Set(prints.map(\.filename))
             } catch {
-                localSaveReport = "Couldn’t read This Mac’s Trash safely: \(error.sentence)"
-                localSaveFailures = failures
-                localSaveAlertPresented = true
-                return
+                return .unavailable("Couldn’t read This Mac’s Trash safely: \(error.sentence)")
             }
         } else { localTrashNames = [] }
         let localByName = Dictionary(localPrints.map { ($0.filename, $0) },
                                      uniquingKeysWith: { first, _ in first })
         let destinationCheckpoint = syncAll ? try? await destination.gallerySyncCheckpoint() : nil
-        var syncedCopies = syncAll ? LocalSyncRecord.load() : [:]
+        let syncedCopies = syncAll ? LocalSyncRecord.load() : [:]
         let pendingOrganization = syncAll ? PendingSyncOrganization() : nil
         let localCollections: [Collection]
         do {
@@ -553,49 +684,25 @@ extension LibraryStore {
                 failedCollectionSlugs.insert(shelf.slug)
             }
         }
-        var collectionNames: [String: String] = [:]
-        var collectionFiles: [String: [String]] = [:]
-        var titleAssignments: [GalleryTitleAssignment] = []
-        var favoriteFiles: [String] = []
-        var tagFiles: [String: [String]] = [:]
-        var successfulCopies: [(MirrorTarget, String)] = []
-        var organizationFailedFiles: Set<String> = []
-        var alreadyLocal = 0
-        var transferred = 0
-        func recordIssue(_ message: String, target: MirrorTarget) {
-            guard targetVersioned(target.print) else { return }
-            let context = [target.originContext,
-                           target.print.mediaVersion ?? "", LocalSyncRecord.recipe(target.print) ?? "",
-                           local.baseURL.absoluteString, hosts.instanceID(of: local.id) ?? "", message].joined(separator: "\n")
-            let key = SHA256.hash(data: Data(context.utf8)).map { String(format: "%02x", $0) }.joined()
-            localSaveIssueKeys[message] = Array(Set((localSaveIssueKeys[message]?.split(separator: ":").map(String.init) ?? []) + [key])).sorted().joined(separator: ":")
-        }
-        var completed = 0
-        func record(_ target: MirrorTarget, as filename: String, organize: Bool) {
-            if syncAll { successfulCopies.append((target, filename)) }
-            let sourceKey = LocalSyncRecord.key(hostID: target.hostID, filename: target.print.filename)
-            let fileMembership = !syncAll || syncedCopies[sourceKey] == nil
-                || syncedCopies[sourceKey]?.destinationInstance != hosts.instanceID(of: local.id)
-            for collection in target.collections where fileMembership {
-                let name = localNames[collection.slug] ?? collection.name
-                if let previous = collectionNames[collection.slug], previous != name {
-                    failures.append("Collection “\(collection.slug)” has different names on source machines; using “\(previous)”.")
-                } else {
-                    collectionNames[collection.slug] = name
-                }
-                collectionFiles[collection.slug, default: []].append(filename)
-            }
-            guard organize else { return }
-            if let title = target.print.title, !title.isEmpty {
-                titleAssignments.append(.init(filename: filename, title: title))
-            }
-            if target.print.isFavorite { favoriteFiles.append(filename) }
-            for tag in target.print.tagList {
-                tagFiles[tag, default: []].append(filename)
-            }
-        }
+        return .ready(MirrorDestination(host: local, backend: destination, prints: localByName,
+            trashNames: localTrashNames, checkpoint: destinationCheckpoint, records: syncedCopies,
+            pendingOrganization: pendingOrganization, collectionNames: localNames,
+            createdCollections: createdCollections, failedCollectionSlugs: failedCollectionSlugs,
+            failures: failures))
+    }
 
-        var work: [(Int, MirrorTarget, String, Bool, String?)] = []
+    private func planMirrorWork(_ sources: MirrorSources, destination: MirrorDestination,
+                                syncAll: Bool) async -> MirrorWorkPlan {
+        let targets = sources.targets
+        let sourceCheckpoints = sources.checkpoints
+        let local = destination.host
+        let localByName = destination.prints
+        let localTrashNames = destination.trashNames
+        let syncedCopies = destination.records
+        let pendingOrganization = destination.pendingOrganization
+        let destinationCheckpoint = destination.checkpoint
+        var work: [MirrorWorkItem] = []
+        var cachedCopies: [MirrorCopy] = []
         var claimedOriginals: Set<String> = []
         var keptRemoved = 0
         for (index, target) in targets.enumerated() {
@@ -636,14 +743,65 @@ extension LibraryStore {
                    cached.sourceRoute == target.originContext,
                    cached.destinationRoute == local.baseURL.absoluteString,
                    cached.destinationInstance == hosts.instanceID(of: local.id) {
-                    alreadyLocal += 1
-                    record(target, as: existing.filename, organize: false)
+                    cachedCopies.append(MirrorCopy(target: target, filename: existing.filename))
                     continue
                 }
-                work.append((index, target, requestedName, true, existing.filename))
+                work.append(MirrorWorkItem(index: index, target: target, filename: requestedName, occupied: true, cachedFilename: existing.filename))
                 continue
             }
-            work.append((index, target, requestedName, localByName[requestedName] != nil, nil))
+            work.append(MirrorWorkItem(index: index, target: target, filename: requestedName, occupied: localByName[requestedName] != nil, cachedFilename: nil))
+        }
+
+        return MirrorWorkPlan(items: work, cachedCopies: cachedCopies, keptRemoved: keptRemoved)
+    }
+
+    private func copyMirrorWork(_ plan: MirrorWorkPlan, sources: MirrorSources,
+                                prepared: MirrorDestination, syncAll: Bool) async -> MirrorCopies {
+        let targets = sources.targets
+        let work = plan.items
+        let local = prepared.host
+        let destination = prepared.backend
+        let localByName = prepared.prints
+        let localNames = prepared.collectionNames
+        let pendingOrganization = prepared.pendingOrganization
+        var syncedCopies = prepared.records
+        var failures = sources.failures + prepared.failures
+        var collectionNames: [String: String] = [:]
+        var collectionFiles: [String: [String]] = [:]
+        var titleAssignments: [GalleryTitleAssignment] = []
+        var favoriteFiles: [String] = []
+        var tagFiles: [String: [String]] = [:]
+        var successfulCopies: [MirrorCopy] = []
+        var alreadyLocal = 0
+        var transferred = 0
+        var completed = 0
+        func record(_ target: MirrorTarget, as filename: String, organize: Bool) {
+            if syncAll { successfulCopies.append(MirrorCopy(target: target, filename: filename)) }
+            let sourceKey = LocalSyncRecord.key(hostID: target.hostID, filename: target.print.filename)
+            let fileMembership = !syncAll || syncedCopies[sourceKey] == nil
+                || syncedCopies[sourceKey]?.destinationInstance != hosts.instanceID(of: local.id)
+            for collection in target.collections where fileMembership {
+                let name = localNames[collection.slug] ?? collection.name
+                if let previous = collectionNames[collection.slug], previous != name {
+                    failures.append("Collection “\(collection.slug)” has different names on source machines; using “\(previous)”.")
+                } else {
+                    collectionNames[collection.slug] = name
+                }
+                collectionFiles[collection.slug, default: []].append(filename)
+            }
+            guard organize else { return }
+            if let title = target.print.title, !title.isEmpty {
+                titleAssignments.append(.init(filename: filename, title: title))
+            }
+            if target.print.isFavorite { favoriteFiles.append(filename) }
+            for tag in target.print.tagList {
+                tagFiles[tag, default: []].append(filename)
+            }
+        }
+
+        for cached in plan.cachedCopies {
+            alreadyLocal += 1
+            record(cached.target, as: cached.filename, organize: false)
         }
 
         // Large clips can briefly occupy download and upload staging space.
@@ -657,18 +815,15 @@ extension LibraryStore {
                 forPath: FileManager.default.temporaryDirectory.path)[.systemFreeSize]
                 as? NSNumber)?.int64Value ?? 0
             let largeTransfer = work.contains {
-                ($0.1.print.sizeBytes ?? 0) > 512 * 1_024 * 1_024
+                ($0.target.print.sizeBytes ?? 0) > 512 * 1_024 * 1_024
             }
             let lanes = largeTransfer || free < 5 * 1_024 * 1_024 * 1_024 ? 1 : 3
             for _ in 0..<min(lanes, work.count) {
-                let (index, target, filename, occupied, cached) = work[next]
+                let item = work[next]
                 next += 1
                 group.addTask {
-                    if let cached { return (index, await repairCachedSources(target, to: destination, as: cached)) }
-                    return (index, await mirror(target, to: destination,
-                                                as: filename, occupied: occupied,
-                                                knownPrints: localByName,
-                                                pending: pendingOrganization, destinationInstance: destinationInstance))
+                    await item.perform(to: destination, knownPrints: localByName,
+                                       pending: pendingOrganization, destinationInstance: destinationInstance)
                 }
             }
             for await (index, result) in group {
@@ -678,7 +833,7 @@ extension LibraryStore {
                         let target = targets[index]
                         let notice = "\(hosts.name(of: target.hostID) ?? target.hostID.uuidString) · \(target.print.filename): Original inputs are unavailable; the finished file is saved."
                         localSaveNotices.append(notice)
-                        recordIssue(notice, target: target)
+                        recordMirrorIssue(notice, target: target, local: local)
                     }
                     if result.alreadyLocal { alreadyLocal += 1 }
                     else { transferred += 1 }
@@ -699,20 +854,17 @@ extension LibraryStore {
                 } else {
                     let failure = "\(targets[index].print.filename): \(result.error ?? "save failed")"
                     failures.append(failure)
-                    if result.repeatAcknowledgable { recordIssue(failure, target: targets[index]) }
+                    if result.repeatAcknowledgable { recordMirrorIssue(failure, target: targets[index], local: local) }
                 }
                 if completed % 10 == 0 || completed == work.count {
                     localSaveProgress = "Checked \(completed.formatted()) of \(work.count.formatted()) · Copied \(transferred.formatted()) · Already here \(alreadyLocal.formatted()) · Issues \(failures.count.formatted())"
                 }
                 if next < work.count && !Task.isCancelled && !localSaveStopRequested {
-                    let (index, target, filename, occupied, cached) = work[next]
+                    let item = work[next]
                     next += 1
                     group.addTask {
-                        if let cached { return (index, await repairCachedSources(target, to: destination, as: cached)) }
-                        return (index, await mirror(target, to: destination,
-                                                    as: filename, occupied: occupied,
-                                                    knownPrints: localByName,
-                                                    pending: pendingOrganization, destinationInstance: destinationInstance))
+                        await item.perform(to: destination, knownPrints: localByName,
+                                           pending: pendingOrganization, destinationInstance: destinationInstance)
                     }
                 }
             }
@@ -721,6 +873,30 @@ extension LibraryStore {
             failures.append("Save stopped. Remaining prints were not transferred.")
         }
 
+        return MirrorCopies(successful: successfulCopies, records: syncedCopies,
+            assignments: MirrorAssignments(collectionNames: collectionNames, collectionFiles: collectionFiles,
+                titles: titleAssignments, favorites: favoriteFiles, tags: tagFiles),
+            transferred: transferred, alreadyLocal: alreadyLocal, failures: failures)
+    }
+
+    private func recordMirrorIssue(_ message: String, target: MirrorTarget, local: MoldHost) {
+        guard targetVersioned(target.print) else { return }
+        let context = [target.originContext,
+                       target.print.mediaVersion ?? "", LocalSyncRecord.recipe(target.print) ?? "",
+                       local.baseURL.absoluteString, hosts.instanceID(of: local.id) ?? "", message].joined(separator: "\n")
+        let key = SHA256.hash(data: Data(context.utf8)).map { String(format: "%02x", $0) }.joined()
+        localSaveIssueKeys[message] = Array(Set((localSaveIssueKeys[message]?.split(separator: ":").map(String.init) ?? []) + [key])).sorted().joined(separator: ":")
+    }
+
+    private func organizeMirrorCopies(_ assignments: MirrorAssignments,
+                                       destination: any MoldBackend) async -> MirrorOrganization {
+        let collectionNames = assignments.collectionNames
+        let collectionFiles = assignments.collectionFiles
+        let titleAssignments = assignments.titles
+        let favoriteFiles = assignments.favorites
+        let tagFiles = assignments.tags
+        var failures: [String] = []
+        var organizationFailedFiles: Set<String> = []
         localSaveProgress = "Organizing copied prints and collections…"
         // A host resolves a collection name to its own slug and creates the
         // local copy once. Never send the source machine's collection ID.
@@ -763,83 +939,99 @@ extension LibraryStore {
             }
         }
 
-        if transferred > 0 || !collectionFiles.isEmpty || createdCollections > 0 {
-            if let collections = try? await destination.collections() {
-                collectionsPerHost[local.id] = collections
+        return MirrorOrganization(failedFiles: organizationFailedFiles, failures: failures)
+    }
+
+    private func verifyMirrorCopies(sources: MirrorSources, prepared: MirrorDestination,
+                                     plan: MirrorWorkPlan, copies: MirrorCopies,
+                                     organization: MirrorOrganization) async -> [String] {
+        let work = plan.items
+        let destination = prepared.backend
+        let local = prepared.host
+        let sourceCheckpoints = sources.checkpoints
+        let sourceMachines = sources.machines
+        let successfulCopies = copies.successful
+        let organizationFailedFiles = organization.failedFiles
+        let unresolvedCollections = sources.unresolvedCollections
+        let failedCollectionSlugs = prepared.failedCollectionSlugs
+        let pendingOrganization = prepared.pendingOrganization
+        var syncedCopies = copies.records
+        var failures: [String] = []
+        localSaveProgress = "Verifying copied prints and retained inputs…"
+        let verifiedDestinationCheckpoint = try? await destination.gallerySyncCheckpoint()
+        var checkpointFailures: Set<String> = []
+        let checkedKeys = Set(work.map { LocalSyncRecord.key(hostID: $0.target.hostID, filename: $0.target.print.filename) })
+        if verifiedDestinationCheckpoint != nil {
+            // Capture evidence BEFORE checking bindings. A foreign writer
+            // changing a binding after copy must not seal a stale success.
+            for copy in successfulCopies where checkedKeys.contains(LocalSyncRecord.key(hostID: copy.target.hostID, filename: copy.target.print.filename)) {
+                let target = copy.target, filename = copy.filename
+                if Task.isCancelled || localSaveStopRequested { checkpointFailures.insert(filename); continue }
+                let result = await repairCachedSources(target, to: destination, as: filename)
+                if result.filename == nil {
+                    checkpointFailures.insert(filename)
+                    failures.append("\(target.print.filename): \(result.error ?? "copy verification failed")")
+                }
             }
         }
-        // End suppression before the final read. An unrelated client may
-        // import while collections load; the read then catches it, and later
-        // events apply normally.
-        localSaveSuppressImports = false
-        localSaveProgress = "Refreshing This Mac’s Library…"
-        await refresh(on: local.id)
-        await reconcileCollectionVisibility()
-        if syncAll && !work.isEmpty {
-            localSaveProgress = "Verifying copied prints and retained inputs…"
-            let verifiedDestinationCheckpoint = try? await destination.gallerySyncCheckpoint()
-            var checkpointFailures: Set<String> = []
-            let checkedKeys = Set(work.map { LocalSyncRecord.key(hostID: $0.1.hostID, filename: $0.1.print.filename) })
-            if verifiedDestinationCheckpoint != nil {
-                // Capture evidence BEFORE checking bindings. A foreign writer
-                // changing a binding after copy must not seal a stale success.
-                for (target, filename) in successfulCopies where checkedKeys.contains(LocalSyncRecord.key(hostID: target.hostID, filename: target.print.filename)) {
-                    if Task.isCancelled || localSaveStopRequested { checkpointFailures.insert(filename); continue }
-                    let result = await repairCachedSources(target, to: destination, as: filename)
-                    if result.filename == nil {
-                        checkpointFailures.insert(filename)
-                        failures.append("\(target.print.filename): \(result.error ?? "copy verification failed")")
-                    }
-                }
+        let finalDestinationCheckpoint = try? await destination.gallerySyncCheckpoint()
+        var stableSourceCheckpoints: [MoldHost.ID: GallerySyncCheckpoint] = [:]
+        for (hostID, before) in sourceCheckpoints {
+            if let backend = sourceMachines[hostID]?.1,
+               let after = try? await backend.gallerySyncCheckpoint(),
+               after.instanceId == before.instanceId {
+                stableSourceCheckpoints[hostID] = after
             }
-            let finalDestinationCheckpoint = try? await destination.gallerySyncCheckpoint()
-            var stableSourceCheckpoints: [MoldHost.ID: GallerySyncCheckpoint] = [:]
-            for (hostID, before) in sourceCheckpoints {
-                if let backend = sourceMachines[hostID]?.1,
-                   let after = try? await backend.gallerySyncCheckpoint(),
-                   after.instanceId == before.instanceId {
-                    stableSourceCheckpoints[hostID] = after
-                }
-            }
-            let refreshed = Dictionary((perHost[local.id] ?? []).map {
-                ($0.print.filename, $0.print)
-            }, uniquingKeysWith: { first, _ in first })
-            for (target, filename) in successfulCopies {
-                let sourceKey = LocalSyncRecord.key(hostID: target.hostID,
-                                                    filename: target.print.filename)
-                guard checkedKeys.contains(sourceKey),
-                      !organizationFailedFiles.contains(filename),
-                      !unresolvedCollections.contains(sourceKey),
-                      !target.collections.contains(where: {
-                          failedCollectionSlugs.contains($0.slug)
-                      }) else { continue }
-                guard let localPrint = refreshed[filename],
-                      var record = LocalSyncRecord(source: target.print, local: localPrint, destinationInstance: hosts.instanceID(of: local.id))
-                else { continue }
-                if let before = sourceCheckpoints[target.hostID],
-                   let after = stableSourceCheckpoints[target.hostID],
-                   let token = before.revisions[target.print.filename],
-                   after.revisions[target.print.filename] == token {
-                    record.sourceCheckpoint = before.instanceId + ":" + token
-                }
-                if !checkpointFailures.contains(filename),
-                   await target.isCurrent(),
-                   let checkpoint = finalDestinationCheckpoint,
-                   let verified = verifiedDestinationCheckpoint,
-                   checkpoint.instanceId == verified.instanceId,
-                   let token = checkpoint.revisions[filename],
-                   verified.revisions[filename] == token {
-                    record.destinationCheckpoint = checkpoint.instanceId + ":" + token
-                }
-                record.sourceRoute = target.originContext
-                record.destinationRoute = local.baseURL.absoluteString
-                syncedCopies[sourceKey] = record
-                pendingOrganization?.clear(sourceKey)
-                LocalSyncRecord.checkpoint(record, key: sourceKey)
-            }
-            LocalSyncRecord.save(syncedCopies)
         }
-        let skipped = syncAll ? 0 : selection.count - candidates.count
+        let refreshed = Dictionary((perHost[local.id] ?? []).map {
+            ($0.print.filename, $0.print)
+        }, uniquingKeysWith: { first, _ in first })
+        for copy in successfulCopies {
+            let target = copy.target, filename = copy.filename
+            let sourceKey = LocalSyncRecord.key(hostID: target.hostID,
+                                                filename: target.print.filename)
+            guard checkedKeys.contains(sourceKey),
+                  !organizationFailedFiles.contains(filename),
+                  !unresolvedCollections.contains(sourceKey),
+                  !target.collections.contains(where: {
+                      failedCollectionSlugs.contains($0.slug)
+                  }) else { continue }
+            guard let localPrint = refreshed[filename],
+                  var record = LocalSyncRecord(source: target.print, local: localPrint, destinationInstance: hosts.instanceID(of: local.id))
+            else { continue }
+            if let before = sourceCheckpoints[target.hostID],
+               let after = stableSourceCheckpoints[target.hostID],
+               let token = before.revisions[target.print.filename],
+               after.revisions[target.print.filename] == token {
+                record.sourceCheckpoint = before.instanceId + ":" + token
+            }
+            if !checkpointFailures.contains(filename),
+               await target.isCurrent(),
+               let checkpoint = finalDestinationCheckpoint,
+               let verified = verifiedDestinationCheckpoint,
+               checkpoint.instanceId == verified.instanceId,
+               let token = checkpoint.revisions[filename],
+               verified.revisions[filename] == token {
+                record.destinationCheckpoint = checkpoint.instanceId + ":" + token
+            }
+            record.sourceRoute = target.originContext
+            record.destinationRoute = local.baseURL.absoluteString
+            syncedCopies[sourceKey] = record
+            pendingOrganization?.clear(sourceKey)
+            LocalSyncRecord.checkpoint(record, key: sourceKey)
+        }
+        LocalSyncRecord.save(syncedCopies)
+        return failures
+    }
+
+    private func publishMirrorReport(selectedCount: Int, syncAll: Bool, sources: MirrorSources,
+                                     prepared: MirrorDestination, plan: MirrorWorkPlan,
+                                     copies: MirrorCopies, failures: [String]) {
+        let transferred = copies.transferred
+        let alreadyLocal = copies.alreadyLocal
+        let keptRemoved = plan.keptRemoved
+        let createdCollections = prepared.createdCollections
+        let skipped = syncAll ? 0 : selectedCount - sources.candidates.count
         var summary = "Copied \(transferred) \(transferred == 1 ? "print" : "prints") to This Mac’s Library."
         if alreadyLocal > 0 {
             summary += alreadyLocal == 1 ? " 1 was already here." : " \(alreadyLocal) were already here."
@@ -848,7 +1040,7 @@ extension LibraryStore {
         if createdCollections > 0 {
             summary += " Created \(createdCollections) \(createdCollections == 1 ? "collection" : "collections")."
         }
-        let unsaved = candidates.count - transferred - alreadyLocal - keptRemoved
+        let unsaved = sources.candidates.count - transferred - alreadyLocal - keptRemoved
         if keptRemoved > 0 { summary += " \(keptRemoved) copies were kept removed from This Mac; use Save to copy them again deliberately." }
         if unsaved > 0 { summary += " \(unsaved) were not copied." }
         if skipped > 0 { summary += " Skipped \(skipped) local or unsupported prints." }

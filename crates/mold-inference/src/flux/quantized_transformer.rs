@@ -55,11 +55,14 @@
 #![allow(dead_code)]
 
 use anyhow::Result;
-use candle_core::{quantized::QTensor, DType, IndexOp, Module, Tensor, D};
+#[cfg(test)]
+use candle_core::quantized::QTensor;
+use candle_core::{DType, IndexOp, Module, Tensor, D};
 use candle_nn::{LayerNorm, RmsNorm};
 use candle_transformers::models::flux::model::{Config, EmbedNd};
 use candle_transformers::models::flux::BlockHook;
 use mold_candle::quantized::VarBuilder;
+#[cfg(test)]
 use std::sync::Arc;
 
 use crate::quantized_linear::QuantizedLinear;
@@ -971,11 +974,6 @@ fn arc_quantize_cpu(
     Ok(Arc::new(quantize_cpu(src, dtype, device)?))
 }
 
-// `Arc<QTensor>` is unused in production builds; reference the import so
-// non-test cargo check doesn't warn.
-#[allow(dead_code)]
-fn _arc_qtensor_unused(_t: Arc<QTensor>) {}
-
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1443,8 +1441,9 @@ mod tests {
         let device = Device::Cpu;
         // Make a synthetic registry targeting `double_blocks.0.img_attn.qkv.weight`
         // so the rebind call has somewhere to land.
-        use crate::flux::lora::{LoraAdapter, LoraLayer, LoraSpec};
+        use crate::flux::lora::LoraSpec;
         use crate::flux::lora_bypass::{build_registry, LoraRegistry};
+        use crate::lora::{LoraAdapter, LoraLayer};
         use std::collections::HashMap as HM;
 
         let h = 16;
@@ -1455,11 +1454,10 @@ mod tests {
             "transformer.transformer_blocks.0.attn.to_q".to_string(),
             LoraLayer { a, b, alpha: None },
         );
-        let adapter = LoraAdapter { layers, rank: 4 };
+        let adapter = LoraAdapter::from_layers(layers, 4);
         let specs = [LoraSpec {
             adapter: &adapter,
             scale: 0.5,
-            path_hash: 0x1234,
         }];
         let mut linear_out_dims = HM::new();
         linear_out_dims.insert("double_blocks.0.img_attn.qkv.weight".to_string(), 3 * h);

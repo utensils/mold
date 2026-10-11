@@ -40,6 +40,9 @@ use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
 use crate::engine_base::EngineBase;
 use crate::image::{build_output_metadata, encode_image};
 use crate::img_utils;
+use crate::lora::{
+    fence_fingerprint, fingerprint_stack, LoraFingerprint as QwenImageLoraFingerprint,
+};
 use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
 use crate::upscaler::tiling::{upscale_with_tiling, TilingConfig};
 
@@ -541,33 +544,6 @@ struct QuantizedCfgDecision {
     split: bool,
     transformer_size: u64,
     free: u64,
-}
-
-/// Order-sensitive fingerprint of a single LoRA adapter (path-hash + scale).
-#[derive(Clone, PartialEq, Eq, Debug)]
-struct QwenImageLoraFingerprint {
-    path_hash: u64,
-    scale_bits: u64,
-}
-
-impl QwenImageLoraFingerprint {
-    fn from_lora(lora: &mold_core::LoraWeight) -> Self {
-        Self {
-            path_hash: super::lora::lora_path_hash(&lora.path),
-            scale_bits: lora.scale.to_bits(),
-        }
-    }
-}
-
-/// Fingerprint of an ordered LoRA stack. Equality is order-sensitive for
-/// the same reason FLUX's is — the deltas commute numerically, but the
-/// user-facing intent is order-driven and one redundant rebuild is cheap
-/// next to a wrong merge.
-fn fingerprint_stack(loras: &[mold_core::LoraWeight]) -> Vec<QwenImageLoraFingerprint> {
-    loras
-        .iter()
-        .map(QwenImageLoraFingerprint::from_lora)
-        .collect()
 }
 
 /// Resolve the effective LoRA list for a request. Mirrors `flux::pipeline::
@@ -1828,7 +1804,6 @@ impl QwenImageEngine {
                     .map(|(adapter, w)| super::lora::QwenImageLoraSpec {
                         adapter: adapter.as_ref(),
                         scale: w.scale,
-                        path_hash: super::lora::lora_path_hash(&w.path),
                     })
                     .collect();
                 super::lora::gguf_lora_var_builder(
@@ -1836,7 +1811,6 @@ impl QwenImageEngine {
                     &specs,
                     device,
                     &self.base.progress,
-                    None,
                 )?
             } else {
                 crate::weight_loader::load_gguf_var_builder(
@@ -2001,7 +1975,6 @@ impl QwenImageEngine {
             .map(|(adapter, w)| super::lora::QwenImageLoraSpec {
                 adapter: adapter.as_ref(),
                 scale: w.scale,
-                path_hash: super::lora::lora_path_hash(&w.path),
             })
             .collect();
 
@@ -2022,8 +1995,7 @@ impl QwenImageEngine {
             Box::new(tensors)
         };
 
-        let wrapped =
-            super::lora::wrap_backend_with_lora(inner, &specs, &self.base.progress, None)?;
+        let wrapped = super::lora::wrap_backend_with_lora(inner, &specs, &self.base.progress)?;
 
         let target_dtype = if is_fp8 { DType::BF16 } else { dtype };
         Ok(candle_nn::VarBuilder::from_backend(
@@ -2444,6 +2416,7 @@ impl QwenImageEngine {
         };
         self.base.progress.stage_start(&xformer_label);
         let xformer_start = Instant::now();
+        let before_lora = fingerprint_stack(&self.pending_loras);
         let transformer = self.load_transformer(
             &device,
             dtype,
@@ -2571,7 +2544,7 @@ impl QwenImageEngine {
         // The transformer above was built through `load_transformer`, which
         // merges `pending_loras`; record what it carries so the first
         // generate does not immediately rebuild it.
-        self.note_transformer_lora_stack();
+        self.note_transformer_lora_stack(before_lora);
         self.base.loaded = Some(LoadedQwenImage {
             transformer: Some(transformer),
             text_encoder,
@@ -2595,6 +2568,7 @@ impl QwenImageEngine {
         width: usize,
         height: usize,
     ) -> Result<()> {
+        let before_lora = fingerprint_stack(&self.pending_loras);
         let transformer = self.load_transformer(
             &loaded.device,
             loaded.dtype,
@@ -2602,15 +2576,20 @@ impl QwenImageEngine {
             width,
             height,
         )?;
-        self.install_reloaded_transformer(&mut loaded.transformer, transformer);
+        self.install_reloaded_transformer(&mut loaded.transformer, transformer, before_lora);
         Ok(())
     }
 
     /// Install weights returned by the real loader and bind their residency
     /// authority to the exact pending LoRA stack that loader consumed.
-    fn install_reloaded_transformer<T>(&mut self, slot: &mut Option<T>, transformer: T) {
+    fn install_reloaded_transformer<T>(
+        &mut self,
+        slot: &mut Option<T>,
+        transformer: T,
+        before_lora: Vec<QwenImageLoraFingerprint>,
+    ) {
         *slot = Some(transformer);
-        self.note_transformer_lora_stack();
+        self.note_transformer_lora_stack(before_lora);
     }
 
     /// Record the stack that a just-built transformer carries.
@@ -2620,8 +2599,9 @@ impl QwenImageEngine {
     /// is what made the original defect possible. Both build sites (eager
     /// `load` and `reload_transformer`) go through here so the derivation
     /// cannot drift between them.
-    fn note_transformer_lora_stack(&mut self) {
-        self.active_lora_fingerprint = fingerprint_stack(&self.pending_loras);
+    fn note_transformer_lora_stack(&mut self, before_lora: Vec<QwenImageLoraFingerprint>) {
+        self.active_lora_fingerprint =
+            fence_fingerprint(before_lora, fingerprint_stack(&self.pending_loras));
     }
 
     /// Drop the resident transformer and forget the stack baked into it.
@@ -4430,6 +4410,31 @@ impl InferenceEngine for QwenImageEngine {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audit_resident_lora_fingerprint_changes_after_file_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("adapter.safetensors");
+        std::fs::write(&path, b"old").unwrap();
+        let stack = [mold_core::LoraWeight {
+            path: path.to_string_lossy().into_owned(),
+            scale: 1.0,
+            expert: None,
+        }];
+        let before = fingerprint_stack(&stack);
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&replacement, b"new-adapter").unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        assert!(
+            before != fingerprint_stack(&stack),
+            "replacement must invalidate resident weights"
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            fingerprint_stack(&stack) != fingerprint_stack(&stack),
+            "unobservable adapters must not be reusable"
+        );
+    }
+
     use super::*;
     use crate::engine::LoadStrategy;
     use crate::shared_pool::SharedPool;
@@ -6125,8 +6130,18 @@ mod tests {
     }
 
     fn lora(path: &str, scale: f64) -> mold_core::LoraWeight {
+        static FILES: std::sync::OnceLock<std::sync::Mutex<tempfile::TempDir>> =
+            std::sync::OnceLock::new();
+        let files = FILES
+            .get_or_init(|| std::sync::Mutex::new(tempfile::tempdir().unwrap()))
+            .lock()
+            .unwrap();
+        let actual = files.path().join(path.replace('/', "_"));
+        if !actual.exists() {
+            std::fs::write(&actual, b"fixture").unwrap();
+        }
         mold_core::LoraWeight {
-            path: path.to_string(),
+            path: actual.to_string_lossy().into_owned(),
             scale,
             expert: None,
         }
@@ -6466,7 +6481,7 @@ mod tests {
         ];
 
         engine.pending_loras = stack.clone();
-        engine.note_transformer_lora_stack();
+        engine.note_transformer_lora_stack(fingerprint_stack(&engine.pending_loras));
 
         assert_eq!(
             engine.active_lora_fingerprint,
@@ -6481,7 +6496,7 @@ mod tests {
 
         // An unmerged rebuild must leave nothing behind to elide against.
         engine.pending_loras.clear();
-        engine.note_transformer_lora_stack();
+        engine.note_transformer_lora_stack(fingerprint_stack(&engine.pending_loras));
         assert!(engine.active_lora_fingerprint.is_empty());
     }
 
@@ -6523,7 +6538,7 @@ mod tests {
         // multimodal conditioning. Releasing it must also revoke its baked
         // stack authority.
         let mut transformer = Some(());
-        engine.note_transformer_lora_stack();
+        engine.note_transformer_lora_stack(fingerprint_stack(&engine.pending_loras));
         engine.release_edit_transformer(&mut transformer);
         assert!(transformer.is_none());
         assert!(engine.active_lora_fingerprint.is_empty());
@@ -6531,7 +6546,11 @@ mod tests {
         // `reload_transformer` routes the real weights through this install
         // transition, so the post-conditioning resident transformer records
         // the exact pending stack the loader merged.
-        engine.install_reloaded_transformer(&mut transformer, ());
+        engine.install_reloaded_transformer(
+            &mut transformer,
+            (),
+            fingerprint_stack(&engine.pending_loras),
+        );
         assert!(transformer.is_some());
         assert_eq!(engine.active_lora_fingerprint, fingerprint_stack(&stack));
 

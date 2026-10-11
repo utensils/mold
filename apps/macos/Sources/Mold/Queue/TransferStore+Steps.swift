@@ -15,19 +15,14 @@ extension TransferStore {
         do { priorBatch = try await lookup(context.destClient, context.clientBatchId) } catch {
             hosts.report(error, on: context.source, doing: context.verb); return nil
         }
-        let authority: QueueAuthority?
+        let sourceLookup: QueueTransferSource
         do {
-            let detail = try await context.sourceClient.queueJob(id: entry.id)
-            authority =
-                QueueTransferEligibility.allows(
-                    detail.job.state, reservedProtocol: context.reservedProtocol)
-                ? detail.job.transferAuthority(
-                    instanceId: authorityInstance, reservedProtocol: context.reservedProtocol) : nil
-        } catch let error as MoldClientError where priorBatch != nil && TransferPlan.isNotFound(error) {
-            authority = nil
+            sourceLookup = try await QueueTransferSource.read(jobID: entry.id, instanceID: authorityInstance,
+                reservedProtocol: context.reservedProtocol, hasPriorAttempt: priorBatch != nil, backend: context.sourceClient)
         } catch {
             hosts.report(error, on: context.source, doing: context.verb); return nil
         }
+        let authority = sourceLookup.authority
 
         if context.reservedProtocol, let priorBatch, let authority,
             let recovered = await restoreTerminalFailure(
@@ -35,7 +30,7 @@ extension TransferStore {
         {
             return recovered
         }
-        switch context.next(.checkPriorAttempt, .priorAttempt(priorBatch, sourceHeld: authority != nil)) {
+        switch context.next(.checkPriorAttempt, .priorAttempt(priorBatch, source: sourceLookup)) {
         case let .outcome(outcome): return report(outcome, context)
         case .step(.complete): return await complete(authority: authority, context: context)
         case .step(.export): break

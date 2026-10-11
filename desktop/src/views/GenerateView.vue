@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { SourceCanvasController } from "@studio/lib/sourceCanvasController";
 import { canvasSource } from "@studio/lib/canvasSource";
 import { PromptClearRecovery } from "@studio/lib/promptClearRecovery";
 import { minimaxH3TaskForModel } from "@studio/lib/minimaxH3Authoring";
@@ -65,14 +66,7 @@ import {
   resolveQueueWait,
 } from "@studio/lib/queuePosition";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
-import {
-  resolveDefaultSourceResolution,
-  resolveSourceConditioningTarget,
-  resolveSourceCanvasTransition,
-  resolveSourceResolution,
-  type SourceDimensions,
-  type SourceResolutionResult,
-} from "@studio/lib/sourceResolution";
+import { resolveSourceConditioningTarget } from "@studio/lib/sourceResolution";
 import { restoredCanvasIntent, type CanvasIntent } from "@studio/lib/outputShape";
 import { promptGuidance, promptRequired } from "@studio/lib/promptRequirement";
 import { promptInputForForm, promptRecipeFromForm } from "../lib/promptRecipe";
@@ -1206,9 +1200,7 @@ const contractEntry = computed(() =>
   hostModels.contractEntryForTarget(form.model, stickyTarget.value),
 );
 
-let previousStillSource = "";
-let previousStillResolution: SourceResolutionResult | null = null;
-let previousStillAutomaticResolution: SourceDimensions | null = null;
+const sourceCanvasController = new SourceCanvasController();
 // `canvasIntent` is this component's own state, not the store-backed form's —
 // a remount (navigating away and back) restarts a plain `ref("model-default")`
 // even though `form.width`/`form.height` kept whatever the user picked, which
@@ -1222,12 +1214,11 @@ const canvasIntent = ref<CanvasIntent>(
     effectiveGenerationRecipe(contractEntry.value, form.pipeline)?.defaults ?? null,
   ),
 );
-let preservedSourceReplacement = "";
 function setCanvasIntent(intent: CanvasIntent) {
   canvasIntent.value = intent;
 }
 function preserveRestoredSourceCanvas(base64: string) {
-  preservedSourceReplacement = base64;
+  sourceCanvasController.preserveRestored(base64);
   canvasIntent.value = "manual";
 }
 
@@ -1247,109 +1238,6 @@ const activeCanvasSource = computed(() =>
     h3: form.h3Authoring,
   }),
 );
-let previousClosingCanvasSource = "";
-let canvasSourceInitialized = false;
-let previousCanvasRecipe = "";
-function preserveBoundaryRemovalCanvas() {
-  const closing =
-    caps.value.sourceImageMode === "h3-boundaries"
-      ? (form.h3Authoring?.lastFrame?.data ?? "")
-      : caps.value.supportsEndFrame
-        ? (form.endFrame?.base64 ?? "")
-        : "";
-  const selected = activeCanvasSource.value?.base64 ?? "";
-  const recipe = `${form.model}:${form.pipeline ?? ""}`;
-  // Removal preserves a manual canvas; deliberate replacement rearms it.
-  if (
-    canvasIntent.value === "manual" &&
-    selected &&
-    (!canvasSourceInitialized ||
-      recipe !== previousCanvasRecipe ||
-      (selected === closing && previousStillSource && closing === previousClosingCanvasSource))
-  ) {
-    preservedSourceReplacement = selected;
-  }
-  previousClosingCanvasSource = closing;
-  canvasSourceInitialized = true;
-  previousCanvasRecipe = recipe;
-}
-
-function applyDecodedSourceResolution(
-  base64: string | null,
-  previous: {
-    base64: string;
-    resolution: SourceResolutionResult | null;
-    automaticResolution: SourceDimensions | null;
-  },
-  setDimensions: (width: number | null, height: number | null) => void,
-): {
-  base64: string;
-  resolution: SourceResolutionResult | null;
-  automaticResolution: SourceDimensions | null;
-} {
-  if (!base64) {
-    setDimensions(null, null);
-    // Clearing the source hands the canvas back to the model, but never
-    // overrides a size the user chose deliberately.
-    if (canvasIntent.value !== "manual") canvasIntent.value = "model-default";
-    return { base64: "", resolution: null, automaticResolution: null };
-  }
-  const dimensions =
-    base64 === previous.base64 && previous.resolution
-      ? previous.resolution.source
-      : activeCanvasSource.value?.width && activeCanvasSource.value.height
-        ? { width: activeCanvasSource.value.width, height: activeCanvasSource.value.height }
-        : imageDimensionsFromBase64(base64);
-  if (!dimensions) {
-    setDimensions(null, null);
-    return { base64, resolution: null, automaticResolution: null };
-  }
-  setDimensions(dimensions.width, dimensions.height);
-  const resolution = resolveSourceResolution(
-    dimensions,
-    contractEntry.value ?? form.family,
-    form.pipeline,
-  );
-  const automaticResolution = resolveDefaultSourceResolution(
-    dimensions,
-    contractEntry.value ?? form.family,
-    form.pipeline,
-  );
-  const replaced = base64 !== previous.base64;
-  // A reference strip is not a canvas: the render's size comes from the model,
-  // not from whichever picture happens to sit first in the order. Qwen edit is
-  // the exception the profile names — `primary_is_target` means image 0 IS the
-  // picture being edited, so its canvas stays source-driven.
-  if (
-    requestConditioning.value !== "references" ||
-    caps.value.referenceImages?.primaryIsTarget === true
-  ) {
-    const preserveReplacement = replaced && preservedSourceReplacement === base64;
-    const nextResolution = resolveSourceCanvasTransition({
-      source: resolution,
-      automatic: automaticResolution,
-      replaced,
-      intent: canvasIntent.value,
-      preserveReplacement,
-    });
-    if (replaced) {
-      preservedSourceReplacement = "";
-      if (preserveReplacement) canvasIntent.value = "manual";
-      else if (canvasIntent.value !== "source-exact") canvasIntent.value = "source";
-    }
-    // A canvasless recipe (a 3-D mesh) renders no pixel canvas: its zero
-    // canvas is the recipe's own answer, and a source's size is not a
-    // resolution to fit it to. The snapshot is the authority; the family is
-    // the fallback for a form restored before it landed (as `buildRequest`).
-    const canvasless = form.recipeCapabilities?.canvasless ?? isMeshFamily(form.family);
-    if (nextResolution && !canvasless) {
-      form.width = nextResolution.width;
-      form.height = nextResolution.height;
-    }
-  }
-  return { base64, resolution, automaticResolution };
-}
-
 watch(
   [
     () => activeCanvasSource.value?.base64 ?? null,
@@ -1366,28 +1254,32 @@ watch(
         ?.map(({ width, height }) => `${width}x${height}`)
         .join("|") ?? "",
   ],
-  ([base64]) => {
-    preserveBoundaryRemovalCanvas();
-    // This watcher also runs when Create remounts. Keep it limited to derived
-    // dimensions; source attachment boundaries own their one-time fit default
-    // so a route change cannot overwrite the user's selected policy.
-    const next = applyDecodedSourceResolution(
-      base64,
-      {
-        base64: previousStillSource,
-        resolution: previousStillResolution,
-        automaticResolution: previousStillAutomaticResolution,
-      },
-      (width, height) => {
-        if (activeCanvasSource.value?.base64 === form.sourceImage) {
-          form.sourceImageWidth = width;
-          form.sourceImageHeight = height;
-        }
-      },
-    );
-    previousStillSource = next.base64;
-    previousStillResolution = next.resolution;
-    previousStillAutomaticResolution = next.automaticResolution;
+  () => {
+    const next = sourceCanvasController.update({
+      source: activeCanvasSource.value,
+      closingSource:
+        caps.value.sourceImageMode === "h3-boundaries"
+          ? (form.h3Authoring?.lastFrame?.data ?? "")
+          : caps.value.supportsEndFrame
+            ? (form.endFrame?.base64 ?? "")
+            : "",
+      recipeKey: `${form.model}:${form.pipeline ?? ""}`,
+      model: contractEntry.value ?? form.family,
+      pipeline: form.pipeline,
+      intent: canvasIntent.value,
+      referenceOnly: requestConditioning.value === "references",
+      primaryIsTarget: caps.value.referenceImages?.primaryIsTarget === true,
+      canvasless: form.recipeCapabilities?.canvasless ?? isMeshFamily(form.family),
+    });
+    canvasIntent.value = next.intent;
+    if (activeCanvasSource.value?.base64 === form.sourceImage) {
+      form.sourceImageWidth = next.dimensions?.width ?? null;
+      form.sourceImageHeight = next.dimensions?.height ?? null;
+    }
+    if (next.canvas) {
+      form.width = next.canvas.width;
+      form.height = next.canvas.height;
+    }
   },
   { immediate: true },
 );

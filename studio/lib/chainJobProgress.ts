@@ -64,7 +64,7 @@ export { emptyChainJobLive };
 
 /** The clip lengths the job's own script declares, or 0 when it declares none. */
 export function estimatedChainFrames(live: ChainJobLive): number {
-  const stages = live.detail?.script?.stages;
+  const stages = live.detail?.script?.stage;
   if (!Array.isArray(stages)) return 0;
   return stages.reduce(
     (total, stage) =>

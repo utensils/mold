@@ -1078,3 +1078,13 @@ readable on narrow phones and at larger text sizes.
 Source Media combines loaded-source search with media-type and exact-machine filters. Tap a preview to inspect the original image, video or audio and its retained roles and owning prints; choose a usage before reusing it. Identical verified bytes share a card across machines while every role and frame remains listed. Reopening reuses fresh discovered inventories and bounded private in-memory previews; originals are limited to 64 MiB, with image preview limits of 32 MP and 8192 pixels per side. Original viewing does not pin or delete sources.
 
 Source discovery runs automatically while the browser is open: a small first page of 25 owners appears before background batches of at most 100, with two requests in flight. Progress reports checked library items; source cards still page independently at 48. Closing cancels pending discovery, and fresh cached inventories restore on reopening.
+
+### Video and audio file input limits
+
+The Tauri phone composer rejects empty source-video, continuation-video and
+conditioning-audio files and files over 64 MiB. Its combined decoded request-media
+budget is 45 MiB, so a pick must also fit alongside existing images, references,
+keyframes and other media. A refusal or read error appears inline and leaves the
+previous attachment intact. Clearing the input, switching model/pipeline, choosing
+a newer file or leaving the screen prevents an older read from overwriting it.
+Video and audio retain their original bytes.

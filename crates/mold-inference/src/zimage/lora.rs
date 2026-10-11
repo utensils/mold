@@ -37,30 +37,19 @@
 //! | PEFT default-adapter | `diffusion_model.layers.0.attention.qkv.lora_A.default.weight` |
 //! | OneTrainer | `layers.0.attention.qkv.lora_linear_layer.down.weight` |
 //!
-//! Suffix detection is delegated to [`crate::flux::lora::classify_lora_key`]
+//! Suffix detection is delegated to [`crate::lora::classify_lora_key`]
 //! — the same matrix as FLUX so we never need to re-invent that table.
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, Tensor};
 use mold_candle::quantized::VarBuilder as QuantizedVarBuilder;
 
-use crate::flux::lora::{get_or_load_adapter, LoraAdapter, LoraDeltaCache};
+use crate::lora::{get_or_load_adapter, LoraAdapter};
 use crate::progress::ProgressReporter;
-
-// ---------------------------------------------------------------------------
-// Path-hash helper — used to seed per-adapter cache keys.
-// ---------------------------------------------------------------------------
-
-pub(crate) fn lora_path_hash(path: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    path.hash(&mut hasher);
-    hasher.finish()
-}
 
 // ---------------------------------------------------------------------------
 // Target descriptors — how a LoRA delta lands on a candle tensor.
@@ -247,22 +236,15 @@ struct ZImageLoraPatch {
     b: Tensor,
     effective_scale: f64,
     target: ZImageLoraTarget,
-    /// Retained for future per-adapter delta caching (mirrors flux2's
-    /// API for consistency). Currently unused — Z-Image's transformer
-    /// rebuild cadence is low enough that re-computing `B @ A` on each
-    /// load is cheap. Tests rely on the field being populated.
-    #[allow(dead_code)]
-    lora_path_hash: u64,
     /// Resolved `(offset, size)` for `Splat` targets. Filled at patch-build
     /// time once `B`'s row count is known.
     resolved_rows: Option<(usize, usize)>,
 }
 
-/// A loaded LoRA + its scale + a stable hash of its file path.
+/// A loaded adapter and its requested scale.
 pub(crate) struct ZImageLoraSpec<'a> {
     pub adapter: &'a LoraAdapter,
     pub scale: f64,
-    pub path_hash: u64,
 }
 
 fn resolve_rows(target: &ZImageLoraTarget, b_rows: usize) -> Option<(usize, usize)> {
@@ -314,7 +296,7 @@ fn build_patches(specs: &[ZImageLoraSpec<'_>]) -> (HashMap<String, Vec<ZImageLor
                         b: layer.b.clone(),
                         effective_scale,
                         target,
-                        lora_path_hash: spec.path_hash,
+
                         resolved_rows,
                     });
             }
@@ -486,11 +468,6 @@ fn apply_gguf_patch_f32(
 struct ZImageLoraBackend {
     inner: Box<dyn candle_nn::var_builder::SimpleBackend>,
     patches: HashMap<String, Vec<ZImageLoraPatch>>,
-    // Reserved for future delta caching (mirrors flux2's API for consistency
-    // when refactoring; currently unused — Z-Image's transformer rebuild
-    // cadence is low enough that re-computing `B @ A` on each construction
-    // is cheap).
-    _delta_cache: Option<Arc<Mutex<LoraDeltaCache>>>,
 }
 
 impl ZImageLoraBackend {
@@ -547,7 +524,6 @@ pub(crate) fn wrap_backend_with_lora(
     inner: Box<dyn candle_nn::var_builder::SimpleBackend>,
     specs: &[ZImageLoraSpec<'_>],
     progress: &ProgressReporter,
-    delta_cache: Option<Arc<Mutex<LoraDeltaCache>>>,
 ) -> Result<Box<dyn candle_nn::var_builder::SimpleBackend>> {
     if specs.is_empty() {
         bail!("wrap_backend_with_lora called with no LoraSpecs");
@@ -561,15 +537,11 @@ pub(crate) fn wrap_backend_with_lora(
         n = specs.len(),
     ));
 
-    Ok(Box::new(ZImageLoraBackend {
-        inner,
-        patches,
-        _delta_cache: delta_cache,
-    }))
+    Ok(Box::new(ZImageLoraBackend { inner, patches }))
 }
 
 /// Build `ZImageLoraSpec`s by loading every adapter through the shared
-/// parsed-LoRA cache (`crate::flux::lora::get_or_load_adapter`). Returns
+/// parsed-LoRA cache (`crate::lora::get_or_load_adapter`). Returns
 /// the `Arc`s so the caller can hold them for the lifetime of the spec
 /// slice.
 pub(crate) fn load_lora_adapters(
@@ -709,7 +681,7 @@ pub(crate) fn gguf_lora_var_builder(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flux::lora::LoraLayer;
+    use crate::lora::LoraLayer;
     use safetensors::tensor::TensorView;
 
     // ── map_zimage_lora_key — leaf coverage ────────────────────────────
@@ -947,7 +919,7 @@ mod tests {
             target: ZImageLoraTarget::Direct {
                 candle_key: "x".into(),
             },
-            lora_path_hash: 0,
+
             resolved_rows: None,
         };
         let merged = apply_patch_f32(&base, &delta, &patch).unwrap();
@@ -986,7 +958,7 @@ mod tests {
                     row_offset: component,
                     row_size: 0,
                 },
-                lora_path_hash: 0,
+
                 resolved_rows: None,
             };
             patch.resolved_rows = resolve_rows(&patch.target, 3 * h);
@@ -1017,7 +989,7 @@ mod tests {
                 row_offset: 0,
                 row_size: 0,
             },
-            lora_path_hash: 0,
+
             resolved_rows: None,
         };
         patch.resolved_rows = resolve_rows(&patch.target, 3 * h);
@@ -1035,7 +1007,7 @@ mod tests {
         let b = Tensor::full(1.0f32, (b_rows, 2), &dev).unwrap();
         let mut layers = HashMap::new();
         layers.insert(layer.to_string(), LoraLayer { a, b, alpha: None });
-        LoraAdapter { layers, rank: 2 }
+        LoraAdapter::from_layers(layers, 2)
     }
 
     #[test]
@@ -1044,7 +1016,6 @@ mod tests {
         let specs = [ZImageLoraSpec {
             adapter: &adapter,
             scale: 0.7,
-            path_hash: 0xCAFE,
         }];
         let (patches, skipped) = build_patches(&specs);
         assert_eq!(skipped, 0);
@@ -1075,7 +1046,6 @@ mod tests {
         let specs = [ZImageLoraSpec {
             adapter: &adapter,
             scale: 0.5,
-            path_hash: 0,
         }];
         let (patches, _) = build_patches(&specs);
         let bucket = &patches["layers.0.attention.to_out.0.weight"];
@@ -1096,11 +1066,10 @@ mod tests {
             "lora_unet_garbage_42_unknown".to_string(),
             LoraLayer { a, b, alpha: None },
         );
-        let adapter = LoraAdapter { layers, rank: 2 };
+        let adapter = LoraAdapter::from_layers(layers, 2);
         let specs = [ZImageLoraSpec {
             adapter: &adapter,
             scale: 1.0,
-            path_hash: 0,
         }];
         let (patches, skipped) = build_patches(&specs);
         assert!(patches.is_empty());
@@ -1115,19 +1084,15 @@ mod tests {
             ZImageLoraSpec {
                 adapter: &a1,
                 scale: 1.0,
-                path_hash: 0xAA,
             },
             ZImageLoraSpec {
                 adapter: &a2,
                 scale: 1.0,
-                path_hash: 0xBB,
             },
         ];
         let (patches, _) = build_patches(&specs);
         let bucket = &patches["layers.0.feed_forward.w1.weight"];
         assert_eq!(bucket.len(), 2);
-        assert_eq!(bucket[0].lora_path_hash, 0xAA);
-        assert_eq!(bucket[1].lora_path_hash, 0xBB);
     }
 
     // ── End-to-end via SimpleBackend wrapper ────────────────────────────
@@ -1186,11 +1151,10 @@ mod tests {
             "lora_unet_layers_0_attention_qkv".to_string(),
             LoraLayer { a, b, alpha: None },
         );
-        let adapter = LoraAdapter { layers, rank: 2 };
+        let adapter = LoraAdapter::from_layers(layers, 2);
         let specs = [ZImageLoraSpec {
             adapter: &adapter,
             scale: 1.0,
-            path_hash: 0xFEED,
         }];
 
         let st =
@@ -1234,7 +1198,7 @@ mod tests {
         let inner: Box<dyn candle_nn::var_builder::SimpleBackend> = Box::new(MmapBackend { st });
 
         let progress = ProgressReporter::default();
-        let wrapped = wrap_backend_with_lora(inner, &specs, &progress, None).expect("wrap");
+        let wrapped = wrap_backend_with_lora(inner, &specs, &progress).expect("wrap");
 
         for k in [
             "layers.0.attention.to_q.weight",
@@ -1273,11 +1237,10 @@ mod tests {
             "lora_unet_layers_0_feed_forward_w1".to_string(),
             LoraLayer { a, b, alpha: None },
         );
-        let adapter = LoraAdapter { layers, rank: 2 };
+        let adapter = LoraAdapter::from_layers(layers, 2);
         let specs = [ZImageLoraSpec {
             adapter: &adapter,
             scale: 1.0,
-            path_hash: 0,
         }];
 
         let st =
@@ -1320,7 +1283,7 @@ mod tests {
         }
         let inner: Box<dyn candle_nn::var_builder::SimpleBackend> = Box::new(MmapBackend { st });
         let progress = ProgressReporter::default();
-        let wrapped = wrap_backend_with_lora(inner, &specs, &progress, None).expect("wrap");
+        let wrapped = wrap_backend_with_lora(inner, &specs, &progress).expect("wrap");
 
         // B@A entry = 2 * 0.5 * 1 = 1. Merged = base(1) + delta(1) = 2.
         let t = wrapped
@@ -1352,16 +1315,15 @@ mod tests {
             "lora_unet_layers_0_feed_forward_w1".to_string(),
             LoraLayer { a, b, alpha: None },
         );
-        let adapter = LoraAdapter { layers, rank: 2 };
+        let adapter = LoraAdapter::from_layers(layers, 2);
         let specs = [ZImageLoraSpec {
             adapter: &adapter,
             scale: 1.0,
-            path_hash: 0,
         }];
 
         let inner: Box<dyn candle_nn::var_builder::SimpleBackend> = Box::new(tensors);
         let progress = ProgressReporter::default();
-        let wrapped = wrap_backend_with_lora(inner, &specs, &progress, None).expect("wrap");
+        let wrapped = wrap_backend_with_lora(inner, &specs, &progress).expect("wrap");
 
         let t = wrapped
             .get_unchecked("layers.0.feed_forward.w1.weight", DType::F32, &dev)
@@ -1384,11 +1346,10 @@ mod tests {
         let specs = [ZImageLoraSpec {
             adapter: &adapter,
             scale: 1.0,
-            path_hash: 0,
         }];
         let inner: Box<dyn candle_nn::var_builder::SimpleBackend> = Box::new(tensors);
         let progress = ProgressReporter::default();
-        let wrapped = wrap_backend_with_lora(inner, &specs, &progress, None).expect("wrap");
+        let wrapped = wrap_backend_with_lora(inner, &specs, &progress).expect("wrap");
         let t = wrapped
             .get_unchecked("unrelated.weight", DType::F32, &dev)
             .expect("get");
@@ -1405,21 +1366,12 @@ mod tests {
         let inner: Box<dyn candle_nn::var_builder::SimpleBackend> = Box::new(empty);
         let progress = ProgressReporter::default();
         let _ = dev;
-        match wrap_backend_with_lora(inner, &[], &progress, None) {
+        match wrap_backend_with_lora(inner, &[], &progress) {
             Ok(_) => panic!("expected error for empty spec list"),
             Err(e) => assert!(
                 e.to_string().contains("no LoraSpecs"),
                 "expected 'no LoraSpecs' message, got: {e}"
             ),
         }
-    }
-
-    #[test]
-    fn lora_path_hash_is_deterministic_and_distinguishes() {
-        let h1 = lora_path_hash("/a/b/c.safetensors");
-        let h2 = lora_path_hash("/a/b/c.safetensors");
-        let h3 = lora_path_hash("/a/b/d.safetensors");
-        assert_eq!(h1, h2);
-        assert_ne!(h1, h3);
     }
 }

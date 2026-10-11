@@ -91,16 +91,7 @@ extension PrintMaterializer {
         }
     }
 
-    /// Says so when a print cannot be kept, instead of letting it disappear.
-    func noteIfTooLarge(_ file: URL, named name: String) {
-        let bytes = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-        guard bytes > capBytes else { return }
-        let size = ByteCountFormatStyle().format(Int64(bytes))
-        let cap = ByteCountFormatStyle().format(Int64(capBytes))
-        note = "“\(name)” is \(size) and the media cache holds \(cap), "
-            + "so Mold cannot keep a copy. Settings ▸ General sets the cap."
-    }
-
+    /// Says so when a print cannot be kept, without reading its size on the main actor.
     func noteIfTooLargeOffMain(_ file: URL, named name: String) async {
         let bytes = await Task.detached(priority: .utility) {
             (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0

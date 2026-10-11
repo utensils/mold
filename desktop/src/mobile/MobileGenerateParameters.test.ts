@@ -70,6 +70,33 @@ async function attachFile(wrapper: VueWrapper, selector: string, file: File): Pr
 }
 
 describe("MobileGenerateParameters", () => {
+  it.each(["model", "pipeline"] as const)(
+    "rejects a settled media read when %s changes in the same turn",
+    async (field) => {
+      let complete!: (value: string) => void;
+      fileToBase64.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            complete = resolve;
+          }),
+      );
+      const { wrapper, form } = mountParameters(formFor("ltx2"));
+      await wrapper.get("[data-test='mobile-ltx2-disclosure']").trigger("click");
+      const input = wrapper.get("[data-test='mobile-ltx2-source-video']");
+      Object.defineProperty(input.element, "files", {
+        configurable: true,
+        value: [new File(["x"], "old.mp4")],
+      });
+      input.element.dispatchEvent(new Event("change"));
+      complete("eA==");
+      if (field === "model") form.model = "ltx2:new";
+      else form.pipeline = "two-stage";
+      await flushPromises();
+      expect(form.sourceVideo).toBeNull();
+      wrapper.unmount();
+    },
+  );
+
   it("keeps all H3 media controls out of the Advanced sheet", () => {
     const fl2va = {
       name: "minimax-h3-fl2va:comfy-pruned-int8",

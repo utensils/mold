@@ -1,5 +1,7 @@
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { reactive } from "vue";
+import * as mediaEncoding from "@studio/lib/base64";
 import Ltx2VideoControls from "./Ltx2VideoControls.vue";
 import {
   useGenerateForm,
@@ -31,6 +33,37 @@ function lastPatch(wrapper: ReturnType<typeof factory>): GenerateFormState {
 }
 
 describe("Ltx2VideoControls", () => {
+  it.each(["model", "pipeline"] as const)(
+    "rejects a settled media read when %s changes in the same turn",
+    async (field) => {
+      let complete!: (value: string) => void;
+      const encoding = vi
+        .spyOn(mediaEncoding, "blobToBase64")
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              complete = resolve;
+            }),
+        );
+      const form = reactive(baseForm());
+      const wrapper = mount(Ltx2VideoControls, { props: { modelValue: form } });
+      await flushPromises();
+      const input = wrapper.get("[data-test='ltx2-video-attach']");
+      Object.defineProperty(input.element, "files", {
+        configurable: true,
+        value: [new File(["x"], "old.mp4")],
+      });
+      input.element.dispatchEvent(new Event("change"));
+      complete("eA==");
+      if (field === "model") form.model = "ltx2:new";
+      else form.pipeline = "two-stage";
+      await flushPromises();
+      expect(wrapper.emitted("update:modelValue")).toBeUndefined();
+      wrapper.unmount();
+      encoding.mockRestore();
+    },
+  );
+
   beforeEach(() => {
     vi.stubGlobal(
       "fetch",
@@ -472,4 +505,27 @@ describe("Ltx2VideoControls", () => {
         .value,
     ).toBe("");
   });
+});
+
+it("shows an inline refusal for an empty source video without changing the form", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue({ ok: true, json: async () => [] }),
+  );
+  const wrapper = factory();
+  await flushPromises();
+  const before = wrapper.emitted("update:modelValue")?.length ?? 0;
+  const input = wrapper.get("[data-test='ltx2-video-attach']");
+  Object.defineProperty(input.element, "files", {
+    configurable: true,
+    value: [new File([], "empty.mp4")],
+  });
+  await input.trigger("change");
+  await flushPromises();
+  expect(wrapper.emitted("update:modelValue")?.length ?? 0).toBe(before);
+  expect(wrapper.get("[data-test='ltx2-media-error']").text()).toContain(
+    "cannot be empty",
+  );
+  wrapper.unmount();
+  vi.unstubAllGlobals();
 });

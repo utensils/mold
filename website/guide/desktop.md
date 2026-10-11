@@ -936,3 +936,11 @@ When the selected model advertises duration prediction, **Predict duration** let
 the server choose a 1–20 second LTX 2.5 clip from the prompt. Turn it off to choose
 an explicit length. Native iOS and macOS expose the same choice as web and Tauri;
 unsupported or unavailable models keep explicit duration controls.
+
+### Picking video and audio files
+
+Source-video, continuation-video and conditioning-audio picks must be nonempty and
+at most 64 MiB each. A file that cannot be read or exceeds the limit produces an
+inline message; the previous attachment stays in place. Picking another file,
+clearing the attachment or changing the model/pipeline prevents an earlier read
+from replacing the current input. Video and audio bytes are preserved as selected.

@@ -17,15 +17,28 @@ final class QueueStore {
     /// A one-line result a person should see ("Sent to hal9000."), in place.
     var summary: String?
     private(set) var acting: Set<String> = []
-    private var sourcePrompts: [String: String] = [:]
-    private var inputFailures: Set<String> = []
-    private var sourceThumbnails: [String: [QueueInputPreview]] = [:]
-    @ObservationIgnored private var thumbnailAttempts: Set<String> = []
-    @ObservationIgnored private var detailThumbnailAttempts: Set<String> = []
-    @ObservationIgnored private var thumbnailInFlight: Set<String> = []
+    nonisolated private struct PreviewKey: Hashable, Sendable {
+        let host: MoldHost?
+        let instance: String?
+        let job: String
+    }
+    nonisolated private struct PreviewFlight: Hashable, Sendable { let key: PreviewKey; let detailed: Bool }
+    nonisolated private struct PreviewRead: Sendable { let prompt: String?; let previews: Result<[QueueInputPreview], Error> }
+    private var sourcePrompts: [PreviewKey: String] = [:]
+    private var inputFailures: Set<PreviewKey> = []
+    private var sourceThumbnails: [PreviewKey: [QueueInputPreview]] = [:]
+    @ObservationIgnored private var thumbnailAttempts: Set<PreviewKey> = []
+    @ObservationIgnored private var detailThumbnailAttempts: Set<PreviewKey> = []
+    @ObservationIgnored private var thumbnailInFlight: Set<PreviewFlight> = []
+    @ObservationIgnored private var previewAccess: [PreviewKey: UInt64] = [:]
+    @ObservationIgnored private var previewClock: UInt64 = 0
+    /// Byte ownership stays in sourceThumbnails; the shared reader retains no hits.
+    @ObservationIgnored private let previewReads = BoundedAsyncCache<PreviewFlight, PreviewRead>(
+        maximumCost: 0, concurrency: 4, cost: { _ in 1 })
+    nonisolated private static let previewBudget = 32 * 1024 * 1024
 
-    private func thumbnailKey(_ entry: QueueEntry, _ id: MoldHost.ID) -> String {
-        "\(id)|\(hosts.instanceID(of: id) ?? "unknown")|\(entry.id)"
+    private func thumbnailKey(_ entry: QueueEntry, _ id: MoldHost.ID) -> PreviewKey {
+        PreviewKey(host: hosts.host(id), instance: hosts.instanceID(of: id), job: entry.id)
     }
 
     func prompt(for entry: QueueEntry, on id: MoldHost.ID) -> String? {
@@ -37,7 +50,10 @@ final class QueueStore {
     }
 
     func inputPreviews(for entry: QueueEntry, on id: MoldHost.ID) -> [QueueInputPreview] {
-        sourceThumbnails[thumbnailKey(entry, id)] ?? []
+        let key = thumbnailKey(entry, id)
+        previewClock &+= 1
+        previewAccess[key] = previewClock
+        return sourceThumbnails[key] ?? []
     }
 
     func inputLoadFailed(for entry: QueueEntry, on id: MoldHost.ID) -> Bool {
@@ -46,7 +62,7 @@ final class QueueStore {
 
     func loadSourceThumbnail(for entry: QueueEntry, on id: MoldHost.ID, detailed: Bool = false, retry: Bool = false) async {
         let key = thumbnailKey(entry, id)
-        let flightKey = key + (detailed ? "|detail" : "|row")
+        let flightKey = PreviewFlight(key: key, detailed: detailed)
         guard let host = hosts.host(id), hosts.isUp(host), !thumbnailInFlight.contains(flightKey) else { return }
         if detailed {
             guard retry || detailThumbnailAttempts.insert(key).inserted else { return }
@@ -54,11 +70,19 @@ final class QueueStore {
         thumbnailInFlight.insert(flightKey)
         defer { thumbnailInFlight.remove(flightKey) }
         let client = hosts.backend(for: host)
-        if !detailed, let detail = try? await client.queueJob(id: entry.id), canStorePreview(entry, on: id, key: key) {
-            sourcePrompts[key] = detail.job.metadata?.prompt
+        let cached = inputPreviews(for: entry, on: id)
+        let response = await previewReads.value(for: flightKey) {
+            let prompt = !detailed ? try? await client.queueJob(id: entry.id).job.metadata?.prompt : nil
+            do {
+                let previews = try await client.queueInputPreviews(id: entry.id, firstOnly: !detailed, cached: cached,
+                                                                  maximumBytes: Self.previewBudget)
+                return PreviewRead(prompt: prompt, previews: .success(previews))
+            } catch { return PreviewRead(prompt: prompt, previews: .failure(error)) }
         }
         do {
-            let previews = try await client.queueInputPreviews(id: entry.id, firstOnly: !detailed, cached: inputPreviews(for: entry, on: id))
+            guard let read = response else { throw CancellationError() }
+            if canStorePreview(entry, on: id, key: key), let prompt = read.prompt { sourcePrompts[key] = prompt }
+            let previews = try read.previews.get()
             guard !Task.isCancelled else { thumbnailAttempts.remove(key); detailThumbnailAttempts.remove(key); return }
             guard canStorePreview(entry, on: id, key: key), previews.allSatisfy({ ($0.bytes?.count ?? 0) <= 2 * 1024 * 1024 }) else { thumbnailAttempts.remove(key); detailThumbnailAttempts.remove(key); return }
             inputFailures.remove(key)
@@ -66,6 +90,7 @@ final class QueueStore {
             sourceThumbnails[key] = previews.map { preview in
                 QueueInputPreview(input: preview.input, bytes: preview.bytes ?? existing.first(where: { $0.input == preview.input })?.bytes)
             }
+            enforcePreviewBudget(keeping: key)
             if detailed && previews.contains(where: { $0.input.preview && $0.bytes == nil }) { detailThumbnailAttempts.remove(key) }
             if !detailed && previews.contains(where: { $0.input.preview }) && !previews.contains(where: { $0.bytes != nil }) { thumbnailAttempts.remove(key) }
         } catch is CancellationError {
@@ -129,7 +154,7 @@ final class QueueStore {
         }
     }
 
-    private func canStorePreview(_ entry: QueueEntry, on id: MoldHost.ID, key: String) -> Bool {
+    private func canStorePreview(_ entry: QueueEntry, on id: MoldHost.ID, key: PreviewKey) -> Bool {
         !Task.isCancelled && hosts.host(id) != nil && key == thumbnailKey(entry, id)
             && listings[id]?.contains(where: { $0.id == entry.id }) == true
     }
@@ -139,10 +164,36 @@ final class QueueStore {
             (listings[host.id] ?? []).map { thumbnailKey($0, host.id) }
         })
         sourceThumbnails = sourceThumbnails.filter { retained.contains($0.key) }
+        previewAccess = previewAccess.filter { retained.contains($0.key) }
         sourcePrompts = sourcePrompts.filter { retained.contains($0.key) }
         inputFailures.formIntersection(retained)
         thumbnailAttempts.formIntersection(retained)
         detailThumbnailAttempts.formIntersection(retained)
+    }
+
+    /// Evict bytes from the published store itself, while preserving ordered
+    /// descriptors and retryability. A large detailed response keeps the first
+    /// previews that fit; row requests and other jobs share this same budget.
+    private func enforcePreviewBudget(keeping newest: PreviewKey) {
+        var total = sourceThumbnails.values.flatMap { $0 }.reduce(0) { $0 + ($1.bytes?.count ?? 0) }
+        for key in previewAccess.keys.sorted(by: { previewAccess[$0, default: 0] < previewAccess[$1, default: 0] })
+            where key != newest && total > Self.previewBudget {
+            guard let previews = sourceThumbnails[key] else { continue }
+            sourceThumbnails[key] = previews.map {
+                total -= $0.bytes?.count ?? 0
+                return QueueInputPreview(input: $0.input, bytes: nil)
+            }
+            thumbnailAttempts.remove(key); detailThumbnailAttempts.remove(key)
+        }
+        guard total > Self.previewBudget, let previews = sourceThumbnails[newest] else { return }
+        var retained = 0
+        sourceThumbnails[newest] = previews.map { preview in
+            let cost = preview.bytes?.count ?? 0
+            guard retained + cost <= Self.previewBudget else { return QueueInputPreview(input: preview.input, bytes: nil) }
+            retained += cost
+            return preview
+        }
+        thumbnailAttempts.remove(newest); detailThumbnailAttempts.remove(newest)
     }
 
     /// Coalesced: a burst of job events is one re-read.

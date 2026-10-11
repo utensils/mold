@@ -21,6 +21,7 @@ use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy, OptionRestoreGuard};
 use crate::engine_base::EngineBase;
 use crate::image::{build_output_metadata, encode_image};
+use crate::lora::{fence_fingerprint, fingerprint_stack, LoraFingerprint};
 use crate::progress::{ProgressCallback, ProgressReporter};
 
 use super::identity::{EngineIdentityState, RenderIdentity};
@@ -789,7 +790,6 @@ fn flux_lora_var_builder<'a>(
         .map(|(adapter, w)| lora::LoraSpec {
             adapter: adapter.as_ref(),
             scale: w.scale,
-            path_hash: lora_path_hash(&w.path),
         })
         .collect();
 
@@ -801,16 +801,6 @@ fn flux_lora_var_builder<'a>(
         progress,
         delta_cache,
     )
-}
-
-/// Stable hash for a LoRA file path. Used as the per-LoRA cache-key
-/// component so the delta cache survives transformer rebuilds and
-/// disambiguates adapters in a multi-LoRA stack.
-fn lora_path_hash(path: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    path.hash(&mut hasher);
-    hasher.finish()
 }
 
 /// Same wrapper for the GGUF (quantized) path.
@@ -844,7 +834,6 @@ fn flux_gguf_lora_var_builder(
         .map(|(adapter, w)| lora::LoraSpec {
             adapter: adapter.as_ref(),
             scale: w.scale,
-            path_hash: lora_path_hash(&w.path),
         })
         .collect();
 
@@ -933,7 +922,6 @@ fn build_lora_registry(
         .map(|(adapter, w)| lora::LoraSpec {
             adapter,
             scale: w.scale,
-            path_hash: lora_path_hash(&w.path),
         })
         .collect();
 
@@ -1068,36 +1056,6 @@ struct LoadedFlux {
     /// answer depends on the checkpoint's HEADER, which the per-render
     /// residency decision must not re-open the file to read.
     transformer_resident_bytes: u64,
-}
-
-/// Fingerprint of a single LoRA adapter (path + scale). Used to detect
-/// when the active LoRA stack has changed so we know to rebuild the
-/// transformer; an unchanged stack reuses the previously merged weights.
-#[derive(Clone, PartialEq, Eq)]
-struct LoraFingerprint {
-    path_hash: u64,
-    scale_bits: u64,
-}
-
-impl LoraFingerprint {
-    fn from_lora_weight(lora: &mold_core::LoraWeight) -> Self {
-        Self {
-            path_hash: lora_path_hash(&lora.path),
-            scale_bits: lora.scale.to_bits(),
-        }
-    }
-}
-
-/// Fingerprint of an ordered LoRA stack. Equality is order-sensitive —
-/// `[A, B]` and `[B, A]` produce identical numerical results in theory
-/// (delta sums commute) but the wrapper still considers them distinct
-/// because the user-facing intent is order-driven (e.g. style vs
-/// override) and the cost of one redundant rebuild is small.
-fn fingerprint_stack(loras: &[mold_core::LoraWeight]) -> Vec<LoraFingerprint> {
-    loras
-        .iter()
-        .map(LoraFingerprint::from_lora_weight)
-        .collect()
 }
 
 /// FLUX inference engine backed by candle.
@@ -1263,10 +1221,8 @@ impl FluxEngine {
 
     /// Return the LoRA delta cache handle, or `None` when disabled via
     /// `MOLD_FLUX_DELTA_CACHE=0`. The cache stores CPU-resident F32 delta
-    /// tensors for every LoRA-touched layer; on a typical FLUX LoRA that's
-    /// ~25 GB of standing memory which dominates host RAM use during Q8+LoRA
-    /// rebuilds. Disabling forces a sub-second `B@A·scale` recompute on the
-    /// next rebuild, which is cheap on GPU.
+    /// tensors, bounded to 256 MiB per engine and released on unload.
+    /// Evicted, oversized, or disabled entries are recomputed on demand.
     fn lora_delta_cache_handle(&self) -> Option<Arc<Mutex<super::lora::LoraDeltaCache>>> {
         if crate::runtime_env::value("MOLD_FLUX_DELTA_CACHE")
             .map(|v| v == "0")
@@ -2764,7 +2720,7 @@ impl FluxEngine {
                     loaded.flux_model = None;
                     loaded.device.synchronize()?;
                 }
-                self.active_lora = requested_stack;
+                self.active_lora.clear();
             }
 
             if loaded.flux_model.is_none() {
@@ -2876,6 +2832,8 @@ impl FluxEngine {
                     )?);
                     FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
                 });
+                self.active_lora =
+                    fence_fingerprint(requested_stack, fingerprint_stack(&active_loras));
                 progress.stage_done(xformer_label, reload_start.elapsed());
             }
 
@@ -3274,8 +3232,10 @@ impl InferenceEngine for FluxEngine {
         // would be device memory nothing accounts for, and a later model
         // switch would fail its preflight or OOM against it.
         self.identity.drop_adapter();
-        // lora_delta_cache lives on CPU and survives park so the next reload
-        // can skip the B @ A · scale recompute. It dies with the engine on Drop.
+        self.lora_delta_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {
@@ -3658,6 +3618,64 @@ impl FluxEngine {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audit_unload_releases_cached_lora_deltas() {
+        let mut engine = super::FluxEngine::new(
+            "flux-dev:q8".into(),
+            dummy_paths("unused.gguf"),
+            Some(false),
+            None,
+            LoadStrategy::Eager,
+            0,
+            false,
+            None,
+            None,
+        );
+        let key = crate::lora::LoraCacheKey {
+            tensor_name: "qkv.weight".into(),
+            source_layer: "to_q".into(),
+            adapter_identity: crate::lora::AdapterIdentity::Synthetic(1),
+            scale_bits: 1.0f64.to_bits(),
+        };
+        engine
+            .lora_delta_cache
+            .lock()
+            .unwrap()
+            .insert(
+                key.clone(),
+                &Tensor::ones(1, DType::F32, &Device::Cpu).unwrap(),
+            )
+            .unwrap();
+        assert!(engine.lora_delta_cache.lock().unwrap().get(&key).is_some());
+        InferenceEngine::unload(&mut engine);
+        assert!(engine.lora_delta_cache.lock().unwrap().get(&key).is_none());
+    }
+
+    #[test]
+    fn audit_resident_lora_fingerprint_changes_after_file_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("adapter.safetensors");
+        std::fs::write(&path, b"old").unwrap();
+        let stack = [mold_core::LoraWeight {
+            path: path.to_string_lossy().into_owned(),
+            scale: 1.0,
+            expert: None,
+        }];
+        let before = super::fingerprint_stack(&stack);
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&replacement, b"new-adapter").unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        assert!(
+            before != super::fingerprint_stack(&stack),
+            "replacement must invalidate resident weights"
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            super::fingerprint_stack(&stack) != super::fingerprint_stack(&stack),
+            "unobservable adapters must not be reusable"
+        );
+    }
+
     use super::{
         build_gguf_transformer, effective_loras, flux_rms_norm_scale_aliases, flux_runtime_dtype,
         flux_transformer_var_builder, gguf_transformer_dtype, park_cond_to_cpu,

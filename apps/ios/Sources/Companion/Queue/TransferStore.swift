@@ -81,21 +81,16 @@ final class TransferStore {
                 context.clientBatchId = UUID().uuidString.lowercased()
             }
             let prior = try await lookup(context.destClient, context.clientBatchId)
-            let detail = try? await context.sourceClient.queueJob(id: entry.id)
-            let authority =
-                detail.map {
-                    QueueTransferEligibility.allows(
-                        $0.job.state, reservedProtocol: reservedProtocol)
-                        ? $0.job.transferAuthority(
-                            instanceId: expectedSource, reservedProtocol: reservedProtocol) : nil
-                } ?? nil
+            let sourceLookup = try await QueueTransferSource.read(jobID: entry.id, instanceID: expectedSource,
+                reservedProtocol: reservedProtocol, hasPriorAttempt: prior != nil, backend: context.sourceClient)
+            let authority = sourceLookup.authority
             if reservedProtocol, let prior, let authority,
                 let recovered = await restoreTerminalFailure(
                     prior, authority: authority, context: context)
             {
                 return finish(recovered, sourceHost, verb)
             }
-            switch context.next(.checkPriorAttempt, .priorAttempt(prior, sourceHeld: authority != nil)) {
+            switch context.next(.checkPriorAttempt, .priorAttempt(prior, source: sourceLookup)) {
             case let .outcome(outcome): return finish(outcome, sourceHost, verb)
             case .step(.complete): return finish(await complete(authority, context), sourceHost, verb)
             case .step(.export): break

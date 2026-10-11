@@ -35,27 +35,13 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, Tensor};
 
-use crate::flux::lora::{get_or_load_adapter, LoraAdapter, LoraDeltaCache};
+use crate::lora::{get_or_load_adapter, LoraAdapter};
 use crate::progress::ProgressReporter;
-
-// ---------------------------------------------------------------------------
-// Public path-hash helper — seed `SdxlLoraSpec`s with a stable per-file id so
-// the delta cache can disambiguate adapters in a multi-LoRA stack.
-// ---------------------------------------------------------------------------
-
-/// Stable hash of a LoRA file path. Independent copy of the FLUX helper of the
-/// same name so this module doesn't reach into `flux::pipeline` internals.
-pub(crate) fn lora_path_hash(path: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    path.hash(&mut hasher);
-    hasher.finish()
-}
 
 // ---------------------------------------------------------------------------
 // Target descriptors
@@ -108,7 +94,7 @@ fn strip_diffusers_prefixes(stem: &str) -> &str {
 ///   prefix, then `(down_blocks|mid_block|up_blocks).<idx>.<rest>`.
 pub(crate) fn map_sdxl_lora_key(raw_stem: &str) -> Vec<SdxlLoraTarget> {
     if let Some(rest) = raw_stem.strip_prefix("lora_unet_") {
-        return match map_kohya_sdxl_key(rest) {
+        return match crate::lora::unet::map_kohya_unet_key(rest) {
             Some(candle_key) => vec![SdxlLoraTarget::Direct { candle_key }],
             None => Vec::new(),
         };
@@ -166,156 +152,6 @@ fn map_diffusers_path(stem: &str) -> Option<String> {
     }
 }
 
-/// Map the Kohya / sd-scripts flattened form (with the `lora_unet_` prefix
-/// already stripped) to a SDXL candle key. The flattening turns every `.` in
-/// the original module path into `_`, so we walk it from the front:
-///
-/// 1. Block kind: `down_blocks_{i}_`, `mid_block_`, `up_blocks_{i}_`.
-/// 2. Inner kind: `attentions_{j}_...`, `resnets_{j}_...`, or for downsamplers
-///    `downsamplers_0_conv`, `upsamplers_0_conv`.
-///
-/// Returns `None` for any leaf the SDXL UNet can't host (text-encoder LoRAs
-/// (`lora_te_*`), shared modulation, etc.) — the caller logs and skips.
-fn map_kohya_sdxl_key(rest: &str) -> Option<String> {
-    if let Some(after) = rest.strip_prefix("down_blocks_") {
-        return map_kohya_indexed_block(after, "down_blocks");
-    }
-    if let Some(after) = rest.strip_prefix("mid_block_") {
-        return map_kohya_mid_block(after);
-    }
-    if let Some(after) = rest.strip_prefix("up_blocks_") {
-        return map_kohya_indexed_block(after, "up_blocks");
-    }
-    // `conv_in`, `conv_out`, `time_embedding_linear_*`, `add_embedding_linear_*`
-    // are theoretically possible but never appear in observed Civitai SDXL
-    // LoRAs — left out intentionally so an unexpected match doesn't silently
-    // mis-merge into a model-level leaf.
-    None
-}
-
-/// Map an indexed-block Kohya tail (the part after `down_blocks_` or
-/// `up_blocks_`) to a candle key. `block_kind` is `"down_blocks"` or
-/// `"up_blocks"`.
-fn map_kohya_indexed_block(rest: &str, block_kind: &str) -> Option<String> {
-    // `rest` begins with `{i}_<sub>...`. Pull the block index.
-    let (block_idx, after_idx) = rest.split_once('_')?;
-    block_idx.parse::<usize>().ok()?;
-
-    if let Some(rest) = after_idx.strip_prefix("attentions_") {
-        return map_kohya_attentions(rest, block_kind, block_idx);
-    }
-    if let Some(rest) = after_idx.strip_prefix("resnets_") {
-        return map_kohya_resnets(rest, block_kind, block_idx);
-    }
-    if let Some(rest) = after_idx.strip_prefix("downsamplers_") {
-        // `0_conv` → `down_blocks.{i}.downsamplers.0.conv.weight`.
-        let candle = format!(
-            "{block_kind}.{block_idx}.downsamplers.{}",
-            rest.replace('_', ".")
-        );
-        return Some(format!("{candle}.weight"));
-    }
-    if let Some(rest) = after_idx.strip_prefix("upsamplers_") {
-        let candle = format!(
-            "{block_kind}.{block_idx}.upsamplers.{}",
-            rest.replace('_', ".")
-        );
-        return Some(format!("{candle}.weight"));
-    }
-    None
-}
-
-fn map_kohya_mid_block(rest: &str) -> Option<String> {
-    if let Some(rest) = rest.strip_prefix("attentions_") {
-        return map_kohya_attentions(rest, "mid_block", "");
-    }
-    if let Some(rest) = rest.strip_prefix("resnets_") {
-        return map_kohya_resnets(rest, "mid_block", "");
-    }
-    None
-}
-
-/// `block_idx_str` is empty for `mid_block` and the numeric index otherwise.
-/// The candle prefix is rebuilt as `{block_kind}.{idx}.` (or `{block_kind}.`
-/// when `idx` is empty).
-fn block_prefix(block_kind: &str, block_idx_str: &str) -> String {
-    if block_idx_str.is_empty() {
-        format!("{block_kind}.")
-    } else {
-        format!("{block_kind}.{block_idx_str}.")
-    }
-}
-
-/// Map an attentions tail like `1_transformer_blocks_0_attn1_to_q` to its
-/// candle key. The attention block index is the first integer; the rest is
-/// `transformer_blocks_{k}_<leaf>` OR a top-level attention leaf
-/// (`proj_in`, `proj_out`, `norm`).
-fn map_kohya_attentions(rest: &str, block_kind: &str, block_idx_str: &str) -> Option<String> {
-    let (attn_idx, after_attn) = rest.split_once('_')?;
-    attn_idx.parse::<usize>().ok()?;
-    let prefix = block_prefix(block_kind, block_idx_str);
-
-    // Top-level attention leaves (no `transformer_blocks_` segment): SDXL uses
-    // linear projections for `proj_in` / `proj_out`, so the LoRA target maps
-    // to the `.weight` directly.
-    if let Some(leaf) = after_attn.strip_prefix("transformer_blocks_") {
-        return map_kohya_transformer_block(leaf, &prefix, attn_idx);
-    }
-    let candle_leaf = match after_attn {
-        "proj_in" => Some("proj_in"),
-        "proj_out" => Some("proj_out"),
-        _ => None,
-    }?;
-    Some(format!(
-        "{prefix}attentions.{attn_idx}.{candle_leaf}.weight"
-    ))
-}
-
-/// Map a transformer-block tail `{k}_<leaf>` to a candle key, where `<leaf>`
-/// is one of the SDXL attention/FF leaves.
-fn map_kohya_transformer_block(rest: &str, prefix: &str, attn_idx: &str) -> Option<String> {
-    let (tb_idx, leaf) = rest.split_once('_')?;
-    tb_idx.parse::<usize>().ok()?;
-
-    // The leaf is the Kohya-flattened tail; reverse-lookup it against the SDXL
-    // candle-form table.
-    let candle_leaf = match leaf {
-        // Self-attention (image-image)
-        "attn1_to_q" => "attn1.to_q",
-        "attn1_to_k" => "attn1.to_k",
-        "attn1_to_v" => "attn1.to_v",
-        "attn1_to_out_0" => "attn1.to_out.0",
-        // Cross-attention (image-text)
-        "attn2_to_q" => "attn2.to_q",
-        "attn2_to_k" => "attn2.to_k",
-        "attn2_to_v" => "attn2.to_v",
-        "attn2_to_out_0" => "attn2.to_out.0",
-        // Feed-forward (GeGLU project + out-projection)
-        "ff_net_0_proj" => "ff.net.0.proj",
-        "ff_net_2" => "ff.net.2",
-        _ => return None,
-    };
-    Some(format!(
-        "{prefix}attentions.{attn_idx}.transformer_blocks.{tb_idx}.{candle_leaf}.weight"
-    ))
-}
-
-/// Map a resnets tail like `0_time_emb_proj` to its candle key.
-fn map_kohya_resnets(rest: &str, block_kind: &str, block_idx_str: &str) -> Option<String> {
-    let (resnet_idx, leaf) = rest.split_once('_')?;
-    resnet_idx.parse::<usize>().ok()?;
-    let prefix = block_prefix(block_kind, block_idx_str);
-
-    let candle_leaf = match leaf {
-        "time_emb_proj" => "time_emb_proj",
-        "conv1" => "conv1",
-        "conv2" => "conv2",
-        "conv_shortcut" => "conv_shortcut",
-        _ => return None,
-    };
-    Some(format!("{prefix}resnets.{resnet_idx}.{candle_leaf}.weight"))
-}
-
 // ---------------------------------------------------------------------------
 // Patch building — turn every (adapter, layer) pair into per-tensor patches
 // ---------------------------------------------------------------------------
@@ -326,16 +162,12 @@ struct SdxlLoraPatch {
     b: Tensor,
     effective_scale: f64,
     target: SdxlLoraTarget,
-    lora_path_hash: u64,
 }
 
-/// A loaded LoRA + its scale + a stable hash of its file path. The hash is the
-/// per-LoRA cache-key component so a multi-LoRA stack keeps each adapter's
-/// delta independently cacheable.
+/// A loaded adapter and its requested scale.
 pub(crate) struct SdxlLoraSpec<'a> {
     pub adapter: &'a LoraAdapter,
     pub scale: f64,
-    pub path_hash: u64,
 }
 
 fn build_patches(specs: &[SdxlLoraSpec<'_>]) -> (HashMap<String, Vec<SdxlLoraPatch>>, usize) {
@@ -364,7 +196,6 @@ fn build_patches(specs: &[SdxlLoraSpec<'_>]) -> (HashMap<String, Vec<SdxlLoraPat
                     b: layer.b.clone(),
                     effective_scale,
                     target,
-                    lora_path_hash: spec.path_hash,
                 });
             }
         }
@@ -375,14 +206,6 @@ fn build_patches(specs: &[SdxlLoraSpec<'_>]) -> (HashMap<String, Vec<SdxlLoraPat
 // ---------------------------------------------------------------------------
 // Delta computation + apply
 // ---------------------------------------------------------------------------
-
-#[derive(Hash, Eq, PartialEq, Clone)]
-struct DeltaCacheKey {
-    tensor_name: String,
-    patch_index: usize,
-    lora_path_hash: u64,
-    scale_bits: u64,
-}
 
 fn compute_delta(patch: &SdxlLoraPatch, target_dev: &Device) -> candle_core::Result<Tensor> {
     let a = patch.a.to_dtype(DType::F32)?.to_device(target_dev)?;
@@ -454,7 +277,6 @@ fn apply_patch_f32(
 struct SdxlLoraBackend {
     inner: Box<dyn candle_nn::var_builder::SimpleBackend>,
     patches: HashMap<String, Vec<SdxlLoraPatch>>,
-    delta_cache: Option<Arc<Mutex<LoraDeltaCache>>>,
 }
 
 impl SdxlLoraBackend {
@@ -469,18 +291,7 @@ impl SdxlLoraBackend {
             return Ok(tensor);
         };
         let mut merged = tensor.to_dtype(DType::F32)?;
-        for (patch_idx, patch) in layer_patches.iter().enumerate() {
-            // Per-patch delta-cache key. We don't share storage with the FLUX
-            // cache (different key struct), so the `delta_cache` argument is
-            // accepted for API parity but currently unused on this backend.
-            let _ = DeltaCacheKey {
-                tensor_name: name.to_string(),
-                patch_index: patch_idx,
-                lora_path_hash: patch.lora_path_hash,
-                scale_bits: patch.effective_scale.to_bits(),
-            };
-            let _ = &self.delta_cache;
-
+        for patch in layer_patches {
             let delta = compute_delta(patch, dev)?;
             merged = apply_patch_f32(&merged, &delta, patch)?;
         }
@@ -524,7 +335,6 @@ pub(crate) fn wrap_backend_with_lora(
     inner: Box<dyn candle_nn::var_builder::SimpleBackend>,
     specs: &[SdxlLoraSpec<'_>],
     progress: &ProgressReporter,
-    delta_cache: Option<Arc<Mutex<LoraDeltaCache>>>,
 ) -> Result<Box<dyn candle_nn::var_builder::SimpleBackend>> {
     if specs.is_empty() {
         bail!("wrap_backend_with_lora called with no LoraSpecs");
@@ -538,11 +348,7 @@ pub(crate) fn wrap_backend_with_lora(
         n = specs.len(),
     ));
 
-    Ok(Box::new(SdxlLoraBackend {
-        inner,
-        patches,
-        delta_cache,
-    }))
+    Ok(Box::new(SdxlLoraBackend { inner, patches }))
 }
 
 /// Load LoRA adapter files into `Arc<LoraAdapter>`s. Reuses the FLUX
@@ -604,7 +410,7 @@ pub(crate) fn effective_sdxl_loras(req: &mold_core::GenerateRequest) -> Vec<mold
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flux::lora::{classify_lora_key, LoraDirection, LoraLayer};
+    use crate::lora::{classify_lora_key, LoraDirection, LoraLayer};
     use safetensors::tensor::TensorView;
 
     // ── map_sdxl_lora_key — Kohya leaf coverage ─────────────────────────
@@ -868,7 +674,7 @@ mod tests {
         let b = Tensor::full(fill_b, (6, 2), &dev).unwrap();
         let mut layers = HashMap::new();
         layers.insert(layer.to_string(), LoraLayer { a, b, alpha: None });
-        LoraAdapter { layers, rank: 2 }
+        LoraAdapter::from_layers(layers, 2)
     }
 
     #[test]
@@ -881,7 +687,6 @@ mod tests {
         let specs = [SdxlLoraSpec {
             adapter: &adapter,
             scale: 0.5,
-            path_hash: 0xC0FFEE,
         }];
         let (patches, skipped) = build_patches(&specs);
         assert_eq!(skipped, 0, "leaf must map to a real candle target");
@@ -909,7 +714,6 @@ mod tests {
         let specs = [SdxlLoraSpec {
             adapter: &adapter,
             scale: 0.5,
-            path_hash: 0,
         }];
         let (patches, _) = build_patches(&specs);
         let key = "down_blocks.2.attentions.1.transformer_blocks.0.attn1.to_q.weight";
@@ -936,20 +740,16 @@ mod tests {
             SdxlLoraSpec {
                 adapter: &a1,
                 scale: 1.0,
-                path_hash: 0xAA,
             },
             SdxlLoraSpec {
                 adapter: &a2,
                 scale: 1.0,
-                path_hash: 0xBB,
             },
         ];
         let (patches, _) = build_patches(&specs);
         let key = "down_blocks.2.attentions.1.transformer_blocks.0.attn1.to_q.weight";
         let bucket = &patches[key];
         assert_eq!(bucket.len(), 2, "stack must keep distinct patches");
-        assert_eq!(bucket[0].lora_path_hash, 0xAA);
-        assert_eq!(bucket[1].lora_path_hash, 0xBB);
     }
 
     #[test]
@@ -974,7 +774,6 @@ mod tests {
             target: SdxlLoraTarget::Direct {
                 candle_key: "down_blocks.0.resnets.0.conv1.weight".to_string(),
             },
-            lora_path_hash: 0,
         };
 
         let delta = compute_delta(&patch, &dev).unwrap();
@@ -1015,7 +814,7 @@ mod tests {
     /// `base + scale·(B @ A)` everywhere.
     #[test]
     fn end_to_end_kohya_direct_merge_matches_math() {
-        use crate::flux::lora::LoraAdapter;
+        use crate::lora::LoraAdapter;
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("base.safetensors");
         // Base tensor is (6, 4) of constant 1.0.
@@ -1035,11 +834,10 @@ mod tests {
             "lora_unet_down_blocks_2_attentions_1_transformer_blocks_0_attn1_to_q".to_string(),
             LoraLayer { a, b, alpha: None },
         );
-        let adapter = LoraAdapter { layers, rank: 2 };
+        let adapter = LoraAdapter::from_layers(layers, 2);
         let specs = [SdxlLoraSpec {
             adapter: &adapter,
             scale: 1.0,
-            path_hash: 0xFEED,
         }];
 
         // Build the inner mmap-backed SimpleBackend.
@@ -1084,7 +882,7 @@ mod tests {
         let inner: Box<dyn candle_nn::var_builder::SimpleBackend> = Box::new(MmapBackend { st });
 
         let progress = ProgressReporter::default();
-        let wrapped = wrap_backend_with_lora(inner, &specs, &progress, None).expect("wrap");
+        let wrapped = wrap_backend_with_lora(inner, &specs, &progress).expect("wrap");
 
         let merged = wrapped.get_unchecked(key, DType::F32, &dev).expect("get");
         let vals: Vec<f32> = merged.flatten_all().unwrap().to_vec1().unwrap();
@@ -1098,7 +896,7 @@ mod tests {
     /// the prefix-strip + dotted-leaf path round-trips through the backend.
     #[test]
     fn end_to_end_diffusers_direct_merge_matches_math() {
-        use crate::flux::lora::LoraAdapter;
+        use crate::lora::LoraAdapter;
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("base_diffusers.safetensors");
         let key = "up_blocks.0.attentions.0.transformer_blocks.0.ff.net.2.weight";
@@ -1116,11 +914,10 @@ mod tests {
             "transformer.up_blocks.0.attentions.0.transformer_blocks.0.ff.net.2".to_string(),
             LoraLayer { a, b, alpha: None },
         );
-        let adapter = LoraAdapter { layers, rank: 2 };
+        let adapter = LoraAdapter::from_layers(layers, 2);
         let specs = [SdxlLoraSpec {
             adapter: &adapter,
             scale: 1.0,
-            path_hash: 0xBEEF,
         }];
 
         let st =
@@ -1163,7 +960,7 @@ mod tests {
         }
         let inner: Box<dyn candle_nn::var_builder::SimpleBackend> = Box::new(MmapBackend { st });
         let progress = ProgressReporter::default();
-        let wrapped = wrap_backend_with_lora(inner, &specs, &progress, None).expect("wrap");
+        let wrapped = wrap_backend_with_lora(inner, &specs, &progress).expect("wrap");
 
         // B@A = (4,2)·(2,8) of ones → entry value 2.0; merged = 0 + 2 = 2.0.
         let merged = wrapped.get_unchecked(key, DType::F32, &dev).expect("get");
@@ -1216,15 +1013,6 @@ mod tests {
                 "down_blocks.2.attentions.1.transformer_blocks.0.attn1.to_q"
             ))
         );
-    }
-
-    #[test]
-    fn lora_path_hash_is_deterministic() {
-        let h1 = lora_path_hash("/a/b/c.safetensors");
-        let h2 = lora_path_hash("/a/b/c.safetensors");
-        let h3 = lora_path_hash("/a/b/d.safetensors");
-        assert_eq!(h1, h2);
-        assert_ne!(h1, h3);
     }
 
     // ── effective_sdxl_loras — request normalisation ────────────────────

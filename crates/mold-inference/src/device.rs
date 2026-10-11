@@ -4331,23 +4331,6 @@ pub(crate) fn is_gpu(device: &candle_core::Device) -> bool {
     device.is_cuda() || device.is_metal()
 }
 
-/// Select the optimal compute dtype for GPU inference.
-///
-/// - CUDA and Metal: BF16 (well-supported by tensor cores / Apple Neural Engine)
-/// - CPU: F32
-///
-/// Note: this is the default compute dtype for model families that support BF16.
-/// Some model families (SD1.5, SDXL) prefer F16 — they handle dtype selection
-/// in their own pipelines.
-#[allow(dead_code)]
-pub(crate) fn gpu_compute_dtype(device: &candle_core::Device) -> candle_core::DType {
-    if is_gpu(device) {
-        candle_core::DType::BF16
-    } else {
-        candle_core::DType::F32
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Transformer residency: what the card is HOLDING, not what the file weighs
 // ---------------------------------------------------------------------------

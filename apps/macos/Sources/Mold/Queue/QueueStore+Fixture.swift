@@ -66,12 +66,3 @@ struct NoInstanceKnown: LocalizedError {
         "This machine hasn't said which run it is; refresh and try again."
     }
 }
-
-/// A held row with no batch to retry against -- `QueueEntry.authority(instanceId:)`
-/// came back `nil`. Retry has nothing to send; this is what surfaces that as a
-/// report rather than a silently ignored tap.
-struct NotADurableBatchChild: LocalizedError {
-    var errorDescription: String? {
-        "This job isn't a durable batch child, so it can't be retried this way."
-    }
-}

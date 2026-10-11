@@ -41,52 +41,62 @@ private func next(
 
 @Test func aDestinationThatAlreadyHoldsThisBatchIsNotSentToTwice() {
     let landed = batch(children: [.running])
-    let result = next(.checkPriorAttempt, .priorAttempt(landed, sourceHeld: true))
+    let result = next(.checkPriorAttempt, .priorAttempt(landed, source: .eligible(.init(instanceId: "src", batchId: "b", clientBatchId: "cb", jobId: "j"))))
     #expect(result == .step(.complete))
 }
 
 @Test func aSourceThatIsNoLongerHeldNeverReachesTheDestination() {
-    let result = next(.checkPriorAttempt, .priorAttempt(nil, sourceHeld: false))
+    let result = next(.checkPriorAttempt, .priorAttempt(nil, source: .ineligible))
     #expect(result == .outcome(.refused("This job is no longer held. Refresh the queue before sending it.")))
 }
 
 @Test func noPriorAttemptAndAHeldSourceMovesOnToExport() {
-    let result = next(.checkPriorAttempt, .priorAttempt(nil, sourceHeld: true))
+    let result = next(.checkPriorAttempt, .priorAttempt(nil, source: .eligible(.init(instanceId: "src", batchId: "b", clientBatchId: "cb", jobId: "j"))))
     #expect(result == .step(.export))
 }
 
 @Test func aPriorAttemptFoundAfterTheSourceWasAlreadyRemovedIsStillASend() {
     let landed = batch(children: [.complete])
-    let result = next(.checkPriorAttempt, .priorAttempt(landed, sourceHeld: false))
+    let result = next(.checkPriorAttempt, .priorAttempt(landed, source: .missing))
     #expect(result == .outcome(.sent(
         sourceRemoved: true,
         message: "Sent to hal9000. The original was already removed from workstation's queue.")))
 }
 
+@Test func aPresentIneligibleSourceMustNotBeReportedRemoved() {
+    let landed = batch(children: [.running])
+    // A running source is present, independently of the destination receipt.
+    let result = next(.checkPriorAttempt, .priorAttempt(landed, source: .ineligible))
+    guard case .outcome(.refused) = result else {
+        Issue.record("A present source must not be reported as already removed: \(result)")
+        return
+    }
+}
+
 @Test func aBatchWithTwoChildrenIsRefusedAsAnUnexpectedIdentity() {
     let landed = batch(children: [.running, .running])
-    let result = next(.checkPriorAttempt, .priorAttempt(landed, sourceHeld: true))
+    let result = next(.checkPriorAttempt, .priorAttempt(landed, source: .eligible(.init(instanceId: "src", batchId: "b", clientBatchId: "cb", jobId: "j"))))
     #expect(result == .outcome(.refused(
         "The destination returned an unexpected job identity. The original remains held.")))
 }
 
 @Test func aWrongDestinationInstanceIsRefusedAsAnUnexpectedIdentity() {
     let landed = batch(instanceId: "some-other-instance", children: [.running])
-    let result = next(.checkPriorAttempt, .priorAttempt(landed, sourceHeld: true))
+    let result = next(.checkPriorAttempt, .priorAttempt(landed, source: .eligible(.init(instanceId: "src", batchId: "b", clientBatchId: "cb", jobId: "j"))))
     #expect(result == .outcome(.refused(
         "The destination returned an unexpected job identity. The original remains held.")))
 }
 
 @Test func aDestinationChildThatFailedLeavesTheSourceHeld() {
     let landed = batch(children: [.failed])
-    let result = next(.checkPriorAttempt, .priorAttempt(landed, sourceHeld: true))
+    let result = next(.checkPriorAttempt, .priorAttempt(landed, source: .eligible(.init(instanceId: "src", batchId: "b", clientBatchId: "cb", jobId: "j"))))
     #expect(result == .outcome(.refused(
         "The destination job failed. The original remains held; choose another machine or inspect the destination.")))
 }
 
 @Test func aDestinationChildThatWasCancelledLeavesTheSourceHeld() {
     let landed = batch(children: [.cancelled])
-    let result = next(.checkPriorAttempt, .priorAttempt(landed, sourceHeld: true))
+    let result = next(.checkPriorAttempt, .priorAttempt(landed, source: .eligible(.init(instanceId: "src", batchId: "b", clientBatchId: "cb", jobId: "j"))))
     #expect(result == .outcome(.refused(
         "The destination job cancelled. The original remains held; choose another machine or inspect the destination.")))
 }

@@ -153,24 +153,13 @@ menu at every text size on iPhone and iPad, preserving its accessibility
 hierarchy as text size changes. The model chooser uses a page-sized sheet so its first and last rows
 remain clear of the form-sheet scroll-edge fades. Auto follows the default online machine that holds the selected model.
 
-**Canvas.** Fills the rest of the screen while generating or showing a result.
-On iPhone while idle, the controls are one scrolling form, with Kind and Machine
-visible above the prompt. They stack at xxLarge and above. A full-width Generate
-action remains above the tab bar while the form scrolls, with enough bottom
-scroll travel to lift Options above it. In compact-height landscape the action
-scrolls with the form. This leaves no empty canvas compressing the controls.
-
-- Empty: a faint `wand.and.sparkles` and "Describe a picture below."
-- Transparent prints sit on the AlphaBed checkerboard.
-- Tapping the canvas while the keyboard is up dismisses it.
-
-**Composer.** On iPad and during a phone render, an opaque system-background panel (radius 16) above the tab bar
-keeps text legible over the canvas. One stable scroll
-view is capped to 55% of the current window's available height. While idle at
-accessibility sizes it uses up to 90%, replacing the redundant empty-canvas
-guidance. Submitting, progress, results and failures retain the canvas. Both
-caps account for keyboard avoidance and iPad resizing; its prompt never moves between
-`ViewThatFits` alternatives. Top to bottom:
+**Composer.** Generate remains a stable scrolling form while jobs run or finish.
+Kind and Machine stay visible above the prompt and stack at xxLarge and above.
+A full-width Generate action remains above the tab bar while the form scrolls,
+with enough bottom travel to lift Options above it. In compact-height landscape
+that action scrolls with the form. The queue-count link opens Queue for live
+progress; results open in Library. The prompt stays in the same view hierarchy
+through keyboard changes and iPad resizing. Top to bottom:
 
 1. **Prompt:** a bounded `TextField(axis: .vertical)` with up to three lines.
    **Edit prompt** opens a large native sheet with a keyboard-safe `TextEditor`.
@@ -541,9 +530,8 @@ foreground, Generate shows a **From Share** card with the same three choices.
    (Generate, chips, the viewer bar) add `.accessibilityShowsLargeContentViewer`.
 7. **Targets** are at least 44×44 pt, via `.contentShape` and a scaled minimum
    frame.
-8. **The composer** scrolls within 55% of the available window height, or 90%
-   while idle at accessibility sizes. Active generation and results retain
-   their canvas; the idle hint gives way to readable controls.
+8. **The composer** stays scrollable at every text size, with its Generate
+   action reachable. Progress and results appear in Queue and Library.
 9. **Colour that the audit proved.** The palette is the system's, with three
    asset-catalog colours added after the shell's contrast audit failed on the
    system defaults:
@@ -587,7 +575,7 @@ foreground, Generate shows a **From Share** card with the same three choices.
 
 | Screen                  | xSmall                     | Large (default)                  | xxxLarge                                             | AX5                                                                                                                             |
 | ----------------------- | -------------------------- | -------------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| Generate                | One chip row; large canvas | Chips wrap to two rows if needed | Chips are icon + short label; prompt shows 1…4 lines | One **Options** button; the estimate sits above a full-width Generate; the model id moves into the menu; the Model button wraps |
+| Generate                | One chip row; scrolling composer | Chips wrap to two rows if needed | Chips are icon + short label; prompt shows 1…4 lines | One **Options** button; the estimate sits above a full-width Generate; the model id moves into the menu; the Model button wraps |
 | Library                 | 5 columns                  | 3 columns                        | 3 columns, larger headers                            | 1–2 columns; headers wrap; machine badges hidden on tiles (still spoken, and shown in Info)                                     |
 | Viewer                  | Icon bar                   | Icon bar                         | Icon bar                                             | Icon bar with the Large Content Viewer; Info opens straight to `.large`                                                         |
 | Queue                   | Thumbnail beside text      | same                             | same                                                 | Thumbnail above text; held-row buttons stacked full width; ETA on its own line                                                  |
@@ -652,7 +640,7 @@ not a delta.
 **Drag and drop (iPad)**
 
 - Drag prints out as `Transferable` files.
-- Drop pictures onto wells or the canvas.
+- Drop pictures onto the composer’s source wells.
 - Drop prints onto a sidebar collection to file them.
 - Drop files onto Library to import them.
 - Drag to reorder Queue rows.
