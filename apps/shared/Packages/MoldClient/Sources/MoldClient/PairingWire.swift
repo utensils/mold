@@ -20,6 +20,9 @@ public struct PairingSession: Codable, Hashable, Sendable {
     public var websocketUrl: String?
     public var inviteSeed: String?
     public var invite: SecureInvite?
+    public var mode: HostConnectionMode?
+    public var pairingToken: String?
+    public var baseUrl: String?
 
     public var secureInvitation: SecureInvitation? {
         guard let hostKey, let hostNoiseKey, let hostBindingSignature, let namespace,

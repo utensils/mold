@@ -34,17 +34,18 @@ struct HostStoreTests {
         return try MoldJSON.decoder.decode(ServerStatus.self, from: Data(json.utf8))
     }
 
-    @Test func loadingAnOldRemoteMachineErasesItsBearerAndKeepsItsIdentity() throws {
+    @Test func loadingAnExistingDirectMachinePreservesItsRegularCredential() throws {
         let (_, credentials, file) = store()
-        let id = UUID(), origin = URL(string: "https://old-relay.example")!
+        let id = UUID(), origin = URL(string: "https://direct.example")!
         credentials.keys[id] = "retired-bearer"
         try file.save(HostList(entries: [.init(id: id, name: "halcyon", baseURL: origin)], defaultID: id))
         let loaded = HostStore(list: file, credentials: credentials, makeBackend: { _ in FakeBackend() })
         #expect(loaded.hosts.first?.id == id)
         #expect(loaded.hosts.first?.name == "halcyon")
         #expect(loaded.hosts.first?.baseURL == origin)
-        #expect(loaded.hosts.first?.apiKey == nil)
-        #expect(credentials.keys[id] == nil)
+        #expect(loaded.hosts.first?.apiKey == "retired-bearer")
+        #expect(loaded.hosts.first?.connectionMode == .regular)
+        #expect(credentials.keys[id] == "retired-bearer")
         #expect(loaded.defaultMachine == id)
     }
 
@@ -160,6 +161,41 @@ struct HostStoreTests {
         #expect(hosts.hosts.count == 1)
         #expect(hosts.hosts.first?.name == "workstation")
         #expect(credentials.keys[existing.id] == "new")
+    }
+
+    @Test func regularPairingReusesTheMachineAndPersistsItsExplicitMode() async throws {
+        let (hosts, credentials, file) = store()
+        let original = try hosts.add(name: "GPU", address: "https://gpu.example.com", apiKey: "secure-old", makeDefault: true)
+        let payload = try MobilePairingPayload.parse("""
+        {"type":"mold.mobile-pairing","version":2,"mode":"regular","base_url":"https://gpu.example.com",
+         "instance_id":"gpu-id","name":"GPU","pairing_token":"\(String(repeating: "a", count: 64))","expires_at":4000000000}
+        """)
+        let paired = try await hosts.pair(payload, claim: { _, _, _ in
+            try MoldJSON.decoder.decode(PairingClaim.self, from: Data(#"{"api_key":"regular-new","instance_id":"gpu-id","hostname":"GPU"}"#.utf8))
+        })
+        #expect(hosts.hosts.count == 1)
+        #expect(paired.id == original.id)
+        #expect(paired.connectionMode == .regular)
+        #expect(paired.secure == nil)
+        #expect(file.load().entries.first?.connectionMode == .regular)
+        let restored = HostStore(list: file, credentials: credentials, makeBackend: { _ in FakeBackend() })
+        #expect(restored.hosts.first?.connectionMode == .regular)
+        #expect(restored.hosts.first?.apiKey == "regular-new")
+    }
+
+    @Test func manuallySwitchingModesCannotReuseTheSecureCredential() throws {
+        let (hosts, credentials, _) = store()
+        let original = try hosts.add(name: "GPU", address: "gpu.example.com", apiKey: "secure-key", makeDefault: true)
+        for key in [nil, "secure-key"] as [String?] {
+            #expect(throws: HostEditError.modeRequiresCredential) {
+                try hosts.update(original.id, name: original.name, address: "gpu.example.com", apiKey: key, connectionMode: .regular)
+            }
+        }
+        #expect(hosts.host(original.id)?.connectionMode == .secure)
+        #expect(credentials.keys[original.id] == "secure-key")
+        try hosts.update(original.id, name: original.name, address: "gpu.example.com", apiKey: "regular-key", connectionMode: .regular)
+        #expect(hosts.host(original.id)?.connectionMode == .regular)
+        #expect(credentials.keys[original.id] == "regular-key")
     }
 
     @Test func hardwareIsSaidTheWayAPersonWould() throws {

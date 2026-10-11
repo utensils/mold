@@ -62,6 +62,8 @@ extension MobilePairingPayload {
         fields["expires_at"] = value("expires_at").map { Double($0) ?? .nan } ?? NSNull()
         fields["instance_id"] = value("instance_id")
         fields["name"] = value("name")
+        fields["mode"] = value("mode")
+        fields["pairing_token"] = value("pairing_token")
         for key in ["namespace", "host_key", "host_noise_key", "host_binding_signature", "websocket_url", "invite_seed"] {
             fields[key] = value(key)
         }
@@ -105,6 +107,25 @@ extension MobilePairingPayload {
               let instance = f["instance_id"] as? String,
               let name = f["name"] as? String
         else { throw .unsupported }
+
+        let mode: HostConnectionMode
+        if let raw = f["mode"] {
+            guard let name = raw as? String, let parsed = HostConnectionMode(rawValue: name) else { throw .unsupported }
+            mode = parsed
+        } else { mode = .secure }
+        if mode == .regular {
+            let forbidden = ["websocket_url", "host_key", "host_noise_key", "host_binding_signature", "namespace", "invite_seed", "invite", "endpoints"]
+            guard forbidden.allSatisfy({ f[$0] == nil || f[$0] is NSNull }),
+                  let url = origin.url, DirectHostAddress.isValid(url),
+                  let token = f["pairing_token"] as? String, token.utf8.count == 64,
+                  token.allSatisfy({ $0.isASCII && $0.isHexDigit }),
+                  let expiry = f["expires_at"] as? NSNumber, CFGetTypeID(expiry) != CFBooleanGetTypeID(),
+                  expiry.doubleValue >= 0, expiry.doubleValue.isFinite,
+                  expiry.doubleValue.rounded(.down) == expiry.doubleValue, expiry.doubleValue < Double(UInt64.max)
+            else { throw .unsupported }
+            return MobilePairingPayload(baseURL: base, token: token, expiresAt: expiry.uint64Value,
+                                        instanceId: instance, name: name, mode: .regular)
+        }
 
         guard let namespace = f["namespace"] as? String, let hostKey = f["host_key"] as? String,
               let noiseKey = f["host_noise_key"] as? String, let signature = f["host_binding_signature"] as? String,

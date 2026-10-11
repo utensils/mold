@@ -39,6 +39,13 @@ public extension HTTPBackend {
         try await post("/api/pairing/sessions", body: EmptyBody())
     }
 
+    func pairingSession(mode: HostConnectionMode, directURL: URL?) async throws -> PairingSession {
+        guard mode == .regular else { return try await pairingSession() }
+        guard let directURL, DirectHostAddress.isValid(directURL) else { throw SecureConnectionError.pairingRequired }
+        struct Request: Encodable { let mode: HostConnectionMode; let directUrl: String }
+        return try await post("/api/pairing/sessions", body: Request(mode: mode, directUrl: directURL.absoluteString))
+    }
+
     /// `GET /api/pairing/clients`. A keyless host can issue an address-only
     /// pairing code, but has no client keys to list or revoke. Use
     /// `PairedClients.canManagePairedClients` for the latter capability.
