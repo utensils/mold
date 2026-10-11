@@ -690,19 +690,7 @@ fn build_observation(
         aac_mux_staging_host_bytes: state.aac_mux_staging_host_bytes,
     };
     let encoded = serde_json::to_value(&observation)?;
-    let zero_fields = encoded
-        .as_object()
-        .into_iter()
-        .flat_map(|object| object.iter())
-        .filter(|(key, _)| {
-            !matches!(
-                key.as_str(),
-                "schema" | "vae_construction_device_workspace_bytes"
-            )
-        })
-        .filter(|(_, value)| value.as_u64() == Some(0))
-        .map(|(key, _)| key.as_str())
-        .collect::<Vec<_>>();
+    let zero_fields = observation_zero_fields(&encoded, observation.envelope.endpoint_count == 0);
     if !zero_fields.is_empty() {
         bail!(
             "private H3 runtime-bound observation contains a zero byte count: {}",
@@ -710,6 +698,26 @@ fn build_observation(
         )
     }
     Ok(Some(observation))
+}
+
+/// Every byte count an observation reports must be nonzero, except VAE
+/// construction (retained allocations can leave it zero) and, for a
+/// text-only render (#1552, zero endpoints), the condition-VAE workspace: no
+/// first/last frame is encoded, so its phase brackets no allocation.
+fn observation_zero_fields(encoded: &serde_json::Value, text_only: bool) -> Vec<&str> {
+    encoded
+        .as_object()
+        .into_iter()
+        .flat_map(|object| object.iter())
+        .filter(|(key, _)| {
+            !matches!(
+                key.as_str(),
+                "schema" | "vae_construction_device_workspace_bytes"
+            ) && !(text_only && key.as_str() == "condition_vae_workspace_device_bytes")
+        })
+        .filter(|(_, value)| value.as_u64() == Some(0))
+        .map(|(key, _)| key.as_str())
+        .collect()
 }
 
 fn routed_qwen_workspace(
@@ -996,6 +1004,32 @@ mod tests {
         assert!(
             error.contains("neither VisualConditionEncode nor ReferenceVisualEncode ran"),
             "{error}"
+        );
+    }
+
+    /// A text-only FL2VA render (#1552) encodes no frame, so its condition-VAE
+    /// workspace is legitimately zero; every other zero is still refused, and
+    /// a frame-conditioned render may not report a zero condition workspace.
+    #[test]
+    fn text_only_observation_may_report_a_zero_condition_vae_workspace() {
+        let encoded = serde_json::json!({
+            "schema": "x",
+            "vae_construction_device_workspace_bytes": 0,
+            "condition_vae_workspace_device_bytes": 0,
+            "attention_workspace_device_bytes": 7,
+        });
+        assert!(observation_zero_fields(&encoded, true).is_empty());
+        assert_eq!(
+            observation_zero_fields(&encoded, false),
+            vec!["condition_vae_workspace_device_bytes"]
+        );
+        let encoded = serde_json::json!({
+            "condition_vae_workspace_device_bytes": 0,
+            "attention_workspace_device_bytes": 0,
+        });
+        assert_eq!(
+            observation_zero_fields(&encoded, true),
+            vec!["attention_workspace_device_bytes"]
         );
     }
 }
