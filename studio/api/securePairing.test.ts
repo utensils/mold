@@ -45,6 +45,8 @@ beforeEach(() => {
   });
 });
 afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
   vi.resetAllMocks();
   vi.unstubAllGlobals();
 });
@@ -63,5 +65,32 @@ it("uses the encrypted cloud when browser policy blocks local WebSockets", async
   await claimSecurePairing(payload, { name: "Browser", kind: "browser" });
   expect(mock.connect).toHaveBeenCalledTimes(2);
   expect(mock.connect.mock.calls[1]![0]).not.toHaveProperty("websocket");
+  expect(mock.save).toHaveBeenCalledTimes(1);
+});
+
+it("allows time to accept a first local-network permission prompt", async () => {
+  vi.useFakeTimers();
+  vi.spyOn(AbortSignal, "timeout").mockImplementation((milliseconds) => {
+    const controller = new AbortController();
+    setTimeout(
+      () => controller.abort(new DOMException("Timed out", "TimeoutError")),
+      milliseconds,
+    );
+    return controller.signal;
+  });
+  const connected = mock.connect.getMockImplementation()!;
+  mock.connect.mockImplementation(async (options) => {
+    await new Promise((resolve) => setTimeout(resolve, 4000));
+    options.signal.throwIfAborted();
+    return connected(options);
+  });
+  const result = expect(
+    claimSecurePairing(
+      { ...payload, base_url: payload.endpoints![0]!.url, websocket_url: null },
+      { name: "Browser", kind: "browser" },
+    ),
+  ).resolves.toMatchObject({ instance_id: "host" });
+  await vi.advanceTimersByTimeAsync(4000);
+  await result;
   expect(mock.save).toHaveBeenCalledTimes(1);
 });

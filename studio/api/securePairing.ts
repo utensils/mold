@@ -44,7 +44,9 @@ export async function claimSecurePairing(
           identity,
           invite: { certificate: payload.invite, identity: invitation },
           websocket: url.href,
-          signal: AbortSignal.timeout(2500),
+          // Pairing is an explicit user action and may need a browser local-
+          // network permission response. Ordinary health probes stay at 2.5 s.
+          signal: AbortSignal.timeout(15000),
         });
         break;
       } catch (error) {
