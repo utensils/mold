@@ -17,6 +17,8 @@ import { RUNTIME_UNAVAILABLE_BADGE } from "@studio/lib/modelRuntimeAvailability"
 import type { ModelRuntimeNotice } from "@studio/lib/modelRuntimeAvailability";
 import type { CatalogEntryWire } from "../types";
 import { formatGB } from "../util/format";
+import { familyLabel } from "@studio/lib/modelFamily";
+import { familyIdentity } from "@studio/lib/modelFamilyIdentity";
 
 const props = withDefaults(
   defineProps<{
@@ -91,28 +93,12 @@ const showThumb = computed(() => thumbUrl.value !== null && !thumbFailed.value);
 /*
  * The no-image state is a family mark rather than a grey box, so a grid of
  * catalog results still reads as a set of models. Mirrors the desktop app's
- * ModelFamilyPlaceholder so both surfaces label a family the same way.
+ * ModelFamilyPlaceholder: both read the shared mark/tone and `familyLabel`.
  */
-const family = computed(() => {
-  const f = props.entry.family.trim().toLowerCase();
-  if (f === "flux2" || f.startsWith("flux.2"))
-    return { mark: "F2", label: "FLUX.2", tone: "cool" };
-  if (f.startsWith("flux")) return { mark: "F", label: "FLUX", tone: "cool" };
-  if (f === "sdxl") return { mark: "XL", label: "SDXL", tone: "warm" };
-  if (f === "sd15" || f.includes("1.5"))
-    return { mark: "1.5", label: "SD 1.5", tone: "warm" };
-  if (f.startsWith("sd3")) return { mark: "3", label: "SD 3", tone: "warm" };
-  if (f.startsWith("qwen"))
-    return { mark: "Q", label: "QWEN", tone: "neutral" };
-  if (f.startsWith("zimage") || f.startsWith("z-image"))
-    return { mark: "Z", label: "Z-IMAGE", tone: "cool" };
-  if (f.startsWith("ltx"))
-    return { mark: "LTX", label: "LTX VIDEO", tone: "neutral" };
-  if (f.startsWith("wuerstchen"))
-    return { mark: "W", label: "WUERSTCHEN", tone: "warm" };
-  const label = f.replaceAll("-", " ").toUpperCase() || "MODEL";
-  return { mark: label.slice(0, 3), label, tone: "neutral" };
-});
+const family = computed(() => ({
+  ...familyIdentity(props.entry.family),
+  label: familyLabel(props.entry.family) || "Model",
+}));
 
 const supported = computed(() => props.entry.supported);
 const kind = computed(() =>
@@ -480,6 +466,7 @@ const pullLabel = computed(() => {
   font-size: 0.75rem;
   letter-spacing: 0.06em;
   color: color-mix(in srgb, var(--family-primary) 72%, var(--rebate));
+  text-transform: uppercase;
 }
 
 .card__media:focus-visible {

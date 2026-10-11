@@ -249,7 +249,7 @@ describe("CommandK", () => {
       expect.arrayContaining(["model-flux-dev:q4", "model-ltx2-distilled"]),
     );
     expect(rows.find((i) => i.id === "model-flux-dev:q4")?.label).toBe(
-      "Use flux-dev:q4",
+      "Use FLUX.1 Dev Q4",
     );
   });
 

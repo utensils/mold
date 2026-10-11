@@ -178,6 +178,21 @@ export interface OutputMetadata {
   version: string;
 }
 
+/**
+ * How a `/api/models` row is named (`mold_core::model_presentation`). All
+ * additive: absent on older servers, and `title`/`variant`/`summary`/
+ * `family_label` are absent on catalog installs, whose provider title is
+ * `display_name`. Display only — every API call keeps `name`. Read through
+ * `studio/lib/modelDisplay.ts`'s `modelPresentation`, never directly.
+ */
+export interface ModelPresentationFields {
+  display_name?: string | null;
+  title?: string | null;
+  variant?: string | null;
+  summary?: string | null;
+  family_label?: string | null;
+}
+
 export interface GalleryImage extends GalleryOrganizationFields {
   filename: string;
   metadata: OutputMetadata;

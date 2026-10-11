@@ -259,8 +259,7 @@ import {
   requestCarriesSource,
   sourceMediaPlan,
 } from "@studio/lib/sourceMediaPlan";
-import { modelDisplayNameForId } from "../lib/models";
-import { styleDisplayName } from "@studio/lib/styleLabel";
+import { modelDisplayNameForId, styleName } from "@studio/lib/modelDisplay";
 import { familyLabel } from "@studio/lib/modelFamily";
 import type {
   CompleteEvent,
@@ -1251,6 +1250,11 @@ watch(
     form.keyframes.length,
   (count, previous) => {
     if (count < previous && !authoritativeReuseApply) invalidateRetainedSourceReuse();
+    // A failed restore blocks until deliberate recovery; attaching an input
+    // by hand is that recovery and gives up the archive with it (desktop's
+    // GenerateView follows the same rule).
+    else if (count > previous && !authoritativeReuseApply && retainedRestoreError.value)
+      invalidateRetainedSourceReuse();
   },
 );
 let sourceUseEpoch = 0;
@@ -2029,13 +2033,13 @@ const pickerModels = computed(() => {
 });
 const stylePickerOpen = ref(false);
 /**
- * The chip's plain half. `styleDisplayName` already stands a family's friendly
+ * The chip's plain half. `styleName` already stands a family's friendly
  * label in for a bare manifest id, so the id is never said twice; the mono
  * half beside it carries the exact runnable name.
  */
 const styleChipName = computed(() => {
   const entry = generationModels.value.find((model) => model.name === form.model);
-  if (entry) return styleDisplayName(entry);
+  if (entry) return styleName(entry);
   if (form.model) return form.family ? familyLabel(form.family) : "";
   return loadingModels.value ? "Loading styles…" : "No generation models available";
 });

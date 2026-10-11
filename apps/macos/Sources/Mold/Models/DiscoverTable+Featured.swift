@@ -25,8 +25,8 @@ extension DiscoverTable {
                     HStack(spacing: 16) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(model.headline).font(.headline)
-                            if let tradeOff = model.tradeOff { Text(tradeOff).foregroundStyle(.secondary) }
-                            Text(model.family).font(.caption).foregroundStyle(.secondary)
+                            if let summary = model.summary { Text(summary).foregroundStyle(.secondary) }
+                            Text(model.familyLabel).font(.caption).foregroundStyle(.secondary)
                             if let size = model.sizeGb { Text("\(size.formatted()) GB").font(.caption) }
                             if model.runtimeAvailable == false, let reason = model.runtimeUnavailableReason {
                                 Text(reason).font(.callout).foregroundStyle(.secondary)

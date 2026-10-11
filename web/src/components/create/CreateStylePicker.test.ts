@@ -66,16 +66,30 @@ describe("CreateStylePicker chip", () => {
     wrapper.unmount();
   });
 
-  it("falls back to the family's friendly label for a bare manifest id", () => {
+  it("names a manifest id through the presentation authority", () => {
     const wrapper = mountPicker({
       models: [model({ name: "flux-dev:q8", family: "flux", description: "" })],
       model: "flux-dev:q8",
     });
     expect(wrapper.get('[data-test="selected-model-name"]').text()).toBe(
-      "FLUX",
+      "FLUX.1 Dev Q8",
     );
     expect(wrapper.get('[data-test="style-chip-id"]').text()).toBe(
       "flux-dev:q8",
+    );
+    wrapper.unmount();
+  });
+
+  it("falls back to the family's friendly label for an id nothing names", () => {
+    const wrapper = mountPicker({
+      models: [model({ name: "custom-flux", family: "flux", description: "" })],
+      model: "custom-flux",
+    });
+    expect(wrapper.get('[data-test="selected-model-name"]').text()).toBe(
+      "FLUX.1",
+    );
+    expect(wrapper.get('[data-test="style-chip-id"]').text()).toBe(
+      "custom-flux",
     );
     wrapper.unmount();
   });
@@ -132,7 +146,7 @@ describe("CreateStylePicker menu", () => {
       [...document.body.querySelectorAll(".ms-model__group")].map(
         (n) => n.textContent,
       ),
-    ).toEqual(["SDXL", "FLUX"]);
+    ).toEqual(["SDXL", "FLUX.1"]);
 
     (rows()[1] as HTMLElement).closest("button")!.click();
     await wrapper.vm.$nextTick();

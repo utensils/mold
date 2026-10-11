@@ -164,15 +164,19 @@ current platform support.
 
 ## Mold Studio
 
-| Platform                | Download                                                                                                                                            |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **macOS (recommended)** | **[Mold Studio for Mac](https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg)** — native, Apple Silicon, macOS 26+ |
-| macOS (legacy)          | [Mold Desktop (Tauri)](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg) — for Macs that cannot run macOS 26          |
-| Windows                 | [Mold Desktop (Tauri)](https://github.com/utensils/mold/releases/latest/download/Mold-windows-x64-self-signed.exe) — see below                      |
-| Linux                   | Mold Desktop (Tauri) — source/CI builds, see below                                                                                                  |
-| Android                 | [Nightly APK](https://github.com/utensils/mold/releases/download/latest/Mold-android.apk) — see below                                               |
+Every download, with requirements, is on the
+[Download page](https://utensils.io/mold/download).
 
-**On a Mac, use Mold Studio.** It is the native macOS app: signed,
+| Platform        | Download                                                                                                                                                                 |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| macOS           | [Mold Studio for Mac](https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg) — built natively, Apple Silicon, macOS 26+                  |
+| macOS           | [Mold Desktop for Mac](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg) — same app as Windows and Linux, macOS 12+                        |
+| Windows         | [Mold Desktop for Windows](https://github.com/utensils/mold/releases/latest/download/Mold-windows-x64-self-signed.exe) — self-signed, see below                          |
+| Linux           | [Mold Desktop for Linux](https://github.com/utensils/mold/releases/latest/download/mold-desktop-x86_64-unknown-linux-gnu-cpu.tar.gz) — GPU-free, for remote GPU machines |
+| iPhone and iPad | Mold Studio Companion (iOS 26) and Mold for iPhone (iOS 17) — TestFlight                                                                                                 |
+| Android         | [Mold for Android](https://github.com/utensils/mold/releases/latest/download/Mold-android.apk) — signed APK, Android 7.0+                                                |
+
+**Two desktop apps on the Mac.** Mold Studio is built natively for macOS: signed,
 notarized, self-updating through Sparkle, with mold's own Metal engine built
 in, and it talks to any `mold serve` on your network too. Generate, a merged
 multi-machine Library, Queue, Models and Machines, all in one native window.
@@ -189,12 +193,12 @@ Library machine filters scope collection counts and membership as well as trash,
 
 **[Download Mold Studio for Mac (Apple Silicon, macOS 26+)](https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg)**
 
-It installs as **Mold Studio.app** beside the older Tauri app (`Mold.app`),
-so both can live in /Applications while you move over. The Tauri app is now
-the **legacy** Mac download — keep it only for a Mac that cannot run macOS 26:
-[Download Mold Desktop for macOS (legacy)](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg).
+It installs as **Mold Studio.app**. Mold Desktop, the same app that runs on
+Windows and Linux, installs as **Mold.app** and runs on macOS 12 or newer; the
+two sit side by side and connect to the same machines:
+[Download Mold Desktop for Mac](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg).
 
-On Windows and Linux the Tauri desktop app remains the default. It puts New
+Mold Desktop is the desktop app on Windows and Linux too. It puts New
 image, Queue, My images, Styles, Machines, and Settings in one window, in plain
 words, with six themes, for local and remote generation, and pairs with the
 iPhone and Android companions.
@@ -207,8 +211,10 @@ CUDA recipe. Verify and explicitly trust the release's
 `mold-windows-self-signing.cert.cer` before installing; the certificate is not
 publicly trusted and does not suppress SmartScreen on its own.
 
-Linux desktop builds are source/CI distributions for now — `nix build
-.#mold-desktop` or the devshell's `desktop-build` CUDA AppImage. See the
+On Linux, the [GPU-free desktop archive](https://github.com/utensils/mold/releases/latest/download/mold-desktop-x86_64-unknown-linux-gnu-cpu.tar.gz)
+(`mold-ai-desktop-bin` on the AUR) drives remote GPU machines; for local CUDA
+use `mold-ai-desktop` from the AUR, `nix build .#mold-desktop`, or the
+devshell's `desktop-build` CUDA AppImage. See the
 [desktop guide](https://utensils.io/mold/guide/desktop).
 
 On iPhone and iPad, **Mold Studio Companion** is the native app beside Mold
@@ -235,9 +241,10 @@ builds and relaunches in Simulator. `companion-run` launches once; see the
 [native iOS developer guide](apps/ios/README.md) for simulator and build-directory overrides.
 
 Android uses the same remote-only Mold Studio mobile interface. Download the
-signed universal nightly APK directly; there is no zip to unpack:
+signed universal APK directly; there is no zip to unpack:
 
-**[Download nightly Android APK](https://github.com/utensils/mold/releases/download/latest/Mold-android.apk)**
+**[Download the Android APK](https://github.com/utensils/mold/releases/latest/download/Mold-android.apk)**
+· [nightly](https://github.com/utensils/mold/releases/download/latest/Mold-android.apk)
 · [Android installation guide](https://utensils.io/mold/guide/android)
 
 ## More ways to create

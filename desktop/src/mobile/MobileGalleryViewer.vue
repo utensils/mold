@@ -14,7 +14,7 @@ import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import type { GalleryImage } from "../lib/api/types";
 import { blobToBase64 } from "../lib/image";
 import { formatBytes, formatScheduler } from "../lib/format";
-import { modelDisplayNameForId } from "../lib/models";
+import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
 import {
   evictMedia,
   galleryMediaPath,

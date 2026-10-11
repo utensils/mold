@@ -60,15 +60,23 @@ beforeEach(() => {
 });
 
 describe("InstalledTab shelf", () => {
-  it("stacks the request id and the plain note under a row's name", async () => {
-    useModelStore().all = [model({ display_name: "Photoreal — best quality" })];
+  it("stacks the request id and the GOOD FOR summary under a row's name", async () => {
+    useModelStore().all = [model()];
     const wrapper = mount(InstalledTab);
     await flushPromises();
-    expect(wrapper.get("[data-test='row-title']").text()).toBe("Photoreal — best quality");
+    expect(wrapper.get("[data-test='row-title']").text()).toBe("FLUX.1 Dev Q4");
     expect(wrapper.get("[data-test='row-id']").text()).toBe("flux-dev:q4");
-    expect(wrapper.get("[data-test='row-note']").text()).toBe(
-      "FLUX.1 Dev Q4 — smaller/faster, good quality",
-    );
+    expect(wrapper.get("[data-test='row-note']").text()).toBe("Smaller/faster, good quality");
+  });
+
+  it("reads the row's own server presentation first", async () => {
+    useModelStore().all = [
+      model({ title: "FLUX.1 Dev", variant: "Q4", summary: "Fits a 12 GB card" }),
+    ];
+    const wrapper = mount(InstalledTab);
+    await flushPromises();
+    expect(wrapper.get("[data-test='row-title']").text()).toBe("FLUX.1 Dev Q4");
+    expect(wrapper.get("[data-test='row-note']").text()).toBe("Fits a 12 GB card");
   });
 
   it("meters the disk used by styles once this machine reports its models disk", async () => {
@@ -110,7 +118,7 @@ describe("InstalledTab shelf", () => {
     expect(removeModel).not.toHaveBeenCalled();
 
     const dialog = wrapper.get("[data-test='confirm-dialog']");
-    expect(dialog.text()).toContain("Remove flux-dev:q4 from disk?");
+    expect(dialog.text()).toContain("Remove FLUX.1 Dev Q4 from disk?");
     expect(dialog.text()).toContain("Frees 6.8 GB weights");
     await wrapper.get("[data-test='confirm-accept']").trigger("click");
     await flushPromises();

@@ -13,7 +13,11 @@ public struct QueueEntry: Codable, Hashable, Sendable, Identifiable {
     public var metadata: OutputMetadata? = nil
     public var seedPinned: Bool? = nil
     public var modelDisplayName: String? = nil
-    public var modelHeadline: String { modelDisplayName ?? model ?? "Model" }
+    /// The machine's own name for the model, else the generated presentation
+    /// table's, else the raw id.
+    public var modelHeadline: String {
+        modelDisplayName ?? model.map(Model.headline(forName:)) ?? "Model"
+    }
     public let state: QueueState
     public let position: Int?
     public let startedAtUnixMs: Int?

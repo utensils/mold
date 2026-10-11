@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { runWithLicenseConsent } from "@studio/composables/useLicenseAcceptance";
+import { modelDisplayName } from "@studio/lib/modelDisplay";
 import { computed, ref, watch } from "vue";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import { modelKindValue, modelWeightsLabel } from "@studio/lib/modelMetadata";
@@ -314,7 +315,7 @@ function formatSize(bytes: number | null): string {
 <template>
   <DrawerPanel
     :open="true"
-    :title="merged.display_name ?? merged.name"
+    :title="modelDisplayName(merged)"
     data-test="catalog-detail-drawer"
     @close="emit('close')"
   >
@@ -322,9 +323,9 @@ function formatSize(bytes: number | null): string {
       <SourceGlyph :source="glyphSource" :size="16" class="shrink-0 text-fg-dim" />
       <h2
         class="min-w-0 flex-1 truncate text-sm font-semibold text-fg"
-        :title="merged.display_name ?? merged.name"
+        :title="modelDisplayName(merged)"
       >
-        {{ merged.display_name ?? merged.name }}
+        {{ modelDisplayName(merged) }}
       </h2>
     </template>
 

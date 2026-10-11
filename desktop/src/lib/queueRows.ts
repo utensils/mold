@@ -8,7 +8,7 @@ import { activeWorkPhaseLabel } from "@studio/api/activity";
 import { queueWaitLabel, resolveQueueWait, type QueueStatus } from "@studio/lib/queuePosition";
 import { formatEta } from "./format";
 import { isCancelledError, type Job } from "./generationJob";
-import { modelDisplayNameForId, type DisplayableModel } from "./models";
+import { modelDisplayNameForId, type DisplayableModel } from "@studio/lib/modelDisplay";
 import type { QueueRow } from "../composables/useQueueActivity";
 
 /**

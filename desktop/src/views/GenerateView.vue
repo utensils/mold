@@ -229,7 +229,7 @@ import { copyableError, describeTransportError } from "../lib/api/errors";
 import { startCatalogDownload } from "../lib/api/catalog";
 import { computeEtaSeconds, useDownloadsStore, type DownloadsState } from "../stores/downloads";
 import { usePullResumeStore } from "../stores/pullResume";
-import { modelDisplayNameForId } from "../lib/models";
+import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
 import {
   authedMediaUrl,
   fetchGalleryMediaBytes,
@@ -4011,6 +4011,29 @@ onBeforeUnmount(() => {
   retainedRestoreAbort.abort();
 });
 let materializingRetainedVersion: number | null = null;
+/** The reused print's metadata, kept for the version it arrived with. The
+ *  retained archive is the first answer, never the only one: a print the host
+ *  never pinned (everything before durable retention) or a role it did not
+ *  retain still restores from the local stash and the gallery by name, which
+ *  is what the phone does too. */
+let retainedFallback: { version: number; metadata: OutputMetadata } | null = null;
+/** Nothing was retained, so the closing still of a first/last-frame print
+ *  has no fallback either (metadata records its name, never its bytes) —
+ *  say so, as an ordinary prefill does. */
+function discloseUnrestorableEndFrame(metadata: OutputMetadata): void {
+  const notice = firstLastFrameRestoreNotice(
+    caps.value.supportsEndFrame,
+    metadata.keyframes,
+    Boolean(metadata.source_image_sha256 ?? metadata.source_image_name),
+  );
+  if (notice) toasts.push(notice, "error");
+}
+async function restoreReuseFallback(metadata: OutputMetadata, epoch: number): Promise<void> {
+  await Promise.all([
+    restorePrefillSource(metadata, epoch),
+    restorePrefillIdentityPhoto(metadata, epoch),
+  ]);
+}
 watch(
   () => composer.retainedSource,
   async (handoff) => {
@@ -4027,7 +4050,13 @@ watch(
     retainedRestoreError.value = null;
     retainedRestorePending.value = true;
     const epoch = restoreEpoch;
+    const fallback = retainedFallback?.version === version ? retainedFallback.metadata : null;
     try {
+      if (fallback && handoff.inventory.availability !== "available") {
+        discloseUnrestorableEndFrame(fallback);
+        await restoreReuseFallback(fallback, epoch);
+        return;
+      }
       const result = await restoreRetainedDraftMedia({
         ...handoff,
         read: () => form,
@@ -4050,6 +4079,12 @@ watch(
       if (restored) preserveRestoredSourceCanvas(restored.base64);
       composer.setRetainedSourceIfCurrent(version, { ...handoff, inventory: result.inventory });
       await nextTick();
+      // The retained patch has landed; from here on a removal is the
+      // person's own and must retire the archive (the fallback below can
+      // take seconds, and it checks the epoch and which wells are empty).
+      authoritativeReuseApply = false;
+      if (fallback && composer.isRetainedSourceCurrent(version) && epoch === restoreEpoch)
+        await restoreReuseFallback(fallback, epoch);
     } catch (error) {
       if (composer.isRetainedSourceCurrent(version)) {
         retainedRestoreError.value =
@@ -4064,6 +4099,17 @@ watch(
     }
   },
   { immediate: true },
+);
+watch(
+  () => composer.retainedSourceDeclinedVersion,
+  (version) => {
+    if (version === null || !composer.isRetainedSourceCurrent(version)) return;
+    retainedRestorePending.value = false;
+    const fallback = retainedFallback?.version === version ? retainedFallback.metadata : null;
+    if (!fallback) return;
+    discloseUnrestorableEndFrame(fallback);
+    void restoreReuseFallback(fallback, restoreEpoch);
+  },
 );
 function invalidateRetainedRestore(): void {
   restoreEpoch += 1;
@@ -4104,11 +4150,17 @@ function applyPrefill() {
   const prefill = composer.take();
   if (!prefill) return;
   const pendingRetainedVersion = composer.takePendingRetainedSourceApplyVersion();
+  // A reuse no copy could be asked about restores like any other prefill: the
+  // decline may well have landed before this view mounted.
+  const legacyRestore =
+    pendingRetainedVersion === null ||
+    composer.retainedSourceDeclinedVersion === pendingRetainedVersion;
   if (
-    pendingRetainedVersion !== null &&
+    !legacyRestore &&
     composer.isRetainedSourceCurrent(pendingRetainedVersion) &&
     "metadata" in prefill
   ) {
+    retainedFallback = { version: pendingRetainedVersion, metadata: prefill.metadata };
     retainedRestorePending.value = true;
     authoritativeReuseApply = true;
     void nextTick(() => {
@@ -4144,13 +4196,12 @@ function applyPrefill() {
       // without it both endpoints need reattaching and the notice says so.
       Boolean(prefill.metadata.source_image_sha256 ?? prefill.metadata.source_image_name),
     );
-    if (endFrameNotice && pendingRetainedVersion === null) toasts.push(endFrameNotice, "error");
-    if (pendingRetainedVersion === null) void restorePrefillSource(prefill.metadata, restoreEpoch);
+    if (endFrameNotice && legacyRestore) toasts.push(endFrameNotice, "error");
+    if (legacyRestore) void restorePrefillSource(prefill.metadata, restoreEpoch);
     // Independent of the source restore above: identity is its own partition,
     // and a print may carry a face photo on a checkpoint that takes no source
     // image at all — the source restore's own early-outs must not skip it.
-    if (pendingRetainedVersion === null)
-      void restorePrefillIdentityPhoto(prefill.metadata, restoreEpoch);
+    if (legacyRestore) void restorePrefillIdentityPhoto(prefill.metadata, restoreEpoch);
   } else if ("request" in prefill && prefill.request) {
     void restoreRequestSource(prefill.request, restoreEpoch);
   }
@@ -4425,6 +4476,12 @@ watch(
     form.keyframes.length,
   (count, previous) => {
     if (count < previous && !authoritativeReuseApply) invalidateRetainedRestore();
+    // A failed restore blocks until deliberate recovery; attaching an input
+    // by hand is that recovery, and it gives up the archive with it — an
+    // archived role (the mask paired with the old source) must never be
+    // relayed beside the input the person chose instead.
+    else if (count > previous && !authoritativeReuseApply && retainedRestoreError.value)
+      invalidateRetainedRestore();
   },
 );
 

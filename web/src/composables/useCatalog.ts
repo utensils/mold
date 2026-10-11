@@ -1,5 +1,5 @@
 import { computed, ref, watch } from "vue";
-import { matchesCatalogFamily } from "@studio/lib/modelFamily";
+import { familyLabel, matchesCatalogFamily } from "@studio/lib/modelFamily";
 import {
   deleteModel,
   fetchCatalogEntry,
@@ -159,7 +159,7 @@ function build() {
         description: model.description || null,
         license: null,
         license_flags: null,
-        tags: ["MiniMax H3", "compact"],
+        tags: [familyLabel(model.family), "compact"],
         companions: [],
         companion_details: [],
         download_recipe: { files: [], needs_token: null },

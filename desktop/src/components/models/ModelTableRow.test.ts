@@ -27,7 +27,7 @@ describe("ModelTableRow", () => {
       "hal9000",
     ]);
     // The chip shows the family's name, not its wire slug (#806).
-    expect(wrapper.get("[data-test='row-family']").text()).toBe("FLUX");
+    expect(wrapper.get("[data-test='row-family']").text()).toBe("FLUX.1");
   });
 
   /**

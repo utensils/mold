@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
+import { isCatalogModelId, modelDisplayName } from "@studio/lib/modelDisplay";
 import { modelKindLabel, modelKindValue } from "@studio/lib/modelMetadata";
 import ModelTableRow from "./ModelTableRow.vue";
 import { catalogPageUrl, catalogSizeInfo } from "../../lib/catalog";
@@ -65,7 +66,7 @@ const pageUrl = computed(() => catalogPageUrl(props.entry));
 const kindValue = computed(() => modelKindValue(props.entry));
 const accessibilityLabel = computed(
   () =>
-    `${props.entry.display_name ?? props.entry.name} — ${modelKindLabel(kindValue.value)}${
+    `${modelDisplayName(props.entry)} — ${modelKindLabel(kindValue.value)}${
       props.entry.nsfw ? ", 18+ NSFW" : ""
     } — view details`,
 );
@@ -107,7 +108,8 @@ const counts = computed(() => {
 
 <template>
   <ModelTableRow
-    :name="entry.display_name ?? entry.name"
+    :name="modelDisplayName(entry)"
+    :id="isCatalogModelId(entry.id) ? null : entry.name"
     :source="glyphSource"
     :family="entry.family"
     :host-labels="hosts ?? []"
@@ -132,7 +134,7 @@ const counts = computed(() => {
           class="h-4 w-4 accent-accent"
           :checked="checked"
           :disabled="!selectable"
-          :aria-label="`Select ${entry.display_name ?? entry.name}`"
+          :aria-label="`Select ${modelDisplayName(entry)}`"
           data-test="catalog-select"
           @change="emit('toggle-select', entry, ($event.target as HTMLInputElement).checked)"
         />

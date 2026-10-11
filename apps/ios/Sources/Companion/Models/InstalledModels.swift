@@ -30,7 +30,7 @@ struct InstalledModels: View {
             }
             ForEach(models.installed(on: host.id), id: \.family) { group in
                 Section {
-                    SectionHeader(group.family).font(.headline).listRowSeparator(.hidden)
+                    SectionHeader(Model.familyLabel(forFamily: group.family)).font(.headline).listRowSeparator(.hidden)
                     ForEach(group.models) { model in
                         InstalledRow(model: model)
                             .swipeActions {
@@ -170,7 +170,7 @@ struct DownloadRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(verbatim: hosts.models.values.lazy.flatMap { $0 }.first { $0.name == row.model }?.headline ?? row.model).font(.body)
+            Text(verbatim: hosts.models.values.lazy.flatMap { $0 }.first { $0.name == row.model }?.headline ?? Model.headline(forName: row.model)).font(.body)
             if let failed = row.failed {
                 Text(failed).foregroundStyle(.secondaryText)
             }

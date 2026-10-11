@@ -901,6 +901,35 @@ describe("LibraryView Use these settings retained source media", () => {
     wrapper.unmount();
   });
 
+  it("leaves an unretained source to Create's fallback but names a missing key", async () => {
+    // A print made before durable retention resolves `unavailable_legacy`, yet
+    // Create still restores it from the local stash or the gallery by name —
+    // a "Reattach it" toast here would contradict a well that fills itself.
+    const img2img: GalleryImage = {
+      ...prints[0]!,
+      filename: "mold-sd15-1787000000000.png",
+      timestamp: 3,
+      metadata: { ...prints[0]!.metadata, seed: 9, source_image_sha256: "a".repeat(64) },
+    };
+    retainedInventoryMock.mockResolvedValueOnce({
+      availability: "unavailable_legacy",
+      members: [],
+    });
+    const legacy = await mountView(img2img);
+    const toastsBefore = useToastStore().items.length;
+    await reuseFromContextMenu(legacy.wrapper);
+    expect(useToastStore().items.length).toBe(toastsBefore);
+    legacy.wrapper.unmount();
+
+    retainedInventoryMock.mockResolvedValueOnce({ availability: "unavailable_auth", members: [] });
+    const keyed = await mountView(img2img);
+    await reuseFromContextMenu(keyed.wrapper);
+    expect(useToastStore().items.map((t) => t.message)).toContain(
+      "Connect this machine with an API key to restore its private source media.",
+    );
+    keyed.wrapper.unmount();
+  });
+
   // Scene-by-scene authoring is retired, but the prints it made — and every
   // auto-chained long clip the host stitches — still carry `metadata.chain`.
   // They are ordinary prints here: one reuse door, down the retained-source

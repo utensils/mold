@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { expansionPullPresentation, type ExpansionPullView } from "../../lib/expansionPull";
-import type { DisplayableModel } from "../../lib/models";
+import type { DisplayableModel } from "@studio/lib/modelDisplay";
 
 const props = defineProps<{
   model: string;

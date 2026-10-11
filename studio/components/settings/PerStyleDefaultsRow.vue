@@ -32,7 +32,7 @@ import {
 const props = defineProps<{
   style: string;
   rows: readonly ConfigRow[];
-  /** Friendlier name for the style, from `studio/lib/styleLabel.ts`. */
+  /** Friendlier name for the style, from `styleName` in `studio/lib/modelDisplay.ts`. */
   displayName?: string | null | undefined;
 }>();
 const emit = defineEmits<{

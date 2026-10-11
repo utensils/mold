@@ -4,6 +4,9 @@ import {
   type RetainedDraftLayout,
 } from "@studio/lib/retainedDraftMedia";
 import {
+  automatedReuseApply,
+  clearRetainedSourceReuseIntent,
+  isAutomatedReuseApply,
   retainedSourceReuseState,
   retainedSourceReuseSnapshot,
   retainedSourceReuseIsCurrent,
@@ -18,6 +21,9 @@ export function useRetainedSourceRestore(options: {
   layout: () => RetainedDraftLayout;
   apply: (patch: Record<string, unknown>) => void;
   onError: (message: string) => void;
+  /** How many inputs the draft holds. A failed restore blocks until
+   * deliberate recovery, and attaching an input by hand is that recovery. */
+  attachedMedia?: () => number;
 }) {
   const error = ref<string | null>(null);
   const pending = ref(false);
@@ -32,6 +38,15 @@ export function useRetainedSourceRestore(options: {
     [retainedSourceReuseState, options.loaded],
     async ([intent, loaded]) => {
       if (!intent) {
+        error.value = null;
+        pending.value = false;
+        return;
+      }
+      // Nothing retained is not a refusal: the Library door restores an
+      // unpinned print from the local stash and the gallery by name and names
+      // what it cannot find. Blocking here kept Generate disabled after that
+      // fallback had already filled the well.
+      if (intent.inventory.availability !== "available") {
         error.value = null;
         pending.value = false;
         return;
@@ -56,7 +71,7 @@ export function useRetainedSourceRestore(options: {
           isCurrent,
         });
         if (!result || !isCurrent()) return;
-        options.apply(result.patch);
+        automatedReuseApply(() => options.apply(result.patch));
         setRetainedSourceReuseIntentIfCurrent(snapshot.version, {
           ...intent,
           inventory: result.inventory,
@@ -75,5 +90,24 @@ export function useRetainedSourceRestore(options: {
     },
     { immediate: true },
   );
+  if (options.attachedMedia)
+    watch(
+      options.attachedMedia,
+      (count, previous) => {
+        // A hand attach after a failure gives up the archive with the error,
+        // so no archived role (a mask paired with the old source) is relayed
+        // beside the input the person chose instead.
+        if (
+          count > previous &&
+          error.value !== null &&
+          !isAutomatedReuseApply()
+        ) {
+          error.value = null;
+          clearRetainedSourceReuseIntent();
+        }
+      },
+      // Synchronous, so the automated marker is still set when it reads it.
+      { flush: "sync" },
+    );
   return { error, pending };
 }

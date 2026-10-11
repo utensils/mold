@@ -78,7 +78,7 @@ struct ModelsTableTests {
     /// Plain alphabetical order on the full headline would put "FLUX.1 Dev L"
     /// -- an unrelated model whose name happens to fall between "BF16" and
     /// "Q4" -- between the two FLUX.1 Dev variants. `sortHeadline`'s
-    /// baseTitle-first key keeps them together instead (design S3, M5).
+    /// title-first key keeps them together instead (design S3, M5).
     @Test func variantsOfOneModelStayTogetherWhenSortedByName() {
         let bf16 = FakeFixtures.model("flux-dev:bf16", downloaded: true, description: "FLUX.1 Dev BF16 — best quality")
         let q4 = FakeFixtures.model("flux-dev:q4", downloaded: true, description: "FLUX.1 Dev Q4 — fast")
@@ -91,15 +91,17 @@ struct ModelsTableTests {
 
     /// M5 S3 UAT: the Model column drew `headline`, which for a tagged
     /// model already ends in the variant word the Variant column's own chip
-    /// repeats ("FLUX.1 Dev Q4" beside a "Q4" chip). The column draws
-    /// `baseTitle` instead -- the bare model name, tag left to the chip
-    /// alone (design S7, M7).
+    /// repeats ("FLUX.1 Dev Q4" beside a "Q4" chip). The column draws the
+    /// presentation `title` instead -- the bare model name, the variant left
+    /// to the Variant column alone (design S7, M7).
     @Test func theModelColumnHeadlineCarriesNoVariantTag() {
         let model = FakeFixtures.model("flux-dev:q4", downloaded: true, description: "FLUX.1 Dev Q4 — fast")
 
-        #expect(model.baseTitle == "FLUX.1 Dev")
-        #expect(model.tag == "q4")
-        #expect(!model.baseTitle.localizedCaseInsensitiveContains(model.tag ?? "NEVER MATCH"))
+        #expect(model.title == "FLUX.1 Dev")
+        #expect(model.variantLabel == "Q4")
+        #expect(model.sortVariant == "Q4")
+        #expect(model.sortTradeOff == "Smaller/faster, good quality")
+        #expect(!model.title.localizedCaseInsensitiveContains(model.variantLabel ?? "NEVER MATCH"))
     }
 
     @Test func sectionsCarryTheServersOwnFamilyName() {
@@ -107,10 +109,11 @@ struct ModelsTableTests {
 
         let sections = ModelSort.grouped(rows, by: ModelSort())
 
-        // Not "LTX-2": rewriting the server's own family string is a client
-        // lexicon for a server id, which M4 already refused for recipe
-        // labels (decision 9, M5).
+        // The section KEY stays the server's own family string (decision 9,
+        // M5); the header reads its label from the generated presentation
+        // table, never a client lexicon.
         #expect(sections.map(\.family) == ["ltx2"])
+        #expect(Model.familyLabel(forFamily: sections[0].family) == "LTX-2")
     }
 
     // MARK: - The footer

@@ -379,7 +379,7 @@ export async function setMinimaxH3BoundaryFile(
   file: File,
 ): Promise<MinimaxH3GalleryImageResult> {
   if (!file.type.toLowerCase().startsWith("image/")) {
-    return { ok: false, error: "FL2VA endpoints must be still images." };
+    return { ok: false, error: "First and last frames must be still images." };
   }
   let base64: string;
   try {
@@ -391,7 +391,10 @@ export async function setMinimaxH3BoundaryFile(
     };
   }
   if (!imageDimensionsFromBase64(base64)) {
-    return { ok: false, error: "Use a PNG or JPEG image for FL2VA endpoints." };
+    return {
+      ok: false,
+      error: "Use a PNG or JPEG image for the first or last frame.",
+    };
   }
   return setMinimaxH3PickedImageBoundary(state, endpoint, {
     ...inputImageFacts(base64, file.name),
@@ -824,8 +827,7 @@ export function minimaxH3AuthoringError(
 ): string | null {
   if (!isMinimaxH3Identity(family, model)) return null;
   const task = minimaxH3TaskForModel(model);
-  if (!task)
-    return "MiniMax H3 requires an explicit FL2VA or Ref2VA model partition.";
+  if (!task) return "Choose MiniMax H3 Frames or MiniMax H3 References.";
   const value = state ?? emptyMinimaxH3AuthoringState();
   if (task === "fl2va") {
     if (requireFirstFrame && !value.firstFrame) {

@@ -53,8 +53,8 @@ describe("RecentPrints", () => {
       props: { prints: [timed, print("harbour.png", "Harbour", "flux-dev:q4")] },
     });
     const rows = wrapper.findAll("[data-test='recent-print']");
-    expect(rows[0]!.get(".ms-recent__meta").text()).toBe("sdxl-base:fp16 · 4.0s");
-    expect(rows[1]!.get(".ms-recent__meta").text()).toBe("flux-dev:q4");
+    expect(rows[0]!.get(".ms-recent__meta").text()).toBe("SDXL Base 1.0 · 4.0s");
+    expect(rows[1]!.get(".ms-recent__meta").text()).toBe("FLUX.1 Dev Q4");
   });
 
   it("hands the whole print back on click", async () => {

@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import type { ModelEntry } from "../../lib/api/types";
-import { modelDisplayName, modelDisplayNameForId } from "../../lib/models";
+import { modelDisplayName, modelDisplayNameForId } from "@studio/lib/modelDisplay";
 import { modelAvailabilityTag } from "@studio/lib/modelAvailability";
 import { formatGB } from "../../lib/format";
 import { useHostModelsStore } from "../../stores/hostModels";

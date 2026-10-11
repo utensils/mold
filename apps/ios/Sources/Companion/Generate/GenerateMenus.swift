@@ -61,13 +61,16 @@ struct ModelChooser: View {
                     let models = group.models
                     if !models.isEmpty {
                         Section {
-                            Text(group.family).font(.headline)
+                            Text(Model.familyLabel(forFamily: group.family)).font(.headline)
                                 .foregroundStyle(.primary)
                                 .accessibilityAddTraits(.isHeader)
                             ForEach(models) { model in
                                 Button { generate.choose(model); dismiss() } label: {
                                     VStack(alignment: .leading, spacing: 4) {
                                         Label(model.headline, systemImage: model.name == generate.modelName ? "checkmark.circle.fill" : "circle")
+                                        if let summary = model.summary {
+                                            Text(summary).font(.callout).foregroundStyle(.secondaryText)
+                                        }
                                         Text(verbatim: model.name).font(.caption.monospaced()).foregroundStyle(.secondaryText)
                                     }
                                     .fixedSize(horizontal: false, vertical: true)
@@ -127,6 +130,7 @@ struct ModelChooser: View {
             let models = group.models.filter {
                 query.isEmpty || $0.name.localizedCaseInsensitiveContains(query)
                     || $0.headline.localizedCaseInsensitiveContains(query)
+                    || $0.familyLabel.localizedCaseInsensitiveContains(query)
             }
             return models.isEmpty ? nil : (group.family, models)
         }

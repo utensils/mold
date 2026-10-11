@@ -13,7 +13,7 @@ import Icon from "@ui/components/Icon.vue";
 import SourceGlyph from "@ui/components/SourceGlyph.vue";
 import Tooltip from "@ui/components/Tooltip.vue";
 import type { ModelInfoExtended } from "../../types";
-import { styleDisplayName } from "@studio/lib/styleLabel";
+import { styleName } from "@studio/lib/modelDisplay";
 import { modelKindValue } from "@studio/lib/modelMetadata";
 import { modelSource } from "@studio/lib/modelSource";
 import { useModelInstallTargets } from "../../composables/useModelInstallTargets";
@@ -36,11 +36,11 @@ const installHint = computed(() => {
     .filter((t) => t.action === "install")
     .map((t) => t.host.label)
     .join(", ");
-  return `Get ${styleDisplayName(props.model)} on ${machines}`;
+  return `Get ${styleName(props.model)} on ${machines}`;
 });
 
 /** The friendly name leads; the runnable id stays below it in mono. */
-const displayName = computed(() => styleDisplayName(props.model));
+const displayName = computed(() => styleName(props.model));
 const glyphSource = computed(() => modelSource(props.model));
 /** Every row on this shelf is a style, so "Checkpoint" says nothing. Only a
  *  row that is something else — a LoRA, a VAE, an upscaler — earns a badge. */

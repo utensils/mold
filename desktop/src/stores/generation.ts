@@ -1784,6 +1784,7 @@ export const useGenerationStore = defineStore("generation", {
       const eligible = eligibleClientIds === null ? null : new Set(eligibleClientIds);
       const finished = this.jobs.filter(
         (job) =>
+          !job.fromLibrary &&
           (job.status === "complete" || job.status === "error") &&
           (!eligible || eligible.has(job.clientId)),
       );
@@ -1905,7 +1906,13 @@ export const useGenerationStore = defineStore("generation", {
       const meta = print.metadata;
       const format = requestFormat(print.filename, meta.output_format ?? "png");
       const frames = meta.frames ?? meta.video_frames ?? null;
+      // One reused print on the canvas at a time; an earlier one is not
+      // history anybody made here, so it leaves rather than piling up.
+      for (const shown of this.jobs.filter((candidate) => candidate.fromLibrary))
+        releaseSettledJob(shown);
+      this.jobs = this.jobs.filter((candidate) => !candidate.fromLibrary);
       const job = createStoreJob(request, this.nextClientId++);
+      job.fromLibrary = true;
       // The request is the form's snapshot at hand-off, taken before any
       // source, mask, face or reference bytes are restored into it. A print
       // that recorded such conditioning is repeatable only if the snapshot

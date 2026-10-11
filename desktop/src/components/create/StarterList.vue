@@ -5,8 +5,8 @@ import {
   loadGenerationTemplates,
   type GenerationTemplate,
 } from "../../lib/generationTemplates";
-import { modelDisplayNameForId, type DisplayableModel } from "../../lib/models";
-import { familyIdentity } from "../../lib/modelFamilyIdentity";
+import { modelDisplayNameForId, type DisplayableModel } from "@studio/lib/modelDisplay";
+import { familyIdentity } from "@studio/lib/modelFamilyIdentity";
 
 /**
  * Starting points as picture cards (README §5): every one shows a picture, a

@@ -7,7 +7,7 @@ import Tooltip from "@ui/components/Tooltip.vue";
 
 import SourceGlyph from "@ui/components/SourceGlyph.vue";
 import ModelFootprintBar from "./ModelFootprintBar.vue";
-import { isOpaqueModelId } from "../../lib/models";
+import { isOpaqueModelId } from "@studio/lib/modelDisplay";
 import { openExternal } from "../../lib/openExternal";
 import type { ModelSource } from "@studio/lib/modelSource";
 

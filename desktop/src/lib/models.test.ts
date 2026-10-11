@@ -1,11 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  groupInstalledModels,
-  mergeModelPresentationMetadata,
-  modelDisplayName,
-  modelDisplayNameForId,
-  modelSizeLabels,
-} from "./models";
+import { groupInstalledModels, mergeModelPresentationMetadata, modelSizeLabels } from "./models";
 import type { ModelEntry } from "./api/types";
 
 function model(
@@ -76,37 +70,27 @@ describe("modelSizeLabels", () => {
   });
 });
 
-describe("modelDisplayName", () => {
-  const base = model("cv:1759168", "sdxl", 6_900_000_000);
-
-  it("prefers the server's display_name", () => {
-    expect(modelDisplayName({ ...base, display_name: "Juggernaut XL - Ragnarok" })).toBe(
-      "Juggernaut XL - Ragnarok",
-    );
-  });
-
-  it("falls back to the description for catalog ids on older servers", () => {
-    expect(modelDisplayName({ ...base, description: "Juggernaut XL - Ragnarok by KandooAI" })).toBe(
-      "Juggernaut XL - Ragnarok by KandooAI",
-    );
-  });
-
-  it("uses a readable fallback for catalog ids with no title metadata", () => {
-    expect(modelDisplayName({ ...base, description: "" })).toBe("Civitai model #1759168");
-  });
-
-  it("never swaps manifest names for their marketing description", () => {
-    expect(modelDisplayName(model("flux-dev:q8", "flux", 1))).toBe("flux-dev:q8");
-  });
-
-  it("resolves raw status and job ids through inventory metadata", () => {
-    expect(
-      modelDisplayNameForId("cv:1759168", [{ ...base, display_name: "Juggernaut XL - Ragnarok" }]),
-    ).toBe("Juggernaut XL - Ragnarok");
-  });
-});
-
 describe("mergeModelPresentationMetadata", () => {
+  it("fills each presentation field an older host omitted from a newer one", () => {
+    const preferred = model("flux-dev:q4", "flux", 1);
+    const supplement = {
+      ...model("flux-dev:q4", "flux", 1),
+      title: "FLUX.1 Dev",
+      variant: "Q4",
+      summary: "Smaller/faster, good quality",
+      family_label: "FLUX.1",
+    };
+    expect(mergeModelPresentationMetadata(preferred, supplement)).toMatchObject({
+      title: "FLUX.1 Dev",
+      variant: "Q4",
+      summary: "Smaller/faster, good quality",
+      family_label: "FLUX.1",
+    });
+    expect(
+      mergeModelPresentationMetadata({ ...supplement, title: "Preferred" }, preferred).title,
+    ).toBe("Preferred");
+  });
+
   it.each(["Studio Model", "Studio Model by Catalog Author"])(
     "replaces the synthetic preferred-host description %j with richer metadata",
     (description) => {

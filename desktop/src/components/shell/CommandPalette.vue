@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { runWithLicenseConsent } from "@studio/composables/useLicenseAcceptance";
+import { modelDisplayName } from "@studio/lib/modelDisplay";
 import { computed, nextTick, onBeforeUnmount, ref, toRef, watch } from "vue";
 import { useRouter } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
@@ -488,7 +489,9 @@ const staticCommands = computed<Command[]>(() => {
       },
     });
   }
-  if (generation.jobs.some((j) => j.status === "complete" || j.status === "error")) {
+  if (
+    generation.jobs.some((j) => !j.fromLibrary && (j.status === "complete" || j.status === "error"))
+  ) {
     cmds.push({
       id: "act-clear-finished",
       title: "Clear finished",
@@ -647,7 +650,7 @@ watch(query, (q) => {
           .filter((entry) => entry.supported !== false)
           .map((entry) => ({
             id: entry.id,
-            name: entry.display_name ?? entry.name,
+            name: modelDisplayName(entry),
             family: entry.family ?? null,
             source: entry.source ?? null,
             installed: entry.installed ?? null,

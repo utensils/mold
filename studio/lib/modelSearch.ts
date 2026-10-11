@@ -17,6 +17,9 @@
  * what it means, and which machine it points at.
  */
 
+import type { ModelPresentationFields } from "./api/serverTypes";
+import { modelDisplayName } from "./modelDisplay";
+
 /** Shortest query worth a live catalog round trip. */
 export const CATALOG_SEARCH_MIN_QUERY = 2;
 /** Catalog rows are appended after the ranked commands — keep them a tail, not a wall. */
@@ -25,9 +28,8 @@ export const CATALOG_SEARCH_LIMIT = 5;
 export const CATALOG_SEARCH_DEBOUNCE_MS = 250;
 
 /** The slice of an installed `/api/models` row the palette reasons over. */
-export interface SearchableModel {
+export interface SearchableModel extends ModelPresentationFields {
   name: string;
-  display_name?: string | null;
   family?: string | null;
   is_loaded?: boolean | null;
 }
@@ -115,11 +117,6 @@ function unique(values: readonly (string | null | undefined)[]): string[] {
   return [...seen];
 }
 
-function displayNameOf(model: SearchableModel): string {
-  const display = model.display_name?.trim();
-  return display ? display : model.name;
-}
-
 export interface UseModelCommandOptions {
   /** Machines known to hold the model on disk, in preference order. */
   ownersFor: (name: string) => readonly string[];
@@ -137,7 +134,7 @@ export function buildUseModelCommands(
 ): UseModelCommand[] {
   const hostLabel = options.hostLabel ?? ((id: string) => id);
   return models.map((model) => {
-    const title = displayNameOf(model);
+    const title = modelDisplayName(model);
     const { switchToHostId } = resolveModelHost(
       options.ownersFor(model.name),
       options.targetHostId ?? null,

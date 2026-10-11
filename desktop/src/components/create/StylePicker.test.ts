@@ -225,12 +225,12 @@ describe("StylePicker — what each row says", () => {
   });
 
   /*
-   * Description-first, on the chip and on the row alike (`docs/design/README.md`
-   * §2 — a bare id is a "never say" as the primary label). Both used to read
-   * a manifest style's own id back: the chip said "FLUX · flux-dev:q8" and the
-   * row printed `flux-dev:q8` above `flux-dev:q8 · 23.1 GB`.
+   * One naming authority (`modelPresentation`), on the chip and on the row
+   * alike (`docs/design/README.md` §2 — a bare id is a "never say" as the
+   * primary label): the chip says the short name with its variant, the row
+   * the title with a variant chip over the mono id, then why to pick it.
    */
-  it("leads the chip and the row with the model's description", async () => {
+  it("leads the chip and the row with the presented name and summary", async () => {
     const described = {
       ...model,
       description: "full quality, 20+ steps",
@@ -242,27 +242,30 @@ describe("StylePicker — what each row says", () => {
     form.model = described.name;
     const wrapper = mountPicker(form);
 
-    expect(wrapper.get('[data-test="selected-model-name"]').text()).toBe("full quality, 20+ steps");
+    expect(wrapper.get('[data-test="selected-model-name"]').text()).toBe("FLUX.1 Dev Q8");
     expect(wrapper.get('[data-test="style-chip"]').text()).toContain("flux-dev:q8");
 
     await wrapper.get('[data-test="style-chip"]').trigger("click");
-    expect(wrapper.get('[data-test="model-option-name"]').text()).toBe("full quality, 20+ steps");
+    expect(wrapper.get('[data-test="model-option-name"]').text()).toBe("FLUX.1 Dev");
+    expect(wrapper.get('[data-test="model-option-variant"]').text()).toBe("Q8");
     expect(wrapper.get('[data-test="model-option-id"]').text()).toBe("flux-dev:q8");
-    // The description IS the title now, so it is never said twice.
-    expect(wrapper.find('[data-test="model-option-description"]').exists()).toBe(false);
+    expect(wrapper.get('[data-test="model-option-description"]').text()).toBe(
+      "Full quality, 20+ steps",
+    );
     expect(wrapper.get('[data-test="model-option-size"]').text()).toBe("23.1 GB");
     expect(wrapper.get('[data-test="model-option-loaded"]').text()).toBe("on GPU");
   });
 
-  it("falls back to the family's own name for a style that describes itself with nothing", async () => {
-    useModelStore().all = [model];
+  it("falls back to the family's own name for a style nothing names", async () => {
+    const custom = { ...model, name: "my-flux-merge" } as ModelEntry;
+    useModelStore().all = [custom];
     const form = useGenerateFormStore().form;
-    form.model = model.name;
+    form.model = custom.name;
     const wrapper = mountPicker(form);
 
-    expect(wrapper.get('[data-test="selected-model-name"]').text()).toBe("FLUX");
+    expect(wrapper.get('[data-test="selected-model-name"]').text()).toBe("FLUX.1");
     await wrapper.get('[data-test="style-chip"]').trigger("click");
-    expect(wrapper.get('[data-test="model-option-name"]').text()).toBe("FLUX");
+    expect(wrapper.get('[data-test="model-option-name"]').text()).toBe("FLUX.1");
   });
 
   it("shows a remote H3 download-only install with readable labels and its refusal", async () => {
@@ -296,7 +299,8 @@ describe("StylePicker — what each row says", () => {
     await wrapper.get('[data-test="style-chip"]').trigger("click");
 
     expect(wrapper.get(".ms-model__group").text()).toBe("MiniMax H3");
-    expect(wrapper.get('[data-test="model-option-name"]').text()).toBe("MiniMax H3 FL2VA · NVFP4");
+    expect(wrapper.get('[data-test="model-option-name"]').text()).toBe("MiniMax H3 Frames");
+    expect(wrapper.get('[data-test="model-option-variant"]').text()).toBe("NVFP4");
     expect(wrapper.get('[data-test="model-disabled-reason"]').text()).toBe(
       "Download only — This H3 weight layout has no executable loader.",
     );
@@ -366,7 +370,7 @@ describe("StylePicker — a restored model no machine has", () => {
 
     // Plain name first, the technical id in mono beside it (the mock's chip),
     // and the fact the user needs before pressing Generate.
-    expect(wrapper.get('[data-test="selected-model-name"]').text()).toBe("Z-Image");
+    expect(wrapper.get('[data-test="selected-model-name"]').text()).toBe("Z-Image Turbo Q6");
     expect(wrapper.get('[data-test="style-chip"]').text()).toContain("z-image-turbo:q6");
     expect(wrapper.get('[data-test="style-not-installed"]').text()).toBe("Not on this machine");
   });
