@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import OriginalMediaButton from "@studio/components/OriginalMediaButton.vue";
 import { originAuthenticatedFetch as fetch } from "../../../lib/originAuth";
 
 /*
@@ -522,6 +523,11 @@ function removeKeyframe(index: number) {
         <span class="ltx2__source-name">{{
           modelValue.audioFile.filename
         }}</span>
+        <OriginalMediaButton
+          :data="modelValue.audioFile.base64"
+          :mime-type="modelValue.audioFile.mime || 'audio/wav'"
+          :label="modelValue.audioFile.filename"
+        />
         <button
           type="button"
           class="ltx2__remove"
@@ -559,6 +565,11 @@ function removeKeyframe(index: number) {
         <span class="ltx2__source-name">{{
           modelValue.sourceVideo.filename
         }}</span>
+        <OriginalMediaButton
+          :data="modelValue.sourceVideo.base64"
+          :mime-type="modelValue.sourceVideo.mime || 'video/mp4'"
+          :label="modelValue.sourceVideo.filename"
+        />
         <button
           type="button"
           class="ltx2__remove"
@@ -801,6 +812,11 @@ function removeKeyframe(index: number) {
           "
         />
         <span class="ltx2__source-name">{{ keyframe.image.filename }}</span>
+        <OriginalMediaButton
+          :data="keyframe.image.base64"
+          mime-type="image/png"
+          :label="`Keyframe ${index + 1}`"
+        />
         <button
           type="button"
           class="ltx2__remove"

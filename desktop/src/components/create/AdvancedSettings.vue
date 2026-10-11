@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import OriginalMediaButton from "@studio/components/OriginalMediaButton.vue";
 import { computed, ref, watch } from "vue";
 import AccordionSection from "@ui/components/AccordionSection.vue";
 import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
@@ -1253,6 +1254,11 @@ function reset() {
             <template v-if="form.pipeline === 'a2-vid'">
               <label class="ms-label ms-label--mt">Conditioning audio</label>
               <div v-if="form.audioFile" class="ms-file-row">
+                <OriginalMediaButton
+                  :data="form.audioFile.base64"
+                  mime-type="audio/wav"
+                  :label="form.audioFile.filename"
+                />
                 <span
                   class="font-mono text-xs ms-file-row__name"
                   :title="form.audioFile.filename"
@@ -1276,6 +1282,11 @@ function reset() {
 
             <label class="ms-label ms-label--mt">Source video</label>
             <div v-if="form.sourceVideo" class="ms-file-row">
+              <OriginalMediaButton
+                :data="form.sourceVideo.base64"
+                mime-type="video/mp4"
+                :label="form.sourceVideo.filename"
+              />
               <span
                 class="font-mono text-xs ms-file-row__name"
                 :title="form.sourceVideo.filename"
@@ -1321,6 +1332,11 @@ function reset() {
                 @input="updateKeyframeFrame(index, ($event.target as HTMLInputElement).value)"
               />
               <span class="ms-kf-row__name">{{ keyframe.image.filename }}</span>
+              <OriginalMediaButton
+                :data="keyframe.image.base64"
+                mime-type="image/png"
+                :label="`Keyframe ${index + 1}`"
+              />
               <button
                 type="button"
                 class="ms-kf-row__remove"
@@ -1351,6 +1367,11 @@ function reset() {
             <span class="font-mono text-xs ms-file-row__name" :title="form.extendVideo.filename">{{
               form.extendVideo.filename
             }}</span>
+            <OriginalMediaButton
+              :data="form.extendVideo.base64"
+              mime-type="video/mp4"
+              :label="form.extendVideo.filename"
+            />
             <button
               type="button"
               class="ms-file-row__clear"

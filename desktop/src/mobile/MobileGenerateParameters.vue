@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import OriginalMediaButton from "@studio/components/OriginalMediaButton.vue";
 import { useMediaFileReader } from "@studio/composables/useMediaFileReader";
 import { inputImageFacts } from "@studio/lib/inputImage";
 import { computed, ref, useId, watch } from "vue";
@@ -841,6 +842,11 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
         <span class="mobile-generate-label">Continue a video</span>
         <div v-if="form.extendVideo" class="mobile-generate-picked-file">
           <span>{{ form.extendVideo.filename }}</span>
+          <OriginalMediaButton
+            :data="form.extendVideo.base64"
+            mime-type="video/mp4"
+            :label="form.extendVideo.filename"
+          />
           <button
             type="button"
             class="mobile-generate-clear"
@@ -1171,6 +1177,11 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
         <div v-if="form.pipeline === 'a2-vid'" class="mobile-generate-file-field">
           <span class="mobile-generate-label">Conditioning audio</span>
           <div v-if="form.audioFile" class="mobile-generate-picked-file">
+            <OriginalMediaButton
+              :data="form.audioFile.base64"
+              mime-type="audio/wav"
+              :label="form.audioFile.filename"
+            />
             <span>{{ form.audioFile.filename }}</span>
             <button type="button" class="mobile-generate-clear" @click="clearAudioFile">
               Remove
@@ -1191,6 +1202,11 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
         <div class="mobile-generate-file-field">
           <span class="mobile-generate-label">Source video</span>
           <div v-if="form.sourceVideo" class="mobile-generate-picked-file">
+            <OriginalMediaButton
+              :data="form.sourceVideo.base64"
+              mime-type="video/mp4"
+              :label="form.sourceVideo.filename"
+            />
             <span>{{ form.sourceVideo.filename }}</span>
             <button type="button" class="mobile-generate-clear" @click="clearSourceVideo">
               Remove
@@ -1240,6 +1256,11 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
                 />
               </label>
               <span class="mobile-generate-keyframe-name">{{ keyframe.image.filename }}</span>
+              <OriginalMediaButton
+                :data="keyframe.image.base64"
+                mime-type="image/png"
+                :label="`Keyframe ${index + 1}`"
+              />
               <button
                 type="button"
                 class="mobile-generate-clear"

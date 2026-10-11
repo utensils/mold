@@ -38,7 +38,7 @@ extension LibraryPickerSheet {
                 .onKeyPress(.downArrow) { moveSelection(columns, proxy: proxy) }
                 .onKeyPress(.space) {
                     guard let entry = rows.first(where: { $0.id == selected }) else { return .ignored }
-                    preview = entry
+                    showPreview(entry)
                     return .handled
                 }
             }
@@ -66,6 +66,7 @@ extension LibraryPickerSheet {
     /// nothing left to fetch its bytes from.
     @ViewBuilder private func tile(_ entry: LibraryEntry) -> some View {
         if let host = hosts.host(entry.hostID) {
+            VStack {
             LibraryCell(entry: entry, host: host, edge: 160,
                         isSelected: selected == entry.id, isLead: selected == entry.id,
                         showsHostBadge: hosts.hosts.count > 1)
@@ -78,11 +79,14 @@ extension LibraryPickerSheet {
                 .rowActionMenu(Self.pictureActions(isFetching: isFetching)) { action in
                     switch action {
                     case .use: selected = entry.id; use()
-                    case .preview: preview = entry
+                    case .preview: showPreview(entry)
                     }
                 }
                 .accessibilityAction(named: "Use Picture") { selected = entry.id; use() }
                 .help("Click to select, double-click to use, or press Space to preview.")
+                Button("View") { showPreview(entry) }.font(.caption)
+                    .accessibilityLabel("View \(entry.print.displayName)")
+            }
         }
     }
 }

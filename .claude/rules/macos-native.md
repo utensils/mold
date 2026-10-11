@@ -180,3 +180,13 @@ snapshot even when Generate is no longer mounted.
 **Local-sync stages.** Keep source discovery, destination preparation, planning, transfer, organization, final checkpoint verification and reporting as explicit typed stages. Preserve backend call order, durable output receipts before retained-input transfer, route/instance fencing, intentionally removed copies and per-file/per-collection failure exclusions. A stage extraction must retain the LocalSave and SyncSession regression suites, including final-checkpoint ordering.
 
 Source reuse stays discoverable in inspector cards and original viewers through the same declared button/context action list. A native chooser offers only connected, installed, runtime-ready compatible recipes; explicitly adopt the selected recipe once, without reconciling through the default. Revalidate source access before changing the draft, and dismiss original details on successful staging.
+
+**Input inspection.** Populated PictureWell and MediaWell offer a separate View
+control; PictureWell adds View Original to its declared menu. View never imports,
+fits, reorders, acknowledges unread prints or changes the draft. Authoring sources
+prefer sourceImageOriginal. Typed retained references resolve the exact ordered
+member after fresh inventory verification. Queue inspection uses the explicit-index
+input-original route and says submitted input: sealed bytes can already be fitted.
+InputMediaViewer owns private files/players only while selected; cancellation,
+replacement and route/instance changes revoke inspection. Native image decoding
+preserves pixel geometry within the 32-Mi-pixel decoded safety limit.

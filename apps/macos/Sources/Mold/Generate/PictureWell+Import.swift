@@ -14,6 +14,7 @@ extension PictureWell {
     /// hands it on, so a new row is a caller's job and never silently dead.
     func route(_ action: GenerateAction) {
         switch action {
+        case .viewInput: showsOriginal = true
         case .chooseFile, .replacePicture, .replacePhoto:
             choose()
         case .chooseFromLibrary, .replaceFromLibrary:

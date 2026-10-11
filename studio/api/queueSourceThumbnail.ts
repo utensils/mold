@@ -1,3 +1,4 @@
+import { originalMediaBlob } from "./originalMedia";
 import { ApiError, apiFetchTo, apiJsonTo, type ApiTarget } from "./client";
 
 const ceiling = 2 * 1024 * 1024;
@@ -78,6 +79,31 @@ export async function queueInputs(
   } catch (error) {
     if (error instanceof ApiError && [404, 405].includes(error.status))
       return [{ label: "Source", preview: true }];
+    throw error;
+  }
+}
+
+/** Original-only read; never falls back to the thumbnail on older hosts. */
+export async function queueInputOriginal(
+  target: ApiTarget,
+  jobId: string,
+  index: number,
+  signal: AbortSignal,
+): Promise<Blob> {
+  if (!Number.isSafeInteger(index) || index < 0)
+    throw new Error("Original input unavailable");
+  try {
+    const response = await apiFetchTo(
+      target,
+      `/api/queue/${encodeURIComponent(jobId)}/input-original?index=${index}`,
+      { signal },
+    );
+    return await originalMediaBlob(response);
+  } catch (error) {
+    if (error instanceof ApiError && [404, 405].includes(error.status))
+      throw new Error(
+        "Original media is unavailable on this machine. It may have been removed or the machine may need an update.",
+      );
     throw error;
   }
 }

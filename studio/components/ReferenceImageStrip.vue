@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import OriginalMediaButton from "./OriginalMediaButton.vue";
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import {
   imageInputFormatOfBase64,
@@ -379,6 +380,11 @@ function onStripDrop(event: DragEvent): void {
             >{{ item.role }}</span
           >
         </div>
+        <OriginalMediaButton
+          :data="images[item.index]?.data"
+          :mime-type="images[item.index]?.mimeType || 'image/png'"
+          :label="item.label"
+        />
         <span
           v-if="images[item.index]?.filename"
           class="ris__filename"

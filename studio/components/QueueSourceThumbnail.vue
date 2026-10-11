@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
+import OriginalMediaButton from "./OriginalMediaButton.vue";
 import type { ApiTarget } from "../api/client";
 import {
   queueInputs,
+  queueInputOriginal,
   queueSourceThumbnail,
   type QueueInput,
 } from "../api/queueSourceThumbnail";
@@ -104,7 +106,7 @@ onBeforeUnmount(release);
 
 <template>
   <div
-    v-if="detailed ? items.length : visible.some((item) => item.url)"
+    v-if="items.length"
     class="queue-inputs"
     :class="{ 'queue-inputs--detail': detailed }"
   >
@@ -127,6 +129,15 @@ onBeforeUnmount(release);
           +{{ items.length - 1 }}</template
         >
       </figcaption>
+      <OriginalMediaButton
+        v-if="target && item.index !== undefined"
+        :label="item.label"
+        action-label="View input"
+        :authority="`${target.baseUrl}:${target.apiKey}:${instanceId}:${jobId}:${item.index}:${online}`"
+        :load="
+          (signal) => queueInputOriginal(target!, jobId, item.index!, signal)
+        "
+      />
       <span v-if="detailed && !item.url" class="queue-input-notice">{{
         item.preview ? "Preview unavailable" : "No still preview"
       }}</span>

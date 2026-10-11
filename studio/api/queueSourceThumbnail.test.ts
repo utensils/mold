@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { queueSourceThumbnail, queueInputs } from "./queueSourceThumbnail";
+import {
+  queueSourceThumbnail,
+  queueInputs,
+  queueInputOriginal,
+} from "./queueSourceThumbnail";
 const mocks = vi.hoisted(() => ({ fetch: vi.fn(), json: vi.fn() }));
 vi.mock("./client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./client")>()),
@@ -75,5 +79,31 @@ it("addresses an exact ordered input without changing the captured target", asyn
     target,
     "/api/queue/job%2Fa/input-thumbnail?index=3",
     {},
+  );
+});
+
+it("reads original queue media by the exact manifest index and refuses unbounded streams", async () => {
+  const target = { baseUrl: "http://box", apiKey: "secret" };
+  const signal = new AbortController().signal;
+  mocks.fetch.mockResolvedValueOnce(
+    new Response("wav", { headers: { "content-type": "audio/wav" } }),
+  );
+  const blob = await queueInputOriginal(target, "job/a", 3, signal);
+  expect(blob.type).toBe("audio/wav");
+  expect(mocks.fetch).toHaveBeenLastCalledWith(
+    target,
+    "/api/queue/job%2Fa/input-original?index=3",
+    { signal },
+  );
+  mocks.fetch.mockResolvedValueOnce(
+    new Response(new Uint8Array(64 * 1024 * 1024 + 1), {
+      headers: { "content-type": "image/png" },
+    }),
+  );
+  await expect(queueInputOriginal(target, "j", 0, signal)).rejects.toThrow(
+    "too large",
+  );
+  await expect(queueInputOriginal(target, "j", -1, signal)).rejects.toThrow(
+    "unavailable",
   );
 });

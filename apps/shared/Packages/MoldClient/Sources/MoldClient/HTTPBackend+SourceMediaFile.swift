@@ -10,16 +10,24 @@ public extension HTTPBackend {
         }
     }
 
-    private func sourceMediaFile(at path: String, member: RetainedSourceMedia.Member) async throws -> SourceMediaFile {
-        let (stream, response) = try await relayBytes(request(path))
+    internal func sourceMediaFile(at path: String, member: RetainedSourceMedia.Member) async throws -> SourceMediaFile {
+        let proposed = (member.displayName as NSString).pathExtension.lowercased()
+        let known = ["png", "jpg", "jpeg", "webp", "gif", "heic", "mp4", "mov", "m4v", "wav", "mp3", "m4a", "aac", "flac", "ogg"]
+        let suffix = known.contains(proposed) ? proposed : (member.contentKind == "video" ? "mp4" : member.contentKind == "audio" ? "wav" : member.contentKind == "image" ? "png" : "bin")
+        return try await sourceMediaFile(request: request(path), suffix: suffix)
+    }
+
+    func mediaPreviewFile(_ filename: String, trashed: Bool) async throws -> SourceMediaFile {
+        try await sourceMediaFile(request: mediaRequest(filename, trashed: trashed), suffix: "bin")
+    }
+
+    internal func sourceMediaFile(request: URLRequest, suffix: String) async throws -> SourceMediaFile {
+        let (stream, response) = try await relayBytes(request)
         guard (200..<300).contains(response.statusCode) else {
             if response.statusCode == 401 { throw MoldClientError.unauthorized }
             throw MoldClientError.http(status: response.statusCode, code: nil, message: nil)
         }
         try SourceMediaFile.checkPreviewSize(Int(clamping: response.expectedContentLength))
-        let proposed = (member.displayName as NSString).pathExtension.lowercased()
-        let known = ["png", "jpg", "jpeg", "webp", "gif", "heic", "mp4", "mov", "m4v", "wav", "mp3", "m4a", "aac", "flac", "ogg"]
-        let suffix = known.contains(proposed) ? proposed : (member.contentKind == "video" ? "mp4" : member.contentKind == "audio" ? "wav" : member.contentKind == "image" ? "png" : "bin")
         let file = try SourceMediaFile(extension: suffix)
         let handle = try FileHandle(forWritingTo: file.url)
         defer { try? handle.close() }

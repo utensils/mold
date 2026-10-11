@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import OriginalMediaButton from "./OriginalMediaButton.vue";
 
 /**
  * The one source-image well shared by every Studio surface: a drop zone that
@@ -17,6 +18,7 @@ const props = withDefaults(
   defineProps<{
     /** Raw base64 (no data-URI prefix) of the attached image, if any. */
     image?: string | null;
+    originalImage?: string | null;
     mimeType?: string | null;
     /** Provenance label; with no `image` bytes it renders a reattach state. */
     filename?: string | null;
@@ -178,6 +180,12 @@ function onDrop(event: DragEvent): void {
       v-if="previewUrl || gallery || needsReattach"
       class="image-well__actions"
     >
+      <OriginalMediaButton
+        v-if="previewUrl"
+        :data="originalImage || image"
+        :mime-type="mimeType || 'image/png'"
+        :label="alt"
+      />
       <span
         v-if="previewUrl"
         class="image-well__action-alias"
@@ -291,6 +299,7 @@ function onDrop(event: DragEvent): void {
 }
 .image-well__actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
 }
 .image-well__action {

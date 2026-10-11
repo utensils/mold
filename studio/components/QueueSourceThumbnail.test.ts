@@ -157,7 +157,7 @@ it("details show every ordered role and keep later images after one preview fail
   view.unmount();
 });
 
-it("compact rows keep their fallback when no image can be loaded", async () => {
+it("compact nonimage inputs remain inspectable without a still preview", async () => {
   mocks.inputs.mockResolvedValueOnce([
     { index: 0, label: "Source audio", preview: false },
   ] as never);
@@ -166,6 +166,7 @@ it("compact rows keep their fallback when no image can be loaded", async () => {
     slots: { default: "Running preview" },
   });
   await flushPromises();
-  expect(view.text()).toBe("Running preview");
+  expect(view.text()).toContain("Source audio");
+  expect(view.text()).toContain("View input");
   view.unmount();
 });

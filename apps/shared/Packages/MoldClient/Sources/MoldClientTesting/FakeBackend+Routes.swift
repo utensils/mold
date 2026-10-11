@@ -114,6 +114,7 @@ extension FakeBackend {
     // MARK: MoldQueueBackend
 
     public func queue() async throws -> QueueListing { try await respond("queue()", []) }
+    public func queueInputOriginal(id: String, index: Int) async throws -> SourceMediaFile { try await respond("queueInputOriginal(id:index:)", [id, index]) }
     public func queueInputs(id: String) async throws -> [QueueInput] { try await respond("queueInputs(id:)", [id]) }
     public func queueInputThumbnail(id: String, index: Int?) async throws -> Data {
         if let index { return try await respond("queueInputThumbnail(id:index:)", [id, index]) }
@@ -140,6 +141,7 @@ extension FakeBackend {
 
     // MARK: MoldRetainedMediaBackend
 
+    public func retainedSourceMediaFile(for filename: String, member: RetainedSourceMedia.Member) async throws -> SourceMediaFile { try await respond("retainedSourceMediaFile(for:member:)", [filename, member]) }
     public func retainedSourceMedia(for filename: String) async throws -> RetainedSourceMedia.Inventory { try await respond("retainedSourceMedia(for:)", [filename]) }
     public func retainedSourceMediaBytes(for filename: String, member memberId: String) async throws -> Data { try await respond("retainedSourceMediaBytes(for:member:)", [filename, memberId]) }
     public func retainedMediaReuseSession(for filename: String, members memberIds: [String], target: GenerateRequest) async throws -> RetainedSourceMedia.ReuseSession { try await respond("retainedMediaReuseSession(for:members:target:)", [filename, memberIds, target]) }

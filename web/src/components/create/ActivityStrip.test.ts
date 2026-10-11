@@ -608,3 +608,27 @@ it("keeps desktop repair buttons compact while retaining phone-width touch contr
     /@media\s*\(max-width:\s*600px\)\s*\{\s*\.activity\s+:deep\(\.queue-download button\)\s*\{[^}]*align-self:\s*stretch/,
   );
 });
+
+it("keeps source inspection buttons outside native activity buttons and does not activate a row from child keys", async () => {
+  const wrapper = mount(ActivityStrip, {
+    props: { jobs: [makeJob()] },
+    global: {
+      stubs: {
+        QueueSourceThumbnail: {
+          template:
+            '<div><button data-test="inspect-source" type="button" @click.stop>View input</button></div>',
+        },
+      },
+    },
+  });
+  expect(wrapper.find("button button").exists()).toBe(false);
+  await wrapper
+    .get('[data-test="inspect-source"]')
+    .trigger("keydown", { key: "Enter" });
+  expect(wrapper.emitted("open")).toBeUndefined();
+  await wrapper
+    .get('[data-test="activity-running-job-1"]')
+    .trigger("keydown", { key: "Enter" });
+  expect(wrapper.emitted("open")).toHaveLength(1);
+  wrapper.unmount();
+});

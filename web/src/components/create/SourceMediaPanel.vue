@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import OriginalMediaButton from "@studio/components/OriginalMediaButton.vue";
 import { computed, ref } from "vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
@@ -699,6 +700,11 @@ function clearControl() {
         <p v-if="caps.supportsStrength && hasSource" class="smp__hint">
           {{ strength.hint }}
         </p>
+        <OriginalMediaButton
+          :data="modelValue.maskImage?.base64"
+          :mime-type="modelValue.maskImage?.mime || 'image/png'"
+          label="Mask"
+        />
         <button
           v-if="caps.supportsMask && hasSource"
           type="button"
@@ -740,6 +746,11 @@ function clearControl() {
             <span class="smp__source-name">{{
               modelValue.controlImage?.filename
             }}</span>
+            <OriginalMediaButton
+              :data="modelValue.controlImage?.base64"
+              :mime-type="modelValue.controlImage?.mime || 'image/png'"
+              label="Control image"
+            />
             <button
               type="button"
               class="smp__remove"

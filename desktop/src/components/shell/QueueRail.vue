@@ -162,8 +162,8 @@ function progressPct(row: QueueRow): number | null {
         role="button"
         tabindex="0"
         @click="commands.open(active)"
-        @keydown.enter.prevent="commands.open(active)"
-        @keydown.space.prevent="commands.open(active)"
+        @keydown.enter.self.prevent="commands.open(active)"
+        @keydown.space.self.prevent="commands.open(active)"
         @contextmenu.prevent="commands.contextMenu($event, active)"
       >
         <div class="flex gap-2.5">
@@ -273,8 +273,8 @@ function progressPct(row: QueueRow): number | null {
         role="button"
         tabindex="0"
         @click="commands.open(row)"
-        @keydown.enter.prevent="commands.open(row)"
-        @keydown.space.prevent="commands.open(row)"
+        @keydown.enter.self.prevent="commands.open(row)"
+        @keydown.space.self.prevent="commands.open(row)"
         @contextmenu.prevent="commands.contextMenu($event, row)"
       >
         <QueueSourceThumbnail
