@@ -491,7 +491,7 @@ The engine started there has no models installed — that is the point.
 
 ## Which mold home it uses
 
-The native app, Tauri app and headless server share host identity and paired-device grants when they use the same Mold home. Their default local owner credential lives in the protected `secure/operator.key` file there. The first upgraded shell adopts its existing key once; later shells use that shared value. Existing app-local keys remain intact, and an explicit `MOLD_API_KEY` override still takes precedence. Stop the current host before handing that home to another app; the phone keeps its existing pairing. Different homes keep separate host identities and grants.
+The native app, Tauri app and headless server share host identity and paired-device grants when they use the same Mold home. Their default local owner credential lives in the protected `secure/operator.key` file there. The first upgraded shell adopts its existing key once; later shells use that shared value. Existing app-local keys remain intact, and an explicit `MOLD_API_KEY` override still takes precedence. For `@file` or comma-separated overrides, the local client uses the first configured key while the server keeps the complete accepted set. Stop the current host before handing that home to another app; the phone keeps its existing pairing. Different homes keep separate host identities and grants.
 
 The in-process engine resolves its home exactly the way `crates/mold-core`'s
 `Config::mold_dir` does, and has to: it IS that engine, so if the two disagree

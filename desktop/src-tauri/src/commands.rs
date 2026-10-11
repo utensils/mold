@@ -37,6 +37,7 @@ pub struct AppState {
     /// Persistent per-home owner key shared by the desktop and native host; exported
     /// as MOLD_API_KEY before the embedded engine starts.
     pub local_api_key: String,
+    pub original_operator_configuration: Option<String>,
     pub secrets: crate::secrets::SecretStore,
 }
 
@@ -209,6 +210,7 @@ pub async fn change_mold_home(
         }
         return Err(format!("{error:#}"));
     }
+    crate::secrets::restore_operator_environment(state.original_operator_configuration.as_deref());
     app.restart();
 }
 
@@ -787,6 +789,7 @@ mod tests {
             conn: tokio::sync::Mutex::new(conn),
             local_server: tokio::sync::Mutex::new(local_server),
             local_api_key: "desktop-test-key".into(),
+            original_operator_configuration: None,
             secrets: crate::secrets::SecretStore::new(dir.path().to_path_buf()),
         }
     }

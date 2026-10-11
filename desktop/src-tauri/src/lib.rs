@@ -170,11 +170,15 @@ pub fn run() {
             };
             // mold-server reads auth from the environment when the server
             // thread starts. Resolve and export the persistent key first.
-            std::env::set_var("MOLD_API_KEY", &local_api_key);
+            let explicit_operator = std::env::var("MOLD_API_KEY").ok();
+            std::env::set_var("MOLD_API_KEY", mold_secure::operator_key::server_configuration(
+                explicit_operator.as_deref(), &local_api_key,
+            ));
             app.manage(commands::AppState {
                 conn: tokio::sync::Mutex::new(connection::Conn::Off),
                 local_server: tokio::sync::Mutex::new(commands::LocalServer::Off),
                 local_api_key,
+                original_operator_configuration: explicit_operator,
                 secrets,
             });
             // Keep the tracing appender alive for the app's lifetime.

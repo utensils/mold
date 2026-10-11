@@ -29,6 +29,15 @@ pub const ALLOWED: &[&str] = &[
 
 pub const DESKTOP_LOCAL_API_KEY: &str = "desktop-local-api-key";
 
+/// Restore the operator's launch environment before relaunching for a new home.
+/// An app-generated export belongs only to the old home and must not be inherited.
+pub(crate) fn restore_operator_environment(original: Option<&str>) {
+    match original {
+        Some(value) => std::env::set_var("MOLD_API_KEY", value),
+        None => std::env::remove_var("MOLD_API_KEY"),
+    }
+}
+
 /// Per-host remote keys use `remote-api-key.<host-id>`. The suffix is a slug
 /// derived from the host URL (see `connection::host_id`).
 const PER_HOST_PREFIX: &str = "remote-api-key.";
@@ -129,7 +138,7 @@ impl SecretStore {
             .ok()
             .filter(|key| !key.is_empty())
         {
-            return Ok(key);
+            return Ok(mold_secure::operator_key::client_override(&key)?.to_string());
         }
         let legacy = self
             .get(DESKTOP_LOCAL_API_KEY)?
@@ -273,6 +282,42 @@ mod tests {
         assert_eq!(
             store.local_server_api_key(dir.path()).unwrap(),
             "operator-key"
+        );
+        std::env::remove_var("MOLD_API_KEY");
+    }
+
+    #[test]
+    fn explicit_file_and_list_select_one_client_key_without_rewriting_config() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (store, dir) = store();
+        let path = dir.path().join("operator-keys");
+        std::fs::write(&path, "# owners\n\n first-key \nsecond-key\n").unwrap();
+        let config = format!("@{}", path.display());
+        std::env::set_var("MOLD_API_KEY", &config);
+        assert_eq!(store.local_server_api_key(dir.path()).unwrap(), "first-key");
+        assert_eq!(std::env::var("MOLD_API_KEY").unwrap(), config);
+        std::env::set_var("MOLD_API_KEY", " , first-key,second-key");
+        assert_eq!(store.local_server_api_key(dir.path()).unwrap(), "first-key");
+        assert!(!dir.path().join("secure/operator.key").exists());
+        std::env::remove_var("MOLD_API_KEY");
+    }
+
+    #[test]
+    fn home_relaunch_does_not_turn_generated_credentials_into_operator_overrides() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (store, _) = store();
+        let home = tempfile::tempdir().unwrap();
+        mold_secure::operator_key::resolve(home.path(), Some("new-home-key")).unwrap();
+        std::env::set_var("MOLD_API_KEY", "previous-home-key");
+        restore_operator_environment(None);
+        assert_eq!(
+            store.local_server_api_key(home.path()).unwrap(),
+            "new-home-key"
+        );
+        restore_operator_environment(Some("first-key,second-key"));
+        assert_eq!(
+            std::env::var("MOLD_API_KEY").unwrap(),
+            "first-key,second-key"
         );
         std::env::remove_var("MOLD_API_KEY");
     }
