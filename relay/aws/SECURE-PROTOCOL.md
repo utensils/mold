@@ -96,7 +96,7 @@ The v2 sequence/ACK mechanics remain, with version 3 envelopes. `data` has
 `{a:"data",v:3,sid,rid,seq,d}` where d is canonical base64 of at most 16384 bytes.
 For optional bulk transport, data carries `o` instead of `d` and preserves all
 original sequence slots; see [OPAQUE-OBJECTS.md](OPAQUE-OBJECTS.md).
-`ack` has `{a:"ack",v:3,sid,rid,next,credit,ack_seq}`; credit is 0–16. `eof` has
+`ack` has `{a:"ack",v:3,sid,rid,next,credit,ack_seq}`; credit is 0–64. `eof` has
 `seq`; `accept` and `cancel` have no additional fields. Unexpected fields are
 not forwarded. Send `{a:"heartbeat",v:3}` within each 90-second lease; the reply
 includes sid. An invite/grant expiration can shorten that lease.

@@ -142,7 +142,7 @@ operation IDs and accepted-job reconciliation; connection retry is never
 permission to repeat POST/DELETE/PATCH.
 
 Uploads and downloads stream through encrypted WebSocket records. Each direction
-has a 256 KiB window per HTTP stream, up to 32 streams per device session, with
+has a 1 MiB window per HTTP stream, up to 32 streams per device session, with
 16 KiB data chunks and consumption-driven credits. This removes the old Lambda
 buffered ingress and streaming response size ceilings without introducing a
 second cryptographic file format. Existing host request admission remains

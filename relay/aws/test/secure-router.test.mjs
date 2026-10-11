@@ -532,18 +532,18 @@ test("hot-path fresh authority reads start together and validate the complete sn
   }
 });
 
-test("ciphertext ACK window is bounded at sixteen frames", () => {
+test("ciphertext ACK window permits four objects and remains bounded at sixty-four frames", () => {
   const ack = {
     a: "ack",
     v: 3,
     sid: "host",
     rid: "peer",
     next: 0,
-    credit: 16,
+    credit: 64,
     ack_seq: 0,
   };
   assert.deepEqual(opaqueFrame(ack), ack);
-  assert.equal(opaqueFrame({ ...ack, credit: 17 }), undefined);
+  assert.equal(opaqueFrame({ ...ack, credit: 65 }), undefined);
 });
 
 test("concurrent JOIN completion order cannot strand the winning host outside quota", async () => {

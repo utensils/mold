@@ -123,7 +123,7 @@ An object is a concatenation of **original consecutive reliable data frames**:
 chunk is 1..16384 bytes; count is 1..16, and total object bytes including all
 four-byte lengths are 5..262144. A full 16 x 16384-byte bundle exceeds that total
 bound and must be split. No trailing bytes, zero-length chunks or padding exist.
-The reliable window remains 16 original sequences, not 16 objects.
+The reliable window is 64 original sequences, not 64 objects.
 
 After successful PUT, send:
 
@@ -218,3 +218,9 @@ Studio origins for browser GET/HEAD/PUT CORS with checksum/content headers.
 Lambda IAM is limited to `ciphertext/v3/*` object read/write and scoped
 admission/quota rows. No S3 list, legacy content, bearer secret or API invoke
 authority is required for the runtime.
+
+The reliable wire window is 64 original frames (ACK credit 0–64), allowing up to
+four 16-frame ciphertext objects in flight without exceeding the existing
+four-object / 1 MiB reservation limit per peer and direction. Each HTTP stream
+has 1 MiB of body credit; consumers replenish at 512 KiB. Object size and frame
+count limits remain 256 KiB and 16 respectively.

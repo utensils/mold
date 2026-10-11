@@ -56,7 +56,7 @@ export function opaqueFrame(frame) {
   if (frame.a === "ack")
     return integer(frame.next) &&
       integer(frame.credit) &&
-      frame.credit <= 16 &&
+      frame.credit <= 64 &&
       integer(frame.ack_seq)
       ? {
           ...result,
