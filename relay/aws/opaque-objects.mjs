@@ -68,9 +68,9 @@ export function createObjectBroker({
     ...fields,
   });
   const error = (f, code) => response(f, "error", { code });
-  async function mutate(c, change) {
+  async function mutate(c, change, initial) {
     for (let n = 0; n < 32; n++) {
-      const old = await store.get(rowKey(c));
+      const old = n === 0 && initial ? initial : await store.get(rowKey(c));
       const next = change(old ?? { members: {}, next: 0 });
       if (!next) return;
       if (
@@ -132,61 +132,19 @@ export function createObjectBroker({
       return response(f, "released", { id: f.id });
     }
     if (f.op !== "create" || !validSize(f)) return;
-    await cleanup(c, (m) => m.expiresAt <= now());
-    let result;
-    await mutate(c, (old) => {
-      const existing = Object.values(old.members).find(
-        (m) => m.requestId === f.requestId,
-      );
-      if (existing) {
-        result =
-          existing.sender === c.sender &&
-          ["seq", "count", "bytes", "sha256"].every(
-            (k) => existing[k] === f[k],
-          ) &&
-          !existing.deleting
-            ? (existing.reply ?? existing)
-            : error(f, "conflict");
-        return;
-      }
-      if (
-        f.seq < old.next ||
-        Object.values(old.members).some(
-          (m) => f.seq < m.seq + m.count && m.seq < f.seq + f.count,
-        )
-      ) {
-        result = error(f, "conflict");
-        return;
-      }
-      const entries = Object.values(old.members);
-      if (
-        entries.length >= 4 ||
-        entries.reduce((sum, m) => sum + m.bytes, 0) + f.bytes > 1048576
-      ) {
-        result = error(f, "capacity");
-        return;
-      }
-      // Signing is local CPU only; the asynchronous signer is resolved below,
-      // after this single row has atomically reserved the full quota.
-      const id = randomBytes(16).toString("hex"),
-        expiresAt = now() + 300;
-      const m = {
-        id,
-        requestId: f.requestId,
-        sender: c.sender,
-        seq: f.seq,
-        count: f.count,
-        bytes: f.bytes,
-        sha256: f.sha256,
-        expiresAt,
-      };
-      result = m;
-      return { ...old, members: { ...old.members, [id]: m } };
-    });
-    if (!result) return error(f, "unavailable");
-    if (result.op) return result;
-    // A retry can arrive while the winning allocation's presigns are being made.
-    const member = result;
+    // Presigning is local CPU, not an S3 operation. Store the exact reply in
+    // the same conditional write that reserves bytes, so four parallel
+    // allocations contend once instead of twice on their shared quota row.
+    const member = {
+      id: randomBytes(16).toString("hex"),
+      requestId: f.requestId,
+      sender: c.sender,
+      seq: f.seq,
+      count: f.count,
+      bytes: f.bytes,
+      sha256: f.sha256,
+      expiresAt: now() + 300,
+    };
     const grants = await storage.grant(objectPath(c, member.id), member);
     const reply = response(f, "created", {
       id: member.id,
@@ -197,29 +155,71 @@ export function createObjectBroker({
       ...grants,
       expiresAt: member.expiresAt,
     });
-    let saved,
-      first = false;
-    await mutate(c, (old) => {
-      const m = old.members[member.id];
-      if (!m || m.deleting) return;
-      first = !m.reply;
-      saved = m.reply ?? reply;
-      return {
-        ...old,
-        members: { ...old.members, [member.id]: { ...m, reply: saved } },
-      };
-    });
-    if (first && saved)
-      console.info(
-        "Mold secure relay object allocated",
-        c.namespace,
-        member.id,
-        c.direction,
-        member.bytes,
-        member.count,
-      );
-    return saved ?? error(f, "expired");
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let result,
+        needsCleanup = false,
+        allocated = false;
+      await mutate(c, (old) => {
+        // Reset on a failed CAS retry: only its winning snapshot is authority.
+        allocated = false;
+        needsCleanup = false;
+        const entries = Object.values(old.members);
+        if (entries.some((m) => m.deleting || m.expiresAt <= now())) {
+          needsCleanup = true;
+          return;
+        }
+        const existing = entries.find((m) => m.requestId === f.requestId);
+        if (existing) {
+          result =
+            existing.sender === c.sender &&
+            ["seq", "count", "bytes", "sha256"].every(
+              (k) => existing[k] === f[k],
+            )
+              ? existing.reply
+              : error(f, "conflict");
+          return;
+        }
+        if (
+          f.seq < old.next ||
+          entries.some(
+            (m) => f.seq < m.seq + m.count && m.seq < f.seq + f.count,
+          )
+        ) {
+          result = error(f, "conflict");
+          return;
+        }
+        if (
+          entries.length >= 4 ||
+          entries.reduce((sum, m) => sum + m.bytes, 0) + f.bytes > 1048576
+        ) {
+          result = error(f, "capacity");
+          return;
+        }
+        allocated = true;
+        result = reply;
+        return {
+          ...old,
+          members: { ...old.members, [member.id]: { ...member, reply } },
+        };
+      });
+      if (needsCleanup) {
+        await cleanup(c, (m) => m.expiresAt <= now());
+        continue;
+      }
+      if (allocated)
+        console.info(
+          "Mold secure relay object allocated",
+          c.namespace,
+          member.id,
+          c.direction,
+          member.bytes,
+          member.count,
+        );
+      return result ?? error(f, "unavailable");
+    }
+    return error(f, "unavailable");
   }
+
   async function forward(c, frame) {
     if (!storage) return { code: "disabled" };
     const f = objectEnvelope(frame);
@@ -240,43 +240,39 @@ export function createObjectBroker({
     )
       return { code: "conflict" };
     if (m.expiresAt <= now()) return { code: "expired" };
-    let valid;
-    await mutate(c, (old) => {
-      const current = old.members[m.id];
-      if (!current || current.deleting) return;
-      valid = true;
-      return {
-        ...old,
-        members: { ...old.members, [m.id]: { ...current, forwarded: true } },
-      };
-    });
-    if (!valid) return { code: "expired" };
-    if (!m.verified) {
-      const metadata = await storage.head(objectPath(c, m.id));
-      if (!metadata) return { code: "not_ready" };
-      if (metadata.bytes !== m.bytes || metadata.sha256 !== m.sha256)
-        return { code: "conflict" };
-      await mutate(c, (old) => {
+    if (m.forwarded && m.verified) return { frame: f };
+    const metadata = await storage.head(objectPath(c, m.id));
+    if (!metadata) return { code: "not_ready" };
+    if (metadata.bytes !== m.bytes || metadata.sha256 !== m.sha256)
+      return { code: "conflict" };
+    let valid = false;
+    await mutate(
+      c,
+      (old) => {
+        valid = false;
         const current = old.members[m.id];
-        return current && !current.deleting
-          ? {
-              ...old,
-              members: {
-                ...old.members,
-                [m.id]: { ...current, verified: true },
-              },
-            }
-          : undefined;
-      });
-      console.info(
-        "Mold secure relay object verified",
-        c.namespace,
-        m.id,
-        c.direction,
-        m.bytes,
-        m.count,
-      );
-    }
+        if (!current || current.deleting || current.expiresAt <= now()) return;
+        valid = true;
+        if (current.forwarded && current.verified) return;
+        return {
+          ...old,
+          members: {
+            ...old.members,
+            [m.id]: { ...current, forwarded: true, verified: true },
+          },
+        };
+      },
+      row,
+    );
+    if (!valid) return { code: "expired" };
+    console.info(
+      "Mold secure relay object verified",
+      c.namespace,
+      m.id,
+      c.direction,
+      m.bytes,
+      m.count,
+    );
     return { frame: f };
   }
   return {

@@ -4,15 +4,18 @@ import { createObjectBroker } from "../opaque-objects.mjs";
 function fixture() {
   const rows = new Map(),
     cleared = [],
-    heads = [];
+    heads = [],
+    operations = { get: 0, cas: 0 };
   let clock = 1000,
     ready = true,
     clearFails = false;
   const store = {
     async get(k) {
+      operations.get++;
       return structuredClone(rows.get(k));
     },
     async cas(k, r, v) {
+      operations.cas++;
       if ((rows.get(k)?.revision ?? 0) !== r) return false;
       rows.set(k, structuredClone({ ...v, revision: r + 1 }));
       return true;
@@ -69,6 +72,8 @@ function fixture() {
     rows,
     cleared,
     heads,
+    operations,
+    storage,
     setTime: (v) => (clock = v),
     setReady: (v) => (ready = v),
     setClearFails: (v) => (clearFails = v),
@@ -198,4 +203,78 @@ test("failed payload clearing retains quota until a successful tombstone retry",
   await f.broker.cancel(f.ctx);
   assert.equal(Object.keys([...f.rows.values()][0].members).length, 0);
   assert.equal(f.cleared.length, 4);
+});
+
+test("fresh allocation and first forwarding each need one atomic quota mutation", async () => {
+  const f = fixture();
+  const a = await f.broker.command(f.ctx, f.create());
+  assert.equal(a.op, "created");
+  assert.deepEqual(f.operations, { get: 1, cas: 1 });
+  f.operations.get = 0;
+  f.operations.cas = 0;
+  const frame = {
+    a: "data",
+    v: 3,
+    sid: f.ctx.sid,
+    rid: f.ctx.rid,
+    seq: a.seq,
+    o: {
+      id: a.id,
+      bytes: a.bytes,
+      count: a.count,
+      sha256: a.sha256,
+      url: a.getUrl,
+    },
+  };
+  assert.deepEqual((await f.broker.forward(f.ctx, frame)).frame, frame);
+  assert.deepEqual(f.operations, { get: 1, cas: 1 });
+  assert.equal(f.heads.length, 1);
+  f.operations.get = 0;
+  f.operations.cas = 0;
+  assert.deepEqual((await f.broker.forward(f.ctx, frame)).frame, frame);
+  assert.deepEqual(f.operations, { get: 1, cas: 0 });
+  assert.equal(f.heads.length, 1);
+});
+test("release during object verification cannot publish a cleared reservation", async () => {
+  const f = fixture(),
+    a = await f.broker.command(f.ctx, f.create());
+  let start, finish;
+  const started = new Promise((r) => (start = r)),
+    resume = new Promise((r) => (finish = r));
+  f.storage.head = async () => {
+    start();
+    await resume;
+    return { bytes: 100, sha256: "a".repeat(64) };
+  };
+  const frame = {
+    a: "data",
+    v: 3,
+    sid: f.ctx.sid,
+    rid: f.ctx.rid,
+    seq: a.seq,
+    o: {
+      id: a.id,
+      bytes: a.bytes,
+      count: a.count,
+      sha256: a.sha256,
+      url: a.getUrl,
+    },
+  };
+  const forwarding = f.broker.forward(f.ctx, frame);
+  await started;
+  const release = await f.broker.command(f.ctx, {
+    a: "object",
+    v: 3,
+    op: "release",
+    requestId: "f".repeat(32),
+    sid: f.ctx.sid,
+    rid: f.ctx.rid,
+    id: a.id,
+  });
+  finish();
+  const outcome = await forwarding;
+  assert.ok(
+    (release.op === "released" && outcome.code === "expired") ||
+      (release.code === "conflict" && outcome.frame),
+  );
 });
