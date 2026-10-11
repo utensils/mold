@@ -9,7 +9,7 @@ public extension Model {
         if let source = query.source {
             guard source == "hf", hfRepo != nil else { return false }
         }
-        let haystack = [headline, name, family, description, hfRepo ?? ""].joined(separator: " ")
+        let haystack = [headline, summary ?? "", name, family, familyLabel, description, hfRepo ?? ""].joined(separator: " ")
         return (query.text ?? "").split(whereSeparator: { $0.isWhitespace }).allSatisfy {
             haystack.range(of: String($0), options: [.caseInsensitive, .diacriticInsensitive]) != nil
         }

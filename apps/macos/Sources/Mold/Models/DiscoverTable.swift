@@ -65,7 +65,7 @@ struct DiscoverTable: View {
     private var table: some View {
         Table(of: CatalogEntry.self, selection: $selection) {
             TableColumn("Name") { entry in nameCell(entry) }
-            TableColumn("Family") { entry in Text(entry.family) }
+            TableColumn("Family") { entry in Text(Model.familyLabel(forFamily: entry.family)) }
             TableColumn("Kind") { entry in Text(entry.kind) }
             TableColumn("Size") { entry in Text(Self.sizeText(entry)).foregroundStyle(.secondary) }
             TableColumn("Downloads") { entry in Text(Self.downloadsText(entry)).foregroundStyle(.secondary) }
@@ -93,7 +93,9 @@ struct DiscoverTable: View {
             }
             Picker("Family", selection: Binding(get: { query.family }, set: { catalog.setFamily($0, on: host.id) })) {
                 Text("Any").tag(String?.none)
-                ForEach(capabilities?.catalogFamilies ?? [], id: \.self) { Text($0).tag(String?.some($0)) }
+                ForEach(capabilities?.catalogFamilies ?? [], id: \.self) {
+                    Text(Model.familyLabel(forFamily: $0)).tag(String?.some($0))
+                }
             }
             .frame(width: 160)
             // Hidden, not drawn empty, on a host that advertises no sorts.

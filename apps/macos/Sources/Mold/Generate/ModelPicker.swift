@@ -6,8 +6,8 @@ import SwiftUI
 ///
 /// A popover rather than a `Menu`: a machine can have 170 models, which is an
 /// unusable system menu, and a menu item flattens to one line — so the
-/// manifest's plain-English trade-off, the one thing that tells you what a
-/// model is FOR, would be thrown away.
+/// model's summary -- the one line that tells you what a model is FOR, from
+/// `mold_core::model_presentation` -- would be thrown away.
 struct ModelPicker: View {
     static let maxToolbarWidth: CGFloat = 280
     let host: MoldHost?
@@ -62,7 +62,7 @@ struct ModelPicker: View {
                             row(model)
                         }
                     } header: {
-                        Text(group.family)
+                        Text(Model.familyLabel(forFamily: group.family))
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -83,8 +83,8 @@ struct ModelPicker: View {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(model.headline)
-                    if let tradeOff = model.tradeOff {
-                        Text(tradeOff)
+                    if let summary = model.summary {
+                        Text(summary)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
@@ -107,7 +107,9 @@ struct ModelPicker: View {
         let needle = query.lowercased()
         return families.compactMap { group in
             let hits = group.models.filter {
-                $0.description.lowercased().contains(needle)
+                $0.headline.lowercased().contains(needle)
+                    || ($0.summary ?? "").lowercased().contains(needle)
+                    || $0.description.lowercased().contains(needle)
                     || $0.name.lowercased().contains(needle)
             }
             return hits.isEmpty ? nil : (family: group.family, models: hits)

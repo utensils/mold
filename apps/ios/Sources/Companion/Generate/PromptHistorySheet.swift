@@ -93,6 +93,6 @@ struct PromptHistorySheet: View {
     }
 
     private func modelTitle(_ entry: HistoryEntry) -> String {
-        hosts.models[history.host.id]?.first { $0.name == entry.model }?.headline ?? entry.model
+        hosts.models[history.host.id]?.first { $0.name == entry.model }?.headline ?? Model.headline(forName: entry.model)
     }
 }

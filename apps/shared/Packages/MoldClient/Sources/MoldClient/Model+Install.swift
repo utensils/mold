@@ -51,30 +51,4 @@ public extension Model {
         guard let colon = name.firstIndex(of: ":") else { return false }
         return catalogPrefixes.contains(String(name[..<colon]))
     }
-
-    /// The part before the em-dash: "FLUX.1 Dev Q4".
-    ///
-    /// The manifest already writes every description this way, so the app
-    /// splits rather than inventing copy of its own. Mirrors `human_name`'s
-    /// fallback order (`types.rs:4048-4076`): a catalog row with no
-    /// `displayName` and an EMPTY description -- an `hf:` repo with nothing
-    /// scraped, say -- falls to the same two tails the server derives from
-    /// the name itself, rather than showing nothing.
-    var headline: String {
-        if let displayName, !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return displayName }
-        guard let range = description.range(of: " — ") else {
-            if let displayName, !displayName.isEmpty { return displayName }
-            if description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                if name.hasPrefix("cv:") { return "Civitai model #\(name.dropFirst(3))" }
-                if name.hasPrefix("hf:") {
-                    let repo = name.dropFirst(3)
-                    let title = repo.split(separator: "/").last.map(String.init) ?? String(repo)
-                    return title.replacingOccurrences(of: "-", with: " ")
-                        .replacingOccurrences(of: "_", with: " ")
-                }
-            }
-            return description
-        }
-        return String(description[..<range.lowerBound])
-    }
 }

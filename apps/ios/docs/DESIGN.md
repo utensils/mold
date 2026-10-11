@@ -403,8 +403,9 @@ button.
 
 - The navigation title names the machine. A labeled menu switches
   Installed and Discover and follows Dynamic Type.
-- **Installed:** grouped by family. Each row shows the name, variant, the
-  manifest's trade-off sentence and the size in mono.
+- **Installed:** grouped by family label. Each row shows the name, variant,
+  the model's one-line summary (both from the server's model presentation
+  authority) and the size in mono.
   - Swipe: Delete.
   - Menu: Load · Unload · Repair · Components │ Delete….
   - Active downloads are listed first; the machine's disk figure is in the
