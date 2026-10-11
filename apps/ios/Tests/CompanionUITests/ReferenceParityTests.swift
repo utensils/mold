@@ -4,6 +4,55 @@ import XCTest
 final class ReferenceParityTests: XCTestCase {
     override func setUp() { super.setUp(); acceptCompanionPermissions() }
 
+    @MainActor func testLibraryPickerHeaderDoesNotCoverPictures() async throws {
+        try await libraryPickerHeader(size: "UICTContentSizeCategoryL")
+    }
+
+    @MainActor func testLibraryPickerHeaderAtAccessibilityXXXL() async throws {
+        try await libraryPickerHeader(size: "UICTContentSizeCategoryAccessibilityXXXL")
+    }
+
+    @MainActor private func libraryPickerHeader(size: String) async throws {
+        continueAfterFailure = false
+        let machine = try FixtureMachine(aspectFixture: true, referenceFixture: true, galleryPrints: 24)
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        defer { app.terminate(); machine.stop() }
+        cleanUpFixture(machine, port: port, app: app)
+        app.launchArguments = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
+        app.launch(); try addMachine(app, port: port)
+        try choose("minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p", in: app)
+        if size != "UICTContentSizeCategoryL" {
+            XCUIDevice.shared.press(.home)
+            XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5))
+            app.terminate()
+            app.launchArguments = ["-UIPreferredContentSizeCategoryName", size]
+            app.launch()
+            XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
+        }
+        let well = app.buttons["First frame, empty"]
+        reveal(well, app: app); XCTAssertTrue(well.isHittable); well.tap()
+        app.buttons["Choose from Library…"].firstMatch.tap()
+        let bar = app.navigationBars["Choose from Library"]
+        XCTAssertTrue(bar.waitForExistence(timeout: 5))
+        let filter = app.buttons.matching(NSPredicate(format: "label CONTAINS 'All Machines'")).firstMatch
+        XCTAssertTrue(filter.waitForExistence(timeout: 5))
+        let picture = app.buttons.matching(NSPredicate(format: "label CONTAINS 'Fixture 0'")).firstMatch
+        XCTAssertTrue(picture.waitForExistence(timeout: 10))
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "Library picker header \(size)"; shot.lifetime = .keepAlways; add(shot)
+        XCTAssertGreaterThanOrEqual(filter.frame.minY, bar.frame.maxY - 1,
+                                   "Machine selector belongs below native navigation chrome")
+        XCTAssertGreaterThanOrEqual(picture.frame.minY, filter.frame.maxY,
+                                   "The first picture must not render behind the machine selector")
+        XCTAssertTrue(bar.buttons["Cancel"].isHittable)
+        XCTAssertTrue(app.searchFields.firstMatch.isHittable)
+        picture.tap()
+        XCTAssertTrue(bar.waitForNonExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["First frame"].waitForExistence(timeout: 5))
+        XCTAssertTrue(machine.generationRequests.isEmpty)
+    }
+
     @MainActor func testMiniMaxMultipleReferencesReachAdmissionInOrder() async throws {
         try await referenceAdmission(size: "UICTContentSizeCategoryL")
     }

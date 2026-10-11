@@ -25,37 +25,10 @@ struct LibraryPicker: View {
 
     var body: some View {
         NavigationStack {
-            Group {
-                if stills.isEmpty {
-                    EmptyState(title: library.isLoading ? String(localized: "Loading pictures…") : String(localized: "No matching pictures"), symbol: "photo",
-                               message: String(localized: "Pictures you generate appear here to start from."))
-                } else {
-                    ScrollView {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: tile), spacing: 3)], spacing: 3) {
-                            ForEach(stills) { entry in
-                                Button { choose(entry) } label: {
-                                    Color.clear.aspectRatio(1, contentMode: .fit)
-                                        .overlay { PrintThumbnail(entry: entry, points: tile * 1.5) }
-                                        .clipShape(.rect(cornerRadius: 5))
-                                }
-                                .buttonStyle(.plain)
-                                .disabled(choosing)
-                                .accessibilityLabel(entry.spokenDescription(showsHost: true))
-                            }
-                        }
-                    }
-                }
-            }
-            .safeAreaInset(edge: .top) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Picker("Machine", selection: $machine) {
-                        Text("All Machines").tag(MoldHost.ID?.none)
-                        ForEach(hosts.hosts) { host in Text(host.name).tag(MoldHost.ID?.some(host.id)) }
-                    }
-                    if let failure { Text(failure).foregroundStyle(.secondaryText) }
-                    if choosing { ProgressView("Fetching picture…") }
-                }.padding(.horizontal, 16).padding(.vertical, 8)
-                    .background(Color(uiColor: .systemBackground))
+            VStack(spacing: 0) {
+                filters
+                Divider()
+                pictures
             }
             .searchable(text: $search, prompt: "Search pictures")
             .refreshable { await library.reload() }
@@ -65,6 +38,47 @@ struct LibraryPicker: View {
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
         }
         .onDisappear { selectionTask?.cancel(); selectionTask = nil }
+    }
+
+    /// Ordinary content owns the filter's height. An opaque top safe-area
+    /// inset painted an intrinsic-width rectangle through the navigation bar.
+    private var filters: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("Machine", selection: $machine) {
+                Text("All Machines").tag(MoldHost.ID?.none)
+                ForEach(hosts.hosts) { host in Text(host.name).tag(MoldHost.ID?.some(host.id)) }
+            }
+            if let failure { Text(failure).foregroundStyle(.secondaryText) }
+            if choosing { ProgressView("Fetching picture…") }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(uiColor: .systemBackground), ignoresSafeAreaEdges: [])
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("library-picker-filters")
+    }
+
+    @ViewBuilder private var pictures: some View {
+        if stills.isEmpty {
+            EmptyState(title: library.isLoading ? String(localized: "Loading pictures…") : String(localized: "No matching pictures"), symbol: "photo",
+                       message: String(localized: "Pictures you generate appear here to start from."))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: tile), spacing: 3)], spacing: 3) {
+                    ForEach(stills) { entry in
+                        Button { choose(entry) } label: {
+                            Color.clear.aspectRatio(1, contentMode: .fit)
+                                .overlay { PrintThumbnail(entry: entry, points: tile * 1.5) }
+                                .clipShape(.rect(cornerRadius: 5))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(choosing)
+                        .accessibilityLabel(entry.spokenDescription(showsHost: true))
+                    }
+                }
+            }
+        }
     }
 
     private func choose(_ entry: LibraryEntry) {

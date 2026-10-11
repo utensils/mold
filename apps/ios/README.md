@@ -70,7 +70,7 @@ can clear both pictures and saved listings after explaining the offline effect.
 
 ### Sources and large pictures
 
-Library tiles and the picture viewer’s More menu offer **Use as Source** without replacing the prompt or model. Reference-only recipes receive a reference; named camera views ask which role to fill. Choose from Library searches the merged gallery, with an All Machines or individual-machine filter. Switching models preserves explicit attachments; incompatible source/reference pictures are disclosed as parked until a compatible recipe is selected.
+Library tiles and the picture viewer’s More menu offer **Use as Source** without replacing the prompt or model. Reference-only recipes receive a reference; named camera views ask which role to fill. Choose from Library searches the merged gallery, with an All Machines or individual-machine filter. Its full-width filter row stays below native navigation chrome and above the pictures at every text size. Switching models preserves explicit attachments; incompatible source/reference pictures are disclosed as parked until a compatible recipe is selected.
 
 Oversized new still inputs are proportionally reduced to at most 4096 pixels per axis and 2 MiB, applying orientation and preserving transparency. Smaller compatible inputs keep their bytes. Replacing a source clears its old mask; retained source/mask pairs and exported originals remain unchanged. Fresh drafts use Random; a deliberately locked seed of zero remains valid.
 
