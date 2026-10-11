@@ -5,6 +5,9 @@
 //! to RunPod's console,
 //! check spend, and generate images on an explicitly selected, paired pod.
 
+#[path = "runpod_security.rs"]
+mod security;
+
 use anyhow::{bail, Context, Result};
 use clap_complete::engine::CompletionCandidate;
 use colored::Colorize;
@@ -668,6 +671,7 @@ pub async fn run_network_volume_create(
             data_center_id: datacenter.into(),
         })
         .await?;
+    security::mark_fresh_volume(&volume.id)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&volume)?);
     } else {
@@ -1360,7 +1364,7 @@ pub async fn run_create(opts: CreateOptions) -> Result<()> {
             return Err(AlreadyReported.into());
         }
     };
-    let req = build_create_request(&opts, &client, &config).await?;
+    let mut req = build_create_request(&opts, &client, &config).await?;
     if !opts.dry_run {
         enforce_cost_alert(&client, &config).await?;
     }
@@ -1380,7 +1384,7 @@ pub async fn run_create(opts: CreateOptions) -> Result<()> {
         print_create_plan(&req);
     }
 
-    let pod = match with_spinner("creating pod…", client.create_pod(&req)).await {
+    let pod = match with_spinner("creating pod…", security::create(&client, &mut req)).await {
         Ok(p) => p,
         Err(e) => {
             explain_runpod_error(&e);
@@ -1633,6 +1637,10 @@ pub async fn run_connect(pod_id: String, check: bool) -> Result<()> {
     }
     let proxy = format!("https://{pod_id}-7680.proxy.runpod.net");
     require_paired_pod(&proxy)?;
+    if let Ok(client) = build_client() {
+        let pod = client.get_pod(&pod_id).await?;
+        security::remember_volume(&pod)?;
+    }
     if check {
         wait_for_mold(&proxy, 15).await?;
     }
@@ -1689,17 +1697,11 @@ pub struct RunOptions {
     pub no_save: bool,
 }
 
-/// `mold runpod run "<prompt>"` — use the selected, already-paired pod,
+/// `mold runpod run "<prompt>"` — securely provision or reuse the selected pod,
 /// generate, save to local repo, park (or delete with --keep).
 pub async fn run_run(opts: RunOptions) -> Result<()> {
     let mut config = Config::load_or_default();
     let effective_model = require_run_model_activation(&mut config, &opts).await?;
-    let state = load_state();
-    let selected = paired_runpod_id(
-        std::env::var("MOLD_HOST").ok().as_deref(),
-        state.last_pod_id.as_deref(),
-    )?;
-    require_paired_pod(&format!("https://{selected}-7680.proxy.runpod.net"))?;
     let client = match build_client() {
         Ok(c) => c,
         Err(e) => {
@@ -1729,8 +1731,7 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
         }
     }
 
-    // Verify the exact already-paired resource before any paid mutation.
-    let pod = ensure_paired_pod(&client, &config, &opts, &selected).await?;
+    let pod = ensure_run_pod(&client, &config, &opts).await?;
     println!(
         "{} using pod {} on {}",
         theme::icon_ok(),
@@ -2076,7 +2077,107 @@ fn paired_runpod_id(origin: Option<&str>, tracked: Option<&str>) -> Result<Strin
             .context("MOLD_HOST is not a RunPod host; use mold runpod connect after pairing")?;
         return Ok(id.into());
     }
-    tracked.map(str::to_owned).context("Create and pair a RunPod host first, then eval the output of mold runpod connect <pod-id>. Automatic unpaired provisioning is disabled")
+    tracked
+        .map(str::to_owned)
+        .context("No selected RunPod host")
+}
+
+async fn ensure_run_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -> Result<Pod> {
+    enforce_cost_alert(client, config).await?;
+    if let Ok(origin) = std::env::var("MOLD_HOST") {
+        let selected = paired_runpod_id(Some(&origin), None)?;
+        require_paired_pod(&origin)?;
+        return ensure_paired_pod(client, config, opts, &selected).await;
+    }
+    if let Some(pod) = security::recover(client).await? {
+        let mut state = load_state();
+        state.last_pod_id = Some(pod.id.clone());
+        state.last_pod_created_at = Some(now_epoch());
+        state.last_pod_last_used_at = Some(now_epoch());
+        state.last_pod_gpu = pod.gpu_name().map(str::to_owned);
+        state.last_pod_cost_per_hr = Some(pod.cost_per_hr);
+        save_state(&state)?;
+        return Ok(pod);
+    }
+    let state = load_state();
+    let mut replace = None;
+    if let Some(id) = &state.last_pod_id {
+        match client.get_pod(id).await {
+            Ok(pod) => {
+                require_paired_pod(&format!("https://{id}-7680.proxy.runpod.net"))?;
+                security::remember_volume(&pod)?;
+                if pod_matches(&pod, config, opts) {
+                    if pod.desired_status == "RUNNING" {
+                        return Ok(pod);
+                    }
+                    if pod.desired_status == "STOPPED" || pod.desired_status == "EXITED" {
+                        client.start_pod(id).await?;
+                        return client.get_pod(id).await;
+                    }
+                }
+                replace = Some(id.clone());
+            }
+            Err(error) if tracked_pod_is_absent(&error) => {}
+            Err(error) => {
+                return Err(error)
+                    .context("Could not verify tracked pod; refusing a paid replacement")
+            }
+        }
+    }
+    let mut create = opts.create.clone();
+    if create.model.is_none() {
+        create.model = opts.model.clone();
+    }
+    let mut request = build_create_request(&create, client, config).await?;
+    security::preflight(&request)?;
+    if let Some(id) = replace {
+        delete_tracked_pod(client, &id).await?;
+    }
+    print_create_plan(&request);
+    let pod = security::create(client, &mut request).await?;
+    let mut state = load_state();
+    state.last_pod_id = Some(pod.id.clone());
+    state.last_pod_created_at = Some(now_epoch());
+    state.last_pod_last_used_at = Some(now_epoch());
+    state.last_pod_gpu = request.gpu_type_ids.first().cloned();
+    state.last_pod_cost_per_hr = Some(pod.cost_per_hr);
+    save_state(&state)?;
+    append_history(&HistoryEntry {
+        pod_id: pod.id.clone(),
+        created_at: now_epoch(),
+        deleted_at: None,
+        cost_per_hr: pod.cost_per_hr,
+        gpu: pod.gpu_name().unwrap_or_default().to_owned(),
+        model: opts.model.clone(),
+        prompt: Some(opts.prompt.clone()),
+    })?;
+    Ok(pod)
+}
+
+fn pod_matches(pod: &Pod, config: &Config, opts: &RunOptions) -> bool {
+    let gpu = opts
+        .create
+        .gpu
+        .as_deref()
+        .or(config.runpod.default_gpu.as_deref());
+    let volume = opts
+        .create
+        .network_volume_id
+        .as_deref()
+        .or(config.runpod.default_network_volume_id.as_deref());
+    let dc = warm_datacenter_requirement(
+        opts.create.datacenter.as_deref(),
+        config.runpod.default_datacenter.as_deref(),
+        volume,
+    );
+    !gpu.is_some_and(|want| {
+        pod.gpu_name().is_none_or(|actual| {
+            !normalize_gpu_id(actual).eq_ignore_ascii_case(&normalize_gpu_id(want))
+        })
+    }) && !dc.as_deref().is_some_and(|want| {
+        pod.datacenter_id()
+            .is_none_or(|actual| !actual.eq_ignore_ascii_case(want))
+    }) && !network_volume_selection_mismatch(pod.attached_network_volume_id(), volume)
 }
 
 async fn ensure_paired_pod(

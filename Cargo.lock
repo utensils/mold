@@ -3200,6 +3200,7 @@ dependencies = [
  "dirs 6.0.0",
  "filetime",
  "flate2",
+ "hex",
  "hostname",
  "image",
  "indicatif 0.17.11",
@@ -3233,6 +3234,7 @@ dependencies = [
  "viuer",
  "walkdir",
  "wiremock",
+ "zeroize",
 ]
 
 [[package]]

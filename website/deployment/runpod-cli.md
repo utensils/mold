@@ -2,7 +2,7 @@
 
 `mold runpod` manages RunPod cloud GPU pods end-to-end from the same binary
 you use for local generation. Create a pod, connect to it, hand off logs to the
-RunPod console, track spend, and (with `mold runpod run`) manage already-paired generation
+RunPod console, track spend, and (with `mold runpod run`) securely provision generation
 in a single command.
 
 Compared to the [Docker & RunPod](./docker) guide (which shows the manual
@@ -29,37 +29,47 @@ mold runpod doctor
 `mold runpod doctor` checks the key, the REST endpoint, and your RunPod
 balance + spend rate.
 
-## Pair before generation
+## Secure provisioning and pairing
 
-RunPod's provider API remains available for creating, listing and managing paid
-resources. Provider status does not establish a trusted Mold connection. Create
-a host explicitly, then use its trusted RunPod console to configure an
-authenticated upgraded server and the [encrypted relay](/deployment/relay).
-Set that host's `MOLD_PUBLIC_URL` to its RunPod proxy origin so the CLI can
-associate the saved pairing with the tracked pod.
+`mold runpod create` and `mold runpod run` prepare the host identity and client
+permission locally before the owner-authenticated RunPod create request. The
+current Mold container imports this one-time bootstrap into an empty store.
+The client keeps the public host pins and its own credential; API calls, progress
+and media then use Noise over the provider's WSS proxy. The provider API remains
+an owner-control surface and does not become a source of trusted host keys.
+Use an image containing this secure bootstrap version; an older/custom image
+cannot satisfy the pinned connection.
 
-On the host, run `mold pairing create --output /private/invitation.json`. Transfer
-the short-lived invitation privately and run
-`mold pair --invite-file /private/invitation.json` on your client. Then:
+A private recovery journal is saved before paid creation. If the provider reply
+is lost, a retry reconciles the exact generated pod name through the owner API;
+it never repeats an uncertain paid POST. Keep that journal when inspecting an
+uncertain outcome in the RunPod console.
+
+A fresh network volume created by Mold can receive its first bootstrap. A known
+paired volume retains its existing identity and permission when moved to a new
+pod. For an existing volume with no saved association, pair its current host
+first and run `mold runpod connect <pod-id>` to record the association before
+replacement. Unknown populated volumes refuse automatic provisioning before a
+paid request. Starting a stopped pod preserves its identity and pairing.
+
+To add another client or upgrade a legacy host, use its trusted owner console:
+run `mold pairing create --output /private/invitation.json`, transfer the
+short-lived invitation privately, and run `mold pair --invite-file
+/private/invitation.json` on the client. Then:
 
 ```bash
 eval "$(mold runpod connect <pod-id> --check)"
 mold runpod run "a cinematic low-angle of a tiny steel robot"
 ```
 
-`runpod run` requires an existing paired pod selected by `MOLD_HOST` or the
-tracked pod. It checks that exact running pod and refuses GPU, datacenter or
-volume mismatches before creating or deleting any resource. Use explicit
-`create`, then pair and connect, when you want a different host. It streams generation and media through the encrypted client;
-`connect --check` verifies application readiness through that same connection.
-Changing the host creates a new trust decision and requires a new invitation.
-A running pod is not deleted just because it refuses an old plaintext proxy
-probe. The provider's web console remains the supported logs and owner-control
-surface; raw public HTTP and browser media URLs are no longer an API transport.
-
+An explicit `MOLD_HOST` selects that exact paired pod and refuses mismatched
+GPU/datacenter/volume settings. Without that override, `run` reuses or resumes
+the matching tracked pod, or securely provisions its requested replacement.
+`connect --check` verifies application readiness through the pinned encrypted
+connection. Provider RUNNING status alone does not establish Mold readiness.
 The encrypted Studio supports Library browsing, thumbnails, video Range reads,
-exports and progress. Open the trusted Studio and pair the host. API keys from
-the old proxy cannot be silently migrated into a secure host identity.
+exports and progress. Pair the Studio separately; old proxy API keys cannot
+silently become host identities. Raw public HTTP is no longer an API transport.
 
 ### Common flags
 
@@ -221,10 +231,10 @@ Both paths use the same API key (`Authorization: Bearer …`).
 
 ## Troubleshooting
 
-**Pod is not ready or does not match the requested GPU**: `runpod run` refuses
-that host without replacing it or creating another paid pod. Inspect the
-provider console, explicitly create a suitable replacement if needed, then
-pair and connect it before generation.
+**Pod is not ready or does not match the requested GPU**: an explicit `MOLD_HOST`
+selects only that paired resource. Unset it to allow the tracked-pod provisioning
+workflow. Inspect the provider console if a bootstrap or secure readiness check
+fails; a paid pod is not deleted merely because an old plaintext probe fails.
 
 **"value must be one of …" from `/pods`**: you pinned a datacenter that
 isn't in RunPod's REST enum whitelist. GraphQL exposes datacenters that
@@ -239,6 +249,7 @@ REST API. `mold runpod logs <pod-id>` validates the Pod, prints its state and
 the console URL, then tells you to open that Pod's **Logs** panel. `--follow`
 is retained for compatibility but cannot stream console-only logs.
 
-**Resources after Ctrl-C**: `mold runpod run` uses an already paired pod;
-explicitly created pods remain visible in `mold runpod list`. Delete a pod you
-no longer need with `mold runpod delete <id>`.
+**Resources after Ctrl-C**: the private pending journal and tracked pod ID retain
+recovery information. Inspect `mold runpod list` and delete a pod you no longer
+need with `mold runpod delete <id>`. An uncertain create is reconciled before any
+new paid request.

@@ -124,10 +124,12 @@ Old proxy credentials cannot be upgraded implicitly;
 upgrade and pair every client again. Plain HTTP is only a private loopback
 engine interface. Do not use raw remote curl or fall back to a cloud-provided
 host key. Uploads are bounded to 64 MiB; responses stream with backpressure.
-Interrupted mutations are never automatically replayed. RunPod generation requires an
-already paired, running pod; explicitly create, pair, and select a replacement
-when its GPU or datacenter differs. Provider readiness alone is not trusted
-Mold readiness. Native Remote Access
+Interrupted mutations are never automatically replayed. RunPod create/run use
+owner-authenticated one-time bootstrap for fresh hosts and preserve the existing
+identity for known paired volumes. A private pre-create journal reconciles an
+uncertain paid response without replaying creation. Unknown existing volumes
+require pairing before replacement. An explicit MOLD_HOST selects that exact
+paired pod; provider readiness alone is not trusted Mold readiness. Native Remote Access
 opens the encrypted LAN listener and outbound connector; stopping it closes
 active sessions. HTTPS browsers may require WSS because of mixed-content rules.
 
