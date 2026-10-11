@@ -729,7 +729,7 @@ describe("HostDetailView storage and queue", () => {
     // under a heading is a figure with nothing saying what it counts.
     expect(wrapper.get("[data-test='queue-depth']").text()).toBe("3/8 queued");
     const chips = wrapper.findAll("[data-test='loaded-model-name']");
-    expect(chips.map((c) => c.text())).toEqual(["flux-dev:q8"]);
+    expect(chips.map((c) => c.text())).toEqual(["FLUX.1 Dev Q8"]);
   });
 
   it("gives the queue panel the section to itself — no second border, no controls row", async () => {
@@ -778,7 +778,7 @@ describe("HostDetailView storage and queue", () => {
     expect(rows[0]!.text()).toContain("QUEUED #1");
     expect(rows[0]!.text()).toContain("z-image:q8");
     expect(rows[1]!.text()).toContain("RUNNING · GPU 0");
-    expect(rows[1]!.text()).toContain("flux-dev:q8");
+    expect(rows[1]!.text()).toContain("FLUX.1 Dev Q8");
     // Elapsed wall-clock for the running row (~90s → "1m 30s").
     expect(rows[1]!.text()).toMatch(/1m \d+s/);
     // Neither entry belongs to this app's generation store.
@@ -898,7 +898,7 @@ describe("HostDetailView models", () => {
     const wrapper = await mountView(`/hosts/${REMOTE_ID}`, [h3Nvfp4]);
     const rows = wrapper.findAll("[data-test='model-row']");
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.text()).toContain("MiniMax H3 FL2VA · NVFP4");
+    expect(rows[0]!.text()).toContain("MiniMax H3 Frames NVFP4");
   });
 
   it("repeats model kind and mature-content classification in the host inventory", async () => {
@@ -968,7 +968,7 @@ describe("HostDetailView models", () => {
     await wrapper.get("[data-test='model-row'] [data-test='row-title']").trigger("click");
     await flushPromises();
     const drawer = wrapper.get("[data-test='catalog-detail-drawer']");
-    expect(drawer.text()).toContain("flux-dev:q8");
+    expect(drawer.text()).toContain("FLUX.1 Dev Q8");
   });
 
   it("closes an open drawer when navigating to a different host", async () => {
@@ -1015,7 +1015,7 @@ describe("HostDetailView models", () => {
     // The card draws its own border, so this slot is the compact readout:
     // one style, its percent and eta, a meter, one line of prose.
     const tray = wrapper.get("[data-test='host-downloads']");
-    expect(tray.text()).toContain("qwen-image:q4");
+    expect(tray.text()).toContain("Qwen Image Q4");
     expect(tray.get("[data-test='downloads-summary-progress']").text()).toContain("25% · eta");
     expect(tray.text()).toContain("Nothing else queued to download.");
     expect(tray.text()).not.toContain("[2.5 GB/10.0 GB,");
@@ -1046,7 +1046,7 @@ describe("HostDetailView models", () => {
     await flushPromises();
 
     const tray = wrapper.get("[data-test='host-downloads']");
-    expect(tray.text()).toContain("qwen-image:q4");
+    expect(tray.text()).toContain("Qwen Image Q4");
     expect(wrapper.text()).not.toContain("Nothing on its way to this machine.");
   });
 
@@ -1177,7 +1177,7 @@ describe("HostDetailView queue drawer", () => {
     await wrapper.get("[data-test='host-queue-row']").trigger("click");
 
     const drawer = wrapper.get("[data-test='queue-entry-drawer']");
-    expect(drawer.text()).toContain("qwen-image:bf16");
+    expect(drawer.text()).toContain("Qwen Image BF16");
     expect(drawer.get("[data-test='queue-detail-prompt']").text()).toBe("a lighthouse at dusk");
     expect(drawer.text()).toContain("1328×1328");
     // Seed 0 on the wire = not pinned.
@@ -1292,7 +1292,7 @@ describe("HostDetailView layout", () => {
     const wrapper = await mountView();
     expect(wrapper.get("[data-test='loaded-label']").text()).toBe("Loaded and ready");
     const chips = wrapper.findAll("[data-test='loaded-model-name']");
-    expect(chips.map((c) => c.text())).toEqual(["flux-dev:q8"]);
+    expect(chips.map((c) => c.text())).toEqual(["FLUX.1 Dev Q8"]);
   });
 
   it("uses the installed model title for an opaque loaded-model id", async () => {

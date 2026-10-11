@@ -29,13 +29,23 @@ export const useComposerStore = defineStore("composer", {
     retainedSource: null as RetainedSourceReuseHandoff | null,
     retainedSourceVersion: 0,
     pendingRetainedSourceApplyVersion: null as number | null,
+    /** The reuse version no copy of the print could be asked about (every
+     *  copy on a machine with no resolvable route). Create stops waiting for
+     *  an inventory that will never arrive and runs its local fallback. */
+    retainedSourceDeclinedVersion: null as number | null,
   }),
   actions: {
     invalidateRetainedSource(): number {
       this.retainedSourceVersion += 1;
       this.retainedSource = null;
       this.pendingRetainedSourceApplyVersion = null;
+      this.retainedSourceDeclinedVersion = null;
       return this.retainedSourceVersion;
+    },
+    declineRetainedSource(version: number): boolean {
+      if (version !== this.retainedSourceVersion) return false;
+      this.retainedSourceDeclinedVersion = version;
+      return true;
     },
     beginRetainedSourceReuse(prefill: ComposerPrefill): number {
       const version = this.invalidateRetainedSource();

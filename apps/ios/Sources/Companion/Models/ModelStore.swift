@@ -59,7 +59,9 @@ final class ModelStore {
         let rows = (hosts.models[host] ?? []).filter { $0.downloaded == true }
         return Dictionary(grouping: rows, by: \.family)
             .map { ($0.key, $0.value.sorted { $0.headline.localizedStandardCompare($1.headline) == .orderedAscending }) }
-            .sorted { $0.family < $1.family }
+            .sorted {
+                Model.familyPrecedes($0.family, $1.family)
+            }
     }
 
     /// Residency is independent of downloaded metadata (including older servers).

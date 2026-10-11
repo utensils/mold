@@ -897,6 +897,92 @@ describe("LibraryPage", () => {
     expect(useGenerateForm().state.value.height).toBe(1344);
   });
 
+  it("reuse restores an unpinned source quietly when the stash still has it", async () => {
+    const sourcePrint = {
+      ...cat,
+      metadata: {
+        ...cat.metadata,
+        source_image_name: "portrait.jpg",
+        source_image_sha256: "a".repeat(64),
+      },
+    };
+    listGalleryMock.mockResolvedValue([sourcePrint]);
+    restoreSourceMock.mockResolvedValue({
+      base64: "ORIGINAL",
+      filename: "portrait.jpg",
+      kind: "upload",
+    });
+    for (const inventory of [
+      // A print made before durable retention: no pins at all.
+      { availability: "unavailable_legacy", members: [] },
+      // A retained archive that kept other roles but not the source.
+      {
+        availability: "available",
+        members: [
+          {
+            member_id: "m",
+            role: "control_image",
+            display_name: "pose.png",
+            size_bytes: 8,
+          },
+        ],
+      },
+    ]) {
+      useGenerateForm().state.value.imageAttachments = [];
+      resetNotifications();
+      retainedInventoryMock.mockResolvedValue(inventory);
+      const wrapper = await mounted();
+      await wrapper.find("[data-test='grid-open']").trigger("click");
+      await wrapper.vm.$nextTick();
+      await wrapper.find("[data-test='lb-reuse']").trigger("click");
+      await flushPromises();
+
+      expect(useGenerateForm().state.value.imageAttachments[0]?.base64).toBe(
+        "ORIGINAL",
+      );
+      expect(
+        useNotifications().toasts.filter((toast) => toast.kind === "error"),
+      ).toEqual([]);
+      wrapper.unmount();
+    }
+  });
+
+  it("reuse looks an unpinned identity photo back up in the stash", async () => {
+    // Create's handoff path restored the face from the stash; the Library
+    // door never did, so an identity print reused from here kept a bytes-less
+    // "photo unavailable" descriptor even with the photo on this browser.
+    const identityPrint = {
+      ...cat,
+      metadata: {
+        ...cat.metadata,
+        id_image_name: "face.png",
+        id_image_sha256: "b".repeat(64),
+        id_weight: 1,
+        id_start_step: 0,
+      },
+    };
+    listGalleryMock.mockResolvedValue([identityPrint]);
+    retainedInventoryMock.mockResolvedValue({
+      availability: "unavailable_legacy",
+      members: [],
+    });
+    restoreSourceMock.mockImplementation(async (sha256: string) =>
+      sha256 === "b".repeat(64)
+        ? { base64: "FACE", filename: "face.png", kind: "upload" }
+        : null,
+    );
+    const wrapper = await mounted();
+    await wrapper.find("[data-test='grid-open']").trigger("click");
+    await wrapper.vm.$nextTick();
+    await wrapper.find("[data-test='lb-reuse']").trigger("click");
+    await flushPromises();
+
+    expect(useGenerateForm().state.value.identityImage).toMatchObject({
+      filename: "face.png",
+      base64: "FACE",
+    });
+  });
+
   it("single delete removes optimistically and commits only after the window", async () => {
     vi.useFakeTimers();
     const wrapper = mountPage();

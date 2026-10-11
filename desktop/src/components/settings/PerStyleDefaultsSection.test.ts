@@ -59,7 +59,7 @@ describe("Settings ▸ Per-style defaults", () => {
       {
         name: "sd1.5",
         family: "sd",
-        description: "Stable Diffusion 1.5",
+        display_name: "Stable Diffusion 1.5",
         downloaded: true,
       } as ModelEntry,
     ];

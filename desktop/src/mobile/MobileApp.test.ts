@@ -1,3 +1,4 @@
+import { modelPresentation, styleName } from "@studio/lib/modelDisplay";
 import { nextTick } from "vue";
 import { flushPromises, mount, type DOMWrapper, type VueWrapper } from "@vue/test-utils";
 import { createPinia, type Pinia } from "pinia";
@@ -1204,7 +1205,7 @@ describe("MobileApp generation lifecycle", () => {
     await flushPromises();
     const activity = wrapper.get("[data-test='mobile-fleet-job']");
     expect(activity.text()).toContain("Studio");
-    expect(activity.text()).toContain("flux-dev:q4");
+    expect(activity.text()).toContain("FLUX.1 Dev Q4");
     expect(localStorage.getItem("mold.mobile.live-activity.v1")).not.toContain(target.apiKey);
   });
 
@@ -4694,7 +4695,7 @@ describe("MobileApp generation queue", () => {
         expect(wrapper.get("[data-test='mobile-retry-expansion']").text()).toBe("Retry expansion");
       } else {
         expect(wrapper.get("[data-test='mobile-retry-expansion-pull']").text()).toContain(
-          "qwen3-expand:q8",
+          "Qwen3-1.7B Q8",
         );
         if (type === "job_failed") {
           expect(wrapper.get(".mobile-expansion-pull").text()).toContain("cached failure");
@@ -14808,9 +14809,9 @@ describe("MobileApp output kinds", () => {
     // The row says the technical truth AND the plain description; the chip
     // beneath says the plain name first and the exact id second.
     expect(row.get("[data-test='model-option-id']").text()).toBe(selected.name);
-    expect(row.text()).toContain(selected.description!);
+    expect(row.text()).toContain(modelPresentation(selected).summary!);
     await closeStyleSheet();
-    expect(wrapper.get("[data-test='mobile-style-chip-name']").text()).toBe(selected.description);
+    expect(wrapper.get("[data-test='mobile-style-chip-name']").text()).toBe(styleName(selected));
     expect(currentStyleId()).toBe(selected.name);
     await wrapper.get("[data-test='mobile-style-browse']").trigger("click");
     await flushPromises();
@@ -14906,7 +14907,7 @@ describe("MobileApp style chip and sheet", () => {
     const chip = styleChip();
     expect(chip.attributes("aria-haspopup")).toBe("listbox");
     // The plain name in sans, the runnable id in mono — never the id twice.
-    expect(chip.get("[data-test='mobile-style-chip-name']").text()).toBe(stillModel.description);
+    expect(chip.get("[data-test='mobile-style-chip-name']").text()).toBe(styleName(stillModel));
     expect(currentStyleId()).toBe(stillModel.name);
     expect(wrapper.find("[data-test='mobile-style-sheet'] .ms-model__option").exists()).toBe(false);
 
@@ -15233,4 +15234,32 @@ it("keeps explicitly opened mobile details reusable outside the source catalog s
   );
   expect(attach).toHaveBeenCalledOnce();
   attach.mockRestore();
+});
+
+// A failed retained restore blocks Develop until deliberate recovery; attaching
+// the input by hand IS that recovery, exactly as on desktop.
+it("lets a hand-attached input retire a failed retained restore", async () => {
+  wrapper = mountMobileApp();
+  await flushPromises();
+  const vm = wrapper.vm as unknown as { retainedRestoreError: string | null };
+  vm.retainedRestoreError = "The original inputs could not be restored.";
+  await flushPromises();
+  const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+
+  const authority = (
+    wrapper.vm as unknown as {
+      retainedSourceAuthority: {
+        begin: () => number;
+        setIfCurrent: (version: number, value: unknown) => boolean;
+        snapshot: () => unknown;
+      };
+    }
+  ).retainedSourceAuthority;
+  authority.setIfCurrent(authority.begin(), { filename: "print.png" });
+  liveForm.sourceImage = "MINE";
+  await flushPromises();
+
+  expect(vm.retainedRestoreError).toBeNull();
+  // Giving up the archive: nothing archived is relayed beside the new input.
+  expect(authority.snapshot()).toBeNull();
 });

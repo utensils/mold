@@ -34,7 +34,7 @@ import { useComposerStore } from "../../stores/composer";
 import { useToastStore } from "../../stores/toasts";
 import { useContextMenuStore, type MenuEntry } from "../../stores/contextMenu";
 import { formatEta } from "../../lib/format";
-import { modelDisplayNameForId } from "../../lib/models";
+import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
 import {
   computeQueueLanes,
   laneForEntry,

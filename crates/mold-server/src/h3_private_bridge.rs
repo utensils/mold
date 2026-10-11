@@ -795,7 +795,8 @@ fn build_fl2va_capability(models_root: &std::path::Path) -> Option<mold_core::Mi
                 .flatten();
             Some(mold_core::MiniMaxH3TurboVariantCapability {
                 model: tier.model.into(),
-                display_name: format!("MiniMax H3 FL2VA {}", tier.display_label),
+                display_name: mold_core::manifest::model_display_name(tier.model)
+                    .unwrap_or_else(|| tier.model.to_string()),
                 tier: tier.display_label.into(),
                 adapter_size_bytes: tier.adapter_size_bytes,
                 installed,
@@ -832,7 +833,10 @@ fn build_fl2va_capability(models_root: &std::path::Path) -> Option<mold_core::Mi
         partitions: vec![mold_core::MiniMaxH3PartitionCapability {
             task: "fl2va".into(),
             model: mold_core::minimax_h3::FL2VA_COMFY.into(),
-            display_name: "MiniMax H3 FL2VA".into(),
+            display_name: mold_core::manifest::model_display_name(
+                mold_core::minimax_h3::FL2VA_COMFY,
+            )
+            .unwrap_or_else(|| mold_core::minimax_h3::FL2VA_COMFY.to_string()),
             runtime_available: true,
             tier: "Compact 24 GiB GPU memory".into(),
             component_ids,
@@ -1166,7 +1170,6 @@ pub(crate) fn authenticated_h3_private_model_row(
 
     h3_model_row(
         &partition.model,
-        &partition.display_name,
         "Compact FL2VA runtime with synchronized audio; text-only or first/last-frame conditioning.",
         request,
         disk_usage_bytes,
@@ -1221,7 +1224,6 @@ pub(crate) fn authenticated_h3_private_model_rows(
         };
         if let Some(row) = h3_model_row(
             &variant.model,
-            &variant.display_name,
             "Compact FL2VA runtime with synchronized audio; reviewed distilled-adapter quality profile.",
             request,
             disk_usage_bytes,
@@ -1274,7 +1276,6 @@ pub(crate) fn installed_h3_distilled_base_model_rows(
             };
             h3_model_row(
                 tier.model,
-                &format!("MiniMax H3 FL2VA {}", tier.display_label),
                 &manifest.description,
                 &request,
                 disk_usage_bytes,
@@ -1290,7 +1291,6 @@ pub(crate) fn installed_h3_distilled_base_model_rows(
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 fn h3_model_row(
     model: &str,
-    display_name: &str,
     description: &str,
     request: &mold_core::MiniMaxH3RequestCapability,
     disk_usage_bytes: u64,
@@ -1301,6 +1301,7 @@ fn h3_model_row(
         .files
         .iter()
         .find(|file| file.component == mold_core::manifest::ModelComponent::Transformer)?;
+    let presentation = mold_core::model_presentation::presentation(manifest);
     Some(mold_core::ModelInfoExtended {
         // The bridge only ever re-publishes a reviewed, executable partition.
         runtime_available: Some(true),
@@ -1391,7 +1392,12 @@ fn h3_model_row(
         downloaded: true,
         disk_usage_bytes: Some(disk_usage_bytes),
         remaining_download_bytes: Some(0),
-        display_name: Some(display_name.to_string()),
+        // The same naming authority every catalog row reads.
+        display_name: Some(presentation.display_name()),
+        title: Some(presentation.title.clone()),
+        variant: presentation.variant.clone(),
+        summary: presentation.summary.clone(),
+        family_label: presentation.family_label.clone(),
         kind: Some("checkpoint".into()),
         modality: Some("video".into()),
         nsfw: None,

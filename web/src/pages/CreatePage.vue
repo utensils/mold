@@ -141,6 +141,7 @@ import {
   retainedSourceMediaMembersForRequest,
 } from "@studio/api/gallerySourceMedia";
 import {
+  automatedReuseApply,
   clearRetainedSourceReuseIntent,
   retainedSourceReuseIsCurrent,
   retainedSourceReuseSnapshot,
@@ -1779,6 +1780,22 @@ const { error: retainedRestoreError, pending: retainedRestorePending } =
       if (restored) preserveRestoredSourceCanvas(restored.base64);
     },
     onError: (message) => toast("error", message),
+    attachedMedia: () => {
+      const s = form.state.value;
+      return (
+        s.imageAttachments.length +
+        (s.referenceImages?.length ?? 0) +
+        s.keyframes.length +
+        Number(Boolean(s.endFrame?.base64)) +
+        Number(Boolean(s.identityImage?.base64)) +
+        Number(Boolean(s.maskImage)) +
+        Number(Boolean(s.controlImage)) +
+        Number(Boolean(s.audioFile)) +
+        Number(Boolean(s.sourceVideo)) +
+        Number(Boolean(s.h3Authoring?.firstFrame?.data)) +
+        Number(Boolean(s.h3Authoring?.lastFrame?.data))
+      );
+    },
   });
 const pendingEndFrameNotice = ref<OutputMetadata | null>(null);
 function noticeFirstLastFrameRestore(metadata: OutputMetadata) {
@@ -1834,17 +1851,19 @@ async function restoreReusedIdentityPhoto(metadata: OutputMetadata) {
     identityRestoreNotice.value = IDENTITY_PHOTO_UNAVAILABLE;
     return;
   }
-  form.state.value = {
-    ...form.state.value,
-    identityImage: {
-      kind: "upload",
-      filename: restored.filename || descriptor.filename,
-      base64: restored.base64,
-      width: restored.width ?? null,
-      height: restored.height ?? null,
-      mime: restored.mime ?? null,
-    },
-  };
+  automatedReuseApply(() => {
+    form.state.value = {
+      ...form.state.value,
+      identityImage: {
+        kind: "upload",
+        filename: restored.filename || descriptor.filename,
+        base64: restored.base64,
+        width: restored.width ?? null,
+        height: restored.height ?? null,
+        mime: restored.mime ?? null,
+      },
+    };
+  });
 }
 // The disclosure is about THIS descriptor; a photo the user attaches
 // afterwards retires it.
@@ -1927,7 +1946,9 @@ async function restoreReusedH3BoundaryMedia() {
     }
   }
   if (committed > 0) {
-    form.state.value = { ...form.state.value, h3Authoring: authoring };
+    automatedReuseApply(() => {
+      form.state.value = { ...form.state.value, h3Authoring: authoring };
+    });
   }
   if (outcome.failed.length > 0) {
     toast(

@@ -222,7 +222,7 @@ describe("MiniMax H3 Studio authority", () => {
     );
     expect(refused).toEqual({
       ok: false,
-      error: "FL2VA endpoints must be still images.",
+      error: "First and last frames must be still images.",
     });
 
     const undecodable = await setMinimaxH3BoundaryFile(
@@ -232,7 +232,7 @@ describe("MiniMax H3 Studio authority", () => {
     );
     expect(undecodable).toEqual({
       ok: false,
-      error: "Use a PNG or JPEG image for FL2VA endpoints.",
+      error: "Use a PNG or JPEG image for the first or last frame.",
     });
   });
 
@@ -285,7 +285,7 @@ describe("MiniMax H3 Studio authority", () => {
     expect(request).not.toHaveProperty("source_image");
     expect(request).not.toHaveProperty("references");
     expect(minimaxH3AuthoringError(null, model, null)).toContain(
-      "explicit FL2VA or Ref2VA",
+      "MiniMax H3 Frames or MiniMax H3 References",
     );
   });
 

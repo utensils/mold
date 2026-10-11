@@ -25,11 +25,15 @@ extension ModelSort {
     }
 
     /// Grouped by the server's OWN family string (decision 9, M5), families
-    /// sorted, and each group's rows in the same order the table shows.
+    /// sorted by the label their section header shows
+    /// (`Model.familyLabel(forFamily:)`), and each group's rows in the same
+    /// order the table shows.
     static func grouped(_ rows: [Model], by sort: ModelSort) -> [(family: String, rows: [Model])] {
         Dictionary(grouping: rows, by: \.family)
             .map { (family: $0.key, rows: sorted($0.value, by: sort)) }
-            .sorted { $0.family.localizedStandardCompare($1.family) == .orderedAscending }
+            .sorted {
+                Model.familyPrecedes($0.family, $1.family)
+            }
     }
 
     private static func compare(_ a: Model, _ b: Model, column: Column) -> Int {
@@ -63,13 +67,13 @@ extension Model {
     // needs). `Model` is a plain value type with no actor of its own, so
     // there is nothing unsafe about reading these off the main actor.
 
-    /// `baseTitle` then `headline`, tab-separated so the base name always
+    /// `title` then `headline`, tab-separated so the base name always
     /// wins the comparison: variants of one model stay adjacent under this
     /// column whatever their trade-off or size say. Only the Model column
     /// reads this -- every other column sorts by its own value alone.
-    nonisolated var sortHeadline: String { "\(baseTitle)\t\(headline)" }
-    nonisolated var sortVariant: String { tag ?? "" }
-    nonisolated var sortTradeOff: String { tradeOff ?? "" }
+    nonisolated var sortHeadline: String { "\(title)\t\(headline)" }
+    nonisolated var sortVariant: String { variantLabel ?? "" }
+    nonisolated var sortTradeOff: String { summary ?? "" }
     /// The honest number for the row whatever its state (design fact 3, M5):
     /// what is on disk, or failing that what it would cost to fetch. Never
     /// the machine's own `models_disk` figure -- that is the footer's alone.

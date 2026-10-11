@@ -1346,9 +1346,9 @@ jobs:
 
             ## Desktop apps
 
-            **Mac: use Mold Studio.** `Mold-Studio-macos-arm64.dmg` (also attached as `Mold-native-*.dmg`) — the native macOS app (Apple Silicon, macOS 26 or newer), signed, notarized and stapled. It updates itself through Sparkle; `mold-native-appcast.xml` beside it is that channel's feed. Stable link to the newest build: https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg
+            **Mac: two desktop apps, side by side** ([which one?](https://utensils.io/mold/download#mac)). `Mold-Studio-macos-arm64.dmg` (also attached as `Mold-native-*.dmg`) — Mold Studio, built natively for macOS (Apple Silicon, macOS 26 or newer), signed, notarized and stapled. It updates itself through Sparkle; `mold-native-appcast.xml` beside it is that channel's feed. Stable link to the newest build: https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg
 
-            `Mold-macos-arm64.dmg` (also attached with its versioned name) — the legacy Tauri desktop app for macOS, for Macs that cannot run macOS 26. Signed, notarized, and stapled. Stable link: https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg
+            `Mold-macos-arm64.dmg` (also attached with its versioned name) — Mold Desktop for Mac, the same app as Windows and Linux (Apple Silicon, macOS 12 or newer). Signed, notarized, and stapled. Stable link: https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg
 
             `mold-desktop-x86_64-unknown-linux-gnu-cpu.tar.gz` — the Linux desktop app for remote GPU hosts (no CUDA), as a `usr/` tree with its .desktop entry and icons. Arch users install it as the `mold-ai-desktop-bin` AUR package; `mold-ai-desktop` builds the CUDA app from source.
 

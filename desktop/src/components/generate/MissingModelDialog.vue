@@ -5,7 +5,7 @@
  * (pullResume store) instead of surfacing a raw HTTP error.
  */
 import { onMounted, ref } from "vue";
-import { modelDisplayNameForId, type DisplayableModel } from "../../lib/models";
+import { modelDisplayNameForId, type DisplayableModel } from "@studio/lib/modelDisplay";
 
 const props = defineProps<{
   model: string;

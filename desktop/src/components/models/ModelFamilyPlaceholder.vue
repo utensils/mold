@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed } from "vue";
 
-import { familyIdentity } from "../../lib/modelFamilyIdentity";
+import { familyLabel } from "@studio/lib/modelFamily";
+import { familyIdentity } from "@studio/lib/modelFamilyIdentity";
 
 const props = defineProps<{ family: string }>();
 
 const identity = computed(() => familyIdentity(props.family));
+const label = computed(() => familyLabel(props.family) || "Model");
 </script>
 
 <template>
@@ -22,8 +24,8 @@ const identity = computed(() => familyIdentity(props.family));
     >
       {{ identity.mark }}
     </span>
-    <span class="family-label font-mono absolute bottom-2.5 left-3 text-micro">
-      {{ identity.label }}
+    <span class="family-label font-mono absolute bottom-2.5 left-3 text-micro uppercase">
+      {{ label }}
     </span>
   </div>
 </template>

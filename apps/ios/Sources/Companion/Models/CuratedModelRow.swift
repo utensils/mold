@@ -17,8 +17,8 @@ struct CuratedModelRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(model.headline).font(.headline)
                 if model.hfRepo != nil { ModelSourceLabel(source: "hf") }
-                if let tradeOff = model.tradeOff {
-                    Text(tradeOff).font(.callout).foregroundStyle(.secondaryText)
+                if let summary = model.summary {
+                    Text(summary).font(.callout).foregroundStyle(.secondaryText)
                 }
                 Text(verbatim: model.name).font(.caption.monospaced()).foregroundStyle(.secondaryText)
                 if let reason = model.runtimeUnavailableReason, model.runtimeAvailable == false {

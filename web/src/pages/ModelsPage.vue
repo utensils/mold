@@ -30,8 +30,7 @@ import InstalledModelRow from "../components/models/InstalledModelRow.vue";
 import ModelDetailDrawer from "../components/models/ModelDetailDrawer.vue";
 import ModelInstallTargetDialog from "../components/models/ModelInstallTargetDialog.vue";
 import { toast } from "../lib/toasts";
-import { modelDisplayName } from "@studio/lib/modelDisplay";
-import { styleDisplayName } from "@studio/lib/styleLabel";
+import { modelPresentation, styleName } from "@studio/lib/modelDisplay";
 import {
   modelsForOutputKind,
   OUTPUT_KIND_LABEL,
@@ -122,8 +121,8 @@ const searchedInstalled = computed(() => {
   if (!q) return cat.installed.value;
   return cat.installed.value.filter((m) =>
     [
-      modelDisplayName(m),
-      styleDisplayName(m),
+      styleName(m),
+      modelPresentation(m).summary ?? "",
       m.name,
       m.family,
       m.description ?? "",
@@ -148,7 +147,7 @@ function showAllInstalled() {
 async function installElsewhere(model: ModelInfoExtended) {
   const choice = await installTargets.chooseInstallTarget({
     modelId: model.name,
-    displayName: styleDisplayName(model),
+    displayName: styleName(model),
     ownedByOrigin: true,
   });
   if (choice.kind === "cancelled") return;

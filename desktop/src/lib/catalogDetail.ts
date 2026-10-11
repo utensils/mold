@@ -6,7 +6,7 @@
  * testable (project test rule).
  */
 import { modelSource } from "@studio/lib/modelSource";
-import { modelDisplayName } from "./models";
+import { modelPresentation } from "@studio/lib/modelDisplay";
 import { modelKindValue } from "@studio/lib/modelMetadata";
 import type { CatalogEntry, ModelEntry } from "./api/types";
 
@@ -24,8 +24,9 @@ export function installedModelToEntry(m: ModelEntry): CatalogEntry {
   const catalogNamed = m.name.startsWith("cv:") || m.name.startsWith("hf:");
   const sourceId = catalogNamed ? m.name.slice(3) : m.hf_repo || null;
   const hfRepo = m.name.startsWith("hf:") ? m.name.slice(3) : m.hf_repo || null;
-  const displayName = modelDisplayName(m);
-  const description = m.description?.trim() ?? "";
+  const presented = modelPresentation(m);
+  const displayName = presented.displayName;
+  const description = (catalogNamed ? null : presented.summary) ?? m.description?.trim() ?? "";
   const repeatsDisplayName =
     description.length > 0 &&
     (description.localeCompare(displayName.trim(), undefined, { sensitivity: "accent" }) === 0 ||

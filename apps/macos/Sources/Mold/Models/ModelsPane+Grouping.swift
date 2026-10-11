@@ -60,7 +60,8 @@ extension ModelsPane {
         guard !query.isEmpty else { return all }
         let needle = query.lowercased()
         return all.filter {
-            $0.description.lowercased().contains(needle) || $0.name.lowercased().contains(needle)
+            $0.headline.lowercased().contains(needle)
+                || $0.description.lowercased().contains(needle) || $0.name.lowercased().contains(needle)
         }
     }
 

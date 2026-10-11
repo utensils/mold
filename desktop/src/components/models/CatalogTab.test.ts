@@ -347,7 +347,7 @@ describe("CatalogTab media filter under pagination", () => {
     searchCatalog.mockResolvedValue({
       entries: [
         {
-          ...entry("flux-dev:q8", "flux"),
+          ...entry("custom-flux:q8", "flux"),
           id: "hf:org/repo",
           source_id: "org/repo",
           kind: "lora",
@@ -366,7 +366,7 @@ describe("CatalogTab media filter under pagination", () => {
         layout: "grid" as const,
         installedEntries: [
           {
-            name: "flux-dev:q8",
+            name: "custom-flux:q8",
             family: "flux",
             size_gb: 12,
             is_loaded: false,
@@ -387,7 +387,7 @@ describe("CatalogTab media filter under pagination", () => {
 
     // One card, not the installed row plus the untagged live duplicate.
     const cards = wrapper.findAll("[data-test='catalog-card']");
-    const occurrences = wrapper.text().split("flux-dev:q8").length - 1;
+    const occurrences = wrapper.text().split("custom-flux:q8").length - 1;
     expect(occurrences).toBe(1);
     expect(cards.length).toBeLessThanOrEqual(1);
     // Host chips are the "you have this" indicator.

@@ -42,7 +42,7 @@ struct CatalogDetailSheet: View {
             if let author = entry.author {
                 Text("by \(author)").font(.caption).foregroundStyle(.secondary)
             }
-            Text("\(entry.family) · \(entry.kind) · \(entry.modality)")
+            Text("\(Model.familyLabel(forFamily: entry.family)) · \(entry.kind) · \(entry.modality)")
                 .font(.caption).foregroundStyle(.secondary)
             // `false` draws nothing -- never an affirmative "Safe" claim.
             if entry.nsfw {

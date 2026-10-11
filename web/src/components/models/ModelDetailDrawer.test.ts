@@ -679,6 +679,7 @@ describe("ModelDetailDrawer", () => {
         mockDetail.value = {
           kind: "installed",
           model: makeModel({
+            name: "cv:4242",
             display_name: "Studio Model",
             description,
           }),
@@ -694,6 +695,7 @@ describe("ModelDetailDrawer", () => {
       mockDetail.value = {
         kind: "installed",
         model: makeModel({
+          name: "cv:4242",
           display_name: "Studio Model",
           description: "A fast portrait model tuned for natural light.",
         }),
@@ -703,6 +705,17 @@ describe("ModelDetailDrawer", () => {
       expect(w.get(".md__desc").text()).toContain(
         "A fast portrait model tuned for natural light.",
       );
+    });
+
+    it("names a curated install by its short title and says why to pick it", () => {
+      mockDetail.value = {
+        kind: "installed",
+        model: makeModel(),
+        components: [],
+      };
+      const w = mount(ModelDetailDrawer);
+      expect(w.get(".md__name").text()).toBe("FLUX.1 Schnell Q8");
+      expect(w.get(".md__desc").text()).toBe("Fast 4-step, general purpose");
     });
 
     it("renders retained catalog sidecar metadata for an installed model", () => {

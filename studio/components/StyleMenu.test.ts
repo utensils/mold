@@ -49,9 +49,9 @@ describe("StyleMenu rows", () => {
     });
 
     expect(wrapper.findAll(".ms-model__group").map((n) => n.text())).toEqual([
-      "FLUX",
+      "FLUX.1",
       "Z-Image",
-      "Flux.2",
+      "FLUX.2",
     ]);
     expect(
       wrapper.findAll("[data-test='model-option-id']").map((n) => n.text()),
@@ -97,14 +97,12 @@ describe("StyleMenu rows", () => {
   });
 
   /*
-   * The lexicon is description-first (§2: "Photoreal — best quality ·
-   * `flux-dev:q4`"; a bare id is a "never say" as the primary label). A
-   * manifest style's `modelDisplayName` IS its id, so the rows used to read
-   * `flux-schnell:q8` over `flux-schnell:q8 23.1 GB` — the id twice — while
-   * the chip above them already said the description. One rule now:
-   * `styleDisplayName`.
+   * One naming authority (`modelPresentation`): a manifest row reads its
+   * short title with the variant as a mono chip, the id in mono beneath, and
+   * the one-line reason to pick it — never the id twice, never the old
+   * "Title — trade-off" description as the name.
    */
-  it("leads a manifest style with its description, not its id", () => {
+  it("leads a manifest style with its short title, variant and summary", () => {
     const wrapper = mountMenu({
       models: [
         model({
@@ -116,37 +114,54 @@ describe("StyleMenu rows", () => {
     });
 
     expect(wrapper.get("[data-test='model-option-name']").text()).toBe(
-      "FLUX.1 Schnell Q8 — fast 4-step, general purpose",
+      "FLUX.1 Schnell",
     );
+    expect(wrapper.get("[data-test='model-option-variant']").text()).toBe("Q8");
     expect(wrapper.get("[data-test='model-option-id']").text()).toBe(
       "flux-schnell:q8",
     );
-    expect(
-      wrapper.find("[data-test='model-option-description']").exists(),
-    ).toBe(false);
+    expect(wrapper.get("[data-test='model-option-description']").text()).toBe(
+      "Fast 4-step, general purpose",
+    );
   });
 
-  it("falls back to the family's own name when a style describes itself with nothing", () => {
+  it("prefers the row's own server presentation", () => {
     const wrapper = mountMenu({
       models: [
-        model({ name: "wan22-ti2v-5b:fp16", family: "wan", description: "" }),
+        model({
+          name: "flux-dev:q4",
+          title: "FLUX.1 Dev",
+          variant: "Q4",
+          summary: "Smaller and faster",
+        }),
       ],
+    });
+    expect(wrapper.get("[data-test='model-option-name']").text()).toBe(
+      "FLUX.1 Dev",
+    );
+    expect(wrapper.get("[data-test='model-option-description']").text()).toBe(
+      "Smaller and faster",
+    );
+  });
+
+  it("falls back to the family's own name for an id nothing names", () => {
+    const wrapper = mountMenu({
+      models: [model({ name: "custom-wan", family: "wan", description: "" })],
     });
     expect(wrapper.get("[data-test='model-option-name']").text()).toBe(
       "Wan Video",
     );
     expect(wrapper.get("[data-test='model-option-id']").text()).toBe(
-      "wan22-ti2v-5b:fp16",
+      "custom-wan",
+    );
+    expect(wrapper.find("[data-test='model-option-variant']").exists()).toBe(
+      false,
     );
   });
 
-  /*
-   * `styleDisplayName` ranks the description ABOVE `display_name`, so a
-   * catalog row carrying both would silently lose its curated name. The
-   * second line is where that name goes — never a repeat of the title or of
-   * the id beneath it.
-   */
-  it("keeps the curated name the description outranked, and never repeats one", () => {
+  /* A catalog install is never renamed: its provider title leads and the
+   * catalog description, when it says something else, is the second line. */
+  it("keeps a catalog install's provider title and its description", () => {
     const wrapper = mountMenu({
       models: [
         model({
@@ -155,35 +170,16 @@ describe("StyleMenu rows", () => {
           display_name: "Studio style",
           description: "RealVisXL V5.0 by SG161222",
         }),
+        model({ name: "cv:2", family: "sdxl", description: "RealVisXL V5.0" }),
       ],
     });
 
-    expect(wrapper.get("[data-test='model-option-name']").text()).toBe(
-      "RealVisXL V5.0 by SG161222",
-    );
-    expect(wrapper.get("[data-test='model-option-description']").text()).toBe(
-      "Studio style",
-    );
-  });
-
-  it("says nothing on the second line when the row has one name", () => {
-    const wrapper = mountMenu({
-      models: [
-        model({
-          name: "flux-dev:q8",
-          family: "flux",
-          description: "Detailed still images",
-        }),
-        model({ name: "cv:1", family: "sdxl", description: "RealVisXL V5.0" }),
-      ],
-    });
-
-    expect(wrapper.findAll("[data-test='model-option-description']")).toEqual(
-      [],
-    );
+    expect(rowText(wrapper)).toEqual(["Studio style", "RealVisXL V5.0"]);
     expect(
-      wrapper.findAll("[data-test='model-option-name']").map((n) => n.text()),
-    ).toEqual(["Detailed still images", "RealVisXL V5.0"]);
+      wrapper
+        .findAll("[data-test='model-option-description']")
+        .map((n) => n.text()),
+    ).toEqual(["RealVisXL V5.0 by SG161222"]);
   });
 
   it("renders the host's glyph slot beside every row", () => {
@@ -248,7 +244,7 @@ describe("StyleMenu filter", () => {
 
   /* Everything a person might have read on the row, or remembered from the
    * command line, reaches the filter — the title, the id, and the family. */
-  it("narrows on the id, the description, the plain name and the family label", async () => {
+  it("narrows on the id, the description, the title, the summary and the family label", async () => {
     const wrapper = mountMenu({
       models: [
         ...many(8),
@@ -262,13 +258,16 @@ describe("StyleMenu filter", () => {
     });
 
     await wrapper.get("[data-test='model-filter']").setValue("wan video");
-    expect(rowText(wrapper)).toEqual(["Wan Video"]);
+    expect(rowText(wrapper)).toEqual(["Wan 2.2 TI2V 5B"]);
 
     await wrapper.get("[data-test='model-filter']").setValue("flux-dev");
-    expect(rowText(wrapper)).toEqual(["Photoreal — best quality"]);
+    expect(rowText(wrapper)).toEqual(["FLUX.1 Dev"]);
 
     await wrapper.get("[data-test='model-filter']").setValue("photoreal");
-    expect(rowText(wrapper)).toEqual(["Photoreal — best quality"]);
+    expect(rowText(wrapper)).toEqual(["FLUX.1 Dev"]);
+
+    await wrapper.get("[data-test='model-filter']").setValue("full quality");
+    expect(rowText(wrapper)).toEqual(["FLUX.1 Dev"]);
   });
 
   it("says a filter matched nothing in different words from an empty section", async () => {

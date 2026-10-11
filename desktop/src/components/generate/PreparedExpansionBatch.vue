@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { hostSelectionLabel, type PreparedExpansionBatch } from "../../lib/preparedExpansion";
 import type { ExpansionPullView } from "../../lib/expansionPull";
 import ExpansionPullStatus from "./ExpansionPullStatus.vue";
-import type { DisplayableModel } from "../../lib/models";
+import type { DisplayableModel } from "@studio/lib/modelDisplay";
 
 const props = defineProps<{
   batch: PreparedExpansionBatch;

@@ -55,12 +55,22 @@ describe("model family labels", () => {
     expect(fixture.family_label).not.toBe(fixture.family);
   });
 
-  it("keeps the established labels for the families that have one", () => {
-    expect(familyLabel("flux")).toBe("FLUX");
+  it("reads the generated authority for the families that have one", () => {
+    expect(familyLabel("flux")).toBe("FLUX.1");
+    expect(familyLabel("flux2")).toBe("FLUX.2");
+    expect(familyLabel("sd3.5")).toBe("SD 3.5");
+    expect(familyLabel("ltx2")).toBe("LTX-2");
     expect(familyLabel("ltx-2")).toBe("LTX-2");
     expect(familyLabel("qwen-image-edit")).toBe("Qwen Image Edit");
     expect(familyLabel("qwen-image21")).toBe("Qwen Image 2.1");
     expect(familyLabel("minimax-h3")).toBe("MiniMax H3");
+  });
+
+  it("resolves separator-only spellings of a known slug", () => {
+    expect(familyLabel("minimax_h3")).toBe("MiniMax H3");
+    expect(familyLabel("zimage")).toBe("Z-Image");
+    expect(familyLabel("flux-2")).toBe("FLUX.2");
+    expect(familyLabel("sd1.5")).toBe("SD 1.5");
   });
 
   it("title-cases an unknown family rather than showing the slug", () => {

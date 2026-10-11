@@ -8,10 +8,10 @@ use crate::output::{is_piped, status};
 use crate::theme;
 
 /// Display label for a family identifier. The table itself lives in
-/// `mold_core::format::family_display_label` so no two surfaces can drift
+/// `mold_core::model_presentation::family_label` so no two surfaces can drift
 /// (#806); unknown identifiers fall back to the raw string here.
 pub(crate) fn family_label(family: &str) -> &str {
-    mold_core::format::family_display_label(family).unwrap_or(family)
+    mold_core::model_presentation::family_label(family).unwrap_or(family)
 }
 
 pub(crate) fn format_family_padded(family: &str, width: usize) -> String {
@@ -39,7 +39,7 @@ pub(crate) fn format_family_padded(family: &str, width: usize) -> String {
 }
 
 pub(crate) fn format_family(family: &str) -> String {
-    if mold_core::format::family_display_label(family).is_some() {
+    if mold_core::model_presentation::family_label(family).is_some() {
         format_family_padded(family, family_label(family).len())
             .trim_end()
             .to_string()
@@ -557,7 +557,7 @@ mod tests {
     #[test]
     fn format_family_qwen_image_edit_matches_qwen_image_label() {
         let result = format_family("qwen-image-edit");
-        assert!(result.contains("Qwen-Image-Edit"));
+        assert!(result.contains("Qwen Image Edit"));
     }
 
     #[test]

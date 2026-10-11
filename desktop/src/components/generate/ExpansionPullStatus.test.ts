@@ -10,7 +10,7 @@ function mountStatus(status: ExpansionPullView) {
     props: {
       model: "qwen3-expand:q8",
       hostLabel: "Studio GPU",
-      error: "The expansion model qwen3-expand:q8 isn't installed on Studio GPU.",
+      error: "The expansion model Qwen3-1.7B Q8 isn't installed on Studio GPU.",
       status,
       etaSeconds: 42,
     },
@@ -42,10 +42,10 @@ describe("ExpansionPullStatus", () => {
     ["ready", downloadJob("completed")],
     ["failed", downloadJob("failed", { error: "disk full" })],
     ["cancelled", downloadJob("cancelled")],
-  ] as const)("keeps exact model and host identity visible in the %s state", (kind, job) => {
+  ] as const)("keeps the model and host visible in the %s state", (kind, job) => {
     const wrapper = mountStatus({ kind, job });
     expect(wrapper.get('[role="status"]').attributes("aria-live")).toBe("polite");
-    expect(wrapper.text()).toContain("qwen3-expand:q8");
+    expect(wrapper.text()).toContain("Qwen3-1.7B Q8");
     expect(wrapper.text()).toContain("Studio GPU");
   });
 
@@ -75,7 +75,7 @@ describe("ExpansionPullStatus", () => {
   it("offers expansion retry only after the exact pull is ready", async () => {
     const wrapper = mountStatus({ kind: "ready", job: downloadJob("completed") });
     const button = wrapper.get('[data-test="retry-expansion"]');
-    expect(button.attributes("aria-label")).toContain("qwen3-expand:q8");
+    expect(button.attributes("aria-label")).toContain("Qwen3-1.7B Q8");
     expect(button.attributes("aria-label")).toContain("Studio GPU");
     await button.trigger("click");
     expect(wrapper.emitted("retry-expansion")).toHaveLength(1);
@@ -90,7 +90,7 @@ describe("ExpansionPullStatus", () => {
       });
       expect(wrapper.text()).toContain("Studio GPU");
       const button = wrapper.get('[data-test="retry-expand-pull"]');
-      expect(button.text()).toContain("qwen3-expand:q8");
+      expect(button.text()).toContain("Qwen3-1.7B Q8");
       expect(button.text()).toContain("Studio GPU");
       await button.trigger("click");
       expect(wrapper.emitted("pull")).toHaveLength(1);

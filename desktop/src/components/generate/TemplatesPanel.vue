@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import type { GenerateForm } from "../../lib/generateForm";
-import { modelDisplayNameForId, type DisplayableModel } from "../../lib/models";
+import { modelDisplayNameForId, type DisplayableModel } from "@studio/lib/modelDisplay";
 import {
   deleteGenerationTemplateWithMedia,
   fallbackTemplateName,

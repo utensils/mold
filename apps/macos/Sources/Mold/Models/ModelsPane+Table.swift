@@ -8,17 +8,17 @@ import SwiftUI
 extension ModelsPane {
     var table: some View {
         Table(of: Model.self, selection: $selection, sortOrder: sortOrder) {
-            // The bare name: `baseTitle` drops the trailing variant words
+            // The bare name: the presentation `title` carries no variant
             // (`headline` would repeat "Q4" beside the Variant column's own
             // chip -- M5 S3 UAT).
             TableColumn("Model", value: \.sortHeadline) { model in
-                Text(model.baseTitle).help(model.name)
+                Text(model.title).help(model.name)
             }
             TableColumn("Variant", value: \.sortVariant) { model in
                 variantCell(model)
             }
             TableColumn("Trade-off", value: \.sortTradeOff) { model in
-                Text(model.tradeOff ?? "—")
+                Text(model.summary ?? "—")
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -33,7 +33,7 @@ extension ModelsPane {
             }
         } rows: {
             ForEach(sections, id: \.family) { section in
-                Section(section.family) {
+                Section(Model.familyLabel(forFamily: section.family)) {
                     ForEach(section.rows) { model in
                         TableRow(model).rowActionMenu(menuItems(for: model)) { kind in
                             if let host { actions.perform(kind, on: model, host: host) }
@@ -44,14 +44,14 @@ extension ModelsPane {
         }
     }
 
-    /// The quantization tag as a chip, or an em dash for an untagged model --
-    /// what `ModelVariantRow`'s own chip drew, now the Variant column's cell.
+    /// The presentation's variant ("Q4", "Turbo 4-step 768p") as a chip, or
+    /// an em dash for a model with no siblings -- never the raw id tag.
     private func variantCell(_ model: Model) -> some View {
         Group {
-            if let tag = model.tag {
-                Text(tag.uppercased())
+            if let variant = model.variantLabel {
+                Text(variant)
                     .font(.caption.weight(.medium))
-                    .monospaced()
+                    .lineLimit(1)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
                     .background(Chrome.wellFill, in: RoundedRectangle(cornerRadius: Chrome.tileRadius))

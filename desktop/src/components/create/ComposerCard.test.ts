@@ -547,3 +547,56 @@ describe("spacious prompt editing", () => {
     wrapper.unmount();
   });
 });
+
+// The prompt is a real writing surface, not a one-line field: it opens three
+// lines tall and a handle above it makes it taller or shorter, remembered
+// across launches — the native Mac composer's behaviour.
+describe("resizable prompt", () => {
+  const height = (wrapper: ReturnType<typeof mountComposer>) =>
+    (wrapper.get("textarea[aria-label='Prompt']").element as HTMLTextAreaElement).style.height;
+
+  it("opens at the remembered height and grows upward from its handle", async () => {
+    localStorage.clear();
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 1200 });
+    const wrapper = mountComposer(baseForm());
+    expect(height(wrapper)).toBe("72px");
+    const handle = wrapper.get('[data-test="prompt-resize-handle"]');
+    expect(handle.attributes("role")).toBe("separator");
+    expect(handle.attributes("aria-orientation")).toBe("horizontal");
+
+    await handle.trigger("keydown", { key: "ArrowUp" });
+    expect(height(wrapper)).toBe("112px");
+    expect(localStorage.getItem("mold.desktop.promptEditorHeight.v1")).toBe("112");
+    await handle.trigger("keydown", { key: "ArrowDown" });
+    await handle.trigger("keydown", { key: "ArrowDown" });
+    expect(height(wrapper)).toBe("48px");
+
+    await handle.trigger("pointerdown", { clientY: 500, pointerId: 1, button: 0 });
+    await handle.trigger("pointermove", { clientY: 380, pointerId: 1 });
+    await handle.trigger("pointerup", { clientY: 380, pointerId: 1 });
+    expect(height(wrapper)).toBe("168px");
+
+    await handle.trigger("dblclick");
+    expect(height(wrapper)).toBe("72px");
+    wrapper.unmount();
+
+    savePromptHeightForTest(240);
+    expect(height(mountComposer(baseForm()))).toBe("240px");
+  });
+
+  it("draws a short window's prompt smaller without forgetting the choice", async () => {
+    savePromptHeightForTest(400);
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 700 });
+    const wrapper = mountComposer(baseForm());
+    expect(height(wrapper)).toBe("120px");
+    expect(localStorage.getItem("mold.desktop.promptEditorHeight.v1")).toBe("400");
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 1200 });
+    window.dispatchEvent(new Event("resize"));
+    await wrapper.vm.$nextTick();
+    expect(height(wrapper)).toBe("400px");
+  });
+});
+
+function savePromptHeightForTest(px: number) {
+  localStorage.setItem("mold.desktop.promptEditorHeight.v1", String(px));
+}

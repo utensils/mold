@@ -48,7 +48,7 @@ import {
   type ConfigRow,
   type ConfigValue,
 } from "@studio/api/config";
-import { styleDisplayName, styleLabel } from "@studio/lib/styleLabel";
+import { styleLabel, styleName } from "@studio/lib/modelDisplay";
 import type { DeviceInfo } from "@studio/api/devices";
 import { ORIGIN_ACCESS_CHANGE_KEY } from "../lib/originAuth";
 import { matchSystem, theme } from "../lib/theme";
@@ -284,8 +284,7 @@ async function loadModels() {
 }
 
 const styleNames = computed(
-  () =>
-    new Map(models.value.map((model) => [model.name, styleDisplayName(model)])),
+  () => new Map(models.value.map((model) => [model.name, styleName(model)])),
 );
 
 const defaultModelOptions = computed(() => {

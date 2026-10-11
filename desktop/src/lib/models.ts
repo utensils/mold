@@ -5,21 +5,7 @@
  */
 import type { ModelEntry } from "./api/types";
 import { formatGB } from "./format";
-import {
-  isCatalogModelId,
-  isOpaqueModelId,
-  modelDisplayName,
-  modelDisplayNameForId,
-  type DisplayableModel,
-} from "@studio/lib/modelDisplay";
-
-export {
-  isCatalogModelId,
-  isOpaqueModelId,
-  modelDisplayName,
-  modelDisplayNameForId,
-  type DisplayableModel,
-};
+import { isCatalogModelId } from "@studio/lib/modelDisplay";
 
 /** Families that aren't image/video generators — grouped separately at the
  * bottom of the Installed tab. Mirrors `stores/models.ts`'s exclusion set. */
@@ -68,9 +54,17 @@ export function mergeModelPresentationMetadata<T extends ModelEntry>(
       ? supplement.description
       : (preferred.description ?? supplement.description);
 
+  // The four presentation fields are one answer from one server build: take
+  // them together from whichever copy has a title, never one machine's title
+  // beside another's variant.
+  const presented = hasText(preferred.title) ? preferred : supplement;
   return {
     ...preferred,
     display_name: displayName,
+    title: presented.title,
+    variant: presented.variant,
+    summary: presented.summary,
+    family_label: presented.family_label,
     kind: hasText(preferred.kind) ? preferred.kind : supplement.kind,
     modality: hasText(preferred.modality) ? preferred.modality : supplement.modality,
     description,

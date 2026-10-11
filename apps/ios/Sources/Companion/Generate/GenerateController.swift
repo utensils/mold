@@ -81,7 +81,9 @@ final class GenerateController {
             }
         }
         let grouped = Dictionary(grouping: seen.values, by: \.family)
-        return grouped.keys.sorted().map { family in
+        return grouped.keys.sorted {
+            Model.familyPrecedes($0, $1)
+        }.map { family in
             (family, grouped[family]!.sorted { $0.name < $1.name })
         }
     }

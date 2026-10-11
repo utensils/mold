@@ -54,7 +54,7 @@ describe("DownloadsTray a11y", () => {
     expect(bar.attributes("aria-valuemin")).toBe("0");
     expect(bar.attributes("aria-valuemax")).toBe("100");
     expect(bar.attributes("aria-valuenow")).toBe("25");
-    expect(bar.attributes("aria-label")).toContain("flux-dev:q4");
+    expect(bar.attributes("aria-label")).toContain("FLUX.1 Dev Q4");
   });
 
   /**
@@ -76,7 +76,7 @@ describe("DownloadsTray a11y", () => {
     const wrapper = mount(DownloadsTray);
 
     const cancel = wrapper.get("button");
-    expect(cancel.attributes("aria-label")).toBe("Cancel download of flux-dev:q4 on This device");
+    expect(cancel.attributes("aria-label")).toBe("Cancel download of FLUX.1 Dev Q4 on This device");
   });
 
   it("renders a source glyph for each download row", () => {
@@ -116,7 +116,7 @@ describe("DownloadsTray a11y", () => {
 
     expect(wrapper.text()).toContain("hal9000");
     const cancel = wrapper.get("button");
-    expect(cancel.attributes("aria-label")).toBe("Cancel download of flux-dev:q4 on hal9000");
+    expect(cancel.attributes("aria-label")).toBe("Cancel download of FLUX.1 Dev Q4 on hal9000");
     await cancel.trigger("click");
     expect(apiFetchTo).toHaveBeenCalledWith(
       { baseUrl: "http://hal9000:7680", apiKey: "remote-key" },
@@ -274,7 +274,7 @@ describe("DownloadsTray a11y", () => {
 
     await toggle.trigger("click");
     const list = wrapper.get('[data-test="history-list"]');
-    expect(list.text()).toContain("flux-dev:q4");
+    expect(list.text()).toContain("FLUX.1 Dev Q4");
     expect(list.text()).toContain("Failed");
     expect(list.text()).toContain("connection reset");
   });
@@ -410,7 +410,7 @@ describe("DownloadsTray compact summary", () => {
     const wrapper = mount(DownloadsTray, { props: { compact: true } });
 
     const summary = wrapper.get("[data-test='downloads-summary']");
-    expect(summary.text()).toContain("flux-dev:q4");
+    expect(summary.text()).toContain("FLUX.1 Dev Q4");
     expect(summary.get("[data-test='downloads-summary-progress']").text()).toContain("25% · eta");
     expect(summary.text()).toContain("Nothing else queued to download.");
     expect(summary.get("[role='progressbar']").attributes("aria-valuenow")).toBe("25");

@@ -38,9 +38,9 @@ import {
   groupInstalledModels,
   isUtilityModel,
   modelDiskBytes,
-  modelDisplayName,
   modelSizeLabels,
 } from "../../lib/models";
+import { modelDisplayName, modelPresentation, styleName } from "@studio/lib/modelDisplay";
 import { modelSource } from "@studio/lib/modelSource";
 import { styleDiskSegments, type StyleDiskSegment } from "../../lib/styleDiskSegments";
 import { familyLabel } from "@studio/lib/modelFamily";
@@ -386,7 +386,7 @@ async function unload(m: LibraryModelEntry) {
         <li v-for="m in list" :key="m.name">
           <ModelTableRow
             class="px-3"
-            :name="modelDisplayName(m)"
+            :name="styleName(m)"
             :id="m.name"
             :source="modelSource(m)"
             :loaded="m.is_loaded"
@@ -397,7 +397,7 @@ async function unload(m: LibraryModelEntry) {
             speed-column
             :speed="formatTypicalTime(typicalTimes.get(m.name))"
             :page-url="pageUrl(m)"
-            :note="m.description || null"
+            :note="modelPresentation(m).summary"
             :size-primary="
               modelSizeLabels(m).weights ?? modelSizeLabels(m).runtime ?? 'Size unavailable'
             "

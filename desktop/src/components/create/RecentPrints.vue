@@ -5,7 +5,7 @@ import { displayTitle } from "@studio/lib/libraryOrganization";
 import AuthedMedia from "../gallery/AuthedMedia.vue";
 import { showsAlphaBed } from "@studio/lib/alphaMedia";
 import { galleryMediaPath } from "../../lib/gallery/media";
-import { modelDisplayNameForId, type DisplayableModel } from "../../lib/models";
+import { modelDisplayNameForId, type DisplayableModel } from "@studio/lib/modelDisplay";
 import { useGalleryStore, type MergedPrint } from "../../stores/gallery";
 
 /**

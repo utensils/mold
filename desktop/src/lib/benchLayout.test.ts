@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { COMPOSER_FALLBACK_HEIGHT, MIN_CANVAS_HEIGHT } from "./benchLayout";
+import { PROMPT_HEIGHT_INITIAL, availablePromptHeight } from "./promptEditorHeight";
 
 /*
  * The workbench is `overflow-hidden`, so whatever the canvas floor fails to
@@ -18,6 +19,17 @@ describe("workbench canvas floor", () => {
     expect(MIN_CANVAS_HEIGHT + COMPOSER_FALLBACK_HEIGHT).toBeLessThanOrEqual(
       MIN_WINDOW - SHELL_CHROME,
     );
+  });
+
+  it("lets the prompt grow only as far as the minimum window still fits Generate", () => {
+    // The composer around the prompt (handle, padding, control row) plus the
+    // tallest prompt this window allows plus the canvas floor must fit, or
+    // dragging the handle up would push Generate off the bottom.
+    const aroundPrompt = COMPOSER_FALLBACK_HEIGHT - PROMPT_HEIGHT_INITIAL;
+    expect(PROMPT_HEIGHT_INITIAL).toBeLessThanOrEqual(availablePromptHeight(MIN_WINDOW));
+    expect(
+      MIN_CANVAS_HEIGHT + aroundPrompt + availablePromptHeight(MIN_WINDOW),
+    ).toBeLessThanOrEqual(MIN_WINDOW - SHELL_CHROME);
   });
 
   it("keeps the retired scene bench's constants gone", async () => {

@@ -111,6 +111,10 @@ export interface Job {
   /** A terminal recovered from disk is historical, not a fresh foreground
    * completion that should raise the App-shell toast again. */
   suppressFreshCompletion?: boolean;
+  /** A finished Library print shown on the canvas by "Use these settings".
+   *  It is never queue work: every queue projection leaves it out, and only
+   *  the newest one is kept. */
+  fromLibrary?: boolean;
   /** Object URL of the decoded result. */
   resultUrl: string | null;
   /** Object URL of the latest live latent preview (small PNG, upscaled by CSS). */

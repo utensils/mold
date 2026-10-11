@@ -36,7 +36,6 @@ import {
   type CatalogSource,
 } from "../lib/catalogFilters";
 import { catalogFamily, familyLabel, matchesCatalogFamily } from "@studio/lib/modelFamily";
-import { styleDisplayName } from "@studio/lib/styleLabel";
 import { filterRestrictedModels } from "@studio/lib/modelAccess";
 import {
   modelRuntimeNotice,
@@ -58,12 +57,13 @@ import { catalogThumbnailUrl } from "../lib/catalogThumbnails";
 import { outputKindForModel, OUTPUT_KIND_LABEL } from "@studio/lib/outputKind";
 import { useInfiniteScrollSentinel } from "../lib/useInfiniteScrollSentinel";
 import { formatCount, formatGB, percent } from "../lib/format";
+import { isUtilityModel, mergeModelPresentationMetadata } from "../lib/models";
 import {
   isCatalogModelId,
-  isUtilityModel,
-  mergeModelPresentationMetadata,
+  modelDisplayName,
   modelDisplayNameForId,
-} from "../lib/models";
+  styleName,
+} from "@studio/lib/modelDisplay";
 import { fetchModelComponents, loadModel, removeModel, unloadModel } from "../lib/api/models";
 import type {
   CatalogEntry,
@@ -539,7 +539,7 @@ const detailVariants = computed(() => {
 
 /** Human title for announce/toast text; ids stay `entry.name` in API calls. */
 function entryTitle(entry: MobileCatalogEntry): string {
-  return entry.display_name ?? entry.name;
+  return modelDisplayName(entry);
 }
 
 /**
@@ -558,12 +558,7 @@ function installedWeightLabel(entry: MobileCatalogEntry): string | null {
  * screens. The row keeps `entry.name` beside it in mono when they differ.
  */
 function entryStyleName(entry: MobileCatalogEntry): string {
-  return styleDisplayName({
-    name: entry.name,
-    family: entry.family,
-    description: entry.description ?? null,
-    display_name: entry.display_name ?? null,
-  });
+  return styleName(entry);
 }
 
 /**
@@ -1590,7 +1585,7 @@ const { dragging, panelStyle, backdropStyle, beginDismiss, moveDismiss, finishDi
               :disabled="downloadHosts.length <= 1 && Boolean(pullStatus(entry))"
               :aria-busy="Boolean(pullStatus(entry))"
               :data-pull-state="pullStatus(entry)?.phase"
-              :aria-label="`${pullButtonLabel(entry)} ${entry.display_name ?? entry.name}`"
+              :aria-label="`${pullButtonLabel(entry)} ${entryTitle(entry)}`"
               @click="requestPull(entry)"
             >
               {{ pullButtonLabel(entry) }}
@@ -1655,7 +1650,7 @@ const { dragging, panelStyle, backdropStyle, beginDismiss, moveDismiss, finishDi
             <div class="mobile-catalog-detail-title">
               <div>
                 <h2 id="mobile-catalog-detail-title">
-                  {{ mergedDetail.display_name ?? mergedDetail.name }}
+                  {{ entryTitle(mergedDetail) }}
                 </h2>
                 <p v-if="mergedDetail.author">by {{ mergedDetail.author }}</p>
               </div>
@@ -1921,17 +1916,16 @@ const { dragging, panelStyle, backdropStyle, beginDismiss, moveDismiss, finishDi
                 <!-- Only a mixed list needs the repair caveat; a plain first
                      download must not imply some machine already has it. -->
                 <template v-if="targetPlanMixed">
-                  {{ targetEntry.display_name ?? targetEntry.name }} and its required components
-                  will be stored on the machine you pick; machines that already have it are repaired
-                  instead.
+                  {{ entryTitle(targetEntry) }} and its required components will be stored on the
+                  machine you pick; machines that already have it are repaired instead.
                 </template>
                 <template v-else-if="targetPlan?.canInstall">
-                  {{ targetEntry.display_name ?? targetEntry.name }} and its required components
-                  will be stored on the machine you pick.
+                  {{ entryTitle(targetEntry) }} and its required components will be stored on the
+                  machine you pick.
                 </template>
                 <template v-else>
                   Only missing or damaged files for
-                  {{ targetEntry.display_name ?? targetEntry.name }} will be fetched.
+                  {{ entryTitle(targetEntry) }} will be fetched.
                 </template>
               </p>
               <!-- Where a model lands decides where Create can route it. -->

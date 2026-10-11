@@ -63,10 +63,12 @@ export function useQueueActivity(): QueueActivity {
   const hosts = useHostsStore();
   const liveActivity = useLiveActivityStore();
 
-  /** Every live job newest-first, then the recent finished prints. */
+  /** Every live job newest-first, then the recent finished prints. A Library
+   *  print reused onto the canvas is not work and never lists here. */
   const prints = computed<Job[]>(() => {
-    const live = railOrder(generation.jobs.filter((j) => !jobSettled(j)));
-    const done = generation.jobs.filter(jobSettled).slice(-GENERATION_HISTORY_LIMIT).reverse();
+    const work = generation.jobs.filter((j) => !j.fromLibrary);
+    const live = railOrder(work.filter((j) => !jobSettled(j)));
+    const done = work.filter(jobSettled).slice(-GENERATION_HISTORY_LIMIT).reverse();
     return [...live, ...done];
   });
 

@@ -12,7 +12,7 @@ import { computed, ref } from "vue";
 import PerStyleDefaultsRow from "@studio/components/settings/PerStyleDefaultsRow.vue";
 import type { ConfigValue } from "@studio/api/config";
 import { groupPerStyleRows } from "@studio/lib/settingsSchema";
-import { styleDisplayName } from "@studio/lib/styleLabel";
+import { styleName } from "@studio/lib/modelDisplay";
 import { useModelStore } from "../../stores/models";
 import { useSettingsConfigStore } from "../../stores/settingsConfig";
 import { useToastStore } from "../../stores/toasts";
@@ -38,11 +38,12 @@ const shown = computed(() => {
   );
 });
 
-/** The friendly name this machine knows the style by, if it knows it at all —
- *  a style may be tuned on a machine that no longer lists it. */
+/** The style's friendly name — from this machine's row, else the generated
+ *  presentation table (a style may be tuned on a machine that no longer
+ *  lists it); null when nothing names it beyond its id. */
 function displayName(style: string): string | null {
-  const model = models.all.find((entry) => entry.name === style);
-  return model ? styleDisplayName(model) : null;
+  const name = styleName(models.all.find((entry) => entry.name === style) ?? { name: style });
+  return name === style ? null : name;
 }
 
 async function save(key: string, value: ConfigValue) {

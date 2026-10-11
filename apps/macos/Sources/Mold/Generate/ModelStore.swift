@@ -90,7 +90,9 @@ final class ModelStore {
     func families(on host: MoldHost.ID) -> [(family: String, models: [Model])] {
         Dictionary(grouping: ready(on: host), by: \.family)
             .map { (family: $0.key, models: $0.value.sorted { $0.name < $1.name }) }
-            .sorted { $0.family < $1.family }
+            .sorted {
+                Model.familyPrecedes($0.family, $1.family)
+            }
     }
 
     func model(named name: String, on host: MoldHost.ID) -> Model? {

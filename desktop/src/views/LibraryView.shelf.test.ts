@@ -374,7 +374,7 @@ describe("Prints tiles + chip row", () => {
   it("reads title · model · seed on the edge strip and ♥ on favorites", async () => {
     const { wrapper } = await mountView();
     const strip = tileFor(wrapper, smurf04.filename).get("[data-test='edge-strip']");
-    expect(strip.text().replace(/\s+/g, " ")).toBe("smurf 04 · flux-dev:q8 · seed 4");
+    expect(strip.text().replace(/\s+/g, " ")).toBe("smurf 04 · FLUX.1 Dev Q8 · seed 4");
     expect(
       tileFor(wrapper, smurf04.filename)
         .get("[data-test='tile-favorite']")

@@ -37,8 +37,12 @@ describe("installedModelToEntry", () => {
       installed: true,
       size_bytes: 11_800_000_000,
       page_url: "https://huggingface.co/org/repo",
-      description: "The dev model.",
+      // A curated id's note is its one-line summary, not the long description.
+      description: "Full quality, 20+ steps",
     });
+    expect(installedModelToEntry(installedModel({ name: "my-custom:q8" })).description).toBe(
+      "The dev model.",
+    );
   });
 
   it("keeps the upstream version id for Civitai installs and omits unreported fields", () => {
@@ -69,8 +73,12 @@ describe("installedModelToEntry", () => {
     expect(entry.display_name).toBe("Juggernaut XL - Ragnarok");
   });
 
-  it("leaves display_name empty when the name is already readable", () => {
-    expect(installedModelToEntry(installedModel()).display_name).toBeNull();
+  it("names a manifest install through the presentation authority", () => {
+    expect(installedModelToEntry(installedModel()).display_name).toBe("FLUX.1 Dev Q8");
+  });
+
+  it("leaves display_name empty when nothing names the id", () => {
+    expect(installedModelToEntry(installedModel({ name: "my-custom:q8" })).display_name).toBeNull();
   });
 
   it("preserves additive installed metadata and derives built-in utility kinds", () => {

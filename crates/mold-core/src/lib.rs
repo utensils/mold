@@ -42,6 +42,7 @@ pub mod mesh_workflow;
 pub mod metal_memory;
 pub mod minimax_h3;
 pub mod model_policy;
+pub mod model_presentation;
 pub mod organization;
 pub mod print_title;
 pub mod prompt_text;

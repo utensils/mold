@@ -20,7 +20,7 @@ import {
 } from "../lib/generationTemplates";
 import type { GenerateForm } from "../lib/generateForm";
 import type { ModelEntry } from "../lib/api/types";
-import { modelDisplayNameForId } from "../lib/models";
+import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
 
 const props = defineProps<{ form: GenerateForm; hostId: string; models?: ModelEntry[] }>();
 const modelLabel = (name: string) => modelDisplayNameForId(name, props.models ?? []);

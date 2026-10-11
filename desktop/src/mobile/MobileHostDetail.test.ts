@@ -357,7 +357,7 @@ describe("MobileHostDetail remote host data", () => {
     pendingModels.resolve([model("flux-dev:q8", "flux")]);
     await flushPromises();
 
-    expect(view.text()).toContain("flux-dev:q8");
+    expect(view.text()).toContain("FLUX.1 Dev Q8");
     expect(view.text()).not.toContain("Reading installed models…");
   });
 
@@ -527,11 +527,11 @@ describe("MobileHostDetail remote host data", () => {
     const queueRows = view.get("[data-test='host-detail-queue']").findAll("li");
     expect(queueRows).toHaveLength(2);
     expect(queueRows[0]!.text()).toContain("z-image:q8StudioQUEUED #2");
-    expect(queueRows[1]!.text()).toContain("flux-dev:q8StudioRUNNING · GPU 0");
+    expect(queueRows[1]!.text()).toContain("FLUX.1 Dev Q8StudioRUNNING · GPU 0");
 
     const modelRows = view.get("[data-test='host-detail-models']").findAll("li");
     expect(modelRows).toHaveLength(2);
-    expect(modelRows[0]!.text()).toContain("flux-dev:q8");
+    expect(modelRows[0]!.text()).toContain("FLUX.1 Dev Q8");
     expect(modelRows[0]!.text()).toContain("LOADED");
     expect(view.text()).not.toContain("not-installed");
 
@@ -586,7 +586,7 @@ describe("MobileHostDetail remote host data", () => {
     expect(view.text()).toContain("18.0 GB/48.0 GB");
     expect(view.text()).toContain("43% · 32 cores");
     expect(view.text()).toContain("32.0 GB/128.0 GB");
-    expect(view.text()).toContain("qwen-image:bf16");
+    expect(view.text()).toContain("Qwen Image BF16");
     expect(view.text()).toContain("2/4 files");
     expect(
       view
@@ -604,7 +604,7 @@ describe("MobileHostDetail remote host data", () => {
     ).toBe("75");
     expect(
       view
-        .get("[role='meter'][aria-label='Download progress for qwen-image:bf16']")
+        .get("[role='meter'][aria-label='Download progress for Qwen Image BF16']")
         .attributes("aria-valuenow"),
     ).toBe("25");
 
@@ -643,7 +643,7 @@ describe("MobileHostDetail remote host data", () => {
       view
         .findAll("[data-test^='host-detail-queue-row-']")
         .map((row) => row.get(".mobile-generation-job-copy p").text()),
-    ).toEqual(["z-image:q8", "flux-dev:q8"]);
+    ).toEqual(["z-image:q8", "FLUX.1 Dev Q8"]);
   });
 
   it("confirms and cancels only a queued job on the exact authenticated host", async () => {
@@ -685,7 +685,7 @@ describe("MobileHostDetail remote host data", () => {
 
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "DELETE")).toHaveLength(1);
     expect(view.get("[data-test='host-detail-queue']").text()).not.toContain("z-image:q8");
-    expect(view.get("[data-test='host-detail-queue']").text()).toContain("flux-dev:q8");
+    expect(view.get("[data-test='host-detail-queue']").text()).toContain("FLUX.1 Dev Q8");
   });
 
   it("pauses one queued machine row without pausing its sibling or host", async () => {
@@ -1866,7 +1866,7 @@ describe("MobileHostDetail remote host data", () => {
 
     expect(statusAttempts).toBe(2);
     expect(view.find("[data-test='host-detail-retry']").exists()).toBe(false);
-    expect(view.text()).toContain("flux-dev:q8");
+    expect(view.text()).toContain("FLUX.1 Dev Q8");
     expect(sseCalls).toHaveLength(2);
     expect(view.emitted("status")).toEqual([
       [{ id: studio.id, status: null }],
@@ -1909,7 +1909,7 @@ describe("MobileHostDetail remote host data", () => {
     const pending = deferred<void>();
     unloadModel.mockReturnValueOnce(pending.promise);
     const view = await mountDetail();
-    const unload = view.get("[aria-label='Unload flux-dev:q8']");
+    const unload = view.get("[aria-label='Unload FLUX.1 Dev Q8']");
 
     await unload.trigger("click");
     expect(unloadModel).toHaveBeenCalledWith("flux-dev:q8", studioTarget);
@@ -1918,7 +1918,7 @@ describe("MobileHostDetail remote host data", () => {
 
     pending.resolve();
     await flushPromises();
-    expect(view.find("[aria-label='Unload flux-dev:q8']").exists()).toBe(false);
+    expect(view.find("[aria-label='Unload FLUX.1 Dev Q8']").exists()).toBe(false);
     expect(view.text()).toContain("No models are loaded on the GPU.");
     expect(view.get("[data-test='host-detail-models']").text()).not.toContain("LOADED");
     expect(view.emitted("status")?.at(-1)).toEqual([
@@ -1972,7 +1972,7 @@ describe("MobileHostDetail host switching", () => {
     await flushPromises();
 
     expect(view.text()).toContain("Render Box");
-    expect(view.text()).toContain("qwen-image:bf16");
+    expect(view.text()).toContain("Qwen Image BF16");
     expect(view.text()).not.toContain("STALE STUDIO GPU");
 
     view.unmount();
@@ -2032,7 +2032,7 @@ describe("MobileHostDetail host switching", () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain("Render Box");
-    expect(wrapper.text()).toContain("qwen-image:bf16");
+    expect(wrapper.text()).toContain("Qwen Image BF16");
     expect(wrapper.emitted("status")).toEqual([
       [
         {
