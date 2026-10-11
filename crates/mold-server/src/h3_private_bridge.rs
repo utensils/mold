@@ -1305,6 +1305,7 @@ fn h3_model_row(
         .files
         .iter()
         .find(|file| file.component == mold_core::manifest::ModelComponent::Transformer)?;
+    let presentation = mold_core::model_presentation::presentation(manifest);
     Some(mold_core::ModelInfoExtended {
         // The bridge only ever re-publishes a reviewed, executable partition.
         runtime_available: Some(true),
@@ -1396,6 +1397,10 @@ fn h3_model_row(
         disk_usage_bytes: Some(disk_usage_bytes),
         remaining_download_bytes: Some(0),
         display_name: Some(display_name.to_string()),
+        title: Some(presentation.title),
+        variant: presentation.variant,
+        summary: presentation.summary,
+        family_label: presentation.family_label,
         kind: Some("checkpoint".into()),
         modality: Some("video".into()),
         nsfw: None,
@@ -3269,6 +3274,11 @@ mod tests {
             row.source_image,
             Some(mold_core::SourceImageCapability::Optional)
         );
+        let presentation = mold_core::model_presentation::presentation(manifest);
+        assert_eq!(row.title.as_deref(), Some(presentation.title.as_str()));
+        assert_eq!(row.variant, presentation.variant);
+        assert_eq!(row.summary, presentation.summary);
+        assert_eq!(row.family_label, presentation.family_label);
         assert_eq!(row.defaults.default_steps, 9);
         assert_eq!(
             row.disk_usage_bytes,

@@ -1,0 +1,1 @@
+- Fixed CUDA/H3 builds and executable H3 model rows to carry the shared model presentation metadata.
