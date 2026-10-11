@@ -373,6 +373,13 @@ FL2VA tag. On one L40S at 1344x768x124 text-only it denoised in about 395 s
 (1 Hz `nvidia-smi`), against 21.3 GB for the DMAD 4-step tier on the same
 prompt; the qualification record holds the full campaign.
 
+Veda sparse attention remains deferred: it needs a separate Rust predictor and
+attention implementation plus numerical and performance qualification. The
+FastH3 tag above does not enable that acceleration. PDD Acc is separate work
+tracked in [#1540](https://github.com/utensils/mold/issues/1540); the remaining
+packs and acceleration work are tracked in
+[#1812](https://github.com/utensils/mold/issues/1812).
+
 ## Download size and sources
 
 Each compact variant has the same component graph except for its task-specific
