@@ -1,1 +1,0 @@
-- **Reliable native Mac packaging.** Builds isolate Swift package checkouts from stale runner caches so signed distributions can resolve Sparkle and the encrypted transport framework reliably.
