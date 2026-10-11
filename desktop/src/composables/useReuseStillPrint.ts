@@ -93,9 +93,14 @@ export function useReuseStillPrint() {
       }
       if (!unavailable || !composer.setRetainedSourceIfCurrent(retainedVersion, unavailable))
         return;
-      const disclosure = retainedSourceMediaDisclosable(entry.item.metadata)
-        ? retainedSourceMediaDisclosure(unavailable.inventory.availability)
-        : null;
+      // Only the missing key is this door's to say. An unretained archive is
+      // not the end of the story: Create falls back to the local stash and the
+      // gallery by name, and names whatever it still cannot find.
+      const disclosure =
+        unavailable.inventory.availability === "unavailable_auth" &&
+        retainedSourceMediaDisclosable(entry.item.metadata)
+          ? retainedSourceMediaDisclosure(unavailable.inventory.availability)
+          : null;
       if (disclosure) toasts.push(disclosure, "error");
     })();
   };

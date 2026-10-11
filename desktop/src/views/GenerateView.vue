@@ -4011,6 +4011,18 @@ onBeforeUnmount(() => {
   retainedRestoreAbort.abort();
 });
 let materializingRetainedVersion: number | null = null;
+/** The reused print's metadata, kept for the version it arrived with. The
+ *  retained archive is the first answer, never the only one: a print the host
+ *  never pinned (everything before durable retention) or a role it did not
+ *  retain still restores from the local stash and the gallery by name, which
+ *  is what the phone does too. */
+let retainedFallback: { version: number; metadata: OutputMetadata } | null = null;
+async function restoreReuseFallback(metadata: OutputMetadata, epoch: number): Promise<void> {
+  await Promise.all([
+    restorePrefillSource(metadata, epoch),
+    restorePrefillIdentityPhoto(metadata, epoch),
+  ]);
+}
 watch(
   () => composer.retainedSource,
   async (handoff) => {
@@ -4027,7 +4039,21 @@ watch(
     retainedRestoreError.value = null;
     retainedRestorePending.value = true;
     const epoch = restoreEpoch;
+    const fallback = retainedFallback?.version === version ? retainedFallback.metadata : null;
     try {
+      if (fallback && handoff.inventory.availability !== "available") {
+        // Nothing was retained, so the closing still of a first/last-frame
+        // print has no fallback either (metadata records its name, never its
+        // bytes) — say so, as an ordinary prefill does.
+        const endFrameNotice = firstLastFrameRestoreNotice(
+          caps.value.supportsEndFrame,
+          fallback.keyframes,
+          Boolean(fallback.source_image_sha256 ?? fallback.source_image_name),
+        );
+        if (endFrameNotice) toasts.push(endFrameNotice, "error");
+        await restoreReuseFallback(fallback, epoch);
+        return;
+      }
       const result = await restoreRetainedDraftMedia({
         ...handoff,
         read: () => form,
@@ -4050,6 +4076,8 @@ watch(
       if (restored) preserveRestoredSourceCanvas(restored.base64);
       composer.setRetainedSourceIfCurrent(version, { ...handoff, inventory: result.inventory });
       await nextTick();
+      if (fallback && composer.isRetainedSourceCurrent(version) && epoch === restoreEpoch)
+        await restoreReuseFallback(fallback, epoch);
     } catch (error) {
       if (composer.isRetainedSourceCurrent(version)) {
         retainedRestoreError.value =
@@ -4109,6 +4137,7 @@ function applyPrefill() {
     composer.isRetainedSourceCurrent(pendingRetainedVersion) &&
     "metadata" in prefill
   ) {
+    retainedFallback = { version: pendingRetainedVersion, metadata: prefill.metadata };
     retainedRestorePending.value = true;
     authoritativeReuseApply = true;
     void nextTick(() => {

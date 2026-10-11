@@ -126,7 +126,14 @@ primary button and its right-click item both go through `reuseSettings`, which
 is the only path that attaches retained authority (`composer.set` invalidates
 it). A same-host reuse session is one-time, short-lived, and bound to the exact
 target request — on a keyless host to one stable anonymous subject; cross-host
-reuse remains a client download-and-upload relay.
+reuse remains a client download-and-upload relay. **Retained authority is the
+first answer, never the only one.** An `unavailable_*` inventory, or an
+`available` one missing a role the metadata names, still restores through the
+local content-addressed stash and the gallery-by-name lookup (desktop
+`GenerateView`'s `retainedFallback`, the phone's `restoreOrdinaryReusedSource`);
+most pre-retention prints have no pins at all, and suppressing that fallback is
+what left every desktop reuse saying "Reattach …". The Library door discloses
+only `unavailable_auth`; Create names whatever the fallback cannot find.
 
 Queue source previews on every GUI surface read the owning host's authenticated
 `/api/queue/:id/input-thumbnail` route. Keep source thumbnails distinct from live
