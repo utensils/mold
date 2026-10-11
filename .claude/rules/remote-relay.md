@@ -77,7 +77,9 @@ status, stream IDs, content and logical EOF/cancellation stay inside Noise. Oute
 version 3 frames expose only routing IDs and bounded reliable sequence/ACK data.
 Reorder and deduplicate ciphertext before decrypting; retransmit identical bytes
 at the same sequence, never encrypt new bytes with a reused nonce. Request EOF
-is logical, not a TCP half-close. Heartbeats do not count as application progress.
+is logical, not a TCP half-close. Interrupting an active response must report a
+body error; only authenticated logical End may produce successful EOF. Heartbeats
+do not count as application progress.
 A reconnect starts a fresh Noise session; never replay uncertain mutations.
 
 Cloud host admission additionally requires an enabled operator-provisioned public
