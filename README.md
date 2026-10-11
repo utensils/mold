@@ -120,6 +120,9 @@ and `ffprobe` on `PATH` before the server advertises that feature.
   and replay, including all supported Turbo tiers.
   Forced-local H3 execution accepts one FL2VA request; batches, sequences, and
   Ref2VA reference uploads require the server route.
+  Remote Ref2VA automatically selects authenticated uploads or bounded inline
+  references on hosts with authentication disabled; no client
+  API key is needed for the latter. Server license acceptance remains server-owned.
   Qwen Image 2.1 (non-commercial Qwen Research License) edits from up to ten
   ordered references, renders transparent PNG/WebP cut-outs, runs native 2K
   presets, and ships BF16, INT8, FP8, GGUF and 6-step turbo tiers; its CUDA
@@ -207,7 +210,7 @@ Studio for Mac: pair by scanning the Mac's code, generate on your machines,
 and follow renders from the Lock Screen. Generation options adapt to large text,
 and the full-screen viewer keeps its media actions accessible. Rotate an iPhone
 horizontally for landscape video across the display; rotate upright to restore
-gallery actions, or tap Close to return to the Library. Library New badges and unread counts are saved on each client independently. Media discovered after the initial machine baseline stays new until that client successfully displays it in the viewer. Opening Library, filters, refreshes and neighboring preloads do not clear it. Merged copies count once; hidden collections and Trash do not count. Existing read history is preserved on upgrade. Native icon badges follow the same history, with the existing permission or preference controls. It is in TestFlight while it is new.
+gallery actions, or tap Close to return to the Library. Library New badges and unread counts are saved on each client independently. Media discovered after the initial machine baseline stays new during a Library visit. Viewing a print clears it immediately; leaving Library clears the eligible images shown during that visit. Hidden or filtered-out images and arrivals after departure stay new. Merged copies count once; hidden collections and Trash do not count. Existing read history is preserved on upgrade. Native icon badges follow the same history, with the existing permission or preference controls. It is in TestFlight while it is new.
 [Mold Studio for iPhone & iPad guide](https://utensils.io/mold/guide/companion)
 
 The native iOS companion uses concise render notifications with its app icon; tapping opens the finished print from the background or a cold launch, with notification activation completed on the main thread. Library long-press and drag previews retain their thumbnail loader, and source selection prefers a reachable machine copy; the notification icon keeps the same authored colors in light and dark appearances. Its Live Activity uses the system background material with matching semantic text, a full-width progress row, and a separate machine/queue footer. Generate Options marks the selected aspect with a checkmark; attaching the first/start frame chooses the closest supported aspect, and a closing frame preserves it. Options shows proportionate aspect icons, source-image fitting (centered Crop to fill by default), and an explicit Random seed default.
@@ -328,6 +331,8 @@ verified source bytes appear once, with every owning print and input role still
 available. Bounded in-memory previews and incremental inventory loading make
 return visits faster without changing source retention. Older machines that do
 not provide verified content digests keep separate entries.
+Native source viewers identify legacy originals from their contents when opened
+and keep large-library access checks indexed so inspecting a source stays responsive.
 
 Native Mac mirrors accept missing archive-only job IDs and generation durations, a short version matching the same version with a build suffix, and an alpha-channel fact derived from identical output bytes when absent on the source. The same compatibility check compares the gallery listing with its stable source archive, so completion bookkeeping does not falsely report a changed print. When an older archive omits scheduler or transparency settings, the source output is downloaded and its digest verified before its embedded recipe can corroborate those fields. Output bytes and all generation settings must still match; conflicting recorded provenance is refused. Retrying Sync All repairs retained inputs on compatible existing copies without duplicating their outputs.
 

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { LibraryVisit } from "@studio/lib/libraryUnreadLedger";
 import { useSourceMediaVisibility } from "@studio/lib/sourceMediaVisibility";
 import { viewerAfterRemoval } from "@studio/lib/viewerRemoval";
 import { useLibraryUnread } from "../stores/libraryUnread";
@@ -1659,6 +1660,27 @@ const filtered = computed(() => {
   if (!q) return organizationFiltered.value;
   return organizationFiltered.value.filter((e) => entryMatchesSearch(e, q));
 });
+
+const libraryVisit = new LibraryVisit();
+watch(
+  [filtered, scope, sourceView, collectionSlug],
+  () => {
+    if (
+      sourceView.value ||
+      scope.value === "trash" ||
+      (scope.value === "collections" && !collectionSlug.value)
+    )
+      return;
+    const shown = new Set(filtered.value.map(keyOf));
+    libraryVisit.capture(
+      groupLogicalGalleryPrints(rawEntries.value)
+        .filter((group) => group.copies.some((copy) => shown.has(keyOf(copy))))
+        .map((group) => group.copies.map(keyOf)),
+    );
+  },
+  { immediate: true },
+);
+onBeforeUnmount(() => unread.finishVisit(libraryVisit.finish()));
 
 // Source owners remain independently accessible even when the ordinary output
 // grid has a search, media filter, or a preferred logical copy elsewhere.

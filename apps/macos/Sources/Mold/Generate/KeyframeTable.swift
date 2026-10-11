@@ -12,13 +12,10 @@ import UniformTypeIdentifiers
 /// frame COUNT, rather than accepting an out-of-range value and failing
 /// later at the wire (`validation.rs:1705-1711`).
 struct KeyframeTable: View {
-    let temporal: TemporalProfile?
+    let recipe: GenerationRecipe
     @Binding var draft: RenderDraft
-
-    /// What a file the engine cannot read said, beside the control that
-    /// collected it rather than nowhere at all -- the same caption its two
-    /// sibling wells draw (finding 02#7).
-    @State private var importFailure: String?
+    @Environment(GenerateController.self) var controller
+    private var temporal: TemporalProfile? { recipe.temporal }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -26,14 +23,13 @@ struct KeyframeTable: View {
                 row(index: index, keyframe: keyframe)
             }
             addButton
-            if let importFailure {
-                Text(importFailure).font(.caption2).foregroundStyle(.secondary)
-            }
         }
     }
 
     @ViewBuilder private func row(index: Int, keyframe: KeyframeCondition) -> some View {
         if let temporal {
+            let session = ReferenceImportSession(controller: controller, recipe: recipe, media: draft.media)
+            let frames = clipFrames
             HStack(spacing: 6) {
                 Stepper(value: frameBinding(index: index, temporal: temporal),
                         in: 0...ceiling, step: Swift.max(temporal.frames.step, 1)) {
@@ -42,10 +38,14 @@ struct KeyframeTable: View {
                         .frame(minWidth: 30, alignment: .trailing)
                 }
                 .help("Choose which frame of the clip this picture should guide")
-                MediaWell(
-                    systemImage: "photo", allowedTypes: [.png, .jpeg],
-                    placeholder: "No picture", attachment: attachmentBinding(index: index)
-                )
+                PictureWell(
+                    rows: GenerateMenus.referenceAdd(canPaste: PicturePaste.hasPicture),
+                    picture: keyframe.image, label: "Picture at frame \(keyframe.frame)",
+                    pick: { picked in
+                        guard frames == clipFrames,
+                              session.isCurrent(controller: controller, media: draft.media) else { return }
+                        _ = Self.replace(picked, at: index, expected: keyframe, in: &draft.media)
+                    })
                 Button {
                     draft.media.keyframes.remove(at: index)
                 } label: {
@@ -59,37 +59,18 @@ struct KeyframeTable: View {
 
     @ViewBuilder private var addButton: some View {
         if let temporal {
-            Button {
-                addKeyframe(temporal: temporal)
-            } label: {
-                Label("Add keyframe", systemImage: "plus")
-            }
-            .help("Choose a picture to guide a specific moment in the clip")
-            .buttonStyle(.plain)
-            .font(.caption)
-        }
-    }
-
-    /// Through `PictureSource`'s one panel and `PictureImport` like every
-    /// other still: read and encoded off the main actor, and conformed to
-    /// something the engine decodes rather than uploaded and refused (findings
-    /// 02#7 and 02#10). Its own panel offered PNG and JPEG alone, so an iPhone
-    /// photograph could not be picked as a keyframe at all. The frame is
-    /// chosen when the bytes arrive, so two picks in a row cannot land on
-    /// the same one.
-    private func addKeyframe(temporal: TemporalProfile) {
-        guard let url = PictureSource.choose().first else { return }
-        Task {
-            do {
-                let picked = try await PictureImport.load(
-                    url, accepting: PictureImport.engineReadable)
-                draft.media.addingKeyframe(KeyframeCondition(
-                    frame: nextFrame(temporal: temporal), image: picked.encoded,
-                    name: picked.name))
-                importFailure = nil
-            } catch {
-                importFailure = error.failureSentence
-            }
+            let session = ReferenceImportSession(controller: controller, recipe: recipe, media: draft.media)
+            let frames = clipFrames
+            PictureWell(
+                rows: GenerateMenus.referenceAdd(canPaste: PicturePaste.hasPicture),
+                placeholder: "plus", actionTitle: "Add keyframe", label: "Add keyframe picture",
+                pick: { picked in
+                    guard frames == clipFrames,
+                          session.isCurrent(controller: controller, media: draft.media) else { return }
+                    draft.media.addingKeyframe(KeyframeCondition(
+                        frame: nextFrame(temporal: temporal), image: picked.encoded, name: picked.name))
+                })
+                .help("Choose a picture from any machine, a file, or the clipboard to guide a moment in the clip")
         }
     }
 
@@ -109,26 +90,21 @@ struct KeyframeTable: View {
         )
     }
 
-    private func attachmentBinding(index: Int) -> Binding<MediaWell.Attachment?> {
-        Binding(
-            get: {
-                guard draft.media.keyframes.indices.contains(index) else { return nil }
-                let keyframe = draft.media.keyframes[index]
-                return MediaWell.Attachment(base64: keyframe.image, name: keyframe.name ?? "")
-            },
-            set: { newValue in
-                guard draft.media.keyframes.indices.contains(index), let newValue else { return }
-                draft.media.keyframes[index].image = newValue.base64
-                draft.media.keyframes[index].name = newValue.name
-            }
-        )
-    }
-
     private var ceiling: Int { Swift.max(clipFrames - 1, 0) }
     private var clipFrames: Int { draft.frames ?? temporal?.frames.default ?? 1 }
 }
 
 extension KeyframeTable {
+    /// A slow replacement can never write into a different row after an edit/removal.
+    @discardableResult
+    static func replace(_ picked: ImportedPicture, at index: Int, expected: KeyframeCondition,
+                        in media: inout DraftMedia) -> Bool {
+        guard media.keyframes.indices.contains(index), media.keyframes[index] == expected else { return false }
+        media.keyframes[index].image = picked.encoded
+        media.keyframes[index].name = picked.name
+        return true
+    }
+
     /// A requested frame, clamped strictly below `frames` -- never a value
     /// the server would refuse (`validation.rs:1705-1711`).
     static func snappedFrame(_ requested: Int, temporal: TemporalProfile, frames: Int) -> Int {

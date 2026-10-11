@@ -466,7 +466,7 @@ fn validate_image_args_for_model(family: &str, model: &str, image: &[String]) ->
 ///
 /// `--reference` is one flag with two destinations, chosen by the recipe and
 /// never by the model name: MiniMax H3 reads it as Ref2VA authoring (handled
-/// by `h3::prepare_authoring`, which owns the upload session), and a recipe
+/// by `h3::prepare_authoring`, which probes the original files), and a recipe
 /// whose profile advertises `reference_images` reads it as `edit_images`.
 /// Anything else is refused with the profile's own sentence, so the CLI and
 /// the server say the same thing about the same model.
@@ -1259,11 +1259,6 @@ pub async fn run(
             || camera_control.is_some(),
         clip_frames,
     })?;
-    if is_h3 && !references.is_empty() && batch > 1 {
-        anyhow::bail!(
-            "MiniMax H3 uploaded references require --batch 1: an upload session binds one request, so Batch N needs one session per sibling"
-        );
-    }
     if is_h3 && steps.is_some_and(|value| value < 2) {
         anyhow::bail!(
             "MiniMax H3 --steps counts terminal-inclusive sigma grid points and must be at least 2"
@@ -1271,7 +1266,7 @@ pub async fn run(
     }
 
     // One flag, two destinations. On H3 `--reference` is Ref2VA authoring and
-    // stays with `prepare_authoring`, which owns the upload session; on every
+    // stays with `prepare_authoring`, which probes the original files; on every
     // other model it is the ordered reference group and is resolved here,
     // before H3's authoring gate can refuse it as an H3-only option.
     let reference_edit_paths = if is_h3 || references.is_empty() {
@@ -1289,8 +1284,6 @@ pub async fn run(
         anyhow::ensure!(batch == 1, "Hunyuan3D 2mv named views require --batch 1");
     }
 
-    let reference_client =
-        (is_h3 && !references.is_empty()).then(|| crate::control::client_for_host(host.as_deref()));
     let mut h3_authoring = h3::prepare_authoring(
         &model,
         &family,
@@ -1303,7 +1296,6 @@ pub async fn run(
         image.first().map(String::as_str),
         last_frame.as_deref(),
         h3_references,
-        reference_client.as_ref(),
     )?;
     let frames = h3_authoring.frames.or(frames);
     let fps = h3_authoring.fps.or(fps);

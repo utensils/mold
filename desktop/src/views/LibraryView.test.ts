@@ -1246,6 +1246,45 @@ describe("LibraryView header + NEW badges", () => {
     wrapper.unmount();
   });
 
+  it("acknowledges the visited Library projection on departure without opening every image", async () => {
+    const { wrapper, gallery } = await mountView(undefined, (g) => {
+      g.unreadMedia.observe([], ["local"]);
+      g.observeUnreadMedia();
+    });
+    expect(gallery.newCount).toBe(2);
+    expect(wrapper.findAll('[data-test="new-badge"]')).toHaveLength(2);
+    wrapper.unmount();
+    expect(gallery.newCount).toBe(0);
+  });
+
+  it("preserves filtered media and post-departure arrivals through later refreshes", async () => {
+    const { wrapper, gallery } = await mountView(undefined, (g) => {
+      g.query = "first";
+      g.unreadMedia.observe([], ["local"]);
+      g.observeUnreadMedia();
+    });
+    expect(gallery.filtered.map((entry) => entry.item.filename)).toEqual(["first.png"]);
+    wrapper.unmount();
+    expect(
+      gallery.isUnread(gallery.merged.find((entry) => entry.item.filename === "first.png")!),
+    ).toBe(false);
+    expect(
+      gallery.isUnread(gallery.merged.find((entry) => entry.item.filename === "second.png")!),
+    ).toBe(true);
+    gallery.buckets.local!.items.push({
+      ...prints[0]!,
+      filename: "later.png",
+      metadata: { ...prints[0]!.metadata, seed: 99 },
+    });
+    gallery.observeUnreadMedia();
+    expect(
+      gallery.isUnread(gallery.merged.find((entry) => entry.item.filename === "later.png")!),
+    ).toBe(true);
+    expect(
+      gallery.isUnread(gallery.merged.find((entry) => entry.item.filename === "second.png")!),
+    ).toBe(true);
+  });
+
   it("shows nothing as new on the very first visit (baseline only)", async () => {
     const { wrapper, gallery } = await mountView();
     expect(wrapper.findAll('[data-test="new-badge"]')).toHaveLength(0);

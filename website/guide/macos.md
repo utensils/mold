@@ -77,6 +77,11 @@ and API only), RunPod provisioning, and the 3-D authoring workflows.
 
 ## Working in Generate
 
+**Choose from Library** opens a spacious combined picture browser with machine
+filtering, search, and previews. Library **Add as Reference** supports H3 while
+keeping your current model and prompt. Oversized pictures are resized for the
+selected input; keyframes share the same library, file, paste, and drop options.
+
 Use the compact prompt field for quick edits, or choose **Edit prompt** for a
 spacious text editor. Changes stay in your draft as you type; **Done** returns to
 Generate. **Recent prompts** searches previous text without changing your model,
@@ -156,7 +161,7 @@ New oversized input pictures are fitted proportionally, with orientation and tra
 
 Queue rows show the owning machine’s sealed conditioning images across models. Job Details shows every ordered reference separately with its role, including identity photos, named views, masks, control images and boundary frames. Audio/video references are listed by kind; unavailable previews are disclosed. Inputs remain separate from live denoise previews and are fetched through authenticated routes, including work submitted from another device. Older servers retain their singular source preview.
 
-Library New badges and unread counts are saved on each client independently. Media discovered after the initial machine baseline stays new until that client successfully displays it in the viewer. Opening Library, filters, refreshes and neighboring preloads do not clear it. Merged copies count once; hidden collections and Trash do not count. Existing read history is preserved on upgrade. Native icon badges follow the same history, with the existing permission or preference controls.
+Library New badges and unread counts are saved on each client independently. Media discovered after the initial machine baseline stays new during a Library visit. Individual viewer display clears one print immediately; leaving Library clears the eligible projections captured during that visit. Unvisited hidden or filtered-out media, Trash, and arrivals after departure remain unread. Merged copies count once; hidden collections and Trash do not count. Existing read history is preserved on upgrade. Native icon badges follow the same history, with the existing permission or preference controls.
 
 ### Queue model downloads
 

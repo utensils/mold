@@ -386,7 +386,7 @@ overlay register calls top acts on either.
   or delete the chosen prints. Delete removes every matching copy from
   reachable saved hosts; a host failure leaves that copy visible and reports
   the partial cleanup.
-  Persistent New badges follow this client’s individual viewing history, and post-generation
+  Persistent New badges follow this client’s individual viewing and Library visit history, and post-generation
   upscaled images carry the shared Upscaled badge. The full-media viewer also
   offers **Upscale…** for images and **Framewise upscale…** for videos through
   the shared model/progress dialog, including first-use model download and
@@ -706,7 +706,7 @@ WebView local storage contains non-secret mobile state:
 - `mold.mobile.generation.templates.v1` — mobile-local generation templates
 - `mold.mobile.library-seen-at.v1` / `mold.mobile.library-visited.v1` — legacy
   timestamp baseline migrated into individual viewing history
-- `mold.mobile.libraryUnread.v1` — compact client-local individual viewing history
+- `mold.mobile.libraryUnread.v1` — compact client-local individual viewing and Library visit history
 
 Per-host API keys live in the iOS Keychain under
 `com.utensils.mold.remote-api-key`. Android encrypts them with a non-exportable
@@ -1053,7 +1053,7 @@ job before the request arrives.
 
 ### Local viewing history
 
-Library New badges and unread counts are saved on each client independently. Media discovered after the initial machine baseline stays new until that client successfully displays it in the viewer. Opening Library, filters, refreshes and neighboring preloads do not clear it. Merged copies count once; hidden collections and Trash do not count. Existing read history is preserved on upgrade. Native icon badges follow the same history, with the existing permission or preference controls. Browser and Tauri clients persist compact histories locally. If browser storage is full, the client reports the persistence failure and preserves the previously saved history.
+Library New badges and unread counts are saved on each client independently. Media discovered after the initial machine baseline stays new during a Library visit. Individual viewer display clears one print immediately; leaving Library clears the eligible projections captured during that visit. Unvisited hidden or filtered-out media, Trash, and arrivals after departure remain unread. Merged copies count once; hidden collections and Trash do not count. Existing read history is preserved on upgrade. Native icon badges follow the same history, with the existing permission or preference controls. Browser and Tauri clients persist compact histories locally. If browser storage is full, the client reports the persistence failure and preserves the previously saved history.
 
 Manual Save Locally reports processed selected prints, including existing copies, rather than claiming each processed item was copied. Native iOS offline progress describes checking thumbnails, including cache hits.
 

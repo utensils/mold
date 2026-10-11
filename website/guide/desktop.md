@@ -916,7 +916,7 @@ Queue menus and touch swipe controls follow the owning machine’s current state
 
 ## Local viewing history
 
-Library New badges and unread counts are saved on each client independently. Media discovered after the initial machine baseline stays new until that client successfully displays it in the viewer. Opening Library, filters, refreshes and neighboring preloads do not clear it. Merged copies count once; hidden collections and Trash do not count. Existing read history is preserved on upgrade. Native icon badges follow the same history, with the existing permission or preference controls. Browser, desktop and mobile-shell histories are separate. Storage errors are visible and preserve the previous saved history.
+Library New badges and unread counts are saved on each client independently. Media discovered after the initial machine baseline stays new during a Library visit. Individual viewer display clears one print immediately; leaving Library clears the eligible projections captured during that visit. Unvisited hidden or filtered-out media, Trash, and arrivals after departure remain unread. Merged copies count once; hidden collections and Trash do not count. Existing read history is preserved on upgrade. Native icon badges follow the same history, with the existing permission or preference controls. Browser, desktop and mobile-shell histories are separate. Storage errors are visible and preserve the previous saved history.
 
 ### Move queued work to another machine
 

@@ -176,10 +176,12 @@ Native CI splits media exports into delivery, video accessibility and mesh acces
 Queue inputs use shared QueueInput descriptors and QueueInputPreview loading. Details independently load every ordered input, with role labels and explicit failed/nonimage previews; rows show an input image and additional-input count. Older hosts fall back only on missing additive routes. A failed member must not hide later images. Host/instance/job fencing and removal pruning apply to the entire set.
 
 Library New badges and unread counts share persisted client-local viewing state.
-Only individually displayed viewer media is read; opening Library, refreshes,
-filters and neighboring preloads must not clear unread media. Preserve current
+Individual viewer display marks that logical print read immediately. A Library
+visit captures its displayed eligible projections and marks that captured set
+read when navigation leaves Library. Keep New labels during the visit; exclude
+Trash and unvisited hidden/filtered media, and preserve arrivals after departure. Preserve current
 read status on upgrade and establish an initial baseline for newly connected
-hosts. Later arrivals remain unread across visits and relaunches. Count merged
+hosts. Later arrivals remain unread until viewed or acknowledged by a Library visit. Count merged
 visible active inventory, excluding hidden collections and Trash; retain offline
 history. iOS navigation and native icon badges follow that same ledger, with the
 existing permission/preference controls. Do not let activation-only arrival

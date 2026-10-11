@@ -445,6 +445,12 @@ from job actions, and expanded children remain individually selectable. Empty Qu
 machine in a fleet. File ▸ New Image and View destinations also reopen the
 main window when Settings is the remaining window.
 
+The larger **Choose from Library** sheet opens on **All Machines**, deduplicates
+copies, prefers an available copy, and offers machine filtering, search, preview,
+and a Use Picture context action. Oversized raster images are resized before
+attachment. Keyframes use the same library, file, paste, and drop intake. H3
+references have larger previews and explicit reorder/remove controls.
+
 Library pictures can be used as a source image or added as a reference from
 the tile menu, full-size viewer, or Library menu. These actions preserve the
 current prompt and model, fetch from the machine holding the picture, and appear only
@@ -778,7 +784,7 @@ for the reviewed native surfaces and runtime verification boundaries.
 
 Queue rows show the owning machine’s sealed conditioning images across models. Job Details shows every ordered reference separately with its role, including identity photos, named views, masks, control images and boundary frames. Audio/video references are listed by kind; unavailable previews are disclosed. Inputs remain separate from live denoise previews and are fetched through authenticated routes, including work submitted from another device. Older servers retain their singular source preview.
 
-Library New badges and unread counts are saved on each client independently. Newly discovered media stays new until that client displays it in the viewer; opening Library, changing filters, refreshing, and preparing neighboring pages do not clear it. Counts and badges deduplicate merged copies and exclude hidden collections and Trash. Existing read status is preserved during upgrade, and a newly connected machine establishes a historical baseline; subsequent arrivals require individual viewing. Native iOS also badges its Images navigation. Native app-icon counts follow the same local history, subject to the existing badge preference or permission. iOS refreshes while active and opportunistically in the background; the server has no push.
+Library New badges and unread counts are saved on each client independently. Newly discovered media stays new while browsing Library. Viewing an individual print clears its New label immediately; leaving Library acknowledges the eligible prints shown by the projections visited there. Hidden or filtered-out prints, Trash, and arrivals after departure remain unread. Counts and badges deduplicate merged copies and exclude hidden collections and Trash. Existing read status is preserved during upgrade, and a newly connected machine establishes a historical baseline; subsequent arrivals require viewing or a Library visit. Native iOS also badges its Images navigation. Native app-icon counts follow the same local history, subject to the existing badge preference or permission. iOS refreshes while active and opportunistically in the background; the server has no push.
 
 ## Error messages
 
@@ -861,7 +867,7 @@ Shared generation jobs keep supported Cancel controls during model loading; auto
 
 ### New gallery media
 
-Library New badges and unread counts are saved on each client independently. Media discovered after the initial machine baseline stays new until that client successfully displays it in the viewer. Opening Library, filters, refreshes and neighboring preloads do not clear it. Merged copies count once; hidden collections and Trash do not count. Existing read history is preserved on upgrade. Native icon badges follow the same history, with the existing permission or preference controls.
+Library New badges and unread counts are saved on each client independently. Media discovered after the initial machine baseline stays new during a Library visit. Individual viewer display clears one print immediately; leaving Library clears the captured eligible projections from that visit. Unvisited, hidden, filtered-out and later arrivals remain unread. Merged copies count once; hidden collections and Trash do not count. Existing read history is preserved on upgrade. Native icon badges follow the same history, with the existing permission or preference controls.
 
 Queue rows keep a stable height as previews and progress arrive, preserving the scroll position while browsing. Preview reads share a bounded cache across row reuse.
 
@@ -914,3 +920,15 @@ Source previews and inventories refresh after 60 seconds. Named gallery changes 
 Held jobs with a server-verified missing model component (including a missing adapter) offer **Download and Retry** directly in Queue and Job Details. The original explanation and Failure Details remain available alongside Move to. Downloads use that job’s exact model and machine, retain normal license review, and retry only after every returned download ticket succeeds. Malformed or mismatched recovery hints never redirect a download; older servers retain their typed missing-model recovery.
 
 Source Media offers media-type and machine filters alongside search. Open a source to inspect its original image, video or audio, file details, and every visible use (including multiple roles and keyframe positions in the same print). Choose an exact copy for reuse or open an owning print to manage retention. Native viewers stream only the selected original into a private temporary file, delete it on dismissal, and bound image decoding; originals larger than 128 MiB are not previewed. No originals are downloaded just by scrolling. Inventory discovery starts with four owners per machine, then batches up to 100 with two concurrent requests; fresh repeated visits make no new inventory requests.
+
+Source details reuse an indexed visibility projection rather than scanning every
+print for each use. Refresh keeps unchanged authorized rows visible while reading
+new inventories; refusals revoke an open original. Updates to another print do not
+restart playback. Older sources with unknown type are inspected only when opened,
+using bounded content decoding; filenames never determine their type. A detected
+supported type enables reuse only for that exact inspected copy.
+
+Sync file comparison/hashing and ordinary navigation draft saves run off the UI
+thread. Final quit still flushes the latest draft, including after leaving Generate.
+See [the October performance audit](docs/performance-audit-2026-10.md) for measured
+source-browser results and remaining profiling candidates.

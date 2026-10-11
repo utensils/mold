@@ -106,6 +106,7 @@ Xcode must be installed and selected; the devshell provides XcodeGen and Python.
 | `make lint`               | Architecture lints (shared ones via `../shared/scripts/swift-lint.sh`)                                                                                                                                                                                                   |
 
 UI tests make one complete pass, then retry only identified failed methods once
+
 <!-- Temporary owner-directed build-first delivery, 2026-10-06: hosted
 accessibility matrix disabled; local tests remain available and CI compiles the
 native app/shared packages for Simulator instead of running test/lint lanes. -->
@@ -310,7 +311,7 @@ Local validation and qualification limits: [native acceptance record](../../docs
 
 Queue rows show the owning machine’s sealed conditioning images across models. Job Details shows every ordered reference separately with its role, including identity photos, named views, masks, control images and boundary frames. Audio/video references are listed by kind; unavailable previews are disclosed. Inputs remain separate from live denoise previews and are fetched through authenticated routes, including work submitted from another device. Older servers retain their singular source preview.
 
-Library New badges and unread counts are saved on each client independently. Newly discovered media stays new until that client displays it in the viewer; opening Library, changing filters, refreshing, and preparing neighboring pages do not clear it. Counts and badges deduplicate merged copies and exclude hidden collections and Trash. Existing read status is preserved during upgrade, and a newly connected machine establishes a historical baseline; subsequent arrivals require individual viewing. Native iOS also badges its Images navigation. Native app-icon counts follow the same local history, subject to the existing badge preference or permission. iOS refreshes while active and opportunistically in the background; the server has no push.
+Library New badges and unread counts are saved on each client independently. Newly discovered media stays new while browsing Library. Viewing an individual print clears its New label immediately; leaving Library acknowledges the eligible prints shown by the projections visited there. Hidden or filtered-out prints, Trash, and arrivals after departure remain unread. Counts and badges deduplicate merged copies and exclude hidden collections and Trash. Existing read status is preserved during upgrade, and a newly connected machine establishes a historical baseline; subsequent arrivals require viewing or a Library visit. Native iOS also badges its Images navigation. Native app-icon counts follow the same local history, subject to the existing badge preference or permission. iOS refreshes while active and opportunistically in the background; the server has no push.
 
 On iOS, Use These Settings replaces all active and parked attachments with the selected print’s media. Retained archives restore from the owning machine or another available copy; unavailable conditioning blocks Generate until restored, reattached or explicitly removed. Retry retained media after reconnecting. Late replies cannot replace a newer reuse or revive a source added and removed during restoration.
 
@@ -406,3 +407,9 @@ Held jobs with a server-verified missing model component (including a missing ad
 Active model downloads and repairs keep model names and IDs full width, with progress and a compact **Cancel** control underneath. The control remains labeled **Cancel Download** for VoiceOver and retains a 44-point touch target. Accessibility text sizes stack progress text and actions.
 
 Source Media offers media-type and machine filters alongside search. Open a source to inspect its original image, video or audio, file details, and every visible use (including multiple roles and keyframe positions in the same print). Choose an exact copy for reuse or open an owning print to manage retention. Native viewers stream only the selected original into a private temporary file, delete it on dismissal, and bound image decoding; originals larger than 128 MiB are not previewed. No originals are downloaded just by scrolling. Inventory discovery starts with four owners per machine, then batches up to 100 with two concurrent requests; fresh repeated visits make no new inventory requests.
+
+Native source details use an indexed visibility projection and owner-specific
+invalidation. Unrelated print updates do not restart the selected original.
+Unchanged rows remain visible during refresh; refused inventories revoke open
+source access. Legacy originals with unknown metadata are identified from their
+contents only when opened, with bounded decoding and cancellable playback inspection.

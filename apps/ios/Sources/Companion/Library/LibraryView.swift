@@ -12,6 +12,7 @@ struct LibraryView: View {
     @SceneStorage("library.tile") private var tile = TileSize.medium
     @SceneStorage("library.sort") private var sort = LibrarySort.newest
     @AppStorage(Preference.showDateSeparators) private var showDateSeparators = true
+    @State private var visitSelection: TabSelection?
     @State private var query = LibraryQuery()
     @State private var selecting = false
     @State private var managingCollections = false
@@ -127,7 +128,20 @@ struct LibraryView: View {
         .onChange(of: library.machineID) { scrollPosition.reset(); selection = [] }
         .onAppear {
             query.sort = sort
+            visitSelection = router.selection
+            captureVisit(showing.visible)
         }
+        .onChange(of: library.revision) { captureVisit(showing.visible) }
+        .onChange(of: scope) { captureVisit(showing.visible) }
+        .onChange(of: showingQuery) { captureVisit(showing.visible) }
+        .onChange(of: router.selection) { _, new in
+            if new == visitSelection { captureVisit(showing.visible) }
+        }
+    }
+
+    private func captureVisit(_ entries: [LibraryEntry]) {
+        guard router.isInLibrary, router.selection == visitSelection else { return }
+        router.libraryVisit.capture(entries, scope: scope)
     }
 
     private var libraryTitle: String {

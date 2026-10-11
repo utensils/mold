@@ -99,6 +99,20 @@ struct ClipMediaTests {
         #expect(KeyframeTable.snappedFrame(8, temporal: temporal, frames: 121) == 8)
     }
 
+    @Test func replacingAKeyframePreservesItsFrameAndRejectsMovedOrRemovedRows() {
+        var media = DraftMedia()
+        let expected = KeyframeCondition(frame: 24, image: "old", name: "old.png")
+        media.keyframes = [KeyframeCondition(frame: 0, image: "first"), expected]
+        let picked = ImportedPicture(encoded: "new", name: "new.png", data: Data())
+        #expect(KeyframeTable.replace(picked, at: 1, expected: expected, in: &media))
+        #expect(media.keyframes[1].frame == 24)
+        #expect(media.keyframes[1].image == "new")
+        #expect(media.keyframes[0].image == "first")
+        #expect(!KeyframeTable.replace(picked, at: 1, expected: expected, in: &media))
+        media.keyframes.removeLast()
+        #expect(!KeyframeTable.replace(picked, at: 1, expected: expected, in: &media))
+    }
+
     // MARK: - The Clip group shows for a temporal recipe with no audio
 
     @Test func theClipGroupShowsForATemporalRecipeWithoutAudio() {

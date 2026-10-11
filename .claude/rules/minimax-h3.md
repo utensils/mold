@@ -110,3 +110,12 @@ envelope (`validate_for_task_with_distillation`, the prepared-attempt grid
 check in `h3_factory`) all read it, never "has a Turbo tier". Text-only T2VA
 is its trained operating point; first/last frames use the ordinary FL2VA
 boundary contract.
+
+**CLI reference transport follows the selected host.** Remote Ref2VA uses
+request-bound upload sessions when a client API key and an available upload
+capability are present; otherwise it prepares bounded inline media using the
+shared decoded-byte limit across all batch siblings before cloning. This supports
+auth-disabled hosts; it never grants access to an auth-enabled host without a valid credential. Capability failures
+other than legacy 404/405 must surface, and rejected uploads or license refusals
+must never trigger a downgrade or forced-local retry. Server-owned model/license
+decisions remain authoritative; H3 has no client acceptance gate.

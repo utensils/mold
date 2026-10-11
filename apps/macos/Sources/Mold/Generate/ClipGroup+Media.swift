@@ -11,9 +11,9 @@ extension ClipGroup {
             LabeledSection("Boundary frames") {
                 BoundaryFrameWells(recipe: recipe, draft: $draft)
             }
-        } else if recipe?.capabilities.acceptsKeyframes == true {
+        } else if let recipe, recipe.capabilities.acceptsKeyframes {
             LabeledSection("Keyframes") {
-                KeyframeTable(temporal: recipe?.temporal, draft: $draft)
+                KeyframeTable(recipe: recipe, draft: $draft)
             }
         }
     }

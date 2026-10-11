@@ -17,18 +17,20 @@ extension LibraryStore {
         sourceMediaCatalog.invalidate(host: host, filename: filename)
         Task { await SourceMediaPreview.invalidate(host: host, filename: filename) }
     }
-    /// Unfiltered visible publications: source privacy is independent of the open pane.
-    var sourceMediaOwners: [LibraryEntry] {
-        let projected = LibraryScope.all.resolve(LibraryQuery(), shelves: shelves,
-            hiddenCollectionIDs: hiddenCollectionIDs).apply(to: items)
-        return projected.flatMap(\.everyCopy)
-    }
-    func allowsSource(_ authority: SourceMediaAuthority, detail: Bool = false) -> Bool {
-        let owners = detail ? (items + trashed).flatMap(\.everyCopy) : sourceMediaOwners
-        return owners.contains { owner in
-            owner.id == authority.owner && SourceMediaAuthority(owner: owner,
-                route: hosts.host(owner.hostID), instance: hosts.instanceIDs[owner.hostID]) == authority
+    var sourceAccess: SourceMediaAccessIndex.Snapshot {
+        sourceAccessIndex.snapshot(key: .init(revision: sourceAccessRevision,
+            visibility: collectionVisibility.generation, hosts: hosts.hosts, instances: hosts.instanceIDs)) {
+            let currentShelves = shelves
+            let visible = LibraryScope.all.resolve(LibraryQuery(), shelves: currentShelves,
+                hiddenCollectionIDs: CollectionShelf.hiddenIDs(in: currentShelves)).apply(to: items)
+            return .init(visible: visible.flatMap(\.everyCopy), details: (items + trashed).flatMap(\.everyCopy),
+                         hosts: hosts.hosts, instances: hosts.instanceIDs)
         }
+    }
+    /// Unfiltered visible publications: source privacy is independent of the open pane.
+    var sourceMediaOwners: [LibraryEntry] { sourceAccess.owners }
+    func allowsSource(_ authority: SourceMediaAuthority, detail: Bool = false) -> Bool {
+        sourceAccess.allows(authority, detail: detail)
     }
 }
 
@@ -37,11 +39,9 @@ struct SourceMediaAccessMonitor: ViewModifier {
     @Environment(HostStore.self) private var hosts
     @Environment(LibraryStore.self) private var library
     func body(content: Content) -> some View {
-        let authorities = Set(library.sourceMediaOwners.map { owner in
-            SourceMediaAuthority(owner: owner, route: hosts.host(owner.hostID),
-                instance: hosts.instanceIDs[owner.hostID])
-        })
-        let detailAuthorities = Set(library.openSourceDetails.values.filter { library.allowsSource($0, detail: true) })
+        let access = library.sourceAccess
+        let authorities = access.authorities
+        let detailAuthorities = Set(library.openSourceDetails.values.filter { access.allows($0, detail: true) })
         let previewAuthorities = authorities.union(detailAuthorities)
         content.task(id: previewAuthorities) {
             library.sourceMediaCatalog.retain(authorities: authorities)

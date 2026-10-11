@@ -10,11 +10,20 @@ import MoldClient
 @Observable
 final class LibraryStore {
     let sourceMediaCatalog = SourceMediaCatalog()
+    @ObservationIgnored let sourceAccessIndex = SourceMediaAccessIndex()
+    var sourceAccessRevision = 0
     var openSourceDetails: [UUID: SourceMediaAuthority] = [:]
     private(set) var unreadMedia: LibraryUnreadLedger
     var unreadCount: Int { unreadMedia.count }
     @ObservationIgnored private let readDefaults: UserDefaults
     @ObservationIgnored var unreadCountChanged: ((Int) -> Void)?
+
+    func finishVisit(_ ids: Set<PrintID>) {
+        guard !ids.isEmpty else { return }
+        unreadMedia.markSeen(ids)
+        unreadMedia.save(to: readDefaults)
+        unreadCountChanged?(unreadCount)
+    }
 
     func markViewed(_ id: PrintID) {
         if let entry = pool.first(where: { $0.everyCopy.contains { $0.id == id } }) { unreadMedia.view(entry) }
@@ -30,9 +39,9 @@ final class LibraryStore {
 
 
 
-    private(set) var pool: [LibraryEntry] = []
-    private(set) var trashPool: [LibraryEntry] = []
-    private(set) var shelves: [CollectionShelf] = []
+    private(set) var pool: [LibraryEntry] = [] { didSet { sourceAccessRevision &+= 1 } }
+    private(set) var trashPool: [LibraryEntry] = [] { didSet { sourceAccessRevision &+= 1 } }
+    private(set) var shelves: [CollectionShelf] = [] { didSet { sourceAccessRevision &+= 1 } }
     private(set) var knownTags: [String] = []
     /// Bumped whenever the pool changes; `LibraryShowingCache` keys on it.
     private(set) var revision = 0

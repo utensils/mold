@@ -699,8 +699,25 @@ async fn lease_mesh_upload(
     let Some(path) = mesh_path else {
         return Ok((request, None));
     };
-    let Ok(capabilities) = client.capabilities().await else {
-        return Ok((request, None));
+    let capabilities = match client.capabilities().await {
+        Ok(capabilities) => capabilities,
+        // Only a missing legacy endpoint establishes compatibility. Auth,
+        // service and malformed-response failures must not silently switch
+        // transport and send media after the capability probe was refused.
+        Err(error)
+            if error
+                .downcast_ref::<reqwest::Error>()
+                .and_then(reqwest::Error::status)
+                .is_some_and(|status| matches!(status.as_u16(), 404 | 405)) =>
+        {
+            return Ok((request, None));
+        }
+        Err(error) => {
+            return Err(error.context(format!(
+                "{} did not report reference-upload capabilities; no mesh was submitted",
+                client.host()
+            )));
+        }
     };
     if !capabilities.reference_uploads.available || !client.has_api_key() {
         return Ok((request, None));
@@ -1103,6 +1120,66 @@ fn state_line(state: MeshWorkflowJobState, error: &Option<String>) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn mesh_reference_capability_response(status: u16, body: &str) -> Result<()> {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities"))
+            .respond_with(ResponseTemplate::new(status).set_body_string(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let request = CreateMeshWorkflowRequest::MeshRoundtrip {
+            roundtrip_request: Box::new(
+                serde_json::from_value(serde_json::json!({
+                    "model": "hunyuan3d-2.1:fp16", "prompt": "",
+                    "width": 0, "height": 0, "steps": 30
+                }))
+                .unwrap(),
+            ),
+        };
+        // Capability decisions must precede reading or sending this file.
+        let result = lease_mesh_upload(
+            &MoldClient::new(&server.uri()),
+            request,
+            Some(Path::new("not-opened.glb")),
+        )
+        .await;
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        result.map(|(_, lease)| assert!(lease.is_none()))
+    }
+
+    #[tokio::test]
+    async fn mesh_reference_capability_failures_are_not_legacy_hosts() {
+        for status in [401, 403, 429, 500, 503] {
+            assert!(
+                mesh_reference_capability_response(status, "unavailable")
+                    .await
+                    .is_err(),
+                "HTTP {status} must stop reference submission"
+            );
+        }
+        assert!(mesh_reference_capability_response(200, "not JSON")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn mesh_reference_capability_absence_keeps_inline_compatibility() {
+        for status in [404, 405] {
+            mesh_reference_capability_response(status, "older host")
+                .await
+                .unwrap();
+        }
+        let body = serde_json::to_string(&mold_core::ServerCapabilities::default()).unwrap();
+        mesh_reference_capability_response(200, &body)
+            .await
+            .unwrap();
+    }
 
     fn args() -> CreateArgs {
         CreateArgs {

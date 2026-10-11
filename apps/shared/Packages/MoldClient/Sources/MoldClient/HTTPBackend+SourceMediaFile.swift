@@ -19,7 +19,7 @@ public extension HTTPBackend {
         try SourceMediaFile.checkPreviewSize(Int(clamping: response.expectedContentLength))
         let proposed = (member.displayName as NSString).pathExtension.lowercased()
         let known = ["png", "jpg", "jpeg", "webp", "gif", "heic", "mp4", "mov", "m4v", "wav", "mp3", "m4a", "aac", "flac", "ogg"]
-        let suffix = known.contains(proposed) ? proposed : (member.contentKind == "video" ? "mp4" : member.contentKind == "audio" ? "wav" : "png")
+        let suffix = known.contains(proposed) ? proposed : (member.contentKind == "video" ? "mp4" : member.contentKind == "audio" ? "wav" : member.contentKind == "image" ? "png" : "bin")
         let file = try SourceMediaFile(extension: suffix)
         let handle = try FileHandle(forWritingTo: file.url)
         defer { try? handle.close() }

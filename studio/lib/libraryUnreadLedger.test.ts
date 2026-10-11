@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { LibraryUnreadLedger } from "./libraryUnreadLedger";
+import { LibraryUnreadLedger, LibraryVisit } from "./libraryUnreadLedger";
 
 describe("client-local gallery viewing history", () => {
   it("baselines each host, preserves arrivals until individually viewed, and survives restart", () => {
@@ -138,4 +138,22 @@ it("persists viewing before inventory without consuming the host baseline", () =
   ledger.observe([["a|arriving.png"], ["a|other.png"]], ["a"]);
   expect(ledger.isUnread(["a|arriving.png"])).toBe(false);
   expect(ledger.isUnread(["a|other.png"])).toBe(true);
+});
+
+it("finishes a Library visit without clearing hidden or later arrivals", () => {
+  const ledger = new LibraryUnreadLedger();
+  ledger.observe([], ["one", "two"]);
+  const shown = ["one|a.png", "two|copy.png"],
+    hidden = ["one|hidden.png"],
+    later = ["one|later.png"];
+  ledger.observe([shown, hidden], ["one", "two"]);
+  const visit = new LibraryVisit();
+  visit.capture([shown]);
+  expect(ledger.isUnread(shown)).toBe(true);
+  ledger.observe([shown, hidden, later], ["one", "two"]);
+  ledger.view(visit.finish());
+  expect(ledger.isUnread(shown)).toBe(false);
+  expect(ledger.isUnread(hidden)).toBe(true);
+  expect(ledger.isUnread(later)).toBe(true);
+  expect(visit.finish()).toEqual([]);
 });

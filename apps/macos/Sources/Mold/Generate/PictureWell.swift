@@ -46,6 +46,9 @@ struct PictureWell: View {
     /// square carries its own inline controls (a ✕, an order badge) that a
     /// `Menu` label would swallow -- it keeps the contextual menu and the drop.
     var opensOnClick = true
+    /// A full-width labeled chooser for inspector add actions. Uses the same
+    /// menu, import task and library sheet as the thumbnail presentation.
+    var actionTitle: String?
     /// Draws `AlphaBed` under the picture, so a transparent reference reads
     /// as transparent rather than as the well's fill.
     var alphaBed = false
@@ -65,6 +68,7 @@ struct PictureWell: View {
     /// reorder. The chooser routes only the rows that open a door.
     var perform: (GenerateAction) -> Void = { _ in }
 
+    @Environment(GenerateController.self) var controller: GenerateController?
     @Environment(HostStore.self) var hosts
     @Environment(LibraryStore.self) var library
     /// Not `private`: `PictureWell+Shape` draws with these and
@@ -75,6 +79,7 @@ struct PictureWell: View {
     @State var showsLibrary = false
     @State var importFailure: String?
     @State var importTask: Task<Void, Never>?
+    @State var librarySession: PictureImportSession?
 
     /// The wells beside the prompt. A staged picture in a strip is smaller
     /// (`ReferenceStrip.thumbnailSize`); this is the size of a well you pick
@@ -108,6 +113,7 @@ struct PictureWell: View {
             // Decoded off the main actor -- a 50 MB still is a visible stall.
             .task(id: picture) { preview = await PicturePreview.decode(picture) }
             .task { seedLibraryPickerIfRequested() }
+            .onDisappear { importTask?.cancel(); librarySession = nil }
             .sheet(isPresented: $showsLibrary) {
                 LibraryPickerSheet(accepting: accepting, pick: deliver)
             }
@@ -115,6 +121,7 @@ struct PictureWell: View {
 
     private func seedLibraryPickerIfRequested() {
         guard seedsLibraryPicker, !showsLibrary, GenerateUAT.wantsLibraryPicker() else { return }
+        librarySession = PictureImportSession.begin(controller: controller, replacing: &importTask)
         showsLibrary = true
     }
 }

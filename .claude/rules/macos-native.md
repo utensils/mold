@@ -55,10 +55,12 @@ chooses **Use current inputs** after reattaching any needed files. This snapshot
 behavior is Mac-only; preserve the existing scalar-only iOS persistence path.
 
 Library New badges and unread counts share persisted client-local viewing state.
-Only individually displayed viewer media is read; opening Library, refreshes,
-filters and neighboring preloads must not clear unread media. Preserve current
+Individual viewer display marks that logical print read immediately. A Library
+visit captures its displayed eligible projections and marks that captured set
+read when navigation leaves Library. Keep New labels during the visit; exclude
+Trash and unvisited hidden/filtered media, and preserve arrivals after departure. Preserve current
 read status on upgrade and establish an initial baseline for newly connected
-hosts. Later arrivals remain unread across visits and relaunches. Count merged
+hosts. Later arrivals remain unread until viewed or acknowledged by a Library visit. Count merged
 visible active inventory, excluding hidden collections and Trash; retain offline
 history. iOS navigation and native icon badges follow that same ledger, with the
 existing permission/preference controls. Do not let activation-only arrival
@@ -162,3 +164,13 @@ Opening a source shows its original with existing native zoom/playback component
 metadata and every host/print/member use; never collapse several roles in one print.
 Load only the selected original into a bounded private temporary file, cancel on
 dismissal, revoke on authority changes, and release playback/files on close.
+
+Source access must use revision-keyed indexes, never repeated whole-library scans
+per usage row. Cover same-count metadata, visibility, route/key/instance changes.
+Open gallery originals require current exact member inventory, including refusal
+revocation; owner-specific generations must not reload unrelated originals.
+Unknown originals are inspected on demand from bounded authenticated files, never
+inferred from filename. Detected kinds are ephemeral and bound to exact load keys.
+Sync comparison/hash/import metadata work stays off-main with chunk cancellation.
+Draft navigation saves asynchronously; app-lifetime termination flushes the latest
+snapshot even when Generate is no longer mounted.
