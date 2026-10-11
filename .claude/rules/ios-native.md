@@ -276,3 +276,5 @@ Native `HTTPBackend.queue()` consumes every returned cursor before publishing a 
 Native model recovery prefers the queue row’s `model_download` hint, requiring a nonblank exact match to the row model. A present malformed/null/mismatched hint blocks legacy fallback without dropping the row. Only absent hints permit typed batch-code fallback. Preserve actual missing-component prose and diagnostics; use the existing exact-host, license-aware download-and-retry coordinator.
 
 Active curated/community model downloads reserve a full-width section beneath model identity; never put a growing cancel/progress column beside the title. Keep visible Cancel concise, accessibilityLabel Cancel Download explicit, and the button's label/hit area at least 44pt. RowAxis.model pins this layout for every Dynamic Type size.
+
+The image Library picker keeps machine filters in a full-width ordinary content row below native navigation chrome. Do not use an opaque top safe-area inset: its intrinsic-width background can extend behind the title. Preserve native search, refresh, empty/error/loading states and Cancel; verify default and AX5 geometry in light and dark.

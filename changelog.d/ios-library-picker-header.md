@@ -1,0 +1,1 @@
+- **Clear iOS Library picker header.** Keep the machine filter below the native title in a full-width row, preventing an opaque rectangle from covering the navigation header or pictures. Preserve search, refresh and source selection at large text sizes.
