@@ -10507,7 +10507,11 @@ mod tests {
         // q5, q4, q3, q2) on the shared conditioner/VAE, and +3 turbo tags
         // (bf16, int8-conv, q8) that stack the Viggle 6-step adapter on those
         // base files.
-        assert_eq!(known_manifests().len(), 222);
+        // DMAD / PDMD distill bump: +3. `minimax-h3-fl2va:comfy-pruned-int8-dmad-4step`,
+        // `…-pdmd-2step` and `…-pdmd-4step` — Kijai's rank-reduced builds of the
+        // DMAD and PDMD distill LoRAs from `Kijai/MiniMax-H3-experimental`, each
+        // one adapter beside the FL2VA compact base stack, so one manifest each.
+        assert_eq!(known_manifests().len(), 225);
     }
 
     /// Every reviewed H3 Turbo adapter lands in the one family `loras/`

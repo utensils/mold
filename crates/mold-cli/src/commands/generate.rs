@@ -6439,6 +6439,9 @@ mod tests {
             (mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP_768P, 9),
             (mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_R21, 5),
             (mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP_R21, 9),
+            (mold_core::minimax_h3::FL2VA_COMFY_DMAD_4STEP, 5),
+            (mold_core::minimax_h3::FL2VA_COMFY_PDMD_2STEP, 3),
+            (mold_core::minimax_h3::FL2VA_COMFY_PDMD_4STEP, 5),
         ] {
             let model_cfg = config.resolved_model_config(model);
             assert_eq!(
@@ -6528,6 +6531,9 @@ mod tests {
                 false,
             ),
             (mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP_R21, 9, false),
+            (mold_core::minimax_h3::FL2VA_COMFY_DMAD_4STEP, 5, false),
+            (mold_core::minimax_h3::FL2VA_COMFY_PDMD_2STEP, 3, false),
+            (mold_core::minimax_h3::FL2VA_COMFY_PDMD_4STEP, 5, false),
         ] {
             let mut stale = config.resolved_model_config(model);
             stale.default_steps = Some(30);
@@ -6625,6 +6631,9 @@ mod tests {
             mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP_768P,
             mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_R21,
             mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP_R21,
+            mold_core::minimax_h3::FL2VA_COMFY_DMAD_4STEP,
+            mold_core::minimax_h3::FL2VA_COMFY_PDMD_2STEP,
+            mold_core::minimax_h3::FL2VA_COMFY_PDMD_4STEP,
         ] {
             assert_eq!(
                 effective_dimensions(

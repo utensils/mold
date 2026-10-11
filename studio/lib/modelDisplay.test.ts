@@ -100,6 +100,21 @@ describe("modelDisplayName", () => {
         name: "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21",
       }),
     ).toBe("MiniMax H3 Ref2VA Turbo 4-step (rank 21)");
+    expect(
+      modelDisplayName({
+        name: "minimax-h3-fl2va:comfy-pruned-int8-dmad-4step",
+      }),
+    ).toBe("MiniMax H3 FL2VA DMAD 4-step (rank-reduced)");
+    expect(
+      modelDisplayName({
+        name: "minimax-h3-fl2va:comfy-pruned-int8-pdmd-2step",
+      }),
+    ).toBe("MiniMax H3 FL2VA PDMD 2-step (rank-reduced)");
+    expect(
+      modelDisplayName({
+        name: "minimax-h3-fl2va:comfy-pruned-int8-pdmd-4step",
+      }),
+    ).toBe("MiniMax H3 FL2VA PDMD 4-step (rank-reduced)");
   });
 
   it("resolves a wire model id through the model inventory", () => {

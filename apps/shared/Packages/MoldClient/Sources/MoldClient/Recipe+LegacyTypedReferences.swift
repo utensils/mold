@@ -8,7 +8,7 @@ public extension RecipeCapabilities {
         let normalized = model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let parts = normalized.split(separator: ":", maxSplits: 1).map(String.init)
         guard parts.count == 2 else { return self }
-        let fl = Set(["comfy-pruned-int8", "comfy-pruned-int8-turbo-8step", "comfy-pruned-int8-turbo-4step-768p", "comfy-pruned-int8-turbo-4step-768p-v1.1", "comfy-pruned-int8-turbo-8step-768p", "comfy-pruned-int8-turbo-4step-768p-r21", "comfy-pruned-int8-turbo-8step-r21"])
+        let fl = Set(["comfy-pruned-int8", "comfy-pruned-int8-turbo-8step", "comfy-pruned-int8-turbo-4step-768p", "comfy-pruned-int8-turbo-4step-768p-v1.1", "comfy-pruned-int8-turbo-8step-768p", "comfy-pruned-int8-turbo-4step-768p-r21", "comfy-pruned-int8-turbo-8step-r21", "comfy-pruned-int8-dmad-4step", "comfy-pruned-int8-pdmd-2step", "comfy-pruned-int8-pdmd-4step"])
         let ref = Set(["comfy-pruned-int8", "comfy-pruned-int8-turbo-4step", "comfy-pruned-int8-turbo-4step-r21"])
         var result = self
         if parts[0] == "minimax-h3-ref2va", ref.contains(parts[1]), generationReferences == nil {

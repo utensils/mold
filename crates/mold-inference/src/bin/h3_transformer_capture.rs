@@ -37,14 +37,14 @@ const AUTHORIZATION_SOURCE_SHA256: &str =
 const CLAIM_MARKER: &str = "mold.minimax-h3.private-uat-transformer-capture.v1";
 const MODEL_REVISION: &str = "bfc8ed0353f5a9733be73e6b2c98ec0948195b86";
 const LICENSE_SHA256: &str = "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44";
-// Repinned by the rank-21 Turbo tags PR (stacked on the rank-dynamic adapter
-// contract, #1550), which added the third-party `drbaph-resized-loras` source
-// to the reviewed capture manifest. Previously repinned after #1544 added
-// `lightx2v-turbo-adapters`, after #1319 added `nvfp4-checkpoints`, and after
-// #985 moved the H3 frame ceiling 362 -> 345. The adapter authenticates the
-// manifest by digest before it touches a weight, so a stale pin refuses every
-// capture run.
-const MANIFEST_SHA256: &str = "f5560f20c7747b644312c7d47c4262f7376057e5316fb80e835b6b19a594f64f";
+// Repinned by the DMAD/PDMD distill tiers (#1812), which added the
+// third-party `kijai-experimental-loras` source to the reviewed capture
+// manifest. Previously repinned by the rank-21 Turbo tags PR (#1555,
+// `drbaph-resized-loras`), after #1544 added `lightx2v-turbo-adapters`, after
+// #1319 added `nvfp4-checkpoints`, and after #985 moved the H3 frame ceiling
+// 362 -> 345. The adapter authenticates the manifest by digest before it
+// touches a weight, so a stale pin refuses every capture run.
+const MANIFEST_SHA256: &str = "61c5ad54eda738ae2583708e373f24a0d284dd773c0a59c289b9e64b9b615fac";
 const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_AUTHORIZATION_BYTES: u64 = 64 * 1024;
 

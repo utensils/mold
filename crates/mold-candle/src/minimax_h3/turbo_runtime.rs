@@ -1866,12 +1866,18 @@ mod tests {
         use super::super::turbo_lora::{H3_TURBO_LORA_KIJAI_PINS, H3_TURBO_LORA_MODULE_COUNT};
         let directory = std::env::var("MOLD_TEST_H3_KIJAI_LORA_DIR")
             .expect("MOLD_TEST_H3_KIJAI_LORA_DIR must be set to run this test");
-        for pin in &H3_TURBO_LORA_KIJAI_PINS {
-            let path = std::path::Path::new(&directory).join(pin.file_name());
+        let tiers = H3TurboLoraTier::ALL
+            .into_iter()
+            .filter(|tier| tier.shape().is_per_module_alpha())
+            .collect::<Vec<_>>();
+        assert_eq!(tiers.len(), H3_TURBO_LORA_KIJAI_PINS.len());
+        for tier in tiers {
+            let pin = tier.published_pin().unwrap();
+            let path = std::path::Path::new(&directory).join(tier.file_name());
             let runtime = H3TurboLoraRuntime::open_against(
                 &path,
-                &pin.expectation(),
-                H3TurboLoraTier::Fl2v8StepV10, // identity stand-in until wave 2
+                &tier.expectation(),
+                tier,
                 &Device::Cpu,
                 DType::F32,
                 &H3ComfyNeverCancel,

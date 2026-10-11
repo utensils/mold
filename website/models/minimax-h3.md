@@ -111,20 +111,23 @@ throughput claim.
 
 ## Compact variants
 
-| Model                                                      | Task                                                       | Total pull | Runtime status                            |
-| ---------------------------------------------------------- | ---------------------------------------------------------- | ---------: | ----------------------------------------- |
-| `minimax-h3-fl2va:comfy-pruned-int8`                       | First/last-frame conditioning with audio                   |  42.482 GB | CUDA/Metal generation; boundary frames    |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`           | FL2VA + reviewed Turbo 8-step LoRA (9 steps)               |  44.438 GB | CUDA/Metal generation; boundary frames    |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`      | FL2VA + reviewed Turbo 4-step 768p LoRA (5 steps)          |  44.438 GB | CUDA/Metal generation; boundary frames    |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1` | FL2VA + reviewed Turbo 4-step 768p v1.1 LoRA (5 steps)     |  44.438 GB | CUDA/Metal generation; boundary frames    |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p`      | FL2VA + reviewed Turbo 8-step 768p LoRA (9 steps)          |  44.438 GB | CUDA/Metal generation; boundary frames    |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21`  | FL2VA + reviewed Turbo 4-step 768p LoRA, rank 21 (5 steps) |  42.780 GB | CUDA/Metal generation; boundary frames    |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21`       | FL2VA + reviewed Turbo 8-step LoRA, rank 21 (9 steps)      |  42.809 GB | CUDA/Metal generation; boundary frames    |
-| `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`          | Ref2VA + reviewed Turbo 4-step LoRA (5 steps)              |  44.438 GB | CUDA/Metal generation; reference profile  |
-| `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21`      | Ref2VA + reviewed Turbo 4-step LoRA, rank 21 (5 steps)     |  42.809 GB | CUDA/Metal generation; reference profile  |
-| `minimax-h3-ref2va:comfy-pruned-int8`                      | Reference media to video with audio                        |  42.482 GB | CUDA/Metal generation; ordered references |
-| `minimax-h3-fl2va:comfy-pruned-nvfp4`                      | First/last-frame conditioning with audio                   |  34.040 GB | Downloadable; execution unavailable       |
-| `minimax-h3-ref2va:comfy-pruned-nvfp4`                     | Reference media to video with audio                        |  34.040 GB | Downloadable; execution unavailable       |
+| Model                                                      | Task                                                              | Total pull | Runtime status                            |
+| ---------------------------------------------------------- | ----------------------------------------------------------------- | ---------: | ----------------------------------------- |
+| `minimax-h3-fl2va:comfy-pruned-int8`                       | First/last-frame conditioning with audio                          |  42.482 GB | CUDA/Metal generation; boundary frames    |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`           | FL2VA + reviewed Turbo 8-step LoRA (9 steps)                      |  44.438 GB | CUDA/Metal generation; boundary frames    |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`      | FL2VA + reviewed Turbo 4-step 768p LoRA (5 steps)                 |  44.438 GB | CUDA/Metal generation; boundary frames    |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1` | FL2VA + reviewed Turbo 4-step 768p v1.1 LoRA (5 steps)            |  44.438 GB | CUDA/Metal generation; boundary frames    |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p`      | FL2VA + reviewed Turbo 8-step 768p LoRA (9 steps)                 |  44.438 GB | CUDA/Metal generation; boundary frames    |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21`  | FL2VA + reviewed Turbo 4-step 768p LoRA, rank 21 (5 steps)        |  42.780 GB | CUDA/Metal generation; boundary frames    |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21`       | FL2VA + reviewed Turbo 8-step LoRA, rank 21 (9 steps)             |  42.809 GB | CUDA/Metal generation; boundary frames    |
+| `minimax-h3-fl2va:comfy-pruned-int8-dmad-4step`            | FL2VA + reviewed DMAD 4-step distill LoRA, rank-reduced (5 steps) |  42.849 GB | CUDA/Metal generation; boundary frames    |
+| `minimax-h3-fl2va:comfy-pruned-int8-pdmd-2step`            | FL2VA + reviewed PDMD 2-step distill LoRA, rank-reduced (3 steps) |  42.863 GB | CUDA/Metal generation; boundary frames    |
+| `minimax-h3-fl2va:comfy-pruned-int8-pdmd-4step`            | FL2VA + reviewed PDMD 4-step distill LoRA, rank-reduced (5 steps) |  43.041 GB | CUDA/Metal generation; boundary frames    |
+| `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`          | Ref2VA + reviewed Turbo 4-step LoRA (5 steps)                     |  44.438 GB | CUDA/Metal generation; reference profile  |
+| `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21`      | Ref2VA + reviewed Turbo 4-step LoRA, rank 21 (5 steps)            |  42.809 GB | CUDA/Metal generation; reference profile  |
+| `minimax-h3-ref2va:comfy-pruned-int8`                      | Reference media to video with audio                               |  42.482 GB | CUDA/Metal generation; ordered references |
+| `minimax-h3-fl2va:comfy-pruned-nvfp4`                      | First/last-frame conditioning with audio                          |  34.040 GB | Downloadable; execution unavailable       |
+| `minimax-h3-ref2va:comfy-pruned-nvfp4`                     | Reference media to video with audio                               |  34.040 GB | Downloadable; execution unavailable       |
 
 The official `minimax-h3-fl2va:official-bf16` and
 `minimax-h3-ref2va:official-bf16` identities are also visible downloads. They
@@ -191,6 +194,9 @@ mold pull minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1
 mold pull minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p
 mold pull minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21
 mold pull minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21
+mold pull minimax-h3-fl2va:comfy-pruned-int8-dmad-4step
+mold pull minimax-h3-fl2va:comfy-pruned-int8-pdmd-2step
+mold pull minimax-h3-fl2va:comfy-pruned-int8-pdmd-4step
 mold pull minimax-h3-ref2va:comfy-pruned-int8
 mold pull minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21
 ```
@@ -254,6 +260,35 @@ VRAM saving, with the measured PSNR band recorded, along with the full
 measured evidence, in `docs/qualification/minimax-h3.md`, "The rank-21 Turbo
 tiers campaign (2026-09-02)".
 
+## Reviewed DMAD and PDMD distill tiers
+
+Three further FL2VA tags overlay a DMAD or PDMD distillation LoRA on the same
+compact INT8 checkpoint, exactly as a Turbo tag does. Unlike the Turbo tiers,
+each distillation was published with its own sampler and audio shift, and mold
+runs the published recipe for each tag rather than the Turbo one:
+
+| Tag                                             | Steps (grid points) | Sampler                                                          | Video / audio shift | Upstream recipe                                                                                                                              |
+| ----------------------------------------------- | ------------------- | ---------------------------------------------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `minimax-h3-fl2va:comfy-pruned-int8-dmad-4step` | 4 (5)               | Comfy `lcm` on the `simple` grid (re-noise to each step's sigma) | 12 / 2              | [`ZhengmingYu/DMAD`](https://huggingface.co/ZhengmingYu/DMAD) README: `lcm` + `simple`, shift 12/2, CFG 1                                    |
+| `minimax-h3-fl2va:comfy-pruned-int8-pdmd-2step` | 2 (3)               | Euler on the `simple` grid                                       | 12 / 6              | [`pdmd2026/pdmd_2NFE_lora`](https://huggingface.co/pdmd2026/pdmd_2NFE_lora) README: Euler on `shift(linspace(1, 0, nfe + 1))`, audio shift 6 |
+| `minimax-h3-fl2va:comfy-pruned-int8-pdmd-4step` | 4 (5)               | Euler on the `simple` grid                                       | 12 / 3              | [`pdmd2026/pdmd_4NFE_lora`](https://huggingface.co/pdmd2026/pdmd_4NFE_lora) README: same Euler schedule, shift 12/3                          |
+
+The `lcm` update predicts the clean latent at each step and re-noises it to
+the next step's sigma with fresh noise, separately for the video and audio
+streams at their own sigma. That noise is drawn deterministically from the
+request seed, so a DMAD render is reproducible from its seed like every other
+tier. PDMD's own reference sampler is plain Euler over the shifted linspace,
+which is exactly Comfy's `simple` grid with the Euler update.
+
+The adapters are Kijai's rank-reduced builds of the upstream full-rank
+distillation LoRAs (average rank 39, 38, and 57 respectively), each with one
+`alpha` per module equal to that module's rank, so the effective scale is 1.0.
+Like the `-r21` Turbo tiers they are a lossy low-rank approximation of the
+published distillation; the full-rank upstream files are not registered.
+The upstream DMAD and PDMD releases were distilled for text-only
+audio+video generation (T2VA); they run on the FL2VA compact stack like any
+other FL2VA tag, with the same boundary-frame and memory rules.
+
 A Turbo tag stores its base stack in its own task's base checkpoint directory
 (`minimax-h3-fl2va-comfy-pruned-int8/` or `minimax-h3-ref2va-comfy-pruned-int8/`,
 plus the shared family bucket), so a machine that already has that base tag
@@ -270,7 +305,7 @@ kept files with the tags that still use them.
 Selecting a Turbo model resolves the base INT8 transformer, the tier's pinned
 adapter, and the tier's reviewed step count with no extra configuration. The
 Create screen locks Steps at that count and prints the reason underneath it
-("Fixed by the 8-step Turbo tier: 9 terminal-inclusive sampler grid points
+("Fixed by the 8-step distilled tier: 9 terminal-inclusive sampler grid points
 (8 denoise intervals)."), so the `9` is not a surprise; Guidance is locked the
 same way, because H3 has no classifier-free branch and pins the scale at 0.
 Both sentences come from the server's generation profile, so the web, desktop,
@@ -337,6 +372,24 @@ still governs the base checkpoint and the full-rank adapter each was resized
 from. Every adapter, whichever of the three sources it comes from, lands at
 the same `shared/minimax-h3/loras/` path keyed by its own basename.
 
+The `-dmad-4step`, `-pdmd-2step`, and `-pdmd-4step` tags pull their adapter
+from a FOURTH third-party source:
+[`Kijai/MiniMax-H3-experimental`](https://huggingface.co/Kijai/MiniMax-H3-experimental/tree/d8023be02fefbb3633b0cd335c3879f91177299d)
+under `loras/` at pinned revision
+`d8023be02fefbb3633b0cd335c3879f91177299d` —
+`minimax_h3_DMAD_4step_full_lora_avg_rank_39_bf16.safetensors`
+(366,647,000 bytes), `minimax_h3_pdmd_2step_lora_avg_rank_38_bf16.safetensors`
+(381,015,376 bytes), and `minimax_h3_pdmd_4step_lora_avg_rank_57_bf16.safetensors`
+(558,735,392 bytes), bringing those three variants to 42,848,737,318,
+42,863,105,694, and 43,040,825,710 bytes (42.849 GB, 42.863 GB, and
+43.041 GB) respectively. Each is a rank-reduced build of an upstream
+full-rank distillation LoRA (DMAD from `ZhengmingYu/DMAD`, PDMD from
+`pdmd2026/pdmd_2NFE_lora` and `pdmd2026/pdmd_4NFE_lora`) with a per-module
+rank and a per-module `alpha` equal to that rank; mold pins each file by size,
+SHA-256, and header identity. The MiniMax H3 Community License still governs
+the base checkpoint each tag executes on, and the same
+`shared/minimax-h3/loras/` storage rule applies.
+
 The encoder, VAEs, and common support files are shared between every compact
 variant, INT8 and NVFP4 alike. After one complete variant is installed, adding
 another downloads only its transformer (20.970 GB for an INT8 tag, 12.529 GB
@@ -364,8 +417,9 @@ The current compact implementation supports this request profile:
   the default and the floor: below it the print flashes once per latent
   frame); a reviewed Turbo tag instead requires exactly its tier's own count
   (9 for `-turbo-8step`, `-turbo-8step-768p`, and `-turbo-8step-r21`, 5 for
-  `-turbo-4step-768p`, `-turbo-4step-768p-v1.1`, and `-turbo-4step-768p-r21`),
-  because that count is the distilled adapter's own schedule length
+  `-turbo-4step-768p`, `-turbo-4step-768p-v1.1`, `-turbo-4step-768p-r21`,
+  `-dmad-4step`, and `-pdmd-4step`, 3 for `-pdmd-2step`), because that count
+  is the distilled adapter's own schedule length
 - zero, one, or two boundary images on every FL2VA tag, base and Turbo:
   text-only (T2VA — no frame, the prompt builds the whole clip), first frame,
   last frame, or both. Endpoint order is first then last, and each image

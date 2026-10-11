@@ -9459,10 +9459,11 @@ mod tests {
             } else {
                 assert!(outcome.is_err());
             }
-            // Every reviewed distillation is 4-step or 8-step, so the grid is
-            // 5 or 9 terminal-inclusive points. A future 6-step tier must
-            // widen this deliberately rather than pass by accident.
-            assert!(matches!(contract_entry.grid_points, 5 | 9));
+            // Every reviewed distillation is 2-step (PDMD), 4-step or 8-step,
+            // so the grid is 3, 5 or 9 terminal-inclusive points. A future
+            // 6-step tier must widen this deliberately rather than pass by
+            // accident.
+            assert!(matches!(contract_entry.grid_points, 3 | 5 | 9));
         }
     }
 
