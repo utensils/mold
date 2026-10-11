@@ -38,7 +38,7 @@ describe("opaque relay byte delivery", () => {
         sid: "sid",
         rid: "rid",
         next: 4,
-        credit: 16,
+        credit: 64,
         ack_seq: 1,
       });
       await pending;
@@ -104,12 +104,12 @@ describe("opaque relay byte delivery", () => {
     wire.receive(frame(0, 1));
     wire.receive(frame(1, 2));
     expect(received).toEqual([1, 2]);
-    expect(sent.at(-1)).toMatchObject({ a: "ack", next: 2, credit: 16 });
+    expect(sent.at(-1)).toMatchObject({ a: "ack", next: 2, credit: 64 });
     expect(() => wire.receive(frame(1, 9))).toThrow(/duplicate/);
     wire.close();
   });
 
-  it("retries the exact ciphertext and never exceeds the sixteen-frame window", async () => {
+  it("retries the exact ciphertext and never exceeds the 64-frame window", async () => {
     vi.useFakeTimers();
     const sent: WireFrame[] = [];
     const wire = new SecureWire(
@@ -119,23 +119,23 @@ describe("opaque relay byte delivery", () => {
       () => {},
     );
     const pending = Promise.all(
-      Array.from({ length: 4 }, () => wire.write(new Uint8Array(65539))),
+      Array.from({ length: 16 }, () => wire.write(new Uint8Array(65539))),
     );
     await vi.advanceTimersByTimeAsync(0);
-    expect(sent.filter((frame) => frame.a === "data")).toHaveLength(16);
+    expect(sent.filter((frame) => frame.a === "data")).toHaveLength(64);
     await vi.advanceTimersByTimeAsync(10000);
-    expect(sent.slice(16)).toEqual(sent.slice(0, 16));
+    expect(sent.slice(64)).toEqual(sent.slice(0, 64));
     wire.receive({
       a: "ack",
       v: 3,
       sid: "sid",
       rid: "rid",
-      next: 16,
-      credit: 16,
+      next: 64,
+      credit: 64,
       ack_seq: 0,
     });
     await pending;
-    expect(sent.at(-1)).toMatchObject({ a: "data", seq: 19 });
+    expect(sent.at(-1)).toMatchObject({ a: "data", seq: 79 });
     wire.close();
   });
 
@@ -143,7 +143,7 @@ describe("opaque relay byte delivery", () => {
     const invalid = [
       { sid: "different", seq: 0, d: "AA==" },
       { seq: 0, d: "AA" },
-      { seq: 16, d: "AA==" },
+      { seq: 64, d: "AA==" },
     ];
     for (const fields of invalid) {
       const wire = new SecureWire(

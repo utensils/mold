@@ -137,7 +137,7 @@ it("fetches and verifies once, coalesces ACKs, and acknowledges already-consumed
   };
   await carrier.receive(frame);
   expect(received).toHaveLength(2);
-  await vi.advanceTimersByTimeAsync(8);
+  await vi.advanceTimersByTimeAsync(32);
   expect(sent).toHaveLength(1);
   expect(sent[0]).toMatchObject({ a: "ack", next: 2 });
   await carrier.receive(frame);
@@ -170,7 +170,7 @@ it("rejects corrupt, oversized, cross-session and out-of-window objects before d
     o: { id, bytes: 5, count: 1, sha256: packed.sha256, url: url() },
   };
   await expect(carrier.receive({ ...frame, sid: "other" })).rejects.toThrow();
-  await expect(carrier.receive({ ...frame, seq: 16 })).rejects.toThrow();
+  await expect(carrier.receive({ ...frame, seq: 64 })).rejects.toThrow();
   expect(fetcher).not.toHaveBeenCalled();
   await expect(carrier.receive(frame)).rejects.toThrow();
   expect(delivered).not.toHaveBeenCalled();
@@ -284,7 +284,7 @@ it("uploads only retained ciphertext, binds broker replies, and retransmits the 
   await vi.waitFor(() => expect(sent.some((frame) => frame.o)).toBe(true));
   const ref = sent.find((frame) => frame.o)!;
   carrier.send(frames[0]!);
-  await vi.advanceTimersByTimeAsync(8);
+  await vi.advanceTimersByTimeAsync(32);
   expect(sent.filter((frame) => frame.o).at(-1)).toEqual(ref);
   expect(fetcher).toHaveBeenCalledTimes(1);
   expect(fetcher.mock.calls[0]?.[1]).toMatchObject({

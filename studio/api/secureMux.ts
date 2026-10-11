@@ -5,7 +5,7 @@ export interface SecureRecord {
   payload: Uint8Array;
 }
 
-const WINDOW = 262144;
+const WINDOW = 1048576;
 const CHUNK = 16320;
 const MAX_UPLOAD = 64 * 1024 * 1024;
 const encoder = new TextEncoder();
@@ -32,7 +32,7 @@ interface Stream {
   dispose: () => void;
 }
 
-/** One session, at most 32 requests and 256 KiB of unread data per direction per request.
+/** One session, at most 32 requests and 1 MiB of unread data per direction per request.
  * Reconnection creates a NEW mux. There is deliberately no replay queue. */
 export class SecureMux {
   private readonly streams = new Map<number, Stream>();

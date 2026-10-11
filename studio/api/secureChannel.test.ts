@@ -25,12 +25,12 @@ describe("secure WebSocket backpressure", () => {
     try {
       await expect(
         Promise.all(
-          Array.from({ length: 16 }, () => wire.write(new Uint8Array(16384))),
+          Array.from({ length: 64 }, () => wire.write(new Uint8Array(16384))),
         ),
-      ).resolves.toHaveLength(16);
-      expect(socket.bufferedAmount).toBeGreaterThan(256 * 1024);
-      expect(socket.bufferedAmount).toBeLessThan(512 * 1024);
-      socket.bufferedAmount = 512 * 1024;
+      ).resolves.toHaveLength(64);
+      expect(socket.bufferedAmount).toBeGreaterThan(1024 * 1024);
+      expect(socket.bufferedAmount).toBeLessThan(2 * 1024 * 1024);
+      socket.bufferedAmount = 2 * 1024 * 1024;
       expect(() => channel.send({ a: "heartbeat", v: 3 })).toThrow(/buffer/);
     } finally {
       wire.close();

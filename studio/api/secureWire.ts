@@ -5,7 +5,8 @@ export type WireFrame = Record<string, unknown> & {
   sid: string;
   rid: string;
 };
-const WINDOW = 16;
+export const SECURE_WIRE_WINDOW = 64;
+const WINDOW = SECURE_WIRE_WINDOW;
 const integer = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 const encode = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
@@ -167,7 +168,7 @@ export class SecureWire {
         const current = this.incoming.get(this.next)!;
         this.incoming.delete(this.next);
         this.seen.set(this.next++, current.d as string);
-        if (this.seen.size > 32)
+        if (this.seen.size > WINDOW * 2)
           this.seen.delete(this.seen.keys().next().value!);
         this.consume(decode(current.d));
       }

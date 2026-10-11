@@ -75,23 +75,23 @@ describe("encrypted HTTP stream multiplexing", () => {
     const pending = h.mux.fetch(new Request("https://host.example/api/file"));
     h.receive(2, bytes({ status: 200, headers: [] }));
     const reader = (await pending).body!.getReader();
-    for (let i = 0; i < 8; i++) h.receive(3, new Uint8Array(16384));
+    for (let i = 0; i < 32; i++) h.receive(3, new Uint8Array(16384));
     expect(h.sent.filter((r) => r.kind === 6)).toHaveLength(0);
-    for (let i = 0; i < 7; i++) await reader.read();
+    for (let i = 0; i < 31; i++) await reader.read();
     expect(h.sent.filter((r) => r.kind === 6)).toHaveLength(0);
     await reader.read();
     const credit = h.sent.filter((r) => r.kind === 6);
     expect(credit).toHaveLength(1);
-    expect(new DataView(credit[0]!.payload.buffer).getUint32(0)).toBe(131072);
+    expect(new DataView(credit[0]!.payload.buffer).getUint32(0)).toBe(524288);
     await reader.cancel();
   });
 
-  it("bounds an unread response to 256 KiB and fails the session on credit violation", async () => {
+  it("bounds an unread response to 1 MiB and fails the session on credit violation", async () => {
     const h = harness();
     const pending = h.mux.fetch(new Request("https://host.example/api/file"));
     h.receive(2, bytes({ status: 200, headers: [] }));
     const response = await pending;
-    for (let i = 0; i < 16; i++) h.receive(3, new Uint8Array(16384));
+    for (let i = 0; i < 64; i++) h.receive(3, new Uint8Array(16384));
     expect(() => h.receive(3, new Uint8Array([1]))).toThrow(/credit/);
     await expect(response.arrayBuffer()).rejects.toThrow(/credit/);
     expect(h.mux.activeStreams).toBe(0);
@@ -102,7 +102,7 @@ describe("encrypted HTTP stream multiplexing", () => {
     const pending = h.mux.fetch(
       new Request("https://host.example/api/upload", {
         method: "POST",
-        body: new Uint8Array(300000),
+        body: new Uint8Array(1200000),
       }),
     );
     const failure = pending.catch((error: unknown) => error);
@@ -111,7 +111,7 @@ describe("encrypted HTTP stream multiplexing", () => {
       h.sent
         .filter((r) => r.kind === 3)
         .reduce((n, r) => n + r.payload.length, 0),
-    ).toBe(262144);
+    ).toBe(1048576);
     const credit = new Uint8Array(4);
     new DataView(credit.buffer).setUint32(0, 16384);
     h.receive(6, credit);
@@ -120,7 +120,7 @@ describe("encrypted HTTP stream multiplexing", () => {
       h.sent
         .filter((r) => r.kind === 3)
         .reduce((n, r) => n + r.payload.length, 0),
-    ).toBe(278528);
+    ).toBe(1064960);
     h.mux.close(new Error("disconnected; request may have completed"));
     expect(await failure).toMatchObject({
       message: "disconnected; request may have completed",

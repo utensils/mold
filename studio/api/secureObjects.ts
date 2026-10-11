@@ -1,9 +1,11 @@
+import { SECURE_WIRE_WINDOW } from "./secureWire";
+
 /** Optional S3 carrier for existing Noise bytes; see relay/aws/OPAQUE-OBJECTS.md. */
 export const PRODUCTION_OBJECT_ORIGIN =
   "https://mold-relay-042506291754-us-west-2.s3.us-west-2.amazonaws.com";
 const MAX_BYTES = 262144;
 const MAX_PENDING = 1048576;
-const THRESHOLD = 131072;
+const THRESHOLD = 65536;
 const integer = (n: unknown): n is number =>
   typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
 const hex32 = (s: unknown): s is string =>
@@ -211,7 +213,7 @@ export class CipherObjectCarrier {
       if (cached.frames.find((f) => f.seq === frame.seq)?.d !== frame.d)
         throw new Error("Conflicting ciphertext retry.");
       if (cached.reference) this.resend.add(cached);
-      this.timer ??= setTimeout(() => this.guard(() => this.flush()), 8);
+      this.timer ??= setTimeout(() => this.guard(() => this.flush()), 32);
       return;
     }
     const staged = this.staged.find((entry) => entry.frame.seq === frame.seq);
@@ -231,7 +233,7 @@ export class CipherObjectCarrier {
     this.staged.push({ frame, bytes });
     this.stagedBytes += bytes.length + 4;
     if (this.staged.length === 16) this.flush();
-    else this.timer ??= setTimeout(() => this.guard(() => this.flush()), 8);
+    else this.timer ??= setTimeout(() => this.guard(() => this.flush()), 32);
   }
 
   async receive(frame: Frame): Promise<void> {
@@ -266,7 +268,7 @@ export class CipherObjectCarrier {
     validateObjectUrl(o.url, this.context, "host", o.id);
     const end = frame.seq + o.count;
     const next = this.receiveNext();
-    if (!Number.isSafeInteger(end) || end > next + 16)
+    if (!Number.isSafeInteger(end) || end > next + SECURE_WIRE_WINDOW)
       throw new Error("Ciphertext object exceeds the receive window.");
     if (end <= next) {
       if (this.ack) this.flushAck();
