@@ -106,7 +106,11 @@ The current decision permits:
   visual parity — below the rule's 20 dB drop clause), and all three shipped
   on the maintainer's 2026-09-02 call on PR #1555 (see
   `docs/qualification/minimax-h3.md`, "The rank-21 Turbo tiers campaign") —
-  from `drbaph/MiniMax-H3-Turbo-Lora-ComfyUI` at the repository root); and the
+  from `drbaph/MiniMax-H3-Turbo-Lora-ComfyUI` at the repository root); the
+  reviewed distilled base tier `minimax-h3-fl2va:fasth3-v2-int8` — the FL2VA
+  compact stack with FastVideo's full-weight FastH3 V2 8-step distilled INT8
+  ConvRot transformer substituted for Comfy-Org's, at its own fixed schedule
+  (9 grid points, `res_multistep`, shift 10/3); and the
   pinned download-only tiers
   (`minimax-h3-{fl2va,ref2va}:official-bf16` and `:comfy-pruned-nvfp4`), which
   acquire, verify, inventory, and remove normally but are refused at
@@ -117,6 +121,8 @@ The current decision permits:
   `Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot`, the two lightx2v Turbo LoRA
   adapters from `lightx2v/Minimax-h3-Turbo`, and the three SVD-resized
   rank-21 Turbo LoRA adapters from `drbaph/MiniMax-H3-Turbo-Lora-ComfyUI`,
+  and the FastH3 V2 distilled transformer from
+  `FastVideo/FastVideo-FastH3-Comfy`,
   with existing SHA-256 verification and repair flows;
 - no raw repository, arbitrary live-catalog recipe, configured alias, or
   caller-authored manifest may substitute for those registered graphs;
@@ -162,6 +168,7 @@ The current decision does not permit Mold to:
 - [Third-party pruned NVFP4 transformers, pinned revision](https://huggingface.co/Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot/tree/908eccad7e68751190d04c171956f163bfeed741)
 - [Third-party Turbo LoRA adapters, pinned revision](https://huggingface.co/lightx2v/Minimax-h3-Turbo/tree/05ef678438e84933c406131b59abbf86919b3aac)
 - [Third-party SVD-resized Turbo LoRA adapters, pinned revision](https://huggingface.co/drbaph/MiniMax-H3-Turbo-Lora-ComfyUI/tree/be8eb3ea3466cbb7def202ffec0d2fdc054256ac)
+- [Third-party FastH3 V2 distilled transformer, pinned revision](https://huggingface.co/FastVideo/FastVideo-FastH3-Comfy/tree/ec1e3aa374a91c57b0b94a1623b7e657c0498cf2)
 
 ### The pruned NVFP4 third-party source
 
@@ -236,6 +243,39 @@ Reviewed 2026-09-02, against the same standard already applied to
 `Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot` and `lightx2v/Minimax-h3-Turbo`:
 acceptable as a third-party derivative source, recorded in the reviewed-source
 links above and the decision table's Third-party sources row below.
+
+### The FastH3 distilled transformer source
+
+`FastVideo/FastVideo-FastH3-Comfy` @
+`ec1e3aa374a91c57b0b94a1623b7e657c0498cf2` is pinned in
+`crates/mold-core/src/minimax_h3.rs` (`FASTVIDEO_FASTH3_REPO` /
+`_REVISION`, and the `REVIEWED_DISTILLED_BASE_TIERS` row) and in
+`crates/mold-candle/src/minimax_h3/comfy_dit.rs`
+(`H3ComfyPublishedArtifact::FastH3V2Fl2VaPrunedInt8ConvRot`) as the source of
+ONE file: `diffusion_models/fastvideo_fasth3_8step_v2_pruned_int8_convrot.safetensors`,
+22,128,378,696 bytes, SHA-256
+`0922785978dc9bfe1adf27d8b291b0ca763f9f165f882e6cb297c72fbb6deda8`, plus its
+exact header identity and 1,098-tensor inventory. Unlike every other
+third-party source above, it substitutes a whole transformer rather than
+adding an adapter or a differently quantized copy: FastH3 V2 is a full-weight
+DMD distillation of MiniMax H3 (original repository
+`FastVideo/FastVideo-FastH3-8-Step-V2`), repackaged for ComfyUI in Comfy-Org's
+curve-AdaLN INT8 ConvRot layout. Everything else the tag pulls is the
+Comfy-Org and MiniMaxAI graph already reviewed above, byte for byte.
+
+The repository card declares `license: other`,
+`license_name: minimax-h3-community-license-agreement`, a `license_link` to
+`MiniMaxAI/MiniMax-H3`'s LICENSE, and `base_model: MiniMaxAI/MiniMax-H3`; it
+ships no LICENSE file (404 at the pinned revision), the same packaging gap as
+the sources above. The MiniMax H3 Community License therefore governs this
+transformer exactly as it governs every other H3 weight. The operating point
+mold runs it at is FastVideo's own, from
+`FastVideo/FastVideo-FastH3-8-Step-V2-NVFP4-Comfy` @
+`994a40beb8c8f15739e4f0fad96aec101bb7123c` README.md:25-26 (8 steps,
+`res_multistep`, `simple`, `MiniMaxH3SigmaShift` 10 video / 3 audio). Reviewed
+2026-10-10 against the same standard applied to the sources above: acceptable
+as a third-party distillation source of the reviewed base model, runnable on
+the FL2VA compact stack.
 
 ## Decision record
 

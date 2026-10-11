@@ -7693,8 +7693,7 @@ mod tests {
             };
             // The fixture's prepared attempt renders 5 grid points, and a
             // frozen override must equal the attempt's own count.
-            *base_sampler =
-                Some(H3FactoryBaseSamplerOverride::new(kind, 5, video, audio).unwrap());
+            *base_sampler = Some(H3FactoryBaseSamplerOverride::new(kind, 5, video, audio).unwrap());
             FrozenH3FactoryAuthority::new_contract_only(input).unwrap()
         };
         let fasth3 = with_override(H3FactorySamplerKind::ComfyResMultistep, 10.0, 3.0);
@@ -7780,13 +7779,17 @@ mod tests {
     /// frozen identity.
     #[test]
     fn the_fasth3_base_override_is_the_reviewed_distilled_tier_contract() {
-        let tier =
-            contract::distilled_base_tier_for_model(contract::FL2VA_FASTH3_V2_INT8).unwrap();
+        let tier = contract::distilled_base_tier_for_model(contract::FL2VA_FASTH3_V2_INT8).unwrap();
         let fasth3 = H3FactoryBaseSamplerOverride::for_distilled_base_tier(tier).unwrap();
         assert_eq!(
             fasth3,
-            H3FactoryBaseSamplerOverride::new(H3FactorySamplerKind::ComfyResMultistep, 9, 10.0, 3.0)
-                .unwrap()
+            H3FactoryBaseSamplerOverride::new(
+                H3FactorySamplerKind::ComfyResMultistep,
+                9,
+                10.0,
+                3.0
+            )
+            .unwrap()
         );
         assert_eq!(fasth3.grid_points(), 9);
         assert!(fasth3.matches_tier(tier));
@@ -7799,7 +7802,10 @@ mod tests {
             contract::REF2VA_COMFY,
             contract::FL2VA_COMFY_TURBO_8STEP,
         ] {
-            assert_eq!(H3FactoryBaseSamplerOverride::for_model(model).unwrap(), None);
+            assert_eq!(
+                H3FactoryBaseSamplerOverride::for_model(model).unwrap(),
+                None
+            );
         }
         // Every reviewed distilled base tier builds its own override.
         for tier in contract::REVIEWED_DISTILLED_BASE_TIERS {
@@ -7830,8 +7836,13 @@ mod tests {
         };
         let nine = frozen_with(fasth3.clone());
         let five = frozen_with(
-            H3FactoryBaseSamplerOverride::new(H3FactorySamplerKind::ComfyResMultistep, 5, 10.0, 3.0)
-                .unwrap(),
+            H3FactoryBaseSamplerOverride::new(
+                H3FactorySamplerKind::ComfyResMultistep,
+                5,
+                10.0,
+                3.0,
+            )
+            .unwrap(),
         );
         assert_ne!(nine.identity_sha256(), five.identity_sha256());
         assert_eq!(nine.quantization().fixed_grid_points(), Some(9));
@@ -7856,8 +7867,8 @@ mod tests {
         else {
             panic!("fixture uses the compact layout");
         };
-        *base_sampler = H3FactoryBaseSamplerOverride::for_model(contract::FL2VA_FASTH3_V2_INT8)
-            .unwrap();
+        *base_sampler =
+            H3FactoryBaseSamplerOverride::for_model(contract::FL2VA_FASTH3_V2_INT8).unwrap();
         let fasth3 = FrozenH3FactoryAuthority::new_contract_only(input).unwrap();
         assert!(media_model_matches_h3_authority(
             contract::FL2VA_FASTH3_V2_INT8,

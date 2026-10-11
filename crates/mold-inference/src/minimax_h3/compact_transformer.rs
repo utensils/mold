@@ -340,8 +340,7 @@ mod tests {
             H3CompactTransformerSelection::for_model(contract::FL2VA_FASTH3_V2_INT8).unwrap(),
             selection
         );
-        let tier =
-            contract::distilled_base_tier_for_model(contract::FL2VA_FASTH3_V2_INT8).unwrap();
+        let tier = contract::distilled_base_tier_for_model(contract::FL2VA_FASTH3_V2_INT8).unwrap();
         let artifact = H3ComfyPublishedArtifact::FastH3V2Fl2VaPrunedInt8ConvRot;
         assert_eq!(tier.transformer_hf_filename, H3_FASTH3_V2_INT8_SOURCE_PATH);
         assert_eq!(tier.transformer_size_bytes, artifact.file_bytes());

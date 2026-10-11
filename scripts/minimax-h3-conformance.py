@@ -69,6 +69,10 @@ EXPECTED_REVISIONS = {
     # derivatives of three adapters already pinned above, runnable on the
     # compact stacks.
     "drbaph-resized-loras": "be8eb3ea3466cbb7def202ffec0d2fdc054256ac",
+    # Third-party distilled base transformer (FastH3 V2 8-step, #1812): a
+    # full-weight DMD distillation in the Comfy INT8 ConvRot layout, runnable
+    # on the FL2VA compact stack.
+    "fasth3-checkpoints": "ec1e3aa374a91c57b0b94a1623b7e657c0498cf2",
     "sglang": "0c3a76fa0a5bfab410b645f4143e7e8e3cc25c77",
     "vllm-omni": "3d7fc3b9ba3cac88d579d4dc35b78b0b641675fc",
 }

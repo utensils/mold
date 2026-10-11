@@ -104,6 +104,13 @@
       "authority": "deployment"
     },
     {
+      "id": "fasth3-checkpoints",
+      "repository": "https://huggingface.co/FastVideo/FastVideo-FastH3-Comfy",
+      "revision": "ec1e3aa374a91c57b0b94a1623b7e657c0498cf2",
+      "role": "third-party distilled base transformer (FastH3 V2 8-step, INT8 ConvRot); runnable on the FL2VA compact stack",
+      "authority": "deployment"
+    },
+    {
       "id": "sglang",
       "repository": "https://github.com/sgl-project/sglang",
       "revision": "0c3a76fa0a5bfab410b645f4143e7e8e3cc25c77",

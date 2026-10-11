@@ -381,11 +381,12 @@ pub struct DistilledBaseManifestTier {
 }
 
 /// Reviewed distilled base tiers (#1812). FastH3 V2's operating point is
-/// FastVideo's own (`FastVideo/FastVideo-FastH3-Comfy@ec1e3aa3` README and the
-/// FastVideo-FastH3-8-Step-V2-NVFP4-Comfy README): 8 steps of
-/// `res_multistep` on the `simple` schedule, `MiniMaxH3SigmaShift` 10 for
-/// video and 3 for audio, cfg 1 (mold guidance 0). 8 steps is 9
-/// terminal-inclusive grid points.
+/// FastVideo's own: `FastVideo/FastVideo-FastH3-8-Step-V2-NVFP4-Comfy@994a40be`
+/// README.md:25-26 ("Keep the template's sampler settings: 8 steps,
+/// `res_multistep`, `simple`, and the `MiniMaxH3SigmaShift` node at 10 (video)
+/// and 3 (audio)"), the same 8-step V2 checkpoint the INT8 file at
+/// `FastVideo/FastVideo-FastH3-Comfy@ec1e3aa3` repackages; cfg 1 is mold's
+/// guidance 0. 8 steps is 9 terminal-inclusive grid points.
 pub const REVIEWED_DISTILLED_BASE_TIERS: &[DistilledBaseManifestTier] =
     &[DistilledBaseManifestTier {
         model: FL2VA_FASTH3_V2_INT8,
@@ -7210,9 +7211,9 @@ mod fasth3_tier_tests {
 
     #[test]
     fn the_fasth3_tier_pins_fastvideo_upstream_operating_point() {
-        // FastVideo/FastVideo-FastH3-Comfy@ec1e3aa3 README: 8 steps,
-        // res_multistep + simple, MiniMaxH3SigmaShift video 10 / audio 3,
-        // cfg 1 (mold guidance 0). 8 steps = 9 terminal-inclusive points.
+        // FastVideo-FastH3-8-Step-V2-NVFP4-Comfy@994a40be README:25-26: 8
+        // steps, res_multistep + simple, MiniMaxH3SigmaShift video 10 / audio
+        // 3; cfg 1 is mold guidance 0. 8 steps = 9 terminal-inclusive points.
         let tier = tier();
         assert_eq!(tier.model, FL2VA_FASTH3_V2_INT8);
         assert_eq!(tier.display_label, "FastH3 V2 8-step (FastVideo)");

@@ -98,9 +98,9 @@ use crate::attention::{AttentionBackend, AttentionChunkPolicy};
 // Feature-independent: the envelope validators below name this in their
 // signatures in every build, matching how the type itself is defined.
 use crate::engine::GenerationReferenceBinding;
-use crate::h3_factory::{H3FactoryBaseSamplerOverride, H3FactoryTurboAdapterAuthority};
 #[cfg(feature = "mp4")]
 use crate::h3_factory::H3PrivateFl2VaFactoryAuthority;
+use crate::h3_factory::{H3FactoryBaseSamplerOverride, H3FactoryTurboAdapterAuthority};
 use crate::progress::ProgressReporter;
 use crate::{
     h3_factory_activation_prerequisites, FrozenH3FactoryAuthority, H3FactoryActivationPrerequisite,
@@ -8775,7 +8775,10 @@ mod tests {
                 .validate_for_task_with_distillation(Task::Fl2va, None, Some(&base_sampler))
                 .unwrap_err()
                 .to_string();
-            assert!(error.contains("renders exactly 9 steps"), "{wrong}: {error}");
+            assert!(
+                error.contains("renders exactly 9 steps"),
+                "{wrong}: {error}"
+            );
         }
         // Without the override the same 9-point envelope is out of range.
         assert!(reviewed_envelope(9)

@@ -100,6 +100,11 @@ describe("modelDisplayName", () => {
         name: "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21",
       }),
     ).toBe("MiniMax H3 Ref2VA Turbo 4-step (rank 21)");
+    expect(
+      modelDisplayName({
+        name: "minimax-h3-fl2va:fasth3-v2-int8",
+      }),
+    ).toBe("MiniMax H3 FL2VA FastH3 V2 8-step (FastVideo)");
   });
 
   it("resolves a wire model id through the model inventory", () => {
