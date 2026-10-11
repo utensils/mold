@@ -219,6 +219,15 @@ Lambda IAM is limited to `ciphertext/v3/*` object read/write and scoped
 admission/quota rows. No S3 list, legacy content, bearer secret or API invoke
 authority is required for the runtime.
 
+The DynamoDB quota document alone uses bounded `deflate-v1` binary storage to
+avoid rebilling repeated signed URL parameters on every conditional write.
+Revision and TTL remain top-level attributes. Both encoded and inflated content
+are capped at 64 KiB, with the inflation cap enforced during decompression.
+Unknown codecs and malformed documents fail closed. Existing protocol3 JSON
+quota rows remain readable during a runtime update; this is an internal storage
+format migration, not an older wire-protocol admission path. Grant responses
+round-trip exactly, so retries do not mint different URLs or capabilities.
+
 The reliable wire window is 64 original frames (ACK credit 0–64), allowing up to
 four 16-frame ciphertext objects in flight without exceeding the existing
 four-object / 1 MiB reservation limit per peer and direction. Each HTTP stream

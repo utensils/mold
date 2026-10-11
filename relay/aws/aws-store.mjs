@@ -4,6 +4,7 @@ import {
   PutItemCommand,
   DeleteItemCommand,
 } from "@aws-sdk/client-dynamodb";
+import { encodeDocument, decodeDocument } from "./store-codec.mjs";
 const dynamo = new DynamoDBClient({});
 export const store = {
   async get(id) {
@@ -16,7 +17,7 @@ export const store = {
     );
     return r.Item
       ? {
-          ...JSON.parse(r.Item.document.S),
+          ...decodeDocument(id, r.Item),
           revision: Number(r.Item.revision?.N ?? 0),
         }
       : undefined;
@@ -28,7 +29,7 @@ export const store = {
           TableName: process.env.TABLE_NAME,
           Item: {
             id: { S: id },
-            document: { S: JSON.stringify(value) },
+            ...encodeDocument(id, value),
             revision: { N: String(revision + 1) },
             expiresAt: {
               N: String(
@@ -61,7 +62,7 @@ export const store = {
         TableName: process.env.TABLE_NAME,
         Item: {
           id: { S: id },
-          document: { S: JSON.stringify(value) },
+          ...encodeDocument(id, value),
           revision: { N: "1" },
           expiresAt: {
             N: String(value.expiresAt ?? Math.floor(Date.now() / 1000) + 3600),

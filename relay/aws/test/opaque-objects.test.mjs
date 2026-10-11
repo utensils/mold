@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createObjectBroker } from "../opaque-objects.mjs";
-function fixture() {
+import { encodeDocument, decodeDocument } from "../store-codec.mjs";
+function fixture(compressed = false) {
   const rows = new Map(),
     cleared = [],
     heads = [],
@@ -12,12 +13,20 @@ function fixture() {
   const store = {
     async get(k) {
       operations.get++;
-      return structuredClone(rows.get(k));
+      const row = rows.get(k);
+      return compressed && row
+        ? { ...decodeDocument(k, row), revision: row.revision }
+        : structuredClone(row);
     },
     async cas(k, r, v) {
       operations.cas++;
       if ((rows.get(k)?.revision ?? 0) !== r) return false;
-      rows.set(k, structuredClone({ ...v, revision: r + 1 }));
+      rows.set(
+        k,
+        compressed
+          ? { ...encodeDocument(k, v), revision: r + 1 }
+          : structuredClone({ ...v, revision: r + 1 }),
+      );
       return true;
     },
   };
@@ -79,6 +88,20 @@ function fixture() {
     setClearFails: (v) => (clearFails = v),
   };
 }
+test("compressed quota CAS keeps concurrent grants bounded and exact on retry", async () => {
+  const f = fixture(true);
+  const requests = [0, 2, 4, 6, 8].map((seq) => f.create(seq));
+  const replies = await Promise.all(
+    requests.map((r) => f.broker.command(f.ctx, r)),
+  );
+  assert.equal(replies.filter((r) => r.op === "created").length, 4);
+  assert.equal(replies.filter((r) => r.code === "capacity").length, 1);
+  for (let i = 0; i < replies.length; i++) {
+    if (replies[i].op === "created")
+      assert.deepEqual(await f.broker.command(f.ctx, requests[i]), replies[i]);
+  }
+  assert.ok([...f.rows.values()].every((row) => row.codec.S === "deflate-v1"));
+});
 test("allocation retries are idempotent and changes conflict; parallel allocations respect quota", async () => {
   const f = fixture();
   const a = await f.broker.command(f.ctx, f.create());
