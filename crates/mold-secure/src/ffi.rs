@@ -290,6 +290,29 @@ pub unsafe extern "C" fn mold_secure_operator_key(
     }
 }
 
+/// Normalize one local client key without changing the explicit server config.
+#[no_mangle]
+pub unsafe extern "C" fn mold_secure_operator_override(
+    raw: *const u8,
+    length: usize,
+    destination: *mut u8,
+    capacity: usize,
+) -> i32 {
+    if destination.is_null() || capacity < operator_key::MAX_KEY_BYTES {
+        return -4;
+    }
+    let Ok(raw) = (unsafe { input(raw, length, 65536) }) else {
+        return -1;
+    };
+    let Ok(raw) = std::str::from_utf8(raw) else {
+        return -1;
+    };
+    match operator_key::client_override(raw) {
+        Ok(key) => unsafe { output(destination, capacity, key.as_bytes()) },
+        Err(_) => -2,
+    }
+}
+
 #[cfg(test)]
 mod operator_tests {
     use super::*;
