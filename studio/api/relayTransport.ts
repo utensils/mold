@@ -4,6 +4,7 @@ import {
   secureHostForOrigin,
   renewSecureHostGrant,
   assertSecureHostCurrent,
+  type SecurePairingChange,
 } from "./secureStore";
 import {
   checkGrant,
@@ -16,6 +17,7 @@ type RequestAdapter = (
   init?: RequestInit,
 ) => Promise<Response>;
 interface ChannelEntry {
+  namespace: string;
   promise: Promise<SecureChannel>;
   controller: AbortController;
   waiters: number;
@@ -114,6 +116,7 @@ async function channelFor(
   if (!entry) {
     const controller = new AbortController();
     const created: ChannelEntry = {
+      namespace: profile.namespace,
       promise: Promise.resolve(null as unknown as SecureChannel),
       controller,
       waiters: 0,
@@ -275,4 +278,18 @@ export async function relayFetch(
 }
 
 if (typeof window !== "undefined")
-  window.addEventListener("mold:secure-pairings-changed", clearRelayInfoCache);
+  window.addEventListener("mold:secure-pairings-changed", (event) => {
+    const change = (event as CustomEvent<SecurePairingChange>).detail;
+    if (
+      !change ||
+      (change.authority !== "removed" && change.authority !== "replaced")
+    )
+      return;
+    // Route discovery and renewal preserve session authority. Removing another
+    // host must not cancel this host's SSE, uploads, or in-flight mutations.
+    for (const [key, entry] of channels) {
+      if (entry.namespace !== change.namespace) continue;
+      entry.controller.abort();
+      channels.delete(key);
+    }
+  });

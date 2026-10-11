@@ -91,10 +91,16 @@ async function registerPlatform(profile: SecureHostProfile): Promise<void> {
     }
   });
 }
-function changed(): void {
+export interface SecurePairingChange {
+  namespace: string;
+  authority: "removed" | "replaced" | "unchanged";
+}
+function changed(detail: SecurePairingChange): void {
   profiles = undefined;
   if (typeof window !== "undefined")
-    window.dispatchEvent(new Event("mold:secure-pairings-changed"));
+    window.dispatchEvent(
+      new CustomEvent("mold:secure-pairings-changed", { detail }),
+    );
 }
 const updates =
   typeof BroadcastChannel !== "undefined"
@@ -102,12 +108,15 @@ const updates =
     : null;
 updates?.addEventListener("message", ({ data }: MessageEvent) => {
   if (
-    typeof data?.namespace === "string" &&
-    (data.authority === "removed" || data.authority === "replaced")
+    typeof data?.namespace !== "string" ||
+    !data.namespace ||
+    !["removed", "replaced", "unchanged"].includes(data.authority)
   )
+    return;
+  if (data.authority !== "unchanged")
     authorityGenerations.set(data.namespace, generation(data.namespace) + 1);
-  registered.clear();
-  changed();
+  registered.delete(data.namespace);
+  changed({ namespace: data.namespace, authority: data.authority });
 });
 
 function db(): Promise<IDBDatabase> {
@@ -295,7 +304,7 @@ export async function saveSecureHost(
       profile.namespace,
       generation(profile.namespace) + 1,
     );
-    changed();
+    changed({ namespace: profile.namespace, authority: "replaced" });
     await registerPlatform(profile);
     updates?.postMessage({
       namespace: profile.namespace,
@@ -385,7 +394,7 @@ export async function forgetSecureHost(namespace: string): Promise<void> {
           }),
         );
       registered.delete(namespace);
-      changed();
+      changed({ namespace, authority: "removed" });
       updates?.postMessage({ namespace, authority: "removed" });
     });
   } finally {
