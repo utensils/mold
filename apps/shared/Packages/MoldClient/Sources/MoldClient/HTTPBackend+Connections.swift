@@ -10,6 +10,10 @@ public extension HTTPBackend {
     }
 
     func resolvedConnection() async throws -> MoldHost? {
+        if host.connectionMode == .regular {
+            guard host.permitsRegularDirect else { throw SecureConnectionError.pairingRequired }
+            return nil // Never discover another address or fall back to the proxy with this credential.
+        }
         if host.secure != nil {
             let resolved = try await SecureTransportPool.shared.resolve(host)
             guard let secure = resolved.secure,

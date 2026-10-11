@@ -48,6 +48,9 @@ struct PairingScanView: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .font(.body.monospaced())
+                if let payload = try? MobilePairingPayload.parse(pasted) {
+                    Text("\(payload.mode.title): \(payload.mode.explanation)").foregroundStyle(.secondaryText)
+                }
                 Button("Pair") { redeem(pasted) }
                     .disabled(pasted.isEmpty || phase != .scanning)
             }

@@ -14,6 +14,7 @@ struct HostList: Codable, Equatable {
         var connectionInstanceID: String? = nil
         var connectionOriginalURL: URL? = nil
         var secure: SecureHost? = nil
+        var connectionMode: HostConnectionMode? = nil
     }
 
     var entries: [Entry] = []

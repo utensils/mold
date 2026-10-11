@@ -54,6 +54,8 @@ struct PairingLinkSheet: View {
     @ViewBuilder private func details(_ payload: MobilePairingPayload) -> some View {
         Section {
             row("Machine", payload.name)
+            row("Connection", payload.mode.title)
+            Text(payload.mode.explanation).foregroundStyle(.secondaryText)
             row("Address", payload.baseURL, mono: true)
         } footer: {
             Text("Pair only with a machine you trust: what you make on this phone is sent to it.")

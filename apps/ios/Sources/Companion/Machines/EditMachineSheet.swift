@@ -8,6 +8,7 @@ struct EditMachineSheet: View {
     @Environment(\.dismiss) private var dismiss
     let host: MoldHost
 
+    @State private var mode: HostConnectionMode = .secure
     @State private var name = ""
     @State private var address = ""
     @State private var apiKey = ""
@@ -18,6 +19,15 @@ struct EditMachineSheet: View {
         NavigationStack {
             Form {
                 Section {
+                    Picker("Connection", selection: $mode) {
+                        ForEach(HostConnectionMode.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
+                    Text(mode.explanation).foregroundStyle(.secondaryText)
+                    if mode == .secure && host.connectionMode != .secure {
+                        NavigationLink("Pair with a Secure Code") { PairingScanView(done: { dismiss() }) }
+                    }
+                }
+                Section {
                     TextField("Name", text: $name)
                     TextField("Address", text: $address)
                         .keyboardType(.URL)
@@ -25,6 +35,7 @@ struct EditMachineSheet: View {
                         .autocorrectionDisabled()
                         .font(.body.monospaced())
                 }
+                if mode == .regular {
                 Section {
                     SecureField(host.apiKey == nil ? "API key (optional)" : "API key (saved)", text: $apiKey)
                         .textInputAutocapitalization(.never)
@@ -36,6 +47,7 @@ struct EditMachineSheet: View {
                 } footer: {
                     Text("Keys are kept only in this iPhone's Keychain.").foregroundStyle(.secondaryText)
                 }
+                }
                 if let problem {
                     Section { Label(problem, systemImage: "exclamationmark.triangle").foregroundStyle(.red) }
                 }
@@ -44,9 +56,10 @@ struct EditMachineSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) { Button("Save") { save() } }
+                ToolbarItem(placement: .confirmationAction) { Button("Save") { save() }.disabled(mode == .secure && host.connectionMode != .secure) }
             }
             .onAppear {
+                mode = host.connectionMode
                 name = host.name
                 address = HostAddress.displayString(for: host.baseURL)
             }
@@ -55,7 +68,7 @@ struct EditMachineSheet: View {
 
     private func save() {
         do {
-            try hosts.update(host.id, name: name, address: address, apiKey: keyTouched ? apiKey : nil)
+            try hosts.update(host.id, name: name, address: address, apiKey: keyTouched ? apiKey : nil, connectionMode: mode)
             dismiss()
         } catch {
             problem = error.errorDescription

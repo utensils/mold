@@ -9,6 +9,7 @@ struct AddressForm: View {
     let initialAddress: String
     let done: () -> Void
 
+    @State private var mode: HostConnectionMode = .secure
     @State private var name = ""
     @State private var address = ""
     @State private var apiKey = ""
@@ -18,6 +19,16 @@ struct AddressForm: View {
 
     var body: some View {
         Form {
+            Section {
+                Picker("Connection", selection: $mode) {
+                    ForEach(HostConnectionMode.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                Text(mode.explanation).foregroundStyle(.secondaryText)
+                if mode == .secure {
+                    NavigationLink("Scan or Paste a Secure Pairing Code") { PairingScanView(done: done) }
+                }
+            }
+            if mode == .regular {
             Section {
                 TextField("Name", text: $name, prompt: Text(suggestedName))
                     .accessibilityIdentifier("machine-name")
@@ -41,6 +52,7 @@ struct AddressForm: View {
                 }
                 .foregroundStyle(.secondaryText)
             }
+            }
             if let problem {
                 Section { Label(problem, systemImage: "exclamationmark.triangle").foregroundStyle(.red) }
             }
@@ -49,7 +61,7 @@ struct AddressForm: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
-                Button("Add") { add() }.disabled(HostAddress.normalize(address) == nil)
+                Button("Add") { add() }.disabled(mode != .regular || HostAddress.normalize(address).map { !DirectHostAddress.isValid($0, allowingPathPrefix: true) } ?? true)
             }
         }
         .onAppear {
@@ -57,7 +69,7 @@ struct AddressForm: View {
             if address.isEmpty { address = initialAddress }
             makeDefault = hosts.hosts.isEmpty
         }
-        .task(id: address + "\u{0}" + apiKey) { await recheck() }
+        .task(id: mode.rawValue + address + "\u{0}" + apiKey) { await recheck() }
     }
 
     private var suggestedName: String {
@@ -67,17 +79,17 @@ struct AddressForm: View {
     /// Debounced: a keystroke cancels the previous check.
     private func recheck() async {
         problem = nil
-        guard let url = HostAddress.normalize(address) else { check = .unknown; return }
+        guard mode == .regular, let url = HostAddress.normalize(address), DirectHostAddress.isValid(url, allowingPathPrefix: true) else { check = .unknown; return }
         try? await Task.sleep(for: .milliseconds(450))
         guard !Task.isCancelled else { return }
         check = .checking
-        let answer = await hosts.probe(url: url, apiKey: apiKey.isEmpty ? nil : apiKey)
+        let answer = await hosts.probe(url: url, apiKey: apiKey.isEmpty ? nil : apiKey, mode: .regular)
         if !Task.isCancelled { check = answer }
     }
 
     private func add() {
         do {
-            try hosts.add(name: name, address: address, apiKey: apiKey, makeDefault: makeDefault)
+            try hosts.add(name: name, address: address, apiKey: apiKey, makeDefault: makeDefault, connectionMode: .regular)
             done()
         } catch {
             problem = error.errorDescription

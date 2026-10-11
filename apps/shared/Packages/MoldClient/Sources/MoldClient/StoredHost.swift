@@ -18,6 +18,7 @@ public struct StoredHost: Codable, Hashable, Sendable {
     public var connectionInstanceID: String?
     public var connectionOriginalURL: URL?
     public var secure: SecureHost?
+    public var connectionMode: HostConnectionMode?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -27,9 +28,10 @@ public struct StoredHost: Codable, Hashable, Sendable {
         case connectionInstanceID = "connection_instance_id"
         case connectionOriginalURL = "connection_original_url"
         case secure
+        case connectionMode = "connection_mode"
     }
 
-    public init(id: UUID, name: String, baseURL: URL, connectionEndpoints: [ConnectionEndpoint]? = nil, connectionInstanceID: String? = nil, connectionOriginalURL: URL? = nil, secure: SecureHost? = nil) {
+    public init(id: UUID, name: String, baseURL: URL, connectionEndpoints: [ConnectionEndpoint]? = nil, connectionInstanceID: String? = nil, connectionOriginalURL: URL? = nil, secure: SecureHost? = nil, connectionMode: HostConnectionMode? = nil) {
         self.id = id
         self.name = name
         self.baseURL = baseURL
@@ -37,14 +39,15 @@ public struct StoredHost: Codable, Hashable, Sendable {
         self.connectionInstanceID = connectionInstanceID
         self.connectionOriginalURL = connectionOriginalURL
         self.secure = secure
+        self.connectionMode = connectionMode
     }
 
     public init(_ host: MoldHost) {
-        self.init(id: host.id, name: host.name, baseURL: host.baseURL, connectionEndpoints: host.connectionEndpoints, connectionInstanceID: host.connectionInstanceID, connectionOriginalURL: host.connectionOriginalURL, secure: host.secure)
+        self.init(id: host.id, name: host.name, baseURL: host.baseURL, connectionEndpoints: host.connectionEndpoints, connectionInstanceID: host.connectionInstanceID, connectionOriginalURL: host.connectionOriginalURL, secure: host.secure, connectionMode: host.connectionMode)
     }
 
     /// Rejoined with the key the secrets file was holding for it.
     public func host(apiKey: String?) -> MoldHost {
-        MoldHost(id: id, name: name, baseURL: baseURL, apiKey: apiKey, connectionEndpoints: connectionEndpoints, connectionInstanceID: connectionInstanceID, connectionOriginalURL: connectionOriginalURL, secure: secure)
+        MoldHost(id: id, name: name, baseURL: baseURL, apiKey: apiKey, connectionEndpoints: connectionEndpoints, connectionInstanceID: connectionInstanceID, connectionOriginalURL: connectionOriginalURL, secure: secure, connectionMode: connectionMode ?? (secure == nil ? .regular : .secure))
     }
 }
