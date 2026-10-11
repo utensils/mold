@@ -13,7 +13,11 @@ analytics service for these apps.
 ## Website analytics
 
 The public website at [utensils.io/mold](https://utensils.io/mold/) loads
-Google Analytics automatically when you visit, without a consent popup.
+Google Analytics automatically on documentation pages, without a consent popup.
+The standalone pairing page (`/mold/pair/`) and secure Studio (`/mold/studio/`)
+load no analytics or third-party scripts. Pairing links keep their one-time
+invitation in the URL fragment, clear it from browser history on arrival, and
+pass it to Studio only when you choose to continue.
 
 Google Analytics measures page visits, traffic sources, scrolls,
 outbound link clicks, and file-download clicks, along with browser/device

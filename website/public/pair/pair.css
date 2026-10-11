@@ -1,0 +1,51 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+  line-height: 1.6;
+  background: #161411;
+  color: #f3eee7;
+}
+body {
+  margin: 0;
+}
+main {
+  max-width: 36rem;
+  padding: 4rem 1.5rem;
+  margin: auto;
+}
+.brand {
+  font-size: 2rem;
+  font-weight: 750;
+  letter-spacing: -0.08em;
+  color: #eab677;
+}
+h1 {
+  line-height: 1.15;
+  font-size: 2rem;
+}
+code {
+  overflow-wrap: anywhere;
+}
+button {
+  border: 0;
+  border-radius: 0.6rem;
+  padding: 0.85rem 1.2rem;
+  font: inherit;
+  font-weight: 650;
+  color: #23170b;
+  background: #eab677;
+  cursor: pointer;
+}
+button:focus-visible,
+a:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 4px;
+}
+a {
+  color: #edc99e;
+}
+.note {
+  color: #bfb7ac;
+  margin-top: 2rem;
+  font-size: 0.9rem;
+}

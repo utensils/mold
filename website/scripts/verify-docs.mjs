@@ -39,6 +39,7 @@ function resolveDocLink(link) {
   return [
     join(websiteDir, `${rel}.md`),
     join(websiteDir, rel, 'index.md'),
+    join(websiteDir, 'public', rel, 'index.html'),
   ].find(existsSync)
 }
 

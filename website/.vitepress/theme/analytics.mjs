@@ -1,3 +1,5 @@
+import { isSecureDocument } from './secure-pages.mjs'
+
 // Public documentation only. The apps and embedded Studio never import this.
 export const measurementId = 'G-RG6PPTGX2T'
 
@@ -15,7 +17,8 @@ export function createAnalytics(win) {
   let previousPage = cleanUrl(win.document.referrer)
   const eligible = () =>
     win.location.origin === 'https://utensils.io' &&
-    win.location.pathname.startsWith('/mold/')
+    win.location.pathname.startsWith('/mold/') &&
+    !isSecureDocument(win.location.pathname)
   function gtag() {
     win.dataLayer.push(arguments)
   }
