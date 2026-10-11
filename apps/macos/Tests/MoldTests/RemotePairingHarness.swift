@@ -17,6 +17,10 @@ import MoldClient
     var calls: [String] = []
     var saved: ManagedRelayEnrollment?
     var optedIn: Bool?
+    var regularOptedIn = false
+    var regularStates: [Bool] = []
+    var regularEndpoints: [URL] = [URL(string: "http://192.168.1.5:7681")!]
+    var regularFailure: (any Error)?
     var refuseClear = false
     var refuseSave = false
     var previous: ManagedRelayEnrollment?
@@ -51,6 +55,10 @@ import MoldClient
             stop: { [self] in calls.append("stop"); alive = false },
             isAlive: { [self] in alive },
             advertise: { [self] origin in calls.append(origin == nil ? "withdraw" : "advertise"); advertised = origin },
-            verify: { [self] _, _ in calls.append("verify"); if let verificationFailure { throw verificationFailure } }))
+            verify: { [self] _, _ in calls.append("verify"); if let verificationFailure { throw verificationFailure } },
+            loadRegularEnabled: { [self] in regularOptedIn },
+            saveRegularEnabled: { [self] in regularOptedIn = $0 },
+            regularNetwork: { [self] in regularStates.append($0) },
+            regularAddresses: { [self] in if let regularFailure { throw regularFailure }; return regularEndpoints }))
     }
 }

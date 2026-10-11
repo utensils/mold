@@ -68,7 +68,7 @@ final class PairingStore {
     /// `POST /api/pairing/sessions`: a two-minute, one-use handoff. Replaces
     /// whatever session was in flight, for this host or another -- a New
     /// Code press means the old code is dead even if nobody rescans it.
-    func createSession(on host: MoldHost.ID) async {
+    func createSession(on host: MoldHost.ID, mode: HostConnectionMode = .secure, directURL: URL? = nil) async {
         guard !refuseIfFixture(host, doing: "start a pairing session") else { return }
         sessionGeneration += 1
         let generation = sessionGeneration
@@ -80,8 +80,9 @@ final class PairingStore {
             return
         }
         do {
-            let answer = try await client.pairingSession()
+            let answer = try await client.pairingSession(mode: mode, directURL: directURL)
             guard generation == sessionGeneration, !Task.isCancelled else { return }
+            guard (answer.mode ?? .secure) == mode else { throw MoldClientError.malformedResponse }
             session = answer
             sessionHost = host
             hosts.succeeded(on: host, doing: "start a pairing session")

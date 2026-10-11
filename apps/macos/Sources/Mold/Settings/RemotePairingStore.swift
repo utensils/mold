@@ -17,11 +17,16 @@ final class RemotePairingStore {
         var advertise: (URL?) throws -> Void
         var verify: (PairingSession, URL) async throws -> Void
         var localNetwork: (Bool) -> Void = { _ in }
+        var loadRegularEnabled: () -> Bool = { false }
+        var saveRegularEnabled: (Bool) -> Void = { _ in }
+        var regularNetwork: (Bool) -> Void = { _ in }
+        var regularAddresses: () async throws -> [URL] = { throw ManagedRelayFailure.notReady }
     }
 
     internal(set) var state: State = .off
     private(set) var enrollment: ManagedRelayEnrollment?
     private(set) var enabled = false
+    private(set) var regularEnabled = false
     private(set) var isStopping = false
     let pairing: PairingStore
     let dependencies: Dependencies
@@ -34,6 +39,7 @@ final class RemotePairingStore {
         self.dependencies = dependencies
         do { enrollment = try dependencies.load(); enabled = dependencies.loadEnabled() }
         catch { state = .failed("Mold couldn’t read its saved remote connection. Try pairing again.") }
+        regularEnabled = dependencies.loadRegularEnabled()
     }
 
     func prepare(_ host: MoldHost, renew: Bool = false) async throws -> MoldHost {
@@ -103,6 +109,24 @@ final class RemotePairingStore {
         }
     }
 
+    /// Explicit Regular opt-in is independent of the encrypted LAN/proxy switch.
+    func setRegularEnabled(_ enabled: Bool) {
+        regularEnabled = enabled
+        dependencies.saveRegularEnabled(enabled)
+        dependencies.regularNetwork(enabled)
+    }
+
+    func prepareRegular(_ host: MoldHost) async throws -> URL {
+        guard host.id == MoldEngine.localHostID else { throw ManagedRelayFailure.engineNotRunning }
+        setRegularEnabled(true)
+        let endpoints = try await dependencies.regularAddresses()
+        try Task.checkCancellation()
+        guard regularEnabled, let first = endpoints.first(where: { DirectHostAddress.isValid($0) }) else {
+            throw ManagedRelayFailure.notReady
+        }
+        return first
+    }
+
     /// Withdraw transport before removing public connection metadata.
     func disable() async {
         guard !isStopping else { return }
@@ -125,6 +149,7 @@ final class RemotePairingStore {
         supervisor?.cancel()
         supervisor = nil
         stopTransport()
+        dependencies.regularNetwork(false)
     }
 
     func stopTransport() {

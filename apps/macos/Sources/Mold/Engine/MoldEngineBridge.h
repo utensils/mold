@@ -26,6 +26,8 @@ int64_t mold_engine_home_writer_pid(void);
 int32_t mold_relay_start(const char *endpoint, const char *host_id,
                          uint16_t local_port, const char *public_origin);
 void mold_local_network_set_enabled(bool enabled);
+void mold_regular_network_set_enabled(bool enabled);
+int32_t mold_regular_network_ready(uint8_t *out, size_t capacity, uint32_t timeout_ms);
 int32_t mold_relay_stop(void);
 bool mold_relay_is_alive(void);
 bool mold_relay_is_ready(void);

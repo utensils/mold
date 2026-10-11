@@ -6,6 +6,32 @@ import Testing
 
 @MainActor
 struct RemotePairingStoreTests {
+    @Test func regularPairingWaitsForTheDirectListenerWithoutStartingAProxy() async throws {
+        let harness = RemotePairingHarness()
+        let store = harness.store()
+        let address = try await store.prepareRegular(harness.host)
+        #expect(address == harness.regularEndpoints.first)
+        #expect(store.regularEnabled)
+        #expect(harness.regularOptedIn)
+        #expect(harness.regularStates == [true])
+        #expect(harness.calls.isEmpty)
+        #expect(!store.enabled)
+        await store.disable()
+        #expect(store.regularEnabled, "Stopping encrypted proxy access must not change explicit Regular access")
+        store.setRegularEnabled(false)
+        #expect(!harness.regularOptedIn)
+        #expect(harness.regularStates.last == false)
+    }
+
+    @Test func aRegularListenerFailureCannotProduceAPairingAddress() async {
+        let harness = RemotePairingHarness()
+        harness.regularFailure = ManagedRelayFailure.notReady
+        let store = harness.store()
+        await #expect(throws: ManagedRelayFailure.notReady) { try await store.prepareRegular(harness.host) }
+        #expect(harness.fake.callCount("pairingSession") == 0)
+        #expect(harness.calls.isEmpty)
+    }
+
     @Test func storedConnectionContainsOnlyPublicMetadata() throws {
         let owner = RemotePairingHarness().owner
         let value = String(decoding: try JSONEncoder().encode(owner), as: UTF8.self)

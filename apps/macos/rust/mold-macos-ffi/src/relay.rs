@@ -41,6 +41,58 @@ pub extern "C" fn mold_local_network_set_enabled(enabled: bool) {
     });
 }
 
+/// Separate explicit direct-API listener; stopping the proxy leaves it alone.
+#[no_mangle]
+pub extern "C" fn mold_regular_network_set_enabled(enabled: bool) {
+    guarded("regular_network_access", (), || {
+        connection_addresses().set_regular_network_enabled(enabled && ALIVE.load(Ordering::SeqCst));
+    });
+}
+
+/// Returns a JSON array of bound direct origins, or a negative readiness error.
+/// Called off the UI thread; the caller supplies a bounded wait and output buffer.
+/// # Safety
+/// `out` must reference a writable buffer of `capacity` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn mold_regular_network_ready(
+    out: *mut u8,
+    capacity: usize,
+    timeout_ms: u32,
+) -> i32 {
+    guarded("regular_network_ready", -1, || {
+        if out.is_null() || capacity == 0 || capacity > 65_536 || !ALIVE.load(Ordering::SeqCst) {
+            return -1;
+        }
+        let generation = ENGINE_LIFETIME.snapshot();
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return -1;
+        };
+        let result = runtime.block_on(connection_addresses().regular_network_ready(
+            Duration::from_millis(u64::from(timeout_ms.clamp(1, 30_000))),
+        ));
+        runtime.shutdown_timeout(Duration::from_millis(100));
+        let Ok(endpoints) = result else {
+            return -2;
+        };
+        if !engine_matches(generation) {
+            return -2;
+        }
+        let Ok(bytes) = serde_json::to_vec(&endpoints) else {
+            return -1;
+        };
+        if bytes.len() > capacity {
+            return -3;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out, bytes.len());
+        }
+        bytes.len() as i32
+    })
+}
+
 fn managed_origin(origin: &str, host_id: &str) -> anyhow::Result<String> {
     mold_relay::aws::validate_host_namespace(host_id)?;
     // Reuse server's origin authority, including credential/path rejection.
@@ -288,6 +340,7 @@ pub(super) fn cancel_for_engine_exit() {
     // Monotonic withdrawal cannot be missed when ALIVE becomes true again on
     // a rapid restart, even if another thread currently owns CONNECTOR.
     ENGINE_LIFETIME.invalidate();
+    connection_addresses().set_regular_network_enabled(false);
     // Engine exit must never wait behind native stop's join budget.
     if let Ok(slot) = CONNECTOR.try_lock() {
         if let Some(connector) = slot.as_ref() {
