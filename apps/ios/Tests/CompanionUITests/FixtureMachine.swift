@@ -416,7 +416,7 @@ final class FixtureMachine: @unchecked Sendable {
             json = #"{"original":"Fixture prompt","expanded":["Expanded fixture prompt"]}"#
         case "/api/capabilities":
             if omitOrganizationCapabilities { return Data("{}".utf8) }
-            if promptExpansionFixture { return Data(#"{"max_batch_outputs":4,"expand":{"configured":true}}"#.utf8) }
+            if promptExpansionFixture { return Data(#"{"max_batch_outputs":4,"queue":{"heterogeneous_batch_max_outputs":4},"expand":{"configured":true}}"#.utf8) }
             if queueDestinationFixture { return Data(#"{"max_batch_outputs":4,"queue":{"heterogeneous_batch_max_outputs":4}}"#.utf8) }
             if exportFixture { return Data(#"{"max_batch_outputs":4,"mesh":{"generation":true,"formats":["glb"],"export_formats":["glb","obj","zip","stl","ply","gif","apng"],"export_geometry":{"size_mm":{"min":1,"max":10000,"default":100},"up_axes":["y","z"],"origins":["center","floor"],"defaults":{"obj":{"up_axis":"y","origin":"floor"},"stl":{"size_mm":100,"up_axis":"z","origin":"floor"},"ply":{"size_mm":100,"up_axis":"z","origin":"floor"}}}}}"#.utf8) }
             if queueControls { return Data(#"{"max_batch_outputs":4,"queue":{"can_pause_job":true,"cooperative_cancellation":true}}"#.utf8) }

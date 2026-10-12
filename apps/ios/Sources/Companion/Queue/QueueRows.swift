@@ -16,11 +16,14 @@ struct QueueGroupRows: View {
                 } label: {
                     QueueBatchLabel(rows: group.rows, host: host)
                 }
-                Button("Cancel Batch", systemImage: "xmark", role: .destructive) {
+                Button(role: .destructive) {
                     Task { await queue.cancel(group, on: host.id) }
+                } label: {
+                    Label("Cancel Batch", systemImage: "xmark")
+                        .frame(minHeight: 44)
+                        .contentShape(.rect)
                 }
                 .buttonStyle(.borderless)
-                .frame(minHeight: 44)
                 .disabled(!queue.canCancel(group, on: host.id))
                 .accessibilityIdentifier("queue-cancel-batch-" + group.id)
             }

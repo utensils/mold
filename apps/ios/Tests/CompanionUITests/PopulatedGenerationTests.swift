@@ -367,14 +367,21 @@ final class PopulatedGenerationTests: XCTestCase {
         XCTAssertTrue(picture.waitForExistence(timeout: 10)); picture.tap()
         let options = app.buttons["Options"].firstMatch
         reveal(options, in: app); options.tap()
-        let batch = app.buttons["options-batch"]
-        reveal(batch, in: app); batch.tap()
-        app.buttons["4"].firstMatch.tap()
+        let batch = app.descendants(matching: .any)["options-batch"].firstMatch
+        // Form exposes a row-wide accessibility wrapper around the intrinsic
+        // Menu button. Its child frame locates the visible label even when
+        // XCTest reports the child as non-hittable behind that wrapper.
+        reveal(batch, in: app)
+        batch.buttons.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        let four = app.descendants(matching: .any).matching(NSPredicate(format: "label == '4'")).firstMatch
+        XCTAssertTrue(four.waitForExistence(timeout: 5)); four.tap()
         XCTAssertTrue(batch.label.contains("4"))
         app.buttons["Done"].firstMatch.tap()
-        let kind = app.buttons["Still picture"].firstMatch
-        reveal(kind, in: app); kind.tap()
-        app.buttons["Short clip"].firstMatch.tap()
+        let kind = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Still picture'")).firstMatch
+        reveal(kind, in: app)
+        kind.buttons.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        let clip = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Short clip'")).firstMatch
+        XCTAssertTrue(clip.waitForExistence(timeout: 5)); clip.tap()
         reveal(chooser, in: app); chooser.tap()
         let video = app.buttons["model-ltx-2.5-22b-distilled:bf16"]
         XCTAssertTrue(video.waitForExistence(timeout: 10)); video.tap()
@@ -382,7 +389,9 @@ final class PopulatedGenerationTests: XCTestCase {
         XCTAssertTrue(batch.waitForExistence(timeout: 5), "Videos must retain a visible Batch control")
         reveal(batch, in: app)
         XCTAssertTrue(batch.label.contains("4"), "Switching kind must preserve the authored batch size")
-        batch.tap(); app.buttons["1"].firstMatch.tap()
+        batch.buttons.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        let one = app.descendants(matching: .any).matching(NSPredicate(format: "label == '1'")).firstMatch
+        XCTAssertTrue(one.waitForExistence(timeout: 5)); one.tap()
         XCTAssertTrue(batch.label.contains("1"), "One output disables batching")
         attach(app)
         XCTAssertTrue(machine.generationRequests.isEmpty)

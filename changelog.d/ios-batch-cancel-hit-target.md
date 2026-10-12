@@ -1,0 +1,1 @@
+- Fixed the native iOS queue's Cancel Batch button hit target and accessibility frame to cover its full 44-point height.

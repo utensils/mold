@@ -17,6 +17,7 @@ use the existing durable batch DELETE after rechecking instance, batch, client a
 identity. A changed route, credential, mode or selected job invalidates confirmation.
 
 Regression coverage: QueueStoreTests, PopulatedGenerationTests video options and collapsed
-batch tests, Studio queueBatchCancel and QueueBatchCancelControl tests. Local Simulator
-execution is blocked until the installed Xcode license is accepted; no physical-device
-validation has been claimed.
+batch tests, Studio queueBatchCancel and QueueBatchCancelControl tests. Local iOS unit
+tests and architecture lint passed after accepting the installed Xcode license.
+Simulator UAT also checks the Cancel Batch button's full 44-point accessibility target;
+no physical-device validation has been claimed.
