@@ -59,17 +59,33 @@ pub async fn execute_http(
             "secure" => {}
             "regular" => {
                 crate::regular_origin(&origin)?;
+                for value in request.headers().get_all("authorization") {
+                    let value = value.to_str()?;
+                    anyhow::ensure!(
+                        !crate::store::is_known_secure_credential(value)?,
+                        "Secure credentials cannot authorize Regular HTTP"
+                    );
+                    let mut parts = value.split_ascii_whitespace();
+                    let scheme = parts.next().unwrap_or_default();
+                    if scheme.eq_ignore_ascii_case("bearer") {
+                        let candidate = parts.next().unwrap_or_default();
+                        anyhow::ensure!(
+                            !crate::store::is_known_secure_credential(candidate)?,
+                            "Secure credentials cannot authorize Regular HTTP"
+                        );
+                    }
+                }
+                request.headers_mut().remove("cookie");
+                request.headers_mut().remove("x-mold-secure-peer");
+                request.headers_mut().remove("x-mold-secure-control");
                 let host = crate::load_regular_host(&origin)?;
                 host.validate()?;
-                let provided = request
-                    .headers()
-                    .get("x-api-key")
-                    .map(|v| v.to_str())
-                    .transpose()?;
-                anyhow::ensure!(
-                    provided.is_none() || provided == host.api_key.as_deref(),
-                    "Regular credential does not match the selected host"
-                );
+                for provided in request.headers().get_all("x-api-key") {
+                    anyhow::ensure!(
+                        Some(provided.to_str()?) == host.api_key.as_deref(),
+                        "Regular credential does not match the selected host"
+                    );
+                }
                 if let Some(key) = host.api_key {
                     request.headers_mut().insert("x-api-key", key.parse()?);
                 }
