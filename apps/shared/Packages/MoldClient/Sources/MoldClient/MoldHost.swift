@@ -58,7 +58,7 @@ public struct MoldHost: Identifiable, Hashable, Codable, Sendable {
                   connectionEndpoints: try value.decodeIfPresent([ConnectionEndpoint].self, forKey: .connectionEndpoints),
                   connectionInstanceID: try value.decodeIfPresent(String.self, forKey: .connectionInstanceID),
                   connectionOriginalURL: try value.decodeIfPresent(URL.self, forKey: .connectionOriginalURL), secure: secure,
-                  connectionMode: try value.decodeIfPresent(HostConnectionMode.self, forKey: .connectionMode) ?? (secure == nil ? .regular : .secure))
+                  connectionMode: try value.decodeIfPresent(HostConnectionMode.self, forKey: .connectionMode) ?? .secure)
     }
 }
 
