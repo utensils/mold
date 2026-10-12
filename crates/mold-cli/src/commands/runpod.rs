@@ -2254,7 +2254,7 @@ async fn wait_for_mold(mold_host: &str, timeout_secs: u64) -> Result<()> {
         // a `version` field. Before the mold process is up, the RunPod
         // Cloudflare proxy returns an empty 404 or 502. We need to see the
         // actual mold server response, not the proxy's.
-        let progress = match http.get(&status_url).secure_send().await {
+        let progress = match http.get(&status_url).configured_send().await {
             Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
                 Ok(v) if v.get("version").is_some() => {
                     pb.finish_and_clear();

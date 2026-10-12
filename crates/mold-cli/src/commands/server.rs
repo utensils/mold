@@ -615,7 +615,11 @@ async fn probe_latency_ms(base_url: &str) -> Option<u64> {
     // /health is auth-exempt; if it 404s on an old build, /api/status confirms
     // mold even behind auth (401 is a positive signal).
     for path in ["/health", "/api/status"] {
-        if let Ok(resp) = client.get(format!("{base_url}{path}")).secure_send().await {
+        if let Ok(resp) = client
+            .get(format!("{base_url}{path}"))
+            .configured_send()
+            .await
+        {
             let ok = resp.status().is_success() || resp.status().as_u16() == 401;
             if ok {
                 return Some(start.elapsed().as_millis() as u64);
