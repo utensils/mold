@@ -67,6 +67,58 @@ public struct MoldResponseBytes: AsyncSequence, Sendable {
     }
 
     public func makeAsyncIterator() -> AsyncIterator { AsyncIterator(source) }
+
+    /// Pull bounded buffers rather than hopping off the caller's actor for
+    /// every byte. AVKit can receive each buffer as soon as it arrives.
+    public var chunks: Chunks { Chunks(source: source) }
+
+    public struct Chunks: AsyncSequence, Sendable {
+        public typealias Element = Data
+        fileprivate let source: Source
+
+        public struct AsyncIterator: AsyncIteratorProtocol {
+            private let lease: BodyLease?
+            private var bytes: MoldResponseBytes.AsyncIterator?
+            private var ended = false
+
+            fileprivate init(_ source: Source) {
+                switch source {
+                case .loopback: bytes = MoldResponseBytes.AsyncIterator(source); lease = nil
+                case let .encrypted(lease): self.lease = lease
+                }
+            }
+
+            public mutating func next() async throws -> Data? {
+                guard !ended else { return nil }
+                do {
+                    try Task.checkCancellation()
+                    if let lease {
+                        let chunk = try await withTaskCancellationHandler {
+                            try await lease.reader.read()
+                        } onCancel: { Task { await lease.reader.cancel() } }
+                        guard let chunk else { ended = true; return nil }
+                        guard !chunk.isEmpty, chunk.count <= 65_536 else { throw MoldBodyError.invalidChunk }
+                        return chunk
+                    }
+                    // URLSession exposes bytes. Coalesce them off the caller's
+                    // actor, retaining at most one 16 KiB buffer.
+                    var chunk = Data()
+                    chunk.reserveCapacity(16_384)
+                    while chunk.count < 16_384 {
+                        guard let byte = try await bytes?.next() else { ended = true; break }
+                        chunk.append(byte)
+                    }
+                    return chunk.isEmpty ? nil : chunk
+                } catch {
+                    ended = true
+                    await lease?.reader.cancel()
+                    throw error
+                }
+            }
+        }
+
+        public func makeAsyncIterator() -> AsyncIterator { AsyncIterator(source) }
+    }
 }
 
 /// The last owner dropping a partially consumed response also cancels the host stream.

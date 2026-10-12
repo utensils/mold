@@ -50,10 +50,7 @@ private nonisolated(unsafe) var secureMediaLoaderKey: UInt8 = 0
             var request = URLRequest(url: url)
             request.timeoutInterval = 300
             if let key = backend.host.apiKey { request.setValue(key, forHTTPHeaderField: "X-Api-Key") }
-            // AVPlayer's initial content-information probe can also carry a
-            // two-byte data request. Answer it with metadata only; feeding those
-            // probe bytes to the decoder can leave the item permanently unknown.
-            let dataRequest = loading.contentInformationRequest == nil ? loading.dataRequest : nil
+            let dataRequest = loading.dataRequest
             let offset = dataRequest.map { max($0.requestedOffset, $0.currentOffset) } ?? 0
             let length = dataRequest.map { Int64($0.requestedLength) }
             guard offset >= 0, length.map({ $0 > 0 }) ?? true else { throw SecureConnectionError.protocolViolation }
@@ -74,17 +71,14 @@ private nonisolated(unsafe) var secureMediaLoaderKey: UInt8 = 0
             }
             if let dataRequest {
                 var remaining = dataRequest.requestsAllDataToEndOfResource ? Int64.max : length!
-                var chunk = Data(); chunk.reserveCapacity(16_384)
-                for try await byte in body {
+                for try await chunk in body.chunks {
                     try Task.checkCancellation()
                     guard !loading.isCancelled else { throw CancellationError() }
-                    chunk.append(byte); remaining -= 1
-                    if chunk.count == 16_384 || remaining == 0 {
-                        dataRequest.respond(with: chunk); chunk.removeAll(keepingCapacity: true)
-                    }
+                    let count = Int(min(Int64(chunk.count), remaining))
+                    dataRequest.respond(with: Data(chunk.prefix(count)))
+                    remaining -= Int64(count)
                     if remaining == 0 { break }
                 }
-                if !chunk.isEmpty { dataRequest.respond(with: chunk) }
             }
             await body.cancel()
             guard !loading.isCancelled else { return }

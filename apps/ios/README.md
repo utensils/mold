@@ -46,8 +46,8 @@ ratio. Rotate upright to restore gallery actions, or tap Close to return to
 the Library while horizontal. Native playback controls remain available. See the [landscape video UAT record](docs/LANDSCAPE-VIDEO-UAT.md).
 
 Video playback uses the media audio session, including in silent mode. Clips
-complete a startup metadata probe before streaming video bytes; playback and
-seeking use the machine's authenticated media connection. The
+stream in bounded chunks through the machine's authenticated media connection,
+including when seeking. The
 viewer hides the main tabs so its Share, Favourite, Info and Delete controls
 remain accessible, while keeping phone back navigation visible. Info has a Done button, and shared files retain their original
 filename and media extension. Models uses a text-scaling Installed/Discover menu and
