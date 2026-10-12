@@ -80,10 +80,20 @@ public enum FuzzyModelSearch {
 
     public static func ranked<T>(_ rows: [T], query: String, fields: (T) -> [String], metadata: (T) -> [String] = { _ in [] }) -> [T] {
         if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return rows }
-        return rows.enumerated().map { (index: $0.offset, row: $0.element, score: score(query, fields: fields($0.element), metadata: metadata($0.element))) }
-            .filter { $0.score > 0 }
-            .sorted { $0.score == $1.score ? $0.index < $1.index : $0.score > $1.score }
-            .map(\.row)
+        // Explicit intermediate types keep Swift's generic constraint solver
+        // bounded on both native targets (a chained tuple map exceeded its budget).
+        var matches: [(index: Int, row: T, score: Int)] = []
+        for (index, row) in rows.enumerated() {
+            let primary = fields(row)
+            let secondary = metadata(row)
+            let value = score(query, fields: primary, metadata: secondary)
+            if value > 0 { matches.append((index: index, row: row, score: value)) }
+        }
+        matches.sort { lhs, rhs in
+            if lhs.score == rhs.score { return lhs.index < rhs.index }
+            return lhs.score > rhs.score
+        }
+        return matches.map { $0.row }
     }
 
     /// Rank first, then group by the original family headings. An exact hit in
