@@ -30,6 +30,9 @@ independently deployed trusted Studio, or 426. It never proxies plaintext conten
 serves executable client code or receives an API bearer. Bulk transport may stage
 only existing Noise ciphertext under `ciphertext/v3/`; follow
 `relay/aws/OPAQUE-OBJECTS.md` for grants, bounds, checksum and cleanup.
+The metadata frontend must call `HttpResponseStream.write()` before `end()`;
+Lambda's first-write hook emits the JSON status/headers prelude and eight-null
+delimiter. Empty HEAD, redirect and OPTIONS responses still need an empty write.
 AWS resources belong to URandom Terraform; runtime artifacts belong to Mold.
 Never place credentials in Terraform state, command arguments, URLs or logs.
 
