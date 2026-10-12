@@ -27,6 +27,10 @@ final class SelectionCollectionTests: XCTestCase {
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Connection'")).firstMatch.tap()
         app.buttons["Regular"].firstMatch.tap()
         let address = app.textFields["machine-address"]
+        for _ in 0..<8 {
+            if address.exists && address.isHittable { break }
+            app.swipeUp(velocity: .slow)
+        }
         XCTAssertTrue(address.waitForExistence(timeout: 5))
         address.tap(); address.typeText("127.0.0.1:\(port)")
         app.buttons["Add"].firstMatch.tap()
