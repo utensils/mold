@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreVideo
 import Foundation
 import Testing
 @testable import MoldClient
@@ -12,6 +13,27 @@ import Testing
         let media = try await backend.playableMedia(for: "movie.mp4", trashed: trashed)
         #expect(media.localURL == nil)
         let item = media.playerItem()
+        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+        ])
+        item.add(output)
+        let player = AVPlayer(playerItem: item)
+        defer { player.pause(); player.replaceCurrentItem(with: nil) }
+        player.play()
+        let clock = ContinuousClock()
+        let deadline = clock.now + .seconds(10)
+        var decodedFrame = false
+        while clock.now < deadline, player.currentTime().seconds < 0.25 || !decodedFrame {
+            if let error = item.error { throw error }
+            if let frame = output.copyPixelBuffer(forItemTime: player.currentTime(), itemTimeForDisplay: nil) {
+                decodedFrame = CVPixelBufferGetWidth(frame) > 0
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(item.status == .readyToPlay)
+        #expect(player.currentTime().seconds >= 0.25, "Loading metadata alone must not count as successful playback")
+        #expect(decodedFrame)
+        player.pause()
         let duration = try await item.asset.load(.duration)
         #expect(duration.seconds > 0)
         let generator = AVAssetImageGenerator(asset: item.asset)
