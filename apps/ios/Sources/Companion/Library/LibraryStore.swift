@@ -199,7 +199,7 @@ final class LibraryStore {
                     break
                 }
             }
-            if hosts.capabilities[host.id]?.canOrganize == true {
+            if canOrganize(on: host.id) {
                 let visibilityGeneration = collectionVisibility.generation
                 let fresh = try await client.collections()
                 guard epoch == cacheEpoch, hosts.host(host.id) == host,

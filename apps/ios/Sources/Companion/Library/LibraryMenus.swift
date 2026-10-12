@@ -78,6 +78,8 @@ struct SelectionBar: View {
                     Label(allFavourite ? "Unfavourite" : "Favourite", systemImage: allFavourite ? "star.slash" : "star")
                 }
                 Spacer()
+                SelectionCollectionMenu(entries: selected)
+                Spacer()
                 PrintMenu(entries: selected, trashed: false, compact: true)
                 Spacer()
                 Button(role: .destructive) { Task { await library.trash(selected); cleared() } } label: {

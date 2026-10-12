@@ -82,7 +82,7 @@ struct NewCollectionSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Create", action: create).disabled(slug == nil)
+                    Button("Create", action: create).disabled(slug == nil || !library.canOrganize(entries))
                 }
             }
         }
@@ -95,9 +95,8 @@ struct NewCollectionSheet: View {
     private var slug: String? { CollectionShelf.slug(for: trimmed) }
 
     private func create() {
-        guard let slug else { return }
+        guard let slug, library.canOrganize(entries) else { return }
         library.apply(.collection(name: trimmed, slug: slug, filing: true), to: entries)
-        Task { await library.reload() }
         dismiss()
     }
 }

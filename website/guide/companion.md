@@ -100,7 +100,7 @@ keeps its original filename and file type.
   **Media Type** offers All Media, Photos, Videos and 3D within any shelf.
   Tap **Select**, then tap tiles or sweep sideways across them. Starting on
   a selected tile deselects the range; reverse to shorten it, or hold near
-  an edge to scroll. Vertical swipes still scroll in Select mode. Search
+  an edge to scroll. Vertical swipes still scroll in Select mode. Tap **Add to Collection** in the selection bar to choose a collection, or **New Collection…** to name and create one with the selected prints. The same action appears under **More** and a print’s context menu. Actions remain available while capability inventory is unknown; an explicit machine refusal disables organization. Search
   understands `is:video`, `is:mesh`, `tag:` and `on:`.
 - **Queue** lists what each machine is rendering and waiting on. A held job
   says why in words, with **Download and Retry** when a model is missing, **Retry**

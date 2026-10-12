@@ -2,6 +2,18 @@ import Foundation
 import MoldClient
 
 extension LibraryStore {
+    /// Match the Mac's organization discoverability when inventory is unknown.
+    /// An explicit refusal still blocks the entire presented selection.
+    func canOrganize(_ entries: [LibraryEntry]) -> Bool {
+        !entries.isEmpty && entries.flatMap(\.everyCopy).allSatisfy {
+            canOrganize(on: $0.hostID)
+        }
+    }
+
+    func canOrganize(on hostID: MoldHost.ID) -> Bool {
+        hosts.capabilities[hostID]?.gallery?.organize != false
+    }
+
     var machineIDs: Set<MoldHost.ID> { machineID.map { [$0] } ?? [] }
     var scopedPool: [LibraryEntry] {
         scopedPool(on: machineIDs)

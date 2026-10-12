@@ -299,3 +299,5 @@ close, cancellation, attachment replacement and machine authority changes.
 Known Secure credential fingerprints are retained across native mode changes and aliases. Regular requests refuse matching host keys, X-API-Key and Bearer headers before transport; the Rust C ABI hashes the denial history, which never stores credential bytes or grants access.
 
 A recognized gateway busy envelope during admission, or an HTTP 429/503 upgrade refusal before the WebSocket opens, may retry a fresh socket at most three times within the caller’s existing deadline, with cancellable short backoff. Authentication/protocol failures and every failure after admission remain terminal; never replay an HTTP request.
+
+**Selection organization.** Expose Add to Collection directly in the selection bar and in PrintMenu, sharing one collection menu. Match macOS discoverability when capability inventory is unknown: only an explicit gallery.organize=false blocks edits. Empty selections are ineligible; consider every physical copy in the presented selection. Preserve selection and route mutations through LibraryStore.apply; the outbox refreshes collection inventory after writes settle.

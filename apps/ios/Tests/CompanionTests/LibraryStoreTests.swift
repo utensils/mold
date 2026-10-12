@@ -49,6 +49,20 @@ struct LibraryStoreTests {
         return (library, hosts, one, two)
     }
 
+    @Test func organizationAllowsUnknownCapabilitiesButHonorsEveryCopyRefusal() async throws {
+        let (library, hosts, _, _) = try await fleet(first: [try print("a.png")], second: [try print("a.png")])
+        #expect(!library.canOrganize([]))
+        #expect(library.canOrganize(library.pool))
+        let alpha = hosts.hosts[0], beta = hosts.hosts[1]
+        hosts.setCapabilities(nil, for: alpha.id)
+        hosts.setCapabilities(try MoldJSON.decoder.decode(Capabilities.self, from: Data("{}".utf8)), for: beta.id)
+        #expect(library.canOrganize(library.pool), "Unknown inventory must not hide collection actions")
+        hosts.setCapabilities(try MoldJSON.decoder.decode(Capabilities.self,
+            from: Data(#"{"gallery":{"organize":false}}"#.utf8)), for: beta.id)
+        #expect(!library.canOrganize(library.pool), "One refusing physical copy blocks the full selection")
+        #expect(library.canOrganize(library.scopedPool(on: [alpha.id])), "Machine projection limits the edit authority")
+    }
+
     @Test func machineSelectionProjectsMembershipAndFavoriteMetadata() async throws {
         let (library, hosts, _, _) = try await fleet(first: [try print("a.png")], second: [try print("a.png", favourite: true)])
         let alpha = try #require(hosts.hosts.first { $0.name == "alpha" })
