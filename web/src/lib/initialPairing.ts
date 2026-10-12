@@ -4,7 +4,11 @@ let invitation = "";
 export function captureInitialPairingLink(): void {
   if (import.meta.env.VITE_STANDALONE_STUDIO !== "1") return;
   const fragment = location.hash;
-  if (!fragment.includes("invite_seed=")) return;
+  if (
+    !fragment.includes("invite_seed=") &&
+    !fragment.includes("pairing_token=")
+  )
+    return;
   invitation = `https://utensils.io/mold/pair/${fragment}`;
   history.replaceState(
     history.state,

@@ -297,15 +297,11 @@ export async function relayFetch(
     headers.delete("x-mold-secure-control");
     headers.delete("cookie");
     return globalThis.fetch(
-      new Request(url, {
-        method: request.method,
+      new Request(request, {
         headers,
-        body: request.body,
-        signal: request.signal,
         credentials: "omit",
         redirect: "error",
-        ...(request.body ? { duplex: "half" } : {}),
-      } as RequestInit),
+      }),
     );
   }
   if (!profile && isLoopbackOrigin(url))
