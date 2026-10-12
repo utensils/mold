@@ -5,6 +5,11 @@ paths:
 
 # Native Mac interaction contracts
 
+Every streamed `PlayableMedia` player calls `configure(_:)` before playback or
+seeking. AVFoundation's predictive stall waiting does not support media bytes
+supplied by a resource-loader delegate; the shared policy disables it and keeps
+the default for local files. Deliver bounded chunks to the delegate on the main actor.
+
 Native Xcode builds keep Swift package checkouts in their own
 `build/DerivedData/SourcePackages` and disable the shared repository cache.
 Do not clear developer-global SwiftPM caches to repair a build. Keep that local

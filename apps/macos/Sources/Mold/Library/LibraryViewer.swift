@@ -145,6 +145,7 @@ struct LibraryViewer: View {
             if let url = media.localURL, url.isFileURL { playbackFile = url }
             let item = media.playerItem()
             let player = AVPlayer(playerItem: item)
+            media.configure(player)
             playbackID = entry.id
             self.player = player
             return

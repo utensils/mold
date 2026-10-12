@@ -12,6 +12,14 @@ public struct PlayableMedia: Sendable {
     public init(url: URL) { localURL = url; backend = nil; mediaURL = nil }
     init(backend: HTTPBackend, url: URL) { self.backend = backend; mediaURL = url; localURL = nil }
 
+    /// Apply before playing or seeking, including when reusing a player.
+    /// AVAssetResourceLoader.setDelegate(_:queue:) requires disabling predictive
+    /// buffering when the delegate supplies media bytes; its predictions cannot
+    /// account for client-controlled delivery. Local assets retain the default.
+    @MainActor public func configure(_ player: AVPlayer) {
+        player.automaticallyWaitsToMinimizeStalling = backend == nil
+    }
+
     @MainActor public func playerItem() -> AVPlayerItem {
         guard let backend, let mediaURL else { return AVPlayerItem(url: localURL!) }
         let asset = AVURLAsset(url: URL(string: "mold-secure://media")!.appending(path: UUID().uuidString).appending(path: mediaURL.lastPathComponent))

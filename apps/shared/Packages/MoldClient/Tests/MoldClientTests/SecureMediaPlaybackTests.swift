@@ -23,7 +23,7 @@ import Testing
         let media = try await backend.playableMedia(for: "movie.mp4", trashed: trashed)
         #expect(media.localURL == nil)
         let item = media.playerItem()
-        do { try await assertPlayback(item) }
+        do { try await assertPlayback(item, media: media) }
         catch {
             let trace = await transport.requests.map { "\($0.httpMethod ?? "GET") \($0.value(forHTTPHeaderField: "Range") ?? "metadata")" }
             print("Playback request trace: \(trace)")
@@ -35,12 +35,22 @@ import Testing
         #expect(await transport.requests.allSatisfy { $0.url?.query == (trashed ? "view=trash" : nil) })
     }
 
-    private func assertPlayback(_ item: AVPlayerItem) async throws {
+    @Test func playbackPolicyFollowsTheCurrentMediaWhenAPlayerIsReused() {
+        let player = AVPlayer()
+        let backend = HTTPBackend(host: .init(name: "Fixture", baseURL: URL(string: "https://not-fetched.invalid")!), transport: MediaRangeFixture(data: Data()))
+        PlayableMedia(backend: backend, url: fixture).configure(player)
+        #expect(!player.automaticallyWaitsToMinimizeStalling)
+        PlayableMedia(url: fixture).configure(player)
+        #expect(player.automaticallyWaitsToMinimizeStalling)
+    }
+
+    private func assertPlayback(_ item: AVPlayerItem, media: PlayableMedia? = nil) async throws {
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
         ])
         item.add(output)
         let player = AVPlayer(playerItem: item)
+        media?.configure(player)
         defer { player.pause(); player.replaceCurrentItem(with: nil); item.asset.cancelLoading() }
         player.play()
         let clock = ContinuousClock()

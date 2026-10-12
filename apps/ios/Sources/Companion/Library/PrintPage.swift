@@ -214,9 +214,10 @@ struct ClipPlayer: View {
     private func play(from time: CMTime?, reminted: Bool) async {
         guard let host = hosts.host(entry.hostID) else { return }
         let item: AVPlayerItem
+        let media: PlayableMedia
         do {
             try PlaybackAudio.configure()
-            let media = try await hosts.backend(for: host).playableMedia(for: entry.print.filename, trashed: entry.print.trashedAt != nil)
+            media = try await hosts.backend(for: host).playableMedia(for: entry.print.filename, trashed: entry.print.trashedAt != nil)
             if Task.isCancelled {
                 if let url = media.localURL, url.isFileURL { try? FileManager.default.removeItem(at: url) }
                 return
@@ -233,6 +234,7 @@ struct ClipPlayer: View {
         ready = false
         playbackID = entry.id
         if let player { player.replaceCurrentItem(with: item) } else { player = AVPlayer(playerItem: item) }
+        if let player { media.configure(player) }
         if let time { await player?.seek(to: time) }
         guard !Task.isCancelled, isSelected else { player?.pause(); return }
         if autoplay || reminted { ClipPlayback.sync(player, isSelected: true) }
