@@ -64,6 +64,9 @@ device grant. The claim proof binds invitation ID, Noise handshake hash and both
 device public keys inside Noise. A distinct per-device API key is returned only
 inside that encrypted channel and is bound to the device/grant in the local DB.
 Operators' API keys are never injected into tunnels.
+Both Secure and Regular pairing session responses include `auth_required: true`:
+an authenticated operator creates each invitation, and native clients require
+this field to decode the shared pairing response.
 
 The connector signs fresh local request context covering the authenticated peer,
 certificate, handshake hash, stream ID, method/path and nonce. Server middleware
