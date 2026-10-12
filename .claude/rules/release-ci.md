@@ -68,3 +68,8 @@ Workflow-only PRs also avoid docs, web, Windows, and Metal builds unless their o
 Native CI splits media exports into delivery, video accessibility and mesh accessibility jobs per appearance. Method selectors cover every MediaExportUITests method exactly once; the routing contract refuses omissions and duplicates. The full local suite remains unchanged.
 
 - Native Mac FFI keeps its independent package version, while `sync-release-pr.sh` updates every workspace path package in its standalone lock. Trusted release scope allows only that lock modification; release validation resolves its full locked `shipping-metal` graph (without `--no-deps`, which does not detect stale locks).
+
+- Every standalone release lock must synchronize all versioned workspace path
+  packages, including the remote-only mobile shell's Secure transport crates.
+  Keep external resolutions unchanged and verify the generated lock with Cargo
+  under `--locked`; fixture coverage must include path dependencies in each root.

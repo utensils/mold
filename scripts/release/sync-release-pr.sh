@@ -136,8 +136,10 @@ sed -E "0,/^version = \"[^\"]+\"/s//version = \"$version\"/" \
   apps/mobile/src-tauri/Cargo.toml > apps/mobile/src-tauri/Cargo.toml.tmp \
   && mv apps/mobile/src-tauri/Cargo.toml.tmp apps/mobile/src-tauri/Cargo.toml
 
+# The remote-only mobile shell now resolves shared Secure transport crates.
+# Sync every workspace path dependency, while retaining external resolutions.
 awk -v ver="$version" '
-  /^name = "mold-mobile"$/ { print; sync = 1; next }
+  /^name = "mold-mobile"$/ || /^name = "mold-ai-/ { print; sync = 1; next }
   sync && /^version = / { print "version = \"" ver "\""; sync = 0; next }
   { print }
 ' apps/mobile/src-tauri/Cargo.lock > apps/mobile/src-tauri/Cargo.lock.tmp \
