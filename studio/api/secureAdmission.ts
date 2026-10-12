@@ -1,7 +1,13 @@
-/** Only a recognized gateway pressure envelope before admission is retryable. */
+/** A recognized gateway pressure envelope before session admission. */
 export class PreAdmissionProxyBusy extends Error {
   constructor() {
     super("The secure proxy is temporarily busy. Try connecting again.");
+  }
+}
+/** Browser WebSockets hide upgrade HTTP status; retry only before socket open. */
+export class PreOpenSocketFailure extends Error {
+  constructor() {
+    super("Could not reach this host securely.");
   }
 }
 function backoff(signal: AbortSignal, delay: number): Promise<void> {
@@ -40,7 +46,13 @@ export async function retrySecureAdmission<T>(
         return await open(signal);
       } catch (error) {
         signal.throwIfAborted();
-        if (!(error instanceof PreAdmissionProxyBusy) || attempt >= 2)
+        if (
+          !(
+            error instanceof PreAdmissionProxyBusy ||
+            error instanceof PreOpenSocketFailure
+          ) ||
+          attempt >= 2
+        )
           throw error;
         await backoff(
           signal,

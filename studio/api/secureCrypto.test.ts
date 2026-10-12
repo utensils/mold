@@ -175,3 +175,84 @@ it("lets browser policy decide whether pinned LAN WebSockets are available from 
     identity.free();
   }
 });
+
+it.each(["before-open", "after-open", "protocol", "auth"] as const)(
+  "bounds socket startup retries to the pre-open phase: %s",
+  async (phase) => {
+    vi.useFakeTimers();
+    const socket = vi.fn(function () {
+      const transport = {
+        readyState: 0,
+        bufferedAmount: 0,
+        onopen: null as (() => void) | null,
+        onerror: null as (() => void) | null,
+        onmessage: null as ((event: { data: string }) => void) | null,
+        onclose: null,
+        send: vi.fn(),
+        close: vi.fn(),
+      };
+      queueMicrotask(() => {
+        if (phase !== "before-open") {
+          transport.readyState = 1;
+          transport.onopen?.();
+        }
+        if (phase === "protocol")
+          transport.onmessage?.({ data: JSON.stringify({ v: 2 }) });
+        else if (phase === "auth")
+          transport.onmessage?.({ data: JSON.stringify({ v: 3, a: "error" }) });
+        else transport.onerror?.();
+      });
+      return transport;
+    });
+    vi.stubGlobal("WebSocket", Object.assign(socket, { OPEN: 1 }));
+    const hostIdentity = Identity.fromBytes(new Uint8Array(64).fill(21));
+    const identity = Identity.fromBytes(new Uint8Array(64).fill(22));
+    try {
+      const keys = binding(hostIdentity);
+      const host = {
+        namespace: namespace(hostIdentity.publicSigningKey()),
+        host_key: keys.signingKey,
+        host_noise_key: keys.noiseKey,
+        host_binding_signature: keys.signature,
+        websocket_url: "wss://proxy.example.invalid/production",
+      };
+      const grant = {
+        id: "02".repeat(16),
+        expiresAt: Math.floor(Date.now() / 1000) + 600,
+        epoch: 0,
+        signature: "",
+      };
+      grant.signature = hex(
+        hostIdentity.sign(grantBytes(host, binding(identity), grant)),
+      );
+      const failed = expect(
+        SecureChannel.connect({ host, identity, grant }),
+      ).rejects.toThrow(
+        phase === "protocol"
+          ? /current secure protocol/
+          : phase === "auth"
+            ? /no longer paired/
+            : /reach this host/,
+      );
+      await vi.advanceTimersByTimeAsync(1000);
+      await failed;
+      expect(socket).toHaveBeenCalledTimes(phase === "before-open" ? 3 : 1);
+      expect(
+        socket.mock.results.every(
+          ({ value }) => value.close.mock.calls.length === 1,
+        ),
+      ).toBe(true);
+      if (phase === "before-open")
+        expect(
+          socket.mock.results.every(
+            ({ value }) => value.send.mock.calls.length === 0,
+          ),
+        ).toBe(true);
+    } finally {
+      hostIdentity.close();
+      hostIdentity.free();
+      identity.close();
+      identity.free();
+    }
+  },
+);

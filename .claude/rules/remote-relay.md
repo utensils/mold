@@ -89,6 +89,11 @@ A reconnect starts a fresh Noise session; never replay uncertain mutations.
 Cloud host admission additionally requires an enabled operator-provisioned public
 key/principal registration. Runtime IAM may read but never write registration
 rows; public enrollment is metadata-only. Admission has bounded pending source/global slots and per-host/device limits.
+Source-quota recovery must fence expired sockets before closing/releasing them,
+preserve active partial joins, and allow reservation-before-row creation grace.
+Cleanup failure retains discoverable quota; preserve four/source and 128/global.
+Only bounded pre-open upgrade capacity failures or typed pre-admission busy may
+retry; never retry authentication failures or dispatched application requests.
 API Gateway socket source IP is trusted; X-Forwarded-For is not. DynamoDB TTL is
 cleanup, never permission. Every frame checks namespace, current host session,
 lease, epoch and membership. A PostToConnection 410 must be confirmed by

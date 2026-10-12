@@ -54,6 +54,23 @@ or put any credential in URLs. Send:
 }
 ```
 
+Pending sockets retain the existing four-per-source and 128-global caps. On a
+source quota refusal the gateway examines at most that source's four reservations
+using strongly consistent reads. Expired pending/challenge sockets are fenced
+with a CAS closing state, then closed before their quota is released. Missing
+rows require a full 60-second creation grace; joining rows receive an additional
+60-second completion grace. A completed active join with leftover quota is
+released without closing its authenticated socket. Failed cleanup retains a
+retryable source reservation; DynamoDB TTL remains a fallback, not authority.
+Active installation uses the consumed challenge's joining revision, preventing
+cleanup from being overwritten by a late join.
+
+Clients may retry at most three fresh admissions within their existing deadline
+when a WebSocket HTTP upgrade returns 429/503, or the typed gateway busy envelope
+arrives before admission. Browser/native adapters with opaque upgrade errors may
+retry only a failure before WebSocket open. Authentication/protocol errors after
+open and dispatched HTTP requests are never replayed.
+
 The router sends `{a:"challenge", v:3, connectionId, nonce, expiresAt}`. The
 challenge is fresh, single-use, connection-bound and expires within 60 seconds
 of upgrade. Reply `{a:"join", v:3, binding, signature, grant}`. For role host,

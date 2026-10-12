@@ -337,6 +337,8 @@ the publish workflow.)
 
 **Pair a Device…** issues a one-use encrypted pairing invitation from a machine’s card menu, Machine menu or machine page. **Add a Machine** accepts that version 2 link on another Mac; iPhone and iPad can scan the same code. New connections default to Secure. Choose Regular explicitly for a direct HTTP(S) server; its separate credential never travels through Mold proxy. Existing direct credentials remain available.
 
+Secure connection startup retries brief proxy pressure up to three times within its existing deadline. Authentication failures and requests already sent are never retried by this startup recovery.
+
 In **Settings ▸ Remote Access**, **Pair a Device** prepares This Mac’s authenticated LAN listener and outbound Lambda connector. The ordinary engine API remains on numeric loopback. LAN clients can reach only the secure WebSocket endpoint and must authenticate using a host-issued device grant. The connector reads the same owner-only host identity as the server; cloud discovery supplies public addresses, never a replacement host identity or owner bearer.
 
 It is not keyless, though. The engine is started with an API key this app

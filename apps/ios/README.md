@@ -27,6 +27,8 @@ main actor; dismissing an alert does not navigate.
 
 ## Generation and playback
 
+Secure connection startup retries brief proxy pressure up to three times within its existing deadline. Authentication failures and requests already sent are never retried by this startup recovery.
+
 On iPhone, Generate opens as a scrolling form: choose the kind and machine,
 describe the result, then choose a model. Tap **Model** to search installed
 models and recipes; **Get More Models…** opens model management directly.

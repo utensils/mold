@@ -2,6 +2,10 @@ import Foundation
 
 /// Retries a fresh admission only. The caller has not dispatched any HTTP record.
 enum SecureAdmissionRetry {
+    static func isBusyUpgrade(response: URLResponse?, opened: Bool) -> Bool {
+        guard !opened, let response = response as? HTTPURLResponse else { return false }
+        return response.statusCode == 429 || response.statusCode == 503
+    }
     struct ProxyBusy: LocalizedError, Sendable {
         var errorDescription: String? { "The secure proxy is temporarily busy. Try connecting again." }
     }

@@ -295,6 +295,10 @@ Regular code or entering a direct address and API key. The cloud proxy always
 requires Secure. A connection never downgrades automatically, and re-pairing
 updates the existing machine rather than adding a duplicate.
 
+Secure clients make up to three connection attempts for transient proxy startup
+failures. Authentication failures stop immediately, and requests already sent
+are never automatically replayed.
+
 Headless hosts opt in with `mold serve --allow-direct-api` or
 `MOLD_ALLOW_DIRECT_API=true`; Nix hosts use `services.mold.allowDirectApi = true`.
 The CLI follows the saved per-origin connection profile. Set

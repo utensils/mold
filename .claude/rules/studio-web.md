@@ -172,6 +172,14 @@ manual/restored canvas survives remount, recipe changes and boundary removal;
 a deliberate replacement may re-arm source dimensions. Shells bind form state and
 keep their own presentation behavior.
 
+**Secure startup:** fresh channel admission is bounded to three attempts within
+one 15-second deadline. Browser WebSockets hide upgrade HTTP status, so only an
+error before `open` is a retryable socket startup failure; mark `open` before
+sending protocol data. After open, only the typed pre-admission gateway busy
+envelope may retry. Authentication/protocol errors and dispatched HTTP requests
+never trigger a fresh channel or request replay. Preserve cancellation and close
+all failed sockets.
+
 **Hosted Studio selection:** the `origin` routing alias is immutable only for the
 numeric-loopback engine. In standalone Studio it resolves to a saved pairing that
 can be disconnected or forgotten. All origin consumers use the tab's accepted

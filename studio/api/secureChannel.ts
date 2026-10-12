@@ -1,5 +1,9 @@
 import { SecureMux } from "./secureMux";
-import { PreAdmissionProxyBusy, retrySecureAdmission } from "./secureAdmission";
+import {
+  PreAdmissionProxyBusy,
+  PreOpenSocketFailure,
+  retrySecureAdmission,
+} from "./secureAdmission";
 import { PacketReader, SecureWire, framePacket } from "./secureWire";
 import { CipherObjectCarrier, objectPolicy } from "./secureObjects";
 import {
@@ -31,6 +35,7 @@ export class SecureChannel {
   private timeout: ReturnType<typeof setTimeout>;
   private failed: Error | null = null;
   private challenged = false;
+  private opened = false;
   private admitted: { sid: string; rid: string } | null = null;
   private accepted: { sid: string; rid: string } | null = null;
   private started = false;
@@ -124,6 +129,7 @@ export class SecureChannel {
       20000,
     );
     this.socket.onopen = () => {
+      this.opened = true;
       try {
         this.send({
           a: "hello",
@@ -138,7 +144,11 @@ export class SecureChannel {
       }
     };
     this.socket.onerror = () =>
-      this.close(new Error("Could not reach this host securely."));
+      this.close(
+        this.opened
+          ? new Error("Could not reach this host securely.")
+          : new PreOpenSocketFailure(),
+      );
     this.socket.onclose = () =>
       this.close(
         new Error(
