@@ -101,6 +101,83 @@ mod regular_authority_tests {
         crate::forget_ephemeral(&owner, None);
     }
     #[tokio::test]
+    async fn regular_dispatch_strips_internal_headers_and_cookies_without_following_redirects() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let owner = uuid::Uuid::new_v4().to_string();
+        register_regular_ephemeral(
+            &owner,
+            RegularHost {
+                origin: origin.clone(),
+                api_key: Some("direct-cookie-test".into()),
+            },
+        )
+        .unwrap();
+        let captured = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = vec![0; 8192];
+            let count = socket.read(&mut bytes).await.unwrap();
+            socket.write_all(b"HTTP/1.1 302 Found\r\nLocation: https://refuse-redirect.invalid\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+            String::from_utf8(bytes[..count].to_vec())
+                .unwrap()
+                .to_lowercase()
+        });
+        let client = reqwest::Client::new();
+        let request = client
+            .get(format!("{origin}/api/status"))
+            .header("x-mold-connection-mode", "regular")
+            .header("cookie", "fixture-cookie")
+            .header("x-mold-secure-peer", "fixture-proof")
+            .header("x-mold-secure-control", "fixture-control")
+            .build()
+            .unwrap();
+        let response = crate::execute_http(&client, request).await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+        let request = captured.await.unwrap();
+        assert!(request.contains("x-api-key: direct-cookie-test"));
+        for header in [
+            "cookie:",
+            "x-mold-connection-mode:",
+            "x-mold-secure-peer:",
+            "x-mold-secure-control:",
+        ] {
+            assert!(!request.contains(header));
+        }
+        forget_regular_ephemeral(&owner, None);
+    }
+    #[tokio::test]
+    async fn regular_dispatch_never_exports_known_secure_authorization() {
+        let owner = uuid::Uuid::new_v4().to_string();
+        let secure = crate::prepare_bootstrap("headers", "desktop")
+            .unwrap()
+            .profile(&format!("https://{}.invalid", uuid::Uuid::new_v4()))
+            .unwrap();
+        crate::register_ephemeral(&owner, secure.clone()).unwrap();
+        crate::forget_ephemeral(&owner, None);
+        let origin = format!("https://{}.invalid", uuid::Uuid::new_v4());
+        register_regular_ephemeral(
+            &owner,
+            RegularHost {
+                origin: origin.clone(),
+                api_key: Some("regular".into()),
+            },
+        )
+        .unwrap();
+        let client = reqwest::Client::new();
+        let request = client
+            .get(format!("{origin}/api/status"))
+            .header("x-mold-connection-mode", "regular")
+            .header("authorization", "Bearer harmless-fixture")
+            .header("authorization", format!("Bearer {}", secure.api_key))
+            .build()
+            .unwrap();
+        let error = crate::execute_http(&client, request).await.unwrap_err();
+        assert!(error.to_string().contains("Secure credentials"));
+        forget_regular_ephemeral(&owner, None);
+        crate::forget_ephemeral(&owner, None);
+    }
+    #[tokio::test]
     async fn regular_dispatch_requires_request_local_mode_and_registered_credential() {
         let origin = format!("https://{}.invalid", uuid::Uuid::new_v4());
         let mut request = reqwest::Client::new()

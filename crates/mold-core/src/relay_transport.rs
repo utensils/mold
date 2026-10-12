@@ -6,6 +6,7 @@ use serde::Serialize;
 pub(crate) struct RelayClient {
     client: Client,
     mode: Result<mold_secure_client::ConnectionMode, String>,
+    api_key: Option<String>,
 }
 impl RelayClient {
     #[cfg(test)]
@@ -13,12 +14,58 @@ impl RelayClient {
         Self {
             client,
             mode: Ok(mold_secure_client::ConnectionMode::Secure),
+            api_key: None,
         }
     }
-    pub(crate) fn for_origin(client: Client, origin: &str) -> Self {
+    pub(crate) fn for_origin(client: Client, origin: &str, mut api_key: Option<String>) -> Self {
+        let mode = mold_secure_client::configured_connection_mode(origin)
+            .and_then(|mode| {
+                if mode == mold_secure_client::ConnectionMode::Regular
+                    && std::env::var("MOLD_CONNECTION_MODE").as_deref() == Ok("regular")
+                {
+                    let key = api_key.clone().or_else(|| {
+                        mold_secure_client::load_regular_host(origin)
+                            .ok()
+                            .and_then(|host| host.api_key)
+                    });
+                    mold_secure_client::register_regular_ephemeral(
+                        "cli-env",
+                        mold_secure_client::RegularHost {
+                            origin: origin.into(),
+                            api_key: key,
+                        },
+                    )?;
+                }
+                if mode == mold_secure_client::ConnectionMode::Regular {
+                    let host = mold_secure_client::load_regular_host(origin)?;
+                    host.validate()?;
+                    if api_key.is_none() {
+                        api_key = host.api_key;
+                    }
+                }
+                Ok(mode)
+            })
+            .map_err(|error| error.to_string());
         Self {
             client,
-            mode: mold_secure_client::configured_connection_mode(origin).map_err(|e| e.to_string()),
+            mode,
+            api_key,
+        }
+    }
+    pub(crate) fn has_paired_api_key(&self, origin: &str) -> bool {
+        match self.mode {
+            Ok(mold_secure_client::ConnectionMode::Regular) => {
+                self.api_key.as_deref().is_some_and(|key| {
+                    !key.is_empty() && reqwest::header::HeaderValue::from_str(key).is_ok()
+                })
+            }
+            Ok(mold_secure_client::ConnectionMode::Secure) => {
+                mold_secure_client::load_pairing(origin).is_ok_and(|host| {
+                    !host.api_key.is_empty()
+                        && reqwest::header::HeaderValue::from_str(&host.api_key).is_ok()
+                })
+            }
+            Err(_) => false,
         }
     }
     pub(crate) fn get(&self, url: impl reqwest::IntoUrl) -> RelayRequest {
@@ -37,6 +84,10 @@ impl RelayClient {
         self.wrap(self.client.delete(url))
     }
     fn wrap(&self, request: RequestBuilder) -> RelayRequest {
+        let request = match &self.api_key {
+            Some(key) => request.header("x-api-key", key),
+            None => request,
+        };
         RelayRequest {
             request,
             client: self.clone(),
