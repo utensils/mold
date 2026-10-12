@@ -1,1 +1,0 @@
-- **Native pairing from the browser.** The pairing webpage can open Mold Studio Companion with the same private invitation while retaining browser Studio pairing. Long pasted native pairing links keep the Pair action reachable.
