@@ -295,3 +295,5 @@ retained descriptors require their exact verified ordered member. Queue views
 inspect full-sized submitted pixels, which may already be fitted. Private files
 and players belong only to the selected presentation and are released/revoked on
 close, cancellation, attachment replacement and machine authority changes.
+
+Known Secure credential fingerprints are retained across native mode changes and aliases. Regular requests refuse matching host keys, X-API-Key and Bearer headers before transport; the Rust C ABI hashes the denial history, which never stores credential bytes or grants access.

@@ -53,6 +53,7 @@ final class HostStore {
             MoldHost(id: entry.id, name: entry.name, baseURL: entry.baseURL, apiKey: readKey(entry),
                      connectionEndpoints: entry.connectionEndpoints, connectionInstanceID: entry.connectionInstanceID, connectionOriginalURL: entry.connectionOriginalURL, secure: entry.secure, connectionMode: entry.connectionMode ?? (entry.secure == nil ? .regular : .secure))
         }
+        SecureCredentialHistory.shared.remember(hosts)
     }
 
     private func readKey(_ entry: HostList.Entry) -> String? {
@@ -102,7 +103,10 @@ final class HostStore {
             defaultID: defaultMachine))
     }
 
-    func setHosts(_ new: [MoldHost]) { hosts = new }
+    func setHosts(_ new: [MoldHost]) {
+        SecureCredentialHistory.shared.remember(hosts + new)
+        hosts = new
+    }
     func setDefaultMachine(_ id: MoldHost.ID?) { defaultMachine = id }
     func setReachability(_ state: Reachability?, for id: MoldHost.ID) { reachability[id] = state }
     func setCapabilities(_ value: Capabilities?, for id: MoldHost.ID) { capabilities[id] = value }

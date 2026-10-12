@@ -9,10 +9,16 @@ extension HTTPBackend {
 
     func response(_ request: URLRequest, body: MoldRequestBody? = nil) async throws -> (MoldResponseBytes, HTTPURLResponse) {
         let body = body ?? .data(request.httpBody ?? Data())
+        if host.connectionMode == .regular {
+            try SecureCredentialHistory.shared.refuseKnownSecureCredentials(host: host, request: request, session: session)
+        }
         if let injectedTransport { return try await injectedTransport.response(for: request, body: body) }
         if host.connectionMode == .regular {
             guard host.permitsRegularDirect, let url = request.url, url.user == nil, url.password == nil, HostAddress.sameOrigin(url, host.baseURL) else { throw SecureConnectionError.pairingRequired }
-            return try await LoopbackHTTPTransport(session: session).response(for: request, body: body)
+            var direct = request
+            direct.httpShouldHandleCookies = false
+            direct.setValue(nil, forHTTPHeaderField: "Cookie")
+            return try await LoopbackHTTPTransport(session: session).response(for: direct, body: body)
         }
         if host.secure == nil, Self.isEmbeddedLoopback(host.baseURL) {
             return try await LoopbackHTTPTransport(session: session).response(for: request, body: body)

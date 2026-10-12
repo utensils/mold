@@ -35,4 +35,7 @@ int32_t mold_secure_operator_key(const uint8_t *home, size_t home_length, const 
 /* Resolve one local client header from an explicit @file or CSV server config.
  * Does not write any file. The server must retain the original configuration. */
 int32_t mold_secure_operator_override(const uint8_t *input, size_t length, uint8_t *output, size_t capacity);
+/* Domain-separated SHA-256 for denial history, never authentication.
+ * Nonempty input <=4096 bytes; returns 32 digest bytes or error. */
+int32_t mold_secure_credential_digest(const uint8_t *input, size_t length, uint8_t *output, size_t capacity);
 #endif
