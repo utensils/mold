@@ -64,13 +64,20 @@ struct PairingScanView: View {
             }
             Section("Paste a Pairing Link") {
                 TextField("https://utensils.io/mold/pair#…", text: $pasted, axis: .vertical)
+                    .lineLimit(1...3)
+                    .accessibilityIdentifier("pairing-link-input")
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .font(.body.monospaced())
                 if let payload = try? MobilePairingPayload.parse(pasted) {
                     Text("\(payload.mode.title): \(payload.mode.explanation)").foregroundStyle(.secondaryText)
                 }
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
                 Button("Pair") { redeem(pasted) }
+                    .accessibilityIdentifier("pairing-link-submit")
                     .disabled(pasted.isEmpty || phase != .scanning)
             }
         }

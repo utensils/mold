@@ -40,18 +40,23 @@ test('pairing handoff clears history before parsing, retains secret only in memo
     'utf8'
   )
   const elements = new Map(
-    ['machine', 'address', 'pair-ready', 'pair-missing', 'open-studio'].map(
-      (id) => [
-        id,
-        {
-          textContent: '',
-          hidden: false,
-          addEventListener(name, fn) {
-            this[name] = fn
-          },
+    [
+      'machine',
+      'address',
+      'pair-ready',
+      'pair-missing',
+      'open-studio',
+      'open-native',
+    ].map((id) => [
+      id,
+      {
+        textContent: '',
+        hidden: false,
+        addEventListener(name, fn) {
+          this[name] = fn
         },
-      ]
-    )
+      },
+    ])
   )
   const fields = new URLSearchParams({
     version: '2',
@@ -150,6 +155,7 @@ test('Regular handoff names its mode and rejects mixed or proxy invitations', ()
         'pair-ready',
         'pair-missing',
         'open-studio',
+        'open-native',
       ].map((id) => [
         id,
         {
@@ -198,4 +204,69 @@ test('Regular handoff names its mode and rejects mixed or proxy invitations', ()
     true
   )
   assert.equal(inspect({ expires_at: '1' }).get('pair-ready').hidden, true)
+})
+
+test('native handoff keeps invitation private and preserves browser fallback', () => {
+  const source = readFileSync(
+    new URL('../public/pair/pair.js', import.meta.url),
+    'utf8'
+  )
+  const elements = new Map(
+    [
+      'machine',
+      'address',
+      'mode',
+      'pair-ready',
+      'pair-missing',
+      'open-studio',
+      'open-native',
+    ].map((id) => [
+      id,
+      {
+        hidden: false,
+        textContent: '',
+        addEventListener(name, fn) {
+          this[name] = fn
+        },
+      },
+    ])
+  )
+  const fields = new URLSearchParams({
+    version: '2',
+    base_url: 'http://192.168.1.4:7680',
+    invite_seed: 'a'.repeat(64),
+  })
+  const navigation = []
+  const win = {
+    location: {
+      hash: `#${fields}`,
+      pathname: '/mold/pair/',
+      assign(url) {
+        navigation.push(url)
+      },
+    },
+    history: { replaceState() {} },
+    addEventListener() {},
+  }
+  win.top = win.self = win
+  runInNewContext(source, {
+    window: win,
+    document: { getElementById: (id) => elements.get(id) },
+    URL,
+    URLSearchParams,
+  })
+  assert.equal(elements.get('open-native').href, undefined)
+  elements.get('open-native').click()
+  assert.deepEqual(navigation, [`moldstudio://pair#${fields}`])
+  // If the native app is not installed, the user can still choose browser Studio.
+  elements.get('open-studio').click()
+  assert.equal(navigation[1], `https://utensils.io/mold/studio/#${fields}`)
+  elements.get('open-native').click()
+  assert.equal(navigation.length, 2)
+  const html = readFileSync(
+    new URL('../public/pair/index.html', import.meta.url),
+    'utf8'
+  )
+  assert.match(html, /id="open-native"[^>]*>\s*Open iPhone or iPad app/)
+  assert.match(html, /Open browser Studio/)
 })

@@ -73,6 +73,12 @@
     invitation = ''
     window.location.assign(target)
   })
+  document.getElementById('open-native').addEventListener('click', () => {
+    if (!invitation) return
+    // Custom-scheme navigation can fail when the app is absent. Keep the
+    // browser fallback available without exposing the invitation in the DOM.
+    window.location.assign(`moldstudio://pair#${invitation}`)
+  })
   window.addEventListener('hashchange', consume)
   consume()
 })()

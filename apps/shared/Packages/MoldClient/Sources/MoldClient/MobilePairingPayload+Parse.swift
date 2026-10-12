@@ -78,10 +78,15 @@ extension MobilePairingPayload {
     }
 
     /// The still form-encoded fields: the universal link's fragment (never
-    /// its query -- that would reach the web server) or `mold://pair`'s query.
+    /// its query -- that would reach the web server). The native handoff uses
+    /// `moldstudio://pair#...` and shares this exact fragment validation.
     private static func linkQuery(_ url: URLComponents) -> String? {
         guard url.user == nil, url.password == nil else { return nil }
         switch url.scheme?.lowercased() {
+        case "moldstudio":
+            guard url.host?.lowercased() == "pair", url.port == nil,
+                  url.path.isEmpty, url.query == nil else { return nil }
+            return url.percentEncodedFragment ?? ""
         case link.scheme:
             let path = url.path.hasSuffix("/") ? String(url.path.dropLast()) : url.path
             // `:443` is the default port and an empty `?` sends nothing:

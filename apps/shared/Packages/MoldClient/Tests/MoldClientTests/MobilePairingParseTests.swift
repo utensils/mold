@@ -11,6 +11,31 @@ struct MobilePairingParseTests {
         #expect(try MobilePairingPayload.parse(url.absoluteString) == payload)
         #expect(payload.isExpired(at: Date(timeIntervalSince1970: 4_000_000_001)))
     }
+    @Test func nativeAppHandoffRetainsTheSameValidatedInvitation() throws {
+        for fixture in PairingLinkContractTests.fixtures.links {
+            let universal = try #require(URLComponents(string: fixture.link))
+            let raw = "moldstudio://pair#" + (universal.percentEncodedFragment ?? "")
+            let nativeURL = try #require(URL(string: raw))
+            #expect(MobilePairingPayload.isPairingLink(nativeURL))
+            #expect(try MobilePairingPayload.parse(raw) == fixture.expected)
+        }
+    }
+
+    @Test func nativeAppHandoffRejectsAmbiguousOrForeignRoutes() throws {
+        let universal = try #require(URLComponents(string: PairingLinkContractTests.fixtures.links.first!.link))
+        let fragment = try #require(universal.percentEncodedFragment)
+        for prefix in ["mold://pair", "moldstudio://other", "moldstudio://pair.evil", "moldstudio://user@pair",
+                       "moldstudio://pair:443", "moldstudio://pair/other", "moldstudio://pair?token=private"] {
+            let raw = prefix + "#" + fragment
+            #expect(!MobilePairingPayload.isPairingLink(try #require(URL(string: raw))))
+            #expect(throws: MobilePairingPayload.ParseError.notPairingCode) {
+                try MobilePairingPayload.parse(raw)
+            }
+        }
+        let tampered = "moldstudio://pair#version=9"
+        #expect(throws: MobilePairingPayload.ParseError.unsupported) { try MobilePairingPayload.parse(tampered) }
+    }
+
     @Test func unencryptedLegacySessionsCannotProduceACode() {
         for keyed in [false, true] {
             let legacy = PairingSession(token: "old", expiresAt: 4_000_000_000, authRequired: keyed, instanceId: "old", hostname: "old")
