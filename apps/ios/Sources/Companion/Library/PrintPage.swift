@@ -244,9 +244,9 @@ struct ClipPlayer: View {
             player = nil
             return
         }
-        guard !Task.isCancelled, isSelected, scenePhase == .active else { nextPlayer.pause(); return }
+        guard !Task.isCancelled, isSelected else { nextPlayer.pause(); return }
         player = nextPlayer
-        if autoplay || reminted { ClipPlayback.sync(player, isSelected: true) }
+        if autoplay || reminted { ClipPlayback.sync(player, isSelected: scenePhase == .active) }
         for await status in item.publisher(for: \.status).values {
             guard !Task.isCancelled, isSelected else { return }
             if status == .readyToPlay { ready = true }
