@@ -1,22 +1,32 @@
-# Encrypted remote connections
+# Secure and Regular connections
 
-Mold connects paired clients to a host through the same encrypted protocol on
+Secure connections use the same encrypted protocol on
 LAN and through the optional Lambda relay. The relay carries ciphertext; HTTP
 paths, API credentials, prompts, uploads, progress events and media stay inside
 a Noise XX session between the client and the pinned host. The cloud still sees
 connection identities, IP addresses, timing and traffic sizes.
 
-This is a hard protocol cutover. Upgrade the host and every client, then pair
-again. Old bearer-only proxy credentials and raw remote HTTP clients are not
-accepted. Plain HTTP remains available only on the host's private loopback
-engine socket. A shared-network address is an address hint, not a trust source.
+Secure is the default. Upgrade and pair again when moving from the old proxy
+protocol; old proxy bearer credentials are not accepted. Direct hosts can also
+enable explicit Regular HTTP or HTTPS access alongside Secure.
+
+| Mode               | Routes                                 | Protection                                                                     |
+| ------------------ | -------------------------------------- | ------------------------------------------------------------------------------ |
+| Secure (default)   | LAN, Tailscale, WAN, or the Mold proxy | Pinned end-to-end encryption between client and host                           |
+| Regular (explicit) | Direct LAN, Tailscale, or WAN HTTP(S)  | HTTPS or Tailscale encrypts transport when used; plain HTTP adds no encryption |
+
+The Mold proxy always requires Secure, including HTTPS proxy URLs. A failed
+Secure connection never switches to Regular. Each mode uses its own device
+credentials; never reuse a Secure or operator key for Regular access.
+A shared-network address is an address hint, not a trust source.
 
 ## Pair in the apps
 
-On the host, open **Settings → Remote Access** and create a pairing code. Scan
-or paste it on the client. The code contains the host's public key and a short
-one-use invitation; transfer it privately. Each client receives its own identity
-and independently revocable grant. Forgetting a client locally removes its local
+On the host, open **Settings → Remote Access**, choose Secure or Regular, and
+create a pairing code. Scan or paste it on the client and confirm its mode before
+pairing. Secure codes contain the host's public key; both modes carry a short
+one-use invitation. Transfer it privately. Each client receives its own
+independently revocable grant. Forgetting a client locally removes its local
 access; revoke it on the host to invalidate every retained copy of that grant.
 
 In hosted browser Studio, **Settings → Machines → Switch machine** opens the
@@ -33,6 +43,75 @@ identity when moving to the relay. An HTTPS browser may need the WSS relay
 because browsers restrict unencrypted WebSocket URLs from HTTPS pages. Such
 browser restrictions do not weaken the encryption or change the host pin.
 Stopping Remote Access closes its listener and existing encrypted sessions.
+Regular direct access is a separate host choice. Use the address advertised by
+its invitation; an embedded app's Regular listener may use a different port from
+the private engine or Secure listener. Pairing the same host again updates its
+saved connection instead of adding a duplicate machine.
+
+## A persistent key for your REST app
+
+Keep authentication enabled. Enable Regular direct access on the host with
+`mold serve --allow-direct-api`, `MOLD_ALLOW_DIRECT_API=1`, or
+`services.mold.allowDirectApi = true` in NixOS. Secure remains available alongside
+it. Choose the actual direct origin reachable by your app, such as a LAN or
+Tailscale address; do not use a Mold proxy URL.
+
+On the authenticated host, export a new private invitation:
+
+```bash
+mold pairing create --mode regular --direct-url http://HOST:7680 \
+  --output "$MOLD_HOME/secure/custom-app-invitation.json"
+```
+
+Run this as the host owner with its actual `MOLD_HOME`. On NixOS, explicitly
+select the service home and the operator key file configured by `apiKeyFile`:
+
+```bash
+sudo -u 'mold' env MOLD_HOME=/var/lib/mold \
+  MOLD_API_KEY=@/run/agenix/mold-api-key mold pairing create --mode regular \
+  --direct-url http://HOST:7680 \
+  --output /var/lib/mold/secure/custom-app-invitation.json
+```
+
+Replace the home and key-file paths with your actual configuration. A custom
+host-local wrapper can supply these settings if you configured one; the upstream
+Mold module does not install a `mold-local` command.
+Transfer the owner-only invitation privately and claim it within two minutes.
+Use a separate private client home for each app:
+
+```bash
+mkdir -m 700 "$HOME/.mold-custom-app"
+MOLD_HOME="$HOME/.mold-custom-app" mold pair \
+  --invite-file /private/custom-app-invitation.json --name "Custom app"
+```
+
+The invitation is single use. The resulting device key persists across server
+restarts until the host revokes that client. Its owner-only profile is
+`$HOME/.mold-custom-app/secure/clients/regular-<SHA256(origin)>.json`; read its
+`api_key` for your app and its `origin` for the direct URL. Do not commit or log
+the key, and do not copy the host's operator key into the app.
+
+REST requests use **`X-API-Key`**; `Authorization: Bearer` alone is not accepted.
+For example, a Node app can read its private profile without putting the key in
+command arguments:
+
+```js
+import { readFile } from 'node:fs/promises'
+
+const { origin, api_key } = JSON.parse(
+  await readFile(process.env.MOLD_APP_PROFILE, 'utf8')
+)
+const response = await fetch(`${origin}/api/status`, {
+  headers: { 'X-API-Key': api_key },
+})
+if (!response.ok) throw new Error(`Mold returned ${response.status}`)
+const status = await response.json()
+```
+
+Create another invitation to issue an independent key for another app. This is
+a runtime operation: no Nix rebuild or authentication disable is needed.
+Revoke only the intended client on the host when retiring its key. Forgetting
+the local profile alone does not revoke a retained credential.
 
 ## Headless host
 
@@ -168,3 +247,14 @@ operator configuration of an independently trusted HTTPS object bucket origin.
 It defaults to the production ciphertext bucket; isolated staging uses its own
 exact origin. A relay advertisement cannot change this trust setting. Keep
 fixture profiles and invitations private even though their data is synthetic.
+
+## Switching host apps
+
+Native, Tauri, and headless hosts share identity, operator authority, and paired-device
+grants when they use the same `MOLD_HOME`. Stop the current host before starting
+another app with that home. Remote Access enablement is app-specific: Native
+enrollment does not automatically enable Tauri’s cloud connector. Configure the
+Tauri process with the host’s public `MOLD_PUBLIC_URL` and production
+`MOLD_SECURE_WEBSOCKET_URL` before starting its engine. These public addresses do
+not replace the home’s private identity or device grants. Keep the variables
+process-specific rather than setting them globally for every app.

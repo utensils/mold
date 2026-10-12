@@ -26,6 +26,13 @@ same contract every surface reads — `ThemeId`, `THEME_FAMILY_META`, `toneChoic
 `migrateLegacyTheme`, `applyTheme` in `ui/theme.ts` — with the Rust
 `AppSettings` persisting `{ theme, match_system }`.
 
+Native and Tauri share host identity, operator authority, and paired-device grants
+when they use the same `MOLD_HOME`; stop one host before starting the other.
+Remote Access enablement remains app-specific. Native enrollment does not
+automatically configure Tauri’s outbound connector; a configured Tauri process
+uses `MOLD_PUBLIC_URL` and `MOLD_SECURE_WEBSOCKET_URL` at engine startup.
+See [the relay guide](../../website/deployment/relay.md#switching-host-apps).
+
 ## Android foundation
 
 Android reuses the same standalone `apps/mobile/src-tauri` crate, the generated

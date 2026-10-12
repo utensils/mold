@@ -134,9 +134,10 @@ works for SPA hot-iteration without recompiling Rust.
     hfTokenFile = config.age.secrets.hf-token.path;
     civitaiTokenFile = config.age.secrets.civitai-token.path;
 
-    # API key authentication: file with one key per line (e.g. agenix secret)
-    # When set, all API requests require an X-Api-Key header
+    # Operator bootstrap: file with one key per line (e.g. agenix secret)
+    # Keep this private; issue separate per-app device grants by pairing.
     # apiKeyFile = config.age.secrets.mold-api-key.path;
+    # allowDirectApi = true; # opt into Regular direct HTTP(S), alongside Secure
 
     # Rate limiting: per-IP, generation endpoints at configured rate, reads at 10x
     # rateLimit = "10/min";
@@ -189,7 +190,8 @@ works for SPA hot-iteration without recompiling Rust.
 | `outputDir`             | null/string | `null`              | Image output directory (default: `homeDir/output`)                                          |
 | `hfTokenFile`           | null/path   | `null`              | Path to overridable default HuggingFace token                                               |
 | `civitaiTokenFile`      | null/path   | `null`              | Path to overridable default Civitai token                                                   |
-| `apiKeyFile`            | null/path   | `null`              | Path to file with API key(s) for authentication (e.g. agenix secret)                        |
+| `apiKeyFile`            | null/path   | `null`              | Private operator bootstrap key file, loaded at service start; not a per-app key list        |
+| `allowDirectApi`        | bool        | `false`             | Enable explicit Regular direct HTTP(S); the Mold proxy always remains Secure                |
 | `runpodApiKeyFile`      | null/path   | `null`              | Path to file with the RunPod API key, loaded at service start                               |
 | `metadataDb.enable`     | bool        | `true`              | SQLite gallery metadata DB; `false` sets `MOLD_DB_DISABLE=1`                                |
 | `metadataDb.path`       | null/string | `null`              | Override the metadata DB path (sets `MOLD_DB_PATH`)                                         |
@@ -203,6 +205,20 @@ works for SPA hot-iteration without recompiling Rust.
 `queueSize` bounds only the hydrated runtime window; the durable backlog
 itself is uncapped — see
 [Configuration](/guide/configuration#server).
+
+### Operator keys and app keys
+
+`services.mold.apiKeyFile` configures the host's operator authority. Do not change
+it, disable authentication, or rebuild Nix merely to add an app. With Regular
+direct access enabled, run `mold pairing create --mode regular` as the service
+owner with its actual `MOLD_HOME` and `MOLD_API_KEY=@operator-key-file`, then
+claim the invitation on the client to obtain its own
+persistent device grant. The host stores that grant independently of Nix
+configuration; it survives restarts and can be revoked without affecting other
+apps. REST apps send the issued key in `X-API-Key`.
+
+See [the complete per-app key flow](/deployment/relay#a-persistent-key-for-your-rest-app)
+for private invitation transfer, client profile storage and a REST example.
 
 `cudaArch` does not select a package automatically. Set `package` to the
 matching flake output:

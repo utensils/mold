@@ -170,7 +170,10 @@ export default defineConfig({
             { text: 'Docker & RunPod', link: '/deployment/docker' },
             { text: 'mold runpod CLI', link: '/deployment/runpod-cli' },
             { text: 'mold lambda CLI', link: '/deployment/lambda-cli' },
-            { text: 'HTTPS reverse relay', link: '/deployment/relay' },
+            {
+              text: 'Secure and Regular connections',
+              link: '/deployment/relay',
+            },
             { text: 'NixOS', link: '/deployment/nixos' },
           ],
         },

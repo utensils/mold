@@ -121,7 +121,7 @@ in
     apiKeyFile = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
       default = null;
-      description = "Path to a file containing the API key(s) for authentication (e.g. an agenix secret). Loaded at service start. When set, all API requests require an X-Api-Key header.";
+      description = "Private operator bootstrap key file (e.g. an agenix secret), loaded at service start. Paired apps receive separate persistent device grants at runtime; REST callers use X-API-Key.";
     };
 
     rateLimit = lib.mkOption {

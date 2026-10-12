@@ -753,14 +753,16 @@ The operator creates a one-use, two-minute invitation using MOLD_API_KEY (or
 @owner-only-key-file). Transfer the invitation privately. Each paired client
 stores its own key and revocable grant. MOLD_HOST selects a paired origin.
 
-Direct and relay API traffic, uploads, progress and media use pinned Noise XX over
+Secure direct and relay API traffic, uploads, progress and media use pinned Noise XX over
 LAN or the Lambda WebSocket relay. The cloud sees metadata and ciphertext, not
 API credentials or media. Bounded S3 objects may carry only the same encrypted
 wire bytes; object keys and cloud URLs never replace host identity verification.
 Old proxy credentials cannot be upgraded implicitly;
-upgrade and pair every client again. Plain HTTP is only a private loopback
-engine interface. Do not use raw remote curl or fall back to a cloud-provided
-host key. Uploads are bounded to 64 MiB; responses stream with backpressure.
+upgrade and pair every Secure client again. The private engine remains loopback;
+Regular direct HTTP(S) is a separate explicit host/client choice, described
+under Connection modes below. Raw HTTP apps cannot use the encrypted proxy.
+Never fall back to a cloud-provided host key. Uploads are bounded to 64 MiB;
+responses stream with backpressure.
 Interrupted mutations are never automatically replayed. RunPod create/run use
 owner-authenticated one-time bootstrap for fresh hosts and preserve the existing
 identity for known paired volumes. A private pre-create journal reconciles an
@@ -825,8 +827,17 @@ Enable host direct access with `mold serve --allow-direct-api`,
 Use `mold pairing create --mode regular --direct-url https://direct.example:7680
 --output /private/invite.json`, then `mold pair --invite-file /private/invite.json`.
 Manual Regular setup uses `mold pair --mode regular --direct-url URL
---api-key-file /private/key`. Omit the key file only for an explicitly
-auth-disabled direct host. `MOLD_HOST` picks the saved origin;
+--api-key-file /private/key` with a distinct Regular device key.
+Omit the key file only for an explicitly auth-disabled direct host; keep
+authentication enabled when issuing per-app grants.
+`MOLD_HOST` picks the saved origin;
 `MOLD_CONNECTION_MODE=secure|regular` explicitly overrides its selected mode.
 Owner invitation export reads the canonical per-home operator credential if
 MOLD_API_KEY is absent. Invitations expire in two minutes and are single use.
+Use a separate private `MOLD_HOME` per REST app and claim with `--name "Custom app"`.
+Its key persists across server restarts until revoked; the owner-only profile is
+`$MOLD_HOME/secure/clients/regular-<SHA256(origin)>.json`. REST apps send that
+profile's `api_key` in `X-API-Key`, not Bearer alone. Do not log the key or send
+the operator bootstrap credential remotely. Nix `services.mold.apiKeyFile`
+configures operator authority; runtime per-app grants are issued by pairing
+without a Nix rebuild or disabling authentication.
