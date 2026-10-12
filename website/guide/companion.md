@@ -295,6 +295,11 @@ Regular code or entering a direct address and API key. The cloud proxy always
 requires Secure. A connection never downgrades automatically, and re-pairing
 updates the existing machine rather than adding a duplicate.
 
+Headless hosts opt in with `mold serve --allow-direct-api` or
+`MOLD_ALLOW_DIRECT_API=true`; Nix hosts use `services.mold.allowDirectApi = true`.
+The CLI follows the saved per-origin connection profile. Set
+`MOLD_CONNECTION_MODE=secure|regular` to explicitly override that mode.
+
 Web Studio follows browser mixed-content and private-network rules. A hosted
 HTTPS Studio cannot connect to a public HTTP address; use a direct HTTPS
 endpoint, the host's embedded HTTP Studio, or a native app/CLI for Regular HTTP.
