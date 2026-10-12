@@ -395,7 +395,7 @@ it("rejects a known Secure credential on an unrelated Regular origin", async () 
     { authorization: "Bearer secure-other-origin" },
     { authorization: "Bearer harmless, Bearer secure-other-origin" },
     { "x-api-key": "harmless, secure-other-origin" },
-  ]) {
+  ] as Record<string, string>[]) {
     await expect(
       relayFetch("http://203.0.113.7:7680/api/status", {
         headers: { "x-mold-connection-mode": "regular", ...credentials },
