@@ -27,3 +27,12 @@ Every `main()` calls `mold_db::config_sync::install_config_post_load_hook()`, wh
 `MOLD_WEB_UI_ENABLED`. Resolve it once at server startup. False omits only the
 web UI/static-asset/SPA fallback router; every API route retains its behavior.
 NixOS exposes the same policy as `services.mold.webUi.enable`. Requires restart.
+
+`allow_direct_api` is a bootstrap opt-in for Regular direct HTTP(S), overridden
+by `MOLD_ALLOW_DIRECT_API`; NixOS exposes `services.mold.allowDirectApi`.
+It does not weaken Secure or the encrypted-only managed proxy. The Nix
+`apiKeyFile` configures operator bootstrap authority, not per-app device grants.
+Pairing issues persistent runtime grants independently of config preferences;
+adding or revoking one app does not require a Nix rebuild or auth disable.
+CLI client credentials stay in owner-private `$MOLD_HOME/secure/clients`
+profiles. Keep those credentials and host authority intact during config sync.

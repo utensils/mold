@@ -140,6 +140,12 @@ The private per-origin profile captures its selected mode; `MOLD_CONNECTION_MODE
 is an explicit CLI override. Secure credentials cannot authorize Regular HTTP.
 The canonical per-home operator file also authorizes invitation export when
 MOLD_API_KEY is absent. Keep invitations and credentials in owner-private files.
+For a REST app, claim a Regular invitation with `--name "Custom app"` in a
+separate private `MOLD_HOME`. Read its persistent key from
+`secure/clients/regular-<SHA256(origin)>.json` and send `X-API-Key`; Bearer alone
+is not accepted. Revoke only that app's grant when retiring it. Nix `apiKeyFile`
+is operator bootstrap authority, not an app-key list; adding a device grant
+needs no Nix rebuild and must not disable authentication.
 
 Temporary gateway pressure may retry admission at most three times with short
 backoff inside the existing connection deadline, before any HTTP request frame.

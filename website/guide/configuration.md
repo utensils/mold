@@ -157,6 +157,21 @@ temperature = 0.7
 
 ## Environment Variables
 
+### Connection modes and app credentials
+
+Secure is the default. `MOLD_ALLOW_DIRECT_API=1` opts the host into separate
+Regular direct HTTP(S) access; `MOLD_CONNECTION_MODE=secure|regular` explicitly
+selects the CLI mode, and `MOLD_HOST` selects its saved origin. A failed Secure
+request never downgrades to Regular, and the Mold proxy always requires
+end-to-end encryption.
+
+`MOLD_API_KEY` and Nix `services.mold.apiKeyFile` configure operator bootstrap
+authority. Keep authentication enabled and issue a separate persistent Regular
+device grant for each REST app instead of sharing that operator key. The client
+profile stores the app key under `$MOLD_HOME/secure/clients`; REST requests send
+`X-API-Key`. Adding an app grant is a runtime pairing operation, not a config
+edit or Nix rebuild. See [app-key generation](/deployment/relay#a-persistent-key-for-your-rest-app).
+
 Environment variables take precedence over config file values.
 
 ### Core

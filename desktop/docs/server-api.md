@@ -122,8 +122,8 @@ sequences additionally permit resume from `Failed` or `Cancelled`.
 | GET | `/api/history` | `?query=` substring, `?limit=` (default 50, max 500) | `mold_core::HistoryListing` | Prompt history, newest first; 503 with the metadata DB disabled |
 | DELETE | `/api/history` | `?keep=N` optional | 204 | Clears prompt history, or trims it to the most recent N |
 | GET | `/api/discovery/peers` | — | `mold_core::DiscoveryPeer[]` | Cached `_mold._tcp` peers visible on the serving host's LAN; available only when `discovery.can_browse`, excludes the serving instance, and returns direct-connect addresses rather than proxying traffic |
-| POST | `/api/pairing/sessions` | — | `routes::PairingSessionResponse` | Mints a two-minute, one-use pairing ticket for the phone QR flow. Operator API key required (401); the durable key is never copied into the ticket |
-| POST | `/api/pairing/claim` | `routes::PairingClaimRequest` | `routes::PairingClaimResponse { api_key, instance_id, hostname }` | **Auth-exempt** — the one-use ticket _is_ the credential. 401 when it is invalid, expired, or already redeemed |
+| POST | `/api/pairing/sessions` | Optional `{mode:"regular",direct_url}`; absent mode is Secure | Mode-specific invitation plus `auth_required:true`, instance ID, and hostname | Mints a two-minute, one-use invitation. Operator authority required; Regular requires an enabled direct listener and explicit HTTP(S) origin. The operator key is never copied into the invitation |
+| POST | `/api/pairing/claim` | Secure `{proof,client_name?,client_kind?}`; Regular `{token,client_name?,client_kind?}` | Secure signed grant/pins/endpoints; Regular separate `api_key`, instance ID, and hostname | **Auth-exempt** — the one-use invitation authorizes the claim. Invalid, expired, or redeemed claims fail; credentials cannot cross modes |
 | GET | `/api/pairing/clients` | — | `routes::PairedClientsResponse` | Lists the granted per-client credentials; operator key required (403 for a paired credential) |
 | DELETE | `/api/pairing/clients/:id` | — | 204 | Revokes one grant immediately; operator key required |
 | GET | `/api/capabilities/chain-limits` | `?model=` | `chain_limits::ChainLimits` (mold-server) | Per-model chain frame/stage caps; resolves built-in manifests and installed catalog sidecars/config |
@@ -277,10 +277,14 @@ The **non-streaming `/api/generate`** returns raw bytes with headers, not SSE. C
 
 `auth.rs`: `load_api_keys()` reads `MOLD_API_KEY` — single value, comma-separated list, or `@/path/to/file` (one key/line, `#` comments). Unset/empty ⇒ auth disabled. Enforced by `require_api_key` middleware checking the **`X-Api-Key`** header with constant-time compare (`subtle`). Exempt paths (`auth.rs::EXEMPT_PATHS`): `/health`, `/api/docs`, `/api/openapi.json`, and `/api/pairing/claim` — the last because the one-use pairing ticket _is_ the credential being redeemed, so it is deliberately the only unauthenticated credential handoff (`/metrics` is mounted outside the auth layer entirely). The browser shell and static assets are public so the API-key entry screen can load; API data still requires authentication. When auth is **disabled**, `POST /api/shutdown` is restricted to loopback IPs. Rate limiting (`rate_limit.rs`) is opt-in via `MOLD_RATE_LIMIT=N/period` (sec|min|hour) + `MOLD_RATE_LIMIT_BURST`, and `classify_route` sorts every path into two tiers: **read** is every `GET`, `POST /api/generation-batches/status`, and anything unclassified, at ten times the configured rate capped at 1000/period; **generation** is `POST` to `/api/generate`, `/api/generate/stream`, `/api/generate/placement-preview`, `/api/generation-batches`, `/api/chain-jobs/placement-preview`, `/api/expand`, `/api/upscale[/stream]`, `/api/models/load`, `/api/models/pull`, `/api/queue/:id/retry` and `/api/queue/held/sweep`, plus `PATCH /api/devices/*`, `DELETE /api/models/unload`, and every `DELETE` under `/api/gallery/`. `/health`, `/api/docs`, and `/api/openapi.json` are not rate limited at all.
 
-Pairing never copies an operator key. `POST /api/pairing/sessions` creates a
-two-minute, one-use handoff; `POST /api/pairing/claim` exchanges it for a
-random per-client credential whose SHA-256 digest is persisted in
-`paired_clients`. Operator credentials list grants with
+Pairing never copies an operator key. `POST /api/pairing/sessions` defaults to
+Secure and creates a two-minute, one-use pinned invitation. Secure claim proves
+the device identity and returns its signed grant for encrypted requests. Explicit
+Regular sessions return `mode`, `base_url`, `pairing_token`, `expires_at`, and
+`auth_required:true`; the claim returns a separate `mold_regular_` credential
+whose SHA-256 digest is persisted in `paired_clients`. The HTTP response-only
+`auth_required` and `hostname` fields are omitted by the CLI when exporting the
+strict canonical Regular invitation. Operator credentials list grants with
 `GET /api/pairing/clients` and revoke one immediately with
 `DELETE /api/pairing/clients/:id`. Paired credentials are accepted by normal
 API routes but cannot mint or manage pairing grants.

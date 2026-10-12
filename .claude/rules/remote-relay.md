@@ -74,6 +74,9 @@ The CLI Regular invitation exporter removes response-only `auth_required`
 metadata before writing the canonical invitation; its strict client parser still
 rejects unknown fields. Test exported JSON against `RegularInvite`, not a second
 copy of the client schema.
+Regular app grants persist across host restarts until individually revoked.
+REST callers use `X-API-Key`; Bearer alone is not accepted. Do not hand remote
+apps the operator bootstrap key or rotate Nix `apiKeyFile` to add an app.
 
 The connector signs fresh local request context covering the authenticated peer,
 certificate, handshake hash, stream ID, method/path and nonce. Server middleware

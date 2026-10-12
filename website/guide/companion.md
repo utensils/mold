@@ -289,7 +289,7 @@ The compact prompt stays bounded while you type. **Edit prompt** opens a spaciou
 
 Secure is the default and encrypts LAN, Tailscale, and proxy traffic end to end.
 Regular connects directly using HTTP or HTTPS over LAN, Tailscale, or WAN;
-HTTP relies on your network or VPN for encryption. Enable Regular access on
+plain HTTP adds no encryption. HTTPS or Tailscale encrypts transport when used. Enable Regular access on
 the host before creating its pairing code. Select Regular when scanning a
 Regular code or entering a direct address and API key. The cloud proxy always
 requires Secure. A connection never downgrades automatically, and re-pairing
@@ -308,3 +308,8 @@ Web Studio follows browser mixed-content and private-network rules. A hosted
 HTTPS Studio cannot connect to a public HTTP address; use a direct HTTPS
 endpoint, the host's embedded HTTP Studio, or a native app/CLI for Regular HTTP.
 Browser permission prompts may also apply to LAN addresses.
+
+Switching the Mac host app preserves the phone’s pairing when both apps use the
+same `MOLD_HOME`, but cloud enablement is app-specific. See
+[Switching host apps](/deployment/relay#switching-host-apps) for Tauri’s supported
+public connector settings.

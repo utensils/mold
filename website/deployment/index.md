@@ -10,21 +10,28 @@ The simplest setup: run the server on a GPU host, generate from anywhere.
 ```bash
 # On your GPU server
 mold serve
+mold pairing create --output "$MOLD_HOME/secure/invitation.json"
 
-# From your laptop
-MOLD_HOST=http://gpu-server:7680 mold run "a cat"
+# Privately transfer the invitation, then pair on your laptop
+mold pair --invite-file /private/invitation.json
+MOLD_HOST=PAIRED_HOST_ORIGIN mold run "a cat"
 ```
+
+Secure is the default for both direct connections and the optional proxy.
+Hosts can also opt into Regular direct HTTP(S) for REST apps. See
+[Secure and Regular connections](/deployment/relay), including
+[persistent app-key generation](/deployment/relay#a-persistent-key-for-your-rest-app).
 
 ## Deployment Options
 
-| Method                                    | Best For                                 |
-| ----------------------------------------- | ---------------------------------------- |
-| [Docker & RunPod](/deployment/docker)     | Cloud GPUs, RunPod pods                  |
-| [mold runpod CLI](/deployment/runpod-cli) | Integrated pod and volume control        |
-| [mold lambda CLI](/deployment/lambda-cli) | Private Lambda Cloud web UI              |
-| [HTTPS reverse relay](/deployment/relay)  | Access an existing machine from anywhere |
-| [NixOS](/deployment/nixos)                | NixOS systems, declarative setup         |
-| Systemd service                           | Any Linux with NVIDIA GPU                |
+| Method                                              | Best For                                    |
+| --------------------------------------------------- | ------------------------------------------- |
+| [Docker & RunPod](/deployment/docker)               | Cloud GPUs, RunPod pods                     |
+| [mold runpod CLI](/deployment/runpod-cli)           | Integrated pod and volume control           |
+| [mold lambda CLI](/deployment/lambda-cli)           | Private Lambda Cloud web UI                 |
+| [Secure and Regular connections](/deployment/relay) | Pair clients or issue a direct REST app key |
+| [NixOS](/deployment/nixos)                          | NixOS systems, declarative setup            |
+| Systemd service                                     | Any Linux with NVIDIA GPU                   |
 
 ## Systemd Service
 

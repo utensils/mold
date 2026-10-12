@@ -287,6 +287,8 @@ http://HOST:7680 --output /private/regular-invitation.json`, then claim it with
 `mold pair --invite-file /private/regular-invitation.json --name 'My app'`.
 Each app receives its own persistent device key; REST apps send it in
 `X-API-Key`. Keep the host operator key private and authentication enabled.
+See the [persistent REST app-key guide](https://utensils.io/mold/deployment/relay#a-persistent-key-for-your-rest-app)
+for private profile storage and the Nix operator-key distinction.
 
 `--offload` also applies to remote renders and durable sequences on GPU hosts.
 Add `--no-save` to keep one render out of a server's Library; the host still
