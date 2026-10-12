@@ -29,6 +29,7 @@ pub const WELL_KNOWN_PORT: u16 = 7680;
 pub const LAN_BIND: &str = "0.0.0.0";
 
 pub struct EngineHandle {
+    pub addresses: std::sync::Arc<mold_server::ConnectionAddresses>,
     pub port: u16,
     pub models_dir: PathBuf,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -74,6 +75,7 @@ impl EngineHandle {
     #[cfg(test)]
     pub(crate) fn parked_for_tests(release: std::sync::mpsc::Receiver<()>) -> Self {
         Self {
+            addresses: Default::default(),
             port: 9,
             models_dir: PathBuf::new(),
             thread: Some(std::thread::spawn(move || {
@@ -87,6 +89,7 @@ impl EngineHandle {
     #[cfg(test)]
     pub(crate) fn held_gallery_task_for_tests(release: std::sync::mpsc::Receiver<()>) -> Self {
         Self {
+            addresses: Default::default(),
             port: 9,
             models_dir: PathBuf::new(),
             thread: Some(std::thread::spawn(move || {
@@ -171,6 +174,9 @@ fn start_engine_inner(
     let bind = bind.to_string();
     let dir = models_dir.clone();
     let size = queue_size();
+    let listener = std::net::TcpListener::bind((bind.as_str(), port))?;
+    let addresses = std::sync::Arc::new(mold_server::ConnectionAddresses::default());
+    let thread_addresses = addresses.clone();
     let thread = std::thread::Builder::new()
         .name("mold-engine".into())
         .spawn(move || {
@@ -183,12 +189,14 @@ fn start_engine_inner(
             // it, so the engine's HTTP drain is bounded rather than left to
             // the webview's connections.
             mold_server::bound_http_drain(HTTP_DRAIN_GRACE);
-            let result = rt.block_on(mold_server::run_server(
+            let result = rt.block_on(mold_server::run_server_with_listener_and_addresses(
                 &bind,
                 port,
                 dir,
                 gpu_selection,
                 size,
+                listener,
+                Some(thread_addresses),
             ));
             match result {
                 Ok(()) => {
@@ -225,6 +233,7 @@ fn start_engine_inner(
             tracing::debug!("engine: runtime dropped; thread exiting");
         })?;
     Ok(EngineHandle {
+        addresses,
         port,
         models_dir,
         thread: Some(thread),

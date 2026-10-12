@@ -339,6 +339,15 @@ async fn ensure_local_server_inner(
         gpu_selection,
     )
     .map_err(|e| format!("{e:#}"))?;
+    engine.addresses.set_regular_network_enabled(
+        store
+            .current
+            .lock()
+            .map_err(|_| "Settings unavailable")?
+            .engine_env
+            .get("MOLD_REGULAR_ACCESS")
+            .is_some_and(|value| value == "1"),
+    );
     let base_url = engine.base_url();
     if !server::wait_healthy(&base_url, Duration::from_secs(30)).await {
         if !shutdown_embedded_or_retain(
@@ -1034,4 +1043,118 @@ mod tests {
             "hal9000.local"
         ));
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegularAccessInfo {
+    pub enabled: bool,
+    pub endpoints: Vec<String>,
+}
+#[tauri::command]
+pub async fn regular_access_get(
+    state: tauri::State<'_, AppState>,
+    store: tauri::State<'_, SettingsStore>,
+) -> Result<RegularAccessInfo, String> {
+    let enabled = store
+        .current
+        .lock()
+        .map_err(|_| "Settings unavailable")?
+        .engine_env
+        .get("MOLD_REGULAR_ACCESS")
+        .is_some_and(|v| v == "1");
+    let local = state.local_server.lock().await;
+    let endpoints = match &*local {
+        LocalServer::Embedded(engine) => engine.addresses.regular_network_endpoints(),
+        _ => Vec::new(),
+    };
+    Ok(RegularAccessInfo { enabled, endpoints })
+}
+#[tauri::command]
+pub async fn regular_access_set(
+    state: tauri::State<'_, AppState>,
+    store: tauri::State<'_, SettingsStore>,
+    enabled: bool,
+) -> Result<RegularAccessInfo, String> {
+    let previous = store
+        .current
+        .lock()
+        .map_err(|_| "Settings unavailable")?
+        .engine_env
+        .get("MOLD_REGULAR_ACCESS")
+        .is_some_and(|v| v == "1");
+    let addresses = {
+        let local = state.local_server.lock().await;
+        match &*local {
+            LocalServer::Embedded(engine) => Some(engine.addresses.clone()),
+            LocalServer::External { .. } => {
+                return Err("Configure Regular access on the external Mold server".into())
+            }
+            LocalServer::Off => None,
+        }
+    };
+    let endpoints = if let Some(addresses) = &addresses {
+        addresses.set_regular_network_enabled(enabled);
+        if enabled {
+            match addresses
+                .regular_network_ready(Duration::from_secs(10))
+                .await
+            {
+                Ok(endpoints) => endpoints,
+                Err(error) => {
+                    addresses.set_regular_network_enabled(previous);
+                    return Err(error.to_string());
+                }
+            }
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+    let local = state.local_server.lock().await;
+    let same_engine = match (&*local, &addresses) {
+        (LocalServer::Embedded(engine), Some(addresses)) => {
+            std::sync::Arc::ptr_eq(&engine.addresses, addresses)
+        }
+        (LocalServer::Off, None) => true,
+        _ => false,
+    };
+    if !same_engine {
+        if let Some(addresses) = addresses {
+            addresses.set_regular_network_enabled(false)
+        }
+        return Err("The local engine changed; try again".into());
+    }
+    let saved = (|| {
+        let mut settings = store
+            .current
+            .lock()
+            .map_err(|_| "Settings unavailable".to_string())?;
+        let old = settings.engine_env.insert(
+            "MOLD_REGULAR_ACCESS".into(),
+            if enabled { "1" } else { "0" }.into(),
+        );
+        if let Err(error) = settings::save(&store.path, &settings) {
+            match old {
+                Some(value) => {
+                    settings
+                        .engine_env
+                        .insert("MOLD_REGULAR_ACCESS".into(), value);
+                }
+                None => {
+                    settings.engine_env.remove("MOLD_REGULAR_ACCESS");
+                }
+            }
+            return Err(error.to_string());
+        }
+        Ok(())
+    })();
+    if let Err(error) = saved {
+        if let Some(addresses) = addresses {
+            addresses.set_regular_network_enabled(previous)
+        }
+        return Err(error);
+    }
+    Ok(RegularAccessInfo { enabled, endpoints })
 }

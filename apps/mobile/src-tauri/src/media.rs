@@ -380,6 +380,7 @@ fn place_in_mold_folder(
 async fn download_export(
     url: &str,
     api_key: Option<String>,
+    connection_mode: mold_secure_client::ConnectionMode,
     request: &serde_json::Value,
     filename: &str,
     media_kind: ExportedMediaKind,
@@ -411,6 +412,7 @@ async fn download_export(
             request = request.header("x-api-key", api_key);
         }
         let mut response = request
+            .header("x-mold-connection-mode", connection_mode.as_str())
             .secure_send()
             .await
             .and_then(|response| response.error_for_status().map_err(Into::into))
@@ -460,6 +462,7 @@ async fn download_export(
 async fn staged_export(
     url: &str,
     api_key: Option<String>,
+    connection_mode: mold_secure_client::ConnectionMode,
     request: &serde_json::Value,
     filename: &str,
     media_kind: ExportedMediaKind,
@@ -468,7 +471,7 @@ async fn staged_export(
     if let Some(cached) = take_cached_export(reuse_key) {
         return Ok(cached);
     }
-    download_export(url, api_key, request, filename, media_kind).await
+    download_export(url, api_key, connection_mode, request, filename, media_kind).await
 }
 
 #[cfg(any(target_os = "ios", test))]
@@ -761,10 +764,13 @@ pub async fn share_exported_animation(
     window: tauri::WebviewWindow,
     url: String,
     api_key: Option<String>,
+    connection_mode: Option<mold_secure_client::ConnectionMode>,
     request: serde_json::Value,
     filename: String,
     reuse_key: String,
 ) -> Result<String, String> {
+    let connection_mode = connection_mode.unwrap_or_default();
+    let reuse_key = format!("{}:{reuse_key}", connection_mode.as_str());
     validate_video_url(&url)?;
     let (filename, media_kind) = sanitize_export_filename(&filename)?;
 
@@ -775,8 +781,16 @@ pub async fn share_exported_animation(
         use objc2_foundation::{NSArray, NSError, NSURL};
         use objc2_ui_kit::{UIActivityType, UIActivityViewController, UIViewController};
 
-        let staged =
-            staged_export(&url, api_key, &request, &filename, media_kind, &reuse_key).await?;
+        let staged = staged_export(
+            &url,
+            api_key,
+            connection_mode,
+            &request,
+            &filename,
+            media_kind,
+            &reuse_key,
+        )
+        .await?;
         let staged_for_sheet = staged.clone();
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let setup_sender = sender.clone();
@@ -894,7 +908,15 @@ pub async fn share_exported_animation(
 
         #[cfg(not(target_os = "android"))]
         {
-            let _ = (window, api_key, request, filename, media_kind, reuse_key);
+            let _ = (
+                window,
+                api_key,
+                connection_mode,
+                request,
+                filename,
+                media_kind,
+                reuse_key,
+            );
             Err("sharing exports is available in the mobile builds".to_string())
         }
     }
@@ -916,10 +938,13 @@ pub async fn save_export_to_mold_folder(
     window: tauri::WebviewWindow,
     url: String,
     api_key: Option<String>,
+    connection_mode: Option<mold_secure_client::ConnectionMode>,
     request: serde_json::Value,
     filename: String,
     reuse_key: String,
 ) -> Result<MoldFolderSave, String> {
+    let connection_mode = connection_mode.unwrap_or_default();
+    let reuse_key = format!("{}:{reuse_key}", connection_mode.as_str());
     validate_video_url(&url)?;
     let (filename, media_kind) = sanitize_export_filename(&filename)?;
 
@@ -927,8 +952,16 @@ pub async fn save_export_to_mold_folder(
     {
         use tauri::Manager;
 
-        let staged =
-            staged_export(&url, api_key, &request, &filename, media_kind, &reuse_key).await?;
+        let staged = staged_export(
+            &url,
+            api_key,
+            connection_mode,
+            &request,
+            &filename,
+            media_kind,
+            &reuse_key,
+        )
+        .await?;
         // The app's Documents directory IS the Mold folder the Files app
         // shows; nesting another "Mold" inside it would read Mold ▸ Mold.
         let folder =
@@ -981,7 +1014,15 @@ pub async fn save_export_to_mold_folder(
 
         #[cfg(not(target_os = "android"))]
         {
-            let _ = (window, api_key, request, filename, media_kind, reuse_key);
+            let _ = (
+                window,
+                api_key,
+                connection_mode,
+                request,
+                filename,
+                media_kind,
+                reuse_key,
+            );
             Err("the Mold folder is available in the mobile builds".to_string())
         }
     }

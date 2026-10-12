@@ -5,10 +5,21 @@ use serde::Serialize;
 #[derive(Clone)]
 pub(crate) struct RelayClient {
     client: Client,
+    mode: Result<mold_secure_client::ConnectionMode, String>,
 }
 impl RelayClient {
+    #[cfg(test)]
     pub(crate) fn new(client: Client) -> Self {
-        Self { client }
+        Self {
+            client,
+            mode: Ok(mold_secure_client::ConnectionMode::Secure),
+        }
+    }
+    pub(crate) fn for_origin(client: Client, origin: &str) -> Self {
+        Self {
+            client,
+            mode: mold_secure_client::configured_connection_mode(origin).map_err(|e| e.to_string()),
+        }
     }
     pub(crate) fn get(&self, url: impl reqwest::IntoUrl) -> RelayRequest {
         self.wrap(self.client.get(url))
@@ -60,7 +71,15 @@ impl RelayRequest {
         self
     }
     pub(crate) async fn send(self) -> Result<Response> {
-        let request = self.request.build()?;
+        let mut request = self.request.build()?;
+        let mode = self
+            .client
+            .mode
+            .as_ref()
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        request
+            .headers_mut()
+            .insert("x-mold-connection-mode", mode.as_str().parse()?);
         mold_secure_client::execute_http(&self.client.client, request).await
     }
 }

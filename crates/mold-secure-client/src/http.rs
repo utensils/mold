@@ -50,9 +50,41 @@ pub fn is_private_engine(url: &reqwest::Url) -> bool {
 }
 pub async fn execute_http(
     client: &reqwest::Client,
-    request: reqwest::Request,
+    mut request: reqwest::Request,
 ) -> Result<reqwest::Response> {
     let origin = request.url().origin().ascii_serialization();
+    let mode = request.headers_mut().remove("x-mold-connection-mode");
+    if let Some(mode) = mode {
+        match mode.to_str()? {
+            "secure" => {}
+            "regular" => {
+                crate::regular_origin(&origin)?;
+                let host = crate::load_regular_host(&origin)?;
+                host.validate()?;
+                let provided = request
+                    .headers()
+                    .get("x-api-key")
+                    .map(|v| v.to_str())
+                    .transpose()?;
+                anyhow::ensure!(
+                    provided.is_none() || provided == host.api_key.as_deref(),
+                    "Regular credential does not match the selected host"
+                );
+                if let Some(key) = host.api_key {
+                    request.headers_mut().insert("x-api-key", key.parse()?);
+                }
+                // A direct credential must never follow a redirect to another authority.
+                let direct = reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()?;
+                return direct
+                    .execute(request)
+                    .await
+                    .context("Regular Mold request failed");
+            }
+            _ => anyhow::bail!("invalid Mold connection mode"),
+        }
+    }
     let paired = crate::pairing_exists(&origin);
     if is_private_engine(request.url()) && !paired {
         return client
@@ -104,7 +136,20 @@ pub trait RequestBuilderExt {
 impl RequestBuilderExt for reqwest::RequestBuilder {
     async fn secure_send(self) -> Result<reqwest::Response> {
         let (client, request) = self.build_split();
-        execute_http(&client, request?).await
+        let mut request = request?;
+        if !request.headers().contains_key("x-mold-connection-mode") {
+            let origin = request.url().origin().ascii_serialization();
+            let mode = crate::configured_connection_mode(&origin)?;
+            request.headers_mut().insert(
+                "x-mold-connection-mode",
+                match mode {
+                    crate::ConnectionMode::Secure => "secure",
+                    crate::ConnectionMode::Regular => "regular",
+                }
+                .parse()?,
+            );
+        }
+        execute_http(&client, request).await
     }
 }
 #[cfg(test)]

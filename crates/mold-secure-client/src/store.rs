@@ -202,3 +202,31 @@ mod tests {
         forget_ephemeral(&other_owner, None);
     }
 }
+
+/// Retain Secure credential knowledge across mode selection and route aliases.
+pub(crate) fn is_known_secure_credential(candidate: &str) -> Result<bool> {
+    if ephemeral().values().any(|h| h.api_key == candidate) {
+        return Ok(true);
+    }
+    let root = default_store();
+    if !root.try_exists()? {
+        return Ok(false);
+    }
+    for entry in std::fs::read_dir(&root)? {
+        let path = entry?.path();
+        let name = path
+            .file_name()
+            .and_then(|v| v.to_str())
+            .unwrap_or_default();
+        if path.extension().and_then(|v| v.to_str()) != Some("json") || name.starts_with("regular-")
+        {
+            continue;
+        }
+        let host: PairedHost = serde_json::from_slice(&read_private(&path)?)?;
+        host.validate()?;
+        if host.api_key == candidate {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
