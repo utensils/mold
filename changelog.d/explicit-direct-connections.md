@@ -1,1 +1,0 @@
-- Added explicit Regular direct HTTP(S) connections alongside default Secure connections, with separate device credentials, one-use direct pairing, CLI profiles, native registration and independently controlled host access. Managed proxy connections remain end-to-end encrypted.

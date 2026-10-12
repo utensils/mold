@@ -1,1 +1,0 @@
-- **Shared local host authority.** Native and Tauri hosts use one owner-private operator key per Mold home, preserving the host identity and paired-device grants across app handoffs.

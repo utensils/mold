@@ -1,1 +1,0 @@
-- **Explicit native connection modes.** Native Mac and iOS clients offer Secure by default and explicit Regular direct HTTP(S) connections, preserve existing direct credentials, keep one saved machine when re-pairing, and keep proxy traffic encrypted. Mac Regular pairing waits for its independently controlled direct listener before displaying a code.
