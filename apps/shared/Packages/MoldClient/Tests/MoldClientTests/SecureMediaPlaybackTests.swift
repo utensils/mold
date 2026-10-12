@@ -32,7 +32,7 @@ import Testing
             }
             try await Task.sleep(for: .milliseconds(50))
         }
-        #expect(item.status == .readyToPlay)
+        try #require(item.status == .readyToPlay)
         #expect(player.currentTime().seconds >= 0.25, "Loading metadata alone must not count as successful playback")
         #expect(decodedFrame)
         player.pause()
