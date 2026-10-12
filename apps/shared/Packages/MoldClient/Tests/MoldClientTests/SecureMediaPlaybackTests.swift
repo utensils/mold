@@ -7,7 +7,9 @@ import Testing
 @MainActor struct SecureMediaPlaybackTests {
     @Test(arguments: [false, true], [Duration.zero, .milliseconds(30)])
     func avFoundationLoadsAndSeeksThroughRangeAdapter(trashed: Bool, delay: Duration) async throws {
-        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "Fixtures/reference-video.mp4")
+        // A generated 720p clip exercises real playback throughput; the old
+        // 32 KiB sample only demonstrated metadata and single-frame decoding.
+        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "Fixtures/playback-range-stress.mp4")
         let transport = MediaRangeFixture(data: try Data(contentsOf: fixture), delay: delay)
         let backend = HTTPBackend(host: .init(name: "Encrypted fixture", baseURL: URL(string: "https://not-fetched.invalid")!, apiKey: "encrypted-api-credential"), transport: transport)
         let media = try await backend.playableMedia(for: "movie.mp4", trashed: trashed)
