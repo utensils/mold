@@ -73,8 +73,13 @@ struct EngineLaunchTests {
         let blocker = FileManager.default.temporaryDirectory
             .appending(path: "engine-launch-blocker-\(UUID().uuidString)")
         FileManager.default.createFile(atPath: blocker.path(percentEncoded: false), contents: Data())
+        let directory = scratch()
+        // The shared home now owns the key. Block that canonical private
+        // directory rather than the former app-local credential store.
+        let secure = directory.appending(path: "secure")
+        FileManager.default.createFile(atPath: secure.path(percentEncoded: false), contents: Data())
         let secrets = SecretStore(directory: blocker.appending(path: "inside"))
-        let env = environment(scratch())
+        let env = environment(directory)
 
         #expect(throws: EngineLaunchRefusal.self) {
             try EngineLaunchPlan.resolve(
