@@ -1,1 +1,0 @@
-- Fix tall dialogs (such as the model licence review listing many components) growing past the window and clipping their title and Accept/Cancel buttons; dialogs now fit the window and scroll their contents.
