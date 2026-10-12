@@ -21,6 +21,17 @@ struct RegularConnectionTests {
         #expect(try MobilePairingPayload.parse(link.absoluteString) == payload)
     }
 
+    @Test func aDecodedHostWithoutModeDoesNotOptIntoRegular() throws {
+        let original = MoldHost(name: "GPU", baseURL: URL(string: "http://gpu.example.com:7680")!, apiKey: "old-key")
+        let encoded = try MoldJSON.localEncoder.encode(original)
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object.removeValue(forKey: "connectionMode")
+        let decoded = try MoldJSON.localDecoder.decode(MoldHost.self, from: JSONSerialization.data(withJSONObject: object))
+        #expect(decoded.connectionMode == .secure)
+        #expect(decoded.requiresSecurePairing)
+        #expect(!decoded.permitsRegularDirect)
+    }
+
     @Test func existingDirectMachineKeepsItsRegularCredential() throws {
         let data = Data(#"{"id":"00000000-0000-0000-0000-000000000001","name":"GPU","base_url":"http://gpu.example.com:7680"}"#.utf8)
         let saved = try MoldJSON.localDecoder.decode(StoredHost.self, from: data)
