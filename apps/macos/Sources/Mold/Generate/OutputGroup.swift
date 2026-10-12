@@ -8,6 +8,7 @@ struct OutputGroup: View {
     /// This host's whole model list, upscalers included -- filtered here by
     /// `UpscaleRow.resolve`, never assumed by name.
     let models: [Model]
+    @State private var search = ""
     @Binding var draft: RenderDraft
 
     var body: some View {
@@ -93,10 +94,12 @@ struct OutputGroup: View {
     @ViewBuilder private var upscaleSection: some View {
         let ready = UpscaleRow.resolve(models: models)
         if !ready.isEmpty {
+            TextField("Search upscalers", text: $search)
+                .textFieldStyle(.roundedBorder)
             InspectorField("Upscale") {
                 Picker("Upscale", selection: $draft.upscaleModel) {
                     Text("Don't upscale").tag(String?.none)
-                    ForEach(ready) { model in
+                    ForEach(ready.filter { $0.name == draft.upscaleModel || $0.searchScore(search) > 0 }) { model in
                         Text(model.headline).tag(String?.some(model.name))
                     }
                 }

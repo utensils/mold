@@ -572,3 +572,23 @@ Collection counts and hidden membership load with the initial library snapshot, 
 Web, Tauri desktop and mobile share media-type, exact-machine and text filters, verified-byte deduplication, and an original-media viewer with bounded usage lists and owning-print navigation. Cached discovery survives reopening; filters narrow usages before choosing a preview or reuse route. Original preview limits are 64 MiB and, for PNG/JPEG/WebP images, 32 MP/8192 pixels per side. Existing print retention remains authoritative.
 
 Source discovery runs automatically while the browser is open: a small first page of 25 owners appears before background batches of at most 100, with two requests in flight. Progress reports checked library items; source cards still page independently at 48. Closing cancels pending discovery, and fresh cached inventories restore on reopening.
+
+## Finding models
+
+Model search in Generate, Installed and curated Discover accepts partial names,
+ordered abbreviations and small spelling mistakes. Case, accents and separators
+such as `-`, `_`, `:` and `.` do not matter. Try `flx dev`, `flxu dev`, or
+`fluxdevq4`; multiple words can match the model name, family or repository.
+Direct name matches rank ahead of fuzzy matches, and clearing search restores
+the existing list. Selection, machine routing and capability restrictions stay
+unchanged. Search is available even when only a few models are installed.
+
+Add-on look selectors and supported upscaler/adapter selectors use the same
+matching behavior. Filtering a select keeps its current value visible.
+
+Live Hugging Face/Civitai discovery uses the provider's normal search first.
+After a successful zero-result query, an updated server searches a broader
+prefix, filters at most 100 returned candidates with fuzzy matching, and paginates
+that matching set. Source, family, kind and mature-content filters still apply.
+Provider errors remain errors; this bounded fallback is not an exhaustive search
+of either provider's index. Older servers retain their provider search behavior.

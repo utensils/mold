@@ -6,6 +6,7 @@ struct SourceMediaModelChooser: View {
     @Environment(ModelStore.self) private var models
     @Environment(GenerateController.self) private var generate
     @Environment(\.dismiss) private var dismiss
+    @State private var search = ""
     let member: RetainedSourceMedia.Member
     let select: (MoldHost, Model, GenerationRecipe, SourceMediaAttachment) -> Void
 
@@ -17,7 +18,7 @@ struct SourceMediaModelChooser: View {
                 List {
                     ForEach(hosts.hosts.filter(hosts.isUp)) { host in
                         Section(host.name) {
-                            ForEach(models.ready(on: host.id)) { model in
+                            ForEach(FuzzyModelSearch.models(models.ready(on: host.id), query: search)) { model in
                                 let offers = SourceMediaReuseOffer.offers(model: model, member: member, draft: generate.draft)
                                 ForEach(offers) { offer in
                                     HStack {
@@ -41,6 +42,7 @@ struct SourceMediaModelChooser: View {
                 Text("Only installed compatible models on connected machines are shown.")
                     .font(.caption).foregroundStyle(.secondary)
             }.padding()
+            .searchable(text: $search, prompt: "Search models")
             .navigationTitle("Use source")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }

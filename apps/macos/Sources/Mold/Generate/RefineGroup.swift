@@ -20,6 +20,7 @@ struct RefineGroup: View {
     @Binding var destination: Destination
 
     @Environment(GenerateController.self) private var controller
+    @State var adapterSearch = ""
     @State private var maskPreview: NSImage?
 
     var body: some View {

@@ -14,7 +14,12 @@ mold server status
 
 Mold Studio Companion (`apps/ios`) is remote-only. In Generate, tap **Model**
 below the prompt to search installed models and choose the output kind, recipe
-and machine. **Get More Models…** opens model management. Options uses separate
+and machine. Model search accepts abbreviations, small typos, accents and
+separator differences (for example `flx dev` or `flxu dev`); every query word
+must match. Installed and curated Discover use the same behavior across web,
+Tauri desktop/mobile and native Mac/iOS. An updated server adds a bounded
+100-candidate fuzzy fallback to successful zero-result provider searches,
+retaining filters and reporting provider errors. **Get More Models…** opens model management. Options uses separate
 rows for large text; clip/3-D drafts restore after profiles arrive. The viewer
 hides the main tabs to expose its media actions. On iPhone, landscape clips use
 the full display with native controls and Close; portrait restores the actions.

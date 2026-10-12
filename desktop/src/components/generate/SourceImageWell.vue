@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { fuzzyModelScore } from "@studio/lib/fuzzyModelSearch";
 import { computed, ref, watch } from "vue";
 import type { GenerateForm, PickedImage } from "../../lib/generateForm";
 import type { ModelEntry } from "../../lib/api/types";
@@ -410,6 +411,14 @@ const controlNetOptions = computed(() =>
   ),
 );
 
+const controlQuery = ref("");
+const searchedControlOptions = computed(() =>
+  controlNetOptions.value.filter(
+    (option) =>
+      option.value === props.form.controlModel ||
+      fuzzyModelScore(controlQuery.value, [option.value, option.label]) > 0,
+  ),
+);
 const controlSelectValue = computed(() =>
   controlCustomMode.value ? CUSTOM_CONTROL_MODEL : props.form.controlModel,
 );
@@ -855,6 +864,13 @@ function setSourceFitMode(e: Event) {
         <label class="mt-3 block text-micro text-fg-2" for="controlnet-select">
           Control model
         </label>
+        <input
+          v-model="controlQuery"
+          class="ms-input"
+          type="search"
+          aria-label="Search control models"
+          placeholder="Search control models…"
+        />
         <select
           id="controlnet-select"
           data-test="controlnet-select"
@@ -864,7 +880,7 @@ function setSourceFitMode(e: Event) {
         >
           <option value="">None</option>
           <option
-            v-for="opt in controlNetOptions"
+            v-for="opt in searchedControlOptions"
             :key="opt.value"
             :value="opt.value"
             :disabled="opt.disabled"

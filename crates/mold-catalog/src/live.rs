@@ -560,7 +560,75 @@ pub async fn search(
 /// - `Some(Civitai)` → Civitai only
 /// - `Some(Hf)`      → HF only
 /// - `None`          → both (concatenated, Civitai first)
+///
+/// Search providers normally first. Only a complete zero-result query can
+/// broaden into a bounded fuzzy candidate snapshot. Rebuild the same snapshot
+/// for later pages using the existing per-provider cache and unchanged filters.
 pub async fn search_page(
+    civitai_base: &str,
+    hf_base: &str,
+    cache: &LiveCache,
+    opts: &LiveSearchOpts,
+) -> Result<LiveSearchResult, LiveSearchError> {
+    let Some(query) = opts.q.as_deref().filter(|q| !q.trim().is_empty()) else {
+        return search_page_exact(civitai_base, hf_base, cache, opts).await;
+    };
+    let Some(candidate_query) = crate::fuzzy::candidate_query(query) else {
+        return search_page_exact(civitai_base, hf_base, cache, opts).await;
+    };
+    // Probe page one even on a subsequent fuzzy page: a later empty page of
+    // an ordinary search is not evidence that its original query found nothing.
+    let mut first_opts = opts.clone();
+    first_opts.page = 1;
+    let first = search_page_exact(civitai_base, hf_base, cache, &first_opts).await?;
+    if !first.entries.is_empty() || first.total != 0 || !first.provider_errors.is_empty() {
+        return if opts.page <= 1 {
+            Ok(first)
+        } else {
+            search_page_exact(civitai_base, hf_base, cache, opts).await
+        };
+    }
+    let mut broader = opts.clone();
+    broader.q = Some(candidate_query);
+    broader.page = 1;
+    // A fixed candidate budget keeps page N's membership/order independent of
+    // the requested page size and avoids scraping either provider's full index.
+    broader.page_size = 100;
+    let candidates = search_page_exact(civitai_base, hf_base, cache, &broader).await?;
+    if !candidates.provider_errors.is_empty() {
+        // Surface errors without presenting unrelated broadened rows.
+        return Ok(LiveSearchResult {
+            entries: Vec::new(),
+            total: 0,
+            provider_errors: candidates.provider_errors,
+        });
+    }
+    let mut matches: Vec<_> = candidates
+        .entries
+        .into_iter()
+        .filter_map(|entry| {
+            let primary = [
+                entry.name.as_str(),
+                entry.id.as_str(),
+                entry.source_id.as_str(),
+                entry.family.as_str(),
+                entry.author.as_deref().unwrap_or(""),
+            ];
+            let mut metadata: Vec<_> = entry.tags.iter().map(String::as_str).collect();
+            metadata.push(entry.description.as_deref().unwrap_or(""));
+            let score = crate::fuzzy::score(query, &primary, &metadata);
+            (score > 0).then_some((score, entry))
+        })
+        .collect();
+    // Stable ties keep the provider's chosen ordering.
+    matches.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+    Ok(paginate_local(
+        matches.into_iter().map(|(_, entry)| entry).collect(),
+        opts,
+    ))
+}
+
+async fn search_page_exact(
     civitai_base: &str,
     hf_base: &str,
     cache: &LiveCache,
@@ -2009,6 +2077,44 @@ mod tests {
                 "metadata": { "nextCursor": format!("c{}", call + 1) }
             }))
         }
+    }
+
+    #[tokio::test]
+    async fn fuzzy_search_fallback_is_bounded_and_paginates_filtered_candidates() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/models"))
+            .and(query_param("search", "flxu dev"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(Vec::<serde_json::Value>::new()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET")).and(path("/api/models"))
+            .and(query_param("search", "fl"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(vec![
+                serde_json::json!({"id":"test/FLUX-dev", "downloads":100, "tags":["diffusers", "text-to-image"], "pipeline_tag":"text-to-image"}),
+                serde_json::json!({"id":"test/FLUX-dev-fast", "downloads":90, "tags":["diffusers", "text-to-image"], "pipeline_tag":"text-to-image"}),
+                serde_json::json!({"id":"test/FLUX-schnell", "downloads":80, "tags":["diffusers", "text-to-image"], "pipeline_tag":"text-to-image"})
+            ]))
+            .expect(1).mount(&server).await;
+        let cache = test_cache();
+        let mut opts = LiveSearchOpts {
+            q: Some("flxu dev".into()),
+            source: Some(Source::Hf),
+            page_size: 1,
+            ..Default::default()
+        };
+        let first = search_page(&server.uri(), &server.uri(), &cache, &opts)
+            .await
+            .unwrap();
+        assert_eq!(first.total, 2);
+        assert_eq!(first.entries[0].source_id, "test/FLUX-dev");
+        opts.page = 2;
+        let second = search_page(&server.uri(), &server.uri(), &cache, &opts)
+            .await
+            .unwrap();
+        assert_eq!(second.total, 2);
+        assert_eq!(second.entries[0].source_id, "test/FLUX-dev-fast");
     }
 
     fn test_cache() -> LiveCache {

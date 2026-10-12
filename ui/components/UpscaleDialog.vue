@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { fuzzyTextScore } from "../lib/fuzzySearch";
 
 type Choice = { name: string; downloaded?: boolean };
 type ExecutionHost = { key: string; label: string };
@@ -40,6 +41,21 @@ const emit = defineEmits<{
   resume: [];
   cancel: [];
 }>();
+
+const query = ref("");
+const visibleModels = computed(() =>
+  props.models.filter(
+    (model) =>
+      model.name === props.modelValue ||
+      fuzzyTextScore(query.value, [model.name]) > 0,
+  ),
+);
+watch(
+  () => props.open,
+  () => {
+    query.value = "";
+  },
+);
 
 function onKeydown(event: KeyboardEvent) {
   if (!props.open || event.key !== "Escape") return;
@@ -125,6 +141,15 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
         </label>
 
         <label class="upscale-dialog__field">
+          <span>Search upscalers</span>
+          <input
+            v-model="query"
+            type="search"
+            data-test="upscale-search"
+            :disabled="busy || !!jobState"
+          />
+        </label>
+        <label class="upscale-dialog__field">
           <span>Upscaler</span>
           <select
             :value="modelValue"
@@ -141,7 +166,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
               {{ modelValue }} (downloads on first use)
             </option>
             <option
-              v-for="model in models"
+              v-for="model in visibleModels"
               :key="model.name"
               :value="model.name"
             >
@@ -309,7 +334,8 @@ h2 {
 .upscale-dialog__field + .upscale-dialog__field {
   margin-top: 14px;
 }
-select {
+select,
+input {
   width: 100%;
   max-width: 100%;
   min-width: 0;

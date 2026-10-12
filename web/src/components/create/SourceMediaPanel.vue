@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { rankModels } from "@studio/lib/fuzzyModelSearch";
 import OriginalMediaButton from "@studio/components/OriginalMediaButton.vue";
 import { computed, ref } from "vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
@@ -765,7 +766,6 @@ function clearControl() {
             <input
               class="smp__input"
               data-test="control-model"
-              list="installed-controlnet-models"
               placeholder="e.g. control_v11p_sd15_canny"
               :value="modelValue.controlModel"
               @input="
@@ -774,13 +774,22 @@ function clearControl() {
                 })
               "
             />
-            <datalist id="installed-controlnet-models">
-              <option
-                v-for="model in controlModels"
+            <div
+              v-if="modelValue.controlModel"
+              aria-label="Matching control models"
+            >
+              <button
+                v-for="model in rankModels(
+                  controlModels,
+                  modelValue.controlModel,
+                ).slice(0, 5)"
                 :key="model.name"
-                :value="model.name"
-              />
-            </datalist>
+                type="button"
+                @click="patch({ controlModel: model.name })"
+              >
+                {{ model.name }}
+              </button>
+            </div>
           </div>
           <SliderRow
             label="Control scale"

@@ -8,6 +8,7 @@ struct AdaptersSection: View {
     @Environment(HostStore.self) private var hosts
     let recipe: GenerationRecipe
     @State private var available: [LoraInfo] = []
+    @State private var search = ""
 
     var body: some View {
         if let stack = recipe.capabilities.loraStack, stack.mode.isVisible {
@@ -24,8 +25,9 @@ struct AdaptersSection: View {
                     }
                 }
                 if generate.draft.media.loras.count < stack.maxCount {
+                    TextField("Search add-on looks", text: $search)
                     Menu {
-                        ForEach(available.filter { info in !generate.draft.media.loras.contains { $0.path == info.path } }) { info in
+                        ForEach(FuzzyModelSearch.ranked(available.filter { info in !generate.draft.media.loras.contains { $0.path == info.path } }, query: search, fields: { [$0.name, $0.path] }, metadata: { $0.trainedWords })) { info in
                             Button(info.name) {
                                 generate.draft.media.loras.append(LoraChoice(path: info.path, name: info.name))
                             }

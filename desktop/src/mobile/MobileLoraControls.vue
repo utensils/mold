@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { fuzzyModelScore } from "@studio/lib/fuzzyModelSearch";
 import { computed, onMounted, ref, watch } from "vue";
 import type { ApiTarget } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
@@ -19,6 +20,12 @@ const emit = defineEmits<{ (event: "append-word", word: string): void }>();
 
 const open = ref(props.form.loras.length > 0);
 const available = ref<LoraInfo[]>([]);
+const search = ref("");
+const filteredAvailable = computed(() =>
+  available.value.filter(
+    (lora) => fuzzyModelScore(search.value, [lora.name, lora.path], lora.trained_words) > 0,
+  ),
+);
 const loading = ref(false);
 const error = ref("");
 let loadToken = 0;
@@ -172,16 +179,29 @@ onMounted(() => {
         </div>
       </div>
 
+      <input
+        v-if="available.length"
+        v-model="search"
+        class="mobile-input"
+        type="search"
+        aria-label="Search add-on looks"
+        data-test="mobile-lora-search"
+        placeholder="Search add-on looks…"
+      />
       <p v-if="loading" class="mobile-helper-text" role="status">Loading LoRAs…</p>
       <p v-else-if="error" class="error-text mobile-helper-text" data-test="mobile-lora-error">
         {{ error }}
       </p>
-      <p v-else-if="available.length === 0" class="mobile-helper-text">
-        No compatible LoRAs are installed on this host.
+      <p v-else-if="filteredAvailable.length === 0" class="mobile-helper-text">
+        {{
+          available.length
+            ? "No matching add-on looks. Try another name."
+            : "No compatible LoRAs are installed on this host."
+        }}
       </p>
       <div v-else class="mobile-option-list" aria-label="Available LoRAs">
         <button
-          v-for="lora in available"
+          v-for="lora in filteredAvailable"
           :key="lora.path"
           type="button"
           data-test="mobile-lora-option"

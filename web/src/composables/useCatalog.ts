@@ -1,3 +1,4 @@
+import { modelSearchScore } from "@studio/lib/fuzzyModelSearch";
 import { computed, ref, watch } from "vue";
 import { familyLabel, matchesCatalogFamily } from "@studio/lib/modelFamily";
 import {
@@ -131,12 +132,7 @@ function build() {
       .filter((model) =>
         matchesCatalogFamily(model.family, filter.value.family ?? ""),
       )
-      .filter(
-        (model) =>
-          !query ||
-          model.name.toLowerCase().includes(query) ||
-          model.description.toLowerCase().includes(query),
-      )
+      .filter((model) => modelSearchScore(model, query) > 0)
       .map((model) => ({
         id: model.name,
         source: "hf",

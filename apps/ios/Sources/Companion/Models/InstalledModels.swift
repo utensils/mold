@@ -7,6 +7,7 @@ struct InstalledModels: View {
     @Environment(HostStore.self) private var hosts
     @Environment(ModelStore.self) private var models
     let host: MoldHost
+    @State private var search = ""
     @State private var deleting: Model?
     @State private var inspecting: Model?
 
@@ -28,7 +29,7 @@ struct InstalledModels: View {
                     }
                 } header: { SectionHeader(String(localized: "Downloading")) }
             }
-            ForEach(models.installed(on: host.id), id: \.family) { group in
+            ForEach(matchingGroups, id: \.family) { group in
                 Section {
                     SectionHeader(Model.familyLabel(forFamily: group.family)).font(.headline).listRowSeparator(.hidden)
                     ForEach(group.models) { model in
@@ -41,6 +42,9 @@ struct InstalledModels: View {
                     }
                 }
             }
+            if !search.isEmpty, matchingGroups.isEmpty, FuzzyModelSearch.models(models.loaded(on: host.id), query: search).isEmpty {
+                Text("No matching models. Try another name or clear the search.").foregroundStyle(.secondaryText)
+            }
             if models.installed(on: host.id).isEmpty, models.loaded(on: host.id).isEmpty, fetching.isEmpty {
                 Text(models.emptyInventoryMessage(on: host))
                     .foregroundStyle(.secondaryText)
@@ -52,6 +56,8 @@ struct InstalledModels: View {
                 }
             }
         }
+        .searchable(text: $search, prompt: Text("Search models"))
+        .onChange(of: host.id) { search = "" }
         .refreshable { await hosts.refresh(host); await models.refresh(on: host.id) }
         .confirmationDialog(deleting.map { String(localized: "Delete \($0.headline)?") } ?? "",
                             isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
@@ -64,6 +70,13 @@ struct InstalledModels: View {
             Text("Files another installed model still uses are kept.")
         }
         .sheet(item: $inspecting) { ComponentsSheet(model: $0, host: host) }
+    }
+
+    private var matchingGroups: [(family: String, models: [Model])] {
+        models.installed(on: host.id).compactMap { group in
+            let hits = FuzzyModelSearch.models(group.models, query: search)
+            return hits.isEmpty ? nil : (group.family, hits)
+        }
     }
 
     private var canChangeModels: Bool {
@@ -89,7 +102,7 @@ struct InstalledModels: View {
                 Text("Unloads models from \(host.name)’s memory. Downloaded files are kept.")
                     .font(.caption).foregroundStyle(.secondaryText)
             }
-            ForEach(models.loaded(on: host.id)) { model in
+            ForEach(FuzzyModelSearch.models(models.loaded(on: host.id), query: search)) { model in
                 VStack(alignment: .leading, spacing: 6) {
                     InstalledRow(model: model)
                     Button {

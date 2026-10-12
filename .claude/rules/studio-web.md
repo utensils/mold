@@ -207,3 +207,16 @@ means Secure. Mode metadata alone never permits a request to downgrade. Native
 Regular credentials live in Keychain; Secure credentials remain in secureStore.
 Changing mode retires route, cache and prepared-work authority and updates the
 same physical host record. Pairing rejects mixed Secure/Regular fields.
+
+**Fuzzy model search.** `ui/lib/fuzzySearch.ts` owns generic bounded text scoring;
+`studio/lib/fuzzyModelSearch.ts` projects model identity/presentation/metadata and
+provides stable relevance ranking. Generate's shared StyleMenu always offers
+search for a nonempty list. Installed/curated discovery, installed-model palette
+commands, add-on looks, upscalers and per-style settings call the same policy.
+Native apps use MoldClient.FuzzyModelSearch with aligned fixtures. Every query
+token must match; numeric tokens are never edit-distance or abbreviation matches.
+Search cannot change wire IDs, eligibility, installed state or host routing.
+Explicit management sorts remain authoritative. A filtered select must retain its
+current value. The server's bounded catalog fallback preserves all upstream
+filters and only follows a complete, error-free zero-result query; page N must
+use the same bounded candidate set as page one.

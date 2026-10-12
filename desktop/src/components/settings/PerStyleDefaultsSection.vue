@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { fuzzyModelScore } from "@studio/lib/fuzzyModelSearch";
 /*
  * Settings ▸ Per-style defaults: what one style starts with, when it differs
  * from the defaults every style shares.
@@ -32,9 +33,7 @@ const shown = computed(() => {
   const query = filter.value.trim().toLowerCase();
   if (!query || !filterable.value) return groups.value;
   return groups.value.filter(
-    (group) =>
-      group.style.toLowerCase().includes(query) ||
-      (displayName(group.style) ?? "").toLowerCase().includes(query),
+    (group) => fuzzyModelScore(query, [group.style, displayName(group.style) ?? ""]) > 0,
   );
 });
 

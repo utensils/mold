@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { fuzzyModelScore } from "@studio/lib/fuzzyModelSearch";
 import OriginalMediaButton from "@studio/components/OriginalMediaButton.vue";
 import { computed, ref, watch } from "vue";
 import { inputImageFacts } from "@studio/lib/inputImage";
@@ -313,6 +314,14 @@ const controlOptions = computed(() =>
     props.controlModels,
     catalogControlModels.value,
     controlCustomMode.value ? "" : props.form.controlModel,
+  ),
+);
+const controlQuery = ref("");
+const searchedControlOptions = computed(() =>
+  controlOptions.value.filter(
+    (option) =>
+      option.value === props.form.controlModel ||
+      fuzzyModelScore(controlQuery.value, [option.value, option.label]) > 0,
   ),
 );
 const controlSelectValue = computed(() =>
@@ -1060,15 +1069,23 @@ function applyMask(mask: string): void {
 
           <label class="field">
             <span>Control model</span>
+            <input
+              v-model="controlQuery"
+              type="search"
+              class="control"
+              aria-label="Search control models"
+              placeholder="Search control models…"
+            />
             <select
               class="control"
               :value="controlSelectValue"
               data-test="mobile-control-model"
+              aria-label="Control model"
               @change="setControlModel"
             >
               <option value="">None</option>
               <option
-                v-for="option in controlOptions"
+                v-for="option in searchedControlOptions"
                 :key="option.value"
                 :value="option.value"
                 :disabled="option.disabled"

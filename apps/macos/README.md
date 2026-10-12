@@ -924,3 +924,23 @@ Sync file comparison/hashing and ordinary navigation draft saves run off the UI
 thread. Final quit still flushes the latest draft, including after leaving Generate.
 See [the October performance audit](docs/performance-audit-2026-10.md) for measured
 source-browser results and remaining profiling candidates.
+
+## Finding models
+
+Model search in Generate, Installed and curated Discover accepts partial names,
+ordered abbreviations and small spelling mistakes. Case, accents and separators
+such as `-`, `_`, `:` and `.` do not matter. Try `flx dev`, `flxu dev`, or
+`fluxdevq4`; multiple words can match the model name, family or repository.
+Direct name matches rank ahead of fuzzy matches, and clearing search restores
+the existing list. Selection, machine routing and capability restrictions stay
+unchanged. Search is available even when only a few models are installed.
+
+Add-on look selectors and supported upscaler/adapter selectors use the same
+matching behavior. Filtering a select keeps its current value visible.
+
+Live Hugging Face/Civitai discovery uses the provider's normal search first.
+After a successful zero-result query, an updated server searches a broader
+prefix, filters at most 100 returned candidates with fuzzy matching, and paginates
+that matching set. Source, family, kind and mature-content filters still apply.
+Provider errors remain errors; this bounded fallback is not an exhaustive search
+of either provider's index. Older servers retain their provider search behavior.

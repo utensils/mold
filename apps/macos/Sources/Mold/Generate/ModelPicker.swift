@@ -41,9 +41,9 @@ struct ModelPicker: View {
             Divider()
             if matches.isEmpty {
                 ContentUnavailableView(
-                    host == nil ? "No machine" : "Nothing installed",
+                    host == nil ? "No machine" : query.isEmpty ? "Nothing installed" : "No matching models",
                     systemImage: "cube",
-                    description: Text("Install a model from the Models tab.")
+                    description: Text(query.isEmpty ? "Install a model from the Models tab." : "Try another name or clear the search.")
                 )
                 .frame(height: 200)
             } else {
@@ -103,16 +103,6 @@ struct ModelPicker: View {
     }
 
     private var matches: [(family: String, models: [Model])] {
-        guard !query.isEmpty else { return families }
-        let needle = query.lowercased()
-        return families.compactMap { group in
-            let hits = group.models.filter {
-                $0.headline.lowercased().contains(needle)
-                    || ($0.summary ?? "").lowercased().contains(needle)
-                    || $0.description.lowercased().contains(needle)
-                    || $0.name.lowercased().contains(needle)
-            }
-            return hits.isEmpty ? nil : (family: group.family, models: hits)
-        }
+        FuzzyModelSearch.groups(families, query: query)
     }
 }

@@ -1,3 +1,4 @@
+import { fuzzyModelScore } from "@studio/lib/fuzzyModelSearch";
 import { WORKSPACES, SETTINGS_DESTINATION } from "./workspaces";
 import { matchSystem, theme } from "./theme";
 import {
@@ -243,10 +244,12 @@ export function filterCommands(
     .map((command, index) => ({
       command,
       index,
-      score: Math.max(
-        scoreText(q, command.label),
-        ...(command.keywords ?? []).map((keyword) => scoreText(q, keyword)),
-      ),
+      score: command.id.startsWith("model-")
+        ? fuzzyModelScore(q, [command.label, ...(command.keywords ?? [])])
+        : Math.max(
+            scoreText(q, command.label),
+            ...(command.keywords ?? []).map((keyword) => scoreText(q, keyword)),
+          ),
     }))
     .filter((match) => match.score > 0)
     .sort((a, b) => b.score - a.score || a.index - b.index)

@@ -1,3 +1,4 @@
+import { fuzzyModelScore } from "@studio/lib/fuzzyModelSearch";
 /**
  * Command-palette matching. Pure and UI-agnostic: the ⌘K component builds a
  * registry of commands (each carrying a `run` closure over router/stores) and
@@ -7,6 +8,7 @@
 
 export interface Matchable {
   title: string;
+  id?: string;
   /** Extra text to match against (e.g. model family, synonyms). */
   keywords?: string[];
 }
@@ -32,7 +34,9 @@ export function matchCommands<T extends Matchable>(query: string, items: T[]): T
   return items
     .map((item, index) => {
       const texts = [item.title, ...(item.keywords ?? [])];
-      const score = Math.max(...texts.map((t) => scoreText(q, t)));
+      const score = item.id?.startsWith("model-")
+        ? fuzzyModelScore(q, texts)
+        : Math.max(...texts.map((t) => scoreText(q, t)));
       return { item, score, index };
     })
     .filter((s) => s.score > 0)

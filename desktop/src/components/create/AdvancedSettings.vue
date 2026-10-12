@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { modelSearchScore, fuzzyModelScore } from "@studio/lib/fuzzyModelSearch";
 import OriginalMediaButton from "@studio/components/OriginalMediaButton.vue";
 import { computed, ref, watch } from "vue";
 import AccordionSection from "@ui/components/AccordionSection.vue";
@@ -530,6 +531,21 @@ function reset() {
   // The canvas comes back to the model's default, so its authority does too.
   emit("canvas-intent", "model-default");
 }
+const controlQuery = ref("");
+const searchedAdapters = computed(() =>
+  props.controlAdapters.filter(
+    (adapter) =>
+      adapter.id === props.form.icLoraControl ||
+      fuzzyModelScore(controlQuery.value, [adapter.id, adapter.label]) > 0,
+  ),
+);
+const upscaleQuery = ref("");
+const searchedUpscalers = computed(() =>
+  props.upscalers.filter(
+    (model) =>
+      model.name === props.form.upscaleModel || modelSearchScore(model, upscaleQuery.value) > 0,
+  ),
+);
 </script>
 
 <template>
@@ -794,9 +810,21 @@ function reset() {
         data-test="section-upscale"
       >
         <label class="ms-label">Upscaler</label>
-        <select v-model="form.upscaleModel" data-test="upscale-select" class="ms-select">
+        <input
+          v-model="upscaleQuery"
+          class="ms-input"
+          type="search"
+          aria-label="Search upscalers"
+          placeholder="Search upscalers…"
+        />
+        <select
+          v-model="form.upscaleModel"
+          data-test="upscale-select"
+          aria-label="Upscaler"
+          class="ms-select"
+        >
           <option value="">Off</option>
-          <option v-for="u in upscalers" :key="u.name" :value="u.name">
+          <option v-for="u in searchedUpscalers" :key="u.name" :value="u.name">
             {{ u.name }}{{ u.downloaded ? "" : " (downloads on first use)" }}
           </option>
         </select>
@@ -1021,6 +1049,13 @@ function reset() {
             </p>
 
             <label class="ms-label ms-label--mt">Reference control</label>
+            <input
+              v-model="controlQuery"
+              class="ms-input"
+              type="search"
+              aria-label="Search reference adapters"
+              placeholder="Search reference adapters…"
+            />
             <select
               :value="form.icLoraControl ?? ''"
               aria-label="Reference control"
@@ -1029,7 +1064,7 @@ function reset() {
               @change="setControlAdapter(($event.target as HTMLSelectElement).value)"
             >
               <option value="">Custom / none</option>
-              <option v-for="adapter in controlAdapters" :key="adapter.id" :value="adapter.id">
+              <option v-for="adapter in searchedAdapters" :key="adapter.id" :value="adapter.id">
                 {{ adapter.label }}{{ adapter.installed ? "" : " · download" }}
               </option>
             </select>

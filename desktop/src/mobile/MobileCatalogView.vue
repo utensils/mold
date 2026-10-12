@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { modelSearchScore } from "@studio/lib/fuzzyModelSearch";
 import MobileCatalogFilterSheet from "./MobileCatalogFilterSheet.vue";
 import { useSheetDismiss } from "./useSheetDismiss";
 import { useMobileBack } from "./useMobileBack";
@@ -311,7 +312,7 @@ const manifestEntries = computed<MobileCatalogEntry[]>(() => {
   return (modelsByHost.value[props.selectedHostId] ?? [])
     .filter((model) => !model.downloaded && !isUtilityModel(model))
     .filter((model) => !installedNames.value.has(model.name))
-    .filter((model) => !q || model.name.toLowerCase().includes(q))
+    .filter((model) => modelSearchScore(model, q) > 0)
     .filter((model) => matchesCatalogFamily(model.family, family.value))
     .map(manifestModelToEntry);
 });
@@ -393,10 +394,7 @@ const enrichedInstalledEntries = computed(() => {
 const filteredInstalled = computed(() => {
   const q = query.value.trim().toLowerCase();
   return enrichedInstalledEntries.value
-    .filter(
-      (entry) =>
-        !q || entry.name.toLowerCase().includes(q) || entryRowName(entry).toLowerCase().includes(q),
-    )
+    .filter((entry) => modelSearchScore(entry, q) > 0)
     .filter((entry) => matchesCatalogFamily(entry.family, family.value))
     .filter((entry) => !kind.value || entry.kind === kind.value)
     .filter(sourceMatches)

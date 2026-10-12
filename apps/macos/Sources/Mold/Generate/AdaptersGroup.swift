@@ -15,6 +15,7 @@ struct AdaptersGroup: View {
     let maxCount: Int
     @Binding var draft: RenderDraft
 
+    @State private var search = ""
     @Environment(LoraStore.self) private var adapters
 
     var body: some View {
@@ -65,8 +66,10 @@ struct AdaptersGroup: View {
                 .foregroundStyle(.secondary)
         case let .rows(available, canAdd):
             if canAdd {
+                TextField("Search add-on looks", text: $search)
+                    .textFieldStyle(.roundedBorder)
                 Menu("Add adapter…") {
-                    ForEach(available) { info in
+                    ForEach(FuzzyModelSearch.ranked(available, query: search, fields: { [$0.name, $0.path] }, metadata: { $0.trainedWords })) { info in
                         Button(info.name) { add(info) }
                     }
                 }

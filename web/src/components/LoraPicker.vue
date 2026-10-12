@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { fuzzyModelScore } from "@studio/lib/fuzzyModelSearch";
 import { computed, ref, watch } from "vue";
 import { RouterLink } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
@@ -57,17 +58,13 @@ const canAddMore = computed(
 const filteredLoras = computed(() => {
   const q = search.value.trim().toLowerCase();
   if (!q) return loras.value;
-  return loras.value.filter((entry) =>
-    [
-      entry.name,
-      entry.author ?? "",
-      entry.id,
-      entry.primary_path ?? "",
-      ...(entry.trained_words ?? []),
-    ]
-      .join(" ")
-      .toLowerCase()
-      .includes(q),
+  return loras.value.filter(
+    (entry) =>
+      fuzzyModelScore(
+        q,
+        [entry.name, entry.id, entry.primary_path ?? "", entry.author ?? ""],
+        entry.trained_words ?? [],
+      ) > 0,
   );
 });
 
@@ -85,6 +82,14 @@ function trainedWordsForRow(row: LoraSelection): string[] {
   if (row.trainedWords && row.trainedWords.length > 0) return row.trainedWords;
   const entry = entryForPath(row.path);
   return entry?.trained_words ?? [];
+}
+
+// A search must never make an existing selection disappear from its select.
+function filteredLorasFor(path: string) {
+  return loras.value.filter(
+    (entry) =>
+      entry.primary_path === path || filteredLoras.value.includes(entry),
+  );
 }
 
 function selectAt(index: number, event: Event) {
@@ -134,7 +139,7 @@ function addAnother() {
   // Default to the first LoRA not yet in the stack to keep the picker
   // useful out of the box; user can change it via the dropdown.
   const used = new Set(props.modelValue.map((l) => l.path));
-  const fresh = loras.value.find((e) => !used.has(e.primary_path!));
+  const fresh = filteredLoras.value.find((e) => !used.has(e.primary_path!));
   if (!fresh || !fresh.primary_path) return;
   const next = [
     ...props.modelValue,
@@ -165,7 +170,7 @@ function addAnother() {
     </div>
 
     <input
-      v-if="loras.length > 6"
+      v-if="loras.length > 0"
       v-model="search"
       type="search"
       class="lp__search"
@@ -190,7 +195,7 @@ function addAnother() {
             {{ cameraMotionLoraLabel(row.path) }}
           </option>
           <option
-            v-for="e in filteredLoras"
+            v-for="e in filteredLorasFor(row.path)"
             :key="e.id"
             :value="e.primary_path!"
           >
