@@ -26,9 +26,22 @@ for package in ("mold-web", "mold-desktop-web"):
     paths = set(re.findall(r"\./([^\s]+)", fileset))
     if "docs/contracts" not in paths:
         sys.exit(f"FAIL: Nix {package} must include docs/contracts for frontend type checking")
+    fixture = "relay/aws/test/fixtures/admission-v3.json"
+    if fixture not in paths:
+        sys.exit(f"FAIL: Nix {package} must include {fixture} for frontend type checking")
+    if package == "mold-desktop-web" and "docs/generated/generation-profiles-v1.json" not in paths:
+        sys.exit("FAIL: Nix mold-desktop-web must include the canonical generation profiles fixture")
     for workspace in json.loads((root / "package.json").read_text())["workspaces"]:
         if workspace not in paths and f"{workspace}/package.json" not in paths:
             sys.exit(f"FAIL: Nix {package} must include {workspace}/package.json before bun install")
+# Secure crypto tests are also checked by vue-tsc, so their canonical relay
+# fixture must reach Docker's build stage as well as both Nix filesets.
+fixture = "relay/aws/test/fixtures/admission-v3.json"
+if not (root / fixture).is_file():
+    sys.exit(f"FAIL: canonical secure admission fixture is missing: {fixture}")
+build = next(i for i, line in enumerate(docker) if line == "RUN bun run build:web")
+if f"COPY {fixture} {fixture}" not in docker[:build]:
+    sys.exit(f"FAIL: Docker web-builder must copy {fixture} before frontend type checking")
 PYTHON
 
 grep -Fq 'COPY docs/contracts docs/contracts' "$dockerfile" || {

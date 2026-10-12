@@ -539,10 +539,13 @@ describe("spacious prompt editing", () => {
       }),
     );
     expect(wrapper.emitted("generate")).toBeUndefined();
-    expect(wrapper.vm.isEditingPrompt()).toBe(true);
+    // Keep the public exposed-method assertion independent of vue-tsc's
+    // optional expose inference for a mount helper with prop overrides.
+    const exposed = wrapper.vm as unknown as { isEditingPrompt(): boolean };
+    expect(exposed.isEditingPrompt()).toBe(true);
     (document.querySelector('[data-test="prompt-done"]') as HTMLButtonElement).click();
     await wrapper.vm.$nextTick();
-    expect(wrapper.vm.isEditingPrompt()).toBe(false);
+    expect(exposed.isEditingPrompt()).toBe(false);
     expect(form.prompt).toBe("large\nmultiline draft");
     wrapper.unmount();
   });

@@ -632,6 +632,7 @@
                 ./package.json
                 ./bun.lock
                 ./relay/aws/package.json
+                ./relay/aws/test/fixtures/admission-v3.json
                 ./desktop/package.json
                 ./web
                 ./docs/contracts
@@ -684,9 +685,11 @@
                 ./package.json
                 ./bun.lock
                 ./relay/aws/package.json
+                ./relay/aws/test/fixtures/admission-v3.json
                 ./desktop
                 ./web/package.json
                 ./docs/contracts
+                ./docs/generated/generation-profiles-v1.json
                 ./studio
                 ./ui
               ];
