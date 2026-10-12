@@ -1080,6 +1080,7 @@ function applyMask(mask: string): void {
               class="control"
               :value="controlSelectValue"
               data-test="mobile-control-model"
+              aria-label="Control model"
               @change="setControlModel"
             >
               <option value="">None</option>

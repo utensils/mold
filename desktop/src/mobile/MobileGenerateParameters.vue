@@ -667,7 +667,12 @@ const searchedAdapters = computed(() =>
           aria-label="Search upscalers"
           placeholder="Search upscalers…"
         />
-        <select v-model="form.upscaleModel" class="control" data-test="mobile-upscale">
+        <select
+          v-model="form.upscaleModel"
+          class="control"
+          data-test="mobile-upscale"
+          aria-label="Upscaler"
+        >
           <option value="">Off</option>
           <option v-for="upscaler in searchedUpscalers" :key="upscaler.name" :value="upscaler.name">
             {{ upscaler.name }}{{ upscaler.downloaded ? "" : " (downloads on first use)" }}
@@ -781,6 +786,7 @@ const searchedAdapters = computed(() =>
           <select
             class="control"
             data-test="mobile-ltx2-reference-control"
+            aria-label="Reference control"
             :value="form.icLoraControl ?? ''"
             @change="setControlAdapter(($event.target as HTMLSelectElement).value)"
           >

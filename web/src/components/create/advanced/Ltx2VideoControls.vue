@@ -407,6 +407,7 @@ const searchedAdapters = computed(() =>
       <select
         class="ltx2__select"
         data-test="ltx2-reference-control"
+        aria-label="Reference control"
         :value="modelValue.icLoraControl ?? ''"
         @change="setControlAdapter(($event.target as HTMLSelectElement).value)"
       >

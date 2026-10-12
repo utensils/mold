@@ -817,7 +817,12 @@ const searchedUpscalers = computed(() =>
           aria-label="Search upscalers"
           placeholder="Search upscalers…"
         />
-        <select v-model="form.upscaleModel" data-test="upscale-select" class="ms-select">
+        <select
+          v-model="form.upscaleModel"
+          data-test="upscale-select"
+          aria-label="Upscaler"
+          class="ms-select"
+        >
           <option value="">Off</option>
           <option v-for="u in searchedUpscalers" :key="u.name" :value="u.name">
             {{ u.name }}{{ u.downloaded ? "" : " (downloads on first use)" }}
