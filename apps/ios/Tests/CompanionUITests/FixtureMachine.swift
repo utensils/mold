@@ -52,11 +52,15 @@ final class FixtureMachine: @unchecked Sendable {
     private var jobStates = ["fixture-video": "queued", "fixture-held": "held"]
     private var clearedHistory = false
     private let collectionFixture: Bool
+    private let omitOrganizationCapabilities: Bool
+    private let capturedLibraryMutations = Mutex<[Data]>([])
+    var libraryMutationRequests: [Data] { capturedLibraryMutations.withLock { $0 } }
     private var collectionHidden = false
+    private var createdCollections: [String: String] = [:]
     private let modelMemoryFixture: Bool
     private var residentModels: Set<String> = []
 
-    init(justifiedFixture: Bool = false, landscapePlaybackFixture: Bool = false, exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, retainedFrameFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil, queueDownloadFixture: Bool = false, requiresDownloadLicense: Bool = false, trashFixture: Bool = false, queueFailureFixture: Bool = false, queueSwipeFixture: Bool = false, queueDestinationFixture: Bool = false, promptExpansionFixture: Bool = false) throws {
+    init(justifiedFixture: Bool = false, landscapePlaybackFixture: Bool = false, exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, omitOrganizationCapabilities: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, retainedFrameFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil, queueDownloadFixture: Bool = false, requiresDownloadLicense: Bool = false, trashFixture: Bool = false, queueFailureFixture: Bool = false, queueSwipeFixture: Bool = false, queueDestinationFixture: Bool = false, promptExpansionFixture: Bool = false) throws {
         self.landscapePlaybackFixture = landscapePlaybackFixture
         self.exportFixture = exportFixture
         self.unsupportedExportFormats = unsupportedExportFormats
@@ -80,6 +84,7 @@ final class FixtureMachine: @unchecked Sendable {
         self.queueFailureFixture = queueFailureFixture
         self.memoryErrorFixture = memoryErrorFixture
         self.collectionFixture = collectionFixture
+        self.omitOrganizationCapabilities = omitOrganizationCapabilities
         modelMemoryFixture = loadedModels
         if loadedModels { residentModels = ["flux-dev:q4", "ltx-2.5-22b-distilled:bf16"] }
         var root = URL(fileURLWithPath: #filePath)
@@ -271,6 +276,7 @@ final class FixtureMachine: @unchecked Sendable {
             }
             let libraryMutation = libraryMutations && request.first == "POST"
                 && ["/api/gallery/mutations", "/api/gallery/trash"].contains(path)
+            if libraryMutation { capturedLibraryMutations.withLock { $0.append(Data(bodyText.utf8)) } }
             if libraryMutation,
                let object = try? JSONSerialization.jsonObject(with: Data(bodyText.utf8)) as? [String: Any],
                let filenames = object["filenames"] as? [String],
@@ -279,6 +285,23 @@ final class FixtureMachine: @unchecked Sendable {
                 else if let favorite = object["favorite"] as? Bool {
                     for index in rows.indices where filenames.contains(rows[index]["filename"] as? String ?? "") {
                         rows[index]["favorite"] = favorite
+                    }
+                }
+                if let collection = object["add_to_collection"] as? [String: String],
+                   let name = collection["name"] {
+                    let slug = name.lowercased().replacingOccurrences(of: " ", with: "-")
+                    let id = slug == "uat-drafts" ? "fixture-collection" : slug
+                    if id != "fixture-collection" { createdCollections[id] = name }
+                    for index in rows.indices where filenames.contains(rows[index]["filename"] as? String ?? "") {
+                        var members = rows[index]["collections"] as? [String] ?? []
+                        if !members.contains(id) { members.append(id) }
+                        rows[index]["collections"] = members
+                    }
+                }
+                if let slug = object["remove_from_collection_slug"] as? String {
+                    let id = slug == "uat-drafts" ? "fixture-collection" : slug
+                    for index in rows.indices where filenames.contains(rows[index]["filename"] as? String ?? "") {
+                        rows[index]["collections"] = (rows[index]["collections"] as? [String] ?? []).filter { $0 != id }
                     }
                 }
                 if path == "/api/gallery/mutations", let removePrintOnFavorite {
@@ -390,6 +413,7 @@ final class FixtureMachine: @unchecked Sendable {
         case "/api/expand":
             json = #"{"original":"Fixture prompt","expanded":["Expanded fixture prompt"]}"#
         case "/api/capabilities":
+            if omitOrganizationCapabilities { return Data("{}".utf8) }
             if promptExpansionFixture { return Data(#"{"max_batch_outputs":4,"expand":{"configured":true}}"#.utf8) }
             if queueDestinationFixture { return Data(#"{"max_batch_outputs":4,"queue":{"heterogeneous_batch_max_outputs":4}}"#.utf8) }
             if exportFixture { return Data(#"{"max_batch_outputs":4,"mesh":{"generation":true,"formats":["glb"],"export_formats":["glb","obj","zip","stl","ply","gif","apng"],"export_geometry":{"size_mm":{"min":1,"max":10000,"default":100},"up_axes":["y","z"],"origins":["center","floor"],"defaults":{"obj":{"up_axis":"y","origin":"floor"},"stl":{"size_mm":100,"up_axis":"z","origin":"floor"},"ply":{"size_mm":100,"up_axis":"z","origin":"floor"}}}}}"#.utf8) }
@@ -409,7 +433,12 @@ final class FixtureMachine: @unchecked Sendable {
         case "/api/gallery": return gallery
         case "/api/gallery/collections":
             if collectionFixture {
-                var data = Data("[".utf8); data.append(collection()); data.append(Data("]".utf8)); return data
+                var data = Data("[".utf8); data.append(collection())
+                for (id, name) in createdCollections.sorted(by: { $0.key < $1.key }) {
+                    data.append(Data(",".utf8))
+                    data.append(try! JSONSerialization.data(withJSONObject: ["id": id, "slug": id, "name": name]))
+                }
+                data.append(Data("]".utf8)); return data
             }
             json = "[]"
         case "/api/gallery/tags": json = "[]"

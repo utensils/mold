@@ -193,7 +193,7 @@ Native playback settings control autoplay/repeat, and oversized GUI input pictur
 are fitted automatically while library originals remain unchanged.
 The Generate controls stay at the bottom; the Library can create a collection
 from selected prints and hide collection members from general browsing across
-all their machine copies. The native iOS companion shares collection hiding.
+all their machine copies. The native iOS companion shares collection hiding and offers **Add to Collection** directly in the selection bar, including **New Collection…** to create and file selected prints together.
 Library machine filters scope collection counts and membership as well as trash, restore and permanent deletion to the selected machines, preserving copies elsewhere. Unavailable inventories and collections absent from a machine are distinguished. Native Mac Sync runs immediately and at the interval selected in Settings (five minutes by default) for the current app session, with completion status, a countdown and Stop; unchanged media issues can be acknowledged while retries continue. Sync Details closes with Done, Return or Escape and successful reports omit issue controls. Intentionally removed local copies stay removed. Choose All Machines to act on every copy. Native Trash remains browsable for hidden collection members and offers Put Back, Delete Immediately and Empty Trash for the selected machines.
 [Mold Studio for Mac guide](https://utensils.io/mold/guide/macos)
 

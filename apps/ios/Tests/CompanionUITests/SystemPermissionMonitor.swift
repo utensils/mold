@@ -111,7 +111,8 @@ extension XCUIApplication {
             titleButton.tap()
         }
         func entry() -> XCUIElement? {
-            let predicate = NSPredicate(format: "label == %@ OR identifier == %@", title, title)
+            let predicate = NSPredicate(format: "label == %@ OR identifier == %@ OR label BEGINSWITH %@",
+                                        title, title, title + " · ")
             return [menuItems, buttons, popUpButtons].flatMap {
                 $0.matching(predicate).allElementsBoundByIndex
             }.first { $0.isHittable }

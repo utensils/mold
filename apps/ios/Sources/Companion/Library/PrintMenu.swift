@@ -7,7 +7,6 @@ import SwiftUI
 /// `gallery.organize` capability.
 struct PrintMenu: View {
     @Environment(LibraryStore.self) private var library
-    @Environment(HostStore.self) private var hosts
     @Environment(PrintActions.self) private var actions
     @Environment(AppRouter.self) private var router
     let entries: [LibraryEntry]
@@ -48,7 +47,7 @@ struct PrintMenu: View {
                 Button { library.apply(.favorite(!allFavourite), to: entries) } label: {
                     Label(allFavourite ? "Unfavourite" : "Favourite", systemImage: allFavourite ? "star.slash" : "star")
                 }
-                collectionMenu
+                SelectionCollectionMenu(entries: entries)
                 Button { actions.sheet = .tags(entries) } label: { Label("Tags…", systemImage: "tag") }
                 if single, let entry = entries.first {
                     Button { actions.sheet = .rename(entry) } label: { Label("Rename…", systemImage: "pencil") }
@@ -86,29 +85,10 @@ struct PrintMenu: View {
         }
     }
 
-    @ViewBuilder private var collectionMenu: some View {
-        Menu {
-            ForEach(library.shelves) { shelf in
-                let filed = entries.allSatisfy { shelf.count(in: [$0]) > 0 }
-                Button {
-                    library.apply(.collection(name: shelf.name, slug: shelf.slug, filing: !filed), to: entries)
-                } label: {
-                    Label(shelf.name, systemImage: filed ? "checkmark" : "rectangle.stack")
-                }
-            }
-            Divider()
-            Button { actions.sheet = .newCollection(entries) } label: {
-                Label("New Collection…", systemImage: "plus")
-            }
-        } label: {
-            Label("Add to Collection", systemImage: "rectangle.stack.badge.plus")
-        }
-    }
-
     private var single: Bool { entries.count == 1 }
     private var allFavourite: Bool { !entries.isEmpty && entries.allSatisfy(\.isFavorite) }
     private var canOrganize: Bool {
-        entries.flatMap(\.everyCopy).allSatisfy { hosts.capabilities[$0.hostID]?.canOrganize == true }
+        library.canOrganize(entries)
     }
 }
 
