@@ -3,7 +3,26 @@
 use anyhow::{bail, Context, Result};
 use std::{net::SocketAddr, path::Path};
 
-pub async fn create(target: SocketAddr, output: &Path, relay_url: Option<&str>) -> Result<()> {
+pub async fn create(
+    target: SocketAddr,
+    output: &Path,
+    relay_url: Option<&str>,
+    mode: mold_secure_client::ConnectionMode,
+    direct_url: Option<&str>,
+) -> Result<()> {
+    anyhow::ensure!(
+        mode != mold_secure_client::ConnectionMode::Regular || relay_url.is_none(),
+        "Regular pairing cannot use a proxy endpoint"
+    );
+    let direct_url = match mode {
+        mold_secure_client::ConnectionMode::Regular => Some(mold_secure_client::regular_origin(
+            direct_url.context("Regular pairing requires --direct-url")?,
+        )?),
+        mold_secure_client::ConnectionMode::Secure => {
+            anyhow::ensure!(direct_url.is_none(), "--direct-url requires --mode regular");
+            None
+        }
+    };
     mold_relay::validate_target(target)?;
     if let Some(url) = relay_url {
         validate_relay_url(url)?;
@@ -12,8 +31,14 @@ pub async fn create(target: SocketAddr, output: &Path, relay_url: Option<&str>) 
     if output.try_exists()? {
         bail!("invitation output already exists; choose a new private filename")
     }
-    let raw = std::env::var("MOLD_API_KEY")
-        .context("Set MOLD_API_KEY to the host operator key or @owner-only-key-file")?;
+    let raw = match std::env::var("MOLD_API_KEY") {
+        Ok(value) => value,
+        Err(_) => mold_secure_client::operator_key::read(
+            &mold_core::Config::mold_dir().context("Mold home is unavailable")?,
+        )?
+        .context("Set MOLD_API_KEY to the host operator key or @owner-only-key-file")?
+        .to_string(),
+    };
     let key = if let Some(path) = raw.strip_prefix('@') {
         let bytes = mold_secure_client::read_private(Path::new(path))?;
         std::str::from_utf8(&bytes)?
@@ -34,10 +59,15 @@ pub async fn create(target: SocketAddr, output: &Path, relay_url: Option<&str>) 
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
-    let mut response = client
+    let request = client
         .post(format!("http://{target}/api/pairing/sessions"))
-        .header("x-api-key", key)
-        .body("")
+        .header("x-api-key", key);
+    let request = if let Some(origin) = direct_url {
+        request.json(&serde_json::json!({"mode":"regular","direct_url":origin}))
+    } else {
+        request.body("")
+    };
+    let mut response = request
         .send()
         .await
         .context("cannot contact the local Mold host")?
@@ -50,7 +80,12 @@ pub async fn create(target: SocketAddr, output: &Path, relay_url: Option<&str>) 
         }
         bytes.extend_from_slice(&chunk);
     }
-    let value = invitation_payload(serde_json::from_slice(&bytes)?, relay_url)?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let value = if mode == mold_secure_client::ConnectionMode::Regular {
+        regular_invitation_payload(value)?
+    } else {
+        invitation_payload(value, relay_url)?
+    };
     mold_secure_client::write_invitation(output, &value)?;
     println!("Pairing invitation saved to {}. It expires in two minutes; transfer it privately and run mold pair --invite-file <file> on the client.",output.display());
     println!(
@@ -136,4 +171,26 @@ mod tests {
             invitation_payload(serde_json::json!({"protocol":3,"endpoints":[]}), None).is_err()
         );
     }
+}
+
+fn regular_invitation_payload(mut value: serde_json::Value) -> Result<serde_json::Value> {
+    anyhow::ensure!(
+        value["mode"] == "regular",
+        "invalid Regular invitation response"
+    );
+    let origin = value["base_url"]
+        .as_str()
+        .context("missing Regular origin")?;
+    anyhow::ensure!(
+        mold_secure_client::regular_origin(origin)? == origin,
+        "invalid Regular origin"
+    );
+    value["version"] = 2.into();
+    value["type"] = "mold.mobile-pairing".into();
+    value["name"] = value["hostname"].as_str().unwrap_or("Mold host").into();
+    value
+        .as_object_mut()
+        .context("invalid Regular invitation")?
+        .remove("hostname");
+    Ok(value)
 }

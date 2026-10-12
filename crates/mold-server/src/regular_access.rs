@@ -97,3 +97,58 @@ async fn run(app: Router, addresses: Arc<ConnectionAddresses>, stop: Cancellatio
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::routing::get;
+    use futures::StreamExt;
+    #[tokio::test]
+    async fn explicit_listener_becomes_ready_and_disable_closes_active_streams() {
+        let addresses = Arc::new(ConnectionAddresses::default());
+        let app = Router::new().route(
+            "/stream",
+            get(|| async {
+                axum::body::Body::from_stream(
+                    futures::stream::once(async {
+                        Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"ready"))
+                    })
+                    .chain(futures::stream::pending()),
+                )
+            }),
+        );
+        let access = start(app, addresses.clone());
+        assert!(addresses
+            .regular_network_ready(std::time::Duration::from_millis(1))
+            .await
+            .is_err());
+        addresses.set_regular_network_enabled(true);
+        let endpoints = addresses
+            .regular_network_ready(std::time::Duration::from_secs(2))
+            .await
+            .unwrap();
+        let port = reqwest::Url::parse(&endpoints[0]).unwrap().port().unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let mut response = client
+            .get(format!("http://127.0.0.1:{port}/stream"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.chunk().await.unwrap().unwrap(), "ready");
+        addresses.set_regular_network_enabled(false);
+        assert!(addresses.regular_network_endpoints().is_empty());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), response.chunk())
+                .await
+                .is_ok()
+        );
+        addresses.set_regular_network_enabled(true);
+        assert!(!addresses
+            .regular_network_ready(std::time::Duration::from_secs(2))
+            .await
+            .unwrap()
+            .is_empty());
+        access.shutdown().await;
+        assert!(addresses.regular_network_endpoints().is_empty());
+    }
+}

@@ -138,7 +138,10 @@ impl MoldClient {
         let (client, api_key_configured) = build_client(None);
         Self {
             base_url: normalize_host(base_url),
-            client: crate::relay_transport::RelayClient::new(client),
+            client: crate::relay_transport::RelayClient::for_origin(
+                client,
+                &normalize_host(base_url),
+            ),
             api_key_configured,
             gallery_persists_outputs: Default::default(),
         }
@@ -149,7 +152,10 @@ impl MoldClient {
         let (client, api_key_configured) = build_client(Some(&api_key));
         Self {
             base_url: normalize_host(base_url),
-            client: crate::relay_transport::RelayClient::new(client),
+            client: crate::relay_transport::RelayClient::for_origin(
+                client,
+                &normalize_host(base_url),
+            ),
             api_key_configured,
             gallery_persists_outputs: Default::default(),
         }
@@ -159,10 +165,26 @@ impl MoldClient {
         let base_url =
             std::env::var("MOLD_HOST").unwrap_or_else(|_| "http://localhost:7680".to_string());
         let api_key = std::env::var("MOLD_API_KEY").ok().filter(|k| !k.is_empty());
+        let origin = normalize_host(&base_url);
+        if std::env::var("MOLD_CONNECTION_MODE").as_deref() == Ok("regular") {
+            let key = api_key.clone().or_else(|| {
+                mold_secure_client::load_regular_host(&origin)
+                    .ok()
+                    .and_then(|h| h.api_key)
+            });
+            // Registration validation still refuses a copied Secure key or proxy origin.
+            let _ = mold_secure_client::register_regular_ephemeral(
+                "cli-env",
+                mold_secure_client::RegularHost {
+                    origin: origin.clone(),
+                    api_key: key,
+                },
+            );
+        }
         let (client, api_key_configured) = build_client(api_key.as_deref());
         Self {
             base_url: normalize_host(&base_url),
-            client: crate::relay_transport::RelayClient::new(client),
+            client: crate::relay_transport::RelayClient::for_origin(client, &origin),
             api_key_configured,
             gallery_persists_outputs: Default::default(),
         }

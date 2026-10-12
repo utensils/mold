@@ -65,6 +65,8 @@ pub fn run() {
             secure_media_bridge::secure_media_close,
             secure_media_bridge::secure_host_register,
             secure_media_bridge::secure_host_forget,
+            secure_media_bridge::regular_host_register,
+            secure_media_bridge::regular_host_forget,
             appearance::set_mobile_appearance,
             background_task::begin_mobile_background_task,
             background_task::end_mobile_background_task,
