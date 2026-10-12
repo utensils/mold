@@ -1981,7 +1981,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-secure"
-version = "0.34.0"
+version = "0.35.0"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -2000,7 +2000,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-secure-client"
-version = "0.34.0"
+version = "0.35.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

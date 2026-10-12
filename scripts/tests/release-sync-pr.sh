@@ -110,6 +110,18 @@ version = 4
 [[package]]
 name = "mold-mobile"
 version = "0.14.0"
+
+[[package]]
+name = "mold-ai-secure"
+version = "0.14.0"
+
+[[package]]
+name = "mold-ai-secure-client"
+version = "0.14.0"
+
+[[package]]
+name = "serde"
+version = "1.0.0"
 EOF
 
 cat > "$tmp/apps/mobile/src-tauri/tauri.conf.json" <<'EOF'
@@ -175,6 +187,14 @@ awk '/^name = "serde"$/{getline; exit ($0 == "version = \"1.0.0\"") ? 0 : 1}' "$
 grep -q '^version = "0.15.0"$' "$tmp/apps/mobile/src-tauri/Cargo.toml" || fail "mobile Cargo.toml version not synced"
 awk '/^name = "mold-mobile"$/{getline; exit ($0 == "version = \"0.15.0\"") ? 0 : 1}' "$tmp/apps/mobile/src-tauri/Cargo.lock" || fail "mobile Cargo.lock version not synced"
 grep -q '"version": "0.15.0"' "$tmp/apps/mobile/src-tauri/tauri.conf.json" || fail "mobile tauri config version not synced"
+
+python3 - "$tmp/apps/mobile/src-tauri/Cargo.lock" <<'PYTEST'
+import pathlib
+import sys
+import tomllib
+packages = {p["name"]: p["version"] for p in tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["package"]}
+assert packages == {"mold-mobile": "0.15.0", "mold-ai-secure": "0.15.0", "mold-ai-secure-client": "0.15.0", "serde": "1.0.0"}, packages
+PYTEST
 
 python3 - "$tmp/apps/macos/rust/mold-macos-ffi/Cargo.lock" <<'PYTEST'
 import pathlib
