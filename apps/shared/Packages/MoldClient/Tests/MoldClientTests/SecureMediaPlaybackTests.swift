@@ -25,7 +25,7 @@ import Testing
         let clock = ContinuousClock()
         let deadline = clock.now + .seconds(10)
         var decodedFrame = false
-        while clock.now < deadline, player.currentTime().seconds < 0.25 || !decodedFrame {
+        while clock.now < deadline, player.currentTime().seconds < 2.8 || !decodedFrame {
             if let error = item.error { throw error }
             if let frame = output.copyPixelBuffer(forItemTime: player.currentTime(), itemTimeForDisplay: nil) {
                 decodedFrame = CVPixelBufferGetWidth(frame) > 0
@@ -33,7 +33,7 @@ import Testing
             try await Task.sleep(for: .milliseconds(50))
         }
         try #require(item.status == .readyToPlay)
-        #expect(player.currentTime().seconds >= 0.25, "Loading metadata alone must not count as successful playback")
+        #expect(player.currentTime().seconds >= 2.8, "The clip must sustain playback, not just load metadata or its first frame")
         #expect(decodedFrame)
         player.pause()
         let duration = try await item.asset.load(.duration)
