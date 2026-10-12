@@ -6,4 +6,4 @@
 
 - Native Regular connections refuse previously known Secure credentials across mode changes, machine aliases and authentication headers.
 
-- Native Secure connections retry brief proxy admission pressure before sending requests, with a bounded deadline and cancellation.
+- Native Secure connections retry brief proxy admission pressure, including HTTP 429/503 refusals before a socket opens, with a bounded deadline and cancellation.
