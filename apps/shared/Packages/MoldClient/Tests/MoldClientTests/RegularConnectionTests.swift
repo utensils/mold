@@ -88,6 +88,54 @@ struct RegularConnectionTests {
         }
     }
 
+    @Test func knownSecureCredentialCannotCrossAnAliasInRegularHeaders() async throws {
+        let invitation = try #require(PairingLinkContractTests.fixtures.links.first?.expected.secureInvitation)
+        let pins = SecureHost(binding: invitation.binding, namespace: invitation.namespace, websocketURL: invitation.websocketURL,
+                              grant: .init(id: String(repeating: "a", count: 32), expiresAt: 4_000_000_000, epoch: 0, signature: String(repeating: "a", count: 128)))
+        let secret = "secure-" + UUID().uuidString
+        _ = HTTPBackend(host: MoldHost(name: "Secure", baseURL: URL(string: "https://secure.example")!, apiKey: secret, secure: pins))
+        let regular = MoldHost(name: "Alias", baseURL: URL(string: "https://gpu.example.com")!, apiKey: "regular-key", connectionMode: .regular)
+        let backend = HTTPBackend(host: regular, session: Self.session())
+        for (header, value) in [("X-API-Key", secret), ("Authorization", "bEaReR  " + secret)] {
+            var request = URLRequest(url: regular.baseURL.appending(path: "api/status"))
+            request.setValue(value, forHTTPHeaderField: header)
+            await #expect(throws: SecureConnectionError.pairingRequired) { try await backend.response(request) }
+        }
+        var reused = regular; reused.apiKey = secret
+        await #expect(throws: SecureConnectionError.pairingRequired) {
+            try await HTTPBackend(host: reused, session: Self.session()).status()
+        }
+    }
+
+    @Test func secureCredentialDenialHistorySurvivesReplacementAndRelaunchWithoutSecrets() throws {
+        let suite = "regular-history-" + UUID().uuidString
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let invitation = try #require(PairingLinkContractTests.fixtures.links.first?.expected.secureInvitation)
+        let pins = SecureHost(binding: invitation.binding, namespace: invitation.namespace, websocketURL: invitation.websocketURL,
+                              grant: .init(id: String(repeating: "a", count: 32), expiresAt: 4_000_000_000, epoch: 0, signature: String(repeating: "a", count: 128)))
+        let secret = "secure-private-key"
+        var host = MoldHost(name: "Secure", baseURL: URL(string: "https://secure.example")!, apiKey: secret, secure: pins)
+        SecureCredentialHistory(defaults: defaults).remember([host])
+        host.secure = nil; host.connectionMode = .regular; host.baseURL = URL(string: "http://alias.example")!
+        let restored = SecureCredentialHistory(defaults: defaults)
+        restored.remember([host])
+        #expect(throws: SecureConnectionError.pairingRequired) {
+            try restored.refuseKnownSecureCredentials(host: host, request: URLRequest(url: host.baseURL), session: Self.session())
+        }
+        host.apiKey = "regular-device-key"
+        try restored.refuseKnownSecureCredentials(host: host, request: URLRequest(url: host.baseURL), session: Self.session())
+        let stored = try #require(defaults.stringArray(forKey: SecureCredentialHistory.storageKey))
+        #expect(stored.count == 1)
+        #expect(stored[0].count == 64)
+        #expect(!String(describing: defaults.dictionaryRepresentation()).contains(secret))
+        let config = URLSessionConfiguration.ephemeral
+        config.httpAdditionalHeaders = ["Authorization": "Bearer " + secret]
+        #expect(throws: SecureConnectionError.pairingRequired) {
+            try restored.refuseKnownSecureCredentials(host: host, request: URLRequest(url: host.baseURL), session: URLSession(configuration: config))
+        }
+    }
+
     @Test func regularSessionDecodesCanonicalBaseURL() throws {
         let session = try MoldJSON.decoder.decode(PairingSession.self, from: Data("""
         {"mode":"regular","pairing_token":"\(Self.token)","expires_at":4000000000,
