@@ -10097,6 +10097,7 @@ async fn create_pairing_session(
             })?;
             return Ok(([(header::CACHE_CONTROL,"no-store")],Json(serde_json::json!({
                 "mode":"regular","base_url":origin,"pairing_token":token,"expires_at":expires_at,
+                "auth_required":true,
                 "instance_id":state.instance_id.as_str(),"hostname":pairing_hostname(),
             }))).into_response());
         }
@@ -13189,6 +13190,7 @@ mod tests {
         assert_eq!(created.headers()[header::CACHE_CONTROL], "no-store");
         let value = response_json(created).await;
         assert_eq!(value["mode"], "regular");
+        assert_eq!(value["auth_required"], true);
         assert!(value.get("invite").is_none());
         let token = value["pairing_token"].as_str().unwrap().to_owned();
         let request = || {

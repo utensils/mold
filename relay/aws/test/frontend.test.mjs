@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Writable } from "node:stream";
-import { createFrontend } from "../frontend.mjs";
+import { createFrontend, handler } from "../frontend.mjs";
 function writer() {
   const chunks = [];
   const out = new Writable({
@@ -90,4 +90,66 @@ test("HEAD remains empty, OPTIONS advertises only metadata and unsafe config fai
     { host_domain: "user:secret@host" },
   ])
     assert.throws(() => createFrontend({ config: { ...config, ...unsafe } }));
+});
+test("Lambda first-write framing includes metadata for bodies and empty responses", async () => {
+  // AWS HttpResponseStream.from installs metadata on the first write(), not
+  // end(). Match that runtime boundary rather than ordinary Writable.end(data).
+  // https://github.com/aws/aws-lambda-nodejs-runtime-interface-client/blob/main/src/HttpResponseStream.js
+  const before = globalThis.awslambda;
+  globalThis.awslambda = {
+    HttpResponseStream: {
+      from(raw, metadata) {
+        raw.beforeWrite = () => {
+          raw.chunks.push(
+            Buffer.from(JSON.stringify(metadata)),
+            Buffer.alloc(8),
+          );
+        };
+        return raw;
+      },
+    },
+  };
+  try {
+    const f = createFrontend({ config });
+    for (const [path, method, status, empty, dispatch] of [
+      ["/_mold/relay/info", "GET", 200, false],
+      ["/", "GET", 303, true],
+      ["/_mold/relay/info", "OPTIONS", 204, true],
+      ["/api/status", "GET", 426, false],
+      ["/api/status", "HEAD", 426, true],
+      ["/_mold/relay/info", "GET", 503, false, handler],
+    ]) {
+      const raw = {
+        chunks: [],
+        write(chunk) {
+          this.beforeWrite?.();
+          this.beforeWrite = undefined;
+          this.chunks.push(Buffer.from(chunk));
+        },
+        end(chunk) {
+          if (chunk !== undefined) this.chunks.push(Buffer.from(chunk));
+        },
+      };
+      const previousEndpoint = process.env.WS_ENDPOINT;
+      try {
+        if (dispatch) process.env.WS_ENDPOINT = "invalid";
+        await (dispatch ?? f)(event(path, method), raw);
+      } finally {
+        if (previousEndpoint === undefined) delete process.env.WS_ENDPOINT;
+        else process.env.WS_ENDPOINT = previousEndpoint;
+      }
+      const bytes = Buffer.concat(raw.chunks);
+      const boundary = bytes.indexOf(Buffer.alloc(8));
+      assert.ok(
+        boundary > 0,
+        `${method} ${path} omitted Lambda metadata prelude`,
+      );
+      const metadata = JSON.parse(bytes.subarray(0, boundary));
+      assert.equal(metadata.statusCode, status);
+      assert.equal(metadata.headers["x-mold-relay-protocol"], "3");
+      assert.equal(bytes.subarray(boundary + 8).length === 0, empty);
+    }
+  } finally {
+    globalThis.awslambda = before;
+  }
 });

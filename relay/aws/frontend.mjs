@@ -43,7 +43,10 @@ function output(raw, status, extra, body, method) {
     typeof globalThis.awslambda?.HttpResponseStream?.from === "function"
       ? globalThis.awslambda.HttpResponseStream.from(raw, metadata)
       : (raw.setMetadata?.(status, metadata.headers), raw);
-  stream.end(method === "HEAD" || status === 204 ? undefined : body);
+  // Lambda installs the HTTP metadata prelude on write(), including an empty
+  // write for HEAD/204/redirects. end(data) bypasses that runtime hook.
+  stream.write(method === "HEAD" || status === 204 ? "" : (body ?? ""));
+  stream.end();
 }
 export function createFrontend({ config } = {}) {
   const info = configuration(config);

@@ -30,6 +30,9 @@ independently deployed trusted Studio, or 426. It never proxies plaintext conten
 serves executable client code or receives an API bearer. Bulk transport may stage
 only existing Noise ciphertext under `ciphertext/v3/`; follow
 `relay/aws/OPAQUE-OBJECTS.md` for grants, bounds, checksum and cleanup.
+The metadata frontend must call `HttpResponseStream.write()` before `end()`;
+Lambda's first-write hook emits the JSON status/headers prelude and eight-null
+delimiter. Empty HEAD, redirect and OPTIONS responses still need an empty write.
 AWS resources belong to URandom Terraform; runtime artifacts belong to Mold.
 Never place credentials in Terraform state, command arguments, URLs or logs.
 
@@ -64,6 +67,9 @@ device grant. The claim proof binds invitation ID, Noise handshake hash and both
 device public keys inside Noise. A distinct per-device API key is returned only
 inside that encrypted channel and is bound to the device/grant in the local DB.
 Operators' API keys are never injected into tunnels.
+Both Secure and Regular pairing session responses include `auth_required: true`:
+an authenticated operator creates each invitation, and native clients require
+this field to decode the shared pairing response.
 
 The connector signs fresh local request context covering the authenticated peer,
 certificate, handshake hash, stream ID, method/path and nonce. Server middleware
