@@ -4,6 +4,7 @@ import Foundation
 import Testing
 @testable import MoldClient
 
+@Suite(.serialized)
 @MainActor struct SecureMediaPlaybackTests {
     @Test(arguments: [false, true], [Duration.zero, .milliseconds(30)])
     func avFoundationLoadsAndSeeksThroughRangeAdapter(trashed: Bool, delay: Duration) async throws {
