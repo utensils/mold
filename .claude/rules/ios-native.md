@@ -287,6 +287,11 @@ The image Library picker keeps machine filters in a full-width ordinary content 
 
 **Encrypted transport.** All remote HTTP, SSE, uploads, thumbnails and media use the shared Rust `mold-secure` C ABI and the pull-driven Swift WebSocket/HTTP adapter. Only an unpaired numeric loopback host may use direct HTTP for the embedded engine. Never restore relay v2, HTTP/S3 staging, media bearer URLs or mutation replay. AVPlayer uses `PlayableMedia` and its HEAD/Range resource loader. Private installation identity lives in the app Keychain (Mac: owner-only SecretStore), never preferences. Public pins and host-signed grants persist with the host; renew grants only through the authenticated channel. Bonjour identity remains a hint. `make gen`/archive builds the ignored XCFramework from source for all Apple targets, and secure-crate/lockfile changes trigger Apple builds. Protocol authority: `relay/aws/SECURE-PROTOCOL.md`.
 
+AVPlayer's content-information probe may include a two-byte data request. Complete
+that probe with authenticated HEAD metadata only; media bytes belong to subsequent
+Range requests. Playback regression coverage must run an actual AVPlayer and prove
+decoded frames and clock advancement, in addition to metadata and seeking.
+
 **Input inspection.** The shared Well has a separate accessible View control;
 typed references, masks, queue input details, Library picker tiles and From Share
 use the same read-only InputMediaViewer. Viewing never attaches, consumes a share,

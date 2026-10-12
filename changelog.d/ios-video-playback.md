@@ -1,0 +1,1 @@
+- **Native video playback.** Restore clip playback in the native iOS and macOS apps by completing AVPlayer's startup metadata probe before supplying video bytes.
