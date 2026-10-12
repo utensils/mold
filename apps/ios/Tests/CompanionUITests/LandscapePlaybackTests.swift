@@ -35,8 +35,12 @@ final class LandscapePlaybackTests: XCTestCase {
         tile.tap()
         let more = app.buttons["More"].firstMatch
         XCTAssertTrue(more.waitForExistence(timeout: 5))
-        let player = app.otherElements["viewer-clip-ready"].firstMatch
+        // SwiftUI applies the page identifier to the represented AVKit view;
+        // readiness is exported as its value, rather than its identifier.
+        let player = app.otherElements["viewer-print-fixture-\(identity)-1.mp4"].firstMatch
         guard player.waitForExistence(timeout: 10) else { XCTFail(app.debugDescription); return }
+        let ready = expectation(for: NSPredicate(format: "value == 'Ready'"), evaluatedWith: player)
+        await fulfillment(of: [ready], timeout: 10)
         if !app.buttons["Pause"].firstMatch.exists { player.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5)).tap() }
         guard app.buttons["Pause"].firstMatch.waitForExistence(timeout: 5) else { XCTFail("A decoded video must be playing: \(app.debugDescription)"); return }
         let close = app.buttons["landscape-playback-close"]
