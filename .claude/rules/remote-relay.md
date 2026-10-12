@@ -70,6 +70,10 @@ Operators' API keys are never injected into tunnels.
 Both Secure and Regular pairing session responses include `auth_required: true`:
 an authenticated operator creates each invitation, and native clients require
 this field to decode the shared pairing response.
+The CLI Regular invitation exporter removes response-only `auth_required`
+metadata before writing the canonical invitation; its strict client parser still
+rejects unknown fields. Test exported JSON against `RegularInvite`, not a second
+copy of the client schema.
 
 The connector signs fresh local request context covering the authenticated peer,
 certificate, handshake hash, stream ID, method/path and nonce. Server middleware

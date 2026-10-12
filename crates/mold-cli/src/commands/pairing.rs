@@ -145,6 +145,25 @@ fn validate_relay_url(value: &str) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn regular_owner_export_round_trips_through_the_real_client_parser() {
+        let response = serde_json::json!({
+            "mode": "regular",
+            "auth_required": true,
+            "base_url": "http://192.168.1.5:7680",
+            "instance_id": "host-instance",
+            "hostname": "Host",
+            "pairing_token": "a".repeat(64),
+            "expires_at": 4_000_000_000_u64
+        });
+        let output = regular_invitation_payload(response.clone()).unwrap();
+        let serialized = serde_json::to_vec(&output).unwrap();
+        let _: mold_secure_client::RegularInvite = serde_json::from_slice(&serialized).unwrap();
+        assert_eq!(output["base_url"], response["base_url"]);
+        assert_eq!(output["pairing_token"], response["pairing_token"]);
+        assert_eq!(output["mode"], response["mode"]);
+        assert!(output.get("auth_required").is_none());
+    }
+    #[test]
     fn standalone_invitation_binds_an_explicit_credential_free_relay_endpoint() {
         let value = serde_json::json!({"protocol":3,"hostname":"host","endpoints":[{"kind":"relay","url":"https://host.example"}]});
         let output =
@@ -188,9 +207,10 @@ fn regular_invitation_payload(mut value: serde_json::Value) -> Result<serde_json
     value["version"] = 2.into();
     value["type"] = "mold.mobile-pairing".into();
     value["name"] = value["hostname"].as_str().unwrap_or("Mold host").into();
-    value
+    let invitation = value
         .as_object_mut()
-        .context("invalid Regular invitation")?
-        .remove("hostname");
+        .context("invalid Regular invitation")?;
+    invitation.remove("hostname");
+    invitation.remove("auth_required");
     Ok(value)
 }
