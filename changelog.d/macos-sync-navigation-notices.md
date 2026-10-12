@@ -1,3 +1,0 @@
-- **Restore macOS sidebar navigation.** Generate, Queue, Models and Machines remain selectable alongside queue badges.
-- **Remember source sync notices.** Sync Details offers “Never show me this again for these sources.” for unchanged source issues, including unavailable legacy inputs; acknowledged notices leave the banner while full details remain accessible.
-- **Browse and inspect source media across apps.** Filter by machine and media type, view originals and all owning prints and roles, and reuse the selected copy. Native catalog loading uses larger bounded batches and preserves warm caches; source retention is unchanged.

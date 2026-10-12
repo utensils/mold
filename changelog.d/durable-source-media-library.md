@@ -1,8 +1,0 @@
-- **Browse and reuse original source media.** Web, desktop and mobile libraries show retained inputs in print details and a dedicated Source Media browser, with role labels, image previews and individual reuse. Sources keep their existing library-owned lifetime, including Trash. Keyframe previews and reuse now unwrap the original image correctly.
-- **Expandable desktop library navigation.** Tauri desktop exposes library sections and named collections in the sidebar, with collection management and drag-to-file actions while preserving the collection shelf. Disclosure buttons use the shared chevron icons and larger click targets.
-- **Stable native library layout.** Machine connectivity notices no longer move the iOS and macOS library grid when a machine goes offline or reconnects.
-- **Consistent automatic video duration.** Native iOS and macOS expose LTX 2.5 duration prediction when the connected model supports it. Web hides explicit frame controls while prediction is selected.
-- **Accurate iOS unread badges.** Viewing an image that finishes loading after a swipe now clears its unread state and updates the Library badge.
-- **Waiting-work Queue badges.** Native iOS and macOS count queued, paused and held jobs, excluding running and finished work. macOS now shows the same Queue badge as iOS.
-- **Reliable native macOS development builds.** Apply the selected signing identity only to the app, so Swift package resource bundles no longer fail with a missing development team.
-- Fix initial desktop collection counts and hidden-print filtering, immediate hide/show updates across clients, and hidden mirror protection while a configured machine is offline.

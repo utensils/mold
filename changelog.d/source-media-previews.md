@@ -1,1 +1,0 @@
-- **Inspect source media without detaching it.** View attached images, masks, guides, references, video and audio in larger read-only viewers across Studio interfaces. Source pickers offer original inspection; Queue details show full-sized submitted inputs ([#1868](https://github.com/utensils/mold/pull/1868)).

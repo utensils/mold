@@ -11,6 +11,219 @@ Pull requests do not edit the `[Unreleased]` section directly: each adds a
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-10-12
+
+- **Recover concurrent Secure startup.** Reclaim stale cloud admission reservations
+  safely and retry temporary WebSocket upgrade capacity refusals before any
+  authenticated application request is dispatched.
+- **Explicit connection modes.** Choose Secure or Regular across Studio, desktop, mobile, native apps, and the CLI, with direct HTTP/HTTPS for LAN, Tailscale, and WAN. Secure remains the default and the managed proxy always requires end-to-end encryption. Regular uses separate device credentials, single-use invitations, and independently controlled host access; native camera scans confirm the mode and address before claiming. Re-pairing updates one saved machine and retires previous route authority.
+- **Shared local host authority.** Native and Tauri Mac hosts use one owner-private operator key per Mold home, preserving host identity and phone grants across app handoffs. Preference reset preserves explicit Regular access.
+- **Reliable Secure admission.** Clients retry temporary proxy pressure only before session admission, with bounded attempts and deadlines; authenticated HTTP requests are never replayed.
+- **Isolated frontend packaging.** Include the canonical secure admission fixture in Nix web/desktop and Docker frontend builds, plus the generation-profile fixture used by desktop tests, so type checking succeeds with isolated build inputs.
+- **Verify cloud image readiness before spending.** Automatic cloud provisioning from nightly and source builds now requires a published container digest for the exact source before creating a paid host. Verified stable and scheduled builds publish source readiness and refresh current-main `latest` aliases without downgrading them on older reruns.
+- **Build secure containers.** Docker dependency caching now includes the shared secure transport crates.
+
+- **Connect to encrypted LAN from hosted Studio.** HTTPS Studio now tries authenticated encrypted LAN connections before the cloud relay and falls back when browser local-network policy blocks them. Initial pairing allows time to answer the browser permission prompt while ordinary route probes remain fast.
+
+- **Keep cancellation explicit.** Report interrupted encrypted responses as errors when forgetting a host or cancelling a request, preventing a cleanup race from appearing as a successfully completed body.
+
+- **Reliable native Mac packaging.** Builds isolate Swift package checkouts from stale runner caches so signed distributions can resolve Sparkle and the encrypted transport framework reliably.
+
+- **Manage hosted Studio pairings.** Switch, disconnect, or forget the selected machine without losing recoverability when storage fails. Changes in another browser tab cannot silently retarget the mounted workspace. Generation jobs retain their owning machine across selection changes and reconnects, and ambiguous recovered jobs cannot act on another machine. Switching starts a fresh workspace so cached model and download actions cannot cross machines. Thumbnail caches distinguish routes and instances and respect Forget during in-flight reads.
+- **Encrypted connections across Mold.** Replace the old proxy and pairing protocol
+  with pinned, per-device end-to-end encryption across native apps, Studio, and
+  headless CLI hosts. Nearby machines prefer a verified direct connection;
+  remote requests and media use the same authenticated transport. Existing remote
+  pairings must be replaced with a fresh host-generated invitation after upgrading.
+- **Reliable network recovery.** Bound discovery and connection attempts, close
+  stale or revoked sessions, preserve streaming and Range requests, and show
+  readable offline and retry messages in the iPhone library.
+- **Lower-cost bulk transport.** Move large encrypted transfers through private,
+  session-scoped bucket objects with checksum verification and acknowledgement
+  cleanup. Lambda authorizes and routes small messages; encryption keys stay on
+  the host and client. Verified HTTPS pairing links cover Android and both iOS apps.
+- **Complete pairing removal.** Forgetting a machine clears its encrypted pairing
+  and native media credentials before removing its saved entry, with retryable
+  errors if secure storage is unavailable.
+- **Reliable Windows identity storage.** Concurrent startup reads the same private
+  host identity while it is installed, without transient file-sharing failures
+  or weakening owner-only access.
+- **Inspect source media without detaching it.** View attached images, masks, guides, references, video and audio in larger read-only viewers across Studio interfaces. Source pickers offer original inspection; Queue details show full-sized submitted inputs ([#1868](https://github.com/utensils/mold/pull/1868)).
+- Native macOS source media can be reused from print inspectors, original viewers and right-click menus, with a compatible model/recipe chooser when needed.
+- **Resizable prompt in the desktop composer.** The New image prompt now opens
+  three lines tall and has a handle above it: drag it up for a bigger writing
+  area, use ↑/↓ on the focused handle, or double-click to reset. The size is
+  remembered across launches and a short window never squeezes the canvas or
+  Generate off screen — the same behaviour as Mold Studio for Mac. **Edit
+  prompt** moves beside the estimate.
+- **Desktop Reuse settings reattaches input media again.** Reusing a print whose
+  host never pinned its inputs (anything made before durable source retention,
+  or a role the archive did not keep) left a bytes-less descriptor behind —
+  "Reattach first frame …" — because the retained-media path switched off the
+  local stash and gallery-by-name restore. Retained authority is now the first
+  answer and that fallback the second, matching the phone app, and Library no
+  longer toasts "Reattach it" for a source Create is about to restore.
+- **Web Reuse settings no longer blocks on an unretained print.** An
+  `unavailable` inventory became a blocking "Reattach it before developing"
+  error on Create even after the Library had restored the source from the
+  local stash or gallery; it now defers to that fallback, which also runs for
+  an archive that retained other roles but not the source, and the identity
+  photo is looked back up in the stash as Create's own reuse path already did.
+- **Reuse settings never strands Generate.** A reused print whose every copy
+  sits on an unreachable machine no longer holds the desktop composer on
+  "Restoring the original input files…", and a failed input restore now
+  clears as soon as the input is attached by hand on desktop, web and the
+  phone, instead of only after a New print or Reset.
+- **Reusing a print no longer adds it to the Queue.** "Use these settings" on
+  the desktop put the finished print back in the Queue as "Finished — saved to
+  My images", one more row per reuse, and Clear finished could take it off the
+  canvas. The reused print is now only shown on the canvas.
+- **One Download page for every platform.** The website gains a Download page
+  (top navigation and Getting Started) with stable links for both Mac desktop
+  apps — Mold Studio, built natively for macOS 26, and Mold Desktop, the same
+  app as Windows and Linux — plus Windows, Linux, iPhone and iPad, Android, the
+  CLI and nightly builds. Stale "Windows is nightly only" and "no Linux desktop
+  download" notes are corrected across the guides and README.
+- **Shorter, clearer model names everywhere, from one place.** Every built-in
+  model now has a short title, a variant (precision or speed tier) and a
+  one-line reason to pick it, published on `/api/models` and generated into
+  the web, desktop, phone and native Swift clients from one Rust authority.
+  MiniMax H3 reads as **MiniMax H3 Frames** / **MiniMax H3 References** instead
+  of FL2VA / Ref2VA, and family labels agree across the CLI, Discord and every
+  app. Civitai and Hugging Face models keep their own titles.
+- **Correct and bound LoRA reuse.** Keep fused-layer deltas tied to their source
+  layers and adapter revisions, invalidate resident adapters after file changes,
+  cap derived-delta caches at 256 MiB per engine, and honor integer and singleton
+  SD3 alpha tensors.
+- **Recover native background work reliably.** Cancel thumbnail downloads after
+  their last consumer leaves, resume generation following after transient status
+  failures, preserve submissions accepted while backgrounded, honor Stop for
+  late admission responses, bound iOS queue preview memory and concurrency, and
+  distinguish a missing transfer source from an unavailable or ineligible one.
+- **Unify media input handling.** Web, desktop and mobile validate video/audio
+  files against a 64 MiB limit before encoding, show read errors, preserve the
+  prior attachment on refusal, and discard superseded selections. Mobile also
+  enforces a 45 MiB combined media budget.
+  Shared canvas transitions and wire contracts keep the clients consistent.
+- **Simplify maintained code.** Remove superseded native/frontend helpers,
+  consolidate LoRA and source-media policies, split large authoring and sync
+  routines into tested stages, and check production frontend reachability
+  independently of test imports.
+- **H3 text-only authoring.** Web and Tauri clients honor the selected machine’s optional-source recipe over stale model or draft hints, so upgraded FL2VA models can generate without a start frame. Added cross-surface regression coverage for FastH3 V2 and the DMAD/PDMD tiers.
+- **FastH3 model details.** Installed FastH3 V2 exposes its runtime recipe and correct checkpoint provenance to every client, without requiring the ordinary FL2VA transformer.
+- **Clear iOS Library picker header.** Keep the machine filter below the native title in a full-width row, preventing an opaque rectangle from covering the navigation header or pictures. Preserve search, refresh and source selection at large text sizes.
+- **MiniMax H3 DMAD and PDMD distill tiers.**
+  `minimax-h3-fl2va:comfy-pruned-int8-dmad-4step` (4 steps),
+  `minimax-h3-fl2va:comfy-pruned-int8-pdmd-2step` (2 steps), and
+  `minimax-h3-fl2va:comfy-pruned-int8-pdmd-4step` (4 steps) pull the FL2VA
+  compact stack plus Kijai's rank-reduced build of each distillation LoRA
+  (367-559 MB, from `Kijai/MiniMax-H3-experimental`). Each runs its published
+  recipe: DMAD uses ComfyUI's `lcm` re-noise sampler at video/audio shift
+  12/2, PDMD 2-step uses Euler at 12/6, and PDMD 4-step uses Euler at 12/3.
+  The adapters are lossy low-rank approximations of the upstream full-rank
+  releases. `MOLD_H3_TURBO_TIER` (capture-scope UAT override) accepts
+  `dmad-4step`, `pdmd-2step`, and `pdmd-4step`. The fixed-steps note now reads
+  "Fixed by the N-step distilled tier"
+  ([#1812](https://github.com/utensils/mold/issues/1812)).
+- **MiniMax H3 FastH3 V2 8-step tier.** `mold pull minimax-h3-fl2va:fasth3-v2-int8`
+  adds FastVideo's FastH3 V2: a full-weight distilled FL2VA transformer
+  (22.128 GB, pinned from `FastVideo/FastVideo-FastH3-Comfy`) that runs on the
+  existing compact stack, so a machine with any compact FL2VA tag installed
+  downloads only the transformer. It renders at FastVideo's own operating
+  point with no configuration: 8 steps of `res_multistep` (9 terminal-inclusive
+  grid points, a fixed Steps control that explains itself), sigma shift 10 for
+  video and 3 for audio, guidance 0. Text-only, first-frame, last-frame, and
+  first+last-frame requests all work; qualified on CUDA, with Apple Metal
+  not yet validated ([#1812](https://github.com/utensils/mold/issues/1812)).
+- **MiniMax H3 text-only video (T2VA).** Every compact FL2VA model — the base
+  `minimax-h3-fl2va:comfy-pruned-int8` and all of its Turbo tiers — now renders
+  synchronized audio-video from a prompt alone, with no first or last frame.
+  First, last, and first+last frames work exactly as before, the first frame is
+  now advertised as optional so web, desktop, and iPhone stop blocking Generate
+  without one, and a text-only prompt gets the whole 2,048-row conditioner
+  budget. Text-only memory grants are derived from the measured first-frame
+  ones and never exceed them. Ref2VA still requires references
+  ([#1552](https://github.com/utensils/mold/issues/1552)).
+- **Reuse library pictures more easily.** The native Mac image chooser is larger, searches all connected machines, prefers available copies, and supports preview and context actions. H3 reference actions and keyframes use the shared image intake, including automatic resizing of oversized pictures and protection against stale or cancelled selections.
+- **Clear new-image tags after a library visit.** Leaving Library marks the displayed library scope as seen across native Mac, native iOS, web, and Tauri clients. Viewing a picture still clears it immediately; hidden, filtered-out, and later arrivals remain new.
+- **Use H3 references on keyless servers.** The CLI now supports bounded inline
+  Ref2VA references when authenticated upload sessions are unavailable, while
+  retaining server authentication and license enforcement. Capability failures
+  surface before H3 or mesh transfers instead of silently changing routes.
+- **Keep generated agent guidance current.** Synchronize reference transport and
+  remote license guidance across skill profiles and the website, and refine H3
+  reference prompts from the official subject, task, and audio-role guidance.
+- **Responsive native Source Media.** Avoid repeated full-library scans, preserve source lists during refresh, and keep originals open through unrelated print updates.
+- **Open legacy original media.** Inspect retained images, video and audio whose older metadata does not identify their type, with bounded processing and temporary-file cleanup.
+- **Responsive macOS navigation and sync.** Save drafts and compare or hash sync files off the UI thread, while preserving final-quit draft durability and source-access revocation.
+- **Restore macOS sidebar navigation.** Generate, Queue, Models and Machines remain selectable alongside queue badges.
+- **Remember source sync notices.** Sync Details offers “Never show me this again for these sources.” for unchanged source issues, including unavailable legacy inputs; acknowledged notices leave the banner while full details remain accessible.
+- **Browse and inspect source media across apps.** Filter by machine and media type, view originals and all owning prints and roles, and reuse the selected copy. Native catalog loading uses larger bounded batches and preserves warm caches; source retention is unchanged.
+- **MiniMax H3 Ref2VA no longer crashes the GPU on large reference sets.** The
+  Qwen conditioner's text attention ran one dense softmax over the whole
+  sequence, and the CUDA softmax kernel's 32-bit index overflowed once the
+  sequence passed 5,792 rows — typical of five full-size reference photos — writing
+  outside its buffer (NVIDIA Xid 31) and restarting the server. Attention now
+  runs in exact query-axis chunks, and the raw cause of a fatal CUDA error on the
+  generation, H3, and model-load paths is logged beside the worker quarantine
+  ([#1852](https://github.com/utensils/mold/issues/1852)).
+- **One macOS sync banner.** Native macOS shows one progress banner and one Stop Sync button during Library synchronization instead of a duplicate recurring-sync banner.
+- **Bounded LTX spatial decoding.** LTX convolutional video VAE decoding now selects upstream aspect-coupled spatial Auto tiles independently of the temporal memory estimate, avoiding an untiled decode when that estimate understates CUDA workspace. Explicit tiling overrides remain unchanged; long clips still require sufficient memory for temporal context and output accumulation.
+- **Accurate LTX retry advice.** LTX CUDA out-of-memory messages no longer recommend the exact failed shape as fitting; smaller retry suggestions are explicitly estimates.
+- **Recover missing model components.** Native, web and Tauri queue surfaces offer Download and Retry for held jobs whose missing model components can be downloaded, including adapters for installed recipes. Original errors, failure details and eligible host transfers remain available while exact-host download and retry progress is shown.
+- **Readable iOS repair progress.** Active model downloads keep the model name and identifier full width, with progress and an accessible compact Cancel action below instead of a squeezed side column.
+- **Desktop previews load again on Linux.** In dev builds every reconnect leaked
+  an `/api/events` stream, because the events store keyed its bookkeeping on
+  Pinia's per-call `this` proxy and never aborted the stream it replaced; six of
+  them filled WebKitGTK's per-host connection pool, so every viewer request to
+  that machine (media tickets, clips) queued forever behind "Loading preview".
+  The store now keys on the raw store, and `desktop-dev` exports the GStreamer
+  plugin path the packaged app gets from `wrapGAppsHook3` — without it WebKit
+  aborted the web process the moment a clip loaded.
+- **Clips with sound stream in every player.** The AAC mux wrote all video
+  samples and then all audio, so a front-to-back demuxer (WebKitGTK on Linux)
+  had to buffer the whole picture track before its first audio sample and never
+  started playback. Samples are now written in presentation order, interleaving
+  the tracks in one-second chunks. Clips rendered before this change keep the
+  old layout.
+- **Faster, deduplicated Source Media.** Web, desktop, mobile, and native Apple source browsers group identical verified inputs while preserving every owning print and role. Incremental inventory loading, bounded preview caches, and smaller rendered pages reduce repeated work. Server caches reuse authenticated archive metadata and thumbnails without changing source retention or storing plaintext previews on disk.
+- **Complete native queue badges.** iOS and macOS now total rendering and pending jobs across every machine, including held and paused work and every page of long backlogs, while excluding finished history.
+- **Responsive desktop connections.** Routine machine telemetry no longer repeatedly restarts live-event streams and stalls ordinary requests in the Tauri webview.
+- Fix cramped model-license descriptions in Mold Remote Settings: long descriptions keep a readable width and actions wrap below them on phones, with larger terms-link touch targets and review buttons that grow with accessibility text sizes.
+- **Browse and reuse original source media.** Web, desktop and mobile libraries show retained inputs in print details and a dedicated Source Media browser, with role labels, image previews and individual reuse. Sources keep their existing library-owned lifetime, including Trash. Keyframe previews and reuse now unwrap the original image correctly.
+- **Expandable desktop library navigation.** Tauri desktop exposes library sections and named collections in the sidebar, with collection management and drag-to-file actions while preserving the collection shelf. Disclosure buttons use the shared chevron icons and larger click targets.
+- **Stable native library layout.** Machine connectivity notices no longer move the iOS and macOS library grid when a machine goes offline or reconnects.
+- **Consistent automatic video duration.** Native iOS and macOS expose LTX 2.5 duration prediction when the connected model supports it. Web hides explicit frame controls while prediction is selected.
+- **Accurate iOS unread badges.** Viewing an image that finishes loading after a swipe now clears its unread state and updates the Library badge.
+- **Waiting-work Queue badges.** Native iOS and macOS count queued, paused and held jobs, excluding running and finished work. macOS now shows the same Queue badge as iOS.
+- **Reliable native macOS development builds.** Apply the selected signing identity only to the app, so Swift package resource bundles no longer fail with a missing development team.
+- Fix initial desktop collection counts and hidden-print filtering, immediate hide/show updates across clients, and hidden mirror protection while a configured machine is offline.
+- Keep Library viewers on the next media item after deletion across native macOS/iOS, web, Tauri desktop and Tauri mobile, falling back to the previous item at the end and preserving surviving machine copies.
+- Remove the persistent native macOS completion notice after successful moves to Trash while retaining progress and failure feedback.
+- **Follow the remaining video frame.** Automatic sizing for first/last-frame generation follows the first frame's aspect ratio when present and the last frame's aspect ratio otherwise. Removing the first frame or replacing a last-only frame now updates the canvas across native and web-based interfaces. Removing an endpoint preserves a manually chosen or restored canvas; attaching a new driving frame resumes automatic sizing.
+- **Choose iOS appearance.** Native iOS Settings now offers persistent System, Light and Dark appearance choices, with System as the default.
+- **Fit either video endpoint.** Crop to Fill and the other supported fit choices remain available for last-only frame inputs. Endpoint fitting applies to the submission snapshot while retaining the original attached images for future edits.
+- **Room for long prompts.** Open a spacious prompt editor from Generate on native macOS/iOS, web and Tauri desktop/mobile. Keep edits on dismissal, search recent prompt text without replacing other settings, and undo Clear. The compact composer remains available for quick edits.
+- **Optional Library date separators.** Native iOS and macOS Settings now remember whether Library views show daily headings and row breaks. Turning them off preserves the selected sort order in a continuous grid.
+- **Incremental Library sync.** Library Sync now skips unchanged verified copies using batched retained-media checkpoints on updated machines, preserving repairs when retained inputs change and retrying safely on older machines. Progress distinguishes checked, copied, already-local and failed prints.
+- **Resumable copies.** Interrupted Mac syncs remember acknowledged copies before retained-input and organization work, so retries can repair the remaining work without downloading the finished print again. Manual saves and iOS thumbnail caching now describe processed or checked items accurately.
+- **Client-local new media.** Keep new media unread on each client until that media successfully opens, including arrivals while Library is open. Native iOS navigation and app icon counts share the same persisted viewing history; native Mac, desktop and browser labels survive relaunch. Existing read status and the first inventory of a newly connected machine remain a compatibility baseline, preventing a historical badge flood.
+- **Stable Mac queue scrolling.** Mac queue rows retain their height as previews and progress load, preserving the scroll position; bounded shared preview caching reduces repeated reads.
+
+- **Configurable sync interval.** Mac Library Settings now remembers a configurable sync interval from one minute to one day, defaulting to five minutes. Changes update the pending repeat without overlapping transfers.
+- **Move waiting jobs between hosts.** Offer Move to another host for waiting, paused, and held jobs across native Mac/iOS, web, desktop, and the mobile shell. New servers persist source reservations and seal them before destination admission so concurrent clients, worker dispatch, and restarts cannot render both copies. Destination abort tombstones safely restore refused moves; interrupted transfers retry the same destination and identity while preserving original media and protecting reserved originals from Held retention sweeps. Older source servers retain held-job transfer support; new source hosts require updated transfer clients.
+- **Continuous Library thumbnails.** Native macOS, native iOS, Tauri desktop and web now use dense justified rows that preserve each picture’s aspect ratio and reflow with thumbnail size and available width. Viewer return preserves the viewport. iOS removes machine-name thumbnail badges while keeping machine information in details and filters.
+- **Native gallery New badges.** iOS and macOS immediately remove the New badge
+  when a photo, video or 3-D print is opened, preserving the existing gallery-visit
+  behavior. Home Screen and Dock icons count new visible gallery media until
+  Library opens, with device-local state retained across launches.
+- Fix tall dialogs (such as the model licence review listing many components) growing past the window and clipping their title and Accept/Cancel buttons; dialogs now fit the window and scroll their contents.
+- **iPhone landscape video.** Rotating a Library clip horizontally uses the full display with native playback controls and a Close action. Rotating upright restores gallery actions without restarting playback.
+- Keep cancellation available while shared generation jobs load models in Tauri and native macOS, respecting the machine's cancellation capability and the job's current authority.
+- Changed native iOS queue cards to keep Cancel, Retry and Pause/Resume in swipe actions and Job Details, with read-only Details when mutations are unavailable, preserving held explanations, model recovery progress and Move to controls. Prevented reordering and Empty Queue from overlapping pending actions on the same jobs.
+- Fixed native macOS queue action eligibility across rows, menus and details, including stale and in-flight actions, durable Held recovery, repeated Cancel while stopping, and narrow recovery-control layout. Added supported Cancel and paused Resume for reported long-clip chains, and guarded clip-upscale controls against stale or duplicate requests.
+- Aligned Tauri queue menus and touch actions with current job state and machine capabilities; preserved Held-only cancellation through ambiguous requests and app restarts, restored supported Held recovery, and corrected stopping and terminal state labels.
+
 ## [0.34.0] - 2026-10-09
 
 - **Held queue controls and failure details.** Native iOS and Tauri mobile keep Cancel available while job metadata loads. Native Mac, web and mobile surfaces expose copyable job failure details, and stale held cancellations cannot stop a job that has started running.
@@ -6302,7 +6515,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.34.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.35.0...HEAD
+[0.35.0]: https://github.com/utensils/mold/compare/v0.34.0...v0.35.0
 [0.34.0]: https://github.com/utensils/mold/compare/v0.33.0...v0.34.0
 [0.33.0]: https://github.com/utensils/mold/compare/v0.32.0...v0.33.0
 [0.32.0]: https://github.com/utensils/mold/compare/v0.31.0...v0.32.0
