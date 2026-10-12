@@ -4,6 +4,8 @@
 // themselves rather than by anything pathological.
 #![recursion_limit = "512"]
 
+use anyhow::Context;
+
 mod catalog_bridge;
 mod commands;
 mod completion_cache;
@@ -1640,6 +1642,11 @@ enum PairingAction {
         target: std::net::SocketAddr,
         #[arg(long, value_hint=clap::ValueHint::FilePath)]
         output: std::path::PathBuf,
+        #[arg(long, value_parser=["secure", "regular"], default_value="secure")]
+        mode: String,
+        /// Explicit credential-free direct HTTP(S) origin for Regular pairing.
+        #[arg(long)]
+        direct_url: Option<String>,
         /// Credential-free WSS endpoint for a separately supervised connector.
         #[arg(long)]
         relay_url: Option<String>,
@@ -2279,6 +2286,10 @@ environment before starting mold serve.")]
         #[arg(long, default_value = "0.0.0.0")]
         bind: String,
 
+        /// Enable explicit Regular direct HTTP(S) API access alongside Secure.
+        #[arg(long, env="MOLD_ALLOW_DIRECT_API", default_value_t=false, value_parser=clap::builder::BoolishValueParser::new())]
+        allow_direct_api: bool,
+
         /// Models directory
         #[arg(long, env = "MOLD_MODELS_DIR", value_hint = ValueHint::DirPath)]
         models_dir: Option<String>,
@@ -2758,7 +2769,15 @@ Manage pods manually:
     /// Pair this client using an owner-only invitation file from the host.
     Pair {
         #[arg(long, value_hint = clap::ValueHint::FilePath)]
-        invite_file: std::path::PathBuf,
+        invite_file: Option<std::path::PathBuf>,
+        /// Explicit direct HTTP(S) origin; requires --mode regular.
+        #[arg(long, conflicts_with = "invite_file")]
+        direct_url: Option<String>,
+        #[arg(long, value_parser=["secure", "regular"])]
+        mode: Option<String>,
+        /// Private file containing the Regular API key. Omit only for auth-disabled hosts.
+        #[arg(long, requires="direct_url", value_hint=clap::ValueHint::FilePath)]
+        api_key_file: Option<std::path::PathBuf>,
         #[arg(long, default_value = "Mold CLI")]
         name: String,
     },
@@ -3085,6 +3104,10 @@ fn apply_spatial_tile_override(value: Option<&str>) {
 }
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--allow-direct-api") {
+        // SAFETY: synchronous process entry before runtime threads.
+        unsafe { std::env::set_var("MOLD_ALLOW_DIRECT_API", "1") };
+    }
     // SAFETY: synchronous process entry, before runtime/ctrl-C worker threads.
     let bootstrap = unsafe {
         mold_server::secure_pairing::bootstrap::BootstrapInput::take_environment_before_threads()
@@ -4050,12 +4073,80 @@ async fn run(
                     target,
                     output,
                     relay_url,
+                    mode,
+                    direct_url,
                 },
-        } => commands::pairing::create(target, &output, relay_url.as_deref()).await?,
-        Commands::Pair { invite_file, name } => {
-            let invite = mold_secure_client::read_invitation(&invite_file)?;
+        } => {
+            commands::pairing::create(
+                target,
+                &output,
+                relay_url.as_deref(),
+                if mode == "regular" {
+                    mold_secure_client::ConnectionMode::Regular
+                } else {
+                    mold_secure_client::ConnectionMode::Secure
+                },
+                direct_url.as_deref(),
+            )
+            .await?
+        }
+        Commands::Pair {
+            invite_file,
+            name,
+            mode,
+            direct_url,
+            api_key_file,
+        } => {
+            if let Some(url) = direct_url {
+                anyhow::ensure!(
+                    mode.as_deref() == Some("regular"),
+                    "manual direct pairing requires --mode regular"
+                );
+                let api_key = api_key_file
+                    .map(|p| {
+                        mold_secure_client::read_private(&p)
+                            .and_then(|v| Ok(std::str::from_utf8(&v)?.trim().to_owned()))
+                    })
+                    .transpose()?;
+                let host = mold_secure_client::RegularHost {
+                    origin: mold_secure_client::regular_origin(&url)?,
+                    api_key,
+                };
+                mold_secure_client::save_regular_host(&host)?;
+                println!(
+                    "Saved Regular connection to {}. Set MOLD_HOST to this origin.",
+                    host.origin
+                );
+                return Ok(());
+            }
+            let path =
+                invite_file.context("use --invite-file or explicit --mode regular --direct-url")?;
+            let value: serde_json::Value =
+                serde_json::from_slice(&mold_secure_client::read_private(&path)?)?;
+            if value["mode"] == "regular" {
+                anyhow::ensure!(
+                    mode.as_deref() != Some("secure"),
+                    "invitation mode does not match --mode"
+                );
+                let host = mold_secure_client::pair_regular(value, &name).await?;
+                mold_secure_client::save_regular_host(&host)?;
+                println!(
+                    "Paired in Regular mode with {}. Set MOLD_HOST to this origin.",
+                    host.origin
+                );
+                return Ok(());
+            }
+            anyhow::ensure!(
+                mode.as_deref() != Some("regular"),
+                "invitation mode does not match --mode"
+            );
+            let invite = serde_json::from_value(value)?;
             let host = mold_secure_client::pair(invite, &name).await?;
             mold_secure_client::save_pairing(&host)?;
+            mold_secure_client::select_connection_mode(
+                &host.origin,
+                mold_secure_client::ConnectionMode::Secure,
+            )?;
             println!(
                 "Paired securely with {}. Set MOLD_HOST to this origin.",
                 host.origin

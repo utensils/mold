@@ -670,11 +670,11 @@ pub async fn require_api_key(request: Request, next: Next) -> Response {
     // Only a real loopback socket may carry plaintext API traffic. The secure
     // WebSocket endpoint is mounted outside this middleware. Fail closed even
     // with auth disabled or if future service wiring omits peer metadata.
-    let local = request
+    let peer = request
         .extensions()
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .is_some_and(|peer| peer.0.ip().is_loopback());
-    if !local && request.extensions().get::<RegularApiAllowed>().is_none() {
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>();
+    let local = peer.is_some_and(|peer| peer.0.ip().is_loopback());
+    if peer.is_none() || !local && request.extensions().get::<RegularApiAllowed>().is_none() {
         if is_browser_bootstrap_read(request.method(), request.uri().path()) {
             return (
                 StatusCode::SEE_OTHER,

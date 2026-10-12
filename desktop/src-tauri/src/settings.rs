@@ -143,6 +143,8 @@ pub const MAX_SAVED_HOSTS: usize = 8;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedHost {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_mode: Option<String>,
     /// Slug derived from the URL (`connection::host_id`), stable across saves.
     pub id: String,
     /// Optional friendly name (e.g. the mDNS instance name).
@@ -175,10 +177,12 @@ pub fn upsert_saved_host(
     let existing = hosts.iter().find(|h| h.id == id);
     let existing_name = existing.and_then(|h| h.name.clone());
     let existing_instance_id = existing.and_then(|h| h.instance_id.clone());
+    let existing_mode = existing.and_then(|h| h.connection_mode.clone());
     hosts.retain(|h| h.id != id);
     hosts.insert(
         0,
         SavedHost {
+            connection_mode: existing_mode,
             id: id.to_string(),
             name: name.or(existing_name),
             url: url.to_string(),
@@ -592,6 +596,7 @@ mod tests {
             ui_scale_percent: 120,
             update_channel: UpdateChannel::Nightly,
             saved_hosts: vec![SavedHost {
+                connection_mode: None,
                 id: "hal9000-7680".into(),
                 name: Some("hal9000".into()),
                 url: "http://hal9000:7680".into(),
@@ -689,6 +694,7 @@ mod tests {
     fn forget_host_prunes_the_saved_entry_and_reconnect_id() {
         let mut settings = AppSettings {
             saved_hosts: vec![SavedHost {
+                connection_mode: None,
                 id: "hal9000-7680".into(),
                 name: None,
                 url: "http://hal9000:7680".into(),

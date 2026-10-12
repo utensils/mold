@@ -812,3 +812,21 @@ Servers advertising `queue.pre_render_transfer` allow queued, paused, and held s
 - `POST /api/queue/:id/transfer/release` restores the source only before sealing, or with a matching destination abort receipt after sealing.
 
 Reservations and abort tombstones survive restarts. Held retention sweeps cannot purge a reserved source or its original media. Accepted single-child transfers that durably failed or were cancelled can also obtain an abort receipt and restore the original; running, held, paused, and completed destination jobs cannot. An ambiguous response never permits blindly resuming the source. Reserved originals reject conflicting Resume, Retry, Cancel, and bulk queue mutations. Receipt forwarding uses the authenticated client's existing authority; it is not independent server-to-server proof. No inference or generation is needed to test the protocol.
+
+## Connection modes
+
+Secure is the default and uses pinned Noise for remote requests. Regular is an
+explicit direct HTTP(S) mode, including WAN, LAN and Tailscale origins. The Mold
+proxy always requires Secure. Modes use separate per-device credentials and
+never switch after a failed request.
+
+Enable host direct access with `mold serve --allow-direct-api`,
+`MOLD_ALLOW_DIRECT_API=1`, or `services.mold.allowDirectApi = true` in Nix.
+Use `mold pairing create --mode regular --direct-url https://direct.example:7680
+--output /private/invite.json`, then `mold pair --invite-file /private/invite.json`.
+Manual Regular setup uses `mold pair --mode regular --direct-url URL
+--api-key-file /private/key`. Omit the key file only for an explicitly
+auth-disabled direct host. `MOLD_HOST` picks the saved origin;
+`MOLD_CONNECTION_MODE=secure|regular` explicitly overrides its selected mode.
+Owner invitation export reads the canonical per-home operator credential if
+MOLD_API_KEY is absent. Invitations expire in two minutes and are single use.

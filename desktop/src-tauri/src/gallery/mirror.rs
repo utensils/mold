@@ -36,6 +36,7 @@ async fn require_destination_retention(
     local: &LocalServerInfo,
 ) -> Result<(), String> {
     let destination = MediaSaveTarget {
+        connection_mode: mold_secure_client::ConnectionMode::Secure,
         base_url: local.base_url.clone(),
         api_key: Some(api_key(local)?.to_string()),
     };
@@ -274,6 +275,7 @@ mod tests {
         });
         (
             MediaSaveTarget {
+                connection_mode: mold_secure_client::ConnectionMode::Secure,
                 base_url: format!("http://{address}"),
                 api_key: None,
             },
@@ -416,6 +418,7 @@ mod tests {
         });
         (
             MediaSaveTarget {
+                connection_mode: mold_secure_client::ConnectionMode::Secure,
                 base_url: format!("http://{address}"),
                 api_key: None,
             },
@@ -543,6 +546,7 @@ mod tests {
             });
             (
                 MediaSaveTarget {
+                    connection_mode: mold_secure_client::ConnectionMode::Secure,
                     base_url: format!("http://{address}"),
                     api_key: None,
                 },
@@ -761,7 +765,9 @@ fn request(
     source: &MediaSaveTarget,
     path: &str,
 ) -> reqwest::RequestBuilder {
-    let request = client.get(format!("{}{path}", source.base_url.trim_end_matches('/')));
+    let request = client
+        .get(format!("{}{path}", source.base_url.trim_end_matches('/')))
+        .header("x-mold-connection-mode", source.connection_mode.as_str());
     match source.api_key.as_deref().filter(|key| !key.is_empty()) {
         Some(key) => request.header("X-Api-Key", key),
         None => request,
@@ -929,6 +935,7 @@ async fn mirror_to_local(
         return Ok(destination_filename);
     };
     let destination = MediaSaveTarget {
+        connection_mode: mold_secure_client::ConnectionMode::Secure,
         base_url: local.base_url.clone(),
         api_key: Some(api_key(&local)?.to_string()),
     };

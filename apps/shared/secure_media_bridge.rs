@@ -42,6 +42,7 @@ impl MediaBridges {
             .retain(|(entry_owner, _), _| entry_owner != owner);
         drop(inner);
         mold_secure_client::forget_ephemeral(owner, None);
+        mold_secure_client::forget_regular_ephemeral(owner, None);
     }
 }
 fn caller_origin(window: &tauri::WebviewWindow) -> Result<String, String> {
@@ -169,5 +170,20 @@ pub fn secure_host_forget(
         .retain(|_, entry| entry.owner != window.label() || entry.namespace != namespace);
     drop(inner);
     mold_secure_client::forget_ephemeral_namespace(window.label(), &namespace);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn regular_host_register(
+    window: tauri::WebviewWindow,
+    host: mold_secure_client::RegularHost,
+) -> Result<(), String> {
+    caller_origin(&window)?;
+    mold_secure_client::register_regular_ephemeral(window.label(), host).map_err(|e| e.to_string())
+}
+#[tauri::command]
+pub fn regular_host_forget(window: tauri::WebviewWindow, origin: String) -> Result<(), String> {
+    caller_origin(&window)?;
+    mold_secure_client::forget_regular_ephemeral(window.label(), Some(&origin));
     Ok(())
 }
