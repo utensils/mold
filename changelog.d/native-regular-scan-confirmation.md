@@ -5,3 +5,5 @@
 - General preference reset preserves the explicit Regular direct-access permission alongside Secure remote access.
 
 - Native Regular connections refuse previously known Secure credentials across mode changes, machine aliases and authentication headers.
+
+- Native Secure connections retry brief proxy admission pressure before sending requests, with a bounded deadline and cancellation.

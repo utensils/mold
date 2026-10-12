@@ -76,8 +76,10 @@ actor SecureWebSocketConnection: SecureRecordConnection {
     static func connect(host: SecureHost, identity: SecureIdentity, endpoint: URL? = nil, timeout: Double = 12,
                         trustedObjectOrigin: URL = SecureObjectPolicy.productionOrigin) async throws -> SecureWebSocketConnection {
         try SecureAdmission.validate(host: host, device: identity.binding())
-        let connection = try SecureWebSocketConnection(host: host, identity: identity, endpoint: endpoint, trustedObjectOrigin: trustedObjectOrigin)
-        return try await establish(connection, timeout: timeout)
+        return try await SecureAdmissionRetry.open(timeout: timeout) { remaining in
+            let connection = try SecureWebSocketConnection(host: host, identity: identity, endpoint: endpoint, trustedObjectOrigin: trustedObjectOrigin)
+            return try await establish(connection, timeout: remaining)
+        }
     }
 
     static func connectInvitation(_ invitation: SecureInvitation, identity: SecureIdentity, endpoint: URL? = nil, timeout: Double = 12) async throws -> SecureWebSocketConnection {
@@ -85,8 +87,10 @@ actor SecureWebSocketConnection: SecureRecordConnection {
         guard invitation.invite.expiresAt > UInt64(Date().timeIntervalSince1970) else { throw PairingClaimError.expiredOrUsed }
         let host = SecureHost(binding: invitation.binding, namespace: invitation.namespace, websocketURL: invitation.websocketURL,
             grant: .init(id: "", expiresAt: 0, epoch: 0, signature: ""))
-        let connection = try SecureWebSocketConnection(host: host, identity: identity, endpoint: endpoint, invitation: invitation)
-        return try await establish(connection, timeout: timeout)
+        return try await SecureAdmissionRetry.open(timeout: timeout) { remaining in
+            let connection = try SecureWebSocketConnection(host: host, identity: identity, endpoint: endpoint, invitation: invitation)
+            return try await establish(connection, timeout: remaining)
+        }
     }
 
     private static func establish(_ connection: SecureWebSocketConnection, timeout: Double) async throws -> SecureWebSocketConnection {
@@ -113,7 +117,7 @@ actor SecureWebSocketConnection: SecureRecordConnection {
         if invitation == nil { hello["objects"] = 1 }
         try await sendJSON(hello)
         let challenge = try await receiveJSON()
-        if Self.isGatewayBusy(challenge) { throw URLError(.resourceUnavailable) }
+        if Self.isGatewayBusy(challenge) { throw SecureAdmissionRetry.ProxyBusy() }
         let now = UInt64(Date().timeIntervalSince1970)
         guard challenge["a"] as? String == "challenge", Self.number(challenge["v"]) == 3,
               let connectionID = challenge["connectionId"] as? String,
@@ -129,7 +133,7 @@ actor SecureWebSocketConnection: SecureRecordConnection {
         var ready: [String: Any]?, accepted: [String: Any]?
         for _ in 0..<4 {
             let frame = try await receiveJSON()
-            if Self.isGatewayBusy(frame) { throw URLError(.resourceUnavailable) }
+            if Self.isGatewayBusy(frame) { throw SecureAdmissionRetry.ProxyBusy() }
             guard Self.number(frame["v"]) == 3 else { throw SecureConnectionError.protocolViolation }
             if frame["a"] as? String == "ready" { ready = frame }
             else if frame["a"] as? String == "accept" { accepted = frame }
