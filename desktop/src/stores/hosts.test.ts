@@ -294,8 +294,8 @@ describe("hosts store", () => {
       apiKey: "studio-key",
       primary: false,
     });
-    expect(testRemoteHost).toHaveBeenCalledWith(hal.url, "hal-key", "regular");
-    expect(testRemoteHost).toHaveBeenCalledWith(studio.url, "studio-key", "regular");
+    expect(testRemoteHost).toHaveBeenCalledWith(hal.url, "hal-key", "secure");
+    expect(testRemoteHost).toHaveBeenCalledWith(studio.url, "studio-key", "secure");
   });
 
   it("keeps an unreachable remembered host reconnecting instead of falsely offline", async () => {
@@ -384,7 +384,7 @@ describe("hosts store", () => {
       backend: "api",
     });
     expect(apiJsonTo).toHaveBeenCalledWith(
-      { baseUrl: hal.url, apiKey: "host-key", connectionMode: "regular" },
+      { baseUrl: hal.url, apiKey: "host-key", connectionMode: "secure" },
       "/api/capabilities",
     );
   });
@@ -2182,7 +2182,7 @@ describe("hosts store", () => {
       expect(listQueue).toHaveBeenCalledWith({
         baseUrl: "http://127.0.0.1:49152",
         apiKey: "k",
-        connectionMode: "regular",
+        connectionMode: undefined,
       });
       expect(listQueue.mock.calls[0]).toHaveLength(1);
     },

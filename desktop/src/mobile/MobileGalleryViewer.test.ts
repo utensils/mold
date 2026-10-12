@@ -525,7 +525,7 @@ describe("MobileGalleryViewer", () => {
       },
       filename: "developed clip.gif",
       reuseKey:
-        'http://studio.tailnet.ts.net:7680\ndeveloped clip.mp4\n{"format":"gif","playback":"loop","repeat":"forever","max_dimension":720,"fps":12}',
+        'http://studio.tailnet.ts.net:7680\ndeveloped clip.mp4\nsecure\n{"format":"gif","playback":"loop","repeat":"forever","max_dimension":720,"fps":12}',
     });
     expect(apiFetchTo).not.toHaveBeenCalled();
     expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe(
@@ -1681,7 +1681,7 @@ describe("MobileGalleryViewer mesh export", () => {
       apiKey: "secret",
       request: { format: "stl" },
       filename: "armchair 01.stl",
-      reuseKey: 'http://studio.tailnet.ts.net:7680\narmchair 01.glb\n{"format":"stl"}',
+      reuseKey: 'http://studio.tailnet.ts.net:7680\narmchair 01.glb\nsecure\n{"format":"stl"}',
     });
     // The shell owns the export request, so the WebView never fetches the
     // bytes and the browser share sheet never opens.
@@ -1738,7 +1738,7 @@ describe("MobileGalleryViewer mesh export", () => {
       apiKey: "secret",
       request: { format: "stl" },
       filename: "armchair 01.stl",
-      reuseKey: 'http://studio.tailnet.ts.net:7680\narmchair 01.glb\n{"format":"stl"}',
+      reuseKey: 'http://studio.tailnet.ts.net:7680\narmchair 01.glb\nsecure\n{"format":"stl"}',
     });
     expect(invoke).not.toHaveBeenCalledWith("share_exported_animation", expect.anything());
     expect(apiFetchTo).not.toHaveBeenCalledWith(
@@ -2005,7 +2005,7 @@ describe("MobileGalleryViewer mesh export", () => {
       },
       filename: "armchair 01.gif",
       reuseKey:
-        'http://studio.tailnet.ts.net:7680\narmchair 01.glb\n{"format":"gif","playback":"loop","repeat":"forever","max_dimension":512,"fps":10,"frames":36}',
+        'http://studio.tailnet.ts.net:7680\narmchair 01.glb\nsecure\n{"format":"gif","playback":"loop","repeat":"forever","max_dimension":512,"fps":10,"frames":36}',
     });
     expect(invoke).not.toHaveBeenCalledWith("share_exported_animation", expect.anything());
     expect(view.find("[data-test='video-export-dialog']").exists()).toBe(false);
@@ -2081,7 +2081,7 @@ describe("MobileGalleryViewer mesh export", () => {
         // The reuse key is the request's own JSON, so a changed knob is a
         // different staged download rather than the previous file again.
         reuseKey:
-          'http://studio.tailnet.ts.net:7680\narmchair 01.glb\n{"format":"stl","size_mm":100,"up_axis":"z","origin":"center"}',
+          'http://studio.tailnet.ts.net:7680\narmchair 01.glb\nsecure\n{"format":"stl","size_mm":100,"up_axis":"z","origin":"center"}',
       });
     });
 
@@ -2125,7 +2125,7 @@ describe("MobileGalleryViewer mesh export", () => {
         "share_exported_animation",
         expect.objectContaining({
           request: { format: "stl" },
-          reuseKey: 'http://studio.tailnet.ts.net:7680\narmchair 01.glb\n{"format":"stl"}',
+          reuseKey: 'http://studio.tailnet.ts.net:7680\narmchair 01.glb\nsecure\n{"format":"stl"}',
         }),
       );
     });

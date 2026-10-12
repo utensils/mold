@@ -48,6 +48,6 @@ async function change(event: Event) {
     <p v-for="endpoint in endpoints" :key="endpoint" class="mt-2 font-mono text-xs">
       {{ endpoint }}
     </p>
-    <p v-if="error" role="alert" class="mt-2 text-xs text-stop">{{ error }}</p>
+    <p v-if="error" role="alert" class="mt-2 text-xs text-error">{{ error }}</p>
   </div>
 </template>
