@@ -143,10 +143,14 @@ pub async fn execute_http(
     };
     // Timeout before response headers, if requested by the existing consumer.
     // Body backpressure/cancellation remains owned by the response stream.
+    let read_only = crate::transport::is_read_only_method(request.method());
     if let Some(timeout) = request.timeout().copied() {
         tokio::time::timeout(timeout, secure.send(request))
             .await
-            .context("secure request timed out; its outcome may be unknown")?
+            .context(crate::transport::transport_failure_message(
+                "secure request timed out; its outcome may be unknown",
+                read_only,
+            ))?
     } else {
         secure.send(request).await
     }
