@@ -777,3 +777,5 @@ show an inline error and preserve the previous attachment. Choosing a new file,
 clearing the input, switching model/pipeline or leaving the screen cancels the old
 pick's ability to update the form. These limits concern local file selection;
 server capability and admission limits still apply when generating.
+
+Batch size works for both images and videos. Choose **1** to disable batching. To stop a whole batch, use its native iOS/macOS queue header or open a job’s details and choose **Cancel batch** on web, desktop or Tauri mobile. The CLI also supports `mold queue cancel --batch <BATCH-ID>`. Finished outputs stay in the Library.

@@ -446,3 +446,5 @@ prefix, filters at most 100 returned candidates with fuzzy matching, and paginat
 that matching set. Source, family, kind and mature-content filters still apply.
 Provider errors remain errors; this bounded fallback is not an exhaustive search
 of either provider's index. Older servers retain their provider search behavior.
+
+**Batch** in More Options applies to pictures and clips. Switching kind preserves the count; choose **1** to disable batching. A grouped Queue row exposes **Cancel Batch** even while collapsed. It cancels each eligible live child on its owning machine, preserves completed outputs, and respects older machines that cannot stop a running job.

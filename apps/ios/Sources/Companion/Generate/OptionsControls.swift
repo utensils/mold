@@ -15,13 +15,11 @@ struct OptionsControls: View {
                         range: recipe.steps.min ... recipe.steps.max) { generate.draft.steps = $0 }
                 .accessibilityIdentifier("options-steps")
         }
-        if generate.kind == .picture {
-            StepperChip(title: String(localized: "Batch"), value: generate.draft.batchSize,
-                        range: 1 ... generate.referenceBatchLimit) {
-                generate.draft.batchSize = $0
-            }
-            .accessibilityIdentifier("options-batch")
+        StepperChip(title: String(localized: "Batch"), value: generate.draft.batchSize,
+                    range: 1 ... generate.referenceBatchLimit) {
+            generate.draft.batchSize = $0
         }
+        .accessibilityIdentifier("options-batch")
         if let temporal = recipe.temporal {
             LengthChip(temporal: temporal)
                 .accessibilityIdentifier("options-length")

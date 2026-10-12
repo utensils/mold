@@ -542,3 +542,5 @@ prefix, filters at most 100 returned candidates with fuzzy matching, and paginat
 that matching set. Source, family, kind and mature-content filters still apply.
 Provider errors remain errors; this bounded fallback is not an exhaustive search
 of either provider's index. Older servers retain their provider search behavior.
+
+Batch size applies to images and videos; choose **1** to make a single output. Native iOS exposes it in **More Options**. Cancel a whole batch from its header on native iOS/macOS, or open a queued job’s details and choose **Cancel batch** on web, desktop and Tauri mobile. The CLI equivalent is `mold queue cancel --batch <BATCH-ID>`. Completed outputs remain in the Library.

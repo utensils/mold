@@ -4,10 +4,11 @@
  *
  * The model is resolved by `queueEntryDetailModel` so web, desktop, and
  * iPhone cannot disagree about what a queued job says about itself; this file
- * only paints it. Actions are emitted rather than performed, because each
- * shell owns its own authenticated target for the exact selected host.
+ * paints it. Individual actions are emitted to the shell; the shared batch
+ * control uses the same supplied, authenticated exact-host target.
  */
 import { cancelQueueDownloadRecovery } from "../composables/useQueueDownloadRecovery";
+import QueueBatchCancelControl from "./QueueBatchCancelControl.vue";
 import QueueDownloadControl from "./QueueDownloadControl.vue";
 import QueueSourceThumbnail from "./QueueSourceThumbnail.vue";
 import type { ApiTarget } from "../api/client";
@@ -304,6 +305,14 @@ async function copyDetail(): Promise<void> {
         >
           {{ retrying ? "Retrying…" : "Retry" }}
         </button>
+        <QueueBatchCancelControl
+          v-if="model.cancel.applicable"
+          :target="inputTarget"
+          :instance-id="inputInstanceId"
+          :job-id="model.jobId"
+          :online="inputOnline"
+          :disabled="cancelling || retrying"
+        />
         <button
           v-if="model.cancel.applicable"
           type="button"

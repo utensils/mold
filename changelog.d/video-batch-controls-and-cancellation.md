@@ -1,0 +1,3 @@
+- Native iOS keeps Batch available for videos, including selecting one output after batching pictures, and offers Cancel Batch on grouped queue rows.
+- Web, desktop and Tauri mobile job details offer confirmed cancellation of the selected job's entire durable batch, including batches submitted by another client.
+- Native iOS and macOS whole-batch cancellation follows siblings that start rendering or become held while an earlier cancellation is in flight.

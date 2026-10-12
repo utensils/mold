@@ -327,6 +327,67 @@ final class PopulatedGenerationTests: XCTestCase {
         app.buttons["Done"].firstMatch.tap()
     }
 
+    @MainActor func testCollapsedVideoBatchCanCancelAllItsJobs() async throws {
+        continueAfterFailure = false
+        let machine = try FixtureMachine(queueFixture: true, queueControls: true, batchQueueFixture: true)
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        defer { app.terminate(); machine.stop() }
+        cleanUpFixture(machine, port: port, app: app)
+        app.launch()
+        addQueueDownloadMachine(app, port: port)
+        XCTAssertTrue(app.navigateToDestination("Queue", shortcut: "3"))
+        let cancel = app.buttons["queue-cancel-batch-fixture-batch"]
+        XCTAssertTrue(cancel.waitForExistence(timeout: 10))
+        XCTAssertTrue(cancel.isHittable, "A collapsed batch must expose cancellation")
+        XCTAssertGreaterThanOrEqual(cancel.frame.height, 44)
+        XCTAssertTrue(machine.queueActionRequests().isEmpty)
+        cancel.tap()
+        for _ in 0..<100 where machine.queueActionRequests().count < 2 {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(machine.queueActionRequests(), ["/api/queue/fixture-video", "/api/queue/fixture-held?only_held=true"])
+        XCTAssertTrue(machine.generationRequests.isEmpty)
+        attach(app)
+    }
+
+    @MainActor func testVideoOptionsRetainAndDisableAnImageBatch() async throws {
+        continueAfterFailure = false
+        let machine = try FixtureMachine(promptExpansionFixture: true)
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        defer { app.terminate(); machine.stop() }
+        cleanUpFixture(machine, port: port, app: app)
+        app.launch()
+        addQueueDownloadMachine(app, port: port)
+        XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
+        let chooser = app.buttons["choose-model"]
+        reveal(chooser, in: app); chooser.tap()
+        let picture = app.buttons["model-flux-dev:q4"]
+        XCTAssertTrue(picture.waitForExistence(timeout: 10)); picture.tap()
+        let options = app.buttons["Options"].firstMatch
+        reveal(options, in: app); options.tap()
+        let batch = app.buttons["options-batch"]
+        reveal(batch, in: app); batch.tap()
+        app.buttons["4"].firstMatch.tap()
+        XCTAssertTrue(batch.label.contains("4"))
+        app.buttons["Done"].firstMatch.tap()
+        let kind = app.buttons["Still picture"].firstMatch
+        reveal(kind, in: app); kind.tap()
+        app.buttons["Short clip"].firstMatch.tap()
+        reveal(chooser, in: app); chooser.tap()
+        let video = app.buttons["model-ltx-2.5-22b-distilled:bf16"]
+        XCTAssertTrue(video.waitForExistence(timeout: 10)); video.tap()
+        reveal(options, in: app); options.tap()
+        XCTAssertTrue(batch.waitForExistence(timeout: 5), "Videos must retain a visible Batch control")
+        reveal(batch, in: app)
+        XCTAssertTrue(batch.label.contains("4"), "Switching kind must preserve the authored batch size")
+        batch.tap(); app.buttons["1"].firstMatch.tap()
+        XCTAssertTrue(batch.label.contains("1"), "One output disables batching")
+        attach(app)
+        XCTAssertTrue(machine.generationRequests.isEmpty)
+    }
+
     @MainActor private func checkLandscapeComposer(_ app: XCUIApplication) throws {
         XCUIDevice.shared.orientation = .landscapeLeft
         defer { XCUIDevice.shared.orientation = .portrait }

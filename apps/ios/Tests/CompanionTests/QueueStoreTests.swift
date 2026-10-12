@@ -38,6 +38,54 @@ struct QueueStoreTests {
         return (queue, hosts, fake)
     }
 
+    @Test func cancellingABatchUsesEachEligibleRouteAndLeavesOtherBatchesAlone() async throws {
+        let (queue, hosts, fake) = try await Self.setUp(capabilities: #"{"queue":{"cooperative_cancellation":true}}"#)
+        let id = hosts.hosts[0].id
+        let listing = try Self.decode(QueueListing.self, #"{"entries":[{"id":"run","state":"running","batch_id":"batch","client_batch_id":"client"},{"id":"wait","state":"queued","batch_id":"batch","client_batch_id":"client"},{"id":"held","state":"held","batch_id":"batch","client_batch_id":"client"},{"id":"done","state":"complete","batch_id":"batch","client_batch_id":"client"},{"id":"other","state":"queued","batch_id":"other","client_batch_id":"other"}]}"#)
+        fake.stub("queue()", returning: listing)
+        await queue.poll(id)
+        let group = try #require(queue.groups(for: id).first { $0.batchId == "batch" })
+        fake.stub("cancelJob(id:)", returning: ())
+        fake.stub("cancelHeldJob(id:)", returning: true)
+        #expect(queue.canCancel(group, on: id))
+        await queue.cancel(group, on: id)
+        #expect(fake.calls.filter { $0.route == "cancelJob(id:)" || $0.route == "cancelHeldJob(id:)" }.compactMap { $0.arguments.first as? String } == ["run", "wait", "held"])
+        #expect(!queue.isActing(listing.entries[0], on: id))
+    }
+
+    @Test func batchCancellationFollowsASiblingThatBecomesHeldWhileCancelling() async throws {
+        let (queue, hosts, fake) = try await Self.setUp()
+        let id = hosts.hosts[0].id
+        let before = try Self.decode(QueueListing.self, #"{"entries":[{"id":"first","state":"queued","batch_id":"batch","client_batch_id":"client"},{"id":"next","state":"queued","batch_id":"batch","client_batch_id":"client"}]}"#)
+        let after = try Self.decode(QueueListing.self, #"{"entries":[{"id":"first","state":"cancelled","batch_id":"batch","client_batch_id":"client"},{"id":"next","state":"held","batch_id":"batch","client_batch_id":"client"}]}"#)
+        fake.stub("queue()", returning: before); await queue.poll(id)
+        let group = try #require(queue.groups(for: id).first)
+        fake.stub("cancelJob(id:)") { _ in
+            fake.stub("queue()", returning: after)
+            await queue.poll(id)
+            return ()
+        }
+        fake.stub("cancelHeldJob(id:)", returning: true)
+        await queue.cancel(group, on: id)
+        #expect(fake.calls.filter { $0.route == "cancelHeldJob(id:)" }.compactMap { $0.arguments.first as? String } == ["next"])
+    }
+
+    @Test func batchCancellationSkipsLegacyRunningAndChangedIdentity() async throws {
+        let (queue, hosts, fake) = try await Self.setUp()
+        let id = hosts.hosts[0].id
+        let listing = try Self.decode(QueueListing.self, #"{"entries":[{"id":"run","state":"running","batch_id":"batch","client_batch_id":"client"},{"id":"wait","state":"queued","batch_id":"batch","client_batch_id":"client"}]}"#)
+        fake.stub("queue()", returning: listing); await queue.poll(id)
+        let group = try #require(queue.groups(for: id).first)
+        fake.stub("cancelJob(id:)", returning: ())
+        await queue.cancel(group, on: id)
+        #expect(fake.calls.filter { $0.route == "cancelJob(id:)" }.compactMap { $0.arguments.first as? String } == ["wait"])
+        fake.stub("queue()", returning: try Self.decode(QueueListing.self, #"{"entries":[{"id":"run","state":"queued","batch_id":"replacement","client_batch_id":"replacement"},{"id":"wait","state":"queued","batch_id":"replacement","client_batch_id":"replacement"}]}"#))
+        await queue.poll(id)
+        #expect(!queue.canCancel(group, on: id))
+        await queue.cancel(group, on: id)
+        #expect(fake.calls.filter { $0.route == "cancelJob(id:)" }.compactMap { $0.arguments.first as? String } == ["wait"])
+    }
+
     @Test func inputListingFailureCanBeRetriedWithoutReopeningDetails() async throws {
         let (queue, hosts, fake) = try await Self.setUp()
         let id = hosts.hosts[0].id
