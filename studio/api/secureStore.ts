@@ -195,6 +195,63 @@ async function wrappingKey(): Promise<CryptoKey> {
   );
   return put("wrapping-key", generated, true);
 }
+
+const credentialHistoryKey = "secure-credential-digests";
+function credentialDigests(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (
+    !Array.isArray(value) ||
+    value.length > 4096 ||
+    value.some(
+      (digest) => typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest),
+    )
+  )
+    throw new Error("Invalid Secure credential history.");
+  return value;
+}
+async function credentialDigest(key: string): Promise<string> {
+  const bytes = new TextEncoder().encode(`mold-secure-credential-v1\0${key}`);
+  try {
+    return Array.from(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
+      (byte) => byte.toString(16).padStart(2, "0"),
+    ).join("");
+  } finally {
+    bytes.fill(0);
+  }
+}
+async function rememberSecureCredential(key: string): Promise<void> {
+  const digest = await credentialDigest(key);
+  const database = await db();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction("secrets", "readwrite");
+    const store = transaction.objectStore("secrets");
+    const read = store.get(credentialHistoryKey);
+    read.onsuccess = () => {
+      try {
+        const history = credentialDigests(read.result);
+        if (!history.includes(digest)) {
+          if (history.length >= 4096)
+            throw new Error("Secure credential history capacity exceeded.");
+          store.put([...history, digest], credentialHistoryKey);
+        }
+      } catch {
+        transaction.abort();
+      }
+    };
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = transaction.onabort = () =>
+      reject(new Error("Could not preserve Secure credential history."));
+  });
+}
+/** Cross-origin and forgotten credentials must never authorize direct HTTP. */
+export async function isKnownSecureCredential(key: string): Promise<boolean> {
+  if (typeof indexedDB === "undefined" || !key) return false;
+  await listSecureHosts();
+  const history = credentialDigests(await get(credentialHistoryKey));
+  // Plain HTTP Studio has no Secure store or WebCrypto; Regular still works.
+  return history.length > 0 && history.includes(await credentialDigest(key));
+}
 async function seal(
   key: string,
   bytes: Uint8Array<ArrayBuffer>,
@@ -290,6 +347,7 @@ export async function saveSecureHost(
   }
   const encoded = new TextEncoder().encode(JSON.stringify(profile));
   try {
+    await rememberSecureCredential(profile.apiKey);
     await put(
       key,
       await seal(key, encoded),
@@ -328,7 +386,7 @@ export async function listSecureHosts(): Promise<SecureHostProfile[]> {
       request.onerror = () =>
         reject(new Error("Secure pairings could not be read."));
     });
-    if (keys.length > 130) throw new Error("Too many stored secure pairings.");
+    if (keys.length > 131) throw new Error("Too many stored secure pairings.");
     const result: SecureHostProfile[] = [];
     for (const key of keys) {
       if (typeof key !== "string" || !key.startsWith("host:")) continue;
@@ -341,6 +399,7 @@ export async function listSecureHosts(): Promise<SecureHostProfile[]> {
           new TextDecoder().decode(plain),
         ) as SecureHostProfile;
         profileGenerations.set(profile, authority);
+        await rememberSecureCredential(profile.apiKey);
         result.push(profile);
       } finally {
         plain.fill(0);

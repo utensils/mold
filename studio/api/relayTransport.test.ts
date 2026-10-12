@@ -7,10 +7,12 @@ const mocks = vi.hoisted(() => {
     fetch: vi.fn(),
     current: vi.fn(),
     identity: vi.fn(),
+    knownCredential: vi.fn(),
   };
 });
 vi.mock("./secureStore", () => ({
   secureHostForOrigin: mocks.lookup,
+  isKnownSecureCredential: mocks.knownCredential,
   deviceIdentity: mocks.identity,
   assertSecureHostCurrent: mocks.current,
 }));
@@ -30,6 +32,7 @@ beforeEach(() => {
   mocks.current.mockImplementation(() => {});
   mocks.identity.mockResolvedValue({ close() {}, free() {} });
   mocks.lookup.mockResolvedValue(null);
+  mocks.knownCredential.mockResolvedValue(false);
   mocks.connect.mockResolvedValue({
     closed: false,
     close() {},
@@ -378,5 +381,26 @@ it("does not transmit a secure key through Bearer authentication in Regular mode
       },
     }),
   ).rejects.toThrow(/secure credential/i);
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it("rejects a known Secure credential on an unrelated Regular origin", async () => {
+  const fetch = vi.fn();
+  vi.stubGlobal("fetch", fetch);
+  mocks.knownCredential.mockImplementation(
+    async (key: string) => key === "secure-other-origin",
+  );
+  for (const credentials of [
+    { "x-api-key": "secure-other-origin" },
+    { authorization: "Bearer secure-other-origin" },
+    { authorization: "Bearer harmless, Bearer secure-other-origin" },
+    { "x-api-key": "harmless, secure-other-origin" },
+  ]) {
+    await expect(
+      relayFetch("http://203.0.113.7:7680/api/status", {
+        headers: { "x-mold-connection-mode": "regular", ...credentials },
+      }),
+    ).rejects.toThrow(/Secure credential/);
+  }
   expect(fetch).not.toHaveBeenCalled();
 });

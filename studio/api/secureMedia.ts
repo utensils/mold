@@ -84,7 +84,7 @@ export async function secureMediaUrl(
   const mode = new Headers(headers).get(CONNECTION_MODE_HEADER) ?? "secure";
   const profile = await secureHostForOrigin(url.origin, mode !== "regular");
   if (mode === "regular") {
-    assertRegularRequest(url, new Headers(headers), profile);
+    await assertRegularRequest(url, new Headers(headers), profile);
     return null;
   }
   if (!profile && isLoopbackOrigin(url)) return null;

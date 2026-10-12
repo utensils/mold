@@ -5,6 +5,7 @@ import {
   secureHostForOrigin,
   renewSecureHostGrant,
   assertSecureHostCurrent,
+  isKnownSecureCredential,
   type SecurePairingChange,
 } from "./secureStore";
 import {
@@ -242,11 +243,11 @@ async function channelFor(
 }
 
 /** Also used before media hands an ordinary URL to a platform player. */
-export function assertRegularRequest(
+export async function assertRegularRequest(
   url: URL,
   headers: Headers,
   profile: SecureHostProfile | null,
-): void {
+): Promise<void> {
   directOrigin(url.origin);
   if (
     profile?.endpoints.some(
@@ -254,14 +255,23 @@ export function assertRegularRequest(
     )
   )
     throw new Error("The proxy always requires a Secure connection.");
-  const bearer = headers.get("authorization")?.replace(/^Bearer\s+/i, "");
-  if (
-    profile?.apiKey &&
-    (headers.get("x-api-key") === profile.apiKey || bearer === profile.apiKey)
-  )
-    throw new Error(
-      "A Secure credential cannot be used for a Regular connection. Pair again in Regular mode.",
-    );
+  const candidates = [
+    ...(headers.get("x-api-key") ?? "").split(","),
+    ...(headers.get("authorization") ?? "")
+      .split(",")
+      .map((value) => value.trim().replace(/^Bearer\s+/i, "")),
+  ]
+    .map((value) => value.trim())
+    .filter(Boolean);
+  for (const candidate of candidates) {
+    if (
+      candidate === profile?.apiKey ||
+      (await isKnownSecureCredential(candidate))
+    )
+      throw new Error(
+        "A Secure credential cannot be used for a Regular connection. Pair again in Regular mode.",
+      );
+  }
 }
 
 /** Secure is the default. Regular HTTP requires an explicit direct selection. */
@@ -282,8 +292,10 @@ export async function relayFetch(
   const mode = selection ?? "secure";
   const profile = await secureHostForOrigin(url.origin, mode !== "regular");
   if (mode === "regular") {
-    assertRegularRequest(url, headers, profile);
+    await assertRegularRequest(url, headers, profile);
     headers.delete("x-mold-secure-peer");
+    headers.delete("x-mold-secure-control");
+    headers.delete("cookie");
     return globalThis.fetch(
       new Request(url, {
         method: request.method,

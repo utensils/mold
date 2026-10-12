@@ -1,6 +1,9 @@
 import { beforeEach, expect, it, vi } from "vitest";
 const lookup = vi.hoisted(() => vi.fn());
-vi.mock("./secureStore", () => ({ secureHostForOrigin: lookup }));
+vi.mock("./secureStore", () => ({
+  secureHostForOrigin: lookup,
+  isKnownSecureCredential: async () => false,
+}));
 import { configureSecureMediaAdapter, secureMediaUrl } from "./secureMedia";
 const open = vi.fn();
 beforeEach(() => {
