@@ -96,7 +96,9 @@ struct RegularConnectionTests {
         _ = HTTPBackend(host: MoldHost(name: "Secure", baseURL: URL(string: "https://secure.example")!, apiKey: secret, secure: pins))
         let regular = MoldHost(name: "Alias", baseURL: URL(string: "https://gpu.example.com")!, apiKey: "regular-key", connectionMode: .regular)
         let backend = HTTPBackend(host: regular, session: Self.session())
-        for (header, value) in [("X-API-Key", secret), ("Authorization", "bEaReR  " + secret)] {
+        for (header, value) in [("X-API-Key", secret), ("Authorization", "bEaReR  " + secret),
+                                ("Authorization", "Bearer harmless, Bearer " + secret),
+                                ("X-API-Key", "harmless, " + secret)] {
             var request = URLRequest(url: regular.baseURL.appending(path: "api/status"))
             request.setValue(value, forHTTPHeaderField: header)
             await #expect(throws: SecureConnectionError.pairingRequired) { try await backend.response(request) }
@@ -125,6 +127,13 @@ struct RegularConnectionTests {
         }
         host.apiKey = "regular-device-key"
         try restored.refuseKnownSecureCredentials(host: host, request: URLRequest(url: host.baseURL), session: Self.session())
+        for header in ["Cookie", "X-Mold-Secure-Peer", "X-Mold-Secure-Control"] {
+            let config = URLSessionConfiguration.ephemeral
+            config.httpAdditionalHeaders = [header: "private-session-value"]
+            #expect(throws: SecureConnectionError.pairingRequired) {
+                try restored.refuseKnownSecureCredentials(host: host, request: URLRequest(url: host.baseURL), session: URLSession(configuration: config))
+            }
+        }
         let stored = try #require(defaults.stringArray(forKey: SecureCredentialHistory.storageKey))
         #expect(stored.count == 1)
         #expect(stored[0].count == 64)
@@ -134,6 +143,15 @@ struct RegularConnectionTests {
         #expect(throws: SecureConnectionError.pairingRequired) {
             try restored.refuseKnownSecureCredentials(host: host, request: URLRequest(url: host.baseURL), session: URLSession(configuration: config))
         }
+    }
+
+    @Test func regularRequestsStripCookieAndSecureProofHeaders() async throws {
+        let host = MoldHost(name: "GPU", baseURL: URL(string: "https://gpu.example.com/mold")!, apiKey: "regular-device-key", connectionMode: .regular)
+        let backend = HTTPBackend(host: host, session: Self.session())
+        var request = backend.request("/message")
+        for header in ["Cookie", "X-Mold-Secure-Peer", "X-Mold-Secure-Control"] { request.setValue("private-value", forHTTPHeaderField: header) }
+        let (_, response) = try await backend.response(request)
+        #expect(response.statusCode == 200)
     }
 
     @Test func regularSessionDecodesCanonicalBaseURL() throws {
@@ -171,6 +189,7 @@ private final class RegularProtocol: StubTransport {
             if request.value(forHTTPHeaderField: "X-Api-Key") != nil { status = 400 }
             body = #"{"mode":"regular","api_key":"regular-device-key","instance_id":"machine","hostname":"GPU","base_url":"https://gpu.example.com:8443"}"#
         } else if request.url?.path == "/mold/message", request.value(forHTTPHeaderField: "X-Api-Key") == "regular-device-key" {
+            if ["Cookie", "X-Mold-Secure-Peer", "X-Mold-Secure-Control"].contains(where: { request.value(forHTTPHeaderField: $0) != nil }) { status = 400 }
             body = #"{"value":"regular"}"#
         } else { status = 400; body = "{}" }
         let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!

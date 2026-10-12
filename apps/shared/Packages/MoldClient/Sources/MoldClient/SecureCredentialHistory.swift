@@ -28,11 +28,21 @@ public final class SecureCredentialHistory: @unchecked Sendable {
                             if let name = entry.key as? String, let value = entry.value as? String { result[name] = value }
                         }] {
             for (name, value) in headers {
-                if name.caseInsensitiveCompare("X-API-Key") == .orderedSame { credentials.append(value) }
-                if name.caseInsensitiveCompare("Authorization") == .orderedSame {
-                    let parts = value.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
-                    if parts.count == 2, parts[0].lowercased() == "bearer" { credentials.append(String(parts[1])) }
+                if name.caseInsensitiveCompare("X-API-Key") == .orderedSame {
+                    credentials += value.split(separator: ",").map(String.init)
                 }
+                if name.caseInsensitiveCompare("Authorization") == .orderedSame {
+                    for segment in value.split(separator: ",") {
+                        let parts = segment.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+                        if parts.count == 2, parts[0].lowercased() == "bearer" { credentials.append(String(parts[1])) }
+                    }
+                }
+            }
+        }
+        // URLSession may inject default headers after the request boundary.
+        for name in (session.configuration.httpAdditionalHeaders ?? [:]).keys {
+            if let name = name as? String, Self.privateHeaders.contains(name.lowercased()) {
+                throw SecureConnectionError.pairingRequired
             }
         }
         lock.lock(); defer { lock.unlock() }
@@ -43,6 +53,8 @@ public final class SecureCredentialHistory: @unchecked Sendable {
             }
         }
     }
+
+    static let privateHeaders: Set<String> = ["cookie", "x-mold-secure-peer", "x-mold-secure-control"]
 
     private static func digest(_ credential: String) -> String? {
         let bytes = Data(credential.trimmingCharacters(in: .whitespacesAndNewlines).utf8)
