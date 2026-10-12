@@ -14,10 +14,12 @@ import Testing
         try await assertPlayback(AVPlayerItem(url: fixture))
     }
 
-    @Test(arguments: [false, true], [Duration.zero, .milliseconds(30)])
+    @Test(arguments: [false, true], [Duration.zero, .milliseconds(10)])
     func avFoundationLoadsAndSeeksThroughRangeAdapter(trashed: Bool, delay: Duration) async throws {
         // A generated 720p clip exercises real playback throughput; the old
         // 32 KiB sample only demonstrated metadata and single-frame decoding.
+        // 16 KiB every 10 ms exceeds this clip's ~700 KiB/s bitrate. A 30 ms
+        // interval starves playback and tests manual stall recovery instead.
         let transport = MediaRangeFixture(data: try Data(contentsOf: fixture), delay: delay)
         let backend = HTTPBackend(host: .init(name: "Encrypted fixture", baseURL: URL(string: "https://not-fetched.invalid")!, apiKey: "encrypted-api-credential"), transport: transport)
         let media = try await backend.playableMedia(for: "movie.mp4", trashed: trashed)
