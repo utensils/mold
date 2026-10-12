@@ -214,9 +214,10 @@ struct ClipPlayer: View {
     private func play(from time: CMTime?, reminted: Bool) async {
         guard let host = hosts.host(entry.hostID) else { return }
         let item: AVPlayerItem
+        let media: PlayableMedia
         do {
             try PlaybackAudio.configure()
-            let media = try await hosts.backend(for: host).playableMedia(for: entry.print.filename, trashed: entry.print.trashedAt != nil)
+            media = try await hosts.backend(for: host).playableMedia(for: entry.print.filename, trashed: entry.print.trashedAt != nil)
             if Task.isCancelled {
                 if let url = media.localURL, url.isFileURL { try? FileManager.default.removeItem(at: url) }
                 return
@@ -232,10 +233,20 @@ struct ClipPlayer: View {
         }
         ready = false
         playbackID = entry.id
-        if let player { player.replaceCurrentItem(with: item) } else { player = AVPlayer(playerItem: item) }
-        if let time { await player?.seek(to: time) }
-        guard !Task.isCancelled, isSelected else { player?.pause(); return }
-        if autoplay || reminted { ClipPlayback.sync(player, isSelected: true) }
+        let nextPlayer = player ?? AVPlayer()
+        nextPlayer.replaceCurrentItem(with: item)
+        media.configure(nextPlayer)
+        if let time { await nextPlayer.seek(to: time) }
+        do { try await media.prepare(nextPlayer) }
+        catch is CancellationError { return }
+        catch {
+            problem = String(localized: "This clip can't be played here: \(error.reasonSentence)")
+            player = nil
+            return
+        }
+        guard !Task.isCancelled, isSelected else { nextPlayer.pause(); return }
+        player = nextPlayer
+        if autoplay || reminted { ClipPlayback.sync(player, isSelected: scenePhase == .active) }
         for await status in item.publisher(for: \.status).values {
             guard !Task.isCancelled, isSelected else { return }
             if status == .readyToPlay { ready = true }

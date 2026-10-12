@@ -12,6 +12,38 @@ public struct PlayableMedia: Sendable {
     public init(url: URL) { localURL = url; backend = nil; mediaURL = nil }
     init(backend: HTTPBackend, url: URL) { self.backend = backend; mediaURL = url; localURL = nil }
 
+    /// Apply before playing or seeking, including when reusing a player.
+    /// AVAssetResourceLoader.setDelegate(_:queue:) requires disabling predictive
+    /// buffering when the delegate supplies media bytes; its predictions cannot
+    /// account for client-controlled delivery. Local assets retain the default.
+    @MainActor public func configure(_ player: AVPlayer) {
+        player.automaticallyWaitsToMinimizeStalling = backend == nil
+    }
+
+    /// Client-loaded assets cannot use AVPlayer's predictive waiting. Prime a
+    /// small, measured playback window before starting instead of racing the
+    /// first response buffer. This never waits for an entire long movie.
+    @MainActor public func prepare(_ player: AVPlayer) async throws {
+        configure(player)
+        guard backend != nil, let item = player.currentItem else { return }
+        let duration = try await item.asset.load(.duration).seconds
+        let clock = ContinuousClock()
+        let deadline = clock.now + .seconds(30)
+        while true {
+            try Task.checkCancellation()
+            if let error = item.error { throw error }
+            guard player.currentItem === item else { throw CancellationError() }
+            let position = max(0, player.currentTime().seconds)
+            let ahead = duration.isFinite ? min(2, max(0, duration - position)) : 2
+            if item.status == .readyToPlay, item.loadedTimeRanges.contains(where: {
+                let range = $0.timeRangeValue
+                return range.start.seconds <= position + 0.05 && CMTimeRangeGetEnd(range).seconds >= position + ahead - 0.05
+            }) { return }
+            guard clock.now < deadline else { throw URLError(.timedOut) }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
     @MainActor public func playerItem() -> AVPlayerItem {
         guard let backend, let mediaURL else { return AVPlayerItem(url: localURL!) }
         let asset = AVURLAsset(url: URL(string: "mold-secure://media")!.appending(path: UUID().uuidString).appending(path: mediaURL.lastPathComponent))
@@ -71,17 +103,14 @@ private nonisolated(unsafe) var secureMediaLoaderKey: UInt8 = 0
             }
             if let dataRequest {
                 var remaining = dataRequest.requestsAllDataToEndOfResource ? Int64.max : length!
-                var chunk = Data(); chunk.reserveCapacity(16_384)
-                for try await byte in body {
+                for try await chunk in body.chunks {
                     try Task.checkCancellation()
                     guard !loading.isCancelled else { throw CancellationError() }
-                    chunk.append(byte); remaining -= 1
-                    if chunk.count == 16_384 || remaining == 0 {
-                        dataRequest.respond(with: chunk); chunk.removeAll(keepingCapacity: true)
-                    }
+                    let count = Int(min(Int64(chunk.count), remaining))
+                    dataRequest.respond(with: Data(chunk.prefix(count)))
+                    remaining -= Int64(count)
                     if remaining == 0 { break }
                 }
-                if !chunk.isEmpty { dataRequest.respond(with: chunk) }
             }
             await body.cancel()
             guard !loading.isCancelled else { return }

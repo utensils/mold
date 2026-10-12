@@ -34,6 +34,7 @@ struct SecureSocketIntegrationTests {
             let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
             item.add(output)
             let player = AVPlayer(playerItem: item)
+            try await media.prepare(player)
             defer { player.pause(); player.replaceCurrentItem(with: nil) }
             player.play()
             let clock = ContinuousClock()

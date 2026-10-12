@@ -3,6 +3,41 @@ import Testing
 @testable import MoldClient
 
 struct MoldResponseBytesTests {
+    @Test func chunkSequencePreservesBoundedTransportChunksAndPullsOnDemand() async throws {
+        let first = Data(repeating: 1, count: 16_384)
+        let second = Data([2, 3])
+        let source = BodyFixture([first, second])
+        var iterator = MoldResponseBytes(reader: source).chunks.makeAsyncIterator()
+        #expect(await source.reads == 0)
+        #expect(try await iterator.next() == first)
+        #expect(await source.reads == 1)
+        #expect(try await iterator.next() == second)
+        #expect(await source.reads == 2)
+        #expect(try await iterator.next() == nil)
+    }
+
+    @Test(arguments: [Data(), Data(repeating: 1, count: 65_537)])
+    func chunkSequenceRejectsInvalidTransportChunks(chunk: Data) async throws {
+        let source = BodyFixture([chunk])
+        await #expect(throws: MoldBodyError.invalidChunk) {
+            var iterator = MoldResponseBytes(reader: source).chunks.makeAsyncIterator()
+            _ = try await iterator.next()
+        }
+        #expect(await source.cancelled)
+    }
+
+    @Test func cancellingChunkReadClosesTheUnderlyingStream() async throws {
+        let source = BodyFixture([], suspend: true)
+        let task = Task {
+            var iterator = MoldResponseBytes(reader: source).chunks.makeAsyncIterator()
+            _ = try await iterator.next()
+        }
+        while await source.reads == 0 { await Task.yield() }
+        task.cancel()
+        _ = try? await task.value
+        #expect(await source.cancelled)
+    }
+
     @Test func doesNotPullAnotherChunkUntilConsumerExhaustsTheCurrentOne() async throws {
         let source = BodyFixture([Data([1, 2, 3]), Data([4])])
         let bytes = MoldResponseBytes(reader: source)

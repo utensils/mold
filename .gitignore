@@ -144,6 +144,7 @@ apps/shared/**/build/
 
 # Tiny native media decoder regression fixtures.
 !apps/shared/Packages/MoldClient/Tests/MoldClientTests/Fixtures/reference-video.mp4
+!apps/shared/Packages/MoldClient/Tests/MoldClientTests/Fixtures/playback-range-stress.mp4
 !apps/shared/Packages/MoldClient/Tests/MoldClientTests/Fixtures/reference-hevc.mp4
 
 # Native export UAT archive fixture.
