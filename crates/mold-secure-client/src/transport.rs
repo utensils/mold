@@ -110,7 +110,24 @@ impl Drop for Connection {
         self.cancel.cancel();
     }
 }
+pub(crate) fn is_read_only_method(method: &reqwest::Method) -> bool {
+    matches!(
+        *method,
+        reqwest::Method::GET | reqwest::Method::HEAD | reqwest::Method::OPTIONS
+    )
+}
+pub(crate) fn transport_failure_message(message: &'static str, read_only: bool) -> &'static str {
+    if read_only {
+        message
+            .strip_suffix("; mutation outcome may be unknown")
+            .or_else(|| message.strip_suffix("; its outcome may be unknown"))
+            .unwrap_or(message)
+    } else {
+        message
+    }
+}
 struct StreamState {
+    read_only: bool,
     head: Option<oneshot::Sender<Result<Headers>>>,
     body: crate::BodySender,
     upload_credit: Arc<Semaphore>,
@@ -121,7 +138,7 @@ struct StreamState {
 impl StreamState {
     fn fail(mut self, message: &'static str) {
         self.cancel.cancel();
-        let error = anyhow::anyhow!(message);
+        let error = anyhow::anyhow!(transport_failure_message(message, self.read_only));
         if let Some(head) = self.head.take() {
             let _ = head.send(Err(error));
         } else {
@@ -230,6 +247,7 @@ impl SecureClient {
         self.send_inner(request).await
     }
     async fn send_inner(&self, mut request: reqwest::Request) -> Result<reqwest::Response> {
+        let read_only = is_read_only_method(request.method());
         let host = self.snapshot();
         let connection = self.connection().await?;
         // Hold through Start enqueue: another task cannot publish a newer ID
@@ -292,6 +310,7 @@ impl SecureClient {
                 open,
                 id,
                 state: StreamState {
+                    read_only,
                     head: Some(headtx),
                     body: bodytx,
                     upload_credit: credit.clone(),
@@ -319,11 +338,15 @@ impl SecureClient {
         let head = if let Some(duration) = request.timeout() {
             tokio::time::timeout(*duration, headrx)
                 .await
-                .context("secure response timed out; mutation outcome may be unknown")??
+                .context(transport_failure_message(
+                    "secure response timed out; mutation outcome may be unknown",
+                    read_only,
+                ))??
         } else {
-            headrx
-                .await
-                .context("secure response lost; mutation outcome may be unknown")?
+            headrx.await.context(transport_failure_message(
+                "secure response lost; mutation outcome may be unknown",
+                read_only,
+            ))?
         }?;
         let commands = connection.commands.clone();
         let body = futures_util::stream::unfold(
@@ -846,6 +869,7 @@ mod cancellation_tests {
         // parent token, before the connection-stop select arm is polled.
         cancel.cancel();
         let state = StreamState {
+            read_only: false,
             head: headers_pending.then_some(head_tx),
             body: body_tx,
             upload_credit: Arc::new(Semaphore::new(STREAM_WINDOW as usize)),
@@ -856,6 +880,33 @@ mod cancellation_tests {
         (BTreeMap::from([(1, state)]), head_rx, body_rx)
     }
 
+    #[test]
+    fn read_only_methods_do_not_report_mutation_outcomes() {
+        for method in [
+            reqwest::Method::GET,
+            reqwest::Method::HEAD,
+            reqwest::Method::OPTIONS,
+        ] {
+            assert!(is_read_only_method(&method));
+        }
+        for method in [
+            reqwest::Method::POST,
+            reqwest::Method::PUT,
+            reqwest::Method::PATCH,
+            reqwest::Method::DELETE,
+        ] {
+            assert!(!is_read_only_method(&method));
+        }
+    }
+    #[tokio::test]
+    async fn cancelled_read_reports_interruption_without_mutation_advice() {
+        let (mut streams, _, mut body) = pending_stream(false);
+        streams.get_mut(&1).unwrap().read_only = true;
+        cancel_stream(&mut streams, 1);
+        let error = body.recv().await.unwrap().unwrap_err();
+        assert_eq!(error.to_string(), "secure request cancelled");
+        assert!(body.recv().await.is_none());
+    }
     #[tokio::test]
     async fn cancelled_timer_cleanup_reports_body_error_instead_of_successful_eof() {
         let (mut streams, _, mut body) = pending_stream(false);
