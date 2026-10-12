@@ -141,20 +141,21 @@ export function createSecureRouter({
     });
   }
   async function release(key, id) {
-    await update(key, (old) => {
+    for (let attempt = 0; attempt < 32; attempt++) {
+      const old = await store.get(key);
       if (!old?.members?.[id]) return;
       const members = { ...old.members };
       delete members[id];
-      return { ...old, members };
-    });
+      if (await store.cas(key, old.revision, { ...old, members })) return;
+    }
+    throw new Error("quota cleanup contention");
   }
   async function releasePending(id, connection) {
-    await Promise.all([
-      release("v3-pending", id),
-      connection?.source
-        ? release(`v3-pending#${connection.source}`, id)
-        : undefined,
-    ]);
+    // Keep the source ledger until global cleanup succeeds, so a later
+    // admission can retry a partially completed release.
+    await release("v3-pending", id);
+    if (connection?.source)
+      await release(`v3-pending#${connection.source}`, id);
   }
   async function leave(id, expectedSid) {
     const connection = await store.get(connectionKey(id));
@@ -197,6 +198,52 @@ export function createSecureRouter({
       }
     }
   }
+  async function reclaimPending(source) {
+    const ledger = await store.get(`v3-pending#${source}`);
+    // Source admission is capped at four; never scan the global 128-slot ledger.
+    for (const [id, until] of Object.entries(ledger?.members ?? {})) {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const connection = await store.get(connectionKey(id));
+        if (connection?.state === "active") {
+          // Join committed but release failed: preserve the authenticated socket.
+          await releasePending(id, { source });
+          break;
+        }
+        if (!connection) {
+          // Reservation precedes row creation. Allow a full challenge window
+          // (well beyond the ten-second Lambda deadline) before fencing absence.
+          if (until > now() + IDLE) break;
+        } else if (
+          (connection.state !== "closing" && connection.expiresAt > now()) ||
+          (connection.state === "joining" &&
+            connection.expiresAt + CHALLENGE > now())
+        )
+          break;
+        // Fence hello/join against an expired-row cleanup. A failed close keeps
+        // this tombstone and both quota leases, allowing the next admission to
+        // retry cleanup without admitting an unbounded number of live sockets.
+        const closing = {
+          ...connection,
+          state: "closing",
+          source,
+          expiresAt: now() + IDLE,
+        };
+        if (
+          connection?.state !== "closing" &&
+          !(await store.cas(
+            connectionKey(id),
+            connection?.revision ?? 0,
+            closing,
+          ))
+        )
+          continue;
+        await close(id);
+        await store.remove(connectionKey(id));
+        await releasePending(id, { source });
+        break;
+      }
+    }
+  }
   async function connect(id, event) {
     if (event.queryStringParameters?.v !== "3") return 426;
     // API Gateway's trusted socket source, never a caller forwarding header.
@@ -212,8 +259,18 @@ export function createSecureRouter({
     // sends hello. DynamoDB TTL is cleanup, not an authorization boundary.
     if (
       !(await reserve(`v3-pending#${source}`, id, 4, now() + IDLE + CHALLENGE))
-    )
-      return 429;
+    ) {
+      await reclaimPending(source);
+      if (
+        !(await reserve(
+          `v3-pending#${source}`,
+          id,
+          4,
+          now() + IDLE + CHALLENGE,
+        ))
+      )
+        return 429;
+    }
     if (!(await reserve("v3-pending", id, 128, now() + IDLE + CHALLENGE))) {
       await release(`v3-pending#${source}`, id);
       return 429;
@@ -472,7 +529,10 @@ export function createSecureRouter({
       ...(authority.grant ? { grant: authority.grant } : {}),
       ...(authority.invite ? { invite: authority.invite } : {}),
     };
-    await store.put(connectionKey(id), active);
+    // The joining revision must still belong to this challenge: cleanup must
+    // never be followed by an unconditional active-row resurrection.
+    if (!(await store.cas(connectionKey(id), connection.revision + 1, active)))
+      return 409;
     await releasePending(id, connection);
     if (connection.role !== "host")
       await post(host.connectionId, {

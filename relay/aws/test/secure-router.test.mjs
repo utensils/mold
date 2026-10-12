@@ -20,15 +20,17 @@ function fixture(options = {}) {
       return value;
     },
     async cas(id, rev, value) {
-      await options.cas?.(id, rev, value);
+      if ((await options.cas?.(id, rev, value)) === false) return false;
       if ((rows.get(id)?.revision ?? 0) !== rev) return false;
       rows.set(id, structuredClone({ ...value, revision: rev + 1 }));
       return true;
     },
     async put(id, value) {
+      await options.put?.(id, value);
       rows.set(id, structuredClone({ ...value, revision: 1 }));
     },
     async remove(id) {
+      await options.remove?.(id);
       rows.delete(id);
     },
   };
@@ -40,7 +42,10 @@ function fixture(options = {}) {
       await options.post?.(id, frame);
       delivered.push({ to: id, ...frame });
     },
-    close: async (id) => closed.push(id),
+    close: async (id) => {
+      await options.close?.(id);
+      closed.push(id);
+    },
     checkConnection: options.checkConnection,
   });
   const send = (id, frame) =>
@@ -663,4 +668,183 @@ test("host cancellation closes cloud membership instead of leaving storage autho
   assert.equal(f.rows.has("v3-connection#device"), false);
   assert.ok(f.closed.includes("device"));
   assert.equal(f.rows.get(`v3-host#${h.namespace}`).guests.device, undefined);
+});
+
+function pendingLedgers(f) {
+  return [...f.rows.entries()].filter(([key]) => key.startsWith("v3-pending"));
+}
+async function fillPending(f) {
+  for (let i = 0; i < 4; i++)
+    assert.equal((await f.connect(`stale${i}`)).statusCode, 200);
+}
+test("expired pending sockets are closed before four ordinary admissions recover", async () => {
+  const f = fixture();
+  await fillPending(f);
+  f.advance(61);
+  const results = await Promise.all(
+    Array.from({ length: 4 }, (_, i) => f.connect(`fresh${i}`)),
+  );
+  assert.equal(results.filter((r) => r.statusCode === 200).length, 4);
+  for (let i = 0; i < 4; i++) assert.ok(f.closed.includes(`stale${i}`));
+  for (const [, row] of pendingLedgers(f))
+    assert.equal(Object.keys(row.members).length, 4);
+  assert.equal((await f.connect("over-cap")).statusCode, 429);
+});
+test("missing pending rows are reclaimed only after the creation grace", async () => {
+  const f = fixture();
+  await fillPending(f);
+  f.rows.delete("v3-connection#stale0");
+  assert.equal((await f.connect("creating")).statusCode, 429);
+  assert.deepEqual(f.closed, []);
+  f.advance(61);
+  assert.equal((await f.connect("recovered")).statusCode, 200);
+  assert.ok(f.closed.includes("stale0"));
+  for (const [, row] of pendingLedgers(f)) assert.ok(!row.members.stale0);
+});
+test("completed join with leftover pending leases is reclaimed without closing active peer", async () => {
+  const f = fixture();
+  await fillPending(f);
+  f.rows.set("v3-connection#stale0", {
+    state: "active",
+    sid: "live",
+    revision: 2,
+    expiresAt: 1090,
+  });
+  assert.equal((await f.connect("fresh")).statusCode, 200);
+  assert.deepEqual(f.closed, []);
+  assert.equal(f.rows.get("v3-connection#stale0").sid, "live");
+  for (const [, row] of pendingLedgers(f)) assert.ok(!row.members.stale0);
+});
+test("failed socket cleanup retains both quota leases and recovers on next admission", async () => {
+  let failing = true;
+  const f = fixture({
+    close: async () => {
+      if (failing) throw Error("unavailable");
+    },
+  });
+  await fillPending(f);
+  f.advance(61);
+  assert.equal((await f.connect("blocked")).statusCode, 503);
+  for (const [, row] of pendingLedgers(f))
+    assert.equal(Object.keys(row.members).length, 4);
+  failing = false;
+  assert.equal((await f.connect("recovered")).statusCode, 200);
+});
+test("reclamation CAS loses to a concurrent completed join and never closes that peer", async () => {
+  let armed = false,
+    f;
+  f = fixture({
+    cas: async (key, rev, next) => {
+      if (armed && key === "v3-connection#stale0" && next.state === "closing") {
+        armed = false;
+        f.rows.set(key, {
+          state: "active",
+          sid: "won",
+          revision: rev + 1,
+          expiresAt: 1200,
+        });
+      }
+    },
+  });
+  await fillPending(f);
+  f.advance(61);
+  armed = true;
+  assert.equal((await f.connect("fresh")).statusCode, 200);
+  assert.ok(!f.closed.includes("stale0"));
+  assert.equal(f.rows.get("v3-connection#stale0").sid, "won");
+});
+test("in-flight joining retains capacity until its bounded completion grace", async () => {
+  const f = fixture();
+  await fillPending(f);
+  for (let i = 0; i < 4; i++)
+    f.rows.get(`v3-connection#stale${i}`).state = "joining";
+  f.advance(61);
+  assert.equal((await f.connect("waiting")).statusCode, 429);
+  assert.deepEqual(f.closed, []);
+  f.advance(60);
+  assert.equal((await f.connect("recovered")).statusCode, 200);
+});
+
+test("concurrent reservation before row creation cannot be reclaimed as an orphan", async () => {
+  let releasePut, enteredPut;
+  const gate = new Promise((resolve) => {
+    releasePut = resolve;
+  });
+  const entered = new Promise((resolve) => {
+    enteredPut = resolve;
+  });
+  const f = fixture({
+    put: async (key) => {
+      if (key === "v3-connection#creating") {
+        enteredPut();
+        await gate;
+      }
+    },
+  });
+  const creating = f.connect("creating");
+  await entered;
+  for (let i = 0; i < 3; i++)
+    assert.equal((await f.connect(`other${i}`)).statusCode, 200);
+  assert.equal((await f.connect("over-cap")).statusCode, 429);
+  assert.deepEqual(f.closed, []);
+  releasePut();
+  assert.equal((await creating).statusCode, 200);
+  assert.equal(f.rows.get("v3-connection#creating").state, "pending");
+});
+test("global release failure retains source ledger for a later cleanup retry", async () => {
+  let failing = false;
+  const f = fixture({
+    cas: async (key, _rev, row) => {
+      if (failing && key === "v3-pending" && !row.members.stale0)
+        throw Error("unavailable");
+    },
+  });
+  await fillPending(f);
+  f.advance(61);
+  failing = true;
+  assert.equal((await f.connect("blocked")).statusCode, 503);
+  for (const [, row] of pendingLedgers(f)) assert.ok(row.members.stale0);
+  failing = false;
+  assert.equal((await f.connect("recovered")).statusCode, 200);
+  for (const [, row] of pendingLedgers(f)) assert.ok(!row.members.stale0);
+});
+test("active installation cannot overwrite a cleanup fence after joining", async () => {
+  let f;
+  f = fixture({
+    cas: async (key, revision, next) => {
+      if (key === "v3-connection#host" && next.state === "active") {
+        f.rows.set(key, {
+          state: "closing",
+          revision: revision + 1,
+          expiresAt: 1600,
+        });
+      }
+    },
+  });
+  const h = identity();
+  await f.register(h);
+  assert.equal((await f.join("host", h)).statusCode, 409);
+  assert.notEqual(f.rows.get("v3-connection#host")?.state, "active");
+  assert.ok(f.closed.includes("host"));
+});
+
+test("exhausted global cleanup CAS retains source lease instead of silently dropping it", async () => {
+  let failing = false,
+    losses = 0;
+  const f = fixture({
+    cas: async (key, _rev, row) => {
+      if (failing && key === "v3-pending" && !row.members.stale0) {
+        losses++;
+        return false;
+      }
+    },
+  });
+  await fillPending(f);
+  f.advance(61);
+  failing = true;
+  assert.equal((await f.connect("blocked")).statusCode, 503);
+  assert.equal(losses, 32);
+  for (const [, row] of pendingLedgers(f)) assert.ok(row.members.stale0);
+  failing = false;
+  assert.equal((await f.connect("recovered")).statusCode, 200);
 });

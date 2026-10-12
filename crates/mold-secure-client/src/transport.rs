@@ -473,6 +473,21 @@ impl std::fmt::Display for AdmissionBusy {
     }
 }
 impl std::error::Error for AdmissionBusy {}
+fn admission_upgrade_error(
+    error: tokio_tungstenite::tungstenite::Error,
+) -> tokio_tungstenite::tungstenite::Error {
+    // Only the failed HTTP upgrade is classified here. Once the socket opens,
+    // auth/protocol/transport failures and dispatched requests are never retried.
+    if matches!(&error, tokio_tungstenite::tungstenite::Error::Http(response) if matches!(response.status().as_u16(), 429 | 503))
+    {
+        tokio_tungstenite::tungstenite::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            AdmissionBusy,
+        ))
+    } else {
+        error
+    }
+}
 async fn retry_admission<T, F, Fut>(mut attempt: F) -> Result<T>
 where
     F: FnMut() -> Fut,
@@ -559,7 +574,8 @@ async fn admit(
         ),
         false,
     )
-    .await?;
+    .await
+    .map_err(admission_upgrade_error)?;
     let mut socket = crate::object_socket::ObjectSocket::new(socket, host.namespace.clone(), false);
     let role = if invite.is_some() { "invite" } else { "device" };
     socket.send(Message::Text(serde_json::json!({"a":"hello","v":3,"role":role,"namespace":host.namespace,"hostKey":host.host_key}).to_string().into())).await?;
@@ -941,6 +957,28 @@ mod cancellation_tests {
 #[cfg(test)]
 mod admission_retry_tests {
     use super::*;
+    #[tokio::test]
+    async fn only_capacity_upgrade_responses_retry_before_open() {
+        for status in [429, 503, 400, 401, 403, 404, 426, 500] {
+            let count = std::sync::atomic::AtomicUsize::new(0);
+            let result = retry_admission(|| async {
+                count.fetch_add(1, Ordering::SeqCst);
+                let response = http::Response::builder().status(status).body(None).unwrap();
+                Err::<(), _>(
+                    admission_upgrade_error(tokio_tungstenite::tungstenite::Error::Http(Box::new(
+                        response,
+                    )))
+                    .into(),
+                )
+            })
+            .await;
+            assert!(result.is_err());
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                if [429, 503].contains(&status) { 3 } else { 1 }
+            );
+        }
+    }
     #[tokio::test]
     async fn gateway_busy_retries_only_admission_and_dispatches_once() {
         let count = std::sync::atomic::AtomicUsize::new(0);
