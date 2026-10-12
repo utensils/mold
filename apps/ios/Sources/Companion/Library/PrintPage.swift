@@ -233,10 +233,19 @@ struct ClipPlayer: View {
         }
         ready = false
         playbackID = entry.id
-        if let player { player.replaceCurrentItem(with: item) } else { player = AVPlayer(playerItem: item) }
-        if let player { media.configure(player) }
-        if let time { await player?.seek(to: time) }
-        guard !Task.isCancelled, isSelected else { player?.pause(); return }
+        let nextPlayer = player ?? AVPlayer()
+        nextPlayer.replaceCurrentItem(with: item)
+        media.configure(nextPlayer)
+        if let time { await nextPlayer.seek(to: time) }
+        do { try await media.prepare(nextPlayer) }
+        catch is CancellationError { return }
+        catch {
+            problem = String(localized: "This clip can't be played here: \(error.reasonSentence)")
+            player = nil
+            return
+        }
+        guard !Task.isCancelled, isSelected, scenePhase == .active else { nextPlayer.pause(); return }
+        player = nextPlayer
         if autoplay || reminted { ClipPlayback.sync(player, isSelected: true) }
         for await status in item.publisher(for: \.status).values {
             guard !Task.isCancelled, isSelected else { return }

@@ -21,7 +21,7 @@ extension RunCanvas {
             // same shared verb the Library plays through.
             let media = try await backend.playableMedia(for: filename, trashed: false)
             player = AVPlayer(playerItem: media.playerItem())
-            media.configure(player)
+            try await media.prepare(player)
         } catch {
             show(.unavailable(error.failureSentence))
             return

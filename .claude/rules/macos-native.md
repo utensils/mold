@@ -5,8 +5,10 @@ paths:
 
 # Native Mac interaction contracts
 
-Every streamed `PlayableMedia` player calls `configure(_:)` before playback or
-seeking. AVFoundation's predictive stall waiting does not support media bytes
+Every streamed `PlayableMedia` player awaits `prepare(_:)` before publication;
+it primes up to two seconds of measured media without starting playback.
+Apply `configure(_:)` before a resumed seek, then prepare at that position.
+AVFoundation's predictive stall waiting does not support media bytes
 supplied by a resource-loader delegate; the shared policy disables it and keeps
 the default for local files. Deliver bounded chunks to the delegate on the main actor.
 

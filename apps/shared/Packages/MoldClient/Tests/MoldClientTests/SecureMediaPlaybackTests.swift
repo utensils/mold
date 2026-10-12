@@ -52,8 +52,9 @@ import Testing
         ])
         item.add(output)
         let player = AVPlayer(playerItem: item)
-        media?.configure(player)
         defer { player.pause(); player.replaceCurrentItem(with: nil); item.asset.cancelLoading() }
+        try await media?.prepare(player)
+        #expect(player.rate == 0, "Preparing a stream must not override the user's playback choice")
         player.play()
         let clock = ContinuousClock()
         let deadline = clock.now + .seconds(10)

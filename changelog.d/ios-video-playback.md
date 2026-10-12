@@ -1,1 +1,1 @@
-- **Native video playback.** Restore clip playback in the native iOS and macOS apps by disabling AVPlayer's predictive buffering for authenticated media streams and delivering bounded chunks instead of processing individual response bytes on the main actor.
+- **Native video playback.** Restore clip playback in the native iOS and macOS apps by preparing a short startup buffer, disabling AVPlayer's predictive buffering for authenticated media streams, and delivering bounded chunks instead of processing individual response bytes on the main actor.

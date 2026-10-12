@@ -287,8 +287,10 @@ The image Library picker keeps machine filters in a full-width ordinary content 
 
 **Encrypted transport.** All remote HTTP, SSE, uploads, thumbnails and media use the shared Rust `mold-secure` C ABI and the pull-driven Swift WebSocket/HTTP adapter. Only an unpaired numeric loopback host may use direct HTTP for the embedded engine. Never restore relay v2, HTTP/S3 staging, media bearer URLs or mutation replay. AVPlayer uses `PlayableMedia` and its HEAD/Range resource loader. Private installation identity lives in the app Keychain (Mac: owner-only SecretStore), never preferences. Public pins and host-signed grants persist with the host; renew grants only through the authenticated channel. Bonjour identity remains a hint. `make gen`/archive builds the ignored XCFramework from source for all Apple targets, and secure-crate/lockfile changes trigger Apple builds. Protocol authority: `relay/aws/SECURE-PROTOCOL.md`.
 
-Call `PlayableMedia.configure(_:)` before playing or seeking each new item,
-including on reused players. Apple's `AVAssetResourceLoader.setDelegate(_:queue:)`
+Call `PlayableMedia.prepare(_:)` before publishing a streamed player for playback;
+it primes up to two seconds of measured media without starting the player.
+For a resumed item, call `configure(_:)` before seeking, then prepare at the
+new position. Apple's `AVAssetResourceLoader.setDelegate(_:queue:)`
 contract requires predictive stall waiting to be disabled when the delegate
 supplies media bytes. Local media keeps AVPlayer's default policy.
 AVPlayer's resource loader receives bounded media chunks on the main actor;
