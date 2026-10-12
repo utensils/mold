@@ -50,7 +50,10 @@ private nonisolated(unsafe) var secureMediaLoaderKey: UInt8 = 0
             var request = URLRequest(url: url)
             request.timeoutInterval = 300
             if let key = backend.host.apiKey { request.setValue(key, forHTTPHeaderField: "X-Api-Key") }
-            let dataRequest = loading.dataRequest
+            // AVPlayer's initial content-information probe can also carry a
+            // two-byte data request. Answer it with metadata only; feeding those
+            // probe bytes to the decoder can leave the item permanently unknown.
+            let dataRequest = loading.contentInformationRequest == nil ? loading.dataRequest : nil
             let offset = dataRequest.map { max($0.requestedOffset, $0.currentOffset) } ?? 0
             let length = dataRequest.map { Int64($0.requestedLength) }
             guard offset >= 0, length.map({ $0 > 0 }) ?? true else { throw SecureConnectionError.protocolViolation }

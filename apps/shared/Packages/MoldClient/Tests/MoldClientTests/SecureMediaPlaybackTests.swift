@@ -44,6 +44,7 @@ import Testing
         #expect(image.image.width > 0)
         #expect(await transport.requests.allSatisfy { $0.value(forHTTPHeaderField: "Range") != nil || $0.httpMethod == "HEAD" })
         #expect(await transport.requests.isEmpty == false)
+        #expect(await transport.requests.first?.httpMethod == "HEAD", "The content-information probe must complete before media bytes are supplied")
         #expect(await transport.requests.allSatisfy { $0.value(forHTTPHeaderField: "X-Api-Key") == "encrypted-api-credential" })
         #expect(await transport.requests.allSatisfy { $0.url?.query == (trashed ? "view=trash" : nil) })
     }
