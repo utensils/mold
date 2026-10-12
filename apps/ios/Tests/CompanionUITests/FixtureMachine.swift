@@ -29,6 +29,7 @@ final class FixtureMachine: @unchecked Sendable {
     private let removePrintOnFavorite: String?
     private let retainedMediaFixture: Bool
     let retainedFrameFixture: Bool
+    private let batchQueueFixture: Bool
     private let queueFixture: Bool
     private let unavailableGallery = Mutex(false)
     func setGalleryUnavailable(_ unavailable: Bool) { unavailableGallery.withLock { $0 = unavailable } }
@@ -60,7 +61,7 @@ final class FixtureMachine: @unchecked Sendable {
     private let modelMemoryFixture: Bool
     private var residentModels: Set<String> = []
 
-    init(justifiedFixture: Bool = false, landscapePlaybackFixture: Bool = false, exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, omitOrganizationCapabilities: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, retainedFrameFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil, queueDownloadFixture: Bool = false, requiresDownloadLicense: Bool = false, trashFixture: Bool = false, queueFailureFixture: Bool = false, queueSwipeFixture: Bool = false, queueDestinationFixture: Bool = false, promptExpansionFixture: Bool = false) throws {
+    init(justifiedFixture: Bool = false, landscapePlaybackFixture: Bool = false, exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, omitOrganizationCapabilities: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, retainedFrameFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil, queueDownloadFixture: Bool = false, requiresDownloadLicense: Bool = false, trashFixture: Bool = false, queueFailureFixture: Bool = false, queueSwipeFixture: Bool = false, queueDestinationFixture: Bool = false, promptExpansionFixture: Bool = false, batchQueueFixture: Bool = false) throws {
         self.landscapePlaybackFixture = landscapePlaybackFixture
         self.exportFixture = exportFixture
         self.unsupportedExportFormats = unsupportedExportFormats
@@ -70,6 +71,7 @@ final class FixtureMachine: @unchecked Sendable {
         self.libraryMutations = libraryMutations
         self.retainedMediaFixture = retainedMediaFixture
         self.retainedFrameFixture = retainedFrameFixture
+        self.batchQueueFixture = batchQueueFixture
         self.queueFixture = queueFixture
         self.queueDownloadFixture = queueDownloadFixture
         self.requiresDownloadLicense = requiresDownloadLicense
@@ -338,7 +340,7 @@ final class FixtureMachine: @unchecked Sendable {
         var row: [String: Any] = ["id": id, "state": jobStates[id] ?? "queued", "model": missing ? "flux-dev:q4" : "ltx-2.5-22b-distilled:bf16",
          "model_display_name": "A legacy verbose title that must not appear",
          "position": id == "fixture-video" ? 0 : 1, "durable": true,
-         "batch_id": id, "client_batch_id": "client-" + id, "retryable": true,
+         "batch_id": batchQueueFixture ? "fixture-batch" : id, "client_batch_id": batchQueueFixture ? "client-fixture-batch" : "client-" + id, "retryable": true,
          "explicitly_paused": true,
          "held_reason": missing ? "deferred generation preparation failed: model 'flux-dev:q4' is not downloaded. Run: mold pull flux-dev:q4" : memoryErrorFixture ?? "Temporary machine pressure",
          "error": memoryErrorFixture ?? "Temporary machine pressure",

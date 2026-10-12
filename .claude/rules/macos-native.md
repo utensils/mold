@@ -206,3 +206,5 @@ replacement and route/instance changes revoke inspection. Native image decoding
 preserves pixel geometry within the 32-Mi-pixel decoded safety limit.
 
 Known Secure credential fingerprints are retained across native mode changes and aliases. Regular requests refuse matching host keys, X-API-Key and Bearer headers before transport; the Rust C ABI hashes the denial history, which never stores credential bytes or grants access.
+
+Whole-batch cancellation rechecks identity but follows current child lifecycle changes while earlier cancellations await. Queued-to-running/held transitions must not skip an otherwise cancellable sibling. Individual held-only cancellation and Pause/Resume retain their narrower state guards.

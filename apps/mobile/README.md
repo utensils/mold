@@ -1108,3 +1108,5 @@ prefix, filters at most 100 returned candidates with fuzzy matching, and paginat
 that matching set. Source, family, kind and mature-content filters still apply.
 Provider errors remain errors; this bounded fallback is not an exhaustive search
 of either provider's index. Older servers retain their provider search behavior.
+
+Job Details offers **Cancel batch** for multi-output durable batches, with a separate whole-batch confirmation. It rechecks the selected machine and batch identity before cancelling all unfinished siblings. Batch size remains editable for images and videos; **1** disables batching.

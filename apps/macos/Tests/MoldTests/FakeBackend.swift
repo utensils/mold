@@ -808,6 +808,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     }
     func cancelJob(id: String) async throws {
         try record("cancelJob")
+        await pause("cancelJob")
         cancelledIds.append(id)
     }
     /// Ids planted here answer "no longer held" and are not cancelled.

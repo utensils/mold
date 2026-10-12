@@ -841,3 +841,5 @@ profile's `api_key` in `X-API-Key`, not Bearer alone. Do not log the key or send
 the operator bootstrap credential remotely. Nix `services.mold.apiKeyFile`
 configures operator authority; runtime per-app grants are issued by pairing
 without a Nix rebuild or disabling authentication.
+
+Video batching uses the same batch count as images; `--batch 1` makes a single output. Native iOS exposes Batch in More Options for clips as well as pictures. Native queue batch headers (iOS/macOS) and web/desktop/Tauri mobile job details offer whole-batch cancellation; the CLI uses `mold queue cancel --batch <BATCH-ID>`. Completed outputs are preserved.

@@ -337,6 +337,40 @@ final class QueueStore {
         }
     }
 
+    /// Reserve every eligible child, use its current lifecycle route, then refresh once.
+    func canCancel(_ group: QueueGroup, on id: MoldHost.ID) -> Bool {
+        group.rows.contains { entry in
+            guard let row = current(entry, on: id), row.batchId == entry.batchId,
+                  row.clientBatchId == entry.clientBatchId else { return false }
+            return canCancel(entry, on: id)
+        }
+    }
+
+    func cancel(_ group: QueueGroup, on id: MoldHost.ID) async {
+        guard let host = hosts.host(id), hosts.isUp(host) else { return }
+        let instance = hosts.instanceID(of: id)
+        let eligible = group.rows.filter { entry in
+            guard let row = current(entry, on: id), row.batchId == entry.batchId,
+                  row.clientBatchId == entry.clientBatchId else { return false }
+            return canCancel(row, on: id)
+        }
+        guard !eligible.isEmpty else { return }
+        await actOnIDs(eligible.map(\.id), on: id, String(localized: "cancel that batch")) { client in
+            for entry in eligible {
+                guard hosts.host(id) == host, hosts.instanceID(of: id) == instance,
+                      hosts.isUp(host) else { break }
+                guard let row = current(entry, on: id),
+                      row.batchId == entry.batchId, row.clientBatchId == entry.clientBatchId else { continue }
+                guard row.state == .queued || row.state == .paused || row.state == .held
+                    || (row.state == .running && hosts.capabilities[id]?.canCancelRunningJob == true) else { continue }
+                do {
+                    if row.state == .held { _ = try await client.cancelHeldJob(id: row.id) }
+                    else { try await client.cancelJob(id: row.id) }
+                } catch { hosts.report(host, doing: String(localized: "cancel that batch"), error) }
+            }
+        }
+    }
+
     func setPaused(_ paused: Bool, _ entry: QueueEntry, on id: MoldHost.ID) async {
         guard canPause(entry, on: id), let row = current(entry, on: id),
               row.state == (paused ? .queued : .paused) else { return }

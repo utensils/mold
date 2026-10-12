@@ -28,7 +28,9 @@ extension QueueStore {
         for entry in eligible {
             guard hosts.host(host) == machine, hosts.instanceID(of: host) == instance,
                   let current = entries(on: host).first(where: { $0.id == entry.id }),
-                  current.state == entry.state, hosts.isUp(machine),
+                  (action == .cancel || current.state == entry.state),
+                  current.batchId == entry.batchId, current.clientBatchId == entry.clientBatchId,
+                  hosts.isUp(machine),
                   QueueRowActions.resolve(current, on: hosts.capabilities[host]).offers(action) else { continue }
             do {
                 switch action {

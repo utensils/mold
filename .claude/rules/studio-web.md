@@ -220,3 +220,5 @@ Explicit management sorts remain authoritative. A filtered select must retain it
 current value. The server's bounded catalog fallback preserves all upstream
 filters and only follows a complete, error-free zero-result query; page N must
 use the same bounded candidate set as page one.
+
+**Batch cancellation parity.** QueueEntryDetail embeds QueueBatchCancelControl for web, desktop and Tauri mobile. It reads durable batch identity from the exact selected job, verifies instance/client/child membership, confirms the whole-batch action, and rereads that authority before DELETE. Route, credentials, connection mode, instance and selection changes invalidate pending reads and confirmations; singletons and terminal rows retain their individual actions.

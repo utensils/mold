@@ -123,6 +123,26 @@ struct QueuePaneTests {
         #expect(fake.callCount("cancelJob") == 1)
     }
 
+    @Test func groupCancellationFollowsAChildThatStartsWhileAnotherCancellationAwaits() async {
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
+        fake.capabilityBlock = FakeFixtures.capabilities(cooperativeCancellation: true)
+        fake.serverStatus = FakeFixtures.serverStatus()
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
+        await hosts.refresh(workstation)
+        let queue = QueueStore(hosts: hosts)
+        let initial = [FakeFixtures.queueEntry("first", state: "queued", batchId: "batch"),
+                       FakeFixtures.queueEntry("next", state: "queued", batchId: "batch")]
+        queue.byHost[workstation.id] = initial
+        let group = QueueGroup.build(initial, children: [:])[0]
+        fake.delays["cancelJob"] = .milliseconds(100)
+        let cancellation = Task { await queue.act(.cancel, onLiveChildrenOf: group, host: workstation.id) }
+        await fake.entered("cancelJob")
+        queue.byHost[workstation.id] = [initial[0], FakeFixtures.queueEntry("next", state: "running", batchId: "batch")]
+        await cancellation.value
+        #expect(fake.cancelledIds == ["first", "next"])
+    }
+
     /// One batch with a child in each of the four states that matter.
     private var mixedBatch: [QueueEntry] {
         [

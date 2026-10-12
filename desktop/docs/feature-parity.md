@@ -592,3 +592,5 @@ prefix, filters at most 100 returned candidates with fuzzy matching, and paginat
 that matching set. Source, family, kind and mature-content filters still apply.
 Provider errors remain errors; this bounded fallback is not an exhaustive search
 of either provider's index. Older servers retain their provider search behavior.
+
+Queue job details offer **Cancel batch** for multi-output durable batches with confirmation and fresh machine/batch verification. Batch size remains editable for images and videos; choosing **1** produces a single output.

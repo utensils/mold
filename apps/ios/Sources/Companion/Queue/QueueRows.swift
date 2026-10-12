@@ -4,15 +4,25 @@ import SwiftUI
 /// One group: a plain row, or a batch as a parent row whose children open
 /// beneath it.
 struct QueueGroupRows: View {
+    @Environment(QueueStore.self) private var queue
     let group: QueueGroup
     let host: MoldHost
 
     var body: some View {
         if group.isExpandable {
-            DisclosureGroup {
-                ForEach(group.rows) { entry in QueueEntryRow(entry: entry, host: host, inBatch: true) }
-            } label: {
-                QueueBatchLabel(rows: group.rows, host: host)
+            VStack(alignment: .leading, spacing: 8) {
+                DisclosureGroup {
+                    ForEach(group.rows) { entry in QueueEntryRow(entry: entry, host: host, inBatch: true) }
+                } label: {
+                    QueueBatchLabel(rows: group.rows, host: host)
+                }
+                Button("Cancel Batch", systemImage: "xmark", role: .destructive) {
+                    Task { await queue.cancel(group, on: host.id) }
+                }
+                .buttonStyle(.borderless)
+                .frame(minHeight: 44)
+                .disabled(!queue.canCancel(group, on: host.id))
+                .accessibilityIdentifier("queue-cancel-batch-" + group.id)
             }
         } else {
             QueueEntryRow(entry: group.rows[0], host: host, inBatch: false)
@@ -173,7 +183,7 @@ struct QueueEntryRow: View {
 
     private var caption: String {
         if inBatch, let index = entry.batchIndex {
-            return String(localized: "Picture \(index) · \(entry.state == .held ? "Held" : entry.waitDescription)")
+            return String(localized: "Job \(index) · \(entry.state == .held ? "Held" : entry.waitDescription)")
         }
         return entry.state == .held ? String(localized: "Held") : entry.waitDescription
     }
