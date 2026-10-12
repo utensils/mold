@@ -92,6 +92,7 @@ enum PreferencesReset {
         // Remote access is an explicit permission; General reset must preserve
         // both the user's opt-in and their decision to stop sharing this Mac.
         "managedRemoteAccessEnabled",
+        "regularDirectAccessEnabled",
         // Playback sound is a universal choice across Generate and Library.
         "videoPlaybackMuted",
         "videoPlaybackAutoplay",
