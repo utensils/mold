@@ -142,3 +142,59 @@ describe("Regular pairing", () => {
     }
   });
 });
+
+it("accepts the backend Regular credential shape and rejects Secure claim keys", async () => {
+  const { claimPairingSession } = await import("./pairing");
+  const invitation = parseMobilePairingPayload(
+    JSON.stringify({
+      type: "mold.mobile-pairing",
+      version: 2,
+      mode: "regular",
+      base_url: "http://203.0.113.7:7680",
+      instance_id: "regular-instance",
+      name: "Host",
+      pairing_token: "a".repeat(64),
+      expires_at: 4000000000,
+    }),
+  );
+  const apiKey = `mold_regular_${"b".repeat(64)}`;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            mode: "regular",
+            api_key: apiKey,
+            instance_id: "regular-instance",
+            hostname: "Host",
+            base_url: invitation.base_url,
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    ),
+  );
+  await expect(claimPairingSession(invitation)).resolves.toMatchObject({
+    mode: "regular",
+    api_key: apiKey,
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            mode: "regular",
+            api_key: "mold_pair_secure",
+            instance_id: "regular-instance",
+            hostname: "Host",
+            base_url: invitation.base_url,
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    ),
+  );
+  await expect(claimPairingSession(invitation)).rejects.toThrow(
+    "invalid Regular pairing",
+  );
+});

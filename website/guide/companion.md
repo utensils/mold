@@ -294,3 +294,8 @@ the host before creating its pairing code. Select Regular when scanning a
 Regular code or entering a direct address and API key. The cloud proxy always
 requires Secure. A connection never downgrades automatically, and re-pairing
 updates the existing machine rather than adding a duplicate.
+
+Web Studio follows browser mixed-content and private-network rules. A hosted
+HTTPS Studio cannot connect to a public HTTP address; use a direct HTTPS
+endpoint, the host's embedded HTTP Studio, or a native app/CLI for Regular HTTP.
+Browser permission prompts may also apply to LAN addresses.

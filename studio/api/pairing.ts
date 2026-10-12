@@ -218,7 +218,7 @@ export async function claimPairingSession(
     claim.instance_id !== payload.instance_id ||
     claim.base_url !== origin ||
     typeof claim.api_key !== "string" ||
-    !claim.api_key.startsWith("mold_pair_")
+    !/^mold_regular_[0-9a-f]{64}$/.test(claim.api_key)
   )
     throw new Error("The host returned an invalid Regular pairing.");
   await registerRegularConnection(origin, claim.api_key);
