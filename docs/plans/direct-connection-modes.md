@@ -86,3 +86,10 @@ pre-secure direct pairings may be migrated once; a missing secure device binding
 after migration cannot turn its credential into regular authority. Mode
 selection, credentials and transport routing are captured together for each
 request, including media and queue mutations.
+
+Admission recovery is bounded independently of HTTP delivery. A typed temporary
+gateway-pressure notice before admission may start up to three handshakes with
+short jittered backoff within the existing 15-second connection budget.
+Authentication/protocol failures and any error after HTTP dispatch never repeat
+the application request. Established carrier recovery keeps only original
+ciphertext sequence records; it never resubmits a mutation.
