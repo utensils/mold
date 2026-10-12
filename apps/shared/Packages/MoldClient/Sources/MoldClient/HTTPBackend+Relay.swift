@@ -17,7 +17,7 @@ extension HTTPBackend {
             guard host.permitsRegularDirect, let url = request.url, url.user == nil, url.password == nil, HostAddress.sameOrigin(url, host.baseURL) else { throw SecureConnectionError.pairingRequired }
             var direct = request
             direct.httpShouldHandleCookies = false
-            direct.setValue(nil, forHTTPHeaderField: "Cookie")
+            for header in SecureCredentialHistory.privateHeaders { direct.setValue(nil, forHTTPHeaderField: header) }
             return try await LoopbackHTTPTransport(session: session).response(for: direct, body: body)
         }
         if host.secure == nil, Self.isEmbeddedLoopback(host.baseURL) {
