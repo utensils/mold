@@ -4388,6 +4388,7 @@ dependencies = [
  "mold-ai-relay",
  "mold-ai-scheduler",
  "mold-ai-secure",
+ "mold-ai-secure-client",
  "nvml-wrapper",
  "rayon",
  "rust-embed",

@@ -141,6 +141,7 @@ impl MoldClient {
             client: crate::relay_transport::RelayClient::for_origin(
                 client,
                 &normalize_host(base_url),
+                None,
             ),
             api_key_configured,
             gallery_persists_outputs: Default::default(),
@@ -155,6 +156,7 @@ impl MoldClient {
             client: crate::relay_transport::RelayClient::for_origin(
                 client,
                 &normalize_host(base_url),
+                Some(api_key),
             ),
             api_key_configured,
             gallery_persists_outputs: Default::default(),
@@ -166,25 +168,10 @@ impl MoldClient {
             std::env::var("MOLD_HOST").unwrap_or_else(|_| "http://localhost:7680".to_string());
         let api_key = std::env::var("MOLD_API_KEY").ok().filter(|k| !k.is_empty());
         let origin = normalize_host(&base_url);
-        if std::env::var("MOLD_CONNECTION_MODE").as_deref() == Ok("regular") {
-            let key = api_key.clone().or_else(|| {
-                mold_secure_client::load_regular_host(&origin)
-                    .ok()
-                    .and_then(|h| h.api_key)
-            });
-            // Registration validation still refuses a copied Secure key or proxy origin.
-            let _ = mold_secure_client::register_regular_ephemeral(
-                "cli-env",
-                mold_secure_client::RegularHost {
-                    origin: origin.clone(),
-                    api_key: key,
-                },
-            );
-        }
         let (client, api_key_configured) = build_client(api_key.as_deref());
         Self {
             base_url: normalize_host(&base_url),
-            client: crate::relay_transport::RelayClient::for_origin(client, &origin),
+            client: crate::relay_transport::RelayClient::for_origin(client, &origin, api_key),
             api_key_configured,
             gallery_persists_outputs: Default::default(),
         }
@@ -193,11 +180,7 @@ impl MoldClient {
     /// Whether dispatch has an explicit key or a valid paired device credential.
     /// Paired credentials are inserted only inside the encrypted request.
     pub fn has_api_key(&self) -> bool {
-        self.api_key_configured
-            || mold_secure_client::load_pairing(&self.base_url).is_ok_and(|host| {
-                !host.api_key.is_empty()
-                    && reqwest::header::HeaderValue::from_str(&host.api_key).is_ok()
-            })
+        self.api_key_configured || self.client.has_paired_api_key(&self.base_url)
     }
 
     /// Create a request-bound MiniMax H3 reference upload session.
