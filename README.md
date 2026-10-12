@@ -509,3 +509,7 @@ on a headless host for Regular access; the managed proxy always requires
 end-to-end encrypted Secure transport. Connections never downgrade automatically.
 Regular HTTP relies on the network or VPN for encryption. Pairing again updates
 the same physical machine and its saved connection mode.
+
+Secure clients make up to three connection attempts for transient proxy startup
+failures. Authentication failures stop immediately, and requests already sent
+are never automatically replayed.
