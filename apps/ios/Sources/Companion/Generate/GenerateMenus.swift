@@ -125,15 +125,7 @@ struct ModelChooser: View {
     }
 
     private var matchingFamilies: [(family: String, models: [Model])] {
-        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        return generate.families.compactMap { group in
-            let models = group.models.filter {
-                query.isEmpty || $0.name.localizedCaseInsensitiveContains(query)
-                    || $0.headline.localizedCaseInsensitiveContains(query)
-                    || $0.familyLabel.localizedCaseInsensitiveContains(query)
-            }
-            return models.isEmpty ? nil : (group.family, models)
-        }
+        FuzzyModelSearch.groups(generate.families, query: search)
     }
 }
 

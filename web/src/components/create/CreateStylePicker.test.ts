@@ -253,7 +253,7 @@ describe("CreateStylePicker menu", () => {
    * ↓ moved no row and Tab left the menu behind. Focus goes to the menu root
    * on open, AND the chip forwards its own keys, so both paths operate it.
    */
-  it("walks and picks from the keyboard with too few styles for a filter field", async () => {
+  it("focuses search in a short list and still forwards chip keyboard actions", async () => {
     const flux = model({
       name: "flux-dev:q8",
       family: "flux",
@@ -265,8 +265,10 @@ describe("CreateStylePicker menu", () => {
     await chip.trigger("click");
     expect(
       document.body.querySelector('[data-test="model-filter"]'),
-    ).toBeNull();
-    expect(document.activeElement).toBe(menu());
+    ).not.toBeNull();
+    expect(document.activeElement).toBe(
+      document.body.querySelector('[data-test="model-filter"]'),
+    );
 
     await chip.trigger("keydown", { key: "ArrowDown" });
     await chip.trigger("keydown", { key: "Enter" });

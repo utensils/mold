@@ -229,12 +229,12 @@ describe("StyleMenu rows", () => {
 });
 
 describe("StyleMenu filter", () => {
-  it("offers the filter field only once the list passes eight rows", () => {
+  it("offers search even for a short model list", () => {
     expect(
       mountMenu({ models: many(8) })
         .find("[data-test='model-filter']")
         .exists(),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       mountMenu({ models: many(9) })
         .find("[data-test='model-filter']")
@@ -483,5 +483,18 @@ describe("StyleMenu touch sizing", () => {
   it("keeps every clickable row on the hand cursor", () => {
     expect(block(".ms-model__option")).toContain("cursor: pointer");
     expect(block(".ms-model__browse")).toContain("cursor: pointer");
+  });
+});
+
+it("fuzzy search in a short list preserves keyboard selection", async () => {
+  const wrapper = mountMenu({
+    models: [model(), model({ name: "wan-2.2", family: "wan" })],
+  });
+  const field = wrapper.get("[data-test='model-filter']");
+  await field.setValue("flxu q8");
+  expect(wrapper.findAll("[data-test='model-option-name']")).toHaveLength(1);
+  await field.trigger("keydown", { key: "Enter" });
+  expect(wrapper.emitted("pick")?.[0]?.[0]).toMatchObject({
+    name: "flux-dev:q8",
   });
 });

@@ -179,7 +179,12 @@ describe("resolveThumbnailSrc", () => {
 });
 
 describe("resolveStreamableSrc", () => {
-  it("returns the plain direct URL for a keyless host", async () => {
+  it("returns the plain direct URL when the server confirms public access", async () => {
+    mockFetch(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ auth_required: false }),
+    }));
     const src = await resolveStreamableSrc(keylessRemote, "clip.mp4");
     expect(src).toBe("http://hal9000:7680/api/gallery/image/clip.mp4");
   });

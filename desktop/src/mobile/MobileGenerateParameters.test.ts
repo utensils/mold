@@ -741,3 +741,24 @@ describe("MobileGenerateParameters — continue a video", () => {
     expect(buildRequest(live).extend_overlap_frames).toBe(shown);
   });
 });
+
+it("fuzzy-filters Generate upscalers and retains the current selection", async () => {
+  const chosen = { ...upscaler, name: "other-upscaler" };
+  const initial = formFor("flux");
+  initial.upscaleModel = chosen.name;
+  const { wrapper, form } = mountParameters(initial, [
+    upscaler,
+    chosen,
+    { ...upscaler, name: "unrelated" },
+  ]);
+  await wrapper.get('input[aria-label="Search upscalers"]').setValue("esrgn");
+  expect(
+    wrapper
+      .get('[data-test="mobile-upscale"]')
+      .findAll("option")
+      .map((option) => option.attributes("value")),
+  ).toEqual(["", upscaler.name, chosen.name]);
+  expect(form.upscaleModel).toBe(chosen.name);
+  await wrapper.get('[data-test="mobile-upscale"]').setValue(upscaler.name);
+  expect(buildRequest(form).upscale_model).toBe(upscaler.name);
+});

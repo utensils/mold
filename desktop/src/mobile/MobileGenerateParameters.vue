@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { modelSearchScore, fuzzyModelScore } from "@studio/lib/fuzzyModelSearch";
 import OriginalMediaButton from "@studio/components/OriginalMediaButton.vue";
 import { useMediaFileReader } from "@studio/composables/useMediaFileReader";
 import { inputImageFacts } from "@studio/lib/inputImage";
@@ -517,6 +518,21 @@ function removeKeyframe(index: number): void {
 
 const frameErrorId = `mobile-frame-error-${useId()}`;
 const fpsErrorId = `mobile-fps-error-${useId()}`;
+const upscaleQuery = ref("");
+const controlQuery = ref("");
+const searchedUpscalers = computed(() =>
+  props.upscalers.filter(
+    (model) =>
+      model.name === props.form.upscaleModel || modelSearchScore(model, upscaleQuery.value) > 0,
+  ),
+);
+const searchedAdapters = computed(() =>
+  props.controlAdapters.filter(
+    (adapter) =>
+      adapter.id === props.form.icLoraControl ||
+      fuzzyModelScore(controlQuery.value, [adapter.id, adapter.label]) > 0,
+  ),
+);
 </script>
 
 <template>
@@ -644,9 +660,16 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
         class="field mobile-generate-field"
       >
         <span>{{ caps.supportsVideo ? "Framewise upscale" : "Upscale" }}</span>
+        <input
+          v-model="upscaleQuery"
+          type="search"
+          class="control"
+          aria-label="Search upscalers"
+          placeholder="Search upscalers…"
+        />
         <select v-model="form.upscaleModel" class="control" data-test="mobile-upscale">
           <option value="">Off</option>
-          <option v-for="upscaler in upscalers" :key="upscaler.name" :value="upscaler.name">
+          <option v-for="upscaler in searchedUpscalers" :key="upscaler.name" :value="upscaler.name">
             {{ upscaler.name }}{{ upscaler.downloaded ? "" : " (downloads on first use)" }}
           </option>
         </select>
@@ -748,6 +771,13 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
 
         <label v-if="caps.supportsAdvancedVideo" class="field mobile-generate-field">
           <span>Reference control</span>
+          <input
+            v-model="controlQuery"
+            type="search"
+            class="control"
+            aria-label="Search reference adapters"
+            placeholder="Search reference adapters…"
+          />
           <select
             class="control"
             data-test="mobile-ltx2-reference-control"
@@ -755,7 +785,7 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
             @change="setControlAdapter(($event.target as HTMLSelectElement).value)"
           >
             <option value="">Custom / none</option>
-            <option v-for="adapter in controlAdapters" :key="adapter.id" :value="adapter.id">
+            <option v-for="adapter in searchedAdapters" :key="adapter.id" :value="adapter.id">
               {{ adapter.label }}{{ adapter.installed ? "" : " · download" }}
             </option>
           </select>

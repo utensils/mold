@@ -1,6 +1,7 @@
 <script setup lang="ts" generic="M extends StyleMenuModel">
 import { computed, nextTick, onMounted, ref, useId, watch } from "vue";
 import { familyLabel } from "../lib/modelFamily";
+import { rankModels } from "../lib/fuzzyModelSearch";
 import { formatBytes } from "../lib/formatBytes";
 import { modelDisplayNameForId, modelPresentation } from "../lib/modelDisplay";
 import { modelSource } from "../lib/modelSource";
@@ -105,9 +106,8 @@ const phantomLabel = computed(() =>
   phantom.value ? modelDisplayNameForId(phantom.value, props.models) : "",
 );
 
-/** A short menu is faster to read than to type into; a long one is not. */
-const FILTER_THRESHOLD = 8;
-const showFilter = computed(() => props.models.length > FILTER_THRESHOLD);
+/** Search stays discoverable even with only a few models installed. */
+const showFilter = computed(() => props.models.length > 0);
 
 /** Each row's presentation, resolved once per model list rather than on
  * every read in the template. */
@@ -121,21 +121,11 @@ function presented(model: M) {
   return presentations.value.get(model.name) ?? modelPresentation(model);
 }
 
-function matches(model: M, needle: string): boolean {
-  if (!needle) return true;
-  const shown = presented(model);
-  const haystack = `${model.name} ${shown.displayName} ${shown.title} ${
-    shown.summary ?? ""
-  } ${model.description ?? ""} ${model.family} ${familyLabel(model.family)}`;
-  return haystack.toLocaleLowerCase().includes(needle);
-}
-
 /** Deduped by id, in the order the host handed them, narrowed by the filter. */
 const visibleModels = computed<M[]>(() => {
   const byName = new Map<string, M>();
   for (const model of props.models) byName.set(model.name, model);
-  const needle = query.value.trim().toLocaleLowerCase();
-  return [...byName.values()].filter((model) => matches(model, needle));
+  return rankModels([...byName.values()], query.value);
 });
 
 const families = computed<Map<string, M[]>>(() => {
@@ -242,7 +232,11 @@ function onKeydown(event: KeyboardEvent) {
  */
 defineExpose({
   handleKeydown: onKeydown,
-  focus: () => rootEl.value?.focus(),
+  focus: () => (filterEl.value ?? rootEl.value)?.focus(),
+});
+
+watch(query, () => {
+  activeIndex.value = 0;
 });
 
 // A narrowed list can be shorter than where the cursor was.

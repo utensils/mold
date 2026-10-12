@@ -315,12 +315,26 @@ describe("SourceMediaPanel — ControlNet block", () => {
         } as ModelInfoExtended,
       ],
     });
-    expect(wrapper.get("[data-test='control-model']").attributes("list")).toBe(
-      "installed-controlnet-models",
-    );
     expect(
-      wrapper.get("#installed-controlnet-models option").attributes("value"),
-    ).toBe("controlnet-canny-sd15:fp16");
+      wrapper.get("[data-test='control-model']").attributes("list"),
+    ).toBeUndefined();
+    // Explicit suggestions can show fuzzy matches; a native datalist applies
+    // its own substring filter and would hide this typo match.
+    await wrapper.setProps({
+      modelValue: baseForm({
+        controlImage: { kind: "upload", filename: "canny.png", base64: "AA" },
+        controlModel: "cnny",
+      }),
+    });
+
+    const suggestion = wrapper.get(
+      '[aria-label="Matching control models"] button',
+    );
+    expect(suggestion.text()).toBe("controlnet-canny-sd15:fp16");
+    await suggestion.trigger("click");
+    expect(wrapper.emitted("update:modelValue")?.at(-1)?.[0]).toMatchObject({
+      controlModel: "controlnet-canny-sd15:fp16",
+    });
   });
 
   it("round-trips the control scale slider", async () => {

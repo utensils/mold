@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { modelSearchScore } from "@studio/lib/fuzzyModelSearch";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { catalogFamily, matchesCatalogFamily } from "@studio/lib/modelFamily";
 import CatalogLayoutToggle, {
@@ -145,10 +146,7 @@ const installedNames = computed(() => new Set((props.installedEntries ?? []).map
 const installedCatalogEntries = computed<CatalogListEntry[]>(() => {
   const q = props.query.trim().toLowerCase();
   return (props.installedEntries ?? [])
-    .filter(
-      (m) =>
-        !q || m.name.toLowerCase().includes(q) || modelDisplayName(m).toLowerCase().includes(q),
-    )
+    .filter((m) => modelSearchScore(m, q) > 0)
     .filter((m) => matchesCatalogFamily(m.family, family.value))
     .map((m) => ({ ...installedModelToEntry(m), hostIds: m.hostIds ?? [] }))
     .filter(
@@ -240,13 +238,7 @@ const manifestEntries = computed<CatalogEntry[]>(() => {
   return models.all
     .filter((model) => !model.downloaded && isGenerationModel(model))
     .filter((model) => !installed.has(model.name))
-    .filter(
-      (model) =>
-        !q ||
-        [model.name, modelDisplayName(model), model.hf_repo, model.description, model.family].some(
-          (value) => value?.toLowerCase().includes(q),
-        ),
-    )
+    .filter((model) => modelSearchScore(model, q) > 0)
     .filter((model) => matchesCatalogFamily(model.family, family.value))
     .map(manifestCatalogEntry);
 });

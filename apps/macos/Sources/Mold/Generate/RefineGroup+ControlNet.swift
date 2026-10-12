@@ -25,9 +25,11 @@ extension RefineGroup {
     }
 
     @ViewBuilder private func controlNetReady(_ installed: [Model]) -> some View {
+        TextField("Search adapters", text: $adapterSearch)
+            .textFieldStyle(.roundedBorder)
         Picker("Adapter", selection: controlModelBinding) {
             Text("None").tag(String?.none)
-            ForEach(installed) { model in
+            ForEach(installed.filter { $0.name == draft.media.control?.model || $0.searchScore(adapterSearch) > 0 }) { model in
                 Text(model.headline).tag(String?.some(model.name))
             }
         }

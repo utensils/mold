@@ -155,11 +155,11 @@ describe("StylePicker — finding a style in a long list", () => {
     })) as ModelEntry[];
   }
 
-  it("offers no filter for a list short enough to read", async () => {
+  it("offers search for short lists too", async () => {
     useModelStore().all = manyModels(4);
     const wrapper = mountPicker(useGenerateFormStore().form);
     await wrapper.get('[data-test="style-chip"]').trigger("click");
-    expect(wrapper.find('[data-test="model-filter"]').exists()).toBe(false);
+    expect(wrapper.find('[data-test="model-filter"]').exists()).toBe(true);
   });
 
   it("offers a type-to-filter field once the list is long, and narrows on it", async () => {

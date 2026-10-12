@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { rankModels } from "@studio/lib/fuzzyModelSearch";
 import { runWithLicenseConsent } from "@studio/composables/useLicenseAcceptance";
 /*
  * Ready to use — every style on any connected machine, grouped by family
@@ -75,11 +76,7 @@ const sourceEntries = computed(() => props.entries ?? models.installed);
 
 const filtered = computed(() => {
   const q = (props.query ?? "").trim().toLowerCase();
-  const searched = q
-    ? sourceEntries.value.filter(
-        (m) => m.name.toLowerCase().includes(q) || modelDisplayName(m).toLowerCase().includes(q),
-      )
-    : sourceEntries.value;
+  const searched = rankModels(sourceEntries.value, q);
   const type = props.mediaType ?? "all";
   if (type === "all") return searched;
   // Utility rows make no picture, clip or 3-D object — they only show under

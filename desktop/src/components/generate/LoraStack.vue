@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { fuzzyModelScore } from "@studio/lib/fuzzyModelSearch";
+import { computed, ref, watch } from "vue";
 import Icon from "@ui/components/Icon.vue";
 import type { GenerateForm } from "../../lib/generateForm";
 import { MAX_LORA_STACK } from "../../lib/capabilities";
@@ -13,6 +14,12 @@ const emit = defineEmits<{ (e: "append-word", word: string): void }>();
 
 const pickerOpen = ref(false);
 const available = ref<LoraInfo[]>([]);
+const search = ref("");
+const filteredAvailable = computed(() =>
+  available.value.filter(
+    (lora) => fuzzyModelScore(search.value, [lora.name, lora.path], lora.trained_words) > 0,
+  ),
+);
 const loading = ref(false);
 const error = ref<string | null>(null);
 let loadEpoch = 0;
@@ -91,6 +98,7 @@ watch(
     loading.value = false;
     pickerOpen.value = false;
     available.value = [];
+    search.value = "";
   },
 );
 </script>
@@ -156,13 +164,26 @@ watch(
       data-test="lora-picker"
       class="border-border mt-2 max-h-60 w-full overflow-y-auto rounded-window border bg-bg shadow-md"
     >
+      <input
+        v-if="available.length"
+        v-model="search"
+        class="ms-input"
+        type="search"
+        aria-label="Search add-on looks"
+        data-test="lora-search"
+        placeholder="Search add-on looks…"
+      />
       <p v-if="loading" class="px-2 py-2 text-micro text-fg-dim">Loading…</p>
       <p v-else-if="error" class="px-2 py-2 text-micro text-error">{{ error }}</p>
-      <p v-else-if="available.length === 0" class="px-2 py-2 text-micro text-fg-dim">
-        No add-on looks here yet for this family.
+      <p v-else-if="filteredAvailable.length === 0" class="px-2 py-2 text-micro text-fg-dim">
+        {{
+          available.length
+            ? "No matching add-on looks. Try another name."
+            : "No add-on looks here yet for this family."
+        }}
       </p>
       <button
-        v-for="l in available"
+        v-for="l in filteredAvailable"
         v-else
         :key="l.path"
         type="button"

@@ -85,3 +85,32 @@ describe("UpscaleDialog", () => {
     oneHost.unmount();
   });
 });
+
+it("fuzzy-filters upscalers while preserving the selected option", async () => {
+  const wrapper = mount(UpscaleDialog, {
+    attachTo: document.body,
+    props: {
+      open: true,
+      kind: "image",
+      sourceName: "image.png",
+      modelValue: "other-upscaler",
+      models: [
+        { name: "real-esrgan-x4plus" },
+        { name: "other-upscaler" },
+        { name: "unrelated" },
+      ],
+    },
+  });
+  const search = document.body.querySelector(
+    '[data-test="upscale-search"]',
+  ) as HTMLInputElement;
+  expect(search).not.toBeNull();
+  search.value = "esrgn";
+  search.dispatchEvent(new Event("input", { bubbles: true }));
+  await wrapper.vm.$nextTick();
+  const options = [
+    ...document.body.querySelectorAll('[data-test="upscale-model"] option'),
+  ].map((o) => o.getAttribute("value"));
+  expect(options).toEqual(["real-esrgan-x4plus", "other-upscaler"]);
+  wrapper.unmount();
+});

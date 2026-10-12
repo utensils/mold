@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { fuzzyModelScore } from "@studio/lib/fuzzyModelSearch";
 import OriginalMediaButton from "@studio/components/OriginalMediaButton.vue";
 import { originAuthenticatedFetch as fetch } from "../../../lib/originAuth";
 
@@ -374,6 +375,14 @@ function removeKeyframe(index: number) {
   keyframes.splice(index, 1);
   patch({ keyframes });
 }
+const controlQuery = ref("");
+const searchedAdapters = computed(() =>
+  controlAdapters.value.filter(
+    (adapter) =>
+      adapter.id === props.modelValue.icLoraControl ||
+      fuzzyModelScore(controlQuery.value, [adapter.id, adapter.label]) > 0,
+  ),
+);
 </script>
 
 <template>
@@ -388,6 +397,13 @@ function removeKeyframe(index: number) {
     </p>
     <div class="ltx2__field">
       <label class="ltx2__label">Reference control</label>
+      <input
+        v-model="controlQuery"
+        type="search"
+        class="ltx2__select"
+        aria-label="Search reference adapters"
+        placeholder="Search reference adapters…"
+      />
       <select
         class="ltx2__select"
         data-test="ltx2-reference-control"
@@ -396,7 +412,7 @@ function removeKeyframe(index: number) {
       >
         <option value="">Custom / none</option>
         <option
-          v-for="adapter in controlAdapters"
+          v-for="adapter in searchedAdapters"
           :key="adapter.id"
           :value="adapter.id"
         >

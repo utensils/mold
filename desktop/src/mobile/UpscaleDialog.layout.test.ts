@@ -15,7 +15,7 @@ describe("UpscaleDialog responsive containment", () => {
 
   it("lets long model names shrink within the sheet", () => {
     const field = component.match(/\.upscale-dialog__field\s*\{([^}]*)\}/s);
-    const select = component.match(/select\s*\{([^}]*)\}/s);
+    const select = component.match(/select,\s*input\s*\{([^}]*)\}/s);
 
     expect(field?.[1]).toMatch(/min-width:\s*0\s*;/);
     expect(select?.[1]).toMatch(/min-width:\s*0\s*;/);

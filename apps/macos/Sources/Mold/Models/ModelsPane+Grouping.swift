@@ -57,12 +57,7 @@ extension ModelsPane {
     var candidates: [Model] {
         guard let host else { return [] }
         let all = models.installed(on: host.id)
-        guard !query.isEmpty else { return all }
-        let needle = query.lowercased()
-        return all.filter {
-            $0.headline.lowercased().contains(needle)
-                || $0.description.lowercased().contains(needle) || $0.name.lowercased().contains(needle)
-        }
+        return FuzzyModelSearch.models(all, query: query)
     }
 
     /// Grouped by the server's OWN family string (decision 9, M5) and

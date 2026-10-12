@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { fuzzyModelScore } from "@studio/lib/fuzzyModelSearch";
 /*
  * Settings, on the shared studio kit.
  *
@@ -206,8 +207,10 @@ const visiblePerStyleGroups = computed(() => {
   if (!query) return perStyleGroups.value;
   return perStyleGroups.value.filter(
     (group) =>
-      group.style.toLowerCase().includes(query) ||
-      (styleNames.value.get(group.style) ?? "").toLowerCase().includes(query),
+      fuzzyModelScore(query, [
+        group.style,
+        styleNames.value.get(group.style) ?? "",
+      ]) > 0,
   );
 });
 

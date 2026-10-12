@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { modelSearchScore } from "@studio/lib/fuzzyModelSearch";
 /*
  * "Upscale after generate" — the post-generation Real-ESRGAN pass.
  *
@@ -53,8 +54,12 @@ const selected = computed(() => props.modelValue.trim());
  * not contain. The request would still send it, so the picker keeps it as a
  * row rather than silently disagreeing with what will be submitted.
  */
+const query = ref("");
 const options = computed(() => {
-  const rows = upscalers.value;
+  const rows = upscalers.value.filter(
+    (model) =>
+      model.name === selected.value || modelSearchScore(model, query.value) > 0,
+  );
   if (!selected.value || rows.some((m) => m.name === selected.value)) {
     return rows;
   }
@@ -110,6 +115,13 @@ const summary = computed(() => {
 
     <div v-else class="up__field">
       <label class="up__label" for="upscale-model-select">Upscaler</label>
+      <input
+        v-model="query"
+        type="search"
+        aria-label="Search upscalers"
+        placeholder="Search upscalers…"
+        class="up__select"
+      />
       <select
         id="upscale-model-select"
         class="up__select"

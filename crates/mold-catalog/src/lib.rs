@@ -12,6 +12,7 @@ pub mod companions;
 pub mod defaults;
 pub mod entry;
 pub mod families;
+mod fuzzy;
 pub mod hf_seeds;
 pub mod live;
 pub mod normalizer;

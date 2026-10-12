@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { rankModels } from "@studio/lib/fuzzyModelSearch";
 import { workspaceLabel } from "../lib/workspaces";
 /*
  * Styles workspace (spec §03/§06, prototype WEB MODELS lines 1582-1616). One
@@ -30,7 +31,7 @@ import InstalledModelRow from "../components/models/InstalledModelRow.vue";
 import ModelDetailDrawer from "../components/models/ModelDetailDrawer.vue";
 import ModelInstallTargetDialog from "../components/models/ModelInstallTargetDialog.vue";
 import { toast } from "../lib/toasts";
-import { modelPresentation, styleName } from "@studio/lib/modelDisplay";
+import { styleName } from "@studio/lib/modelDisplay";
 import {
   modelsForOutputKind,
   OUTPUT_KIND_LABEL,
@@ -116,19 +117,9 @@ const installedQuery = ref("");
 
 /* Search first, then the kind: a chosen kind narrows what the search found,
  * so clearing the search never resurrects a style of another kind. */
-const searchedInstalled = computed(() => {
-  const q = installedQuery.value.trim().toLowerCase();
-  if (!q) return cat.installed.value;
-  return cat.installed.value.filter((m) =>
-    [
-      styleName(m),
-      modelPresentation(m).summary ?? "",
-      m.name,
-      m.family,
-      m.description ?? "",
-    ].some((value) => value.toLowerCase().includes(q)),
-  );
-});
+const searchedInstalled = computed(() =>
+  rankModels(cat.installed.value, installedQuery.value),
+);
 const filteredInstalled = computed(() =>
   activeKind.value === "all"
     ? searchedInstalled.value
