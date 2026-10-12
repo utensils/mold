@@ -442,6 +442,39 @@ fn direct_endpoint(origin: &str) -> Result<String> {
     validate_websocket(url.as_str())?;
     Ok(url.to_string())
 }
+#[derive(Debug)]
+pub(crate) struct AdmissionBusy;
+impl std::fmt::Display for AdmissionBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("secure gateway temporarily busy")
+    }
+}
+impl std::error::Error for AdmissionBusy {}
+async fn retry_admission<T, F, Fut>(mut attempt: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    for retry in 0..3 {
+        match attempt().await {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let busy = error.chain().any(|cause| {
+                    cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                        io.get_ref()
+                            .is_some_and(|inner| inner.is::<AdmissionBusy>())
+                    })
+                });
+                if !busy || retry == 2 {
+                    return Err(error);
+                }
+                let jitter = u64::from(uuid::Uuid::new_v4().as_bytes()[0]) % 126;
+                tokio::time::sleep(Duration::from_millis((250_u64 << retry) + jitter)).await;
+            }
+        }
+    }
+    unreachable!("bounded admission attempts return")
+}
 async fn admit_best(
     host: &PairedHost,
     invite: Option<&PairingInvite>,
@@ -467,9 +500,12 @@ async fn admit_best(
             if cloud {
                 tokio::time::sleep(Duration::from_millis(150)).await;
             }
-            tokio::time::timeout(Duration::from_secs(15), admit(&candidate, invite.as_ref()))
-                .await
-                .context("secure admission timed out")?
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                retry_admission(|| admit(&candidate, invite.as_ref())),
+            )
+            .await
+            .context("secure admission timed out")?
         });
     }
     let mut last = None;
@@ -848,5 +884,64 @@ mod cancellation_tests {
         assert!(error
             .to_string()
             .contains("mutation outcome may be unknown"));
+    }
+}
+
+#[cfg(test)]
+mod admission_retry_tests {
+    use super::*;
+    #[tokio::test]
+    async fn gateway_busy_retries_only_admission_and_dispatches_once() {
+        let count = std::sync::atomic::AtomicUsize::new(0);
+        let admitted = retry_admission(|| async {
+            if count.fetch_add(1, Ordering::SeqCst) < 2 {
+                Err(
+                    tokio_tungstenite::tungstenite::Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        AdmissionBusy,
+                    ))
+                    .into(),
+                )
+            } else {
+                Ok(())
+            }
+        })
+        .await;
+        assert!(admitted.is_ok());
+        let dispatched = usize::from(admitted.is_ok());
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+        assert_eq!(dispatched, 1);
+    }
+    #[tokio::test]
+    async fn busy_retry_is_bounded_and_protocol_refusals_never_retry() {
+        let count = std::sync::atomic::AtomicUsize::new(0);
+        let exhausted = retry_admission(|| async {
+            count.fetch_add(1, Ordering::SeqCst);
+            Err::<(), _>(
+                tokio_tungstenite::tungstenite::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    AdmissionBusy,
+                ))
+                .into(),
+            )
+        })
+        .await;
+        assert!(exhausted.is_err());
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+        for refusal in [
+            "secure admission refused",
+            "secure challenge required",
+            "invalid grant",
+            "request dispatched; outcome unknown",
+        ] {
+            let count = std::sync::atomic::AtomicUsize::new(0);
+            let failed = retry_admission(|| async {
+                count.fetch_add(1, Ordering::SeqCst);
+                Err::<(), _>(anyhow::anyhow!("{refusal}"))
+            })
+            .await;
+            assert!(failed.is_err());
+            assert_eq!(count.load(Ordering::SeqCst), 1);
+        }
     }
 }

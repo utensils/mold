@@ -141,7 +141,9 @@ is an explicit CLI override. Secure credentials cannot authorize Regular HTTP.
 The canonical per-home operator file also authorizes invitation export when
 MOLD_API_KEY is absent. Keep invitations and credentials in owner-private files.
 
-Interrupted mutations are never automatically replayed. RunPod create/run use
+Temporary gateway pressure may retry admission at most three times with short
+backoff inside the existing connection deadline, before any HTTP request frame.
+Authentication/protocol refusal is final. Interrupted mutations are never automatically replayed. RunPod create/run use
 owner-authenticated one-time bootstrap for fresh hosts and preserve the existing
 identity for known paired volumes. A private pre-create journal reconciles an
 uncertain paid response without replaying creation. Unknown existing volumes
