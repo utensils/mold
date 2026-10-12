@@ -422,3 +422,5 @@ contents only when opened, with bounded decoding and cancellable playback inspec
 Camera-scanned Regular pairing codes show the connection mode and direct machine address before Pair claims them. Secure remains the default connection choice.
 
 In Library, tap **Select**, choose prints, then tap **Add to Collection** in the selection bar. Choose an existing collection or **New Collection…**, enter a name and tap **Create** to file the selection at once. The same action is available under **More** and a print’s context menu. Organization actions remain available while capability information is unknown; machines that explicitly refuse organization disable these edits. Changes use the ordinary per-machine mutation queue and retry after reconnection.
+
+Held Queue actions use separate full-width rows for Download and Retry and Move to, including in Job Details, with wrapping labels at large text sizes. Input captions sit in the job text column so long reference labels do not squeeze the model and prompt.

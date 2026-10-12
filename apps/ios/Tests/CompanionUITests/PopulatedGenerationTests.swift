@@ -652,6 +652,71 @@ final class PopulatedGenerationTests: XCTestCase {
 }
 
 extension PopulatedGenerationTests {
+    @MainActor func testHeldRecoveryButtonsKeepReadableLabels() async throws {
+        continueAfterFailure = false
+        let machine = try FixtureMachine(queueFixture: true, queueControls: true, queueDownloadFixture: true)
+        let port = try await machine.start()
+        let destination = try FixtureMachine(queueDestinationFixture: true)
+        let destinationPort = try await destination.start()
+        let app = XCUIApplication()
+        defer { app.terminate(); machine.stop(); destination.stop() }
+        cleanUpFixture(machine, port: port, app: app)
+        cleanUpFixture(destination, port: destinationPort, app: app)
+        app.launchArguments = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
+        app.launch()
+        addQueueDownloadMachine(app, port: destinationPort)
+        addQueueDownloadMachine(app, port: port)
+        for category in ["UICTContentSizeCategoryL", "UICTContentSizeCategoryXXL", "UICTContentSizeCategoryAccessibilityXXXL"] {
+            app.terminate()
+            app.launchArguments = ["-UIPreferredContentSizeCategoryName", category]
+            app.launch()
+            XCTAssertTrue(app.navigateToDestination("Queue", shortcut: "3"))
+            let list = app.collectionViews["queue-list"]
+            let download = app.buttons["queue-download-fixture-held"]
+            for _ in 0..<8 where !download.exists || !download.isHittable { list.swipeUp() }
+            guard download.waitForExistence(timeout: 10) else { attach(app); XCTFail(app.debugDescription); return }
+            guard assertHeldButtonGeometry(app, download: download, category: category) else { return }
+            if category == "UICTContentSizeCategoryL" {
+                let image = app.images["queue-source-fixture-held"]
+                let caption = app.staticTexts["queue-input-caption-fixture-held"]
+                XCTAssertTrue(image.waitForExistence(timeout: 5))
+                XCTAssertTrue(caption.exists)
+                XCTAssertGreaterThanOrEqual(caption.frame.minX + 2, image.frame.maxX,
+                                            "Input captions belong in the text column, not a widening thumbnail column")
+            }
+            attach(app)
+            let open = app.buttons["queue-open-fixture-held"]
+            for _ in 0..<8 where !open.isHittable { list.swipeDown() }
+            open.tap()
+            let detailDownload = app.buttons["queue-detail-download-fixture-held"]
+            let detail = app.collectionViews["queue-detail"]
+            for _ in 0..<8 where !detailDownload.exists || !detailDownload.isHittable { detail.swipeUp() }
+            XCTAssertTrue(detailDownload.waitForExistence(timeout: 5))
+            guard assertHeldButtonGeometry(app, download: detailDownload, category: category, detail: true) else { return }
+            attach(app)
+            app.buttons["Done"].firstMatch.tap()
+        }
+        XCTAssertTrue(machine.queueActionRequests().isEmpty, "Layout inspection must not mutate jobs")
+        XCTAssertTrue(machine.installedRequests.isEmpty)
+        XCTAssertTrue(machine.generationRequests.isEmpty)
+    }
+
+    @MainActor private func assertHeldButtonGeometry(_ app: XCUIApplication, download: XCUIElement, category: String, detail: Bool = false) -> Bool {
+        let move = app.collectionViews[detail ? "queue-detail" : "queue-list"].buttons["queue-move-to-fixture-held"]
+        XCTAssertTrue(move.waitForExistence(timeout: 5))
+        attach(app)
+        let bounds = app.frame.insetBy(dx: 16, dy: 0)
+        for button in [download, move] {
+            XCTAssertGreaterThanOrEqual(button.frame.width, 100, "An action must never collapse to a word-width pill")
+            XCTAssertGreaterThanOrEqual(button.frame.minX, bounds.minX)
+            XCTAssertLessThanOrEqual(button.frame.maxX, bounds.maxX)
+        }
+        XCTAssertLessThanOrEqual(move.frame.height, download.frame.height + 4,
+                                 "The shorter Move to label must not wrap into a taller pill")
+        XCTAssertGreaterThanOrEqual(move.frame.minY, download.frame.maxY, "Recovery actions have separate rows")
+        return move.frame.width >= 100 && move.frame.height <= download.frame.height + 4
+    }
+
     @MainActor func testHeldRetryIsANativeSwipeAction() async throws {
         continueAfterFailure = false
         let machine = try FixtureMachine(queueFixture: true, queueControls: true, queueSwipeFixture: true)
@@ -787,6 +852,8 @@ extension PopulatedGenerationTests {
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
         app.buttons["Add a Machine"].firstMatch.tap()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Connection,'")).firstMatch.tap()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Regular'")).firstMatch.tap()
         let name = app.textFields["machine-name"]
         XCTAssertTrue(name.waitForExistence(timeout: 5)); name.tap(); name.typeText("Queue Download Fixture \(port)")
         let address = app.textFields["machine-address"]
