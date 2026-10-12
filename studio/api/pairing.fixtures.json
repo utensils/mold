@@ -106,6 +106,20 @@
       "aliases": [
         "https://utensils.io/mold/pair/#version=2&base_url=https%3A%2F%2Frelay.example&instance_id=inst-roaming&name=Roaming+Studio&namespace=34750f98bd59fcfc946da45aaabe933b&host_key=8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c&host_noise_key=a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209&host_binding_signature=9e599b8745a0e7e45ac91edc93b3eac9bbee97c5684822c64c60ba5c28b2c52f5432e4355049f533aae766cb0edc2e6e9958144d2f364b4998dc1f8c7587420e&websocket_url=wss%3A%2F%2Frelay.example%2Fws&invite_seed=0303030303030303030303030303030303030303030303030303030303030303&invite=%7B%22id%22%3A%2206060606060606060606060606060606%22%2C%22signingKey%22%3A%22ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1%22%2C%22expiresAt%22%3A4000000000%2C%22epoch%22%3A0%2C%22signature%22%3A%2213212a15a7c75715b098b7985ebf9ab074779392297c7a858c6ec83e20acdb3b8ddc382d60c8959020c5e179290b88fc6a71333758ec4551e54dabc77ec2a307%22%7D&endpoints=%5B%7B%22kind%22%3A%22lan%22%2C%22url%22%3A%22http%3A%2F%2F192.168.1.20%3A7680%22%7D%2C%7B%22kind%22%3A%22relay%22%2C%22url%22%3A%22https%3A%2F%2Frelay.example%22%7D%5D"
       ]
+    },
+    {
+      "payload": {
+        "base_url": "http://render.example:7680",
+        "instance_id": "regular-1",
+        "name": "Headless server",
+        "mode": "regular",
+        "pairing_token": "0707070707070707070707070707070707070707070707070707070707070707",
+        "expires_at": 4000000000
+      },
+      "link": "https://utensils.io/mold/pair#version=2&base_url=http%3A%2F%2Frender.example%3A7680&instance_id=regular-1&name=Headless+server&mode=regular&pairing_token=0707070707070707070707070707070707070707070707070707070707070707&expires_at=4000000000",
+      "aliases": [
+        "https://utensils.io/mold/pair/#version=2&base_url=http%3A%2F%2Frender.example%3A7680&instance_id=regular-1&name=Headless+server&mode=regular&pairing_token=0707070707070707070707070707070707070707070707070707070707070707&expires_at=4000000000"
+      ]
     }
   ],
   "rejected": [

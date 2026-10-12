@@ -1,4 +1,5 @@
 import { SecureMux } from "./secureMux";
+import { PreAdmissionProxyBusy, retrySecureAdmission } from "./secureAdmission";
 import { PacketReader, SecureWire, framePacket } from "./secureWire";
 import { CipherObjectCarrier, objectPolicy } from "./secureObjects";
 import {
@@ -55,17 +56,19 @@ export class SecureChannel {
         "A secure connection requires one device grant or pairing invitation.",
       );
     options.signal?.throwIfAborted();
-    const channel = new SecureChannel(options);
-    const abort = () =>
-      channel.close(new Error("Secure connection cancelled."));
-    options.signal?.addEventListener("abort", abort, { once: true });
-    try {
-      await channel.ready;
-      options.signal?.throwIfAborted();
-      return channel;
-    } finally {
-      options.signal?.removeEventListener("abort", abort);
-    }
+    return retrySecureAdmission(async (signal) => {
+      const channel = new SecureChannel(options);
+      const abort = () =>
+        channel.close(new Error("Secure connection cancelled."));
+      signal.addEventListener("abort", abort, { once: true });
+      try {
+        await channel.ready;
+        signal.throwIfAborted();
+        return channel;
+      } finally {
+        signal.removeEventListener("abort", abort);
+      }
+    }, options.signal);
   }
 
   private constructor(
@@ -206,9 +209,11 @@ export class SecureChannel {
       // retains and retries the exact ciphertext under its existing deadline.
       // Never recreate or replay an HTTP request in response to this message.
       if (this.wire) return;
-      throw new Error(
-        "The secure proxy is temporarily busy. Try connecting again.",
-      );
+      if (this.admitted)
+        throw new Error(
+          "The secure proxy is temporarily busy. Try connecting again.",
+        );
+      throw new PreAdmissionProxyBusy();
     }
     if (frame.v !== 3)
       throw new Error(

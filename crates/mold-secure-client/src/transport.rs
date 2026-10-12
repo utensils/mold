@@ -110,7 +110,24 @@ impl Drop for Connection {
         self.cancel.cancel();
     }
 }
+pub(crate) fn is_read_only_method(method: &reqwest::Method) -> bool {
+    matches!(
+        *method,
+        reqwest::Method::GET | reqwest::Method::HEAD | reqwest::Method::OPTIONS
+    )
+}
+pub(crate) fn transport_failure_message(message: &'static str, read_only: bool) -> &'static str {
+    if read_only {
+        message
+            .strip_suffix("; mutation outcome may be unknown")
+            .or_else(|| message.strip_suffix("; its outcome may be unknown"))
+            .unwrap_or(message)
+    } else {
+        message
+    }
+}
 struct StreamState {
+    read_only: bool,
     head: Option<oneshot::Sender<Result<Headers>>>,
     body: crate::BodySender,
     upload_credit: Arc<Semaphore>,
@@ -121,7 +138,7 @@ struct StreamState {
 impl StreamState {
     fn fail(mut self, message: &'static str) {
         self.cancel.cancel();
-        let error = anyhow::anyhow!(message);
+        let error = anyhow::anyhow!(transport_failure_message(message, self.read_only));
         if let Some(head) = self.head.take() {
             let _ = head.send(Err(error));
         } else {
@@ -230,6 +247,7 @@ impl SecureClient {
         self.send_inner(request).await
     }
     async fn send_inner(&self, mut request: reqwest::Request) -> Result<reqwest::Response> {
+        let read_only = is_read_only_method(request.method());
         let host = self.snapshot();
         let connection = self.connection().await?;
         // Hold through Start enqueue: another task cannot publish a newer ID
@@ -292,6 +310,7 @@ impl SecureClient {
                 open,
                 id,
                 state: StreamState {
+                    read_only,
                     head: Some(headtx),
                     body: bodytx,
                     upload_credit: credit.clone(),
@@ -319,11 +338,15 @@ impl SecureClient {
         let head = if let Some(duration) = request.timeout() {
             tokio::time::timeout(*duration, headrx)
                 .await
-                .context("secure response timed out; mutation outcome may be unknown")??
+                .context(transport_failure_message(
+                    "secure response timed out; mutation outcome may be unknown",
+                    read_only,
+                ))??
         } else {
-            headrx
-                .await
-                .context("secure response lost; mutation outcome may be unknown")?
+            headrx.await.context(transport_failure_message(
+                "secure response lost; mutation outcome may be unknown",
+                read_only,
+            ))?
         }?;
         let commands = connection.commands.clone();
         let body = futures_util::stream::unfold(
@@ -442,6 +465,39 @@ fn direct_endpoint(origin: &str) -> Result<String> {
     validate_websocket(url.as_str())?;
     Ok(url.to_string())
 }
+#[derive(Debug)]
+pub(crate) struct AdmissionBusy;
+impl std::fmt::Display for AdmissionBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("secure gateway temporarily busy")
+    }
+}
+impl std::error::Error for AdmissionBusy {}
+async fn retry_admission<T, F, Fut>(mut attempt: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    for retry in 0..3 {
+        match attempt().await {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let busy = error.chain().any(|cause| {
+                    cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                        io.get_ref()
+                            .is_some_and(|inner| inner.is::<AdmissionBusy>())
+                    })
+                });
+                if !busy || retry == 2 {
+                    return Err(error);
+                }
+                let jitter = u64::from(uuid::Uuid::new_v4().as_bytes()[0]) % 126;
+                tokio::time::sleep(Duration::from_millis((250_u64 << retry) + jitter)).await;
+            }
+        }
+    }
+    unreachable!("bounded admission attempts return")
+}
 async fn admit_best(
     host: &PairedHost,
     invite: Option<&PairingInvite>,
@@ -467,9 +523,12 @@ async fn admit_best(
             if cloud {
                 tokio::time::sleep(Duration::from_millis(150)).await;
             }
-            tokio::time::timeout(Duration::from_secs(15), admit(&candidate, invite.as_ref()))
-                .await
-                .context("secure admission timed out")?
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                retry_admission(|| admit(&candidate, invite.as_ref())),
+            )
+            .await
+            .context("secure admission timed out")?
         });
     }
     let mut last = None;
@@ -810,6 +869,7 @@ mod cancellation_tests {
         // parent token, before the connection-stop select arm is polled.
         cancel.cancel();
         let state = StreamState {
+            read_only: false,
             head: headers_pending.then_some(head_tx),
             body: body_tx,
             upload_credit: Arc::new(Semaphore::new(STREAM_WINDOW as usize)),
@@ -820,6 +880,33 @@ mod cancellation_tests {
         (BTreeMap::from([(1, state)]), head_rx, body_rx)
     }
 
+    #[test]
+    fn read_only_methods_do_not_report_mutation_outcomes() {
+        for method in [
+            reqwest::Method::GET,
+            reqwest::Method::HEAD,
+            reqwest::Method::OPTIONS,
+        ] {
+            assert!(is_read_only_method(&method));
+        }
+        for method in [
+            reqwest::Method::POST,
+            reqwest::Method::PUT,
+            reqwest::Method::PATCH,
+            reqwest::Method::DELETE,
+        ] {
+            assert!(!is_read_only_method(&method));
+        }
+    }
+    #[tokio::test]
+    async fn cancelled_read_reports_interruption_without_mutation_advice() {
+        let (mut streams, _, mut body) = pending_stream(false);
+        streams.get_mut(&1).unwrap().read_only = true;
+        cancel_stream(&mut streams, 1);
+        let error = body.recv().await.unwrap().unwrap_err();
+        assert_eq!(error.to_string(), "secure request cancelled");
+        assert!(body.recv().await.is_none());
+    }
     #[tokio::test]
     async fn cancelled_timer_cleanup_reports_body_error_instead_of_successful_eof() {
         let (mut streams, _, mut body) = pending_stream(false);
@@ -848,5 +935,64 @@ mod cancellation_tests {
         assert!(error
             .to_string()
             .contains("mutation outcome may be unknown"));
+    }
+}
+
+#[cfg(test)]
+mod admission_retry_tests {
+    use super::*;
+    #[tokio::test]
+    async fn gateway_busy_retries_only_admission_and_dispatches_once() {
+        let count = std::sync::atomic::AtomicUsize::new(0);
+        let admitted = retry_admission(|| async {
+            if count.fetch_add(1, Ordering::SeqCst) < 2 {
+                Err(
+                    tokio_tungstenite::tungstenite::Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        AdmissionBusy,
+                    ))
+                    .into(),
+                )
+            } else {
+                Ok(())
+            }
+        })
+        .await;
+        assert!(admitted.is_ok());
+        let dispatched = usize::from(admitted.is_ok());
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+        assert_eq!(dispatched, 1);
+    }
+    #[tokio::test]
+    async fn busy_retry_is_bounded_and_protocol_refusals_never_retry() {
+        let count = std::sync::atomic::AtomicUsize::new(0);
+        let exhausted = retry_admission(|| async {
+            count.fetch_add(1, Ordering::SeqCst);
+            Err::<(), _>(
+                tokio_tungstenite::tungstenite::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    AdmissionBusy,
+                ))
+                .into(),
+            )
+        })
+        .await;
+        assert!(exhausted.is_err());
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+        for refusal in [
+            "secure admission refused",
+            "secure challenge required",
+            "invalid grant",
+            "request dispatched; outcome unknown",
+        ] {
+            let count = std::sync::atomic::AtomicUsize::new(0);
+            let failed = retry_admission(|| async {
+                count.fetch_add(1, Ordering::SeqCst);
+                Err::<(), _>(anyhow::anyhow!("{refusal}"))
+            })
+            .await;
+            assert!(failed.is_err());
+            assert_eq!(count.load(Ordering::SeqCst), 1);
+        }
     }
 }

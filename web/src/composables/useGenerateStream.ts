@@ -1113,6 +1113,7 @@ function routeApiTarget(route: HostRoute): ApiTarget {
   return {
     baseUrl: route.target.baseUrl,
     apiKey: route.target.apiKey ?? null,
+    connectionMode: route.target.connectionMode,
   };
 }
 
@@ -1250,7 +1251,15 @@ async function durableCompletionResult(
     id: job.hostId ?? ORIGIN_HOST_ID,
     name: job.hostLabel ?? job.hostId ?? "this server",
     url: target?.baseUrl ?? "",
-    ...(target?.apiKey ? { apiKey: target.apiKey } : {}),
+    ...(target?.apiKey
+      ? {
+          apiKey: target.apiKey,
+          ...(target.connectionMode
+            ? { connectionMode: target.connectionMode }
+            : {}),
+        }
+      : {}),
+    connectionMode: target?.connectionMode,
   };
   const artifact = await fetchGalleryBlob(host, filename);
   const image = await blobToBase64(artifact);
@@ -2336,7 +2345,11 @@ async function confirmDurableCancellation(job: Job): Promise<void> {
     throw new Error("The original machine is not connected.");
   }
   const task = mutateQueueJobOnExpectedInstance(
-    { baseUrl: target.baseUrl, apiKey: target.apiKey ?? null },
+    {
+      baseUrl: target.baseUrl,
+      apiKey: target.apiKey ?? null,
+      connectionMode: target.connectionMode,
+    },
     {
       instanceId: durable.expectedInstanceId,
       batchId: durable.serverBatchId,
@@ -2455,7 +2468,11 @@ async function retryJob(id: string): Promise<void> {
   job.retryable = false;
   try {
     const outcome = await retryQueueJobRecoveringAmbiguity(
-      { baseUrl: target.baseUrl, apiKey: target.apiKey ?? null },
+      {
+        baseUrl: target.baseUrl,
+        apiKey: target.apiKey ?? null,
+        connectionMode: target.connectionMode,
+      },
       {
         instanceId: job.durableBatch.expectedInstanceId,
         batchId: job.durableBatch.serverBatchId,

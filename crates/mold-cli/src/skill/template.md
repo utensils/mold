@@ -105,7 +105,7 @@ readiness manifest for their exact source SHA; if it is unavailable, use a
 published matching build or an explicitly reviewed image digest. Do not replace
 this check with a mutable `latest` tag or retry paid creation blindly.
 
-## Encrypted remote connections
+## Secure and explicit Regular connections
 
 ```bash
 mold relay connect --relay-url wss://API.execute-api.REGION.amazonaws.com/production --target 127.0.0.1:7680
@@ -122,15 +122,28 @@ The operator creates a one-use, two-minute invitation using MOLD_API_KEY (or
 @owner-only-key-file). Transfer the invitation privately. Each paired client
 stores its own key and revocable grant. MOLD_HOST selects a paired origin.
 
-Direct and relay API traffic, uploads, progress and media use pinned Noise XX over
+Secure direct and relay API traffic, uploads, progress and media use pinned Noise XX over
 LAN or the Lambda WebSocket relay. The cloud sees metadata and ciphertext, not
 API credentials or media. Bounded S3 objects may carry only the same encrypted
 wire bytes; object keys and cloud URLs never replace host identity verification.
 Old proxy credentials cannot be upgraded implicitly;
-upgrade and pair every client again. Plain HTTP is only a private loopback
-engine interface. Do not use raw remote curl or fall back to a cloud-provided
-host key. Uploads are bounded to 64 MiB; responses stream with backpressure.
-Interrupted mutations are never automatically replayed. RunPod create/run use
+upgrade and pair every Secure client again. A failed Secure request never falls
+back to HTTP. Regular direct HTTP(S) requires explicit opt-in and a distinct
+credential; the managed Mold proxy always requires Secure. Never fall back to a
+cloud-provided host key. Uploads are bounded to 64 MiB; responses stream with backpressure.
+Enable Regular with `mold serve --allow-direct-api`, `MOLD_ALLOW_DIRECT_API=1`, or
+Nix `services.mold.allowDirectApi = true`. For a one-use direct invitation:
+`mold pairing create --mode regular --direct-url https://direct.example:7680 --output /private/regular.json`.
+Pair with the same `mold pair --invite-file` command. Manual direct setup is
+`mold pair --mode regular --direct-url https://direct.example:7680 --api-key-file /private/key`.
+The private per-origin profile captures its selected mode; `MOLD_CONNECTION_MODE=secure|regular`
+is an explicit CLI override. Secure credentials cannot authorize Regular HTTP.
+The canonical per-home operator file also authorizes invitation export when
+MOLD_API_KEY is absent. Keep invitations and credentials in owner-private files.
+
+Temporary gateway pressure may retry admission at most three times with short
+backoff inside the existing connection deadline, before any HTTP request frame.
+Authentication/protocol refusal is final. Interrupted mutations are never automatically replayed. RunPod create/run use
 owner-authenticated one-time bootstrap for fresh hosts and preserve the existing
 identity for known paired volumes. A private pre-create journal reconciles an
 uncertain paid response without replaying creation. Unknown existing volumes

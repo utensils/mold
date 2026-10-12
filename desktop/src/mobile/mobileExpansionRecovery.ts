@@ -58,6 +58,7 @@ export function createMobileExpansionRecovery(
     name: route.label,
     baseUrl: target.baseUrl,
     apiKey: target.apiKey ?? "",
+    connectionMode: target.connectionMode,
     hostname: undefined,
     version: undefined,
     instanceId: route.instanceId ?? undefined,
@@ -128,6 +129,7 @@ export function mobileExpansionRecoveryStaleReason(
   if (
     host.baseUrl !== recovery.route.target.baseUrl ||
     (host.apiKey || null) !== recovery.route.target.apiKey ||
+    (host.connectionMode ?? "secure") !== (recovery.route.target.connectionMode ?? "secure") ||
     (host.instanceId ?? null) !== (recovery.route.instanceId ?? null)
   ) {
     return `${recovery.route.label}'s connection details changed.`;

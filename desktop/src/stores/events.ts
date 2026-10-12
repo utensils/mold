@@ -39,9 +39,15 @@ type Subscription = {
 function hostIdentity(host: {
   baseUrl: string | null;
   apiKey: string | null;
+  connectionMode?: "secure" | "regular" | undefined;
   instanceId: string | null;
 }): string {
-  return JSON.stringify([host.baseUrl, host.apiKey, host.instanceId]);
+  return JSON.stringify([
+    host.baseUrl,
+    host.apiKey,
+    host.instanceId,
+    host.connectionMode ?? "secure",
+  ]);
 }
 
 /*
@@ -186,7 +192,13 @@ export const useEventsStore = defineStore("events", {
       for (const host of ready) {
         const identity = hostIdentity(host);
         if (sub.streams.has(host.id) || sub.silent.get(host.id) === identity) continue;
-        this.openHostStream(host.id, host.baseUrl!, host.apiKey ?? null, identity);
+        this.openHostStream(
+          host.id,
+          host.baseUrl!,
+          host.apiKey ?? null,
+          identity,
+          host.connectionMode,
+        );
       }
     },
     closeHostStream(hostId: string) {
@@ -200,12 +212,18 @@ export const useEventsStore = defineStore("events", {
       // durable job on that machine with no events at all.
       useGenerationStore().detachSharedDurableEventHost(hostId);
     },
-    openHostStream(hostId: string, baseUrl: string, apiKey: string | null, identity: string) {
+    openHostStream(
+      hostId: string,
+      baseUrl: string,
+      apiKey: string | null,
+      identity: string,
+      connectionMode?: "secure" | "regular",
+    ) {
       const abort = new AbortController();
       subscriptionFor(this).streams.set(hostId, { abort, identity });
       useGenerationStore().attachSharedDurableEventHost(hostId);
       void sseStream("/api/events", {
-        target: { baseUrl, apiKey },
+        target: { baseUrl, apiKey, ...(connectionMode ? { connectionMode } : {}) },
         signal: abort.signal,
         retry: true,
         terminalHttpStatuses: [401, 403, 404],
@@ -215,7 +233,10 @@ export const useEventsStore = defineStore("events", {
         onEvent: (event, data) => {
           useGenerationStore().onDurableEvent(hostId, event, data);
           if (event === "resync_required" && !abort.signal.aborted) {
-            sourceMediaGalleryEvent({ baseUrl, apiKey }, { type: "resync_required" });
+            sourceMediaGalleryEvent(
+              { baseUrl, apiKey, ...(connectionMode ? { connectionMode } : {}) },
+              { type: "resync_required" },
+            );
           }
           if (event !== "event" && event !== "message") return;
           let frame: ServerEvent;
@@ -224,7 +245,11 @@ export const useEventsStore = defineStore("events", {
           } catch {
             return; /* skip malformed frame */
           }
-          if (!abort.signal.aborted) sourceMediaGalleryEvent({ baseUrl, apiKey }, frame);
+          if (!abort.signal.aborted)
+            sourceMediaGalleryEvent(
+              { baseUrl, apiKey, ...(connectionMode ? { connectionMode } : {}) },
+              frame,
+            );
           // Fleet-wide: a print is a print whichever machine made it, and the
           // badge is the only consumer that cares about the others. A print
           // that was trashed or deleted — including one a machine published

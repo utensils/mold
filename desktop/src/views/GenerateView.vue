@@ -879,7 +879,7 @@ function inspectSelectedQueueRender(source: SelectedQueuePreviewSource | undefin
     preview: null,
   };
   stopSelectedQueuePreview = watchSelectedQueuePreview(
-    { baseUrl: host.baseUrl, apiKey: host.apiKey },
+    { baseUrl: host.baseUrl, apiKey: host.apiKey, connectionMode: host.connectionMode },
     source.jobId,
     (preview) => {
       if (
@@ -1128,7 +1128,17 @@ const preparedStaleReasons = computed(() => {
     hostTargets: new Map(
       hosts.all.flatMap((host) =>
         host.baseUrl
-          ? [[host.id, { baseUrl: host.baseUrl, apiKey: host.apiKey, kind: host.kind }] as const]
+          ? [
+              [
+                host.id,
+                {
+                  baseUrl: host.baseUrl,
+                  apiKey: host.apiKey,
+                  connectionMode: host.connectionMode,
+                  kind: host.kind,
+                },
+              ] as const,
+            ]
           : [],
       ),
     ),
@@ -1144,7 +1154,17 @@ function currentHostSnapshot() {
     hostTargets: new Map(
       hosts.all.flatMap((host) =>
         host.baseUrl
-          ? [[host.id, { baseUrl: host.baseUrl, apiKey: host.apiKey, kind: host.kind }] as const]
+          ? [
+              [
+                host.id,
+                {
+                  baseUrl: host.baseUrl,
+                  apiKey: host.apiKey,
+                  connectionMode: host.connectionMode,
+                  kind: host.kind,
+                },
+              ] as const,
+            ]
           : [],
       ),
     ),
@@ -1568,7 +1588,12 @@ function resultHostTarget(clientId: number): ApiTarget | null {
   const frozen = generation.targetForJob(clientId);
   if (frozen) return frozen;
   const info = conn.info;
-  return info?.baseUrl ? { baseUrl: info.baseUrl, apiKey: info.apiKey ?? null } : null;
+  return info?.baseUrl
+    ? {
+        baseUrl: info.baseUrl,
+        apiKey: info.apiKey ?? null,
+      }
+    : null;
 }
 
 /**
@@ -2881,6 +2906,7 @@ async function pullExpansionModel() {
         label: route.label,
         baseUrl: route.target.baseUrl,
         apiKey: route.target.apiKey,
+        ...(route.target.connectionMode ? { connectionMode: route.target.connectionMode } : {}),
       }
     : null;
   try {
@@ -3904,7 +3930,11 @@ async function loadPromptHistory() {
         hostId: host.id,
         hostLabel: host.label,
         fetchable: host.status === "ready" && Boolean(host.baseUrl),
-        source: { baseUrl: host.baseUrl ?? "", apiKey: host.apiKey },
+        source: {
+          baseUrl: host.baseUrl ?? "",
+          apiKey: host.apiKey,
+          connectionMode: host.connectionMode,
+        },
       })),
       (target) => fetchHistoryFrom(target),
     );

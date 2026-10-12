@@ -100,7 +100,7 @@ extension HostStore {
     }
 
     /// Tries an address nobody has committed to yet.
-    func probe(url: URL, apiKey: String?) async -> Reachability {
-        await check(MoldHost(name: "", baseURL: url, apiKey: apiKey))
+    func probe(url: URL, apiKey: String?, mode: HostConnectionMode = .secure) async -> Reachability {
+        await check(MoldHost(name: "", baseURL: url, apiKey: apiKey, connectionMode: mode))
     }
 }

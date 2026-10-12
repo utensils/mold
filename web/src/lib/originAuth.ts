@@ -1,3 +1,5 @@
+import { studioPrimary, standaloneStudio } from "./secureStudio";
+import { CONNECTION_MODE_HEADER } from "@studio/api/connectionMode";
 import type { InjectionKey } from "vue";
 import { relayFetch } from "@studio/api/relayTransport";
 export const ORIGIN_ACCESS_CHANGE_KEY: InjectionKey<() => void> = Symbol(
@@ -8,6 +10,7 @@ const BrowserURL = URL;
 const storageKey = () => `mold.web.origin-key.v1:${window.location.origin}`;
 export function originApiKey(): string | null {
   try {
+    if (standaloneStudio()) return studioPrimary()?.apiKey || null;
     return sessionStorage.getItem(storageKey()) || null;
   } catch {
     return null;
@@ -19,7 +22,13 @@ export function setOriginApiKey(key: string): void {
   else sessionStorage.removeItem(storageKey());
 }
 export function originApiTarget() {
-  return { baseUrl: "", apiKey: originApiKey() };
+  return {
+    baseUrl: "",
+    apiKey: originApiKey(),
+    connectionMode: standaloneStudio()
+      ? (studioPrimary()?.connectionMode ?? ("secure" as const))
+      : ("regular" as const),
+  };
 }
 /** Never carry an origin credential to another host, assets, or a redirect. */
 export function originAuthenticatedFetch(
@@ -36,6 +45,13 @@ export function originAuthenticatedFetch(
   let injected = false;
   if (
     url.origin === window.location.origin &&
+    url.pathname.startsWith("/api/")
+  ) {
+    headers.set(CONNECTION_MODE_HEADER, originApiTarget().connectionMode);
+    injected = true;
+  }
+  if (
+    url.origin === window.location.origin &&
     url.pathname.startsWith("/api/") &&
     !headers.has("x-api-key")
   ) {
@@ -45,7 +61,7 @@ export function originAuthenticatedFetch(
       injected = true;
     }
   }
-  if (!headers.has("x-api-key")) return relayFetch(input, init);
+  if (!headers.has("x-api-key") && !injected) return relayFetch(input, init);
   return relayFetch(input, {
     ...init,
     ...(injected ? { headers } : {}),

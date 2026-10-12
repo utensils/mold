@@ -27,13 +27,22 @@ export type CachedGalleryMediaRef = {
 
 export function createThumbnailRouteGenerationRegistry(): (
   hostId: string,
-  target: { baseUrl: string; apiKey?: string | null },
+  target: {
+    baseUrl: string;
+    apiKey?: string | null;
+    connectionMode?: "secure" | "regular" | undefined;
+  },
 ) => number {
   const hosts = new Map<
     string,
     {
       nextGeneration: number;
-      routes: Array<{ baseUrl: string; apiKey: string | null; generation: number }>;
+      routes: Array<{
+        baseUrl: string;
+        apiKey: string | null;
+        connectionMode: "secure" | "regular";
+        generation: number;
+      }>;
     }
   >();
   return (hostId, target) => {
@@ -43,12 +52,16 @@ export function createThumbnailRouteGenerationRegistry(): (
       hosts.set(hostId, state);
     }
     const apiKey = target.apiKey ?? null;
+    const connectionMode = target.connectionMode ?? "secure";
     const prior = state.routes.find(
-      (route) => route.baseUrl === target.baseUrl && route.apiKey === apiKey,
+      (route) =>
+        route.baseUrl === target.baseUrl &&
+        route.apiKey === apiKey &&
+        route.connectionMode === connectionMode,
     );
     if (prior) return prior.generation;
     const generation = state.nextGeneration++;
-    state.routes.push({ baseUrl: target.baseUrl, apiKey, generation });
+    state.routes.push({ baseUrl: target.baseUrl, apiKey, connectionMode, generation });
     return generation;
   };
 }

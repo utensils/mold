@@ -2076,7 +2076,11 @@ async function restoreLibrarySource(
   };
   const owner = hostForEntry(item);
   const retainedTarget = owner
-    ? { baseUrl: owner.url, apiKey: owner.apiKey ?? null }
+    ? {
+        baseUrl: owner.url,
+        apiKey: owner.apiKey ?? null,
+        connectionMode: owner.connectionMode,
+      }
     : null;
   // Always ask — the host is the only authority on what it retained. But a
   // text-to-image print's archive entry resolves with no pins, which the
@@ -2396,7 +2400,11 @@ watch(
 function upscaleTarget(item: GalleryImage) {
   const host = hostForEntry(item);
   if (!host) throw missingHostError(item);
-  return { baseUrl: host.url, apiKey: host.apiKey ?? null };
+  return {
+    baseUrl: host.url,
+    apiKey: host.apiKey ?? null,
+    connectionMode: host.connectionMode,
+  };
 }
 async function pollUpscaleJob() {
   const item = upscaleItem.value;

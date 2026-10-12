@@ -8,12 +8,16 @@ enum HostEditError: Error, Equatable, LocalizedError {
     case duplicate(String)
     case keychain(String)
     case storage(String)
+    case modeRequiresCredential
+    case regularAddress
 
     var errorDescription: String? {
         switch self {
         case let .address(problem): problem.message
         case let .duplicate(name): "\(name) already answers at this address."
         case let .keychain(reason): "The key couldn't be saved: \(reason)"
+        case .regularAddress: "Regular connections require a direct HTTP or HTTPS address. Mold proxy requires Secure."
+        case .modeRequiresCredential: "Changing connection mode requires a new pairing code or a separate Regular API key."
         case let .storage(reason): "The machine list couldn't be saved: \(reason)"
         }
     }
@@ -24,16 +28,17 @@ extension HostStore {
     /// list whose key failed to save would look keyless and silently refuse.
     @discardableResult
     func add(name: String, address: String, apiKey: String?, makeDefault: Bool,
-             id: UUID = UUID()) throws(HostEditError) -> MoldHost {
+             id: UUID = UUID(), connectionMode: HostConnectionMode = .secure) throws(HostEditError) -> MoldHost {
         let url: URL
         do { url = try HostAddress.resolve(address) } catch { throw .address(error) }
+        if connectionMode == .regular && !DirectHostAddress.isValid(url, allowingPathPrefix: true) { throw .regularAddress }
         if let clash = hosts.first(where: { HostAddress.sameOrigin($0.baseURL, url) }) {
             throw .duplicate(clash.name)
         }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let key = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
         let host = MoldHost(id: id, name: trimmed.isEmpty ? HostAddress.suggestedName(for: url) : trimmed,
-                            baseURL: url, apiKey: key?.isEmpty == false ? key : nil)
+                            baseURL: url, apiKey: key?.isEmpty == false ? key : nil, connectionMode: connectionMode)
         do { try credentials.setAPIKey(key ?? "", for: host.id) } catch {
             throw .keychain(error.reasonSentence)
         }
@@ -46,14 +51,24 @@ extension HostStore {
 
     /// Renames a machine, moves it, or changes its key. `apiKey == nil`
     /// leaves the key alone; an empty string clears it.
-    func update(_ id: MoldHost.ID, name: String, address: String, apiKey: String?) throws(HostEditError) {
+    func update(_ id: MoldHost.ID, name: String, address: String, apiKey: String?, connectionMode: HostConnectionMode? = nil, paired: Bool = false) throws(HostEditError) {
         guard var host = host(id) else { return }
         let url: URL
         do { url = try HostAddress.resolve(address) } catch { throw .address(error) }
         if let clash = hosts.first(where: { $0.id != id && HostAddress.sameOrigin($0.baseURL, url) }) {
             throw .duplicate(clash.name)
         }
+        if (connectionMode ?? host.connectionMode) == .regular && !DirectHostAddress.isValid(url, allowingPathPrefix: true) { throw .regularAddress }
         let previousKey = host.apiKey
+        if let mode = connectionMode, mode != host.connectionMode {
+            guard paired || (mode == .regular && apiKey != nil && apiKey?.trimmingCharacters(in: .whitespacesAndNewlines) != host.apiKey) else {
+                throw .modeRequiresCredential
+            }
+            host.connectionMode = mode
+            host.secure = nil
+            host.connectionEndpoints = nil
+            host.connectionOriginalURL = nil
+        }
         if let apiKey {
             let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
             do { try credentials.setAPIKey(key, for: id) } catch { throw .keychain(error.reasonSentence) }

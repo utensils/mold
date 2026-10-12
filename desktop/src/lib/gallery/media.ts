@@ -102,7 +102,7 @@ export interface StreamableMediaOptions extends AuthedMediaOptions {
 }
 
 const keyOf = (path: string, target: ApiTarget, cacheKey?: string, mediaVersion?: string) =>
-  `${cacheKey ?? "primary"}|${path}|${mediaVersion ?? "legacy"}|${JSON.stringify([target.baseUrl, target.apiKey])}`;
+  `${cacheKey ?? "primary"}|${path}|${mediaVersion ?? "legacy"}|${JSON.stringify([target.baseUrl, target.apiKey, target.connectionMode ?? "secure"])}`;
 
 export function authedMediaUrl(path: string, opts: AuthedMediaOptions = {}): Promise<string> {
   if (path.startsWith("mold-local:")) return Promise.resolve(path);

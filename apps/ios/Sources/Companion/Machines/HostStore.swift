@@ -51,13 +51,14 @@ final class HostStore {
         hosts = []
         hosts = stored.entries.map { entry in
             MoldHost(id: entry.id, name: entry.name, baseURL: entry.baseURL, apiKey: readKey(entry),
-                     connectionEndpoints: entry.connectionEndpoints, connectionInstanceID: entry.connectionInstanceID, connectionOriginalURL: entry.connectionOriginalURL, secure: entry.secure)
+                     connectionEndpoints: entry.connectionEndpoints, connectionInstanceID: entry.connectionInstanceID, connectionOriginalURL: entry.connectionOriginalURL, secure: entry.secure, connectionMode: entry.connectionMode ?? (entry.secure == nil ? .regular : .secure))
         }
+        SecureCredentialHistory.shared.remember(hosts)
     }
 
     private func readKey(_ entry: HostList.Entry) -> String? {
         do {
-            let host = MoldHost(id: entry.id, name: entry.name, baseURL: entry.baseURL, secure: entry.secure)
+            let host = MoldHost(id: entry.id, name: entry.name, baseURL: entry.baseURL, secure: entry.secure, connectionMode: entry.connectionMode ?? (entry.secure == nil ? .regular : .secure))
             if host.requiresSecurePairing {
                 try credentials.clearAPIKey(for: entry.id)
                 return nil
@@ -98,11 +99,14 @@ final class HostStore {
     func persist() throws {
         try list.save(HostList(
             entries: hosts.map { .init(id: $0.id, name: $0.name, baseURL: $0.baseURL,
-                                     connectionEndpoints: $0.connectionEndpoints, connectionInstanceID: $0.connectionInstanceID, connectionOriginalURL: $0.connectionOriginalURL, secure: $0.secure) },
+                                     connectionEndpoints: $0.connectionEndpoints, connectionInstanceID: $0.connectionInstanceID, connectionOriginalURL: $0.connectionOriginalURL, secure: $0.secure, connectionMode: $0.connectionMode) },
             defaultID: defaultMachine))
     }
 
-    func setHosts(_ new: [MoldHost]) { hosts = new }
+    func setHosts(_ new: [MoldHost]) {
+        SecureCredentialHistory.shared.remember(hosts + new)
+        hosts = new
+    }
     func setDefaultMachine(_ id: MoldHost.ID?) { defaultMachine = id }
     func setReachability(_ state: Reachability?, for id: MoldHost.ID) { reachability[id] = state }
     func setCapabilities(_ value: Capabilities?, for id: MoldHost.ID) { capabilities[id] = value }

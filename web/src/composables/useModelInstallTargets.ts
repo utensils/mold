@@ -187,7 +187,11 @@ export function useModelInstallTargets(): ModelInstallTargets {
     // the downloading — not on the browser's own origin.
     const outcome = await runWithLicenseConsent({
       hostLabel: target.host.label,
-      target: { baseUrl: entry.url, apiKey: entry.apiKey ?? null },
+      target: {
+        baseUrl: entry.url,
+        apiKey: entry.apiKey ?? null,
+        connectionMode: entry.connectionMode,
+      },
       installModel: modelId,
       start: () => hostModelDownload(entry, modelId),
     });

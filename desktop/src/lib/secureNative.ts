@@ -1,3 +1,4 @@
+import { configureRegularPlatform } from "@studio/api/directConnection";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import {
   configureSecurePlatform,
@@ -33,6 +34,10 @@ function nativeHost(profile: SecureHostProfile, identity: Identity, origin: stri
 /** IPC receives private state only inside this trusted packaged WebView process. */
 export async function installSecureNative(): Promise<void> {
   if (!isTauri()) return;
+  configureRegularPlatform(
+    (origin, apiKey) => invoke("regular_host_register", { host: { origin, api_key: apiKey } }),
+    (origin) => invoke("regular_host_forget", { origin }),
+  );
   configureSecurePlatform(
     async (profile, identity) => {
       for (const origin of profile.origins)

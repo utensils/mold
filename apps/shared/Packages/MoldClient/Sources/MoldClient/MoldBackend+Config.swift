@@ -17,8 +17,16 @@ public protocol MoldConfigBackend: Sendable {
     func configProfiles() async throws -> ConfigProfiles
     /// Starts a two-minute, one-use mobile pairing handoff.
     func pairingSession() async throws -> PairingSession
+    func pairingSession(mode: HostConnectionMode, directURL: URL?) async throws -> PairingSession
     /// Every client currently holding paired access to this machine.
     func pairedClients() async throws -> PairedClients
     /// Revokes one paired client's access.
     func revokePairedClient(_ id: String) async throws
+}
+
+public extension MoldConfigBackend {
+    func pairingSession(mode: HostConnectionMode, directURL: URL?) async throws -> PairingSession {
+        guard mode == .secure else { throw SecureConnectionError.pairingRequired }
+        return try await pairingSession()
+    }
 }

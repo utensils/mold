@@ -138,7 +138,11 @@ impl MoldClient {
         let (client, api_key_configured) = build_client(None);
         Self {
             base_url: normalize_host(base_url),
-            client: crate::relay_transport::RelayClient::new(client),
+            client: crate::relay_transport::RelayClient::for_origin(
+                client,
+                &normalize_host(base_url),
+                None,
+            ),
             api_key_configured,
             gallery_persists_outputs: Default::default(),
         }
@@ -149,7 +153,11 @@ impl MoldClient {
         let (client, api_key_configured) = build_client(Some(&api_key));
         Self {
             base_url: normalize_host(base_url),
-            client: crate::relay_transport::RelayClient::new(client),
+            client: crate::relay_transport::RelayClient::for_origin(
+                client,
+                &normalize_host(base_url),
+                Some(api_key),
+            ),
             api_key_configured,
             gallery_persists_outputs: Default::default(),
         }
@@ -159,10 +167,11 @@ impl MoldClient {
         let base_url =
             std::env::var("MOLD_HOST").unwrap_or_else(|_| "http://localhost:7680".to_string());
         let api_key = std::env::var("MOLD_API_KEY").ok().filter(|k| !k.is_empty());
+        let origin = normalize_host(&base_url);
         let (client, api_key_configured) = build_client(api_key.as_deref());
         Self {
             base_url: normalize_host(&base_url),
-            client: crate::relay_transport::RelayClient::new(client),
+            client: crate::relay_transport::RelayClient::for_origin(client, &origin, api_key),
             api_key_configured,
             gallery_persists_outputs: Default::default(),
         }
@@ -171,11 +180,7 @@ impl MoldClient {
     /// Whether dispatch has an explicit key or a valid paired device credential.
     /// Paired credentials are inserted only inside the encrypted request.
     pub fn has_api_key(&self) -> bool {
-        self.api_key_configured
-            || mold_secure_client::load_pairing(&self.base_url).is_ok_and(|host| {
-                !host.api_key.is_empty()
-                    && reqwest::header::HeaderValue::from_str(&host.api_key).is_ok()
-            })
+        self.api_key_configured || self.client.has_paired_api_key(&self.base_url)
     }
 
     /// Create a request-bound MiniMax H3 reference upload session.

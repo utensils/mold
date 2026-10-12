@@ -14,6 +14,12 @@ pub(crate) struct LocalNetworkState {
     pub enabled: bool,
     pub epoch: u64,
 }
+#[derive(Clone, Default)]
+pub(crate) struct RegularNetworkStatus {
+    pub epoch: u64,
+    pub address: Option<SocketAddr>,
+    pub error: Option<String>,
+}
 pub struct ConnectionAddresses {
     configuration: RwLock<Option<(SocketAddr, Option<String>)>>,
     managed_relay_origin: RwLock<Option<String>>,
@@ -21,6 +27,9 @@ pub struct ConnectionAddresses {
     secure_policy: RwLock<Option<tokio::sync::watch::Receiver<mold_relay::secure::HostPolicy>>>,
     local_network_enabled: tokio::sync::watch::Sender<LocalNetworkState>,
     local_network_listener: RwLock<Option<SocketAddr>>,
+    regular_network_enabled: tokio::sync::watch::Sender<LocalNetworkState>,
+    regular_network_status: tokio::sync::watch::Sender<RegularNetworkStatus>,
+    regular_api_enabled: std::sync::atomic::AtomicBool,
 }
 impl Default for ConnectionAddresses {
     fn default() -> Self {
@@ -31,10 +40,100 @@ impl Default for ConnectionAddresses {
             secure_policy: RwLock::default(),
             local_network_enabled: tokio::sync::watch::channel(LocalNetworkState::default()).0,
             local_network_listener: RwLock::default(),
+            regular_network_enabled: tokio::sync::watch::channel(LocalNetworkState::default()).0,
+            regular_network_status: tokio::sync::watch::channel(RegularNetworkStatus::default()).0,
+            regular_api_enabled: Default::default(),
         }
     }
 }
 impl ConnectionAddresses {
+    pub fn set_regular_network_enabled(&self, enabled: bool) {
+        self.regular_network_enabled.send_if_modified(|state| {
+            if state.enabled == enabled {
+                return false;
+            }
+            state.enabled = enabled;
+            state.epoch = state.epoch.wrapping_add(1);
+            true
+        });
+        if !enabled {
+            self.regular_network_status
+                .send_replace(RegularNetworkStatus::default());
+        }
+    }
+    pub fn regular_network_endpoints(&self) -> Vec<String> {
+        let state = *self.regular_network_enabled.borrow();
+        let status = self.regular_network_status.borrow();
+        if !state.enabled || state.epoch != status.epoch {
+            return Vec::new();
+        }
+        let Some(bound) = status.address else {
+            return Vec::new();
+        };
+        let interfaces = if_addrs::get_if_addrs()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|i| i.ip())
+            .collect::<Vec<_>>();
+        advertised_endpoints(bound, &interfaces, None)
+            .into_iter()
+            .map(|e| e.url)
+            .collect()
+    }
+    pub async fn regular_network_ready(
+        &self,
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<Vec<String>> {
+        let mut status = self.regular_network_status.subscribe();
+        let mut enabled = self.regular_network_enabled.subscribe();
+        let epoch = enabled.borrow().epoch;
+        tokio::time::timeout(timeout, async {
+            loop {
+                anyhow::ensure!(
+                    enabled.borrow().enabled && enabled.borrow().epoch == epoch,
+                    "Regular access was disabled or replaced"
+                );
+                let current = status.borrow_and_update().clone();
+                if current.epoch == epoch {
+                    if let Some(error) = current.error {
+                        anyhow::bail!("{error}")
+                    }
+                    if current.address.is_some() {
+                        let endpoints = self.regular_network_endpoints();
+                        anyhow::ensure!(
+                            !endpoints.is_empty(),
+                            "No direct network address is available"
+                        );
+                        return Ok(endpoints);
+                    }
+                }
+                tokio::select! {
+                    value = status.changed() => value?,
+                    value = enabled.changed() => value?,
+                }
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("Regular access did not become ready in time"))?
+    }
+    pub(crate) fn watch_regular_network(&self) -> tokio::sync::watch::Receiver<LocalNetworkState> {
+        self.regular_network_enabled.subscribe()
+    }
+    pub(crate) fn publish_regular_network(&self, status: RegularNetworkStatus) {
+        let enabled = self.regular_network_enabled.borrow();
+        if enabled.enabled && enabled.epoch == status.epoch {
+            self.regular_network_status.send_replace(status);
+        }
+    }
+    pub(crate) fn set_regular_api_enabled(&self, enabled: bool) {
+        self.regular_api_enabled
+            .store(enabled, std::sync::atomic::Ordering::Release);
+    }
+    pub(crate) fn regular_api_available(&self) -> bool {
+        self.regular_api_enabled
+            .load(std::sync::atomic::Ordering::Acquire)
+            || !self.regular_network_endpoints().is_empty()
+    }
     /// In-process connectors observe pairing and revocation before the handler replies.
     pub fn watch_secure_policy(
         &self,

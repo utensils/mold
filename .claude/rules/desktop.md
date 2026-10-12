@@ -44,3 +44,15 @@ Retained inputs use the shared Studio source cards in print details and the Sour
 The shell gallery bootstrap must resolve collection inventory before fresh rows: collection counts and hidden membership cannot depend on opening the Collections view. Keep configured offline machines’ collection and organization snapshots as privacy evidence for live mirrors; remove that evidence when the machine is removed or its route, credentials, or installation changes, and never project offline media into the live grid. Default views withhold unresolved collection membership until visibility metadata is available.
 
 **WebKitGTK holds six connections per host, so every long-lived stream is a budget, and store bookkeeping never keys on `this`.** A leaked `/api/events` (or any SSE) stream is invisible until the sixth, after which every webview request to that machine — media tickets, `<video>` URLs, ordinary API reads — queues forever behind "Loading preview" while native-fetched thumbnails still render. In a dev build Pinia's devtools plugin calls each action with a fresh `Proxy` of the store, so a `WeakMap` keyed on `this` misses on every call and a resubscribe never aborts the stream it replaced; `stores/events.ts` keys on `toRaw(this)`. `desktop-dev` runs WebKitGTK unwrapped, so the devshell exports `GST_PLUGIN_SYSTEM_PATH_1_0` (the `devshell-gstreamer-plugins` flake check pins it) — without `autoaudiosink` WebKit aborts the web process on the first `<video>`. A clip with sound must be interleaved (`av_media.rs` writes samples in presentation order): WebKitGTK's qtdemux reads front to back and cannot preroll a file whose audio sits behind the whole video track.
+
+Host operator authority is per Mold home: `$MOLD_HOME/secure/operator.key`, read and created through `mold_secure::operator_key` (including native Swift through the shared C ABI). Explicit operator environment overrides remain explicit. Existing shell-local keys are migration candidates only; preserve them, host.identity and paired-client rows. Never repair invalid private files by replacing keys. An occupied default server port with an inconclusive identity/auth probe refuses engine startup instead of selecting another port.
+
+**Explicit Regular transport.** SavedHost.connectionMode is optional; absent
+means Secure. Regular native IPC registers a distinct direct credential without
+removing Secure authority. MediaSaveTarget captures its mode with URL/key and
+passes an internal mode marker removed by Rust before dispatch; never infer
+Regular from failed Secure transport or a saved key. regular_access_get/set
+owns a separate live listener, bounded readiness and the persisted
+MOLD_REGULAR_ACCESS engine preference; stopping it closes direct streams while
+Secure access remains independent. Adopted external engines are configured by
+their own operator. Nix allowDirectApi is false by default.

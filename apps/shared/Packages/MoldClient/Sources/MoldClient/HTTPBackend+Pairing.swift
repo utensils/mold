@@ -42,6 +42,9 @@ public extension HTTPBackend {
         now: Date = .now, session: URLSession = APISession.api
     ) async throws -> PairingClaim {
         if payload.isExpired(at: now) { throw PairingClaimError.expiredOrUsed }
+        if payload.mode == .regular {
+            return try await claimRegularPairing(payload, clientName: clientName, clientKind: clientKind, session: session)
+        }
         guard let invitation = payload.secureInvitation, let base = URL(string: payload.baseURL)
         else { throw SecureConnectionError.pairingRequired }
         let identity = try await SecureIdentityStore.shared.identity()
@@ -91,5 +94,33 @@ extension HTTPBackend {
         }
         try Task.checkCancellation()
         return (try await SecureWebSocketConnection.connectInvitation(invitation, identity: identity), base)
+    }
+}
+
+private extension HTTPBackend {
+    static func claimRegularPairing(_ payload: MobilePairingPayload, clientName: String, clientKind: String,
+                                    session: URLSession) async throws -> PairingClaim {
+        guard payload.secureInvitation == nil, let token = payload.token, !token.isEmpty,
+              let origin = URL(string: payload.baseURL), DirectHostAddress.isValid(origin) else {
+            throw SecureConnectionError.pairingRequired
+        }
+        struct Claim: Encodable { let token: String; let clientName: String; let clientKind: String }
+        struct Answer: Decodable {
+            let mode: HostConnectionMode
+            let apiKey: String
+            let instanceId: String
+            let hostname: String?
+            let baseUrl: URL
+        }
+        let backend = HTTPBackend(host: MoldHost(name: payload.name, baseURL: origin, connectionMode: .regular), session: session)
+        let answer: Answer
+        do { answer = try await backend.post("/api/pairing/regular/claim", body: Claim(token: token, clientName: clientName, clientKind: clientKind)) }
+        catch MoldClientError.http(let status, _, _) where status == 401 || status == 410 { throw PairingClaimError.expiredOrUsed }
+        guard answer.mode == .regular, answer.instanceId == payload.instanceId, !answer.apiKey.isEmpty,
+              DirectHostAddress.isValid(answer.baseUrl), HostAddress.sameOrigin(answer.baseUrl, origin) else {
+            throw PairingClaimError.wrongMachine
+        }
+        return PairingClaim(apiKey: answer.apiKey, instanceId: answer.instanceId, hostname: answer.hostname,
+                            resolvedBaseURL: origin)
     }
 }

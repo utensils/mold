@@ -48,7 +48,9 @@ const emit = defineEmits<{
 const name = defineModel<string>("name", { required: true });
 const address = defineModel<string>("address", { required: true });
 const apiKey = defineModel<string>("apiKey", { required: true });
+const connectionMode = defineModel<"secure" | "regular">("connectionMode", { default: "secure" });
 const permitsLocalKey = computed(() => {
+  if (connectionMode.value === "regular") return true;
   try {
     return isNumericLoopbackHost(normalizeRemoteAddress(address.value));
   } catch {
@@ -142,6 +144,22 @@ defineExpose({ focusDiscoveredApiKey: () => discoveredApiKeyInput.value?.focus()
         >
           {{ error }}
         </p>
+        <label class="field"
+          ><span>Connection</span>
+          <select
+            v-model="connectionMode"
+            class="control"
+            :disabled="pairing"
+            data-test="mobile-connection-mode"
+          >
+            <option value="secure">Secure · end-to-end encrypted</option>
+            <option value="regular">Regular · direct HTTP or HTTPS</option>
+          </select>
+        </label>
+        <p v-if="connectionMode === 'regular'" class="section-note">
+          Connect directly over LAN, Tailscale, or WAN. HTTP relies on your network or VPN for
+          encryption. The proxy requires Secure.
+        </p>
         <button
           class="primary-button mobile-pair-button"
           type="button"
@@ -201,12 +219,12 @@ defineExpose({ focusDiscoveredApiKey: () => discoveredApiKeyInput.value?.focus()
               placeholder="Required by this machine"
               autocomplete="off"
               data-test="mobile-discovered-api-key"
-              required
+              :required="selectedDiscovered.authRequired"
           /></label>
           <p class="section-note">
             {{
               permitsLocalKey
-                ? "This local engine requires its API key."
+                ? "Enter the machine’s API key if required."
                 : "Pair this machine using its encrypted pairing code."
             }}
           </p>

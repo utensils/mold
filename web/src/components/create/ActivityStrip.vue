@@ -42,6 +42,7 @@ const props = withDefaults(
       id: string;
       url: string;
       apiKey?: string | null;
+      connectionMode?: import("@studio/api/connectionMode").ConnectionMode;
       status: string;
       instanceId?: string | null;
     }>;
@@ -66,7 +67,13 @@ function sourceHost(id: string) {
 }
 function sourceTarget(id: string) {
   const host = sourceHost(id);
-  return host ? { baseUrl: host.url, apiKey: host.apiKey ?? null } : null;
+  return host
+    ? {
+        baseUrl: host.url,
+        apiKey: host.apiKey ?? null,
+        connectionMode: host.connectionMode,
+      }
+    : null;
 }
 /** "Next up" / "#2 in line", or "Waiting for memory" when the scheduler really
  * did park the job. Resolved in the shared studio layer so web, desktop, and

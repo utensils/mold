@@ -41,6 +41,7 @@ pub fn save_pairing(host: &PairedHost) -> Result<PathBuf> {
 }
 pub fn save_pairing_at(root: &Path, host: &PairedHost) -> Result<PathBuf> {
     host.validate()?;
+    remember_secure_credential(&host.api_key)?;
     let dest = root.join(filename(&host.origin));
     let bytes = zeroize::Zeroizing::new(serde_json::to_vec(host)?);
     mold_secure::identity_file::write_private_file(&dest, &bytes, true)?;
@@ -74,6 +75,7 @@ fn ephemeral(
 /// Import a trusted WebView's existing pairing without creating another store.
 pub fn register_ephemeral(owner: &str, host: PairedHost) -> Result<()> {
     host.validate()?;
+    remember_secure_credential(&host.api_key)?;
     let mut store = ephemeral();
     let key = (owner.to_string(), host.origin.clone());
     if !store.contains_key(&key) && store.len() >= 128 {
@@ -201,4 +203,58 @@ mod tests {
         forget_ephemeral(&owner, None);
         forget_ephemeral(&other_owner, None);
     }
+}
+
+/// Retain Secure credential knowledge across mode selection and route aliases.
+pub(crate) fn is_known_secure_credential(candidate: &str) -> Result<bool> {
+    let digest: [u8; 32] = Sha256::digest(candidate.as_bytes()).into();
+    if credential_history().contains(&digest) {
+        return Ok(true);
+    }
+    if ephemeral().values().any(|h| h.api_key == candidate) {
+        return Ok(true);
+    }
+    let root = default_store();
+    if !root.try_exists()? {
+        return Ok(false);
+    }
+    for entry in std::fs::read_dir(&root)? {
+        let path = entry?.path();
+        let name = path
+            .file_name()
+            .and_then(|v| v.to_str())
+            .unwrap_or_default();
+        if path.extension().and_then(|v| v.to_str()) != Some("json") || name.starts_with("regular-")
+        {
+            continue;
+        }
+        let host: PairedHost = serde_json::from_slice(&read_private(&path)?)?;
+        host.validate()?;
+        if host.api_key == candidate {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn credential_history() -> std::sync::MutexGuard<'static, std::collections::HashSet<[u8; 32]>> {
+    static HISTORY: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<[u8; 32]>>> =
+        std::sync::OnceLock::new();
+    HISTORY
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+fn remember_secure_credential(key: &str) -> Result<()> {
+    if key.is_empty() {
+        return Ok(());
+    }
+    let digest = Sha256::digest(key.as_bytes()).into();
+    let mut history = credential_history();
+    anyhow::ensure!(
+        history.contains(&digest) || history.len() < 4096,
+        "Secure credential history capacity exceeded"
+    );
+    history.insert(digest);
+    Ok(())
 }

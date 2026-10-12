@@ -1,3 +1,9 @@
+import { secureHostForOrigin } from "./secureStore";
+import {
+  registerRegularConnection,
+  forgetRegularConnection,
+} from "./directConnection";
+import { directOrigin, rememberConnectionMode } from "./connectionMode";
 import {
   parseConnectionEndpoints,
   type ConnectionEndpoint,
@@ -11,7 +17,8 @@ import type {
 } from "./secureCrypto";
 import { claimSecurePairing } from "./securePairing";
 
-export interface PairingSession extends SecureHostIdentity {
+export interface SecurePairingSession extends SecureHostIdentity {
+  mode?: "secure";
   endpoints?: ConnectionEndpoint[];
   protocol: 3;
   invite_seed: string;
@@ -21,7 +28,8 @@ export interface PairingSession extends SecureHostIdentity {
   hostname: string | null;
 }
 
-export interface PairingClaim {
+export interface SecurePairingClaim {
+  mode?: "secure";
   endpoints?: ConnectionEndpoint[];
   api_key: string | null;
   instance_id: string;
@@ -48,7 +56,8 @@ export interface PairedClientsResponse {
   clients: PairedClient[];
 }
 
-export interface MobilePairingPayload extends SecureHostIdentity {
+export interface SecureMobilePairingPayload extends SecureHostIdentity {
+  mode?: "secure";
   endpoints?: ConnectionEndpoint[];
   type: "mold.mobile-pairing";
   version: 2;
@@ -57,6 +66,44 @@ export interface MobilePairingPayload extends SecureHostIdentity {
   invite: SecureInvite;
   instance_id: string;
   name: string;
+}
+
+export interface RegularMobilePairingPayload {
+  type: "mold.mobile-pairing";
+  version: 2;
+  mode: "regular";
+  base_url: string;
+  instance_id: string;
+  name: string;
+  pairing_token: string;
+  expires_at: number;
+}
+export interface RegularPairingSession {
+  mode: "regular";
+  base_url: string;
+  pairing_token: string;
+  expires_at: number;
+  instance_id: string;
+  hostname: string | null;
+  auth_required: boolean;
+}
+export interface RegularPairingClaim {
+  mode: "regular";
+  api_key: string;
+  instance_id: string;
+  hostname: string | null;
+  base_url: string;
+}
+export type MobilePairingPayload =
+  SecureMobilePairingPayload | RegularMobilePairingPayload;
+export type PairingSession = SecurePairingSession | RegularPairingSession;
+export type PairingClaim = SecurePairingClaim | RegularPairingClaim;
+export function pairingExpiresAt(
+  payload: MobilePairingPayload | PairingSession,
+): number {
+  return payload.mode === "regular"
+    ? payload.expires_at
+    : payload.invite.expiresAt;
 }
 
 /**
@@ -73,6 +120,12 @@ export function mobilePairingUrl(payload: MobilePairingPayload): string {
   fields.set("base_url", payload.base_url);
   fields.set("instance_id", payload.instance_id);
   fields.set("name", payload.name);
+  if (payload.mode === "regular") {
+    fields.set("mode", "regular");
+    fields.set("pairing_token", payload.pairing_token);
+    fields.set("expires_at", String(payload.expires_at));
+    return `${MOBILE_PAIRING_LINK}#${fields.toString()}`;
+  }
   fields.set("namespace", payload.namespace);
   fields.set("host_key", payload.host_key);
   fields.set("host_noise_key", payload.host_noise_key);
@@ -115,17 +168,61 @@ function pairingLinkFields(url: URL): URLSearchParams | null {
 
 export function createPairingSession(
   target: ApiTarget,
+  options?: { mode: "regular"; direct_url: string },
 ): Promise<PairingSession> {
   return apiJsonTo<PairingSession>(target, "/api/pairing/sessions", {
     method: "POST",
+    ...(options
+      ? {
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(options),
+        }
+      : {}),
   });
 }
 
-export function claimPairingSession(
+export async function claimPairingSession(
   payload: MobilePairingPayload,
   client: PairingClientIdentity = { name: "Mold mobile", kind: "mobile" },
 ): Promise<PairingClaim> {
-  return claimSecurePairing(payload, client);
+  if (payload.mode !== "regular") {
+    const claim = await claimSecurePairing(payload, client);
+    const profile = await secureHostForOrigin(
+      new URL(payload.base_url).origin,
+      false,
+    );
+    for (const origin of profile?.origins ?? [payload.base_url]) {
+      await forgetRegularConnection(origin);
+      rememberConnectionMode(origin, "secure");
+    }
+    return claim;
+  }
+  const origin = directOrigin(payload.base_url);
+  if (payload.expires_at <= Date.now() / 1000)
+    throw new Error("That pairing code expired. Create a new one on the host.");
+  const claim = await apiJsonTo<RegularPairingClaim>(
+    { baseUrl: origin, apiKey: null, connectionMode: "regular" },
+    "/api/pairing/regular/claim",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        token: payload.pairing_token,
+        client_name: client.name,
+        client_kind: client.kind,
+      }),
+    },
+  );
+  if (
+    claim.mode !== "regular" ||
+    claim.instance_id !== payload.instance_id ||
+    claim.base_url !== origin ||
+    typeof claim.api_key !== "string" ||
+    !/^mold_regular_[0-9a-f]{64}$/.test(claim.api_key)
+  )
+    throw new Error("The host returned an invalid Regular pairing.");
+  await registerRegularConnection(origin, claim.api_key);
+  return claim;
 }
 
 export function listPairedClients(
@@ -156,13 +253,13 @@ export async function revokePairedClient(
   });
 }
 
-export function parseMobilePairingPayload(raw: string): MobilePairingPayload {
+export function parseMobilePairingPayload(input: string): MobilePairingPayload {
   let value: unknown;
   try {
-    value = JSON.parse(raw);
+    value = JSON.parse(input);
   } catch {
     try {
-      const fields = pairingLinkFields(new URL(raw.trim()));
+      const fields = pairingLinkFields(new URL(input.trim()));
       if (!fields) throw new Error();
       value = {
         type: "mold.mobile-pairing",
@@ -177,18 +274,71 @@ export function parseMobilePairingPayload(raw: string): MobilePairingPayload {
         invite: fields.has("invite") ? JSON.parse(fields.get("invite")!) : null,
         instance_id: fields.get("instance_id"),
         name: fields.get("name"),
+        ...(fields.has("mode") ? { mode: fields.get("mode") } : {}),
+        ...(fields.get("mode") === "regular"
+          ? {
+              pairing_token: fields.get("pairing_token"),
+              expires_at: Number(fields.get("expires_at")),
+            }
+          : {}),
         ...(fields.has("endpoints")
           ? { endpoints: JSON.parse(fields.get("endpoints")!) }
           : {}),
       };
+      if (fields.get("mode") === "regular") {
+        const regular = value as Record<string, unknown>;
+        for (const name of [
+          "namespace",
+          "host_key",
+          "host_noise_key",
+          "host_binding_signature",
+          "websocket_url",
+          "invite_seed",
+          "invite",
+        ])
+          if (!fields.has(name)) delete regular[name];
+      }
     } catch {
       throw new Error("That QR code is not a Mold pairing code.");
     }
   }
   if (!value || typeof value !== "object")
     throw new Error("That QR code is not a Mold pairing code.");
-  const payload = value as Partial<MobilePairingPayload>;
+  const raw = value as Record<string, unknown>;
+  if (raw.mode === "regular") {
+    try {
+      if (
+        raw.type !== "mold.mobile-pairing" ||
+        raw.version !== 2 ||
+        typeof raw.base_url !== "string" ||
+        typeof raw.instance_id !== "string" ||
+        !raw.instance_id ||
+        typeof raw.name !== "string" ||
+        typeof raw.pairing_token !== "string" ||
+        !/^[0-9a-f]{64}$/.test(raw.pairing_token) ||
+        !Number.isSafeInteger(raw.expires_at) ||
+        (raw.expires_at as number) <= 0 ||
+        [
+          "namespace",
+          "host_key",
+          "host_noise_key",
+          "host_binding_signature",
+          "websocket_url",
+          "invite_seed",
+          "invite",
+          "endpoints",
+        ].some((key) => key in raw)
+      )
+        throw new Error();
+      directOrigin(raw.base_url);
+      return raw as unknown as RegularMobilePairingPayload;
+    } catch {
+      throw new Error("That QR code is not a supported Mold pairing code.");
+    }
+  }
+  const payload = value as Partial<SecureMobilePairingPayload>;
   if (
+    (payload.mode !== undefined && payload.mode !== "secure") ||
     payload.type !== "mold.mobile-pairing" ||
     payload.version !== 2 ||
     typeof payload.base_url !== "string" ||
@@ -216,7 +366,7 @@ export function parseMobilePairingPayload(raw: string): MobilePairingPayload {
   }
   if (payload.endpoints !== undefined)
     payload.endpoints = parseConnectionEndpoints(payload.endpoints);
-  return payload as MobilePairingPayload;
+  return payload as SecureMobilePairingPayload;
 }
 
 function validPairingAddress(value: string, websocket: boolean): boolean {

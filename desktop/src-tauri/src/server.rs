@@ -29,6 +29,7 @@ pub const WELL_KNOWN_PORT: u16 = 7680;
 pub const LAN_BIND: &str = "0.0.0.0";
 
 pub struct EngineHandle {
+    pub addresses: std::sync::Arc<mold_server::ConnectionAddresses>,
     pub port: u16,
     pub models_dir: PathBuf,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -74,6 +75,7 @@ impl EngineHandle {
     #[cfg(test)]
     pub(crate) fn parked_for_tests(release: std::sync::mpsc::Receiver<()>) -> Self {
         Self {
+            addresses: Default::default(),
             port: 9,
             models_dir: PathBuf::new(),
             thread: Some(std::thread::spawn(move || {
@@ -87,6 +89,7 @@ impl EngineHandle {
     #[cfg(test)]
     pub(crate) fn held_gallery_task_for_tests(release: std::sync::mpsc::Receiver<()>) -> Self {
         Self {
+            addresses: Default::default(),
             port: 9,
             models_dir: PathBuf::new(),
             thread: Some(std::thread::spawn(move || {
@@ -106,30 +109,12 @@ impl EngineHandle {
     }
 }
 
-/// Reserve a port on `bind` by binding to :0 and reading the assignment.
-///
-/// TOCTOU caveat: the listener is dropped before `run_server` rebinds it.
-/// Upstream fix tracked as U1 (`run_server_with_listener`) in
-/// desktop/docs/architecture.md.
-pub fn allocate_port(bind: &str) -> anyhow::Result<u16> {
-    let probe = std::net::TcpListener::bind((bind, 0))?;
-    Ok(probe.local_addr()?.port())
-}
+#[path = "server_port.rs"]
+mod port;
+pub use port::allocate_port;
 
-/// Prefer the conventional LAN port. If something other than Mold owns it,
-/// fall back to an ephemeral port that mDNS will advertise.
-pub fn available_server_port(bind: &str) -> anyhow::Result<u16> {
-    available_server_port_for(bind, WELL_KNOWN_PORT)
-}
-
-fn available_server_port_for(bind: &str, preferred: u16) -> anyhow::Result<u16> {
-    match std::net::TcpListener::bind((bind, preferred)) {
-        Ok(listener) => {
-            drop(listener);
-            Ok(preferred)
-        }
-        Err(_) => allocate_port(bind),
-    }
+pub fn available_server_port(bind: &str) -> std::io::Result<u16> {
+    port::available_server_port_for(bind, WELL_KNOWN_PORT)
 }
 
 fn queue_size() -> usize {
@@ -171,6 +156,9 @@ fn start_engine_inner(
     let bind = bind.to_string();
     let dir = models_dir.clone();
     let size = queue_size();
+    let listener = std::net::TcpListener::bind((bind.as_str(), port))?;
+    let addresses = std::sync::Arc::new(mold_server::ConnectionAddresses::default());
+    let thread_addresses = addresses.clone();
     let thread = std::thread::Builder::new()
         .name("mold-engine".into())
         .spawn(move || {
@@ -183,12 +171,14 @@ fn start_engine_inner(
             // it, so the engine's HTTP drain is bounded rather than left to
             // the webview's connections.
             mold_server::bound_http_drain(HTTP_DRAIN_GRACE);
-            let result = rt.block_on(mold_server::run_server(
+            let result = rt.block_on(mold_server::run_server_with_listener_and_addresses(
                 &bind,
                 port,
                 dir,
                 gpu_selection,
                 size,
+                listener,
+                Some(thread_addresses),
             ));
             match result {
                 Ok(()) => {
@@ -225,6 +215,7 @@ fn start_engine_inner(
             tracing::debug!("engine: runtime dropped; thread exiting");
         })?;
     Ok(EngineHandle {
+        addresses,
         port,
         models_dir,
         thread: Some(thread),
@@ -293,34 +284,6 @@ pub async fn accepts_api_key(base_url: &str, api_key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn allocates_distinct_nonzero_ports() {
-        let a = allocate_port("127.0.0.1").unwrap();
-        let b = allocate_port("127.0.0.1").unwrap();
-        assert_ne!(a, 0);
-        assert_ne!(b, 0);
-        // Not guaranteed distinct by the OS, but freshly-released ephemeral
-        // ports are not immediately reused on macOS/Linux.
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn prefers_well_known_port_when_available() {
-        let preferred = allocate_port("127.0.0.1").unwrap();
-        let port = available_server_port_for("127.0.0.1", preferred).unwrap();
-        assert_eq!(port, preferred);
-    }
-
-    #[test]
-    fn falls_back_when_well_known_port_is_occupied() {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let occupied = listener.local_addr().unwrap().port();
-        let port = available_server_port_for("127.0.0.1", occupied).unwrap();
-        assert_ne!(port, occupied);
-        assert_ne!(port, 0);
-        drop(listener);
-    }
 
     #[test]
     fn queue_size_defaults_and_honors_env() {

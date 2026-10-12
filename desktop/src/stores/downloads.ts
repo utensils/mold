@@ -266,7 +266,7 @@ export const useDownloadsStore = defineStore("downloads", {
         return this.subscribeHost(host);
       }
       const target = host?.baseUrl
-        ? { baseUrl: host.baseUrl, apiKey: host.apiKey }
+        ? { baseUrl: host.baseUrl, apiKey: host.apiKey, connectionMode: host.connectionMode }
         : currentTarget();
       const hostId = host?.id ?? "primary";
       if (host) this.unsubscribeHost(host.id);
@@ -333,7 +333,11 @@ export const useDownloadsStore = defineStore("downloads", {
     },
     subscribeHost(host: HostView): Promise<void> {
       if (!host.baseUrl) return Promise.reject(new Error(`${host.label} has no API endpoint`));
-      const target = { baseUrl: host.baseUrl, apiKey: host.apiKey };
+      const target = {
+        baseUrl: host.baseUrl,
+        apiKey: host.apiKey,
+        connectionMode: host.connectionMode,
+      };
       const existing = this.hostStates[host.id];
       if (
         existing?.subscribed &&

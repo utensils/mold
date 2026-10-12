@@ -48,7 +48,9 @@ function downloadContext(row: QueueRow) {
   const job = row.kind === "print" ? row.print.id : row.shared.id;
   const held = row.kind === "print" ? !!row.print.holdError : row.shared.phase === "held";
   return {
-    target: host?.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : null,
+    target: host?.baseUrl
+      ? { baseUrl: host.baseUrl, apiKey: host.apiKey, connectionMode: host.connectionMode }
+      : null,
     instance: host?.instanceId,
     job,
     held,

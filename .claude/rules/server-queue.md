@@ -88,3 +88,14 @@ available budget, shortfall, and mandatory restart/cooldown advice.
 **Held model repair.** Queue listing/detail may emit additive `model_download: { model }` only for held retryable rows, using the exact row model and current local known-manifest missing artifact presence. Effective paths must match acquisition destinations; unrelated missing files and unrepairable custom overrides never justify a hint. Deduplicate inspection per model per listing, without weight hashing, network calls, component-options scans, or retained-media reads. Preserve error diagnostics and retryability. Clients use existing exact-host/instance/job acquisition, consent, ticket settlement, and retry; the hint never promises the missing component is the sole cause.
 
 Recovery inspection is tri-state: a positive `model_download` object authorizes the exact model action; explicit JSON `null` is an authoritative negative that suppresses stale batch-error fallback. Omit only when no inspection applies, notably `hf:`/`cv:` catalog recipes whose supported typed batch recovery remains independent. Cache negative observations as well as positive ones within each listing.
+
+**Secure and explicit Regular authority.** MOLD_ALLOW_DIRECT_API defaults off and
+is trusted startup policy; a request header never enables it. Even enabled
+listeners require real socket metadata. Regular pairing invitations use explicit
+credential-free direct origins, hash-only one-use 120-second tokens and a bounded
+set. Durable Regular markers and Secure bindings are mutually exclusive; only
+historical pre-Secure migrations seed Regular authority. Secure credentials
+cannot authorize direct HTTP, and Regular credentials cannot authorize Noise.
+Secure clients use encrypted media; direct media tickets are issued only on
+Regular/loopback HTTP, preventing an encrypted credential from exporting direct
+media authority. Revocation cancels only the matching client's live response.

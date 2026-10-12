@@ -11,7 +11,9 @@ import MoldClient
 final class HostStore {
     @ObservationIgnored let refreshCoordinator = RefreshCoordinator()
     @ObservationIgnored let queuePreviews = QueuePreviewCache()
-    internal(set) var hosts: [MoldHost]
+    internal(set) var hosts: [MoldHost] {
+        didSet { SecureCredentialHistory.shared.remember(oldValue + hosts) }
+    }
     internal(set) var reachability: [MoldHost.ID: Reachability] = [:]
     /// What each machine says it can do. Read rather than guessed -- an
     /// absent block has a different meaning per field, so the app never
@@ -67,6 +69,7 @@ final class HostStore {
     init(hosts: [MoldHost],
          makeBackend: @escaping @MainActor (MoldHost) -> any MoldBackend = HostStore.http) {
         self.hosts = hosts
+        SecureCredentialHistory.shared.remember(hosts)
         self.makeBackend = makeBackend
         self.defaultMachine = Self.storedDefaultMachine()
         followDefaultMachineInSuite()

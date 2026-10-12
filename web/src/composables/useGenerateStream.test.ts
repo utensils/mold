@@ -1887,7 +1887,10 @@ describe("hosted job ownership survives primary changes", () => {
     });
     const job = stream.jobs.value.find((entry) => entry.id === id)!;
     expect(job.hostId).toBe(machineA.id);
-    expect(job.target).toEqual({ baseUrl: machineA.url });
+    expect(job.target).toEqual({
+      baseUrl: machineA.url,
+      connectionMode: "secure",
+    });
     expect(admitGenerationBatch.mock.calls[0]?.[0]).toMatchObject({
       baseUrl: machineA.url,
     });
@@ -1895,7 +1898,7 @@ describe("hosted job ownership survives primary changes", () => {
     await stream.cancel(id);
     expect(
       mutateQueueJobOnExpectedInstance.mock.calls.at(-1)?.[0],
-    ).toMatchObject({ baseUrl: machineA.url });
+    ).toMatchObject({ baseUrl: machineA.url, connectionMode: "secure" });
     __testing__.persistJobs([job]);
     const restored = __testing__.loadPersistedJobs(
       localStorage.getItem(__testing__.STORAGE_KEY),
@@ -1972,7 +1975,10 @@ describe("hosted job ownership survives primary changes", () => {
     const id = stream.submit(singleGen(), chainDecision());
     await flushDurable();
     const job = stream.jobs.value.find((entry) => entry.id === id)!;
-    expect(lastChainTarget).toEqual({ baseUrl: machineA.url });
+    expect(lastChainTarget).toEqual({
+      baseUrl: machineA.url,
+      connectionMode: "secure",
+    });
     expect(job.hostId).toBe(machineA.id);
     __testing__.persistJobs([job]);
     const restored = __testing__.loadPersistedJobs(

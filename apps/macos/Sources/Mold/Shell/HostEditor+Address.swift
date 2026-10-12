@@ -7,7 +7,10 @@ import SwiftUI
 extension HostEditor {
     // MARK: - What the address resolves to
 
-    var resolved: URL? { HostAddress.normalize(address) }
+    var resolved: URL? {
+        guard let url = HostAddress.normalize(address), mode != .regular || DirectHostAddress.isValid(url, allowingPathPrefix: true) else { return nil }
+        return url
+    }
 
     var duplicate: MoldHost? {
         resolved.flatMap { hosts.host(at: $0, excluding: existing?.id) }
@@ -39,7 +42,8 @@ extension HostEditor {
     var addressProblem: String? {
         guard !address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         do {
-            _ = try HostAddress.resolve(address)
+            let url = try HostAddress.resolve(address)
+            if mode == .regular && !DirectHostAddress.isValid(url, allowingPathPrefix: true) { return "Mold proxy requires a Secure connection." }
             return nil
         } catch {
             return error.message

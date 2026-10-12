@@ -354,3 +354,71 @@ it("invalidates another tab's removed authority without invalidating renewals or
     await forgetSecureHost(kept.namespace);
   }
 });
+
+it("publishes namespace and authority on local and cross-tab notifications", async () => {
+  const changes: unknown[] = [];
+  const receive = (event: Event) => changes.push((event as CustomEvent).detail);
+  window.addEventListener("mold:secure-pairings-changed", receive);
+  const profile = original("scoped-notifications");
+  const other = new BroadcastChannel("mold-secure-v3");
+  try {
+    await saveSecureHost(profile);
+    expect(changes).toContainEqual({
+      namespace: profile.namespace,
+      authority: "replaced",
+    });
+    other.postMessage({ namespace: profile.namespace, authority: "unchanged" });
+    await vi.waitFor(() =>
+      expect(changes).toContainEqual({
+        namespace: profile.namespace,
+        authority: "unchanged",
+      }),
+    );
+    await forgetSecureHost(profile.namespace);
+    expect(changes).toContainEqual({
+      namespace: profile.namespace,
+      authority: "removed",
+    });
+  } finally {
+    other.close();
+    window.removeEventListener("mold:secure-pairings-changed", receive);
+  }
+});
+
+it("retains only bounded Secure credential digests after forget and reload", async () => {
+  const store = await import("./secureStore");
+  const profile = {
+    ...original("credential-history"),
+    apiKey: "secure-history-secret",
+  };
+  await store.saveSecureHost(profile);
+  expect(await store.isKnownSecureCredential(profile.apiKey)).toBe(true);
+  await store.forgetSecureHost(profile.namespace);
+  vi.resetModules();
+  const reloaded = await import("./secureStore");
+  expect(await reloaded.isKnownSecureCredential(profile.apiKey)).toBe(true);
+  expect(await reloaded.isKnownSecureCredential("unrelated-regular-key")).toBe(
+    false,
+  );
+  const digests = await stored("secure-credential-digests");
+  expect(JSON.stringify(digests)).not.toContain(profile.apiKey);
+  expect(digests).toEqual(
+    expect.arrayContaining([expect.stringMatching(/^[a-f0-9]{64}$/)]),
+  );
+});
+
+it("allows Regular-only plain HTTP clients without WebCrypto or a Secure history", async () => {
+  const { IDBFactory } = await import("fake-indexeddb");
+  const previousDatabase = globalThis.indexedDB;
+  const previousCrypto = globalThis.crypto;
+  try {
+    vi.stubGlobal("indexedDB", new IDBFactory());
+    vi.stubGlobal("crypto", {});
+    vi.resetModules();
+    const store = await import("./secureStore");
+    expect(await store.isKnownSecureCredential("regular-only-key")).toBe(false);
+  } finally {
+    vi.stubGlobal("indexedDB", previousDatabase);
+    vi.stubGlobal("crypto", previousCrypto);
+  }
+});

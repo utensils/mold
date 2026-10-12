@@ -115,7 +115,7 @@ impl ObjectSocket {
                 host,
                 rx,
                 out.clone(),
-                worker_stop.clone(),
+                worker_stop.child_token(),
                 worker_delivery,
             )
             .await;
@@ -126,15 +126,20 @@ impl ObjectSocket {
                         safe_category(error)
                     );
                 }
-                let message = if result
-                    .as_ref()
-                    .is_err_and(|e| e.to_string() == "secure gateway temporarily busy")
-                {
-                    "secure gateway temporarily busy; retry connecting"
+                let busy = result.as_ref().is_err_and(|error| {
+                    error
+                        .downcast_ref::<crate::transport::AdmissionBusy>()
+                        .is_some()
+                });
+                let error = if busy {
+                    std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        crate::transport::AdmissionBusy,
+                    )
                 } else {
-                    "secure ciphertext carrier unavailable"
+                    std::io::Error::other("secure ciphertext carrier unavailable")
                 };
-                let _ = out.try_send(Err(SocketError::Io(std::io::Error::other(message))));
+                let _ = out.try_send(Err(SocketError::Io(error)));
             }
             worker_stop.cancel();
         });
@@ -297,6 +302,31 @@ fn is_gateway_delivery_failure(value: &Value) -> bool {
 #[cfg(test)]
 mod gateway_tests {
     use super::*;
+    #[tokio::test]
+    async fn gateway_pressure_before_admission_is_typed_and_sends_no_http_frames() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (raw, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(raw).await.unwrap();
+            socket.send(Message::Text(json!({"connectionId":"example=","message":"Internal server error","requestId":"request-id"}).to_string().into())).await.unwrap();
+            let message = tokio::time::timeout(Duration::from_millis(200), socket.next()).await;
+            assert!(
+                !matches!(message, Ok(Some(Ok(Message::Text(_))))),
+                "admission pressure must not dispatch an HTTP frame"
+            );
+        });
+        let (raw, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+            .await
+            .unwrap();
+        let mut socket = ObjectSocket::new(raw, "11".repeat(16), false);
+        let error = socket.next().await.unwrap().unwrap_err();
+        assert!(
+            matches!(error,SocketError::Io(ref io) if io.kind()==std::io::ErrorKind::WouldBlock && io.get_ref().is_some_and(|source|source.is::<crate::transport::AdmissionBusy>()))
+        );
+        drop(socket);
+        server.await.unwrap();
+    }
     #[tokio::test]
     async fn dropped_gateway_frame_retries_only_original_ciphertext() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -882,7 +912,7 @@ async fn run(
             let value: Value = serde_json::from_str(text)?;
             if is_gateway_delivery_failure(&value) {
                 if sid.is_none() {
-                    bail!("secure gateway temporarily busy");
+                    return Err(crate::transport::AdmissionBusy.into());
                 }
                 // API Gateway can drop one invocation under pressure. Leave
                 // sequence/ACK state and deadlines untouched so the existing

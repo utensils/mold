@@ -13,8 +13,9 @@ public struct MobilePairingPayload: Hashable, Sendable {
     public let name: String
     public let endpoints: [ConnectionEndpoint]?
     public let secureInvitation: SecureInvitation?
+    public let mode: HostConnectionMode
 
-    init(baseURL: String, token: String?, expiresAt: UInt64?, instanceId: String, name: String, endpoints: [ConnectionEndpoint]? = nil, secureInvitation: SecureInvitation? = nil) {
+    init(baseURL: String, token: String?, expiresAt: UInt64?, instanceId: String, name: String, endpoints: [ConnectionEndpoint]? = nil, secureInvitation: SecureInvitation? = nil, mode: HostConnectionMode = .secure) {
         self.baseURL = baseURL
         self.token = token
         self.expiresAt = expiresAt
@@ -22,6 +23,7 @@ public struct MobilePairingPayload: Hashable, Sendable {
         self.name = name
         self.endpoints = endpoints
         self.secureInvitation = secureInvitation
+        self.mode = mode
     }
 
     /// A keyless machine's code carries its address and identity alone --
@@ -29,14 +31,15 @@ public struct MobilePairingPayload: Hashable, Sendable {
     /// to store. `nil` only for a keyed machine that sent no token: that code
     /// would redeem nothing, so there is nothing honest to show.
     public init?(session: PairingSession, baseURL: URL, name: String) {
+        if session.mode == .regular {
+            guard let token = session.pairingToken, let expires = session.expiresAt,
+                  let origin = session.baseUrl.flatMap(URL.init(string:)), DirectHostAddress.isValid(origin) else { return nil }
+            self.init(baseURL: origin.absoluteString, token: token, expiresAt: expires, instanceId: session.instanceId, name: name, mode: .regular)
+            return
+        }
         guard let invitation = session.secureInvitation, (try? invitation.validate()) != nil else { return nil }
-        self.baseURL = baseURL.absoluteString
-        self.token = nil
-        expiresAt = invitation.invite.expiresAt
-        instanceId = session.instanceId
-        self.name = name
-        endpoints = session.endpoints
-        secureInvitation = invitation
+        self.init(baseURL: baseURL.absoluteString, token: nil, expiresAt: invitation.invite.expiresAt,
+                  instanceId: session.instanceId, name: name, endpoints: session.endpoints, secureInvitation: invitation)
     }
 
     /// Where a pairing code points (`MOBILE_PAIRING_LINK` in `pairing.ts`): a
@@ -59,6 +62,12 @@ public struct MobilePairingPayload: Hashable, Sendable {
     }
 
     public var url: URL? {
+        if mode == .regular {
+            guard let origin = URL(string: baseURL), DirectHostAddress.isValid(origin), let token, let expiresAt else { return nil }
+            let pairs = [("version", String(Self.version)), ("base_url", baseURL),
+                         ("instance_id", instanceId), ("name", name), ("mode", "regular"), ("pairing_token", token), ("expires_at", String(expiresAt))]
+            return URL(string: "\(Self.link.absoluteString)#\(FormURLEncoded.queryString(pairs))")
+        }
         guard let secure = secureInvitation, (try? secure.validate()) != nil else { return nil }
         var pairs: [(String, String)] = [("version", String(Self.version)), ("base_url", baseURL)]
         pairs.append(("instance_id", instanceId))

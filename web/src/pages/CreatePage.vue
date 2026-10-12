@@ -843,6 +843,7 @@ function machineRegistryForStaleness(): {
       hostTargets.set(host.id, {
         baseUrl: route.target.baseUrl,
         apiKey: route.target.apiKey ?? null,
+        connectionMode: route.target.connectionMode,
         instanceId: route.instanceId ?? null,
       });
   }
@@ -1058,7 +1059,11 @@ async function refreshHistory() {
       hostId: host.id,
       hostLabel: host.label,
       fetchable: host.status === "ready",
-      source: { baseUrl: host.url, apiKey: host.apiKey ?? null },
+      source: {
+        baseUrl: host.url,
+        apiKey: host.apiKey ?? null,
+        connectionMode: host.connectionMode,
+      },
     })),
     async (target) => {
       const listing = await apiJsonTo<{
@@ -1996,7 +2001,11 @@ function inspectSelectedQueueRender(
     preview: null,
   };
   stopSelectedQueuePreview = watchSelectedQueuePreview(
-    { baseUrl: host.url, apiKey: host.apiKey ?? null },
+    {
+      baseUrl: host.url,
+      apiKey: host.apiKey ?? null,
+      connectionMode: host.connectionMode,
+    },
     source.jobId,
     (preview) => {
       if (
@@ -4161,6 +4170,7 @@ async function onSubmitInner(
     target: {
       baseUrl: route.target.baseUrl,
       apiKey: route.target.apiKey ?? null,
+      connectionMode: route.target.connectionMode,
     },
     requirements: licenseRequirements(
       finalizedResult.preview?.pending_downloads,

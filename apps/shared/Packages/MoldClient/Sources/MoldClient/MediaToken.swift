@@ -8,7 +8,7 @@ public struct MediaToken: Codable, Hashable, Sendable {
 
 public extension HTTPBackend {
     func playableMedia(for filename: String, trashed: Bool = false) async throws -> PlayableMedia {
-        guard host.secure != nil || Self.isEmbeddedLoopback(host.baseURL) || injectedTransport != nil else {
+        guard (host.connectionMode == .regular ? host.permitsRegularDirect : (host.secure != nil || Self.isEmbeddedLoopback(host.baseURL))) || injectedTransport != nil else {
             throw SecureConnectionError.pairingRequired
         }
         return PlayableMedia(backend: self, url: MediaURL(baseURL: host.baseURL).media(filename, trashed: trashed))

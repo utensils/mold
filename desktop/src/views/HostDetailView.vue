@@ -90,7 +90,13 @@ let resourceAbort: AbortController | null = null;
 
 function hostTarget(): ApiTarget | null {
   const h = host.value;
-  return h?.baseUrl ? { baseUrl: h.baseUrl, apiKey: h.apiKey } : null;
+  return h?.baseUrl
+    ? {
+        baseUrl: h.baseUrl,
+        apiKey: h.apiKey,
+        ...(h.connectionMode ? { connectionMode: h.connectionMode } : {}),
+      }
+    : null;
 }
 
 /** Reopen the stream against the CURRENT host; prior subscription aborts.

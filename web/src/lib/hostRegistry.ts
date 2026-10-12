@@ -1,3 +1,7 @@
+import {
+  rememberConnectionMode,
+  type ConnectionMode,
+} from "@studio/api/connectionMode";
 import { forgetSecureHostForMachine } from "@studio/api/secureStore";
 import {
   standaloneStudio,
@@ -35,6 +39,7 @@ export interface HostEntry {
   url: string;
   /** Per-host API key. Never placed in a URL; sent as `x-api-key`. */
   apiKey?: string;
+  connectionMode?: ConnectionMode | undefined;
   /** Last-seen `/api/status.instance_id`, used to dedupe re-adds. */
   instanceId?: string;
   /** Successful connection that selected `url`; failed attempts never update it. */
@@ -67,12 +72,13 @@ export function originUrl(): string {
 
 export function originHost(): HostEntry {
   const primary = standaloneStudio() ? studioPrimary() : null;
-  const apiKey = primary ? null : originApiKey();
+  const apiKey = primary ? primary.apiKey : originApiKey();
   return {
     id: ORIGIN_HOST_ID,
     name: primary?.name ?? "this server",
     ...(primary?.instanceId ? { instanceId: primary.instanceId } : {}),
     url: originUrl(),
+    connectionMode: primary?.connectionMode ?? (primary ? "secure" : "regular"),
     ...(apiKey ? { apiKey } : {}),
   };
 }
@@ -314,6 +320,7 @@ export interface AddHostInput {
   url: string;
   name: string;
   apiKey?: string;
+  connectionMode?: ConnectionMode | undefined;
   instanceId?: string;
 }
 
@@ -360,7 +367,13 @@ export function addHost(input: AddHostInput): HostEntry {
     lastConnectedAtMs: Date.now(),
   };
   if (input.apiKey) entry.apiKey = input.apiKey;
-  else if (existing?.apiKey) entry.apiKey = existing.apiKey;
+  else if (existing?.apiKey && !input.connectionMode)
+    entry.apiKey = existing.apiKey;
+  if (input.connectionMode) {
+    entry.connectionMode = input.connectionMode;
+    rememberConnectionMode(url, input.connectionMode);
+  } else if (existing?.connectionMode)
+    entry.connectionMode = existing.connectionMode;
   if (instanceId) entry.instanceId = instanceId;
   else if (existing?.instanceId) entry.instanceId = existing.instanceId;
 

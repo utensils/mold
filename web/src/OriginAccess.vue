@@ -25,6 +25,11 @@ import {
   HOSTS_CHANGED_EVENT,
 } from "./lib/hostRegistry";
 import App from "./App.vue";
+import { connectRegularHost } from "@studio/api/directConnection";
+import {
+  rememberConnectionMode,
+  type ConnectionMode,
+} from "@studio/api/connectionMode";
 import { takeInitialPairingLink } from "./lib/initialPairing";
 import {
   ORIGIN_ACCESS_CHANGE_KEY,
@@ -35,6 +40,16 @@ import {
 const hosted = standaloneStudio();
 if (hosted) configureSecureOrigin(() => studioPrimary()?.url ?? null);
 const invitation = ref(takeInitialPairingLink());
+const mode = ref<ConnectionMode>("secure");
+if (invitation.value) {
+  try {
+    mode.value = parseMobilePairingPayload(invitation.value).mode ?? "secure";
+  } catch {
+    /* Invalid links are reported by the connection form. */
+  }
+}
+const address = ref("");
+const directKey = ref("");
 const remembered = ref(listStoredHosts());
 const selected = ref(studioPrimary()?.id ?? remembered.value[0]?.id ?? "");
 const ready = ref(false);
@@ -52,7 +67,9 @@ const reloading = ref(false);
 const routeKey = (host: StudioPrimary | null) =>
   host
     ? `${host.url}
-${host.instanceId ?? ""}`
+${host.instanceId ?? ""}
+${host.connectionMode ?? "secure"}
+${host.apiKey ?? ""}`
     : "";
 let acceptedRoute = routeKey(studioPrimary());
 function commitSelection(host: StudioPrimary | null) {
@@ -107,6 +124,10 @@ async function connect() {
     if (hosted) {
       if (invitation.value.trim()) {
         const payload = parseMobilePairingPayload(invitation.value.trim());
+        if ((payload.mode ?? "secure") !== mode.value)
+          throw new Error(
+            `Select ${payload.mode === "regular" ? "Regular" : "Secure"} to use this pairing link.`,
+          );
         const claim = await claimPairingSession(payload, {
           name: "Mold Studio browser",
           kind: "browser",
@@ -116,22 +137,53 @@ async function connect() {
           url: payload.base_url,
           name: payload.name ?? "Mold machine",
           instanceId: claim.instance_id,
+          connectionMode: payload.mode ?? "secure",
+          ...(payload.mode === "regular" && claim.api_key
+            ? {
+                apiKey: claim.api_key,
+              }
+            : {}),
         });
         commitSelection(host);
         selected.value = host.id;
         invitation.value = "";
         remembered.value = listStoredHosts();
+      } else if (mode.value === "regular" && address.value.trim()) {
+        const connection = await connectRegularHost(
+          address.value.trim(),
+          directKey.value.trim() || null,
+        );
+        if (!current()) return;
+        const host = addHost({
+          url: connection.baseUrl,
+          name: connection.name,
+          instanceId: connection.instanceId,
+          connectionMode: "regular",
+          ...(connection.apiKey
+            ? {
+                apiKey: connection.apiKey,
+                ...(connection.connectionMode
+                  ? { connectionMode: connection.connectionMode }
+                  : {}),
+              }
+            : {}),
+        });
+        commitSelection(host);
+        selected.value = host.id;
+        directKey.value = "";
+        refreshRemembered();
       } else {
         const host =
           remembered.value.find((host) => host.id === selected.value) ??
           studioPrimary();
         const profile = host ? await secureHostForOrigin(host.url) : null;
         if (!current()) return;
-        if (!host || !profile) {
+        if (!host || (!profile && host.connectionMode !== "regular")) {
           error.value =
             "On your machine, open Remote Access and copy a new pairing link. Paste it here to connect securely.";
           return;
         }
+        rememberConnectionMode(host.url, host.connectionMode ?? "secure");
         commitSelection(host);
       }
     }
@@ -207,8 +259,8 @@ onBeforeUnmount(() => {
       <h1>{{ hosted ? "Connect to Mold" : "Connect to this machine" }}</h1>
       <template v-if="hosted">
         <p>
-          Pair this browser with your machine. Your requests and media stay
-          encrypted between them.
+          Pair this browser with your machine or choose a direct Regular
+          connection.
         </p>
         <label v-if="remembered.length" for="saved-machine"
           >Saved machine</label
@@ -223,6 +275,39 @@ onBeforeUnmount(() => {
             {{ host.name }}
           </option>
         </select>
+        <label for="connection-mode">Connection</label>
+        <select
+          id="connection-mode"
+          v-model="mode"
+          :disabled="busy || reloading"
+        >
+          <option value="secure">Secure · end-to-end encrypted</option>
+          <option value="regular">Regular · direct HTTP or HTTPS</option>
+        </select>
+        <template v-if="mode === 'regular'">
+          <p>
+            HTTP relies on your network or VPN for encryption. The proxy
+            requires Secure.
+          </p>
+          <label for="regular-address"
+            >Machine address (or use a pairing link below)</label
+          >
+          <input
+            id="regular-address"
+            v-model="address"
+            type="url"
+            placeholder="http://machine:7680"
+            :disabled="busy || reloading"
+          />
+          <label for="regular-key">API key (if required)</label>
+          <input
+            id="regular-key"
+            v-model="directKey"
+            type="password"
+            autocomplete="off"
+            :disabled="busy || reloading"
+          />
+        </template>
         <label for="pairing-link">Pairing link</label>
         <textarea
           id="pairing-link"
@@ -234,8 +319,8 @@ onBeforeUnmount(() => {
           placeholder="Paste the link from Remote Access on your machine"
         />
         <p>
-          A pairing link works once and expires shortly. Existing pairings from
-          the previous proxy must be replaced.
+          A pairing link works once and expires shortly. Secure connections stay
+          encrypted on every route.
         </p>
       </template>
       <p v-if="requiresKey">
@@ -264,7 +349,9 @@ onBeforeUnmount(() => {
             : busy
               ? "Connecting…"
               : hosted
-                ? "Connect securely"
+                ? mode === "secure"
+                  ? "Connect securely"
+                  : "Connect Regular"
                 : requiresKey
                   ? "Connect"
                   : "Try again"

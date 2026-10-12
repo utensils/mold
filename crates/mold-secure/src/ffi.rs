@@ -249,3 +249,139 @@ pub unsafe extern "C" fn mold_secure_session_handshake_hash(
         Err(e) => code(e),
     }
 }
+
+/// Host-side owner-key bootstrap; shares the same private-file rules as Rust.
+#[no_mangle]
+pub unsafe extern "C" fn mold_secure_operator_key(
+    home: *const u8,
+    home_len: usize,
+    candidate: *const u8,
+    candidate_len: usize,
+    destination: *mut u8,
+    capacity: usize,
+) -> i32 {
+    if destination.is_null() || capacity < operator_key::MAX_KEY_BYTES {
+        return -4;
+    }
+    let Ok(home) = (unsafe { input(home, home_len, 4096) }) else {
+        return -1;
+    };
+    let Ok(home) = std::str::from_utf8(home) else {
+        return -1;
+    };
+    if home.is_empty() {
+        return -1;
+    }
+    let candidate = if candidate_len == 0 {
+        None
+    } else {
+        let Ok(bytes) = (unsafe { input(candidate, candidate_len, operator_key::MAX_KEY_BYTES) })
+        else {
+            return -1;
+        };
+        let Ok(value) = std::str::from_utf8(bytes) else {
+            return -1;
+        };
+        Some(value)
+    };
+    match operator_key::resolve(std::path::Path::new(home), candidate) {
+        Ok(key) => unsafe { output(destination, capacity, key.as_bytes()) },
+        Err(_) => -2,
+    }
+}
+
+/// Normalize one local client key without changing the explicit server config.
+#[no_mangle]
+pub unsafe extern "C" fn mold_secure_operator_override(
+    raw: *const u8,
+    length: usize,
+    destination: *mut u8,
+    capacity: usize,
+) -> i32 {
+    if destination.is_null() || capacity < operator_key::MAX_KEY_BYTES {
+        return -4;
+    }
+    let Ok(raw) = (unsafe { input(raw, length, 65536) }) else {
+        return -1;
+    };
+    let Ok(raw) = std::str::from_utf8(raw) else {
+        return -1;
+    };
+    match operator_key::client_override(raw) {
+        Ok(key) => unsafe { output(destination, capacity, key.as_bytes()) },
+        Err(_) => -2,
+    }
+}
+
+#[cfg(test)]
+mod operator_tests {
+    use super::*;
+    #[test]
+    fn owner_key_ffi_uses_same_home_authority_and_refuses_small_output_before_writing() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().to_str().unwrap().as_bytes();
+        let candidate = b"native-legacy-key";
+        let mut output = vec![0; 4096];
+        let call = |candidate: &[u8], output: &mut [u8]| unsafe {
+            mold_secure_operator_key(
+                path.as_ptr(),
+                path.len(),
+                candidate.as_ptr(),
+                candidate.len(),
+                output.as_mut_ptr(),
+                output.len(),
+            )
+        };
+        assert_eq!(call(candidate, &mut output[..16]), -4);
+        assert!(!home.path().join("secure").exists());
+        let length = call(candidate, &mut output);
+        assert_eq!(&output[..length as usize], candidate);
+        let length = call(b"other-shell-key", &mut output);
+        assert_eq!(&output[..length as usize], candidate);
+    }
+}
+
+/// A denial-history fingerprint only; never an authentication credential.
+#[no_mangle]
+pub unsafe extern "C" fn mold_secure_credential_digest(
+    credential: *const u8,
+    length: usize,
+    destination: *mut u8,
+    capacity: usize,
+) -> i32 {
+    let Ok(credential) = (unsafe { input(credential, length, 4096) }) else {
+        return -1;
+    };
+    if credential.is_empty() {
+        return -1;
+    }
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(b"mold.secure-credential-denial-history.v1\0");
+    digest.update(credential);
+    unsafe { output(destination, capacity, &digest.finalize()) }
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+    #[test]
+    fn credential_digest_is_domain_separated_and_bounded() {
+        let credential = b"secure-device-key";
+        let mut digest = [0_u8; 32];
+        let call = |input: &[u8], out: &mut [u8]| unsafe {
+            mold_secure_credential_digest(input.as_ptr(), input.len(), out.as_mut_ptr(), out.len())
+        };
+        assert_eq!(call(credential, &mut digest), 32);
+        use sha2::{Digest, Sha256};
+        assert_ne!(digest.as_slice(), &Sha256::digest(credential)[..]);
+        let saved = digest;
+        assert_eq!(call(credential, &mut digest), 32);
+        assert_eq!(digest, saved);
+        assert_eq!(call(b"other-key", &mut digest), 32);
+        assert_ne!(digest, saved);
+        assert_eq!(call(b"", &mut digest), -1);
+        assert_eq!(call(&vec![1; 4097], &mut digest), -1);
+        assert_eq!(call(credential, &mut digest[..31]), -4);
+    }
+}

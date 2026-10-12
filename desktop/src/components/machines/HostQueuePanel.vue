@@ -693,7 +693,15 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
             @keydown.space.self.prevent="openQueueDetail(entry)"
           >
             <QueueSourceThumbnail
-              :target="host.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : null"
+              :target="
+                host.baseUrl
+                  ? {
+                      baseUrl: host.baseUrl,
+                      apiKey: host.apiKey,
+                      connectionMode: host.connectionMode,
+                    }
+                  : null
+              "
               :instance-id="host.instanceId"
               :job-id="entry.id"
               :online="host.status === 'ready' && !host.stale"
@@ -730,7 +738,15 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
               <QueueDownloadControl
                 class="host-queue-recovery"
                 :download-available="queueModelDownloadAvailability(entry)"
-                :target="host.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : null"
+                :target="
+                  host.baseUrl
+                    ? {
+                        baseUrl: host.baseUrl,
+                        apiKey: host.apiKey,
+                        connectionMode: host.connectionMode,
+                      }
+                    : null
+                "
                 :instance="host.instanceId"
                 :job="entry.id"
                 :controls="entry.state === 'held'"
@@ -844,7 +860,11 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
     <QueueEntryDrawer
       v-if="queueDetailModel"
       :model="queueDetailModel"
-      :input-target="host.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : null"
+      :input-target="
+        host.baseUrl
+          ? { baseUrl: host.baseUrl, apiKey: host.apiKey, connectionMode: host.connectionMode }
+          : null
+      "
       :input-instance-id="host.instanceId"
       :input-online="host.status === 'ready' && !host.stale"
       :transfer-host-id="host.id"

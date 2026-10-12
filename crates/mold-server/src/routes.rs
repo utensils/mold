@@ -351,6 +351,7 @@ use crate::queue::clean_error_message;
         crate::connections::addresses,
         create_pairing_session,
         claim_pairing_session,
+        claim_regular_pairing_session,
         list_paired_clients,
         revoke_paired_client,
         import_gallery_file,
@@ -523,6 +524,7 @@ use crate::queue::clean_error_message;
         PairingSessionResponse,
         PairingClaimRequest,
         PairingClaimResponse,
+        RegularPairingClaimRequest,
         PairedClientsResponse,
         PairedClientResponse,
         mold_core::ActiveGenerationStatus,
@@ -883,6 +885,10 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/pairing/sessions", post(create_pairing_session))
         .route("/api/pairing/claim", post(claim_pairing_session))
+        .route(
+            "/api/pairing/regular/claim",
+            post(claim_regular_pairing_session),
+        )
         .route(
             "/api/pairing/secure/check",
             get(crate::secure_pairing::check),
@@ -9980,6 +9986,21 @@ pub(crate) struct PairingClaimRequest {
     pub(crate) client_kind: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PairingSessionRequest {
+    #[serde(default)]
+    mode: mold_secure_client::ConnectionMode,
+    direct_url: Option<String>,
+}
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+struct RegularPairingClaimRequest {
+    token: String,
+    client_name: Option<String>,
+    client_kind: Option<String>,
+}
+
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub(crate) struct PairingClaimResponse {
     #[serde(flatten)]
@@ -9997,6 +10018,7 @@ pub(crate) struct PairedClientResponse {
     pub(crate) client_kind: String,
     pub(crate) created_at_ms: i64,
     pub(crate) last_used_at_ms: Option<i64>,
+    pub(crate) mode: String,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -10029,7 +10051,8 @@ async fn create_pairing_session(
     State(state): State<AppState>,
     auth_state: Option<Extension<crate::auth::AuthState>>,
     authority: Option<Extension<crate::auth::PairingAuthority>>,
-) -> Result<impl IntoResponse, ApiError> {
+    request: Option<Json<PairingSessionRequest>>,
+) -> Result<Response, ApiError> {
     let key_set = auth_state
         .and_then(|Extension(state)| state)
         .ok_or_else(|| {
@@ -10045,6 +10068,45 @@ async fn create_pairing_session(
             "PAIRING_OPERATOR_REQUIRED",
             StatusCode::FORBIDDEN,
         ));
+    }
+    if let Some(Json(request)) = request {
+        if request.mode == mold_secure_client::ConnectionMode::Regular {
+            if !state.connection_addresses.regular_api_available() {
+                return Err(ApiError::with_code(
+                    "enable Regular direct access before pairing",
+                    "REGULAR_ACCESS_DISABLED",
+                    StatusCode::FORBIDDEN,
+                ));
+            }
+            let origin = mold_secure_client::regular_origin(
+                request.direct_url.as_deref().unwrap_or_default(),
+            )
+            .map_err(|_| {
+                ApiError::with_code(
+                    "Regular pairing requires an explicit direct HTTP(S) origin",
+                    "INVALID_DIRECT_ORIGIN",
+                    StatusCode::BAD_REQUEST,
+                )
+            })?;
+            let (token, expires_at) = key_set.issue_regular_pairing(&origin).map_err(|_| {
+                ApiError::with_code(
+                    "Regular pairing is unavailable",
+                    "PAIRING_UNAVAILABLE",
+                    StatusCode::SERVICE_UNAVAILABLE,
+                )
+            })?;
+            return Ok(([(header::CACHE_CONTROL,"no-store")],Json(serde_json::json!({
+                "mode":"regular","base_url":origin,"pairing_token":token,"expires_at":expires_at,
+                "instance_id":state.instance_id.as_str(),"hostname":pairing_hostname(),
+            }))).into_response());
+        }
+        if request.direct_url.is_some() {
+            return Err(ApiError::with_code(
+                "direct_url requires Regular mode",
+                "INVALID_DIRECT_ORIGIN",
+                StatusCode::BAD_REQUEST,
+            ));
+        }
     }
     let secure = key_set.secure.as_ref().ok_or_else(|| {
         ApiError::with_code(
@@ -10076,7 +10138,38 @@ async fn create_pairing_session(
             instance_id: (*state.instance_id).clone(),
             hostname: pairing_hostname(),
         }),
-    ))
+    )
+        .into_response())
+}
+
+#[utoipa::path(post, path="/api/pairing/regular/claim", tag="server", request_body=RegularPairingClaimRequest, responses((status=200, description="One-time explicit Regular credential"),(status=401, description="Invalid, expired, used or unavailable invitation")))]
+async fn claim_regular_pairing_session(
+    State(state): State<AppState>,
+    auth_state: Option<Extension<crate::auth::AuthState>>,
+    context: Option<Extension<mold_secure::RequestContext>>,
+    Json(request): Json<RegularPairingClaimRequest>,
+) -> Result<Response, ApiError> {
+    let invalid = || {
+        ApiError::with_code(
+            "Regular invitation is invalid, expired, or unavailable",
+            "PAIRING_INVITE_INVALID",
+            StatusCode::UNAUTHORIZED,
+        )
+    };
+    if !state.connection_addresses.regular_api_available() || context.is_some() {
+        return Err(invalid());
+    }
+    let key_set = auth_state
+        .and_then(|Extension(state)| state)
+        .ok_or_else(invalid)?;
+    let (api_key, base_url) = key_set
+        .claim_regular_pairing(
+            &request.token,
+            request.client_name.as_deref().unwrap_or("Mold device"),
+            request.client_kind.as_deref().unwrap_or("mobile"),
+        )
+        .map_err(|_| invalid())?;
+    Ok(([(header::CACHE_CONTROL,"no-store")],Json(serde_json::json!({"mode":"regular","api_key":api_key,"base_url":base_url,"instance_id":state.instance_id.as_str(),"hostname":pairing_hostname()}))).into_response())
 }
 
 /// Redeem a signed invitation inside its authenticated Noise channel.
@@ -10173,6 +10266,11 @@ async fn list_paired_clients(
                 client_kind: client.client_kind,
                 created_at_ms: client.created_at_ms,
                 last_used_at_ms: client.last_used_at_ms,
+                mode: match client.mode {
+                    mold_secure_client::ConnectionMode::Regular => "regular",
+                    mold_secure_client::ConnectionMode::Secure => "secure",
+                }
+                .into(),
             })
             .collect(),
     }))
@@ -10247,8 +10345,16 @@ async fn create_gallery_media_token(
     State(state): State<AppState>,
     auth_state: Option<Extension<crate::auth::AuthState>>,
     authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
+    context: Option<Extension<mold_secure::RequestContext>>,
     Json(request): Json<GalleryMediaTokenRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if context.is_some() {
+        return Err(ApiError::with_code(
+            "Secure media uses the encrypted connection",
+            "SECURE_MEDIA_REQUIRED",
+            StatusCode::FORBIDDEN,
+        ));
+    }
     let _gallery_reader = state.gallery_publication_gate.read().await;
     if !crate::auth::is_gallery_image_path(&request.path) {
         return Err(ApiError::validation(
@@ -12974,6 +13080,7 @@ mod tests {
             State(state.clone()),
             Some(Extension(auth.clone())),
             Some(Extension(crate::auth::PairingAuthority)),
+            None,
         )
         .await
         .unwrap()
@@ -13054,12 +13161,89 @@ mod tests {
         assert!(keys.secure.as_ref().unwrap().active_ids().is_empty());
     }
     #[tokio::test]
+    async fn production_regular_pairing_handlers_claim_once_refuse_disable_and_revoke() {
+        let mut state = AppState::for_tests();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        state.metadata_db = db.clone();
+        state.connection_addresses.set_regular_api_enabled(true);
+        let keys = Arc::new(crate::auth::ApiKeySet::new_with_metadata_db(
+            std::collections::HashSet::from(["operator".into()]),
+            db,
+            state.instance_id.as_ref().clone(),
+        ));
+        let auth = Some(keys.clone());
+        let create = || {
+            Some(Json(PairingSessionRequest {
+                mode: mold_secure_client::ConnectionMode::Regular,
+                direct_url: Some("https://direct.example".into()),
+            }))
+        };
+        let created = create_pairing_session(
+            State(state.clone()),
+            Some(Extension(auth.clone())),
+            Some(Extension(crate::auth::PairingAuthority)),
+            create(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.headers()[header::CACHE_CONTROL], "no-store");
+        let value = response_json(created).await;
+        assert_eq!(value["mode"], "regular");
+        assert!(value.get("invite").is_none());
+        let token = value["pairing_token"].as_str().unwrap().to_owned();
+        let request = || {
+            Json(RegularPairingClaimRequest {
+                token: token.clone(),
+                client_name: Some("Phone".into()),
+                client_kind: Some("ios".into()),
+            })
+        };
+        state.connection_addresses.set_regular_api_enabled(false);
+        assert!(claim_regular_pairing_session(
+            State(state.clone()),
+            Some(Extension(auth.clone())),
+            None,
+            request()
+        )
+        .await
+        .is_err());
+        state.connection_addresses.set_regular_api_enabled(true);
+        let answer = claim_regular_pairing_session(
+            State(state.clone()),
+            Some(Extension(auth.clone())),
+            None,
+            request(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer.headers()[header::CACHE_CONTROL], "no-store");
+        let answer = response_json(answer).await;
+        assert_eq!(answer["base_url"], "https://direct.example");
+        let key = answer["api_key"].as_str().unwrap();
+        assert_ne!(key, "operator");
+        assert!(claim_regular_pairing_session(
+            State(state),
+            Some(Extension(auth)),
+            None,
+            request()
+        )
+        .await
+        .is_err());
+        let client = keys.paired_clients().pop().unwrap();
+        assert!(keys.revoke_paired_client(&client.id).unwrap());
+        assert!(!keys.contains(key));
+    }
+
+    #[tokio::test]
     async fn insecure_pairing_is_unavailable_without_authenticated_host() {
-        assert!(
-            create_pairing_session(State(AppState::for_tests()), Some(Extension(None)), None)
-                .await
-                .is_err()
-        );
+        assert!(create_pairing_session(
+            State(AppState::for_tests()),
+            Some(Extension(None)),
+            None,
+            None
+        )
+        .await
+        .is_err());
         assert!(claim_pairing_session(
             State(AppState::for_tests()),
             Some(Extension(None)),

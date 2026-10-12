@@ -8,6 +8,8 @@ pub mod chain_limits;
 mod chain_source_media;
 mod connections;
 mod lan_access;
+mod regular_access;
+mod regular_pairing;
 pub mod secure_pairing;
 pub use connections::ConnectionAddresses;
 mod cuda_peak;
@@ -457,6 +459,11 @@ async fn run_server_inner(
     let web_ui_enabled = match std::env::var("MOLD_WEB_UI_ENABLED") {
         Ok(raw) => mold_core::config_keys::parse_bool(&raw, "MOLD_WEB_UI_ENABLED")?,
         Err(std::env::VarError::NotPresent) => config.web_ui_enabled,
+        Err(error) => return Err(error.into()),
+    };
+    let allow_direct_api = match std::env::var("MOLD_ALLOW_DIRECT_API") {
+        Ok(raw) => mold_core::config_keys::parse_bool(&raw, "MOLD_ALLOW_DIRECT_API")?,
+        Err(std::env::VarError::NotPresent) => false,
         Err(error) => return Err(error.into()),
     };
     let model_name = config.resolved_default_model();
@@ -1483,6 +1490,7 @@ async fn run_server_inner(
     // server can prove it no longer owns background polling at shutdown.
     let video_upscale_dispatcher = video_upscale::recover_at_startup(&state);
     let connection_addresses = state.connection_addresses.clone();
+    connection_addresses.set_regular_api_enabled(allow_direct_api);
     #[allow(unused_mut)]
     let mut app = web_ui::attach(routes::create_router(state), web_ui_enabled)
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
@@ -1496,6 +1504,9 @@ async fn run_server_inner(
             auth_state,
             auth::inject_auth_state,
         ));
+    if allow_direct_api {
+        app = app.layer(axum::Extension(auth::RegularApiAllowed));
+    }
 
     // HTTP metrics middleware sits outside auth so it observes all requests
     // (including auth failures and rate-limited responses).
@@ -1595,6 +1606,7 @@ async fn run_server_inner(
         connection_addresses.clone(),
         lan_txt,
     );
+    let regular_access = regular_access::start(app.clone(), connection_addresses.clone());
     let outbound_cancel = scheduler_shutdown.child_token();
     let outbound_connector =
         secure_websocket
@@ -1734,6 +1746,7 @@ async fn run_server_inner(
     }
     connection_addresses.set_secure_policy(None);
     lan_access.shutdown().await;
+    regular_access.shutdown().await;
     if let Some(backend) = private_backend {
         backend.shutdown().await;
     }

@@ -92,7 +92,8 @@ async function loadDevices(): Promise<void> {
     generation === deviceRequestGeneration &&
     props.host?.id === host.id &&
     props.host.baseUrl === host.baseUrl &&
-    props.host.apiKey === host.apiKey;
+    props.host.apiKey === host.apiKey &&
+    (props.host.connectionMode ?? "secure") === (host.connectionMode ?? "secure");
   const target = mobileHostTarget(host);
   const statusRequest = apiJsonTo<ServerStatus>(target, "/api/status");
   const queueRequest = statusRequest.then((status) =>
@@ -236,7 +237,8 @@ async function unpinWork(workId: string): Promise<void> {
 }
 
 watch(
-  () => [props.host?.id, props.host?.baseUrl, props.host?.apiKey] as const,
+  () =>
+    [props.host?.id, props.host?.baseUrl, props.host?.apiKey, props.host?.connectionMode] as const,
   () => {
     stopDeviceServices();
     devices.value = null;

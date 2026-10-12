@@ -17,18 +17,24 @@ public struct MoldHost: Identifiable, Hashable, Codable, Sendable {
     public var connectionInstanceID: String?
     /// Original user-approved origin, retained when the active route roams.
     public var connectionOriginalURL: URL?
-    /// Pinned host keys and a host-signed grant. Absent legacy remote hosts must pair again.
+    /// Pinned host keys and a host-signed grant. Never used by Regular connections.
     public var secure: SecureHost?
+    public var connectionMode: HostConnectionMode
 
-    /// Retired remote bearers cannot authorize protocol 3. Keep the public
-    /// machine entry for re-pairing, but never load or retain its old secret.
+    public var permitsRegularDirect: Bool {
+        connectionMode == .regular && secure == nil && DirectHostAddress.isValid(baseURL, allowingPathPrefix: true) &&
+            !(connectionEndpoints ?? []).contains { $0.kind == .relay && URL(string: $0.url).map { HostAddress.sameOrigin($0, baseURL) } == true }
+    }
+
+    /// Secure connections require pinned authority; explicitly selected direct Regular
+    /// connections retain their own independent HTTP credential.
     public var requiresSecurePairing: Bool {
-        secure == nil && !HTTPBackend.isEmbeddedLoopback(baseURL)
+        secure == nil && !HTTPBackend.isEmbeddedLoopback(baseURL) && !permitsRegularDirect
     }
 
     public init(id: UUID = UUID(), name: String, baseURL: URL, apiKey: String? = nil,
                 connectionEndpoints: [ConnectionEndpoint]? = nil, connectionInstanceID: String? = nil, connectionOriginalURL: URL? = nil,
-                secure: SecureHost? = nil) {
+                secure: SecureHost? = nil, connectionMode: HostConnectionMode = .secure) {
         self.id = id
         self.name = name
         self.baseURL = baseURL
@@ -37,6 +43,22 @@ public struct MoldHost: Identifiable, Hashable, Codable, Sendable {
         self.connectionInstanceID = connectionInstanceID
         self.connectionOriginalURL = connectionOriginalURL
         self.secure = secure
+        self.connectionMode = connectionMode
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, baseURL, apiKey, connectionEndpoints, connectionInstanceID, connectionOriginalURL, secure, connectionMode
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let value = try decoder.container(keyedBy: CodingKeys.self)
+        let secure = try value.decodeIfPresent(SecureHost.self, forKey: .secure)
+        self.init(id: try value.decode(UUID.self, forKey: .id), name: try value.decode(String.self, forKey: .name),
+                  baseURL: try value.decode(URL.self, forKey: .baseURL), apiKey: try value.decodeIfPresent(String.self, forKey: .apiKey),
+                  connectionEndpoints: try value.decodeIfPresent([ConnectionEndpoint].self, forKey: .connectionEndpoints),
+                  connectionInstanceID: try value.decodeIfPresent(String.self, forKey: .connectionInstanceID),
+                  connectionOriginalURL: try value.decodeIfPresent(URL.self, forKey: .connectionOriginalURL), secure: secure,
+                  connectionMode: try value.decodeIfPresent(HostConnectionMode.self, forKey: .connectionMode) ?? .secure)
     }
 }
 

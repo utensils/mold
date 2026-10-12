@@ -1,3 +1,8 @@
+import {
+  CONNECTION_MODE_HEADER,
+  directOrigin,
+  type ConnectionMode,
+} from "./connectionMode";
 import { relayFetch } from "./relayTransport";
 import { secureHostForOrigin, updateSecureHostRoutes } from "./secureStore";
 
@@ -140,7 +145,10 @@ export async function selectConnectionRoute(options: {
             AbortSignal.timeout(2500),
           ]);
           const value = (await boundedJSON(
-            await relayFetch(`${endpoint.url}/api/status`, { signal }),
+            await relayFetch(`${endpoint.url}/api/status`, {
+              headers: { [CONNECTION_MODE_HEADER]: "secure" },
+              signal,
+            }),
           )) as { instance_id?: string };
           signal.throwIfAborted();
           valid = value.instance_id === options.expectedInstanceId;
@@ -187,6 +195,7 @@ export async function connectionHealth<
   hostId: string;
   baseUrl: string;
   apiKey: string | null | undefined;
+  connectionMode?: ConnectionMode | undefined;
   instanceId?: string | null | undefined;
   read: (baseUrl: string) => Promise<T>;
   signal?: AbortSignal | undefined;
@@ -202,6 +211,17 @@ export async function connectionHealth<
       throw new DOMException("Host connection changed.", "AbortError");
   };
   assertCurrent();
+  if ((options.connectionMode ?? "secure") === "regular") {
+    directOrigin(
+      new URL(
+        options.baseUrl || "/",
+        typeof location !== "undefined" ? location.href : undefined,
+      ).origin,
+    );
+    const value = await options.read(options.baseUrl);
+    assertCurrent();
+    return { value, baseUrl: options.baseUrl };
+  }
   const profile = await secureHostForOrigin(
     new URL(
       options.baseUrl || "/",
@@ -271,6 +291,7 @@ export async function connectionHealth<
       try {
         const addresses = (await boundedJSON(
           await relayFetch(`${url}/api/connection-addresses`, {
+            headers: { [CONNECTION_MODE_HEADER]: "secure" },
             signal: AbortSignal.timeout(2500),
           }),
         )) as ConnectionAddresses;

@@ -227,7 +227,8 @@ export function sourceMediaGalleryEvent(
     if (
       (resync || identity[1] === filename) &&
       identity[2] === target.baseUrl &&
-      (identity[3] ?? null) === (target.apiKey ?? null)
+      (identity[3] ?? null) === (target.apiKey ?? null) &&
+      (identity[6] ?? "secure") === (target.connectionMode ?? "secure")
     )
       invalidateSourceOwner(key);
   }
@@ -241,6 +242,8 @@ export function sourceEventMatches(
   return (
     (event.filename === undefined || owner.filename === event.filename) &&
     owner.target.baseUrl === event.target.baseUrl &&
-    (owner.target.apiKey ?? null) === (event.target.apiKey ?? null)
+    (owner.target.apiKey ?? null) === (event.target.apiKey ?? null) &&
+    (owner.target.connectionMode ?? "secure") ===
+      (event.target.connectionMode ?? "secure")
   );
 }

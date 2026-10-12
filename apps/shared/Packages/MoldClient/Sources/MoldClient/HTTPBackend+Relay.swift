@@ -9,7 +9,17 @@ extension HTTPBackend {
 
     func response(_ request: URLRequest, body: MoldRequestBody? = nil) async throws -> (MoldResponseBytes, HTTPURLResponse) {
         let body = body ?? .data(request.httpBody ?? Data())
+        if host.connectionMode == .regular {
+            try SecureCredentialHistory.shared.refuseKnownSecureCredentials(host: host, request: request, session: session)
+        }
         if let injectedTransport { return try await injectedTransport.response(for: request, body: body) }
+        if host.connectionMode == .regular {
+            guard host.permitsRegularDirect, let url = request.url, url.user == nil, url.password == nil, HostAddress.sameOrigin(url, host.baseURL) else { throw SecureConnectionError.pairingRequired }
+            var direct = request
+            direct.httpShouldHandleCookies = false
+            for header in SecureCredentialHistory.privateHeaders { direct.setValue(nil, forHTTPHeaderField: header) }
+            return try await LoopbackHTTPTransport(session: session).response(for: direct, body: body)
+        }
         if host.secure == nil, Self.isEmbeddedLoopback(host.baseURL) {
             return try await LoopbackHTTPTransport(session: session).response(for: request, body: body)
         }
@@ -51,7 +61,7 @@ extension HTTPBackend {
     }
 }
 
-/// Explicitly selected only for the private embedded engine or injected contract fixtures.
+/// Selected for the private embedded engine or an explicitly approved Regular direct connection.
 struct LoopbackHTTPTransport: MoldHTTPTransport {
     let session: URLSession
     func response(for original: URLRequest, body: MoldRequestBody) async throws -> (MoldResponseBytes, HTTPURLResponse) {

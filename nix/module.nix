@@ -112,6 +112,12 @@ in
       description = "Restrict CORS to a specific origin. Null means permissive.";
     };
 
+    allowDirectApi = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Enable explicit Regular HTTP(S) API access; managed proxy connections always remain encrypted.";
+    };
+
     apiKeyFile = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
       default = null;
@@ -375,6 +381,7 @@ in
       environment = {
         MOLD_HOME = cfg.homeDir;
         MOLD_PORT = toString cfg.port;
+        MOLD_ALLOW_DIRECT_API = if cfg.allowDirectApi then "1" else "0";
         MOLD_WEB_UI_ENABLED = lib.boolToString cfg.webUi.enable;
         MOLD_MODELS_DIR = cfg.modelsDir;
         # MOLD_HOME is deliberately 0775 for CLI/service sharing. Artifact

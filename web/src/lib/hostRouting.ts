@@ -1,3 +1,4 @@
+import type { ConnectionMode } from "@studio/api/connectionMode";
 /*
  * Generation host routing for the web Create surface (spec §08 multi-host).
  *
@@ -51,6 +52,7 @@ export interface RoutableHost {
   url: string;
   /** Per-host key, sent as `x-api-key`. Never placed in a URL. */
   apiKey?: string;
+  connectionMode?: ConnectionMode | undefined;
   instanceId?: string;
   status: HostRoutingStatus;
   /** Latest status transport failed after this host had supplied a verified
@@ -68,6 +70,7 @@ export interface RoutableHost {
 export interface HostTarget {
   baseUrl: string;
   apiKey?: string;
+  connectionMode?: ConnectionMode | undefined;
 }
 
 export interface HostRoute {
@@ -98,6 +101,7 @@ export function sameHostRoute(
     frozen.hostId === current.hostId &&
     frozen.target.baseUrl === current.target.baseUrl &&
     frozen.target.apiKey === current.target.apiKey &&
+    frozen.target.connectionMode === current.target.connectionMode &&
     (frozen.instanceId ?? null) === (current.instanceId ?? null)
   );
 }
@@ -186,7 +190,10 @@ export function resolveRoute(
     chosen = pickAutoHost(withModel.length > 0 ? withModel : hosts, copies);
   }
   if (!chosen) return null;
-  const target: HostTarget = { baseUrl: chosen.url };
+  const target: HostTarget = {
+    baseUrl: chosen.url,
+    connectionMode: chosen.connectionMode,
+  };
   if (chosen.apiKey) target.apiKey = chosen.apiKey;
   return {
     hostId: chosen.id,

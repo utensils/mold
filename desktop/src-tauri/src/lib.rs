@@ -159,14 +159,26 @@ pub fn run() {
                 }
             }
             app.manage(settings_store);
-            let local_api_key = secrets.local_server_api_key()?;
+            let home = mold_core::Config::mold_dir()
+                .ok_or_else(|| anyhow::anyhow!("Cannot resolve the Mold home for its owner credential"))?;
+            let local_api_key = if saved_home_unavailable {
+                // Recovery UI must not recreate an absent external drive. No
+                // engine starts in this state; changing the home relaunches.
+                String::new()
+            } else {
+                secrets.local_server_api_key(&home)?
+            };
             // mold-server reads auth from the environment when the server
             // thread starts. Resolve and export the persistent key first.
-            std::env::set_var("MOLD_API_KEY", &local_api_key);
+            let explicit_operator = std::env::var("MOLD_API_KEY").ok();
+            std::env::set_var("MOLD_API_KEY", mold_secure::operator_key::server_configuration(
+                explicit_operator.as_deref(), &local_api_key,
+            ));
             app.manage(commands::AppState {
                 conn: tokio::sync::Mutex::new(connection::Conn::Off),
                 local_server: tokio::sync::Mutex::new(commands::LocalServer::Off),
                 local_api_key,
+                original_operator_configuration: explicit_operator,
                 secrets,
             });
             // Keep the tracing appender alive for the app's lifetime.
@@ -178,6 +190,8 @@ pub fn run() {
             secure_media_bridge::secure_media_close,
             secure_media_bridge::secure_host_register,
             secure_media_bridge::secure_host_forget,
+            secure_media_bridge::regular_host_register,
+            secure_media_bridge::regular_host_forget,
             commands::app_settings_get,
             commands::app_settings_set,
             commands::get_connection,
@@ -186,6 +200,8 @@ pub fn run() {
             commands::ensure_local_server,
             commands::start_local_engine,
             commands::stop_local_engine,
+            commands::regular_access_get,
+            commands::regular_access_set,
             commands::forget_remote_host,
             commands::test_remote_host,
             commands::discover_servers,

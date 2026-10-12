@@ -1,10 +1,12 @@
-import { isLoopbackOrigin } from "@studio/api/relayTransport";
+import type { ConnectionMode } from "@studio/api/connectionMode";
 
 export interface StudioPrimary {
   id: string;
   name: string;
   url: string;
   instanceId?: string;
+  apiKey?: string;
+  connectionMode?: ConnectionMode | undefined;
 }
 export const STUDIO_PRIMARY_KEY = "mold.web.primary.v3";
 export const STUDIO_PRIMARY_CHANGED = "mold:studio-primary-changed";
@@ -13,10 +15,7 @@ export const STUDIO_PRIMARY_CHANGED = "mold:studio-primary-changed";
 let primary: StudioPrimary | null | undefined;
 /** Hosted Studio is a client; its static origin is never a Mold server. */
 export function standaloneStudio(): boolean {
-  return (
-    import.meta.env.VITE_STANDALONE_STUDIO === "1" ||
-    !isLoopbackOrigin(new URL(window.location.origin))
-  );
+  return import.meta.env.VITE_STANDALONE_STUDIO === "1";
 }
 function readPrimary(): StudioPrimary | null {
   try {
@@ -56,6 +55,8 @@ export function setStudioPrimary(host: StudioPrimary | null): void {
         name: host.name,
         url: host.url,
         instanceId: host.instanceId,
+        apiKey: host.apiKey,
+        connectionMode: host.connectionMode,
       })
     : null;
   if (next) localStorage.setItem(STUDIO_PRIMARY_KEY, JSON.stringify(next));
@@ -69,7 +70,9 @@ export function setStudioPrimary(host: StudioPrimary | null): void {
       (current &&
         stored.id === current.id &&
         stored.url === current.url &&
-        stored.instanceId === current.instanceId)
+        stored.instanceId === current.instanceId &&
+        stored.apiKey === current.apiKey &&
+        stored.connectionMode === current.connectionMode)
     )
       localStorage.removeItem(STUDIO_PRIMARY_KEY);
   }

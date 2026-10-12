@@ -24,3 +24,21 @@ it("removes the one-time invitation before hash routing captures its initial loc
   expect(takeInitialPairingLink()).toBe("");
   router.options.history.destroy();
 }, 30000);
+
+it("captures a Regular handoff once and clears its private token from history", async () => {
+  vi.resetModules();
+  vi.stubEnv("VITE_STANDALONE_STUDIO", "1");
+  history.replaceState(
+    null,
+    "",
+    "/mold/studio/#mode=regular&pairing_token=test-owned-token&version=2",
+  );
+  const { captureInitialPairingLink, takeInitialPairingLink } =
+    await import("./lib/initialPairing");
+  captureInitialPairingLink();
+  expect(location.hash).toBe("#/create");
+  expect(takeInitialPairingLink()).toContain(
+    "mode=regular&pairing_token=test-owned-token",
+  );
+  expect(takeInitialPairingLink()).toBe("");
+});

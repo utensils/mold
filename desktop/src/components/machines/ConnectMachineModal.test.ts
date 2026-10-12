@@ -20,7 +20,7 @@ it("connects a newly verified profile without passing a bearer through general h
   await view.get("textarea").setValue(JSON.stringify(payload));
   await view.get("form").trigger("submit");
   await flushPromises();
-  expect(mocks.connect).toHaveBeenCalledWith(payload.base_url, null, payload.name);
+  expect(mocks.connect).toHaveBeenCalledWith(payload.base_url, null, payload.name, "secure");
   expect(view.emitted("connected")).toHaveLength(1);
   expect(view.emitted("close")).toHaveLength(1);
 });

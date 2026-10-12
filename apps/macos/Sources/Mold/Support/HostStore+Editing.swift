@@ -14,12 +14,12 @@ extension HostStore {
     /// list included -- and two spellings of one box would otherwise become
     /// two rows whose prints never merge.
     @discardableResult
-    func add(name: String, url: URL, apiKey: String?) -> MoldHost {
+    func add(name: String, url: URL, apiKey: String?, connectionMode: HostConnectionMode = .secure) -> MoldHost {
         let address = HostAddress.normalize(url.absoluteString) ?? url
         let host = MoldHost(
             name: resolvedName(name, for: address),
             baseURL: address,
-            apiKey: apiKey
+            apiKey: apiKey, connectionMode: connectionMode
         )
         hosts.append(host)
         store(apiKey, for: host, doing: "save its key")

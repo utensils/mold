@@ -1148,3 +1148,14 @@ describe("mobile download authority", () => {
     expect(store.downloadsByHost[studio.id]).toBeUndefined();
   });
 });
+
+it("retires the download subscription when only connection mode changes", () => {
+  const store = useMobileDownloadsStore();
+  store.registerConsumer("catalog", [studio]);
+  const prior = streams[0]!;
+  prior.onEvent("download", JSON.stringify(snapshot([], [queuedJob("secure-job", "studio")])));
+  store.registerConsumer("catalog", [{ ...studio, connectionMode: "regular" }]);
+  expect(prior.signal.aborted).toBe(true);
+  expect(streams[1]!.target.connectionMode).toBe("regular");
+  expect(store.downloadsByHost[studio.id]?.queued).toEqual([]);
+});

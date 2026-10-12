@@ -78,7 +78,11 @@ export const useLiveActivityStore = defineStore("liveActivity", {
           const route = {
             hostId: host.id,
             hostLabel: host.label,
-            target: { baseUrl: host.baseUrl, apiKey: host.apiKey },
+            target: {
+              baseUrl: host.baseUrl,
+              apiKey: host.apiKey,
+              connectionMode: host.connectionMode,
+            },
           };
           const epoch = (this.epochs[host.id] ?? 0) + 1;
           this.epochs[host.id] = epoch;

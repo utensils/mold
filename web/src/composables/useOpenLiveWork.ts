@@ -20,7 +20,13 @@ export function useOpenLiveWork(routing: HostRouting) {
       const host = routing.hosts.value.find(
         (candidate) => candidate.id === hostId,
       );
-      return host ? { baseUrl: host.url, apiKey: host.apiKey ?? null } : null;
+      return host
+        ? {
+            baseUrl: host.url,
+            apiKey: host.apiKey ?? null,
+            connectionMode: host.connectionMode,
+          }
+        : null;
     },
     go: (to) => router.push(to).then(() => undefined),
     fail: (message) => toast("error", message),

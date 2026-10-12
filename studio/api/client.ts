@@ -1,8 +1,10 @@
 import { relayFetch as fetch } from "./relayTransport";
+import { CONNECTION_MODE_HEADER, type ConnectionMode } from "./connectionMode";
 
 export interface ApiTarget {
   baseUrl: string;
   apiKey: string | null;
+  connectionMode?: ConnectionMode | undefined;
 }
 
 export class ApiError extends Error {
@@ -31,6 +33,8 @@ export class IncompatibleHostError extends ApiError {
 export function apiHeaders(target: ApiTarget, extra?: HeadersInit): Headers {
   const headers = new Headers(extra);
   if (target.apiKey) headers.set("X-Api-Key", target.apiKey);
+  if (target.connectionMode)
+    headers.set(CONNECTION_MODE_HEADER, target.connectionMode);
   return headers;
 }
 
@@ -88,7 +92,12 @@ export async function conditionalApiJsonTo<T>(
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
-  const key = `${target.baseUrl}|${path}`;
+  const key = JSON.stringify([
+    target.baseUrl,
+    target.connectionMode,
+    target.apiKey,
+    path,
+  ]);
   const cached = conditionalJsonCache.get(key);
   const headers = apiHeaders(target, init.headers);
   if (cached) headers.set("If-None-Match", cached.etag);

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { SecureChannel } from "./secureChannel";
 import { SecureWire } from "./secureWire";
+import { PreAdmissionProxyBusy } from "./secureAdmission";
 
 describe("secure WebSocket backpressure", () => {
   it("treats a bounded gateway throttle envelope as lost delivery and retries exact ciphertext", async () => {
@@ -43,7 +44,16 @@ describe("secure WebSocket backpressure", () => {
         failed: null,
         wire: null,
       }) as typeof channel;
-      expect(() => admitting.receive(failure)).toThrow(/temporarily busy/);
+      expect(() => admitting.receive(failure)).toThrow(PreAdmissionProxyBusy);
+      const admitted = Object.assign(Object.create(SecureChannel.prototype), {
+        failed: null,
+        wire: null,
+        admitted: { sid: "session", rid: "route" },
+      }) as typeof channel;
+      expect(() => admitted.receive(failure)).toThrow(/temporarily busy/);
+      expect(() => admitted.receive(failure)).not.toThrow(
+        PreAdmissionProxyBusy,
+      );
     } finally {
       wire.close();
       vi.useRealTimers();

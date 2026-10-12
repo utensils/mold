@@ -3010,6 +3010,7 @@ dependencies = [
  "mold-ai-relay",
  "mold-ai-scheduler",
  "mold-ai-secure",
+ "mold-ai-secure-client",
  "rayon",
  "rust-embed",
  "serde",

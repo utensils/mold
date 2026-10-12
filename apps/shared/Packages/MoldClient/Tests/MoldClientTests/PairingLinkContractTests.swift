@@ -10,13 +10,16 @@ struct PairingLinkContractTests {
     struct Fixture: Decodable {
         struct Payload: Decodable {
             let baseUrl: String
-            let namespace: String
-            let hostKey: String
-            let hostNoiseKey: String
-            let hostBindingSignature: String
-            let websocketUrl: String
-            let inviteSeed: String
-            let invite: SecureInvite
+            let mode: HostConnectionMode?
+            let pairingToken: String?
+            let expiresAt: UInt64?
+            let namespace: String?
+            let hostKey: String?
+            let hostNoiseKey: String?
+            let hostBindingSignature: String?
+            let websocketUrl: String?
+            let inviteSeed: String?
+            let invite: SecureInvite?
             let instanceId: String
             let name: String
             let endpoints: [ConnectionEndpoint]?
@@ -27,10 +30,15 @@ struct PairingLinkContractTests {
         let aliases: [String]
 
         var expected: MobilePairingPayload {
-            MobilePairingPayload(baseURL: payload.baseUrl, token: nil,
-                                 expiresAt: payload.invite.expiresAt, instanceId: payload.instanceId,
+            if payload.mode == .regular {
+                return MobilePairingPayload(baseURL: payload.baseUrl, token: payload.pairingToken,
+                                           expiresAt: payload.expiresAt, instanceId: payload.instanceId,
+                                           name: payload.name, mode: .regular)
+            }
+            return MobilePairingPayload(baseURL: payload.baseUrl, token: nil,
+                                 expiresAt: payload.invite!.expiresAt, instanceId: payload.instanceId,
                                  name: payload.name, endpoints: payload.endpoints,
-                                 secureInvitation: SecureInvitation(binding: .init(signingKey: payload.hostKey, noiseKey: payload.hostNoiseKey, signature: payload.hostBindingSignature), namespace: payload.namespace, websocketURL: URL(string: payload.websocketUrl)!, seed: payload.inviteSeed, invite: payload.invite))
+                                 secureInvitation: SecureInvitation(binding: .init(signingKey: payload.hostKey!, noiseKey: payload.hostNoiseKey!, signature: payload.hostBindingSignature!), namespace: payload.namespace!, websocketURL: URL(string: payload.websocketUrl!)!, seed: payload.inviteSeed!, invite: payload.invite!))
         }
     }
 

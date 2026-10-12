@@ -176,8 +176,8 @@ describe("streamSse", () => {
     expect(url).toBe("/api/generate/stream");
     expect(init.method).toBe("POST");
     expect(init.body).toBe('{"prompt":"a cat"}');
-    const headers = init.headers as Record<string, string>;
-    expect(headers["Content-Type"]).toBe("application/json");
-    expect(headers["Accept"]).toBe("text/event-stream");
+    const headers = new Headers(init.headers);
+    expect(headers.get("Content-Type")).toBe("application/json");
+    expect(headers.get("Accept")).toBe("text/event-stream");
   });
 });

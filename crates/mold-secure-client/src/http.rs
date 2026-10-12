@@ -50,9 +50,62 @@ pub fn is_private_engine(url: &reqwest::Url) -> bool {
 }
 pub async fn execute_http(
     client: &reqwest::Client,
-    request: reqwest::Request,
+    mut request: reqwest::Request,
 ) -> Result<reqwest::Response> {
     let origin = request.url().origin().ascii_serialization();
+    let mode = request.headers_mut().remove("x-mold-connection-mode");
+    if let Some(mode) = mode {
+        match mode.to_str()? {
+            "secure" => {}
+            "regular" => {
+                crate::regular_origin(&origin)?;
+                for value in request.headers().get_all("authorization") {
+                    for value in value.to_str()?.split(',').map(str::trim) {
+                        anyhow::ensure!(
+                            !crate::store::is_known_secure_credential(value)?,
+                            "Secure credentials cannot authorize Regular HTTP"
+                        );
+                        let mut parts = value.split_ascii_whitespace();
+                        if parts
+                            .next()
+                            .unwrap_or_default()
+                            .eq_ignore_ascii_case("bearer")
+                        {
+                            anyhow::ensure!(
+                                !crate::store::is_known_secure_credential(
+                                    parts.next().unwrap_or_default()
+                                )?,
+                                "Secure credentials cannot authorize Regular HTTP"
+                            );
+                        }
+                    }
+                }
+                request.headers_mut().remove("cookie");
+                request.headers_mut().remove("x-mold-secure-peer");
+                request.headers_mut().remove("x-mold-secure-control");
+                let host = crate::load_regular_host(&origin)?;
+                host.validate()?;
+                for provided in request.headers().get_all("x-api-key") {
+                    anyhow::ensure!(
+                        Some(provided.to_str()?) == host.api_key.as_deref(),
+                        "Regular credential does not match the selected host"
+                    );
+                }
+                if let Some(key) = host.api_key {
+                    request.headers_mut().insert("x-api-key", key.parse()?);
+                }
+                // A direct credential must never follow a redirect to another authority.
+                let direct = reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()?;
+                return direct
+                    .execute(request)
+                    .await
+                    .context("Regular Mold request failed");
+            }
+            _ => anyhow::bail!("invalid Mold connection mode"),
+        }
+    }
     let paired = crate::pairing_exists(&origin);
     if is_private_engine(request.url()) && !paired {
         return client
@@ -90,21 +143,44 @@ pub async fn execute_http(
     };
     // Timeout before response headers, if requested by the existing consumer.
     // Body backpressure/cancellation remains owned by the response stream.
+    let read_only = crate::transport::is_read_only_method(request.method());
     if let Some(timeout) = request.timeout().copied() {
         tokio::time::timeout(timeout, secure.send(request))
             .await
-            .context("secure request timed out; its outcome may be unknown")?
+            .context(crate::transport::transport_failure_message(
+                "secure request timed out; its outcome may be unknown",
+                read_only,
+            ))?
     } else {
         secure.send(request).await
     }
 }
 pub trait RequestBuilderExt {
     fn secure_send(self) -> impl std::future::Future<Output = Result<reqwest::Response>> + Send;
+    fn configured_send(self)
+        -> impl std::future::Future<Output = Result<reqwest::Response>> + Send;
 }
 impl RequestBuilderExt for reqwest::RequestBuilder {
     async fn secure_send(self) -> Result<reqwest::Response> {
         let (client, request) = self.build_split();
         execute_http(&client, request?).await
+    }
+    async fn configured_send(self) -> Result<reqwest::Response> {
+        let (client, request) = self.build_split();
+        let mut request = request?;
+        if !request.headers().contains_key("x-mold-connection-mode") {
+            let origin = request.url().origin().ascii_serialization();
+            let mode = crate::configured_connection_mode(&origin)?;
+            request.headers_mut().insert(
+                "x-mold-connection-mode",
+                match mode {
+                    crate::ConnectionMode::Secure => "secure",
+                    crate::ConnectionMode::Regular => "regular",
+                }
+                .parse()?,
+            );
+        }
+        execute_http(&client, request).await
     }
 }
 #[cfg(test)]
@@ -119,6 +195,24 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("No secure pairing"));
+    }
+    #[test]
+    fn native_requests_do_not_inherit_cli_regular_mode() {
+        let scratch =
+            std::env::temp_dir().join(format!("mold-native-mode-test-{}", uuid::Uuid::new_v4()));
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "http::tests::remote_unpaired_never_dispatches_plaintext",
+                "--exact",
+            ])
+            .env("MOLD_CONNECTION_MODE", "regular")
+            .env("MOLD_HOME", scratch)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "native requests must stay Secure when CLI selection is Regular"
+        );
     }
     #[test]
     fn only_loopback_is_private_engine() {

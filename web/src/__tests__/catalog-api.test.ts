@@ -47,7 +47,11 @@ describe("catalog api", () => {
     await fetchCatalogSearch({ q: "flux" });
     const opts = (globalThis.fetch as ReturnType<typeof vi.fn>).mock
       .calls[0][1];
-    expect(opts?.headers).toBeUndefined();
+    expect(new Headers(opts?.headers).has("authorization")).toBe(false);
+    expect(new Headers(opts?.headers).has("x-api-key")).toBe(false);
+    expect(new Headers(opts?.headers).get("x-mold-connection-mode")).toBe(
+      "regular",
+    );
     localStorage.clear();
   });
 
@@ -60,7 +64,11 @@ describe("catalog api", () => {
     await fetchCatalogSearch({ q: "flux" });
     const opts = (globalThis.fetch as ReturnType<typeof vi.fn>).mock
       .calls[0][1];
-    expect(opts?.headers).toBeUndefined();
+    expect(new Headers(opts?.headers).has("authorization")).toBe(false);
+    expect(new Headers(opts?.headers).has("x-api-key")).toBe(false);
+    expect(new Headers(opts?.headers).get("x-mold-connection-mode")).toBe(
+      "regular",
+    );
   });
 
   it("fetchCatalogSearch passes component kind filters as query params", async () => {

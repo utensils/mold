@@ -1,3 +1,4 @@
+import { CONNECTION_MODE_HEADER } from "@studio/api/connectionMode";
 import { isLoopbackOrigin, secureRequestUrl } from "@studio/api/relayTransport";
 import { originalMediaBlob } from "@studio/api/originalMedia";
 import { originAuthenticatedFetch as fetch } from "./originAuth";
@@ -118,7 +119,12 @@ export function directMediaUrl(host: HostEntry, filename: string): string {
 }
 
 function authHeaders(host: HostEntry): Record<string, string> {
-  return host.apiKey ? { "x-api-key": host.apiKey } : {};
+  return {
+    ...(host.apiKey ? { "x-api-key": host.apiKey } : {}),
+    ...(host.connectionMode
+      ? { [CONNECTION_MODE_HEADER]: host.connectionMode }
+      : {}),
+  };
 }
 
 /** A host needs authenticated (blob / ticket) media only when it carries a
@@ -126,7 +132,8 @@ function authHeaders(host: HostEntry): Record<string, string> {
 export function needsAuthedMedia(host: HostEntry): boolean {
   return (
     !!host.apiKey ||
-    !isLoopbackOrigin(secureRequestUrl(`${hostMediaBase(host)}/api/status`))
+    (host.connectionMode !== "regular" &&
+      !isLoopbackOrigin(secureRequestUrl(`${hostMediaBase(host)}/api/status`)))
   );
 }
 

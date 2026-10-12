@@ -241,7 +241,9 @@ export const useJobsStore = defineStore("jobs", {
       }
     },
     targetFor(host: HostView): ApiTarget | null {
-      return host.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : null;
+      return host.baseUrl
+        ? { baseUrl: host.baseUrl, apiKey: host.apiKey, connectionMode: host.connectionMode }
+        : null;
     },
     /** Snapshot ONE host's queue — the host detail page polls just its host. */
     async refreshHost(host: HostView) {
@@ -601,6 +603,7 @@ export const useJobsStore = defineStore("jobs", {
         const captured = {
           baseUrl: host.baseUrl,
           apiKey: host.apiKey,
+          connectionMode: host.connectionMode,
           instanceId: host.instanceId,
         };
         if (captured.instanceId) {

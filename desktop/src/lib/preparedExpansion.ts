@@ -87,6 +87,7 @@ export interface CurrentPreparedExpansionInputs extends PreparedExpansionInputs 
     {
       baseUrl: string;
       apiKey: string | null;
+      connectionMode?: "secure" | "regular" | undefined;
       kind: HostRoute["kind"];
       instanceId?: string | null;
     }
@@ -157,6 +158,7 @@ export function quickExpansionRouteIsCurrent(
   return (
     target.baseUrl === snapshot.route.target.baseUrl &&
     target.apiKey === snapshot.route.target.apiKey &&
+    (target.connectionMode ?? "secure") === (snapshot.route.target.connectionMode ?? "secure") &&
     target.kind === snapshot.route.kind &&
     !knownInstanceIdsDiffer(snapshot.route.instanceId, target.instanceId)
   );

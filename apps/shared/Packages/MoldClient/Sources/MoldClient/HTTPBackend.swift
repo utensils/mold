@@ -11,12 +11,14 @@ public struct HTTPBackend: MoldBackend {
 
     public init(host: MoldHost, session: URLSession = APISession.api) {
         self.host = host
+        SecureCredentialHistory.shared.remember([host])
         self.session = session
         injectedTransport = nil
     }
 
     public init(host: MoldHost, transport: any MoldHTTPTransport) {
         self.host = host
+        SecureCredentialHistory.shared.remember([host])
         session = APISession.api
         injectedTransport = transport
     }

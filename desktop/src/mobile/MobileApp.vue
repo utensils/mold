@@ -32,6 +32,8 @@ import {
 } from "@studio/lib/collectionVisibility";
 import { restoreRetainedDraftMedia } from "@studio/lib/retainedDraftMedia";
 import { connectionHealth, forgetConnectionRoutes } from "@studio/api/connectionRoutes";
+import { registerRegularConnection } from "@studio/api/directConnection";
+import type { ConnectionMode } from "@studio/api/connectionMode";
 import { forgetSecureHostForMachine } from "@studio/api/secureStore";
 import HeldQueueTransferDialog from "@studio/components/HeldQueueTransferDialog.vue";
 import QueueMoveToControl from "@studio/components/QueueMoveToControl.vue";
@@ -91,6 +93,7 @@ import {
 import {
   claimPairingSession,
   parseMobilePairingPayload,
+  pairingExpiresAt,
   type PairingClientIdentity,
 } from "@studio/api/pairing";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
@@ -792,7 +795,12 @@ const connectedHosts = computed(() => hosts.value.filter((host) => host.connecte
 const selectedHostId = ref(localStorage.getItem(SELECTED_KEY) ?? connectedHosts.value[0]?.id ?? "");
 const catalogHostId = ref(selectedHostId.value || connectedHosts.value[0]?.id || "");
 const hostDetailId = ref("");
-const hostInput = reactive({ name: "", address: "", apiKey: "" });
+const hostInput = reactive({
+  name: "",
+  address: "",
+  apiKey: "",
+  connectionMode: "secure" as ConnectionMode,
+});
 const discovered = ref<DiscoveredHost[]>([]);
 const selectedDiscovered = ref<DiscoveredHost | null>(null);
 const discovering = ref(false);
@@ -3328,7 +3336,9 @@ async function cancelFleetActivity(row: FleetActiveWork): Promise<void> {
     if (
       !latestAuthority ||
       latestAuthority.target.baseUrl !== authority.target.baseUrl ||
-      latestAuthority.target.apiKey !== authority.target.apiKey
+      latestAuthority.target.apiKey !== authority.target.apiKey ||
+      (latestAuthority.target.connectionMode ?? "secure") !==
+        (authority.target.connectionMode ?? "secure")
     )
       throw new Error("The original machine changed. Reopen the job's details.");
     if (row.execution === "chain")
@@ -4769,9 +4779,10 @@ async function hydrateApiKeys(): Promise<void> {
   await Promise.all(
     hosts.value.map(async (host) => {
       try {
-        if (!isNumericLoopbackHost(host.baseUrl)) {
+        if (host.connectionMode !== "regular" && !isNumericLoopbackHost(host.baseUrl)) {
           host.apiKey = "";
-          await invoke("keychain_delete_api_key", { hostId: host.id });
+          if (host.connectionMode === "secure")
+            await invoke("keychain_delete_api_key", { hostId: host.id });
           return;
         }
         let key = await invoke<string | null>("keychain_get_api_key", { hostId: host.id });
@@ -4788,8 +4799,14 @@ async function hydrateApiKeys(): Promise<void> {
           }
         }
         host.apiKey = key ?? "";
+        if (host.connectionMode === "regular") {
+          await registerRegularConnection(host.baseUrl, host.apiKey || null);
+        }
         if (host.apiKey && migratedAliasKey) {
-          await invoke("keychain_set_api_key", { hostId: host.id, apiKey: host.apiKey });
+          await invoke("keychain_set_api_key", {
+            hostId: host.id,
+            apiKey: host.apiKey,
+          });
         }
       } catch {
         host.apiKey = "";
@@ -4797,9 +4814,14 @@ async function hydrateApiKeys(): Promise<void> {
     }),
   );
   await Promise.all(
-    pendingMobileHostAliasDrops.map(({ loser }) =>
-      invoke("keychain_delete_api_key", { hostId: loser }).catch(() => undefined),
-    ),
+    pendingMobileHostAliasDrops
+      .filter(
+        ({ survivor }) =>
+          hosts.value.find((host) => host.id === survivor)?.connectionMode !== undefined,
+      )
+      .map(({ loser }) =>
+        invoke("keychain_delete_api_key", { hostId: loser }).catch(() => undefined),
+      ),
   );
   pendingMobileHostAliasDrops = [];
 }
@@ -4808,12 +4830,20 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
   hostError.value = "";
   try {
     const baseUrl = normalizeRemoteAddress(address ?? hostInput.address);
-    if (!isNumericLoopbackHost(baseUrl) && hostInput.apiKey.trim()) {
+    if (
+      hostInput.connectionMode !== "regular" &&
+      !isNumericLoopbackHost(baseUrl) &&
+      hostInput.apiKey.trim()
+    ) {
       throw new Error(
         "Pair this machine with its encrypted pairing code. Remote API keys are no longer accepted.",
       );
     }
-    const target = { baseUrl, apiKey: hostInput.apiKey.trim() || null };
+    const target = {
+      baseUrl,
+      apiKey: hostInput.apiKey.trim() || null,
+      connectionMode: hostInput.connectionMode,
+    };
     const status = await apiJsonTo<ServerStatus>(target, "/api/status");
     const instanceId = status.instance_id?.trim() || undefined;
     const existing = hosts.value.find(
@@ -4826,14 +4856,18 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
       (host) => host.id === slug && host.instanceId?.trim() !== instanceId,
     );
     const id = existing?.id ?? (conflictingSlug && instanceId ? instanceId : slug);
-    const successfulApiKey = isNumericLoopbackHost(baseUrl)
-      ? hostInput.apiKey.trim() || existing?.apiKey || ""
-      : "";
+    if (hostInput.connectionMode === "regular")
+      await registerRegularConnection(baseUrl, target.apiKey);
+    const successfulApiKey =
+      hostInput.connectionMode === "regular" || isNumericLoopbackHost(baseUrl)
+        ? hostInput.apiKey.trim() || existing?.apiKey || ""
+        : "";
     const saved: MobileHost = {
       id,
       name: hostInput.name.trim() || discoveredName || status.hostname || new URL(baseUrl).hostname,
       baseUrl,
       apiKey: successfulApiKey,
+      connectionMode: hostInput.connectionMode,
       hostname: status.hostname ?? undefined,
       version: status.version,
       instanceId,
@@ -4846,7 +4880,11 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
       instanceMismatch: undefined,
     };
     if (existing) {
-      if (existing.baseUrl !== baseUrl || existing.apiKey !== successfulApiKey) {
+      if (
+        existing.baseUrl !== baseUrl ||
+        existing.apiKey !== successfulApiKey ||
+        (existing.connectionMode ?? "secure") !== hostInput.connectionMode
+      ) {
         forgetConnectionRoutes(existing.id);
         cancelHostProbe(existing.id);
         retireMobileHostAuthority(existing.id);
@@ -4868,7 +4906,10 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
     remapMobileHostAliases(aliases.dropped);
     knownHostReachability.add(saved.id);
     if (saved.apiKey) {
-      await invoke("keychain_set_api_key", { hostId: saved.id, apiKey: saved.apiKey });
+      await invoke("keychain_set_api_key", {
+        hostId: saved.id,
+        apiKey: saved.apiKey,
+      });
     } else {
       await invoke("keychain_delete_api_key", { hostId: saved.id });
     }
@@ -4948,7 +4989,12 @@ async function pairFromCode(code: () => Promise<string>): Promise<void> {
   hostError.value = "";
   try {
     const payload = parseMobilePairingPayload(await code());
-    if (payload.invite.expiresAt <= Math.floor(Date.now() / 1000)) {
+    if (addMachineOpen.value && (payload.mode ?? "secure") !== hostInput.connectionMode) {
+      throw new Error(
+        `Select ${payload.mode === "regular" ? "Regular" : "Secure"} to use this pairing code.`,
+      );
+    }
+    if (pairingExpiresAt(payload) <= Math.floor(Date.now() / 1000)) {
       throw new Error("That pairing code expired. Create a new one in the host's Settings.");
     }
     const baseUrl = normalizeRemoteAddress(payload.base_url);
@@ -4964,19 +5010,9 @@ async function pairFromCode(code: () => Promise<string>): Promise<void> {
     }
     hostInput.name = claim.hostname ?? payload.name;
     hostInput.address = baseUrl;
-    hostInput.apiKey = claim.api_key ?? "";
+    hostInput.connectionMode = payload.mode ?? "secure";
+    hostInput.apiKey = claim.mode === "regular" ? claim.api_key : "";
     await connectHost();
-    const paired = hosts.value.find(
-      (host) => host.baseUrl === baseUrl && host.instanceId === claim.instance_id,
-    );
-    if (paired && claim.api_key && (claim.endpoints?.length || payload.endpoints?.length)) {
-      // Fence discovery started by connectHost before approving the QR origin.
-      forgetConnectionRoutes(paired.id);
-      try {
-      } catch {
-        // Optional route metadata cannot undo an already redeemed pairing.
-      }
-    }
   } catch (error) {
     if (!pairingScannerCancelled) hostError.value = describeTransportError(error);
   } finally {
@@ -5176,6 +5212,7 @@ async function probeHost(host: MobileHost): Promise<void> {
   const wasUnavailable = !host.online || host.stale || Boolean(host.instanceMismatch);
   const timeout = setTimeout(() => controller.abort(), HOST_PROBE_TIMEOUT_MS);
   const credential = host.apiKey;
+  const connectionMode = host.connectionMode ?? "secure";
   const probe = { epoch, controller, timeout };
   hostProbes.set(host.id, probe);
   try {
@@ -5183,6 +5220,7 @@ async function probeHost(host: MobileHost): Promise<void> {
       hostId: host.id,
       baseUrl: host.baseUrl,
       apiKey: host.apiKey,
+      ...(host.connectionMode ? { connectionMode: host.connectionMode } : {}),
       instanceId: host.instanceId,
       signal: controller.signal,
       isCurrent: () =>
@@ -5190,6 +5228,7 @@ async function probeHost(host: MobileHost): Promise<void> {
         hosts.value.includes(host) &&
         host.connected !== false &&
         host.apiKey === credential &&
+        (host.connectionMode ?? "secure") === connectionMode &&
         (hostProbes.get(host.id)?.epoch === epoch || !hostProbes.has(host.id)),
       read: (baseUrl) =>
         apiJsonTo<ServerStatus>({ ...mobileHostTarget(host), baseUrl }, "/api/status", {
@@ -5414,7 +5453,7 @@ async function refreshModels(): Promise<boolean> {
     return false;
   }
   const hostId = host.id;
-  const target = { baseUrl: host.baseUrl, apiKey: host.apiKey || null };
+  const target = mobileHostTarget(host);
   loadingModels.value = true;
   modelLoadError.value = "";
   // Keep a same-host last-good presentation mounted while its refresh is in
@@ -8352,7 +8391,7 @@ async function performGalleryRefresh(): Promise<void> {
     cachedResults.map(({ host, cacheKey, prints }) => [host.id, { cacheKey, prints }]),
   );
   const cachedCopies = cachedResults.flatMap(({ host, cacheKey, prints }) => {
-    const target = { baseUrl: host.baseUrl, apiKey: host.apiKey || null };
+    const target = mobileHostTarget(host);
     return prints.map((print) => ({
       ...print,
       hostId: host.id,
@@ -8384,7 +8423,7 @@ async function performGalleryRefresh(): Promise<void> {
   const knownOffline = allHosts.length - galleryHosts.length;
   const results = await Promise.allSettled(
     galleryHosts.map(async (host) => {
-      const target = { baseUrl: host.baseUrl, apiKey: host.apiKey || null };
+      const target = mobileHostTarget(host);
       const cacheKey = mobileGalleryCacheKey(host);
       const cacheFence = captureCachedHostFence(cacheKey);
       const controller = new AbortController();
@@ -8453,7 +8492,7 @@ async function performGalleryRefresh(): Promise<void> {
     .flatMap((host) => {
       const refreshed = refreshedByHost.get(host.id);
       const cacheKey = refreshed?.cacheKey ?? mobileGalleryCacheKey(host);
-      const target = refreshed?.target ?? { baseUrl: host.baseUrl, apiKey: host.apiKey || null };
+      const target = refreshed?.target ?? mobileHostTarget(host);
       const cached = cachedByHost.get(host.id);
       const saved = savedByHost.get(host.id);
       const prints =
@@ -9935,13 +9974,15 @@ function openMobileSourceOwner(owner: SourceMediaOwner) {
       (p) =>
         p.filename === owner.filename &&
         p.target.baseUrl === owner.target.baseUrl &&
-        p.target.apiKey === owner.target.apiKey,
+        p.target.apiKey === owner.target.apiKey &&
+        (p.target.connectionMode ?? "secure") === (owner.target.connectionMode ?? "secure"),
     ) ??
     galleryCopies.find(
       (p) =>
         p.filename === owner.filename &&
         p.target.baseUrl === owner.target.baseUrl &&
-        p.target.apiKey === owner.target.apiKey,
+        p.target.apiKey === owner.target.apiKey &&
+        (p.target.connectionMode ?? "secure") === (owner.target.connectionMode ?? "secure"),
     );
   if (print)
     openPrint({
@@ -10561,9 +10602,10 @@ async function saveSelectedGalleryPrints(): Promise<void> {
           await invoke("save_export_to_mold_folder", {
             url: `${print.target.baseUrl}/api/gallery/export/${encodeURIComponent(print.filename)}`,
             apiKey: print.target.apiKey,
+            connectionMode: print.target.connectionMode,
             request: { format: "glb" },
             filename: print.filename,
-            reuseKey: `${print.target.baseUrl}\n${print.filename}\n${JSON.stringify({ format: "glb" })}`,
+            reuseKey: `${print.target.baseUrl}\n${print.filename}\n${print.target.connectionMode ?? "secure"}\n${JSON.stringify({ format: "glb" })}`,
           });
         } else if (isVideoItem(print)) {
           const url = await streamableMediaUrl(galleryMediaPath(print.filename, "host"), {
@@ -11698,7 +11740,7 @@ async function observeMobileGalleryArrivals(): Promise<void> {
     const cached = await Promise.all(
       observingHosts.map(async (host) => {
         const cacheKey = mobileGalleryCacheKey(host);
-        const target = { baseUrl: host.baseUrl, apiKey: host.apiKey || null };
+        const target = mobileHostTarget(host);
         return (await loadCachedGallery(cacheKey).catch(() => [])).map((print) => ({
           ...print,
           hostId: host.id,
@@ -11712,7 +11754,7 @@ async function observeMobileGalleryArrivals(): Promise<void> {
     observeMobileLibraryMedia(cached.flat());
     const inventories = await Promise.allSettled(
       observingHosts.map(async (host) => {
-        const target = { baseUrl: host.baseUrl, apiKey: host.apiKey || null };
+        const target = mobileHostTarget(host);
         const prints = await apiJsonTo<MobileGalleryImage[]>(target, "/api/gallery", {
           signal: AbortSignal.timeout(GALLERY_HOST_TIMEOUT_MS),
         });
@@ -14371,6 +14413,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             v-model:name="hostInput.name"
             v-model:address="hostInput.address"
             v-model:api-key="hostInput.apiKey"
+            v-model:connection-mode="hostInput.connectionMode"
             :open="addMachineOpen"
             :pairing="pairing"
             :discovering="discovering"

@@ -62,6 +62,26 @@ extension RemotePairingStore.Dependencies {
                         #if MOLD_EMBEDDED_ENGINE
                         mold_local_network_set_enabled(enabled)
                         #endif
+                    }, loadRegularEnabled: {
+                        AppStorageSuite.defaults.bool(forKey: "regularDirectAccessEnabled")
+                    }, saveRegularEnabled: { enabled in
+                        AppStorageSuite.defaults.set(enabled, forKey: "regularDirectAccessEnabled")
+                    }, regularNetwork: { enabled in
+                        #if MOLD_EMBEDDED_ENGINE
+                        mold_regular_network_set_enabled(enabled)
+                        #endif
+                    }, regularAddresses: {
+                        #if MOLD_EMBEDDED_ENGINE
+                        return try await Task.detached {
+                            var bytes = [UInt8](repeating: 0, count: 16_384)
+                            let length = mold_regular_network_ready(&bytes, bytes.count, 5_000)
+                            guard length > 0 else { throw ManagedRelayFailure.notReady }
+                            let strings = try MoldJSON.decoder.decode([String].self, from: Data(bytes.prefix(Int(length))))
+                            return strings.compactMap(URL.init(string:))
+                        }.value
+                        #else
+                        throw ManagedRelayFailure.engineNotRunning
+                        #endif
                     })
     }
 }
@@ -73,6 +93,7 @@ extension RemotePairingStore {
             var lastRenewal = Date.distantPast
             while !Task.isCancelled {
                 guard let self, let engine else { return }
+                self.dependencies.regularNetwork(self.regularEnabled && engine.host != nil)
                 if self.enabled, let host = engine.host {
                     self.dependencies.localNetwork(true)
                     if self.pendingOperationNeeded(lastRenewal: lastRenewal) {

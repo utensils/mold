@@ -14,6 +14,7 @@
  */
 import { computed, nextTick, ref, watch } from "vue";
 import { useRoute } from "vue-router";
+import RegularAccessControl from "../components/settings/RegularAccessControl.vue";
 import PairingAccessPanel from "@studio/components/PairingAccessPanel.vue";
 import LicenseSettingsPanel from "@studio/components/LicenseSettingsPanel.vue";
 import SettingsShell from "@studio/components/settings/SettingsShell.vue";
@@ -47,9 +48,17 @@ const sections = sectionsForSurface("desktop");
 const shell = ref<{ jump: (id: SectionId) => void } | null>(null);
 
 const pairingTarget = computed(() =>
-  conn.baseUrl ? { baseUrl: conn.baseUrl, apiKey: conn.apiKey } : null,
+  conn.baseUrl
+    ? {
+        baseUrl: conn.baseUrl,
+        apiKey: conn.apiKey,
+      }
+    : null,
 );
-const pairingBaseUrl = computed(() => conn.baseUrl ?? "http://127.0.0.1:7680");
+const regularPairingAddress = ref("");
+const pairingBaseUrl = computed(
+  () => regularPairingAddress.value || conn.baseUrl || "http://127.0.0.1:7680",
+);
 
 // Licence acceptance is recorded per Mold data root, so it belongs to the
 // machine that will do the downloading. Generate-time consent already targets
@@ -64,7 +73,13 @@ const licenseHost = computed(
 );
 const licenseTarget = computed(() =>
   licenseHost.value?.baseUrl
-    ? { baseUrl: licenseHost.value.baseUrl, apiKey: licenseHost.value.apiKey }
+    ? {
+        baseUrl: licenseHost.value.baseUrl,
+        apiKey: licenseHost.value.apiKey,
+        ...(licenseHost.value.connectionMode
+          ? { connectionMode: licenseHost.value.connectionMode }
+          : {}),
+      }
     : pairingTarget.value,
 );
 const licenseHostLabel = computed(() => licenseHost.value?.label ?? "This device");
@@ -157,6 +172,7 @@ watch(
           </LicenseSettingsPanel>
         </template>
         <div v-else-if="section.id === 'pairing'" class="p-3.5">
+          <RegularAccessControl @address="regularPairingAddress = $event" />
           <PairingAccessPanel
             :target="pairingTarget"
             :suggested-base-url="pairingBaseUrl"

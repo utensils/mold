@@ -436,7 +436,9 @@ watch(
     if (!generationCapabilitiesForFamily(family).supportsControlNet) return;
     try {
       const host = stickyHost.value;
-      const target = host?.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : undefined;
+      const target = host?.baseUrl
+        ? { baseUrl: host.baseUrl, apiKey: host.apiKey, connectionMode: host.connectionMode }
+        : undefined;
       const res = await fetchCatalogInstalled({ family, kind: "control-net" }, target);
       if (token !== controlFetchToken) return;
       catalogControlNet.value = res.entries.filter((e) => e.installed && e.primary_path);

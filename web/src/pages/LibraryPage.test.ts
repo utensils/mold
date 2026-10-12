@@ -442,7 +442,11 @@ describe("LibraryPage", () => {
     await flushPromises();
 
     expect(createFramewiseUpscaleMock).toHaveBeenCalledWith(
-      { baseUrl: window.location.origin, apiKey: null },
+      {
+        baseUrl: window.location.origin,
+        apiKey: null,
+        connectionMode: "regular",
+      },
       "existing-clip.mp4",
       "real-esrgan-x4plus:fp16",
     );
@@ -477,7 +481,11 @@ describe("LibraryPage", () => {
     await flushPromises();
 
     expect(createFramewiseUpscaleMock).toHaveBeenCalledWith(
-      { baseUrl: window.location.origin, apiKey: null },
+      {
+        baseUrl: window.location.origin,
+        apiKey: null,
+        connectionMode: "regular",
+      },
       "recent-clip.mp4",
       "real-esrgan-x4plus:fp16",
     );

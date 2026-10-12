@@ -86,6 +86,7 @@ const pairingHost = computed(() => originHost());
 const originTarget = computed(() => ({
   baseUrl: pairingHost.value.url,
   apiKey: pairingHost.value.apiKey ?? null,
+  connectionMode: pairingHost.value.connectionMode,
 }));
 
 function errorMessage(error: unknown): string {
@@ -456,7 +457,11 @@ const licenceTarget = computed(() => {
   const host =
     licenceHosts.value.find((entry) => entry.id === licenceHostId.value) ??
     originHost();
-  return { baseUrl: host.url, apiKey: host.apiKey ?? null };
+  return {
+    baseUrl: host.url,
+    apiKey: host.apiKey ?? null,
+    connectionMode: host.connectionMode,
+  };
 });
 const licenceHostLabel = computed(
   () =>
@@ -510,7 +515,11 @@ onMounted(() => {
   window.addEventListener(HOSTS_CHANGED_EVENT, refreshKnownHosts);
   deviceEventsAbort = new AbortController();
   subscribeToDeviceSnapshots(
-    { baseUrl: host.url, apiKey: host.apiKey ?? null },
+    {
+      baseUrl: host.url,
+      apiKey: host.apiKey ?? null,
+      connectionMode: host.connectionMode,
+    },
     deviceEventsAbort.signal,
     () => void loadDevicePanel(),
   );

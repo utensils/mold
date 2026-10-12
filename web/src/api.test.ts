@@ -105,9 +105,10 @@ describe("queue api", () => {
 
     const listing = await fetchQueue();
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/queue?limit=2", {
-      signal: undefined,
-    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/queue?limit=2",
+      expect.objectContaining({ signal: undefined }),
+    );
     expect(listing.entries[0].target_gpu).toBe(1);
     expect(listing.page).toBeUndefined();
   });
@@ -176,7 +177,11 @@ describe("queue api", () => {
 
     expect(fetchMock).toHaveBeenCalledWith("/api/queue/srv-1", {
       method: "PATCH",
-      headers: { "content-type": "application/json" },
+      headers: new Headers({
+        "content-type": "application/json",
+        "x-mold-connection-mode": "regular",
+      }),
+      redirect: "error",
       body: JSON.stringify({ target_gpu: null }),
       signal: undefined,
     });
@@ -257,14 +262,17 @@ describe("auto-chained long video", () => {
   it("creates the ephemeral job, cancels it, and names its event stream", async () => {
     const fetchMock = installFetch({ job_id: "job/1" });
     await createChainJob(chainRequest(), undefined, "create-op");
-    expect(fetchMock).toHaveBeenLastCalledWith("/api/chain-jobs", {
+    const [path, request] = fetchMock.mock.calls.at(-1)!;
+    expect(path).toBe("/api/chain-jobs");
+    expect(request).toMatchObject({
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-mold-operation-id": "create-op",
-      },
+      redirect: "error",
       body: JSON.stringify(chainRequest()),
     });
+    const headers = new Headers(request.headers);
+    expect(headers.get("content-type")).toBe("application/json");
+    expect(headers.get("x-mold-connection-mode")).toBe("regular");
+    expect(headers.get("x-mold-operation-id")).toBe("create-op");
 
     fetchMock.mockResolvedValueOnce(
       new Response(
@@ -284,7 +292,11 @@ describe("auto-chained long video", () => {
     await cancelChainJob("job/1");
     expect(fetchMock).toHaveBeenLastCalledWith(
       "/api/chain-jobs/job%2F1/cancel",
-      { method: "POST", headers: {} },
+      {
+        method: "POST",
+        headers: new Headers({ "x-mold-connection-mode": "regular" }),
+        redirect: "error",
+      },
     );
 
     expect(chainJobEventsUrl("job/1")).toBe("/api/chain-jobs/job%2F1/events");

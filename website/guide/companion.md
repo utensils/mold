@@ -284,3 +284,23 @@ If a connection is interrupted during a move, retry the same destination so Mold
 ### Editing long prompts
 
 The compact prompt stays bounded while you type. **Edit prompt** opens a spacious live editor; **Done**, Escape and backdrop dismissal retain edits and return focus to the opener. Enter inserts a newline, and arrow keys move through text. **Recent prompts** searches full prompt text and replaces only the prompt, preserving model and other settings. **Clear** offers immediate **Undo clear**; a later edit or history choice ends that recovery. Expand and Remix use the existing rewrite flow and return to the editor. The editor never submits a generation shortcut. Phone presentation fills the visible viewport, with controls retained when the keyboard reduces the available space.
+
+## Connection mode
+
+Secure is the default and encrypts LAN, Tailscale, and proxy traffic end to end.
+Regular connects directly using HTTP or HTTPS over LAN, Tailscale, or WAN;
+HTTP relies on your network or VPN for encryption. Enable Regular access on
+the host before creating its pairing code. Select Regular when scanning a
+Regular code or entering a direct address and API key. The cloud proxy always
+requires Secure. A connection never downgrades automatically, and re-pairing
+updates the existing machine rather than adding a duplicate.
+
+Headless hosts opt in with `mold serve --allow-direct-api` or
+`MOLD_ALLOW_DIRECT_API=true`; Nix hosts use `services.mold.allowDirectApi = true`.
+The CLI follows the saved per-origin connection profile. Set
+`MOLD_CONNECTION_MODE=secure|regular` to explicitly override that mode.
+
+Web Studio follows browser mixed-content and private-network rules. A hosted
+HTTPS Studio cannot connect to a public HTTP address; use a direct HTTPS
+endpoint, the host's embedded HTTP Studio, or a native app/CLI for Regular HTTP.
+Browser permission prompts may also apply to LAN addresses.

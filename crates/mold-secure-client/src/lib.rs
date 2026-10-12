@@ -1,8 +1,10 @@
 mod body_queue;
 pub use body_queue::*;
+pub mod direct;
+pub use direct::*;
 mod bootstrap;
 pub use bootstrap::*;
-pub use mold_secure::{identity_file, Binding};
+pub use mold_secure::{identity_file, operator_key, Binding};
 mod http;
 pub use http::*;
 

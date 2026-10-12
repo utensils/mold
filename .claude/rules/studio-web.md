@@ -190,3 +190,12 @@ pending. A fresh document with remembered pairings but no accepted primary stays
 at the chooser. Thumbnail memory and persistent keys include captured machine
 URL and instance plus the saved ID used for Forget eviction; a late response
 after eviction must not repopulate that cache.
+
+**Connection mode authority:** Secure is the default for remote requests. Regular
+requires an explicit direct HTTP/HTTPS selection and is supported across LAN,
+Tailscale and WAN; managed proxy origins always require Secure. ApiTarget carries
+connectionMode through routes, media, SSE and frozen work; missing legacy mode
+means Secure. Mode metadata alone never permits a request to downgrade. Native
+Regular credentials live in Keychain; Secure credentials remain in secureStore.
+Changing mode retires route, cache and prepared-work authority and updates the
+same physical host record. Pairing rejects mixed Secure/Regular fields.

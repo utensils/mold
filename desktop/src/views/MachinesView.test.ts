@@ -372,7 +372,11 @@ describe("MachinesView overview", () => {
     await wrapper.get("[data-test='runpod-open']").trigger("click");
     await flushPromises();
 
-    expect(testRemoteHost).toHaveBeenCalledWith("https://pod-123-7680.proxy.runpod.net", null);
+    expect(testRemoteHost).toHaveBeenCalledWith(
+      "https://pod-123-7680.proxy.runpod.net",
+      null,
+      "secure",
+    );
     expect(router.currentRoute.value.path).toBe("/machines/pod-123-7680-proxy-runpod-net");
   });
 
@@ -553,6 +557,6 @@ describe("MachinesView overview", () => {
     await flushPromises();
     expect(secretGet).toHaveBeenCalledWith("remote-api-key.192-168-1-20-7680");
     expect(secretGet).toHaveBeenCalledWith("remote-api-key.studio-7680");
-    expect(testRemoteHost).toHaveBeenCalledWith("http://192.168.1.20:7680", "twin-key");
+    expect(testRemoteHost).toHaveBeenCalledWith("http://192.168.1.20:7680", "twin-key", "secure");
   });
 });

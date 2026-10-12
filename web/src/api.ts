@@ -1,3 +1,7 @@
+import {
+  CONNECTION_MODE_HEADER,
+  type ConnectionMode,
+} from "@studio/api/connectionMode";
 import { originApiTarget } from "./lib/originAuth";
 import { originAuthenticatedFetch as fetch } from "./lib/originAuth";
 import type {
@@ -238,6 +242,7 @@ export async function remixPrompt(
  * server's `x-api-key` header — never in the URL.
  */
 export interface StreamTarget {
+  connectionMode?: ConnectionMode | undefined;
   baseUrl: string;
   apiKey?: string;
 }
@@ -247,7 +252,12 @@ function targetBase(target?: StreamTarget | null): string {
 }
 
 function targetHeaders(target?: StreamTarget | null): Record<string, string> {
-  return target?.apiKey ? { "x-api-key": target.apiKey } : {};
+  return {
+    ...(target?.apiKey ? { "x-api-key": target.apiKey } : {}),
+    ...(target?.connectionMode
+      ? { [CONNECTION_MODE_HEADER]: target.connectionMode }
+      : {}),
+  };
 }
 
 /** Advisory VRAM preflight against the machine that will render the print. */

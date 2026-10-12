@@ -1187,6 +1187,8 @@ pub async fn save_output_bytes(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaSaveTarget {
+    #[serde(default)]
+    connection_mode: mold_secure_client::ConnectionMode,
     base_url: String,
     api_key: Option<String>,
 }
@@ -1208,11 +1210,14 @@ async fn fetch_gallery_bytes(
         cancellation.check()?;
     }
     let url = format!("{}{api_path}", target.base_url.trim_end_matches('/'));
-    let mut request = client.get(url);
+    let mut request = client
+        .get(url)
+        .header("x-mold-connection-mode", target.connection_mode.as_str());
     if let Some(key) = target.api_key.as_deref().filter(|key| !key.is_empty()) {
         request = request.header("X-Api-Key", key);
     }
     let response = request
+        .header("x-mold-connection-mode", target.connection_mode.as_str())
         .secure_send()
         .await
         .map_err(|error| format!("Couldn't reach the gallery host: {error}"))?;
@@ -1550,6 +1555,7 @@ pub async fn save_gallery_media(
         }
         None => match local_gallery_authority(&state).await {
             LocalGalleryAuthority::Server(info) => MediaSaveTarget {
+                connection_mode: mold_secure_client::ConnectionMode::Secure,
                 base_url: info.base_url,
                 api_key: info.api_key,
             },
@@ -1593,6 +1599,7 @@ pub async fn save_gallery_media(
         request = request.header("X-Api-Key", key);
     }
     let response = request
+        .header("x-mold-connection-mode", target.connection_mode.as_str())
         .secure_send()
         .await
         .map_err(|error| format!("Couldn't reach the media host: {error}"))?;
@@ -2052,6 +2059,7 @@ async fn fetch_local_thumbnail(
     match local_gallery_authority(state).await {
         LocalGalleryAuthority::Server(info) => {
             let target = MediaSaveTarget {
+                connection_mode: mold_secure_client::ConnectionMode::Secure,
                 base_url: info.base_url.clone(),
                 api_key: Some(api_key(&info)?.to_string()),
             };
@@ -2621,6 +2629,7 @@ mod tests {
             conn: tokio::sync::Mutex::new(Conn::Off),
             local_server: tokio::sync::Mutex::new(LocalServer::Off),
             local_api_key: "desktop-test-key".into(),
+            original_operator_configuration: None,
             secrets: crate::secrets::SecretStore::new(dir.path().to_path_buf()),
         })
     }

@@ -301,6 +301,7 @@ function readRegistry(): void {
       previous &&
       (previous.url !== current.url ||
         previous.apiKey !== current.apiKey ||
+        previous.connectionMode !== current.connectionMode ||
         previous.instanceId !== current.instanceId)
     ) {
       // A credential/address/identity edit is a new routing authority even
@@ -330,6 +331,7 @@ const hosts = computed<RoutableHost[]>(() =>
       id: entry.id,
       label: entry.name,
       url: entry.url,
+      connectionMode: entry.connectionMode,
       status: live?.status ?? "connecting",
       stale: live?.stale ?? false,
       queueDepth: live?.queueDepth ?? null,
@@ -526,7 +528,8 @@ async function pollHost(entry: HostEntry): Promise<void> {
     pollGenerations.get(entry.id) !== generation ||
     !current ||
     current.url !== entry.url ||
-    current.apiKey !== entry.apiKey
+    current.apiKey !== entry.apiKey ||
+    current.connectionMode !== entry.connectionMode
   ) {
     return;
   }
@@ -928,6 +931,7 @@ async function resolveFeasibleWithPreview(
         const target = {
           baseUrl: entry.url,
           apiKey: entry.apiKey ?? null,
+          connectionMode: entry.connectionMode,
         };
         const submission = generationHostSubmissionPolicy(
           selection === AUTO_TARGET_ID
@@ -1077,6 +1081,7 @@ async function resolveFeasibleWithPreview(
     if (chosen) {
       const target: HostRoute["target"] = { baseUrl: chosen.url };
       if (chosen.apiKey) target.apiKey = chosen.apiKey;
+      target.connectionMode = chosen.connectionMode;
       return {
         kind: "route",
         preview: planned[0].preview,
@@ -1331,6 +1336,7 @@ async function revalidateFeasibleWithPreview(
     !captured ||
     captured.url !== route.target.baseUrl ||
     (captured.apiKey ?? undefined) !== route.target.apiKey ||
+    captured.connectionMode !== route.target.connectionMode ||
     (captured.instanceId ?? null) !== (route.instanceId ?? null)
   ) {
     return { kind: "transient", perHost: [] };
@@ -1352,6 +1358,7 @@ async function revalidateFeasibleWithPreview(
         {
           baseUrl: route.target.baseUrl,
           apiKey: route.target.apiKey ?? null,
+          connectionMode: route.target.connectionMode,
         },
         options,
       );
@@ -1398,6 +1405,7 @@ async function revalidateFeasibleWithPreview(
     !current ||
     current.url !== route.target.baseUrl ||
     (current.apiKey ?? undefined) !== route.target.apiKey ||
+    current.connectionMode !== route.target.connectionMode ||
     (current.instanceId ?? null) !== capturedInstanceId
   ) {
     return { kind: "transient", perHost: [] };

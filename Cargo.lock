@@ -3528,6 +3528,7 @@ dependencies = [
  "mold-ai-relay",
  "mold-ai-scheduler",
  "mold-ai-secure",
+ "mold-ai-secure-client",
  "mp4",
  "nvml-wrapper",
  "rayon",

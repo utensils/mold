@@ -10,6 +10,13 @@ Native Xcode builds keep Swift package checkouts in their own
 Do not clear developer-global SwiftPM caches to repair a build. Keep that local
 artifact path aligned with Sparkle tool discovery in `make-appcast.sh`.
 
+Native pairing defaults to Secure and offers explicit Regular direct HTTP(S) access.
+The proxy always remains encrypted. Regular has its own persisted opt-in and listener;
+stopping proxy access must not disable Regular, and disabling Regular must not remove
+host identity or grants. Produce a Regular QR only after the listener reports its actual
+bound direct origin. Mode changes require a new pairing or a distinct Regular credential;
+never prefill or probe with the former Secure key. Preserve one physical machine record.
+
 Active Library sync progress replaces the recurring-session countdown banner.
 Expose one Stop Sync control during transfers, including their finishing phase.
 
@@ -197,3 +204,5 @@ input-original route and says submitted input: sealed bytes can already be fitte
 InputMediaViewer owns private files/players only while selected; cancellation,
 replacement and route/instance changes revoke inspection. Native image decoding
 preserves pixel geometry within the 32-Mi-pixel decoded safety limit.
+
+Known Secure credential fingerprints are retained across native mode changes and aliases. Regular requests refuse matching host keys, X-API-Key and Bearer headers before transport; the Rust C ABI hashes the denial history, which never stores credential bytes or grants access.

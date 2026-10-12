@@ -4,6 +4,7 @@ import QRCode from "qrcode";
 import type { ApiTarget } from "../api/client";
 import {
   createPairingSession,
+  pairingExpiresAt,
   mobilePairingUrl,
   type MobilePairingPayload,
   type PairingSession,
@@ -17,6 +18,11 @@ const props = defineProps<{
 const emit = defineEmits<{ sessionCreated: [] }>();
 
 const address = ref(props.suggestedBaseUrl);
+const mode = ref<"secure" | "regular">("secure");
+watch(mode, () => {
+  session.value = null;
+  qrDataUrl.value = "";
+});
 const session = ref<PairingSession | null>(null);
 const qrDataUrl = ref("");
 const error = ref("");
@@ -33,13 +39,13 @@ watch(
 );
 
 const secondsLeft = computed(() =>
-  session.value?.invite.expiresAt
-    ? Math.max(0, session.value.invite.expiresAt - now.value)
+  session.value
+    ? Math.max(0, pairingExpiresAt(session.value) - now.value)
     : null,
 );
 const expired = computed(() => secondsLeft.value === 0);
 const buttonLabel = computed(() => {
-  if (busy.value) return "Creating secure code…";
+  if (busy.value) return "Creating pairing code…";
   if (session.value) return "New pairing code";
   return "Create pairing code";
 });
@@ -79,27 +85,53 @@ async function startPairing(): Promise<void> {
   error.value = "";
   qrDataUrl.value = "";
   try {
-    const next = await createPairingSession(props.target);
+    const next = await createPairingSession(
+      props.target,
+      mode.value === "regular"
+        ? {
+            mode: "regular",
+            direct_url: reachableBaseUrl(
+              address.value || props.suggestedBaseUrl,
+              props.hostLabel ?? null,
+            ),
+          }
+        : undefined,
+    );
     const baseUrl = reachableBaseUrl(
       address.value || props.suggestedBaseUrl,
       next.hostname,
     );
     address.value = baseUrl;
-    const payload: MobilePairingPayload = {
-      type: "mold.mobile-pairing",
-      version: 2,
-      base_url: baseUrl,
-      namespace: next.namespace,
-      host_key: next.host_key,
-      host_noise_key: next.host_noise_key,
-      host_binding_signature: next.host_binding_signature,
-      websocket_url: next.websocket_url,
-      invite_seed: next.invite_seed,
-      invite: next.invite,
-      instance_id: next.instance_id,
-      name: props.hostLabel || next.hostname || new URL(baseUrl).hostname,
-      ...(next.endpoints?.length ? { endpoints: next.endpoints } : {}),
-    };
+    const payload: MobilePairingPayload =
+      next.mode === "regular"
+        ? {
+            type: "mold.mobile-pairing",
+            version: 2,
+            mode: "regular",
+            base_url: next.base_url,
+            instance_id: next.instance_id,
+            name:
+              props.hostLabel ||
+              next.hostname ||
+              new URL(next.base_url).hostname,
+            pairing_token: next.pairing_token,
+            expires_at: next.expires_at,
+          }
+        : {
+            type: "mold.mobile-pairing",
+            version: 2,
+            base_url: baseUrl,
+            namespace: next.namespace,
+            host_key: next.host_key,
+            host_noise_key: next.host_noise_key,
+            host_binding_signature: next.host_binding_signature,
+            websocket_url: next.websocket_url,
+            invite_seed: next.invite_seed,
+            invite: next.invite,
+            instance_id: next.instance_id,
+            name: props.hostLabel || next.hostname || new URL(baseUrl).hostname,
+            ...(next.endpoints?.length ? { endpoints: next.endpoints } : {}),
+          };
     qrDataUrl.value = await QRCode.toDataURL(mobilePairingUrl(payload), {
       width: 320,
       margin: 2,
@@ -140,6 +172,17 @@ onBeforeUnmount(() => {
           </p>
         </div>
       </div>
+      <label class="pairing-address">
+        <span>Connection</span>
+        <select v-model="mode" :disabled="busy">
+          <option value="secure">Secure · end-to-end encrypted</option>
+          <option value="regular">Regular · direct HTTP or HTTPS</option>
+        </select>
+      </label>
+      <p v-if="mode === 'regular'">
+        The host must allow Regular connections. HTTP relies on your network or
+        VPN for encryption; the proxy requires Secure.
+      </p>
       <label class="pairing-address">
         <span>Address your mobile device can reach</span>
         <input

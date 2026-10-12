@@ -52,6 +52,7 @@ interface ConsumerRegistration extends MobileDownloadConsumer {
 }
 
 interface HostIdentitySnapshot {
+  connectionMode: "secure" | "regular";
   hostId: string;
   baseUrl: string;
   instanceId: string | null;
@@ -92,6 +93,7 @@ const STREAM_OPEN_TIMEOUT_MS = 10_000;
 function hostIdentity(host: MobileHost): HostIdentitySnapshot {
   return {
     hostId: host.id,
+    connectionMode: host.connectionMode ?? "secure",
     baseUrl: host.baseUrl,
     instanceId: host.instanceId ?? null,
   };
@@ -99,14 +101,18 @@ function hostIdentity(host: MobileHost): HostIdentitySnapshot {
 
 function hostSignature(host: MobileHost): string {
   const identity = hostIdentity(host);
-  return `${identity.baseUrl}|${host.apiKey}|${identity.instanceId ?? ""}`;
+  return `${identity.baseUrl}|${host.apiKey}|${identity.instanceId ?? ""}|${identity.connectionMode}`;
 }
 
 function identitiesAreCompatible(
   current: HostIdentitySnapshot,
   replacement: HostIdentitySnapshot,
 ): boolean {
-  if (current.hostId !== replacement.hostId || current.baseUrl !== replacement.baseUrl)
+  if (
+    current.hostId !== replacement.hostId ||
+    current.baseUrl !== replacement.baseUrl ||
+    current.connectionMode !== replacement.connectionMode
+  )
     return false;
   // A newly discovered instance id enriches the same endpoint, but two known,
   // different ids mean the URL now reaches a different Mold installation.

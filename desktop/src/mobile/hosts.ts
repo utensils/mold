@@ -31,6 +31,7 @@ export interface MobileHost {
   name: string;
   baseUrl: string;
   apiKey: string;
+  connectionMode?: "secure" | "regular" | undefined;
   hostname: string | undefined;
   version: string | undefined;
   /** Stable server installation id, kept separate from the URL-based row id. */
@@ -173,7 +174,11 @@ export function mobileHostHealthLabel(host: MobileHost): string {
 }
 
 export function mobileHostTarget(host: MobileHost): ApiTarget {
-  return { baseUrl: host.baseUrl, apiKey: host.apiKey || null };
+  return {
+    baseUrl: host.baseUrl,
+    apiKey: host.apiKey || null,
+    ...(host.connectionMode ? { connectionMode: host.connectionMode } : {}),
+  };
 }
 
 /** Exact authority fence for prepared work and placement previews. */
@@ -183,6 +188,7 @@ export function mobileHostMatchesRoute(route: HostRoute, host: MobileHost | unde
   return (
     target.baseUrl === route.target.baseUrl &&
     target.apiKey === route.target.apiKey &&
+    (target.connectionMode ?? "secure") === (route.target.connectionMode ?? "secure") &&
     (route.instanceId === undefined || (host.instanceId ?? null) === route.instanceId)
   );
 }

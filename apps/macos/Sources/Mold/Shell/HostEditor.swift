@@ -15,6 +15,7 @@ struct HostEditor: View {
     @Environment(HostStore.self) var hosts
     @Environment(\.dismiss) private var dismiss
 
+    @State var mode: HostConnectionMode
     @State var address: String
     @State private var name: String
     @State private var apiKey: String
@@ -26,17 +27,19 @@ struct HostEditor: View {
     @State private var attempt = 0
 
     init(host: MoldHost? = nil, save: @escaping (String, URL, String?) -> Void) {
+        _mode = State(initialValue: host?.connectionMode ?? .secure)
         self.existing = host
         self.save = save
         _address = State(initialValue: host.map { HostAddress.displayString(for: $0.baseURL) } ?? "")
         _name = State(initialValue: host?.name ?? "")
-        _apiKey = State(initialValue: host?.apiKey ?? "")
+        _apiKey = State(initialValue: host?.connectionMode == .regular ? (host?.apiKey ?? "") : "")
     }
 
     /// A machine we found but have never spoken to. It is an ADD -- `existing`
     /// stays nil so the sheet says so -- with the address and name already
     /// filled.
     init(adding name: String, at address: String, save: @escaping (String, URL, String?) -> Void) {
+        _mode = State(initialValue: .secure)
         self.existing = nil
         self.save = save
         _address = State(initialValue: address)
@@ -45,9 +48,16 @@ struct HostEditor: View {
     }
 
     var body: some View {
-        if existing?.baseURL.host == "127.0.0.1" || existing?.baseURL.host == "[::1]" {
-            localBody
-        } else { SecureHostEditor(existing: existing) }
+        VStack(spacing: 0) {
+            Picker("Connection", selection: $mode) {
+                ForEach(HostConnectionMode.allCases, id: \.self) { Text($0.title).tag($0) }
+            }.pickerStyle(.segmented).padding([.horizontal, .top], 20)
+            Text(mode.explanation).font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true).padding(20)
+            if mode == .regular || existing?.id == MoldEngine.localHostID { localBody }
+            else { SecureHostEditor(existing: existing) }
+        }
+        .onChange(of: mode) { _, _ in apiKey = ""; probe = .unknown }
     }
 
     private var localBody: some View {
@@ -103,7 +113,7 @@ struct HostEditor: View {
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button(existing == nil ? "Add" : "Save") { commit() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(resolved == nil || duplicate != nil)
+                    .disabled(resolved == nil || duplicate != nil || (mode == .regular && existing?.secure != nil && (apiKey.isEmpty || apiKey == existing?.apiKey)))
             }
             .padding(12)
         }
@@ -124,17 +134,17 @@ struct HostEditor: View {
     /// Changing any of these means the last answer is about a different
     /// machine, so `.task(id:)` cancels the old check and starts a new one.
     private var probeKey: String {
-        "\(attempt)\u{1}\(resolved?.absoluteString ?? "")\u{1}\(apiKey)"
+        "\(mode.rawValue)\u{1}\(attempt)\u{1}\(resolved?.absoluteString ?? "")\u{1}\(apiKey)"
     }
 
     private func runProbe() async {
-        guard let resolved else { probe = .unknown; return }
+        guard let resolved, existing?.secure == nil || apiKey != existing?.apiKey else { probe = .unknown; return }
         // Typing an address goes through a dozen invalid prefixes on the way
         // to a real one. Waiting for a pause means one request, not twelve.
         try? await Task.sleep(for: .milliseconds(500))
         guard !Task.isCancelled else { return }
         probe = .checking
-        let outcome = await hosts.probe(url: resolved, apiKey: apiKey.isEmpty ? nil : apiKey)
+        let outcome = await hosts.probe(url: resolved, apiKey: apiKey.isEmpty ? nil : apiKey, mode: mode)
         guard !Task.isCancelled else { return }
         probe = outcome
         // The machine's own hostname beats whatever we guessed from the
@@ -148,8 +158,17 @@ struct HostEditor: View {
 
     private func commit() {
         guard let resolved, duplicate == nil else { return }
-        save(name.trimmingCharacters(in: .whitespacesAndNewlines), resolved,
-             apiKey.isEmpty ? nil : apiKey)
+        if mode == .regular {
+            guard DirectHostAddress.isValid(resolved, allowingPathPrefix: true), existing?.secure == nil || (!apiKey.isEmpty && apiKey != existing?.apiKey) else { return }
+            if var host = existing {
+                host.name = name; host.baseURL = resolved; host.apiKey = apiKey.isEmpty ? nil : apiKey
+                host.connectionMode = .regular; host.secure = nil
+                host.connectionEndpoints = nil; host.connectionOriginalURL = nil
+                hosts.update(host)
+            } else { hosts.add(name: name, url: resolved, apiKey: apiKey.isEmpty ? nil : apiKey, connectionMode: .regular) }
+        } else {
+            save(name.trimmingCharacters(in: .whitespacesAndNewlines), resolved, apiKey.isEmpty ? nil : apiKey)
+        }
         dismiss()
     }
 }

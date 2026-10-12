@@ -35,8 +35,8 @@ enum EngineLaunchRefusal: Error, Equatable {
 enum EngineLaunchPlan {
     /// Resolves a launch, or refuses.
     ///
-    /// The key follows `SecretStore.localEngineAPIKey`'s precedence, which is
-    /// `secrets.rs:103-119`'s. A failure to PERSIST a freshly minted key is a
+    /// The key follows `SecretStore.localEngineAPIKey`'s per-home authority.
+    /// A failure to persist or validate the shared key is a
     /// refusal and not a shrug: starting anyway would either mint a new key
     /// every launch (so "This Mac" holds one the engine does not accept) or
     /// start keyless, which is the hole itself.
@@ -55,11 +55,11 @@ enum EngineLaunchPlan {
         if let reason = home.unavailableReason { throw EngineLaunchRefusal.home(reason) }
         let key: String
         do {
-            key = try secrets.localEngineAPIKey(environment: environment)
+            key = try secrets.localEngineAPIKey(home: home.url, environment: environment)
         } catch {
             throw EngineLaunchRefusal.key(
                 "Mold couldn't save this Mac's engine key to "
-                    + "\(secrets.directory.path(percentEncoded: false)). The engine needs one: "
+                    + "\(home.url.appending(path: "secure/operator.key").path(percentEncoded: false)). The engine needs one: "
                     + "without it, any web page that finds its port can read and delete your library."
             )
         }

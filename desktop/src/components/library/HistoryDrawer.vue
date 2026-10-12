@@ -257,7 +257,17 @@ watch(
 const historyHosts = computed<HistoryHostTarget[]>(() =>
   hosts.all.flatMap((h) =>
     h.status === "ready" && h.baseUrl
-      ? [{ hostId: h.id, label: h.label, target: { baseUrl: h.baseUrl, apiKey: h.apiKey } }]
+      ? [
+          {
+            hostId: h.id,
+            label: h.label,
+            target: {
+              baseUrl: h.baseUrl,
+              apiKey: h.apiKey,
+              ...(h.connectionMode ? { connectionMode: h.connectionMode } : {}),
+            },
+          },
+        ]
       : [],
   ),
 );
