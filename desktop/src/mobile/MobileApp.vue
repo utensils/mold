@@ -4814,9 +4814,14 @@ async function hydrateApiKeys(): Promise<void> {
     }),
   );
   await Promise.all(
-    pendingMobileHostAliasDrops.map(({ loser }) =>
-      invoke("keychain_delete_api_key", { hostId: loser }).catch(() => undefined),
-    ),
+    pendingMobileHostAliasDrops
+      .filter(
+        ({ survivor }) =>
+          hosts.value.find((host) => host.id === survivor)?.connectionMode !== undefined,
+      )
+      .map(({ loser }) =>
+        invoke("keychain_delete_api_key", { hostId: loser }).catch(() => undefined),
+      ),
   );
   pendingMobileHostAliasDrops = [];
 }

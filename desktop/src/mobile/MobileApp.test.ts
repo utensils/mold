@@ -11011,6 +11011,21 @@ describe("MobileApp host and catalog coordination", () => {
     );
   });
 
+  it("preserves legacy duplicate alias Keychain keys before explicit mode migration", async () => {
+    const saved = JSON.parse(localStorage.getItem("mold.mobile.hosts.v1") ?? "[]");
+    saved[0].instanceId = "legacy-instance";
+    saved.push({
+      ...saved[0],
+      id: "legacy-alias",
+      baseUrl: "http://192.168.1.40:7680",
+      lastConnectedAtMs: -1,
+    });
+    localStorage.setItem("mold.mobile.hosts.v1", JSON.stringify(saved));
+    wrapper = mountMobileApp();
+    await flushPromises();
+    expect(invoke).not.toHaveBeenCalledWith("keychain_delete_api_key", { hostId: "legacy-alias" });
+  });
+
   it("names the signed GitHub APK channel in Android settings", async () => {
     isNativeAndroidRuntime.mockReturnValue(true);
     wrapper = mountMobileApp();
