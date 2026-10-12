@@ -21,6 +21,9 @@ final class LandscapePlaybackTests: XCTestCase {
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
         app.buttons["Add a Machine"].firstMatch.tap()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        // The loopback fixture uses direct HTTP; pairing now defaults to Secure.
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Connection'")).firstMatch.tap()
+        app.buttons["Regular"].firstMatch.tap()
         let address = app.textFields["machine-address"]
         XCTAssertTrue(address.waitForExistence(timeout: 5))
         address.tap(); address.typeText("127.0.0.1:\(port)")
