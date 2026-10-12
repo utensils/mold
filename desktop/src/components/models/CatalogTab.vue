@@ -410,7 +410,11 @@ function catalogTarget(): { target: ApiTarget | undefined; forward: boolean; lab
   const fallback = readyHosts.value[0];
   if (fallback?.baseUrl) {
     return {
-      target: { baseUrl: fallback.baseUrl, apiKey: fallback.apiKey },
+      target: {
+        baseUrl: fallback.baseUrl,
+        apiKey: fallback.apiKey,
+        ...(fallback.connectionMode ? { connectionMode: fallback.connectionMode } : {}),
+      },
       forward: fallback.kind === "remote",
       label: fallback.label,
     };

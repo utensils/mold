@@ -45,6 +45,11 @@ export function generationJobTarget(job: {
   if (hosted && origin) {
     const primary = studioPrimary();
     if (!expected || primary?.instanceId !== expected) return undefined;
+    if (
+      (job.target?.connectionMode ?? "secure") !==
+      (primary.connectionMode ?? "secure")
+    )
+      return undefined;
     return {
       baseUrl: primary.url,
       connectionMode: primary.connectionMode ?? "secure",
@@ -53,6 +58,12 @@ export function generationJobTarget(job: {
   }
   const host = !origin ? getHost(job.hostId!) : null;
   if (host && expected && host.instanceId !== expected) return undefined;
+  if (
+    host &&
+    (job.target?.connectionMode ?? "secure") !==
+      (host.connectionMode ?? "secure")
+  )
+    return undefined;
   if (hosted && !host) return undefined;
   if (job.target) {
     if (

@@ -196,7 +196,11 @@ export const useHostModelsStore = defineStore("hostModels", {
           };
           try {
             const entries = await apiJsonTo<ModelEntry[]>(
-              { baseUrl: h.baseUrl!, apiKey: h.apiKey },
+              {
+                baseUrl: h.baseUrl!,
+                apiKey: h.apiKey,
+                ...(h.connectionMode ? { connectionMode: h.connectionMode } : {}),
+              },
               "/api/models",
             );
             if (!isCurrent()) return;

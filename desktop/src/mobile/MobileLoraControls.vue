@@ -84,7 +84,13 @@ function remove(index: number): void {
 }
 
 watch(
-  () => [props.form.model, props.target.baseUrl, props.target.apiKey] as const,
+  () =>
+    [
+      props.form.model,
+      props.target.baseUrl,
+      props.target.apiKey,
+      props.target.connectionMode,
+    ] as const,
   () => {
     loadToken += 1;
     loading.value = false;

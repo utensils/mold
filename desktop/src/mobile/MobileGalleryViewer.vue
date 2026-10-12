@@ -804,7 +804,11 @@ interface MediaLoad {
 function currentMediaLoad(): MediaLoad {
   return {
     path: galleryMediaPath(props.item.filename, "host"),
-    target: { baseUrl: props.target.baseUrl, apiKey: props.target.apiKey },
+    target: {
+      baseUrl: props.target.baseUrl,
+      apiKey: props.target.apiKey,
+      ...(props.target.connectionMode ? { connectionMode: props.target.connectionMode } : {}),
+    },
     cacheKey: props.cacheKey,
     // Audio is small and not Range-streamed, so the legacy blob path is a
     // fine fallback for it; only video must refuse to buffer whole files.
@@ -1132,9 +1136,10 @@ function nativeExportArguments(filename: string, request: Record<string, unknown
   return {
     url: `${props.target.baseUrl}${videoExportPath(props.item.filename)}`,
     apiKey: props.target.apiKey,
+    ...(props.target.connectionMode ? { connectionMode: props.target.connectionMode } : {}),
     request,
     filename,
-    reuseKey: `${props.target.baseUrl}\n${props.item.filename}\n${JSON.stringify(request)}`,
+    reuseKey: `${props.target.baseUrl}\n${props.item.filename}\n${props.target.connectionMode ?? "secure"}\n${JSON.stringify(request)}`,
   };
 }
 
@@ -1261,22 +1266,35 @@ async function saveGenerationAsset(asset: GenerationAsset): Promise<void> {
 const exportIsTurntable = ref(false);
 
 let exportProbe = 0;
-watch([() => props.item.filename, () => props.target.baseUrl, () => props.target.apiKey], () => {
-  exportProbe++;
-  exportOpen.value = false;
-  exportCapabilities.value = DEFAULT_VIDEO_EXPORT_CAPABILITIES;
-});
+watch(
+  [
+    () => props.item.filename,
+    () => props.target.baseUrl,
+    () => props.target.apiKey,
+    () => props.target.connectionMode,
+  ],
+  () => {
+    exportProbe++;
+    exportOpen.value = false;
+    exportCapabilities.value = DEFAULT_VIDEO_EXPORT_CAPABILITIES;
+  },
+);
 
 async function openVideoExport(): Promise<void> {
   const probe = ++exportProbe;
   const filename = props.item.filename;
-  const target = { baseUrl: props.target.baseUrl, apiKey: props.target.apiKey };
+  const target = {
+    baseUrl: props.target.baseUrl,
+    apiKey: props.target.apiKey,
+    ...(props.target.connectionMode ? { connectionMode: props.target.connectionMode } : {}),
+  };
   const ownsSheet = () =>
     probe === exportProbe &&
     exportOpen.value &&
     props.item.filename === filename &&
     props.target.baseUrl === target.baseUrl &&
-    props.target.apiKey === target.apiKey;
+    props.target.apiKey === target.apiKey &&
+    (props.target.connectionMode ?? "secure") === (target.connectionMode ?? "secure");
   exportCapabilities.value = DEFAULT_VIDEO_EXPORT_CAPABILITIES;
   exportOpen.value = true;
   exportError.value = "";

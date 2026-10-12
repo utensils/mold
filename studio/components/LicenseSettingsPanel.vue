@@ -49,7 +49,13 @@ function requirementsFor(
 async function load() {
   const epoch = ++loadEpoch;
   const target = props.target
-    ? { baseUrl: props.target.baseUrl, apiKey: props.target.apiKey }
+    ? {
+        baseUrl: props.target.baseUrl,
+        apiKey: props.target.apiKey,
+        ...(props.target.connectionMode
+          ? { connectionMode: props.target.connectionMode }
+          : {}),
+      }
     : null;
   if (!target) {
     rows.value = [];

@@ -244,3 +244,29 @@ describe("mobile remote hosts", () => {
     expect(mobileHostHealthLabel(host)).toBe("access denied");
   });
 });
+
+it("fences frozen Secure work when a mobile host switches to Regular", () => {
+  const host: MobileHost = {
+    id: "mode-host",
+    name: "Host",
+    baseUrl: "http://192.168.1.4:7680",
+    apiKey: "",
+    hostname: undefined,
+    version: undefined,
+    online: true,
+    connectionMode: "regular",
+  };
+  const route: HostRoute = {
+    hostId: host.id,
+    label: host.name,
+    kind: "remote",
+    target: { baseUrl: host.baseUrl, apiKey: null },
+  };
+  expect(mobileHostMatchesRoute(route, host)).toBe(false);
+  expect(
+    mobileHostMatchesRoute(
+      { ...route, target: { ...route.target, connectionMode: "regular" } },
+      host,
+    ),
+  ).toBe(true);
+});

@@ -19,7 +19,9 @@ function paired({
     instanceId: claim.instance_id,
     connectionMode: payload.mode ?? "secure",
     ...(payload.mode === "regular" && claim.api_key
-      ? { apiKey: claim.api_key }
+      ? {
+          apiKey: claim.api_key,
+        }
       : {}),
   });
   emit("added", host);
@@ -31,7 +33,14 @@ function regular(connection: RegularConnection) {
     name: connection.name,
     instanceId: connection.instanceId,
     connectionMode: "regular",
-    ...(connection.apiKey ? { apiKey: connection.apiKey } : {}),
+    ...(connection.apiKey
+      ? {
+          apiKey: connection.apiKey,
+          ...(connection.connectionMode
+            ? { connectionMode: connection.connectionMode }
+            : {}),
+        }
+      : {}),
   });
   emit("added", host);
   emit("close");

@@ -1,6 +1,5 @@
 import { rememberConnectionMode, type ConnectionMode } from "@studio/api/connectionMode";
 import { registerRegularConnection, forgetRegularConnection } from "@studio/api/directConnection";
-import { secureHostForOrigin } from "@studio/api/secureStore";
 import { connectionHealth, forgetConnectionRoutes } from "@studio/api/connectionRoutes";
 import { hostRoutingLoad } from "@studio/lib/hostRouting";
 import { defineStore } from "pinia";
@@ -336,7 +335,6 @@ export const useHostsStore = defineStore("hosts", {
         kind: "local",
         baseUrl: conn.info.baseUrl,
         apiKey: conn.info.apiKey,
-        connectionMode: "regular",
         status:
           conn.status === "ready" ? "ready" : conn.status === "starting" ? "connecting" : "error",
         stale: t?.stale ?? false,
@@ -439,10 +437,8 @@ export const useHostsStore = defineStore("hosts", {
             const key = await ipc.secretGet(`remote-api-key.${id}`);
             const live = this.extras.find((h) => h.id === id)!;
             live.apiKey = key;
-            const profile = await secureHostForOrigin(saved.url, false);
-            // Older Regular entries store an ordinary key separately. Secure
-            // pairings keep theirs only in the encrypted profile store.
-            const mode = saved.connectionMode ?? (key && !profile ? "regular" : "secure");
+            // Missing mode preserves Secure for legacy entries.
+            const mode = saved.connectionMode ?? "secure";
             live.connectionMode = mode;
             if (mode === "regular") await registerRegularConnection(saved.url, key);
             else {

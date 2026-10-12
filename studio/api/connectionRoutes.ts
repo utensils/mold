@@ -1,5 +1,4 @@
 import {
-  connectionModeFor,
   CONNECTION_MODE_HEADER,
   directOrigin,
   type ConnectionMode,
@@ -212,9 +211,7 @@ export async function connectionHealth<
       throw new DOMException("Host connection changed.", "AbortError");
   };
   assertCurrent();
-  if (
-    (options.connectionMode ?? connectionModeFor(options.baseUrl)) === "regular"
-  ) {
+  if ((options.connectionMode ?? "secure") === "regular") {
     directOrigin(
       new URL(
         options.baseUrl || "/",

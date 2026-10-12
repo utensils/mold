@@ -135,3 +135,67 @@ test('navigation from the docs app forces a fresh security document', async () =
   )
   assert.match(theme, /router.onBeforeRouteChange = beforeRouteChange/)
 })
+
+test('Regular handoff names its mode and rejects mixed or proxy invitations', () => {
+  const source = readFileSync(
+    new URL('../public/pair/pair.js', import.meta.url),
+    'utf8'
+  )
+  function inspect(extra = {}) {
+    const elements = new Map(
+      [
+        'machine',
+        'address',
+        'mode',
+        'pair-ready',
+        'pair-missing',
+        'open-studio',
+      ].map((id) => [
+        id,
+        {
+          hidden: false,
+          textContent: '',
+          addEventListener(name, fn) {
+            this[name] = fn
+          },
+        },
+      ])
+    )
+    const fields = new URLSearchParams({
+      version: '2',
+      mode: 'regular',
+      base_url: 'http://192.168.1.4:7680',
+      instance_id: 'host',
+      name: 'Studio',
+      pairing_token: 'a'.repeat(64),
+      expires_at: String(Math.floor(Date.now() / 1000) + 120),
+      ...extra,
+    })
+    const win = {
+      location: { hash: `#${fields}`, pathname: '/mold/pair/', assign() {} },
+      history: { replaceState() {} },
+      addEventListener() {},
+    }
+    win.top = win.self = win
+    runInNewContext(source, {
+      window: win,
+      document: { getElementById: (id) => elements.get(id) },
+      URL,
+      URLSearchParams,
+    })
+    return elements
+  }
+  const valid = inspect()
+  assert.equal(valid.get('pair-ready').hidden, false)
+  assert.match(valid.get('mode').textContent, /Regular.*direct/)
+  assert.equal(
+    inspect({ invite_seed: 'b'.repeat(64) }).get('pair-ready').hidden,
+    true
+  )
+  assert.equal(
+    inspect({ base_url: 'https://mold-link.urandom.io' }).get('pair-ready')
+      .hidden,
+    true
+  )
+  assert.equal(inspect({ expires_at: '1' }).get('pair-ready').hidden, true)
+})

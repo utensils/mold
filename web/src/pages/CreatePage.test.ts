@@ -5107,6 +5107,7 @@ describe("CreatePage host routing", () => {
     // Unknown is never "missing": the route the generation earned is kept.
     expect(expandTargetOfCall(0)).toEqual({
       baseUrl: "http://127.0.0.1:3000",
+      connectionMode: "regular",
     });
   });
 

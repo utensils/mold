@@ -630,6 +630,9 @@ export const useGenerationStore = defineStore("generation", {
             targets.set(job.clientId, {
               baseUrl: recoveredHost.baseUrl,
               apiKey: recoveredHost.apiKey,
+              ...(recoveredHost.connectionMode
+                ? { connectionMode: recoveredHost.connectionMode }
+                : {}),
             });
           }
         }
@@ -1424,7 +1427,11 @@ export const useGenerationStore = defineStore("generation", {
             job.hostId = fallback.id;
             job.hostLabel = fallback.label;
             job.remote = fallback.kind === "remote";
-            targets.set(job.clientId, { baseUrl: fallback.baseUrl, apiKey: fallback.apiKey });
+            targets.set(job.clientId, {
+              baseUrl: fallback.baseUrl,
+              apiKey: fallback.apiKey,
+              ...(fallback.connectionMode ? { connectionMode: fallback.connectionMode } : {}),
+            });
           } else {
             // And snapshot the PRIMARY target at submit time: queued batch
             // siblings open their streams later, and cancels resolve later

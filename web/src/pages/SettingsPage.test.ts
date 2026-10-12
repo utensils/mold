@@ -775,6 +775,7 @@ describe("SettingsPage", () => {
     expect(target).toEqual({
       baseUrl: originHost().url,
       apiKey: originHost().apiKey ?? null,
+      connectionMode: "regular",
     });
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
     const before = fetchMock.mock.calls.filter(([input]) =>

@@ -41,6 +41,13 @@ const hosted = standaloneStudio();
 if (hosted) configureSecureOrigin(() => studioPrimary()?.url ?? null);
 const invitation = ref(takeInitialPairingLink());
 const mode = ref<ConnectionMode>("secure");
+if (invitation.value) {
+  try {
+    mode.value = parseMobilePairingPayload(invitation.value).mode ?? "secure";
+  } catch {
+    /* Invalid links are reported by the connection form. */
+  }
+}
 const address = ref("");
 const directKey = ref("");
 const remembered = ref(listStoredHosts());
@@ -132,7 +139,9 @@ async function connect() {
           instanceId: claim.instance_id,
           connectionMode: payload.mode ?? "secure",
           ...(payload.mode === "regular" && claim.api_key
-            ? { apiKey: claim.api_key }
+            ? {
+                apiKey: claim.api_key,
+              }
             : {}),
         });
         commitSelection(host);
@@ -150,7 +159,14 @@ async function connect() {
           name: connection.name,
           instanceId: connection.instanceId,
           connectionMode: "regular",
-          ...(connection.apiKey ? { apiKey: connection.apiKey } : {}),
+          ...(connection.apiKey
+            ? {
+                apiKey: connection.apiKey,
+                ...(connection.connectionMode
+                  ? { connectionMode: connection.connectionMode }
+                  : {}),
+              }
+            : {}),
         });
         commitSelection(host);
         selected.value = host.id;

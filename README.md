@@ -502,3 +502,10 @@ Library thumbnails on native macOS, native iOS, Tauri desktop and web use contin
 Deleting the media currently open in a Library viewer keeps the viewer open on the next surviving item in the current filtered order, or the previous item at the end. It returns to the grid only when no items remain. A surviving machine copy stays visible after a partial deletion failure. Native macOS successful moves to Trash finish without a persistent completion notice; progress, interrupted work and failures remain visible.
 
 LTX convolutional video VAE decoding uses aspect-coupled spatial Auto tiles independently of temporal memory estimates. Long clips still require memory for temporal context and output accumulation; see [spatial tiling](https://utensils.io/mold/models/ltx2#spatial-tiling-spatial-tile).
+
+All clients offer **Secure** (the default) and explicit **Regular** direct HTTP/HTTPS
+connections over LAN, Tailscale, or WAN. Enable `MOLD_ALLOW_DIRECT_API=true`
+on a headless host for Regular access; the managed proxy always requires
+end-to-end encrypted Secure transport. Connections never downgrade automatically.
+Regular HTTP relies on the network or VPN for encryption. Pairing again updates
+the same physical machine and its saved connection mode.

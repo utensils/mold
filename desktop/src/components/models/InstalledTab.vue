@@ -167,7 +167,11 @@ function targetFor(m: LibraryModelEntry) {
 
 function targetForHost(target: HostView | null) {
   return target && !target.primary && target.baseUrl
-    ? { baseUrl: target.baseUrl, apiKey: target.apiKey }
+    ? {
+        baseUrl: target.baseUrl,
+        apiKey: target.apiKey,
+        ...(target.connectionMode ? { connectionMode: target.connectionMode } : {}),
+      }
     : undefined;
 }
 

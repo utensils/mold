@@ -238,7 +238,8 @@ async function refreshQueue(epoch = loadEpoch): Promise<void> {
       epoch === loadEpoch &&
       generation === queueRequestGeneration &&
       requestTarget.baseUrl === target.value.baseUrl &&
-      requestTarget.apiKey === target.value.apiKey
+      requestTarget.apiKey === target.value.apiKey &&
+      (requestTarget.connectionMode ?? "secure") === (target.value.connectionMode ?? "secure")
     ) {
       const head = mergeQueueEntries(
         listing.entries,
@@ -259,7 +260,8 @@ async function refreshQueue(epoch = loadEpoch): Promise<void> {
       epoch === loadEpoch &&
       generation === queueRequestGeneration &&
       requestTarget.baseUrl === target.value.baseUrl &&
-      requestTarget.apiKey === target.value.apiKey
+      requestTarget.apiKey === target.value.apiKey &&
+      (requestTarget.connectionMode ?? "secure") === (target.value.connectionMode ?? "secure")
     ) {
       // A plan is tentative server authority, so it cannot survive a failed
       // refresh. Older hosts still fall back to status queue depth.
@@ -304,7 +306,8 @@ async function loadMoreQueue(): Promise<void> {
       epoch !== loadEpoch ||
       queueNextCursor.value !== cursor ||
       requestTarget.baseUrl !== target.value.baseUrl ||
-      requestTarget.apiKey !== target.value.apiKey
+      requestTarget.apiKey !== target.value.apiKey ||
+      (requestTarget.connectionMode ?? "secure") !== (target.value.connectionMode ?? "secure")
     )
       return;
     const seenTail = new Set(queueTail.value.map(({ id }) => id));
@@ -328,7 +331,8 @@ async function loadMoreQueue(): Promise<void> {
       generation === queueLoadMoreGeneration &&
       epoch === loadEpoch &&
       requestTarget.baseUrl === target.value.baseUrl &&
-      requestTarget.apiKey === target.value.apiKey
+      requestTarget.apiKey === target.value.apiKey &&
+      (requestTarget.connectionMode ?? "secure") === (target.value.connectionMode ?? "secure")
     )
       loadMoreQueueError.value = describeTransportError(error, props.host.name);
   } finally {
@@ -336,7 +340,8 @@ async function loadMoreQueue(): Promise<void> {
       generation === queueLoadMoreGeneration &&
       epoch === loadEpoch &&
       requestTarget.baseUrl === target.value.baseUrl &&
-      requestTarget.apiKey === target.value.apiKey
+      requestTarget.apiKey === target.value.apiKey &&
+      (requestTarget.connectionMode ?? "secure") === (target.value.connectionMode ?? "secure")
     )
       loadingMoreQueue.value = false;
   }
@@ -356,8 +361,10 @@ async function refreshDeviceState(epoch = loadEpoch): Promise<void> {
     props.host.id === requestHost.id &&
     props.host.baseUrl === requestHost.baseUrl &&
     props.host.apiKey === requestHost.apiKey &&
+    (props.host.connectionMode ?? "secure") === (requestHost.connectionMode ?? "secure") &&
     requestTarget.baseUrl === target.value.baseUrl &&
-    requestTarget.apiKey === target.value.apiKey;
+    requestTarget.apiKey === target.value.apiKey &&
+    (requestTarget.connectionMode ?? "secure") === (target.value.connectionMode ?? "secure");
   if (!isCurrent()) return;
 
   let capabilityPayload: ServerCapabilities | null = null;
@@ -463,7 +470,8 @@ async function refreshStatusSafely(epoch: number): Promise<void> {
       epoch !== loadEpoch ||
       queueControlBusy.value ||
       requestTarget.baseUrl !== target.value.baseUrl ||
-      requestTarget.apiKey !== target.value.apiKey
+      requestTarget.apiKey !== target.value.apiKey ||
+      (requestTarget.connectionMode ?? "secure") !== (target.value.connectionMode ?? "secure")
     )
       return;
     const expectedInstanceId = props.host.instanceId?.trim() || status.value?.instance_id?.trim();
@@ -689,7 +697,8 @@ async function refreshModelInventory(epoch = loadEpoch): Promise<void> {
     if (
       epoch !== loadEpoch ||
       requestTarget.baseUrl !== target.value.baseUrl ||
-      requestTarget.apiKey !== target.value.apiKey
+      requestTarget.apiKey !== target.value.apiKey ||
+      (requestTarget.connectionMode ?? "secure") !== (target.value.connectionMode ?? "secure")
     )
       return;
     installed.value = models.filter((model) => model.downloaded);
@@ -697,7 +706,8 @@ async function refreshModelInventory(epoch = loadEpoch): Promise<void> {
     if (
       epoch === loadEpoch &&
       requestTarget.baseUrl === target.value.baseUrl &&
-      requestTarget.apiKey === target.value.apiKey
+      requestTarget.apiKey === target.value.apiKey &&
+      (requestTarget.connectionMode ?? "secure") === (target.value.connectionMode ?? "secure")
     ) {
       modelsError.value = describeTransportError(caught, props.host.name);
     }
@@ -705,7 +715,8 @@ async function refreshModelInventory(epoch = loadEpoch): Promise<void> {
     if (
       epoch === loadEpoch &&
       requestTarget.baseUrl === target.value.baseUrl &&
-      requestTarget.apiKey === target.value.apiKey
+      requestTarget.apiKey === target.value.apiKey &&
+      (requestTarget.connectionMode ?? "secure") === (target.value.connectionMode ?? "secure")
     ) {
       modelsLoading.value = false;
     }
@@ -729,7 +740,8 @@ async function refreshHostDetail(): Promise<void> {
   if (
     epoch !== loadEpoch ||
     requestTarget.baseUrl !== target.value.baseUrl ||
-    requestTarget.apiKey !== target.value.apiKey
+    requestTarget.apiKey !== target.value.apiKey ||
+    (requestTarget.connectionMode ?? "secure") !== (target.value.connectionMode ?? "secure")
   )
     return;
 
@@ -816,7 +828,8 @@ async function cancelQueuedJob(entry: QueueEntry): Promise<void> {
     if (
       epoch === loadEpoch &&
       requestTarget.baseUrl === target.value.baseUrl &&
-      requestTarget.apiKey === target.value.apiKey
+      requestTarget.apiKey === target.value.apiKey &&
+      (requestTarget.connectionMode ?? "secure") === (target.value.connectionMode ?? "secure")
     ) {
       await requestQueueRefresh(epoch);
     }
@@ -824,7 +837,8 @@ async function cancelQueuedJob(entry: QueueEntry): Promise<void> {
     if (
       epoch === loadEpoch &&
       requestTarget.baseUrl === target.value.baseUrl &&
-      requestTarget.apiKey === target.value.apiKey
+      requestTarget.apiKey === target.value.apiKey &&
+      (requestTarget.connectionMode ?? "secure") === (target.value.connectionMode ?? "secure")
     ) {
       error.value = describeTransportError(caught, props.host.name);
     }
@@ -968,7 +982,8 @@ async function onQueueRowAction(entry: QueueEntry, action: string) {
     if (
       epoch === loadEpoch &&
       requestTarget.baseUrl === target.value.baseUrl &&
-      requestTarget.apiKey === target.value.apiKey
+      requestTarget.apiKey === target.value.apiKey &&
+      (requestTarget.connectionMode ?? "secure") === (target.value.connectionMode ?? "secure")
     ) {
       await requestQueueRefresh(epoch);
     }

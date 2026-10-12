@@ -9,7 +9,7 @@
     <meta name="referrer" content="no-referrer" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="robots" content="noindex" />
-    <title>Pair securely · Mold</title>
+    <title>Pair a device · Mold</title>
     <link rel="icon" href="/mold/logo-transparent.png" />
     <link rel="stylesheet" href="/mold/pair/pair.css" />
     <script src="/mold/pair/pair.js" defer></script>
@@ -23,10 +23,11 @@
           Connect to <strong id="machine"></strong> at
           <code id="address"></code>.
         </p>
+        <p id="mode"></p>
         <p>
           Continue only if you created this pairing code on a machine you trust.
         </p>
-        <button id="open-studio" type="button">Open secure Studio</button>
+        <button id="open-studio" type="button">Open Studio</button>
       </section>
       <section id="pair-missing">
         <p>Open a fresh pairing link or scan the code on your machine.</p>
@@ -44,8 +45,7 @@
         loads no analytics or third-party code.
       </p>
       <noscript
-        >JavaScript is required to open the encrypted pairing
-        invitation.</noscript
+        >JavaScript is required to open the pairing invitation.</noscript
       >
     </main>
   </body>

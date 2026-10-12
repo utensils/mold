@@ -10997,13 +10997,13 @@ describe("MobileApp host and catalog coordination", () => {
     expect(wrapper.find("[data-test='mobile-discovered-pair']").exists()).toBe(true);
   });
 
-  it("erases retired remote Keychain bearers without forgetting saved machines", async () => {
+  it("preserves legacy remote Keychain bearers without using them for an implicit downgrade", async () => {
     const saved = JSON.parse(localStorage.getItem("mold.mobile.hosts.v1") ?? "[]");
     saved[0].apiKey = "retired-test-bearer";
     localStorage.setItem("mold.mobile.hosts.v1", JSON.stringify(saved));
     wrapper = mountMobileApp();
     await flushPromises();
-    expect(invoke).toHaveBeenCalledWith("keychain_delete_api_key", { hostId: "studio-id" });
+    expect(invoke).not.toHaveBeenCalledWith("keychain_delete_api_key", { hostId: "studio-id" });
     expect(invoke).not.toHaveBeenCalledWith("keychain_get_api_key", { hostId: "studio-id" });
     expect(localStorage.getItem("mold.mobile.hosts.v1")).not.toContain("retired-test-bearer");
     expect(JSON.parse(localStorage.getItem("mold.mobile.hosts.v1") ?? "[]")).toEqual(
@@ -11257,6 +11257,69 @@ describe("MobileApp host and catalog coordination", () => {
         baseUrl: "http://pair.local:7680",
       }),
     );
+  });
+
+  it("stores a Regular QR key in Keychain and restores the same mode after restart", async () => {
+    const regular = {
+      type: "mold.mobile-pairing",
+      version: 2,
+      mode: "regular",
+      base_url: "http://pair.local:7680",
+      instance_id: "pair-id",
+      name: "Regular host",
+      pairing_token: "a".repeat(64),
+      expires_at: Math.floor(Date.now() / 1000) + 120,
+    };
+    scanPairingQr.mockResolvedValue({ content: JSON.stringify(regular) });
+    claimPairingSession.mockResolvedValue({
+      mode: "regular",
+      api_key: "mold_pair_regular-test",
+      instance_id: "pair-id",
+      hostname: "pair-host",
+      base_url: regular.base_url,
+    });
+    apiJsonTo.mockImplementation((requestTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status")
+        return Promise.resolve(
+          (requestTarget as { baseUrl: string }).baseUrl === regular.base_url
+            ? { ...status, instance_id: "pair-id", hostname: "pair-host" }
+            : status,
+        );
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      return durableApiFallback(path, init, requestTarget);
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+    await wrapper.get("[data-test='mobile-add-machine-open']").trigger("click");
+    await wrapper.get("[data-test='mobile-connection-mode']").setValue("regular");
+    await wrapper.get("[data-test='mobile-scan-pairing']").trigger("click");
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith("keychain_set_api_key", {
+      hostId: "pair-local-7680",
+      apiKey: "mold_pair_regular-test",
+    });
+    expect(localStorage.getItem("mold.mobile.hosts.v1")).not.toContain("mold_pair_regular-test");
+    expect(JSON.parse(localStorage.getItem("mold.mobile.hosts.v1") ?? "[]")).toContainEqual(
+      expect.objectContaining({ instanceId: "pair-id", connectionMode: "regular" }),
+    );
+    wrapper.unmount();
+    invoke.mockImplementation((command: string) =>
+      command === "keychain_get_api_key"
+        ? Promise.resolve("mold_pair_regular-test")
+        : Promise.resolve(null),
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+    expect(
+      apiJsonTo.mock.calls.some(
+        ([request, path]) =>
+          path === "/api/status" &&
+          request.connectionMode === "regular" &&
+          request.apiKey === "mold_pair_regular-test",
+      ),
+    ).toBe(true);
   });
 
   it("stores and connects a QR-paired Android host after the native camera closes", async () => {

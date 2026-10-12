@@ -1588,7 +1588,12 @@ function resultHostTarget(clientId: number): ApiTarget | null {
   const frozen = generation.targetForJob(clientId);
   if (frozen) return frozen;
   const info = conn.info;
-  return info?.baseUrl ? { baseUrl: info.baseUrl, apiKey: info.apiKey ?? null } : null;
+  return info?.baseUrl
+    ? {
+        baseUrl: info.baseUrl,
+        apiKey: info.apiKey ?? null,
+      }
+    : null;
 }
 
 /**
@@ -2901,6 +2906,7 @@ async function pullExpansionModel() {
         label: route.label,
         baseUrl: route.target.baseUrl,
         apiKey: route.target.apiKey,
+        ...(route.target.connectionMode ? { connectionMode: route.target.connectionMode } : {}),
       }
     : null;
   try {

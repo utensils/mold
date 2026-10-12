@@ -1251,7 +1251,14 @@ async function durableCompletionResult(
     id: job.hostId ?? ORIGIN_HOST_ID,
     name: job.hostLabel ?? job.hostId ?? "this server",
     url: target?.baseUrl ?? "",
-    ...(target?.apiKey ? { apiKey: target.apiKey } : {}),
+    ...(target?.apiKey
+      ? {
+          apiKey: target.apiKey,
+          ...(target.connectionMode
+            ? { connectionMode: target.connectionMode }
+            : {}),
+        }
+      : {}),
     connectionMode: target?.connectionMode,
   };
   const artifact = await fetchGalleryBlob(host, filename);

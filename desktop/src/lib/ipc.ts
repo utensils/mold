@@ -209,6 +209,15 @@ const browserFallbackSettings = (): AppSettings => ({
 });
 
 export const ipc = {
+  regularAccessGet(): Promise<{ enabled: boolean; endpoints: string[] }> {
+    if (!inTauri()) return Promise.resolve({ enabled: false, endpoints: [] });
+    return invoke("regular_access_get");
+  },
+  regularAccessSet(enabled: boolean): Promise<{ enabled: boolean; endpoints: string[] }> {
+    if (!inTauri())
+      return Promise.reject(new Error("Configure Regular access on the machine running Mold."));
+    return invoke("regular_access_set", { enabled });
+  },
   getConnection(): Promise<ConnectionInfo> {
     if (!inTauri()) return Promise.resolve(browserFallbackConnection());
     return invoke<ConnectionInfo>("get_connection");

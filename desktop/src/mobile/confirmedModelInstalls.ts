@@ -21,6 +21,7 @@ export function confirmModelInstall(
   const sameRoute =
     prior?.route.target.baseUrl === route.target.baseUrl &&
     prior.route.target.apiKey === route.target.apiKey &&
+    (prior.route.target.connectionMode ?? "secure") === (route.target.connectionMode ?? "secure") &&
     prior.route.instanceId === route.instanceId;
   const livePrior = sameRoute
     ? Object.fromEntries(

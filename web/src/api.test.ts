@@ -262,16 +262,17 @@ describe("auto-chained long video", () => {
   it("creates the ephemeral job, cancels it, and names its event stream", async () => {
     const fetchMock = installFetch({ job_id: "job/1" });
     await createChainJob(chainRequest(), undefined, "create-op");
-    expect(fetchMock).toHaveBeenLastCalledWith("/api/chain-jobs", {
+    const [path, request] = fetchMock.mock.calls.at(-1)!;
+    expect(path).toBe("/api/chain-jobs");
+    expect(request).toMatchObject({
       method: "POST",
-      headers: new Headers({
-        "content-type": "application/json",
-        "x-mold-connection-mode": "regular",
-        "x-mold-operation-id": "create-op",
-      }),
       redirect: "error",
       body: JSON.stringify(chainRequest()),
     });
+    const headers = new Headers(request.headers);
+    expect(headers.get("content-type")).toBe("application/json");
+    expect(headers.get("x-mold-connection-mode")).toBe("regular");
+    expect(headers.get("x-mold-operation-id")).toBe("create-op");
 
     fetchMock.mockResolvedValueOnce(
       new Response(

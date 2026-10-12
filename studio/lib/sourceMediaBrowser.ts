@@ -22,6 +22,7 @@ export function sourceOwnerIdentity(owner: SourceMediaOwner): string {
     owner.target.apiKey,
     owner.instanceId,
     owner.revision,
+    owner.target.connectionMode ?? "secure",
   ]);
 }
 export function sourceMemberKind(member: RetainedSourceMediaMember): string {
@@ -107,6 +108,7 @@ export function sourceHostIdentity(owner: SourceMediaOwner): string {
     owner.target.baseUrl,
     owner.target.apiKey ?? null,
     owner.instanceId ?? null,
+    owner.target.connectionMode ?? "secure",
   ]);
 }
 export function filterSourceMedia(

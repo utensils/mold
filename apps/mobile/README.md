@@ -712,7 +712,7 @@ WebView local storage contains non-secret mobile state:
   timestamp baseline migrated into individual viewing history
 - `mold.mobile.libraryUnread.v1` — compact client-local individual viewing and Library visit history
 
-Remote pairing uses protocol 3 with a version 2 HTTPS invitation. The host
+Secure pairing uses protocol 3 with a version 2 HTTPS invitation. The host
 creates a short-lived, single-use signed invitation through authenticated
 `POST /api/pairing/sessions`. A pinned Noise session claims it using
 `POST /api/pairing/secure/claim` inside the encrypted channel. Each client gets
@@ -734,7 +734,7 @@ native transport's bounded process memory. Host cards persist public names and
 addresses only. Never place credentials in localStorage, URLs, logs or generated
 project files. Settings lists devices with `GET /api/pairing/clients` and revokes
 one with `DELETE /api/pairing/clients/:id`; a paired client cannot manage other
-grants. Remote access requires authenticated secure pairing. Secure transport hooks
+grants. Secure is the default. Regular mode explicitly connects directly over LAN, Tailscale or WAN using HTTP/HTTPS, with API keys kept in the native Keychain. Regular invitations carry a single-use token and are redeemed at `/api/pairing/regular/claim`; they never contain Secure pins or grants. The host must enable `MOLD_ALLOW_DIRECT_API=true`. The cloud proxy always requires Secure, and failures never downgrade a connection. Saved machines retain their mode across restart; re-pairing replaces the same physical host record and retires old route authority. Secure transport hooks
 are installed before the interface mounts; saved credentials warm in the background
 so an operating-system storage prompt cannot prevent the app from appearing. Each
 secure operation still awaits and validates its own pairing profile.
