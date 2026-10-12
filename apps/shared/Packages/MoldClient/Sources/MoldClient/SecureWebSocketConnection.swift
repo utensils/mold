@@ -11,6 +11,7 @@ actor SecureWebSocketConnection: SecureRecordConnection {
     let usesTLS: Bool
     let socket: URLSessionWebSocketTask
     let urlSession: URLSession
+    let admissionDelegate: SecureSocketAdmissionDelegate
     let objectSession: URLSession
     let host: SecureHost
     let identity: SecureIdentity
@@ -63,7 +64,8 @@ actor SecureWebSocketConnection: SecureRecordConnection {
         configuration.urlCache = nil
         configuration.httpCookieStorage = nil
         configuration.urlCredentialStorage = nil
-        urlSession = URLSession(configuration: configuration, delegate: RelayNoRedirect(), delegateQueue: nil)
+        admissionDelegate = SecureSocketAdmissionDelegate()
+        urlSession = URLSession(configuration: configuration, delegate: admissionDelegate, delegateQueue: nil)
         let objectConfiguration = URLSessionConfiguration.ephemeral
         objectConfiguration.timeoutIntervalForRequest = 20
         objectConfiguration.timeoutIntervalForResource = 20
@@ -107,7 +109,16 @@ actor SecureWebSocketConnection: SecureRecordConnection {
                 }
             } onCancel: { Task { await connection.close() } }
             return connection
-        } catch { await connection.close(); throw error }
+        } catch {
+            let busyUpgrade = await connection.busyUpgrade()
+            await connection.close()
+            if !Task.isCancelled, busyUpgrade { throw SecureAdmissionRetry.ProxyBusy() }
+            throw error
+        }
+    }
+
+    private func busyUpgrade() -> Bool {
+        SecureAdmissionRetry.isBusyUpgrade(response: socket.response, opened: admissionDelegate.opened)
     }
 
     func establish() async throws {
