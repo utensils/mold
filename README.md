@@ -240,6 +240,8 @@ the system picker. See the [native permission audit](apps/ios/docs/PERMISSIONS.m
 
 The native iOS Library keeps its offline notice compact and offers scrollable details with every full machine name, preserving room for saved prints at large text sizes. Decorative Library badges stay within their tiles; the full machine names remain in accessibility labels and Info.
 
+Native iOS Queue recovery actions use separate full-width rows; compact input thumbnails keep the model and prompt readable.
+
 The native iOS Models screen offers visible per-model Unload and Unload All Models controls for the selected server; unloading keeps downloaded files.
 
 Native iOS development: `nix develop -c companion-dev` watches Swift sources,

@@ -316,3 +316,5 @@ Switching the Mac host app preserves the phone’s pairing when both apps use th
 same `MOLD_HOME`, but cloud enablement is app-specific. See
 [Switching host apps](/deployment/relay#switching-host-apps) for Tauri’s supported
 public connector settings.
+
+Held Queue cards and Job Details give **Download and Retry** and **Move to…** separate full-width rows, with wrapping labels at large text sizes. Input captions stay alongside the job description, keeping reference thumbnails compact.

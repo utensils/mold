@@ -79,6 +79,11 @@ struct QueueEntryRow: View {
                             Text(prompt).font(.callout).foregroundStyle(.primary)
                                 .lineLimit(size.isAccessibilitySize ? nil : 2)
                         }
+                        if queue.sourceThumbnail(for: entry, on: host.id) != nil {
+                            Text(inputCaption).font(.caption).foregroundStyle(.secondaryText)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityIdentifier("queue-input-caption-" + entry.id)
+                        }
                         HStack {
                             Text(entry.state == .held ? String(localized: "Held") : entry.state == .running ? String(localized: "Rendering") : caption)
                             Spacer()
@@ -181,7 +186,6 @@ struct QueueEntryRow: View {
                     .clipShape(.rect(cornerRadius: 7))
                     .accessibilityLabel(queue.inputPreviews(for: entry, on: host.id).first(where: { $0.bytes != nil })?.input.label ?? "Source")
                     .accessibilityIdentifier("queue-source-" + entry.id)
-                Text(inputCaption).font(.caption).foregroundStyle(.secondaryText)
             }
         }
     }
@@ -224,7 +228,6 @@ struct QueueHeldActions: View {
     @Environment(AppRouter.self) private var router
     @Environment(QueueStore.self) private var queue
     @Environment(ModelStore.self) private var models
-    @Environment(\.dynamicTypeSize) private var size
     let entry: QueueEntry
     let hold: QueueHold
     let host: MoldHost
@@ -246,33 +249,34 @@ struct QueueHeldActions: View {
                     ProgressView(value: fraction).accessibilityLabel("Model download")
                 } else if recovery.isBusy { ProgressView().accessibilityLabel(recovery.message) }
             }
-            if RowAxis.for(size) == .vertical { buttons(stacked: true) } else {
-                ViewThatFits(in: .horizontal) { buttons(stacked: false); buttons(stacked: true) }
-            }
+            buttons
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .buttonStyle(.bordered)
         .padding(.top, 4)
     }
 
-    private func buttons(stacked: Bool) -> some View {
-        let layout = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8)) : AnyLayout(HStackLayout(spacing: 8))
-        return layout {
+    private var buttons: some View {
+        VStack(alignment: .leading, spacing: 8) {
             if case .missingModel = hold, queue.canRetry(entry, on: host.id) {
-                Button(recovery?.isBusy == true ? "Downloading…" : "Download and Retry") {
+                Button {
                     guard queue.canRetry(entry, on: host.id), recovery?.isBusy != true else { return }
                     if let model = entry.model { models.pullThenRetry(model, entry: entry, on: host.id, presenter: router.presentationID) }
+                } label: {
+                    Text(recovery?.isBusy == true ? "Downloading…" : "Download and Retry")
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .disabled(recovery?.isBusy == true)
-                .frame(maxWidth: stacked ? .infinity : nil)
-                .fixedSize(horizontal: !stacked, vertical: false)
                 .accessibilityIdentifier((detail ? "queue-detail-download-" : "queue-download-") + entry.id)
             } else if detail, queue.canRetry(entry, on: host.id) {
-                Button("Retry") { Task { await queue.retry(entry, on: host.id) } }
-                    .frame(maxWidth: stacked ? .infinity : nil)
+                Button { Task { await queue.retry(entry, on: host.id) } } label: {
+                    Text("Retry").fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
             if queue.canTransfer(entry, on: host.id) {
-                MoveToMenu(entry: entry, host: host)
+                MoveToMenu(entry: entry, host: host, fullWidthLabel: true)
             }
         }
     }
@@ -285,6 +289,7 @@ struct MoveToMenu: View {
     @Environment(QueueStore.self) private var queue
     let entry: QueueEntry
     let host: MoldHost
+    var fullWidthLabel = false
 
     var body: some View {
         let destinations = transfers.destinations(from: host.id)
@@ -297,6 +302,8 @@ struct MoveToMenu: View {
                 }
             } label: {
                 Label("Move to…", systemImage: "arrow.right.circle")
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: fullWidthLabel ? .infinity : nil, alignment: .leading)
             }
             .accessibilityIdentifier("queue-move-to-" + entry.id)
             .disabled(transfers.transferring != nil)
