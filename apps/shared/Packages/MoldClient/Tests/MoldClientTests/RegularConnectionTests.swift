@@ -164,6 +164,19 @@ struct RegularConnectionTests {
         #expect(payload?.mode == .regular)
     }
 
+    @Test func regularServerSessionProducesNativePairingCode() throws {
+        // Match the owner-authenticated server response, without synthesizing
+        // Secure-only fields in the native fixture.
+        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appending(path: "Fixtures/regular-pairing-session.json")
+        let session = try MoldJSON.decoder.decode(PairingSession.self, from: Data(contentsOf: fixture))
+        #expect(session.authRequired)
+        let payload = try #require(MobilePairingPayload(session: session, baseURL: URL(string: "http://127.0.0.1:7680")!, name: "GPU"))
+        #expect(payload.mode == .regular)
+        #expect(payload.baseURL == "http://192.168.1.142:7680")
+        #expect(payload.url != nil)
+    }
+
     @Test func regularRequestCannotMoveItsCredentialToAnotherOrigin() async throws {
         let host = MoldHost(name: "GPU", baseURL: URL(string: "https://gpu.example.com")!, apiKey: "regular-key", connectionMode: .regular)
         let backend = HTTPBackend(host: host, session: Self.session())

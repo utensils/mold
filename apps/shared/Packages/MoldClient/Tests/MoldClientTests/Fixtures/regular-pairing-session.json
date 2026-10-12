@@ -1,0 +1,9 @@
+{
+  "mode": "regular",
+  "base_url": "http://192.168.1.142:7680",
+  "pairing_token": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "expires_at": 4000000000,
+  "auth_required": true,
+  "instance_id": "machine",
+  "hostname": "GPU"
+}
