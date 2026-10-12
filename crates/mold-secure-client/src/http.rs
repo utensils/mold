@@ -60,19 +60,24 @@ pub async fn execute_http(
             "regular" => {
                 crate::regular_origin(&origin)?;
                 for value in request.headers().get_all("authorization") {
-                    let value = value.to_str()?;
-                    anyhow::ensure!(
-                        !crate::store::is_known_secure_credential(value)?,
-                        "Secure credentials cannot authorize Regular HTTP"
-                    );
-                    let mut parts = value.split_ascii_whitespace();
-                    let scheme = parts.next().unwrap_or_default();
-                    if scheme.eq_ignore_ascii_case("bearer") {
-                        let candidate = parts.next().unwrap_or_default();
+                    for value in value.to_str()?.split(',').map(str::trim) {
                         anyhow::ensure!(
-                            !crate::store::is_known_secure_credential(candidate)?,
+                            !crate::store::is_known_secure_credential(value)?,
                             "Secure credentials cannot authorize Regular HTTP"
                         );
+                        let mut parts = value.split_ascii_whitespace();
+                        if parts
+                            .next()
+                            .unwrap_or_default()
+                            .eq_ignore_ascii_case("bearer")
+                        {
+                            anyhow::ensure!(
+                                !crate::store::is_known_secure_credential(
+                                    parts.next().unwrap_or_default()
+                                )?,
+                                "Secure credentials cannot authorize Regular HTTP"
+                            );
+                        }
                     }
                 }
                 request.headers_mut().remove("cookie");
@@ -148,9 +153,15 @@ pub async fn execute_http(
 }
 pub trait RequestBuilderExt {
     fn secure_send(self) -> impl std::future::Future<Output = Result<reqwest::Response>> + Send;
+    fn configured_send(self)
+        -> impl std::future::Future<Output = Result<reqwest::Response>> + Send;
 }
 impl RequestBuilderExt for reqwest::RequestBuilder {
     async fn secure_send(self) -> Result<reqwest::Response> {
+        let (client, request) = self.build_split();
+        execute_http(&client, request?).await
+    }
+    async fn configured_send(self) -> Result<reqwest::Response> {
         let (client, request) = self.build_split();
         let mut request = request?;
         if !request.headers().contains_key("x-mold-connection-mode") {
@@ -180,6 +191,24 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("No secure pairing"));
+    }
+    #[test]
+    fn native_requests_do_not_inherit_cli_regular_mode() {
+        let scratch =
+            std::env::temp_dir().join(format!("mold-native-mode-test-{}", uuid::Uuid::new_v4()));
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "http::tests::remote_unpaired_never_dispatches_plaintext",
+                "--exact",
+            ])
+            .env("MOLD_CONNECTION_MODE", "regular")
+            .env("MOLD_HOME", scratch)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "native requests must stay Secure when CLI selection is Regular"
+        );
     }
     #[test]
     fn only_loopback_is_private_engine() {

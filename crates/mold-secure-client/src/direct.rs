@@ -174,6 +174,20 @@ mod regular_authority_tests {
             .unwrap();
         let error = crate::execute_http(&client, request).await.unwrap_err();
         assert!(error.to_string().contains("Secure credentials"));
+        let joined = client
+            .get(format!("{origin}/api/status"))
+            .header("x-mold-connection-mode", "regular")
+            .header(
+                "authorization",
+                format!("Bearer harmless, Bearer {}", secure.api_key),
+            )
+            .build()
+            .unwrap();
+        assert!(crate::execute_http(&client, joined)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Secure credentials"));
         forget_regular_ephemeral(&owner, None);
         crate::forget_ephemeral(&owner, None);
     }
