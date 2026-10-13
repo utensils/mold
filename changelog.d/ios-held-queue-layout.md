@@ -1,1 +1,0 @@
-- Fixed native iOS Queue recovery buttons wrapping into narrow pills, and kept input captions from squeezing job descriptions.

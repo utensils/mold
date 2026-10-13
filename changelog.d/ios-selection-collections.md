@@ -1,1 +1,0 @@
-- Fixed native iOS Library collection actions disappearing when a selected machine’s organization capabilities were unknown; added direct Add to Collection access for selected prints, including New Collection.

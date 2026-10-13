@@ -11,6 +11,31 @@ Pull requests do not edit the `[Unreleased]` section directly: each adds a
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-10-12
+
+- Fixed the native iOS queue's Cancel Batch button hit target and accessibility frame to cover its full 44-point height.
+- Native iOS keeps Batch available for videos, including selecting one output after batching pictures, and offers Cancel Batch on grouped queue rows.
+- Web, desktop and Tauri mobile job details offer confirmed cancellation of the selected job's entire durable batch, including batches submitted by another client.
+- Native iOS and macOS whole-batch cancellation follows siblings that start rendering or become held while an earlier cancellation is in flight.
+- **Native video playback.** Restore clip playback in the native iOS and macOS apps by preparing a short startup buffer, disabling AVPlayer's predictive buffering for authenticated media streams, and delivering bounded chunks instead of processing individual response bytes on the main actor.
+- **Fuzzy model search across UI surfaces.** Web, Tauri desktop/mobile and native macOS/iOS generation pickers, installed models and curated discovery accept abbreviations, small typos and separator/accent differences. Search stays available for short lists, native iOS Installed gains search, and supported add-on look/upscaler/adapter selectors also support it.
+- **Bounded fuzzy discovery fallback.** Updated servers broaden successful zero-result Hugging Face/Civitai queries into at most 100 candidates, then fuzzy-filter and paginate the matching set while preserving filters and provider errors.
+- Fixed native iOS Queue recovery buttons wrapping into narrow pills, and kept input captions from squeezing job descriptions.
+- Fixed native iOS Library collection actions disappearing when a selected machine’s organization capabilities were unknown; added direct Add to Collection access for selected prints, including New Collection.
+- **Native pairing from the browser.** The pairing webpage can open Mold Studio Companion with the same private invitation while retaining browser Studio pairing. Long pasted native pairing links keep the Pair action reachable.
+- **Connection documentation.** Explain Secure and Regular connections together,
+  persistent per-app REST keys, and the difference between Nix operator
+  credentials and runtime pairing grants.
+- **Regular CLI pairing.** Host-created Regular invitations can be claimed with
+  `mold pair` without an unknown-field error; native pairing response metadata
+  and authentication remain unchanged.
+- **Regular pairing QR.** Include the authentication requirement in Regular
+  invitation responses so native apps can display the pairing QR successfully.
+- **Secure relay discovery.** Emit Lambda's required HTTP streaming metadata
+  before discovery responses so API Gateway can return public connection details.
+- **Keep mobile release builds locked.** Synchronize shared Secure transport
+  package versions alongside the mobile shell during automated release updates.
+
 ## [0.35.0] - 2026-10-12
 
 - **Recover concurrent Secure startup.** Reclaim stale cloud admission reservations
@@ -6515,7 +6540,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.35.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.36.0...HEAD
+[0.36.0]: https://github.com/utensils/mold/compare/v0.35.0...v0.36.0
 [0.35.0]: https://github.com/utensils/mold/compare/v0.34.0...v0.35.0
 [0.34.0]: https://github.com/utensils/mold/compare/v0.33.0...v0.34.0
 [0.33.0]: https://github.com/utensils/mold/compare/v0.32.0...v0.33.0
