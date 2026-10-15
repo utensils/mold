@@ -6,11 +6,11 @@ import Testing
 
 @MainActor struct LibraryFilterTests {
     @Test func titlesFollowTheQueryAndCurrentHostNames() {
-        let host = MoldHost(name: "plato", baseURL: URL(string: "http://fixture")!)
+        let host = MoldHost(name: "workstation", baseURL: URL(string: "http://fixture")!)
         var query = LibraryQuery()
         #expect(LibraryMachineFilter.title(for: query, hosts: [host]) == "All Machines")
         query.tokens = [.machine(id: host.id, name: "Old name")]
-        #expect(LibraryMachineFilter.title(for: query, hosts: [host]) == "plato")
+        #expect(LibraryMachineFilter.title(for: query, hosts: [host]) == "workstation")
         #expect(LibraryMachineFilter.title(for: query, hosts: []) == "Old name")
         query.tokens.append(.machine(id: UUID(), name: "hal9000"))
         #expect(LibraryMachineFilter.title(for: query, hosts: [host]) == "2 Machines")
@@ -24,7 +24,7 @@ import Testing
 
     /// The toolbar supplies iconOnly. The filter label must still reserve
     /// visible text, rather than exposing the selection only to VoiceOver.
-    @Test(arguments: ["All Machines", "plato", "All Media", "Photos", "Videos", "3D"])
+    @Test(arguments: ["All Machines", "workstation", "All Media", "Photos", "Videos", "3D"])
     func labelKeepsVisibleTextUnderToolbarStyle(title: String) {
         let label = NSHostingView(rootView: LibraryFilterLabel(title: title, systemImage: "server.rack")
             .labelStyle(.iconOnly))
