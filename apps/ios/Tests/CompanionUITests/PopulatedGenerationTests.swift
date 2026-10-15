@@ -8,6 +8,27 @@ final class PopulatedGenerationTests: XCTestCase {
         acceptCompanionPermissions()
     }
 
+    @MainActor func testSourceFreeQueueKeepsANeutralPlaceholderBesideRealPreviews() async throws {
+        continueAfterFailure = false
+        let machine = try FixtureMachine(queueFixture: true, queueControls: true, sourceFreeQueueFixture: true)
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        defer { app.terminate(); machine.stop() }
+        cleanUpFixture(machine, port: port, app: app)
+        app.launch()
+        addQueueDownloadMachine(app, port: port)
+        XCTAssertTrue(app.navigateToDestination("Queue", shortcut: "3"))
+        let placeholder = app.descendants(matching: .any)["queue-source-placeholder-fixture-video"].firstMatch
+        XCTAssertTrue(placeholder.waitForExistence(timeout: 10))
+        let empty = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == 'No source image'"), object: placeholder)
+        await fulfillment(of: [empty], timeout: 10)
+        XCTAssertGreaterThanOrEqual(placeholder.frame.width, 48)
+        XCTAssertEqual(placeholder.frame.width, placeholder.frame.height, accuracy: 1)
+        XCTAssertTrue(app.images["queue-source-fixture-held"].waitForExistence(timeout: 10))
+        XCTAssertTrue(machine.generationRequests.isEmpty)
+        attach(app)
+    }
+
     @MainActor func testThinAndEnrichedHeldRowsAlwaysOfferCancelAndFailureDetails() async throws {
         continueAfterFailure = false
         let machine = try FixtureMachine(queueFixture: true, queueControls: true, queueFailureFixture: true)

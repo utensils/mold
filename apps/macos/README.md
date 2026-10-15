@@ -53,6 +53,10 @@ What a selection can do is in the **Library menu**, never in a bar that floats
 over the grid: the menu bar is what macOS searches from Help, what the keyboard
 reaches, and what VoiceOver reads.
 
+Successfully restored local input files no longer depend on the original print’s
+archive locator after relaunch or ordinary prompt edits. Missing snapshots and
+unresolved retained references still require recovery or explicit replacement.
+
 The native window keeps a minimum width of 1,080 points so its sidebar,
 canvas and inspector remain usable together. Long machine names truncate in
 sidebar rows with the full name available on hover; oversized tag and collection
@@ -655,6 +659,10 @@ AVPlayer uses an encrypted HEAD/Range resource loader for live and retained vide
 Secure LAN-only hosts can pair and reconnect without a cloud endpoint or cloud account. Their pairing codes pin the host keys and traffic uses the encrypted channel. Explicit Regular HTTP adds no encryption; HTTPS or Tailscale encrypts transport when used.
 
 Cloud peers can negotiate short-lived S3 objects containing only existing Noise ciphertext frames. The client independently pins the storage origin and verifies each complete bounded object before decryption; API keys and plaintext never reach storage. LAN and small records remain inline. Upgrading erases retired proxy bearers while preserving existing direct Regular credentials and their saved machines.
+
+Queue rows reserve a preview square even when a job has no source image. A neutral
+image outline marks that empty slot; loading and unavailable previews have separate
+accessible descriptions. The iOS queue uses the same placeholder.
 
 Library’s native toolbar menus keep the selected machine and media type visible
 beside their icons. **Media Type** shows All Media, Photos, Videos or 3D within

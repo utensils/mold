@@ -1,4 +1,5 @@
 import MoldClient
+import MoldStyle
 import SwiftUI
 
 /// One group: a plain row, or a batch as a parent row whose children open
@@ -193,14 +194,22 @@ struct QueueEntryRow: View {
 
     @ViewBuilder private var inputPreview: some View {
         if let data = queue.sourceThumbnail(for: entry, on: host.id), let image = UIImage(data: data) {
-            VStack(alignment: .leading, spacing: 4) {
-                Image(uiImage: image).resizable().scaledToFill()
-                    .frame(width: thumb, height: thumb)
-                    .clipShape(.rect(cornerRadius: 7))
-                    .accessibilityLabel(queue.inputPreviews(for: entry, on: host.id).first(where: { $0.bytes != nil })?.input.label ?? "Source")
-                    .accessibilityIdentifier("queue-source-" + entry.id)
-            }
+            Image(uiImage: image).resizable().scaledToFill()
+                .frame(width: thumb, height: thumb)
+                .clipShape(.rect(cornerRadius: 7))
+                .accessibilityLabel(queue.inputPreviews(for: entry, on: host.id).first(where: { $0.bytes != nil })?.input.label ?? "Source")
+                .accessibilityIdentifier("queue-source-" + entry.id)
+        } else {
+            MediaPreviewPlaceholder(state: placeholderState)
+                .frame(width: thumb, height: thumb)
+                .accessibilityIdentifier("queue-source-placeholder-" + entry.id)
         }
+    }
+
+    private var placeholderState: MediaPreviewPlaceholder.State {
+        if queue.inputLoadFailed(for: entry, on: host.id) || !hosts.isUp(host) { return .unavailable }
+        if !queue.hasLoadedInputPreviews(for: entry, on: host.id) { return .loading }
+        return queue.inputPreviews(for: entry, on: host.id).isEmpty ? .empty : .noStillPreview
     }
 
     private var inputCaption: String {

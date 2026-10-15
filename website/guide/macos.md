@@ -217,3 +217,8 @@ Also Running offers Cancel for reported long-clip chains when the machine permit
 Library Settings remembers the sync interval between launches; enabling Sync remains specific to the current app session. Changing the interval restarts the pending countdown. Sync reports checking existing copies separately from copying outputs. Updated hosts provide batched retained-input evidence so unchanged verified copies can skip individual transfer probes; older hosts continue checking retained inputs so late repairs are not missed.
 
 Queue rows keep their height while previews and render progress load, preserving the scroll position. Interrupted Library syncs resume from acknowledged output copies and repair remaining retained-input or organization work. The interval accepts one minute to one day.
+
+Queue rows keep a neutral image placeholder when a job has no source image, matching
+the native iOS queue. Successfully restored local input files remain usable after
+prompt edits and relaunch without an obsolete archive warning. Unresolved remote
+references and missing snapshots still require recovery.

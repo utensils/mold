@@ -29,6 +29,7 @@ final class FixtureMachine: @unchecked Sendable {
     private let removePrintOnFavorite: String?
     private let retainedMediaFixture: Bool
     let retainedFrameFixture: Bool
+    private let sourceFreeQueueFixture: Bool
     private let batchQueueFixture: Bool
     private let queueFixture: Bool
     private let unavailableGallery = Mutex(false)
@@ -61,7 +62,7 @@ final class FixtureMachine: @unchecked Sendable {
     private let modelMemoryFixture: Bool
     private var residentModels: Set<String> = []
 
-    init(justifiedFixture: Bool = false, landscapePlaybackFixture: Bool = false, exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, omitOrganizationCapabilities: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, retainedFrameFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil, queueDownloadFixture: Bool = false, requiresDownloadLicense: Bool = false, trashFixture: Bool = false, queueFailureFixture: Bool = false, queueSwipeFixture: Bool = false, queueDestinationFixture: Bool = false, promptExpansionFixture: Bool = false, batchQueueFixture: Bool = false) throws {
+    init(justifiedFixture: Bool = false, landscapePlaybackFixture: Bool = false, exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, omitOrganizationCapabilities: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, retainedFrameFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil, queueDownloadFixture: Bool = false, requiresDownloadLicense: Bool = false, trashFixture: Bool = false, queueFailureFixture: Bool = false, queueSwipeFixture: Bool = false, queueDestinationFixture: Bool = false, promptExpansionFixture: Bool = false, batchQueueFixture: Bool = false, sourceFreeQueueFixture: Bool = false) throws {
         self.landscapePlaybackFixture = landscapePlaybackFixture
         self.exportFixture = exportFixture
         self.unsupportedExportFormats = unsupportedExportFormats
@@ -71,6 +72,7 @@ final class FixtureMachine: @unchecked Sendable {
         self.libraryMutations = libraryMutations
         self.retainedMediaFixture = retainedMediaFixture
         self.retainedFrameFixture = retainedFrameFixture
+        self.sourceFreeQueueFixture = sourceFreeQueueFixture
         self.batchQueueFixture = batchQueueFixture
         self.queueFixture = queueFixture
         self.queueDownloadFixture = queueDownloadFixture
@@ -361,6 +363,7 @@ final class FixtureMachine: @unchecked Sendable {
         if let retainedFrames = retainedFrameResponse(path) { return retainedFrames }
         // A visible coastal illustration makes queue screenshots useful for
         // visual acceptance, rather than a white one-pixel placeholder.
+        if sourceFreeQueueFixture && path.hasSuffix("/fixture-video/inputs") { return Data("[]".utf8) }
         if queueFixture && path.hasSuffix("/inputs") {
             return Data(#"[{"index":0,"label":"Reference image 1","preview":true},{"index":1,"label":"Reference image 2","preview":true},{"index":2,"label":"Reference 3 · audio","preview":false}]"#.utf8)
         }

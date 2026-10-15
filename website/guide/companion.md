@@ -320,3 +320,7 @@ public connector settings.
 Held Queue cards and Job Details give **Download and Retry** and **Move to…** separate full-width rows, with wrapping labels at large text sizes. Input captions stay alongside the job description, keeping reference thumbnails compact.
 
 Batch in **More Options** remains available for pictures and clips. Choose **1** for a single output. Switching kind preserves your count. In Queue, **Cancel Batch** on a collapsed or expanded batch cancels its eligible unfinished jobs; finished prints remain in Library. Older machines that cannot stop running work leave that child rendering.
+
+Queue cards keep a neutral image placeholder when a job has no source image,
+matching the native Mac queue. Loading and unavailable previews have separate
+accessible descriptions.

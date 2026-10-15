@@ -34,7 +34,11 @@ extension ReuseStore {
         fields = fields.filter { revisions[$0, default: 0] == mediaRevisions()[$0, default: 0] }
         var members = authority.members.filter { RetainedSourceMedia.draftField(for: $0).map(fields.contains) == true }
         if !members.contains(where: { RetainedSourceMedia.draftField(for: $0) == .sourceImage }) { members.removeAll { RetainedSourceMedia.draftField(for: $0) == .maskImage } }
-        guard !members.isEmpty else { retireMaterializedFields(inventoryFields); return nil }
+        guard !members.isEmpty else {
+            retireMaterializedFields(inventoryFields)
+            if !inventoryFields.isEmpty { rememberLocalInputsComplete(in: live()) }
+            return nil
+        }
         let fence = currentFence
         attachingSource = true
         defer { if isCurrent(fence) { attachingSource = false } }
@@ -80,6 +84,7 @@ extension ReuseStore {
             if liveDraft.media.generationReferences != original.media.generationReferences { retireMaterializedFields([.references]) }
             retireMaterializedFields(inventoryFields)
             arm(placed)
+            if !inventoryFields.isEmpty { rememberLocalInputsComplete(in: placed) }
             return placed
         } catch {
             if isCurrent(fence) { restorationFailed = true }

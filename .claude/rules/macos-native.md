@@ -219,3 +219,9 @@ Whole-batch cancellation rechecks identity but follows current child lifecycle c
 Library machine and media toolbar menus keep their current query selection visible,
 even under the toolbar’s icon-only label style. Preserve native selection checkmarks,
 multi-token summaries, bounded long host names and full accessible/help labels.
+
+Completed retained-input materialization records local ownership only when the
+authoritative inventory has no hidden roles or unresolved descriptor references.
+A durable independent snapshot then restores without reviving the archive locator;
+missing, stale and descriptor-bearing snapshots stay fail-closed. Queue preview
+slots show the shared neutral placeholder, preserving row dimensions through loading.

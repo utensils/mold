@@ -60,6 +60,10 @@ final class QueueStore {
         inputFailures.contains(thumbnailKey(entry, id))
     }
 
+    func hasLoadedInputPreviews(for entry: QueueEntry, on id: MoldHost.ID) -> Bool {
+        sourceThumbnails[thumbnailKey(entry, id)] != nil
+    }
+
     func loadSourceThumbnail(for entry: QueueEntry, on id: MoldHost.ID, detailed: Bool = false, retry: Bool = false) async {
         let key = thumbnailKey(entry, id)
         let flightKey = PreviewFlight(key: key, detailed: detailed)
@@ -96,7 +100,7 @@ final class QueueStore {
         } catch is CancellationError {
             thumbnailAttempts.remove(key); detailThumbnailAttempts.remove(key)
         } catch {
-            if detailed && canStorePreview(entry, on: id, key: key) { inputFailures.insert(key) }
+            if canStorePreview(entry, on: id, key: key) { inputFailures.insert(key) }
             detailThumbnailAttempts.remove(key)
             // Older hosts and jobs without a source image simply have no preview.
             if let issue = error as? MoldClientError, case .http(status: 404, code: _, message: _) = issue {

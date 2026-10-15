@@ -187,6 +187,8 @@ notarized, self-updating through Sparkle, with mold's own Metal engine built
 in, and it talks to any `mold serve` on your network too. Generate, a merged
 multi-machine Library, Queue, Models and Machines, all in one native window.
 Library’s native machine and media filter menus keep their current selections visible.
+Both native apps keep neutral queue placeholders for jobs without source images;
+Mac restores fully local source attachments without stale archive warnings.
 Queue jobs open into grouped details and live previews; Discover starts with manifest models.
 Generate confirms submissions, offers explicit random or fixed seeds, and lets you
 resize the prompt editor and settings inspector.

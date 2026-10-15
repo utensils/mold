@@ -1,5 +1,6 @@
 import AppKit
 import MoldClient
+import MoldStyle
 import SwiftUI
 
 /// The owning server's retained input, including work submitted by another client.
@@ -17,6 +18,7 @@ struct QueueSourceThumbnail: View {
     @State private var compactCount = 0
     @State private var retry = 0
     @State private var failed = false
+    @State private var loaded = false
 
     private enum Action: Hashable { case viewInputs }
 
@@ -64,13 +66,13 @@ struct QueueSourceThumbnail: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Group {
                         if let image { Image(nsImage: image).resizable().scaledToFit() }
-                        else { Color.clear }
+                        else { MediaPreviewPlaceholder(state: placeholderState) }
                     }
                     .frame(width: size, height: size)
                     .clipShape(.rect(cornerRadius: 6))
-                    .accessibilityLabel(compactLabel)
+                    .accessibilityLabel(image == nil ? placeholderState.label : compactLabel)
                     .accessibilityIdentifier("queue-source-" + entry.id)
-                    Text(compactLabel)
+                    Text(compactCount > 0 ? compactLabel : loaded ? "No image" : "Source")
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     Text("+\(max(0, compactCount - 1)) inputs")
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -78,8 +80,7 @@ struct QueueSourceThumbnail: View {
                         .accessibilityHidden(compactCount <= 1)
                 }
                 .frame(width: max(size, 80), alignment: .leading)
-                .opacity(compactCount == 0 ? 0 : 1)
-                .accessibilityHidden(compactCount == 0)
+                .help(image == nil ? placeholderState.label : compactLabel)
             }
         }
         .rowActionMenu(compactCount > 0 ? [RowAction(kind: Action.viewInputs, title: "View inputs")] : [],
@@ -94,6 +95,7 @@ struct QueueSourceThumbnail: View {
         }
         .task(id: identity) {
             failed = false
+            loaded = false
             image = nil
             previews = []
             compactCount = 0
@@ -112,10 +114,18 @@ struct QueueSourceThumbnail: View {
                     image = result.image
                     compactLabel = result.label
                     compactCount = result.count
+                    loaded = true
                 }
             } catch {
                 if !Task.isCancelled, identity == requestIdentity { failed = true }
             }
         }
     }
+
+    private var placeholderState: MediaPreviewPlaceholder.State {
+        if failed || !hosts.isUp(host) { return .unavailable }
+        if !loaded { return .loading }
+        return compactCount == 0 ? .empty : .noStillPreview
+    }
+
 }

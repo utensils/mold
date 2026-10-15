@@ -1,2 +1,3 @@
-### Fixed
-- Native macOS Library machine and media filters now display their current selections, with consistent native menus, selection checkmarks and accessible labels.
+- **Visible native Mac Library filters.** Machine and media filters now display their current selections, with consistent native menus, selection checkmarks and accessible labels.
+- **Reliable native Mac source restore.** Fully materialized source files remain independent local attachments across prompt edits and relaunch, without a stale archive warning. Unresolved remote references and missing snapshots remain protected.
+- **Balanced native queue previews.** macOS and iOS show a quiet image placeholder for jobs without a source image, with distinct loading and unavailable descriptions and stable thumbnail space.

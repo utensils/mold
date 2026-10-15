@@ -12,10 +12,10 @@ extension LibraryPane {
         // toolbar lives out here for size.
         @Bindable var navigation = navigation
         ToolbarItem {
-            LibraryMachineFilter(query: navigation.query, hosts: hosts.hosts, choose: chooseMachine)
+            LibraryMachineFilter(query: navigation.query, hosts: hosts.hosts, choose: { chooseMachine($0) })
         }
         ToolbarItem {
-            LibraryMediaTypeFilter(query: $navigation.query, didChange: clearSelection)
+            LibraryMediaTypeFilter(query: $navigation.query, didChange: { clearSelection() })
         }
         ToolbarItem {
             Menu {

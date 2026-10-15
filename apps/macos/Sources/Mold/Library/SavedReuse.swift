@@ -14,6 +14,9 @@ nonisolated struct SavedReuse: Codable, Equatable {
     var archive: String?
     var output: String?
     var invalidated = false
+    /// A successful inventory/materialization left no remote input roles.
+    /// Older locators omit this receipt and continue to require verification.
+    var localInputsComplete: Bool?
 
     /// A matching locator alone cannot authorize reordered or changed remote
     /// descriptor slots. Locally held inline media remains explicit input.
