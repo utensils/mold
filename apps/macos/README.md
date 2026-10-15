@@ -56,6 +56,8 @@ reaches, and what VoiceOver reads.
 Successfully restored local input files no longer depend on the original print’s
 archive locator after relaunch or ordinary prompt edits. Missing snapshots and
 unresolved retained references still require recovery or explicit replacement.
+An older source-only draft stuck with the warning can recover its already-local
+picture after reconnecting its unchanged origin, without removing and reattaching it.
 
 The native window keeps a minimum width of 1,080 points so its sidebar,
 canvas and inspector remain usable together. Long machine names truncate in

@@ -225,3 +225,8 @@ authoritative inventory has no hidden roles or unresolved descriptor references.
 A durable independent snapshot then restores without reviving the archive locator;
 missing, stale and descriptor-bearing snapshots stay fail-closed. Queue preview
 slots show the shared neutral placeholder, preserving row dimensions through loading.
+
+Older invalidated source-only snapshots may become independent only after fresh
+origin route/instance and archive/output verification plus a singleton source-image
+inventory. Preserve local bytes; never mint authority, replace attachments, or
+waive hidden inputs and stale/cancelled responses during this migration.

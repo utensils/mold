@@ -68,4 +68,50 @@ import Testing
         #expect(reuse.authority == nil)
     }
 
+
+    @Test(arguments: ["source", "hidden", "changed", "replacement"])
+    func existingInvalidatedSourceSnapshotRecoversWithoutReattachment(scenario: String) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = SavedReuseFile(directory: directory)
+        let host = MoldHost(name: "Origin", baseURL: URL(string: "http://fixture")!)
+        let backend = FakeBackend(host: host)
+        let hosts = HostStore(hosts: [host]) { _ in backend }
+        hosts.instanceIDs[host.id] = "original"
+        let metadata = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(#"{"model":"fixture","source_image_name":"source.png"}"#.utf8))
+        let saved = SavedReuse(origin: host.id, instance: "original", filename: "image.png", model: "fixture", recipe: nil,
+            metadata: metadata, archive: "archive", output: "output", invalidated: true)
+        file.save(saved)
+        let source = RetainedSourceMedia.Member(memberId: "source", role: "source_image", displayName: "source.png", sizeBytes: 3)
+        let hidden = RetainedSourceMedia.Member(memberId: "audio", role: "audio_file", displayName: "audio.wav", sizeBytes: 3)
+        backend.retainedInventories[saved.filename] = .init(availability: .available, members: scenario == "hidden" ? [source, hidden] : [source])
+        backend.retainedTransferOffers[saved.filename] = .init(archiveIdentitySha256: scenario == "changed" ? "changed" : "archive", members: [], outputSha256: "output", outputSizeBytes: 4, metadata: metadata)
+        if scenario == "replacement" {
+            let offer = try #require(backend.retainedTransferOffers[saved.filename])
+            backend.retainedTransferOfferResponder = { _ in
+                hosts.instanceIDs[host.id] = "replacement"
+                return offer
+            }
+        }
+        let controller = GenerateController(hosts: hosts, defaults: ConfigStore(hosts: hosts))
+        controller.modelName = "fixture"
+        controller.draft.media.sourceImage = "AQID"
+        let inputs = DraftInputSnapshot(controller.draft.media, retainedReuseFingerprint: "invalidated")
+        let reuse = ReuseStore(hosts: hosts, savedFile: file)
+        reuse.restoreSaved(into: controller, preserving: inputs, model: "fixture")
+        #expect(reuse.restoring)
+        await reuse.recoverSaved(controller)
+        #expect(controller.draft.media.sourceImage == "AQID")
+        #expect(reuse.authority == nil, "Recovery may only accept existing local bytes")
+        if scenario != "source" {
+            #expect(reuse.restoring)
+            #expect(reuse.referenceRefusal(for: controller.draft) != nil)
+        } else {
+            #expect(!reuse.restoring)
+            #expect(reuse.notice == nil)
+            #expect(reuse.referenceRefusal(for: controller.draft) == nil)
+            #expect(file.load()?.localInputsComplete == true)
+        }
+    }
+
 }

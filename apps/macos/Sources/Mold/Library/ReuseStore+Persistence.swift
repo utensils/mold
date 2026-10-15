@@ -72,6 +72,8 @@ extension ReuseStore {
         guard restoring, let saved = savedRecipe,
               controller.modelName != nil else { return }
         let fence = currentFence
+        if saved.invalidated, await recoverLocalSourceSnapshot(controller, saved: saved, fence: fence) { return }
+        guard isCurrent(fence), !Task.isCancelled, savedRecipe == saved else { return }
         let expectedMedia = controller.draft.media
         initialMediaRevisions = controller.mediaRevisions
         guard !saved.invalidated, saved.version == 1,
