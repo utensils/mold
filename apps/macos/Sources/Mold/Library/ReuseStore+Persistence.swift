@@ -30,6 +30,7 @@ extension ReuseStore {
             }
             return
         }
+        if let inputs, restoreLocalInputsIfComplete(inputs, saved: saved) { return }
         if let inputs {
             if !saved.acceptsSnapshot(inputs, model: model, recipe: controller.recipeID) {
                 saved.invalidated = true
@@ -71,6 +72,8 @@ extension ReuseStore {
         guard restoring, let saved = savedRecipe,
               controller.modelName != nil else { return }
         let fence = currentFence
+        if saved.invalidated, await recoverLocalSourceSnapshot(controller, saved: saved, fence: fence) { return }
+        guard isCurrent(fence), !Task.isCancelled, savedRecipe == saved else { return }
         let expectedMedia = controller.draft.media
         initialMediaRevisions = controller.mediaRevisions
         guard !saved.invalidated, saved.version == 1,
@@ -103,7 +106,9 @@ extension ReuseStore {
             if let placed = await placePicture(in: draft, outgoing: outgoing, live: { controller.draft }, mediaRevisions: { controller.mediaRevisions }) {
                 controller.draft = placed
             }
-            guard isCurrent(fence), savedRecipe == saved,
+            var completed = saved
+            completed.localInputsComplete = true
+            guard isCurrent(fence), savedRecipe == saved || savedRecipe == completed,
                   hosts.instanceID(of: saved.origin) == instance else { return }
             if authority?.members.contains(where: { $0.role == "source_image" || $0.role == "stage_source:0" }) == true,
                controller.draft.media.sourceImage == nil { return }
@@ -123,7 +128,7 @@ extension ReuseStore {
     /// a media edit immediately followed by Quit cannot bind old hidden roles
     /// or reordered descriptor slots to the new local draft.
     func persistenceFingerprint(for draft: RenderDraft, model: String?, recipe: String?) -> String? {
-        guard let saved = savedRecipe else { return nil }
+        guard let saved = savedRecipe, saved.localInputsComplete != true else { return nil }
         let original = restored ?? savedInputBaseline ?? RenderDraft(reusing: saved.metadata)
         guard !saved.invalidated, saved.model == model, saved.recipe == recipe,
               RetainedReferenceGuard.canReuseDraft(draft, original: original) else {
@@ -137,7 +142,7 @@ extension ReuseStore {
         if let selectionModel, selectionModel != model || selectionRecipe != recipe {
             clear()
         }
-        guard var saved = savedRecipe else { return }
+        guard var saved = savedRecipe, saved.localInputsComplete != true else { return }
         let original = restored ?? savedInputBaseline ?? RenderDraft(reusing: saved.metadata)
         let stillMatches = restored == nil && restoring
             ? draft.media == original.media

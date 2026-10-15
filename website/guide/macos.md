@@ -126,7 +126,10 @@ This Mac and `/api/status` aligned with About Mold Studio on Nightly; ordinary
 Rust builds use the workspace package version.
 
 In Library, **Media Type** filters the current shelf to All Media, Photos,
-Videos or 3D while keeping search and machine filters. Multi-select with
+Videos or 3D while keeping search and machine filters. The machine and media
+menus show the current selection beside their icons, with native menu checkmarks.
+Multiple search-token selections show a machine count or “Multiple Media Types”;
+long machine names keep their full name in the tooltip. Multi-select with
 Command-click or Shift-click without recentering tiles already in view.
 Arrow-key navigation still reveals offscreen selections.
 
@@ -214,3 +217,8 @@ Also Running offers Cancel for reported long-clip chains when the machine permit
 Library Settings remembers the sync interval between launches; enabling Sync remains specific to the current app session. Changing the interval restarts the pending countdown. Sync reports checking existing copies separately from copying outputs. Updated hosts provide batched retained-input evidence so unchanged verified copies can skip individual transfer probes; older hosts continue checking retained inputs so late repairs are not missed.
 
 Queue rows keep their height while previews and render progress load, preserving the scroll position. Interrupted Library syncs resume from acknowledged output copies and repair remaining retained-input or organization work. The interval accepts one minute to one day.
+
+Queue rows keep a neutral image placeholder when a job has no source image, matching
+the native iOS queue. Successfully restored local input files remain usable after
+prompt edits and relaunch without an obsolete archive warning. Unresolved remote
+references and missing snapshots still require recovery.

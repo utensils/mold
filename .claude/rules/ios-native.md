@@ -317,3 +317,7 @@ A recognized gateway busy envelope during admission, or an HTTP 429/503 upgrade 
 Held Queue recovery actions use separate full-width rows with wrapping labels, including the Move to menu. Do not put native Menus in a horizontal ViewThatFits candidate: their ideal width can accept compressed labels. Keep input captions in the metadata column rather than widening the thumbnail column; cover card and Job Details geometry at normal, larger and accessibility text sizes.
 
 **Batch parity.** OptionsControls always exposes Batch for every recipe kind; submission and displayed count must agree. Group cancellation reserves all eligible children and rechecks machine instance, batch/client identity and current state before each lifecycle-specific request, with one final refresh. Held uses only-held cancellation; older hosts without running cancellation leave running children alone.
+
+Native Queue rows keep a fixed preview slot with MoldStyle’s neutral image
+placeholder when no source image exists. Distinguish loading, empty, nonimage and
+unavailable states accessibly; do not present an ordinary source-free job as an error.

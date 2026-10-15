@@ -261,6 +261,10 @@ Open Machines → Models → Installed. Server Memory lists loaded models with v
 
 ### Queue details and prompt history
 
+Queue cards reserve a preview square for every job. Without a source image, a
+neutral image outline keeps the row balanced; loading and unavailable previews
+have separate accessible descriptions. The Mac queue uses the same placeholder.
+
 Queue cards show the source image, a short curated model title, prompt excerpt,
 and current state. Tap a card for the full model ID, generation settings,
 source, progress, and job controls. Pause applies only to waiting jobs; Resume

@@ -53,6 +53,12 @@ What a selection can do is in the **Library menu**, never in a bar that floats
 over the grid: the menu bar is what macOS searches from Help, what the keyboard
 reaches, and what VoiceOver reads.
 
+Successfully restored local input files no longer depend on the original print’s
+archive locator after relaunch or ordinary prompt edits. Missing snapshots and
+unresolved retained references still require recovery or explicit replacement.
+An older source-only draft stuck with the warning can recover its already-local
+picture after reconnecting its unchanged origin, without removing and reattaching it.
+
 The native window keeps a minimum width of 1,080 points so its sidebar,
 canvas and inspector remain usable together. Long machine names truncate in
 sidebar rows with the full name available on hover; oversized tag and collection
@@ -656,8 +662,15 @@ Secure LAN-only hosts can pair and reconnect without a cloud endpoint or cloud a
 
 Cloud peers can negotiate short-lived S3 objects containing only existing Noise ciphertext frames. The client independently pins the storage origin and verifies each complete bounded object before decryption; API keys and plaintext never reach storage. LAN and small records remain inline. Upgrading erases retired proxy bearers while preserving existing direct Regular credentials and their saved machines.
 
-Library’s **Media Type** toolbar picker shows All Media, Photos, Videos or 3D
-within the current shelf, preserving search and machine filters. Clicking or
+Queue rows reserve a preview square even when a job has no source image. A neutral
+image outline marks that empty slot; loading and unavailable previews have separate
+accessible descriptions. The iOS queue uses the same placeholder.
+
+Library’s native toolbar menus keep the selected machine and media type visible
+beside their icons. **Media Type** shows All Media, Photos, Videos or 3D within
+the current shelf, preserving search and machine filters. Multiple search-token
+selections read “Multiple Media Types” or a machine count; long machine names
+truncate with their full name in the tooltip. Menu checkmarks follow the query. Clicking or
 Command/Shift-clicking a visible tile keeps the viewport in place;
 keyboard navigation still reveals tiles outside the viewport.
 

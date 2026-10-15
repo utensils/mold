@@ -215,3 +215,18 @@ preserves pixel geometry within the 32-Mi-pixel decoded safety limit.
 Known Secure credential fingerprints are retained across native mode changes and aliases. Regular requests refuse matching host keys, X-API-Key and Bearer headers before transport; the Rust C ABI hashes the denial history, which never stores credential bytes or grants access.
 
 Whole-batch cancellation rechecks identity but follows current child lifecycle changes while earlier cancellations await. Queued-to-running/held transitions must not skip an otherwise cancellable sibling. Individual held-only cancellation and Pause/Resume retain their narrower state guards.
+
+Library machine and media toolbar menus keep their current query selection visible,
+even under the toolbar’s icon-only label style. Preserve native selection checkmarks,
+multi-token summaries, bounded long host names and full accessible/help labels.
+
+Completed retained-input materialization records local ownership only when the
+authoritative inventory has no hidden roles or unresolved descriptor references.
+A durable independent snapshot then restores without reviving the archive locator;
+missing, stale and descriptor-bearing snapshots stay fail-closed. Queue preview
+slots show the shared neutral placeholder, preserving row dimensions through loading.
+
+Older invalidated source-only snapshots may become independent only after fresh
+origin route/instance and archive/output verification plus a singleton source-image
+inventory. Preserve local bytes; never mint authority, replace attachments, or
+waive hidden inputs and stale/cancelled responses during this migration.
