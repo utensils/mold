@@ -12,39 +12,10 @@ extension LibraryPane {
         // toolbar lives out here for size.
         @Bindable var navigation = navigation
         ToolbarItem {
-            Menu {
-                Button {
-                    chooseMachine(nil)
-                } label: {
-                    if selectedMachines.isEmpty { Label("All Machines", systemImage: "checkmark") }
-                    else { Text("All Machines") }
-                }
-                ForEach(hosts.hosts) { host in
-                    Button {
-                        chooseMachine(host)
-                    } label: {
-                        if selectedMachines.contains(host.id) {
-                            Label(host.name, systemImage: "checkmark")
-                        } else { Text(host.name) }
-                    }
-                }
-            } label: {
-                Image(systemName: "server.rack")
-                    .accessibilityLabel("Machine: \(machineFilterTitle)")
-            }
-            .help("Show prints from one machine (\(machineFilterTitle))")
+            LibraryMachineFilter(query: navigation.query, hosts: hosts.hosts, choose: chooseMachine)
         }
         ToolbarItem {
-            Picker("Media Type", selection: Binding(get: {
-                LibraryMediaFilter.selected(in: navigation.query)
-            }, set: { filter in
-                guard let filter else { return }
-                navigation.query = filter.applying(to: navigation.query)
-                clearSelection()
-            })) {
-                ForEach(LibraryMediaFilter.allCases) { filter in Text(filter.title).tag(Optional(filter)) }
-            }
-            .help("Show all media, photos, videos or 3D in this shelf")
+            LibraryMediaTypeFilter(query: $navigation.query, didChange: clearSelection)
         }
         ToolbarItem {
             Menu {
@@ -134,18 +105,11 @@ extension LibraryPane {
     }
 
     var selectedMachines: Set<MoldHost.ID> {
-        Set(navigation.query.tokens.compactMap { token -> MoldHost.ID? in
-            if case let .machine(id, _) = token { return id }
-            return nil
-        })
+        navigation.query.machineIDs
     }
 
     var machineFilterTitle: String {
-        switch selectedMachines.count {
-        case 0: "All Machines"
-        case 1: selectedMachines.first.flatMap(hosts.name(of:)) ?? "One Machine"
-        default: "\(selectedMachines.count) Machines"
-        }
+        LibraryMachineFilter.title(for: navigation.query, hosts: hosts.hosts)
     }
 
     func chooseMachine(_ host: MoldHost?) {

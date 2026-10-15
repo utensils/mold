@@ -656,8 +656,11 @@ Secure LAN-only hosts can pair and reconnect without a cloud endpoint or cloud a
 
 Cloud peers can negotiate short-lived S3 objects containing only existing Noise ciphertext frames. The client independently pins the storage origin and verifies each complete bounded object before decryption; API keys and plaintext never reach storage. LAN and small records remain inline. Upgrading erases retired proxy bearers while preserving existing direct Regular credentials and their saved machines.
 
-Library’s **Media Type** toolbar picker shows All Media, Photos, Videos or 3D
-within the current shelf, preserving search and machine filters. Clicking or
+Library’s native toolbar menus keep the selected machine and media type visible
+beside their icons. **Media Type** shows All Media, Photos, Videos or 3D within
+the current shelf, preserving search and machine filters. Multiple search-token
+selections read “Multiple Media Types” or a machine count; long machine names
+truncate with their full name in the tooltip. Menu checkmarks follow the query. Clicking or
 Command/Shift-clicking a visible tile keeps the viewport in place;
 keyboard navigation still reveals tiles outside the viewport.
 

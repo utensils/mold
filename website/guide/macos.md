@@ -126,7 +126,10 @@ This Mac and `/api/status` aligned with About Mold Studio on Nightly; ordinary
 Rust builds use the workspace package version.
 
 In Library, **Media Type** filters the current shelf to All Media, Photos,
-Videos or 3D while keeping search and machine filters. Multi-select with
+Videos or 3D while keeping search and machine filters. The machine and media
+menus show the current selection beside their icons, with native menu checkmarks.
+Multiple search-token selections show a machine count or “Multiple Media Types”;
+long machine names keep their full name in the tooltip. Multi-select with
 Command-click or Shift-click without recentering tiles already in view.
 Arrow-key navigation still reveals offscreen selections.
 
