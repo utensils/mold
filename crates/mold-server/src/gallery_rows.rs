@@ -275,12 +275,13 @@ mod tests {
         collection_id: String,
     }
 
-    const NAMES: [&str; 8] = [
+    const NAMES: [&str; 9] = [
         "plain.png",
         "organized.png",
         "archived.png",
         "archive-only.png",
         "retired.png",
+        "republished.png",
         "quarantined.png",
         "trashed.png",
         "missing.png",
@@ -340,10 +341,12 @@ mod tests {
             entry(record(&dir, "archive-only.png", 2_000_000)),
         );
         archive.retired_names.insert("retired.png".into());
-        // Retired AND still carried in `entries`: retirement must win.
+        // Retired and then published again: back in `entries`, so
+        // `is_retired` is false and the print is visible again.
+        archive.retired_names.insert("republished.png".into());
         archive.entries.insert(
-            "retired.png".into(),
-            entry(record(&dir, "retired.png", 4_000_000)),
+            "republished.png".into(),
+            entry(record(&dir, "republished.png", 4_000_000)),
         );
         // Trashed in the DB yet present in the archive: the archive re-adds
         // it and the organization overlay must still drop it from Library.
@@ -425,15 +428,16 @@ mod tests {
             .iter()
             .map(|image| image["filename"].as_str().unwrap())
             .collect::<std::collections::BTreeSet<_>>();
-        // The fixture really covers every case: kept, archive-only, and the
-        // three exclusions.
+        // The fixture really covers every case: kept, archive-only,
+        // republished, and the three exclusions.
         assert_eq!(
             listed,
             [
                 "archive-only.png",
                 "archived.png",
                 "organized.png",
-                "plain.png"
+                "plain.png",
+                "republished.png"
             ]
             .into_iter()
             .collect()
@@ -543,6 +547,7 @@ mod tests {
             ("archived.png", true),
             ("archive-only.png", true),
             ("retired.png", false),
+            ("republished.png", true),
             ("quarantined.png", false),
             ("trashed.png", false),
             ("missing.png", false),
