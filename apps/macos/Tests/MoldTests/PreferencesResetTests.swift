@@ -32,18 +32,19 @@ struct PreferencesResetTests {
         #expect(PreferencesReset.keys.count == Set(PreferencesReset.keys).count)
     }
 
-    @Test func generalResetPreservesLibraryIntervalAndCopyRecovery() {
+    @Test func generalResetPreservesKeepInSyncAndCopyRecovery() {
         let name = "io.utensils.mold.native.tests.sync-reset.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!
         defer { defaults.removePersistentDomain(forName: name) }
-        let session = LibrarySyncSession(defaults: defaults)
-        session.intervalMinutes = 60
+        let library = LibraryStore(hosts: HostStore(hosts: []) { FakeBackend(host: $0) },
+                                   syncSession: LibrarySyncSession(defaults: defaults))
+        library.syncSession.setKeepInSync(true, in: library)
         let receiptKey = "librarySyncCompletedCopyV1.fixture"
         let receipt = Data("acknowledged-copy".utf8)
         defaults.set(receipt, forKey: receiptKey)
         PreferencesReset.reset(in: defaults)
-        #expect(session.intervalMinutes == 60)
-        #expect(LibrarySyncSession(defaults: defaults).intervalMinutes == 60)
+        #expect(library.syncSession.keepInSync)
+        #expect(LibrarySyncSession(defaults: defaults).keepInSync)
         #expect(defaults.data(forKey: receiptKey) == receipt)
     }
 

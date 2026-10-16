@@ -447,10 +447,12 @@ extension LibraryStore {
 
     func saveLocally(_ selection: [LibraryEntry]) async {
         await mirrorLocally(selection, syncAll: false)
+        syncSession.runFinished(in: self)
     }
 
     func syncAllLocally() async {
         await mirrorLocally([], syncAll: true)
+        syncSession.runFinished(in: self)
     }
 
     private func mirrorLocally(_ selection: [LibraryEntry], syncAll: Bool) async {

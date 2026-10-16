@@ -22,6 +22,17 @@ final class GalleryLive {
 
     /// One machine's frame.
     func apply(_ event: MoldEvent, from host: MoldHost.ID, in store: LibraryStore) {
+        // "Keep This Mac in Sync" follows remote machines' own announcements.
+        // A (re)connect is the catch-up for whatever happened while the stream
+        // was down; gallery changes are noted after the echo check below.
+        // This Mac's engine (re)connecting releases a run that was waiting
+        // for it.
+        switch event {
+        case .authority, .resyncRequired:
+            if host == MoldEngine.localHostID { store.syncSession.localEngineAvailable(in: store) }
+            else { store.syncSession.noteRemoteChange(in: store) }
+        case .gallery, .deviceStateChanged, .job, .queue: break
+        }
         switch event {
         case .authority:
             break
@@ -57,6 +68,7 @@ final class GalleryLive {
         // the one case that remains.
         guard !echo.isEcho(change, on: host,
                            pending: store.mutations.outbox.chain(for: host)) else { return }
+        if host != MoldEngine.localHostID { store.syncSession.noteRemoteChange(in: store) }
 
         switch change {
         case let .updated(filename, row), let .restored(filename, row):

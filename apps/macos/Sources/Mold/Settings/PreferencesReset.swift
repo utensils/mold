@@ -69,8 +69,10 @@ enum PreferencesReset {
     /// would desynchronise its scheduler from what it believes it agreed with
     /// the user (review F5#6).
     static let kept: Set<String> = [
-        // Library Settings owns this control; preserve the active scheduler's
-        // interval along with its persisted choice during a General reset.
+        // Library Settings owns this control; a General reset must not turn
+        // automatic sync on or off behind the user's back.
+        "library.keepInSync.v1",
+        // The retired sync interval, deleted by LibrarySyncSession at launch.
         "library.syncIntervalMinutes.v1",
         // Sync Details owns an explicit Reset Acknowledgments control.
         "library.acknowledgedSyncIssues.v1",

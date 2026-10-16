@@ -123,8 +123,10 @@ extension HostStore {
         if case let .authority(instanceID) = event {
             let reconnected = instanceIDs[host] != nil
             instanceIDs[host] = instanceID
-            guard reconnected else { return }
-            listeners.forEach { $0(host, .resyncRequired) }
+            // A first connect is forwarded as itself: listeners that keep a
+            // machine in step (Library's Keep in Sync catch-up) need to know
+            // a machine arrived. Every other listener ignores `.authority`.
+            listeners.forEach { $0(host, reconnected ? .resyncRequired : event) }
             return
         }
         listeners.forEach { $0(host, event) }
