@@ -2386,6 +2386,120 @@ fn forget_authority_tail(root: &Path) {
         .remove(root);
 }
 
+/// How many landed commits per root the change-feed projector log keeps. A
+/// gap it no longer covers is answered by re-marking every name, which is
+/// always correct, so the bound is a cost knob only.
+const ARCHIVE_COMMIT_LOG_MAX: usize = 4096;
+
+/// One landed commit, as the gallery change feed's projector needs it: the
+/// generation it produced and every name whose archive state it may have
+/// changed.
+#[derive(Debug, Clone)]
+struct ArchiveCommitNames {
+    to: u64,
+    names: std::collections::BTreeSet<String>,
+}
+
+/// Commits THIS process landed, per canonical root, keyed by the generation
+/// each one started from. Read by `gallery_changes_api` at feed-read time;
+/// a commit by any other process (the CLI, a second server) or one lost to
+/// a crash is simply absent, and the reader's contiguity check turns that
+/// gap into a full re-mark.
+type ArchiveCommitLog =
+    std::collections::HashMap<PathBuf, std::collections::BTreeMap<u64, ArchiveCommitNames>>;
+
+fn archive_commit_log() -> &'static std::sync::Mutex<ArchiveCommitLog> {
+    static LOG: std::sync::OnceLock<std::sync::Mutex<ArchiveCommitLog>> =
+        std::sync::OnceLock::new();
+    LOG.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Every name whose committed-archive visibility a commit from `before` to
+/// `after` may have changed: any key added to or removed from the live,
+/// retired, retired-name, or quarantined sets, plus the names the mutation
+/// declared it edited in place (`exact_names` — the same contract the v3
+/// delta log rests on).
+fn visible_name_changes(
+    before: &AuthorityIndexKeys,
+    after: &AuthorityIndexKeys,
+    exact_names: &[String],
+) -> std::collections::BTreeSet<String> {
+    let mut names = exact_names
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    for (old, new) in [
+        (&before.entries, &after.entries),
+        (&before.retired_entries, &after.retired_entries),
+        (&before.retired_names, &after.retired_names),
+        (&before.quarantined_names, &after.quarantined_names),
+    ] {
+        names.extend(old.symmetric_difference(new).cloned());
+    }
+    names
+}
+
+/// Record a commit that has LANDED (marker durable). Called only at the end
+/// of a successful [`commit_snapshot`], so a failed or torn commit can never
+/// be projected.
+fn record_archive_commit(
+    root: &Path,
+    from: u64,
+    to: u64,
+    names: std::collections::BTreeSet<String>,
+) {
+    let mut log = archive_commit_log()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let commits = log.entry(root.to_path_buf()).or_default();
+    commits.insert(from, ArchiveCommitNames { to, names });
+    while commits.len() > ARCHIVE_COMMIT_LOG_MAX {
+        commits.pop_first();
+    }
+}
+
+/// The union of names this process's commits changed between generations
+/// `from` and `to` of `root` (canonical), or `None` when its log does not
+/// hold one contiguous chain of commits covering exactly that gap.
+pub(crate) fn archive_changes_between(
+    root: &Path,
+    from: u64,
+    to: u64,
+) -> Option<std::collections::BTreeSet<String>> {
+    let log = archive_commit_log()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let commits = log.get(root)?;
+    let mut names = std::collections::BTreeSet::new();
+    let mut at = from;
+    while at < to {
+        let commit = commits.get(&at)?;
+        names.extend(commit.names.iter().cloned());
+        at = commit.to;
+    }
+    (at == to).then_some(names)
+}
+
+/// Forget every commit this process logged for `root`: what a commit by
+/// another process looks like to the projector.
+#[cfg(test)]
+pub(crate) fn forget_archive_commit_log(root: &Path) {
+    archive_commit_log()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .remove(root);
+}
+
+/// Drop log entries a projection at `generation` has made redundant.
+pub(crate) fn prune_archive_commit_log(root: &Path, generation: u64) {
+    let mut log = archive_commit_log()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if let Some(commits) = log.get_mut(root) {
+        commits.retain(|_, commit| commit.to > generation);
+    }
+}
+
 /// The fast path into [`commit_snapshot`], and the whole of its validity
 /// argument.
 ///
@@ -2465,6 +2579,9 @@ pub(crate) fn commit_snapshot(
     let generation = expected_generation
         .checked_add(1)
         .context("gallery authority generation overflow")?;
+    // The v2 path moves `exact_names` into its marker; the change-feed
+    // projector needs them after the commit lands.
+    let exact_names_for_feed = exact_names.clone();
     let mut legacy_evidence_epochs = current.legacy_evidence_epochs.clone();
     let observed_legacy = crate::batch_transaction::legacy_gallery_evidence_paths(root)?;
     legacy_evidence_epochs.retain(|path, _| observed_legacy.contains(path));
@@ -2658,7 +2775,11 @@ pub(crate) fn commit_snapshot(
     // The next commit diffs against this one — names and epochs only, never
     // the records.
     tail.keys = AuthorityIndexKeys::of(index);
+    // The commit has landed: the marker naming `generation` is durable.
+    // Only now may the change feed learn which names it touched.
+    let feed_names = visible_name_changes(&current.keys, &tail.keys, &exact_names_for_feed);
     remember_authority_tail(root, tail);
+    record_archive_commit(root, expected_generation, generation, feed_names);
     Ok(generation)
 }
 

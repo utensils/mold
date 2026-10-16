@@ -785,8 +785,12 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/models/unload", delete(unload_model))
         .route("/api/gallery", get(list_gallery))
         .route(
+            "/api/gallery/changes",
+            get(crate::gallery_changes_api::gallery_changes),
+        )
+        .route(
             "/api/gallery/sync-checkpoint",
-            get(crate::gallery_sync::checkpoint),
+            get(crate::gallery_sync::checkpoint).post(crate::gallery_sync::bounded_checkpoint),
         )
         .route(
             "/api/gallery/source-media/inventory",
@@ -8537,6 +8541,13 @@ async fn server_capabilities(
         // `GET /api/gallery/image/:filename` whenever there is an output
         // directory to write it to.
         persists_outputs: Some(!state.is_output_disabled(&config)),
+        // The feed reads the metadata DB's change log; without it, or with
+        // nowhere to publish, clients keep the full listing.
+        changes_feed: (db_available && !state.is_output_disabled(&config)).then_some(
+            mold_core::GalleryChangesFeedCapabilities {
+                protocol_version: mold_core::GALLERY_CHANGES_PROTOCOL_VERSION,
+            },
+        ),
     };
     Json(mold_core::ServerCapabilities {
         generation_profile_v1: true,
@@ -10908,6 +10919,49 @@ async fn list_gallery(
         let dir = output_dir.clone();
         let gallery_archive = state.gallery_publication_gate.clone();
         let only_owned = only.map(str::to_owned);
+        // The cheap validator: computed from the change log and the archive
+        // generation BEFORE anything is built, so an unchanged library
+        // answers 304 without reading a single row. Only for the whole
+        // listing of a reconciled directory; `?filename=` and every
+        // non-DB exit keep the body-hash ETag.
+        let validator = if only.is_none() && state.gallery_feed_readiness.is_ready(&output_dir) {
+            let db_arc = db_arc.clone();
+            let dir = dir.clone();
+            let gate = gallery_archive.clone();
+            tokio::task::spawn_blocking(move || {
+                db_arc.as_ref().as_ref().and_then(|db| {
+                    crate::gallery_changes_api::listing_validator(
+                        db,
+                        &gate,
+                        &dir,
+                        view == GalleryView::Library,
+                        retention_days,
+                    )
+                    .inspect_err(|error| {
+                        tracing::debug!("gallery listing validator unavailable: {error:#}")
+                    })
+                    .ok()
+                    .flatten()
+                })
+            })
+            .await
+            .ok()
+            .flatten()
+        } else {
+            None
+        };
+        if let Some(etag) = validator.as_deref() {
+            if crate::gallery_changes_api::if_none_match_contains(&headers, etag) {
+                return Response::builder()
+                    .status(StatusCode::NOT_MODIFIED)
+                    .header(header::ETAG, etag)
+                    .header(header::CACHE_CONTROL, "private, no-cache")
+                    .body(Body::empty())
+                    .map_err(|error| {
+                        ApiError::internal(format!("gallery response failed: {error}"))
+                    });
+            }
+        }
         let listed = tokio::task::spawn_blocking(move || {
             let Some(db) = db_arc.as_ref().as_ref() else {
                 return Ok::<_, anyhow::Error>(None);
@@ -10927,7 +10981,7 @@ async fn list_gallery(
         .map_err(|e| ApiError::internal(format!("gallery DB query failed: {e}")))?
         .map_err(|e| ApiError::internal(format!("gallery DB query failed: {e:#}")))?;
         if let Some(images) = listed {
-            return gallery_list_response(&headers, images, only);
+            return gallery_list_response_with_etag(&headers, images, only, validator);
         }
     }
 
@@ -10956,6 +11010,18 @@ fn gallery_list_response(
     images: Vec<mold_core::GalleryImage>,
     only: Option<&str>,
 ) -> Result<Response, ApiError> {
+    gallery_list_response_with_etag(request_headers, images, only, None)
+}
+
+/// [`gallery_list_response`] with the cheap validator computed before the
+/// build (`gallery_changes_api::listing_validator`) in place of the
+/// body-hash ETag. `None` keeps the body hash.
+fn gallery_list_response_with_etag(
+    request_headers: &HeaderMap,
+    images: Vec<mold_core::GalleryImage>,
+    only: Option<&str>,
+    validator: Option<String>,
+) -> Result<Response, ApiError> {
     // Every LISTING exit is here; the row-building helpers
     // (`queue::gallery_image_with_filing`,
     // `gallery_organization::enriched_gallery_image`) stamp their own
@@ -10972,11 +11038,21 @@ fn gallery_list_response(
     };
     let body = serde_json::to_vec(&images)
         .map_err(|error| ApiError::internal(format!("gallery serialization failed: {error}")))?;
-    let etag = format!("\"{:x}\"", Sha256::digest(&body));
-    let unchanged = request_headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.split(',').any(|candidate| candidate.trim() == etag));
+    let (etag, unchanged) = match validator {
+        Some(etag) => {
+            let unchanged =
+                crate::gallery_changes_api::if_none_match_contains(request_headers, &etag);
+            (etag, unchanged)
+        }
+        None => {
+            let etag = format!("\"{:x}\"", Sha256::digest(&body));
+            let unchanged = request_headers
+                .get(header::IF_NONE_MATCH)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.split(',').any(|candidate| candidate.trim() == etag));
+            (etag, unchanged)
+        }
+    };
 
     let mut builder = Response::builder()
         .header(header::ETAG, &etag)

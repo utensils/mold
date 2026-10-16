@@ -72,6 +72,16 @@ pub struct GalleryPublicationGate {
         Arc<std::sync::RwLock<BTreeMap<PathBuf, CachedCommittedArchiveIndex>>>,
 }
 
+/// One consistent read of a gallery's committed archive.
+#[derive(Debug, Clone)]
+pub(crate) struct CommittedArchiveSnapshot {
+    /// The canonical gallery root (the key of every per-root cache).
+    pub(crate) root: PathBuf,
+    /// `None` when the gallery has no authority store yet.
+    pub(crate) generation: Option<u64>,
+    pub(crate) index: Arc<CommittedArchiveIndex>,
+}
+
 #[derive(Debug, Clone)]
 struct CachedCommittedArchiveIndex {
     generation: u64,
@@ -237,11 +247,26 @@ impl GalleryPublicationGate {
         &self,
         output_dir: &Path,
     ) -> anyhow::Result<Arc<CommittedArchiveIndex>> {
+        Ok(self.committed_archive_snapshot(output_dir)?.index)
+    }
+
+    /// [`Self::committed_archive_index`] together with the generation it is
+    /// at and the canonical root, read under ONE bookkeeping lock so the
+    /// three agree. `generation` is `None` when the gallery has no authority
+    /// store yet (the index is then empty).
+    pub(crate) fn committed_archive_snapshot(
+        &self,
+        output_dir: &Path,
+    ) -> anyhow::Result<CommittedArchiveSnapshot> {
         let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
         let key = bookkeeping.canonical_root().to_path_buf();
         let Some(generation) = crate::gallery_authority::read_generation(output_dir, &bookkeeping)?
         else {
-            return Ok(Arc::new(CommittedArchiveIndex::default()));
+            return Ok(CommittedArchiveSnapshot {
+                root: key,
+                generation: None,
+                index: Arc::new(CommittedArchiveIndex::default()),
+            });
         };
         if let Some(index) = self
             .committed_archive_indexes
@@ -251,7 +276,11 @@ impl GalleryPublicationGate {
             .filter(|cached| cached.generation == generation)
             .map(|cached| cached.index.clone())
         {
-            return Ok(index);
+            return Ok(CommittedArchiveSnapshot {
+                root: key,
+                generation: Some(generation),
+                index,
+            });
         }
         let loaded =
             crate::gallery_authority::load_existing_read_only(output_dir, &bookkeeping)?
@@ -262,7 +291,21 @@ impl GalleryPublicationGate {
         );
         let index = Arc::new(loaded.index);
         self.install_shared_committed_archive_index(output_dir, loaded.generation, index.clone());
-        Ok(index)
+        Ok(CommittedArchiveSnapshot {
+            root: key,
+            generation: Some(generation),
+            index,
+        })
+    }
+
+    /// The committed archive generation alone: the marker read, never the
+    /// index. What the legacy listing's cheap validator keys on.
+    pub(crate) fn committed_archive_generation(
+        &self,
+        output_dir: &Path,
+    ) -> anyhow::Result<Option<u64>> {
+        let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
+        crate::gallery_authority::read_generation(output_dir, &bookkeeping)
     }
 
     pub(crate) fn retained_media_for_item(

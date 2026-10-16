@@ -2404,6 +2404,38 @@ impl MoldClient {
         Ok(resp)
     }
 
+    /// One page of the compacted gallery change feed
+    /// (`GET /api/gallery/changes`). `since` is the previous page's opaque
+    /// `cursor`; `None` pages the full snapshot from the beginning. Loop
+    /// while `more`, and rebuild the replica when a page says `reset`.
+    ///
+    /// Only for a host advertising `capabilities.gallery.changes_feed`; an
+    /// older host answers 404. A `503 GALLERY_FEED_NOT_READY` (startup
+    /// reconcile still running) is returned as an error to retry.
+    pub async fn gallery_changes(
+        &self,
+        since: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<crate::types::GalleryChangesPage> {
+        let mut query: Vec<(&str, String)> = Vec::new();
+        if let Some(since) = since.filter(|cursor| !cursor.is_empty()) {
+            query.push(("since", since.to_string()));
+        }
+        if let Some(limit) = limit {
+            query.push(("limit", limit.to_string()));
+        }
+        let resp = self
+            .client
+            .get(format!("{}/api/gallery/changes", self.base_url))
+            .query(&query)
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<crate::types::GalleryChangesPage>()
+            .await?)
+    }
+
     /// Read one gallery row's metadata without transferring the whole index.
     ///
     /// Falls back to a full listing for a host that predates `?filename=`:
@@ -6143,6 +6175,59 @@ mod tests {
         assert_eq!(row.trashed_at, Some(1_700_000_100));
         assert_eq!(row.purge_at, Some(1_702_592_100));
         assert_eq!(row.size_bytes, Some(123_456));
+    }
+
+    #[tokio::test]
+    async fn gallery_changes_sends_the_cursor_and_limit_and_parses_a_page() {
+        use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let page = |cursor: &str| {
+            serde_json::json!({
+                "protocol_version": 1,
+                "instance_id": "inst",
+                "cursor": cursor,
+                "more": false,
+                "reset": false,
+                "changes": [
+                    {"filename": "gone.png", "removed": true},
+                    {"filename": trashed_row_json()["filename"], "removed": false,
+                     "image": trashed_row_json()}
+                ]
+            })
+        };
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/changes"))
+            .and(query_param("since", "c1"))
+            .and(query_param("limit", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page("c2")))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/changes"))
+            .and(query_param_is_missing("since"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page("c0")))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let delta = client.gallery_changes(Some("c1"), Some(2)).await.unwrap();
+        assert_eq!(delta.cursor, "c2");
+        assert!(delta.changes[0].removed);
+        assert_eq!(
+            delta.changes[1].image.as_ref().unwrap().trashed_at,
+            Some(1_700_000_100)
+        );
+        // No cursor (or an empty one) is the snapshot: `since` is not sent.
+        assert_eq!(
+            client.gallery_changes(None, None).await.unwrap().cursor,
+            "c0"
+        );
+        assert_eq!(
+            client.gallery_changes(Some(""), None).await.unwrap().cursor,
+            "c0"
+        );
     }
 
     /// The export client posts the container to the stored print's own

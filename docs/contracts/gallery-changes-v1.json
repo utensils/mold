@@ -1,0 +1,185 @@
+{
+  "protocol_version": 1,
+  "description": "Replay fixtures for GET /api/gallery/changes (protocol 1). Each scenario starts a replica holding `initial` filenames, pulls `pages` in order starting from `since` (null = no cursor, a full snapshot), and must end holding exactly the `expected` filenames, each with at least the listed field values, resuming from `final_cursor`. Cursors are opaque strings: clients store and echo them, never parse them.",
+  "client_rules": [
+    "A page with reset=true discards every row the replica holds before applying that page; the pages that follow continue normally.",
+    "A change with an image upserts the row by filename; a change with removed=true (and no image) deletes it. Removals of unknown names are ignored.",
+    "Loop while more=true, passing each page's cursor as the next since. Persist the cursor only after applying the page it came with.",
+    "Rows with trashed_at belong to the trash; rows without it to the library. Clients sort by (timestamp desc, filename)."
+  ],
+  "scenarios": [
+    {
+      "name": "snapshot_paging",
+      "initial": [],
+      "since": null,
+      "pages": [
+        {
+          "protocol_version": 1,
+          "instance_id": "fixture-instance",
+          "cursor": "snapshot-2",
+          "more": true,
+          "reset": false,
+          "changes": [
+            {
+              "filename": "a.png",
+              "removed": false,
+              "image": {
+                "filename": "a.png",
+                "metadata": {"prompt": "a", "model": "flux-dev:q4", "seed": 1, "steps": 4, "guidance": 3.5, "width": 64, "height": 64, "version": "test"},
+                "timestamp": 1700000001,
+                "format": "png",
+                "media_version": "1700000001000:10"
+              }
+            },
+            {
+              "filename": "b.png",
+              "removed": false,
+              "image": {
+                "filename": "b.png",
+                "metadata": {"prompt": "b", "model": "flux-dev:q4", "seed": 2, "steps": 4, "guidance": 3.5, "width": 64, "height": 64, "version": "test"},
+                "timestamp": 1700000002,
+                "format": "png",
+                "favorite": true
+              }
+            }
+          ]
+        },
+        {
+          "protocol_version": 1,
+          "instance_id": "fixture-instance",
+          "cursor": "snapshot-4",
+          "more": false,
+          "reset": false,
+          "changes": [
+            {"filename": "tombstone.png", "removed": true},
+            {
+              "filename": "c.png",
+              "removed": false,
+              "image": {
+                "filename": "c.png",
+                "metadata": {"prompt": "c", "model": "flux-dev:q4", "seed": 3, "steps": 4, "guidance": 3.5, "width": 64, "height": 64, "version": "test"},
+                "timestamp": 1700000003,
+                "trashed_at": 1700000100,
+                "purge_at": 1702592100
+              }
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "a.png": {"timestamp": 1700000001},
+        "b.png": {"favorite": true},
+        "c.png": {"trashed_at": 1700000100, "purge_at": 1702592100}
+      },
+      "final_cursor": "snapshot-4"
+    },
+    {
+      "name": "delta_update_trash_and_removal",
+      "initial": ["a.png", "b.png", "c.png"],
+      "since": "snapshot-4",
+      "pages": [
+        {
+          "protocol_version": 1,
+          "instance_id": "fixture-instance",
+          "cursor": "delta-7",
+          "more": false,
+          "reset": false,
+          "changes": [
+            {
+              "filename": "a.png",
+              "removed": false,
+              "image": {
+                "filename": "a.png",
+                "metadata": {"prompt": "a", "model": "flux-dev:q4", "seed": 1, "steps": 4, "guidance": 3.5, "width": 64, "height": 64, "version": "test"},
+                "timestamp": 1700000001,
+                "title": "Renamed",
+                "tags": ["kept"]
+              }
+            },
+            {
+              "filename": "b.png",
+              "removed": false,
+              "image": {
+                "filename": "b.png",
+                "metadata": {"prompt": "b", "model": "flux-dev:q4", "seed": 2, "steps": 4, "guidance": 3.5, "width": 64, "height": 64, "version": "test"},
+                "timestamp": 1700000002,
+                "trashed_at": 1700000200
+              }
+            },
+            {"filename": "c.png", "removed": true}
+          ]
+        }
+      ],
+      "expected": {
+        "a.png": {"title": "Renamed", "tags": ["kept"]},
+        "b.png": {"trashed_at": 1700000200}
+      },
+      "final_cursor": "delta-7"
+    },
+    {
+      "name": "idle_delta",
+      "initial": ["a.png"],
+      "since": "delta-7",
+      "pages": [
+        {
+          "protocol_version": 1,
+          "instance_id": "fixture-instance",
+          "cursor": "delta-7",
+          "more": false,
+          "reset": false,
+          "changes": []
+        }
+      ],
+      "expected": {"a.png": {}},
+      "final_cursor": "delta-7"
+    },
+    {
+      "name": "reset_rebuilds_from_scratch",
+      "initial": ["stale.png", "a.png"],
+      "since": "cursor-from-another-database",
+      "pages": [
+        {
+          "protocol_version": 1,
+          "instance_id": "fixture-instance",
+          "cursor": "fresh-1",
+          "more": true,
+          "reset": true,
+          "changes": [
+            {
+              "filename": "a.png",
+              "removed": false,
+              "image": {
+                "filename": "a.png",
+                "metadata": {"prompt": "a", "model": "flux-dev:q4", "seed": 1, "steps": 4, "guidance": 3.5, "width": 64, "height": 64, "version": "test"},
+                "timestamp": 1700000001
+              }
+            }
+          ]
+        },
+        {
+          "protocol_version": 1,
+          "instance_id": "fixture-instance",
+          "cursor": "fresh-2",
+          "more": false,
+          "reset": false,
+          "changes": [
+            {
+              "filename": "d.png",
+              "removed": false,
+              "image": {
+                "filename": "d.png",
+                "metadata": {"prompt": "d", "model": "flux-dev:q4", "seed": 4, "steps": 4, "guidance": 3.5, "width": 64, "height": 64, "version": "test"},
+                "timestamp": 1700000004
+              }
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "a.png": {"timestamp": 1700000001},
+        "d.png": {"timestamp": 1700000004}
+      },
+      "final_cursor": "fresh-2"
+    }
+  ]
+}

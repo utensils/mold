@@ -18,6 +18,7 @@ mod durable_admission_authority;
 mod durable_disposition;
 mod durable_generation_settlement;
 pub mod gallery_authority;
+mod gallery_changes_api;
 mod gallery_media_transfer;
 mod gallery_source_cache;
 mod gallery_source_media;
@@ -1283,6 +1284,11 @@ async fn run_server_inner(
                 let dir = output_dir.clone();
                 let gallery_gate = state.gallery_publication_gate.clone();
                 let (reconciled_tx, reconciled_rx) = tokio::sync::oneshot::channel::<()>();
+                // The change feed answers 503 for this directory until the
+                // reconcile below has finished.
+                let feed_readiness = state.gallery_feed_readiness.clone();
+                feed_readiness.begin(&output_dir);
+                let ready_dir = output_dir.clone();
                 gallery_reconcile_handle = Some(tokio::spawn(async move {
                     // Reconcile mutates SQLite but only observes gallery
                     // files. The shared side keeps publication atomic while
@@ -1310,6 +1316,7 @@ async fn run_server_inner(
                         Ok(Err(e)) => tracing::warn!("metadata DB reconcile failed: {e:#}"),
                         Err(e) => tracing::warn!("metadata DB reconcile task join error: {e}"),
                     }
+                    feed_readiness.finish(&ready_dir);
                     let _ = reconciled_tx.send(());
                 }));
                 trash_sweeper_handle = Some(gallery_trash::spawn_trash_sweeper(
