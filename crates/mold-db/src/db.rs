@@ -37,6 +37,10 @@ enum TrashFilter {
     TrashedOnly,
 }
 
+/// Filenames bound per `filename IN (...)` statement. Well under SQLite's
+/// historical 999-variable ceiling, leaving room for the directory key.
+pub(crate) const FILENAME_IN_CHUNK: usize = 500;
+
 /// The column projection [`row_to_record`] expects, in order. Every
 /// `SELECT` that feeds `row_to_record` must use exactly this list.
 pub(crate) const GENERATION_SELECT_COLUMNS: &str = "SELECT id, filename, output_dir, \
@@ -459,13 +463,83 @@ impl MetadataDb {
         self.list_filtered(output_dir, TrashFilter::TrashedOnly)
     }
 
+    /// Rows for exactly `filenames` in `output_dir` (trashed ones included,
+    /// as [`Self::list`]), keyed by filename. Names without a row are simply
+    /// absent. One indexed `filename IN (...)` query per chunk, so reading a
+    /// handful of prints never walks the whole directory.
+    pub fn rows_by_filenames(
+        &self,
+        output_dir: &Path,
+        filenames: &[String],
+    ) -> Result<std::collections::HashMap<String, GenerationRecord>> {
+        if filenames.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        self.with_corruption_retry(Some(output_dir), || {
+            self.rows_by_filenames_once(output_dir, filenames)
+        })
+    }
+
+    fn rows_by_filenames_once(
+        &self,
+        output_dir: &Path,
+        filenames: &[String],
+    ) -> Result<std::collections::HashMap<String, GenerationRecord>> {
+        let conn = self.conn.lock().expect("metadata db mutex poisoned");
+        let dir_key = canonical_dir_string(output_dir);
+        let mut out = std::collections::HashMap::new();
+        for chunk in filenames.chunks(FILENAME_IN_CHUNK) {
+            let placeholders = (0..chunk.len())
+                .map(|index| format!("?{}", index + 2))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "{GENERATION_SELECT_COLUMNS} FROM generations \
+                 WHERE output_dir = ?1 AND filename IN ({placeholders})"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let params = std::iter::once(&dir_key as &dyn rusqlite::ToSql)
+                .chain(chunk.iter().map(|name| name as &dyn rusqlite::ToSql))
+                .collect::<Vec<_>>();
+            let mut rows = stmt.query(params.as_slice())?;
+            while let Some(row) = rows.next()? {
+                let record = row_to_record(row)?;
+                out.insert(record.filename.clone(), record);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Whether `output_dir` has any gallery row at all (trashed included) —
+    /// the listing's "the DB has not indexed this directory yet" question,
+    /// answered without reading the rows.
+    pub fn has_rows_for_dir(&self, output_dir: &Path) -> Result<bool> {
+        self.with_corruption_retry(Some(output_dir), || {
+            let conn = self.conn.lock().expect("metadata db mutex poisoned");
+            let dir_key = canonical_dir_string(output_dir);
+            Ok(conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM generations WHERE output_dir = ?1)",
+                params![dir_key],
+                |row| row.get::<_, i64>(0),
+            )? != 0)
+        })
+    }
+
     fn list_filtered(
         &self,
         output_dir: Option<&Path>,
         filter: TrashFilter,
     ) -> Result<Vec<GenerationRecord>> {
+        self.with_corruption_retry(output_dir, || self.list_once(output_dir, filter))
+    }
+
+    fn with_corruption_retry<R>(
+        &self,
+        output_dir: Option<&Path>,
+        query: impl Fn() -> Result<R>,
+    ) -> Result<R> {
         let epoch = self.recovery_epoch.load(Ordering::Acquire);
-        match self.list_once(output_dir, filter) {
+        match query() {
             Ok(rows) => Ok(rows),
             Err(error) if is_corruption_error(&error) => {
                 self.rebuild_after_corruption(epoch, &error)?;
@@ -485,8 +559,7 @@ impl MetadataDb {
                         "metadata DB rebuilt from gallery after query-time corruption"
                     );
                 }
-                self.list_once(output_dir, filter)
-                    .context("retrying gallery query after metadata DB rebuild")
+                query().context("retrying gallery query after metadata DB rebuild")
             }
             Err(error) => Err(error),
         }
@@ -1202,6 +1275,68 @@ mod tests {
             favorite: false,
             trashed_at_ms: None,
         }
+    }
+
+    #[test]
+    fn rows_by_filenames_returns_exactly_the_named_rows_in_one_dir() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        // More names than one IN chunk, so chunking is exercised.
+        let names = (0..(FILENAME_IN_CHUNK + 7))
+            .map(|index| format!("print-{index:04}.png"))
+            .collect::<Vec<_>>();
+        let records = names
+            .iter()
+            .map(|name| {
+                let mut record = rec();
+                record.filename = name.clone();
+                record
+            })
+            .collect::<Vec<_>>();
+        db.upsert_batch(&records).unwrap();
+        let mut elsewhere = rec();
+        elsewhere.output_dir = "/tmp/elsewhere".into();
+        elsewhere.filename = "print-0000.png".into();
+        db.upsert(&elsewhere).unwrap();
+        assert!(db
+            .mark_trashed(Path::new("/tmp/out"), "print-0001.png", 9)
+            .unwrap());
+
+        let mut wanted = names.clone();
+        wanted.push("missing.png".into());
+        let found = db
+            .rows_by_filenames(Path::new("/tmp/out"), &wanted)
+            .unwrap();
+        assert_eq!(found.len(), names.len(), "every named row, nothing else");
+        assert!(!found.contains_key("missing.png"));
+        assert_eq!(
+            found["print-0001.png"].trashed_at_ms,
+            Some(9),
+            "trashed rows are included, as list() includes them"
+        );
+        for record in db.list(Some(Path::new("/tmp/out"))).unwrap() {
+            assert_eq!(
+                serde_json::to_value(&found[&record.filename]).unwrap(),
+                serde_json::to_value(&record).unwrap(),
+                "same row as the listing"
+            );
+        }
+        assert!(db
+            .rows_by_filenames(Path::new("/tmp/out"), &[])
+            .unwrap()
+            .is_empty());
+        let other = db
+            .rows_by_filenames(Path::new("/tmp/elsewhere"), &["print-0002.png".into()])
+            .unwrap();
+        assert!(other.is_empty(), "scoped to the requested directory");
+    }
+
+    #[test]
+    fn has_rows_for_dir_reports_whether_a_directory_is_indexed() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        assert!(!db.has_rows_for_dir(Path::new("/tmp/out")).unwrap());
+        db.upsert(&rec()).unwrap();
+        assert!(db.has_rows_for_dir(Path::new("/tmp/out")).unwrap());
+        assert!(!db.has_rows_for_dir(Path::new("/tmp/elsewhere")).unwrap());
     }
 
     #[test]

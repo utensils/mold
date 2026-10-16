@@ -67,15 +67,29 @@ fn ensure_indexed(
     if mold_db::generation_assets::scan_is_current(db, id, &version)? {
         return Ok(());
     }
+    reindex(db, output_dir, record, id, &version)
+}
+
+fn reindex(
+    db: &mold_db::MetadataDb,
+    output_dir: &Path,
+    record: &mold_db::GenerationRecord,
+    id: i64,
+    version: &str,
+) -> anyhow::Result<()> {
     let records = if record.format == mold_core::OutputFormat::Glb {
         let bytes = std::fs::read(print_path(output_dir, record))?;
         inventory_from_glb(&record.filename, &bytes)?
     } else {
         Vec::new()
     };
-    mold_db::generation_assets::replace_for_generation(db, id, &version, &records)
+    mold_db::generation_assets::replace_for_generation(db, id, version, &records)
 }
 
+/// Attach each image's durable asset inventory, indexing any row whose scan
+/// is stale. Scan versions and inventories are read in batched queries
+/// rather than two per row; a batched read that fails falls back to the
+/// per-row path, so a failure still costs only the row it belongs to.
 pub(crate) fn attach_to_images(
     db: &mold_db::MetadataDb,
     output_dir: &Path,
@@ -86,26 +100,102 @@ pub(crate) fn attach_to_images(
         .iter()
         .map(|record| (record.filename.as_str(), record))
         .collect::<std::collections::HashMap<_, _>>();
-    for image in images {
-        let Some(record) = by_name.get(image.filename.as_str()) else {
-            continue;
-        };
-        let indexed = ensure_indexed(db, output_dir, record).and_then(|()| {
-            record.id.map_or_else(
-                || Ok(Vec::new()),
-                |id| mold_db::generation_assets::list_for_generation(db, id),
-            )
-        });
-        match indexed {
-            Ok(records) => {
-                image.assets = records.into_iter().map(|record| record.asset).collect();
+    let matched = images
+        .iter()
+        .enumerate()
+        .filter_map(|(position, image)| {
+            by_name
+                .get(image.filename.as_str())
+                .map(|record| (position, *record))
+        })
+        .collect::<Vec<_>>();
+    if matched.is_empty() {
+        return;
+    }
+    if let Err(error) = attach_batched(db, output_dir, &matched, images) {
+        tracing::debug!("batched generation asset read failed, retrying per row: {error:#}");
+        for (position, record) in matched {
+            attach_one(db, output_dir, record, &mut images[position]);
+        }
+    }
+}
+
+/// The batched half of [`attach_to_images`]. Writes images only after both
+/// batched reads succeed, so the per-row fallback starts from a clean slate.
+fn attach_batched(
+    db: &mold_db::MetadataDb,
+    output_dir: &Path,
+    matched: &[(usize, &mold_db::GenerationRecord)],
+    images: &mut [mold_core::GalleryImage],
+) -> anyhow::Result<()> {
+    let ids = matched
+        .iter()
+        .filter_map(|(_, record)| record.id)
+        .collect::<Vec<_>>();
+    let versions = mold_db::generation_assets::scan_versions_for(db, &ids)?;
+    let mut outcomes = Vec::with_capacity(matched.len());
+    for (position, record) in matched {
+        let outcome = match record.id {
+            None => Ok(None),
+            Some(id) => {
+                let version = media_version(record);
+                if versions.get(&id).is_some_and(|stored| *stored == version) {
+                    Ok(Some(id))
+                } else {
+                    reindex(db, output_dir, record, id, &version).map(|()| Some(id))
+                }
             }
+        };
+        outcomes.push((*position, *record, outcome));
+    }
+    let ready = outcomes
+        .iter()
+        .filter_map(|(_, _, outcome)| outcome.as_ref().ok().copied().flatten())
+        .collect::<Vec<_>>();
+    let mut inventories = mold_db::generation_assets::list_for_generations(db, &ready)?;
+    for (position, record, outcome) in outcomes {
+        match outcome {
+            Ok(Some(id)) => {
+                images[position].assets = inventories
+                    .remove(&id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|record| record.asset)
+                    .collect();
+            }
+            Ok(None) => images[position].assets = Vec::new(),
             Err(error) => {
                 tracing::warn!(
                     filename = %record.filename,
                     "generation asset indexing skipped one gallery row: {error:#}"
                 );
             }
+        }
+    }
+    Ok(())
+}
+
+fn attach_one(
+    db: &mold_db::MetadataDb,
+    output_dir: &Path,
+    record: &mold_db::GenerationRecord,
+    image: &mut mold_core::GalleryImage,
+) {
+    let indexed = ensure_indexed(db, output_dir, record).and_then(|()| {
+        record.id.map_or_else(
+            || Ok(Vec::new()),
+            |id| mold_db::generation_assets::list_for_generation(db, id),
+        )
+    });
+    match indexed {
+        Ok(records) => {
+            image.assets = records.into_iter().map(|record| record.asset).collect();
+        }
+        Err(error) => {
+            tracing::warn!(
+                filename = %record.filename,
+                "generation asset indexing skipped one gallery row: {error:#}"
+            );
         }
     }
 }

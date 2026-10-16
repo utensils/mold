@@ -75,7 +75,9 @@ pub struct GalleryPublicationGate {
 #[derive(Debug, Clone)]
 struct CachedCommittedArchiveIndex {
     generation: u64,
-    index: CommittedArchiveIndex,
+    /// Shared so a reader takes a reference count, never a deep copy of an
+    /// index that grows with the library. Writers copy-on-write.
+    index: Arc<CommittedArchiveIndex>,
     filenames_by_job_id: BTreeMap<String, Vec<String>>,
 }
 
@@ -128,7 +130,7 @@ enum RetainedMediaTarget<'a> {
 }
 
 impl CachedCommittedArchiveIndex {
-    fn new(generation: u64, index: CommittedArchiveIndex) -> Self {
+    fn new(generation: u64, index: Arc<CommittedArchiveIndex>) -> Self {
         let mut filenames_by_job_id: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for (filename, entry) in &index.entries {
             if let Some(job_id) = entry.record.metadata.job_id.as_ref() {
@@ -213,6 +215,15 @@ impl GalleryPublicationGate {
         generation: u64,
         index: CommittedArchiveIndex,
     ) {
+        self.install_shared_committed_archive_index(output_dir, generation, Arc::new(index));
+    }
+
+    fn install_shared_committed_archive_index(
+        &self,
+        output_dir: &Path,
+        generation: u64,
+        index: Arc<CommittedArchiveIndex>,
+    ) {
         let key = fs::canonicalize(output_dir).unwrap_or_else(|_| output_dir.to_path_buf());
         self.committed_archive_indexes
             .write()
@@ -220,15 +231,17 @@ impl GalleryPublicationGate {
             .insert(key, CachedCommittedArchiveIndex::new(generation, index));
     }
 
+    /// The committed archive index for `output_dir`, shared with the cache.
+    /// A cache hit is a reference count, never a copy of the whole index.
     pub(crate) fn committed_archive_index(
         &self,
         output_dir: &Path,
-    ) -> anyhow::Result<CommittedArchiveIndex> {
+    ) -> anyhow::Result<Arc<CommittedArchiveIndex>> {
         let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
         let key = bookkeeping.canonical_root().to_path_buf();
         let Some(generation) = crate::gallery_authority::read_generation(output_dir, &bookkeeping)?
         else {
-            return Ok(CommittedArchiveIndex::default());
+            return Ok(Arc::new(CommittedArchiveIndex::default()));
         };
         if let Some(index) = self
             .committed_archive_indexes
@@ -247,8 +260,8 @@ impl GalleryPublicationGate {
             loaded.generation == generation,
             "gallery authority generation changed during read-only lookup"
         );
-        let index = loaded.index.clone();
-        self.install_committed_archive_index(output_dir, loaded.generation, loaded.index);
+        let index = Arc::new(loaded.index);
+        self.install_shared_committed_archive_index(output_dir, loaded.generation, index.clone());
         Ok(index)
     }
 
@@ -287,7 +300,7 @@ impl GalleryPublicationGate {
     ) -> anyhow::Result<Vec<ValidatedRetainedMedia>> {
         let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
         let canonical = bookkeeping.canonical_root();
-        let index = self.committed_archive_index_while_locked(canonical, &bookkeeping)?;
+        let index = self.shared_committed_archive_index_while_locked(canonical, &bookkeeping)?;
         let resolve = |filename: &str| -> anyhow::Result<ValidatedRetainedMedia> {
             if index.quarantined_names.contains(filename) {
                 return Ok(ValidatedRetainedMedia::Invalid);
@@ -332,7 +345,7 @@ impl GalleryPublicationGate {
     ) -> anyhow::Result<Option<CommittedArchiveEntry>> {
         let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
         let canonical = bookkeeping.canonical_root();
-        let index = self.committed_archive_index_while_locked(canonical, &bookkeeping)?;
+        let index = self.shared_committed_archive_index_while_locked(canonical, &bookkeeping)?;
         ensure!(
             !index.quarantined_names.contains(filename),
             "gallery output is quarantined"
@@ -357,11 +370,24 @@ impl GalleryPublicationGate {
         Ok(None)
     }
 
+    /// An owned copy for callers that mutate the index and install it back.
+    /// Read-only callers use [`Self::shared_committed_archive_index_while_locked`].
     pub(crate) fn committed_archive_index_while_locked(
         &self,
         output_dir: &Path,
         bookkeeping: &GalleryBookkeepingGuard,
     ) -> anyhow::Result<CommittedArchiveIndex> {
+        self.shared_committed_archive_index_while_locked(output_dir, bookkeeping)
+            .map(Arc::unwrap_or_clone)
+    }
+
+    /// The committed archive index under an already-held bookkeeping lock,
+    /// shared with the cache rather than deep-cloned.
+    pub(crate) fn shared_committed_archive_index_while_locked(
+        &self,
+        output_dir: &Path,
+        bookkeeping: &GalleryBookkeepingGuard,
+    ) -> anyhow::Result<Arc<CommittedArchiveIndex>> {
         let generation = crate::gallery_authority::read_generation(output_dir, bookkeeping)?;
         let key = bookkeeping.canonical_root();
         if let (Some(generation), Some((cached_generation, index))) = (
@@ -373,7 +399,7 @@ impl GalleryPublicationGate {
                 .map(|cached| (&cached.generation, &cached.index)),
         ) {
             if generation == *cached_generation {
-                return Ok(index.clone());
+                return Ok(Arc::clone(index));
             }
         }
         let loaded = crate::gallery_authority::load_or_initialize(output_dir, bookkeeping, || {
@@ -386,8 +412,9 @@ impl GalleryPublicationGate {
             reactivated = loaded.stats.reactivated,
             "refreshed gallery metadata authority"
         );
-        self.install_committed_archive_index(output_dir, loaded.generation, loaded.index.clone());
-        Ok(loaded.index)
+        let index = Arc::new(loaded.index);
+        self.install_shared_committed_archive_index(output_dir, loaded.generation, index.clone());
+        Ok(index)
     }
 
     /// Resolve one durable job through the in-memory secondary index built
@@ -522,9 +549,10 @@ impl GalleryPublicationGate {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(cached) = current.get_mut(&key) {
-            cached.index.entries.remove(filename);
-            cached.index.quarantined_names.remove(filename);
-            cached.index.retired_names.insert(filename.to_owned());
+            let index = Arc::make_mut(&mut cached.index);
+            index.entries.remove(filename);
+            index.quarantined_names.remove(filename);
+            index.retired_names.insert(filename.to_owned());
             for filenames in cached.filenames_by_job_id.values_mut() {
                 filenames.retain(|candidate| candidate != filename);
             }
@@ -544,7 +572,9 @@ impl GalleryPublicationGate {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(cached) = current.get_mut(&key) {
             if !cached.index.retired_entries.contains_key(filename) {
-                cached.index.retired_names.remove(filename);
+                Arc::make_mut(&mut cached.index)
+                    .retired_names
+                    .remove(filename);
             }
         }
     }
@@ -1883,11 +1913,14 @@ impl GalleryImportTransaction {
                     if crate::gallery_authority::read_generation(&self.output_dir, namespace)?
                         .is_some()
                     {
-                        gate.committed_archive_index_while_locked(&self.output_dir, namespace)?
+                        gate.shared_committed_archive_index_while_locked(
+                            &self.output_dir,
+                            namespace,
+                        )?
                     } else {
                         // Do not initialize a new authority store ahead of the
                         // archive evidence whose checkpoint lifetime it tracks.
-                        load_committed_archive_index_legacy(&self.output_dir)?
+                        Arc::new(load_committed_archive_index_legacy(&self.output_dir)?)
                     };
                 let child = sole_child(&self.manifest);
                 if let Some(existing) = index.entries.get(&child.final_name) {
