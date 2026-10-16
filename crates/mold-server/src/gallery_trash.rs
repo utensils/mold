@@ -389,7 +389,7 @@ pub(crate) fn restore_print_blocking(
     let index = gate
         .committed_archive_index(dir)
         .map_err(|e| internal("gallery archive read failed", format!("{e:#}")))?;
-    enriched_gallery_image(db, Some(&index), dir, name, retention_days)
+    enriched_gallery_image(db, Some(index.as_ref()), dir, name, retention_days)
         .map_err(|e| internal("gallery enrichment failed", format!("{e:#}")))
 }
 

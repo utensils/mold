@@ -837,7 +837,7 @@ pub(crate) fn save_video_to_dir_named(
         generation_time_ms,
         backend: Some(mold_inference::compiled_backend_label()),
     };
-    let index = gallery_gate.committed_archive_index_while_locked(dir, &authority)?;
+    let index = gallery_gate.shared_committed_archive_index_while_locked(dir, &authority)?;
     let (record, identity) = if let Some(existing) = index.get(filename) {
         anyhow::ensure!(
             existing.record().format == format
@@ -963,7 +963,7 @@ pub(crate) fn publish_video_path_to_dir_named(
         generation_time_ms,
         backend: Some(mold_inference::compiled_backend_label()),
     };
-    let index = gallery_gate.committed_archive_index_while_locked(dir, &authority)?;
+    let index = gallery_gate.shared_committed_archive_index_while_locked(dir, &authority)?;
     let record = if let Some(existing) = index.get(filename) {
         anyhow::ensure!(
             existing.record().format == format

@@ -514,6 +514,106 @@ fn is_unique_violation(error: &rusqlite::Error) -> bool {
     )
 }
 
+/// Fold organization rows for `dir_key` (optionally only `filenames`) into
+/// `out`, keyed by filename. One query per table, joined in Rust.
+fn organization_into(
+    conn: &Connection,
+    dir_key: &str,
+    filenames: Option<&[String]>,
+    out: &mut HashMap<String, PrintOrganization>,
+) -> OrgResult<()> {
+    if filenames.is_some_and(<[String]>::is_empty) {
+        return Ok(());
+    }
+    let name_clause = filenames.map_or_else(String::new, |names| {
+        let placeholders = (0..names.len())
+            .map(|index| format!("?{}", index + 2))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(" AND g.filename IN ({placeholders})")
+    });
+    let bound = std::iter::once(&dir_key as &dyn rusqlite::ToSql)
+        .chain(
+            filenames
+                .unwrap_or_default()
+                .iter()
+                .map(|name| name as &dyn rusqlite::ToSql),
+        )
+        .collect::<Vec<_>>();
+    let mut by_id: HashMap<i64, String> = HashMap::new();
+    {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT g.id, g.filename, g.title, g.favorite, g.trashed_at_ms
+             FROM generations g WHERE g.output_dir = ?1{name_clause}"
+        ))?;
+        let rows = stmt.query_map(bound.as_slice(), |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, i64>(3)? != 0,
+                r.get::<_, Option<i64>>(4)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, filename, title, favorite, trashed_at_ms) = row?;
+            by_id.insert(id, filename.clone());
+            out.insert(
+                filename,
+                PrintOrganization {
+                    title,
+                    favorite,
+                    tags: Vec::new(),
+                    collections: Vec::new(),
+                    trashed_at_ms,
+                },
+            );
+        }
+    }
+    {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT gt.generation_id, t.name
+             FROM generation_tags gt
+             JOIN tags t ON t.id = gt.tag_id
+             JOIN generations g ON g.id = gt.generation_id
+             WHERE g.output_dir = ?1{name_clause}"
+        ))?;
+        let rows = stmt.query_map(bound.as_slice(), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (gid, name) = row?;
+            if let Some(org) = by_id.get(&gid).and_then(|f| out.get_mut(f)) {
+                org.tags.push(name);
+            }
+        }
+    }
+    {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT ci.generation_id, ci.collection_id
+             FROM collection_items ci
+             JOIN generations g ON g.id = ci.generation_id
+             WHERE g.output_dir = ?1{name_clause}"
+        ))?;
+        let rows = stmt.query_map(bound.as_slice(), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (gid, cid) = row?;
+            if let Some(org) = by_id.get(&gid).and_then(|f| out.get_mut(f)) {
+                org.collections.push(cid);
+            }
+        }
+    }
+    for filename in by_id.values() {
+        if let Some(org) = out.get_mut(filename) {
+            sort_case_insensitive(&mut org.tags);
+            org.collections.sort();
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // MetadataDb API
 // ---------------------------------------------------------------------------
@@ -528,75 +628,25 @@ impl MetadataDb {
     ) -> OrgResult<HashMap<String, PrintOrganization>> {
         let dir_key = canonical_dir_string(dir);
         self.with_conn_typed(|conn| {
-            let mut by_id: HashMap<i64, String> = HashMap::new();
-            let mut out: HashMap<String, PrintOrganization> = HashMap::new();
-            {
-                let mut stmt = conn.prepare(
-                    "SELECT id, filename, title, favorite, trashed_at_ms
-                     FROM generations WHERE output_dir = ?1",
-                )?;
-                let rows = stmt.query_map(params![dir_key], |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, Option<String>>(2)?,
-                        r.get::<_, i64>(3)? != 0,
-                        r.get::<_, Option<i64>>(4)?,
-                    ))
-                })?;
-                for row in rows {
-                    let (id, filename, title, favorite, trashed_at_ms) = row?;
-                    by_id.insert(id, filename.clone());
-                    out.insert(
-                        filename,
-                        PrintOrganization {
-                            title,
-                            favorite,
-                            tags: Vec::new(),
-                            collections: Vec::new(),
-                            trashed_at_ms,
-                        },
-                    );
-                }
-            }
-            {
-                let mut stmt = conn.prepare(
-                    "SELECT gt.generation_id, t.name
-                     FROM generation_tags gt
-                     JOIN tags t ON t.id = gt.tag_id
-                     JOIN generations g ON g.id = gt.generation_id
-                     WHERE g.output_dir = ?1",
-                )?;
-                let rows = stmt.query_map(params![dir_key], |r| {
-                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-                })?;
-                for row in rows {
-                    let (gid, name) = row?;
-                    if let Some(org) = by_id.get(&gid).and_then(|f| out.get_mut(f)) {
-                        org.tags.push(name);
-                    }
-                }
-            }
-            {
-                let mut stmt = conn.prepare(
-                    "SELECT ci.generation_id, ci.collection_id
-                     FROM collection_items ci
-                     JOIN generations g ON g.id = ci.generation_id
-                     WHERE g.output_dir = ?1",
-                )?;
-                let rows = stmt.query_map(params![dir_key], |r| {
-                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-                })?;
-                for row in rows {
-                    let (gid, cid) = row?;
-                    if let Some(org) = by_id.get(&gid).and_then(|f| out.get_mut(f)) {
-                        org.collections.push(cid);
-                    }
-                }
-            }
-            for org in out.values_mut() {
-                sort_case_insensitive(&mut org.tags);
-                org.collections.sort();
+            let mut out = HashMap::new();
+            organization_into(conn, &dir_key, None, &mut out)?;
+            Ok(out)
+        })
+    }
+
+    /// [`Self::organization_for_dir`] for exactly `filenames`: the same
+    /// three tables, scoped by `filename IN (...)` so a single-print read
+    /// never walks the directory. Names without a row are absent.
+    pub fn organization_for_filenames(
+        &self,
+        dir: &Path,
+        filenames: &[String],
+    ) -> OrgResult<HashMap<String, PrintOrganization>> {
+        let dir_key = canonical_dir_string(dir);
+        self.with_conn_typed(|conn| {
+            let mut out = HashMap::new();
+            for chunk in filenames.chunks(crate::db::FILENAME_IN_CHUNK) {
+                organization_into(conn, &dir_key, Some(chunk), &mut out)?;
             }
             Ok(out)
         })
@@ -1562,6 +1612,33 @@ mod tests {
             .organization_for_dir(Path::new("/tmp/elsewhere"))
             .unwrap();
         assert_eq!(elsewhere["a.png"], PrintOrganization::default());
+    }
+
+    #[test]
+    fn organization_for_filenames_matches_the_dir_map_for_the_named_prints() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        seed(&db, &["a.png", "b.png", "c.png"]);
+        db.set_title(dir(), "a.png", Some("Titled")).unwrap();
+        db.set_favorite(dir(), "a.png", true).unwrap();
+        db.add_tags(dir(), "a.png", &s(&["zeta", "Alpha"])).unwrap();
+        db.add_tags(dir(), "c.png", &s(&["other"])).unwrap();
+        let c = db.create_collection("Col", None).unwrap();
+        db.collection_add(&c.id, dir(), &s(&["a.png", "c.png"]))
+            .unwrap();
+        assert!(db.mark_trashed(dir(), "b.png", 99).unwrap());
+
+        let full = db.organization_for_dir(dir()).unwrap();
+        let some = db
+            .organization_for_filenames(dir(), &s(&["a.png", "b.png", "missing.png"]))
+            .unwrap();
+        assert_eq!(some.len(), 2, "only the named prints that have rows");
+        assert_eq!(some["a.png"], full["a.png"]);
+        assert_eq!(some["b.png"], full["b.png"]);
+        assert!(!some.contains_key("c.png"));
+        assert!(db
+            .organization_for_filenames(dir(), &[])
+            .unwrap()
+            .is_empty());
     }
 
     // ---- bulk -------------------------------------------------------------

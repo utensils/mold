@@ -10907,50 +10907,21 @@ async fn list_gallery(
         let db_arc = state.metadata_db.clone();
         let dir = output_dir.clone();
         let gallery_archive = state.gallery_publication_gate.clone();
+        let only_owned = only.map(str::to_owned);
         let listed = tokio::task::spawn_blocking(move || {
             let Some(db) = db_arc.as_ref().as_ref() else {
                 return Ok::<_, anyhow::Error>(None);
             };
-            let organization = db
-                .organization_for_dir(&dir)
-                .map_err(|e| anyhow::anyhow!("gallery organization query failed: {e}"))?;
-            match view {
-                GalleryView::Trash => {
-                    let rows = db.list_trashed(Some(&dir))?;
-                    let mut images = rows
-                        .iter()
-                        .map(|row| {
-                            let mut image = row.to_gallery_image();
-                            crate::gallery_organization::apply_organization(
-                                &mut image,
-                                organization.get(&row.filename),
-                                retention_days,
-                            );
-                            image
-                        })
-                        .collect::<Vec<_>>();
-                    crate::generation_assets::attach_to_images(db, &dir, &rows, &mut images);
-                    images.sort_by_key(|image| {
-                        std::cmp::Reverse((image.trashed_at.unwrap_or(0), image.timestamp))
-                    });
-                    Ok(Some(images))
-                }
-                GalleryView::Library => {
-                    let rows = db.list(Some(&dir))?;
-                    if rows.is_empty() {
-                        return Ok(None);
-                    }
-                    let archive = gallery_archive.committed_archive_index(&dir)?;
-                    let images = archive.overlay_db_gallery(&rows);
-                    let mut images = crate::gallery_organization::enrich_library_listing(
-                        images,
-                        &organization,
-                        retention_days,
-                    );
-                    crate::generation_assets::attach_to_images(db, &dir, &rows, &mut images);
-                    Ok(Some(images))
-                }
-            }
+            // `?filename=` reads only that print's rows; the full listing is
+            // built only when the caller asked for the whole directory.
+            crate::gallery_rows::listing_images(
+                db,
+                || gallery_archive.committed_archive_index(&dir),
+                &dir,
+                view,
+                retention_days,
+                only_owned.as_deref(),
+            )
         })
         .await
         .map_err(|e| ApiError::internal(format!("gallery DB query failed: {e}")))?

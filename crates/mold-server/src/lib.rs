@@ -45,6 +45,7 @@ mod durable_queue_feeder;
 pub mod events;
 pub mod execution_plan;
 mod gallery_organization;
+mod gallery_rows;
 mod gallery_trash;
 pub mod generation_cancel;
 pub mod gpu_pool;

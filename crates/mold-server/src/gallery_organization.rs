@@ -286,7 +286,7 @@ pub(crate) async fn patch_gallery_image(
         let index = archive
             .committed_archive_index(&dir)
             .map_err(|e| ApiError::internal(format!("gallery archive read failed: {e:#}")))?;
-        enriched_gallery_image(db, Some(&index), &dir, &name, retention)
+        enriched_gallery_image(db, Some(index.as_ref()), &dir, &name, retention)
             .map_err(|e| ApiError::internal(format!("gallery enrichment failed: {e:#}")))?
             .ok_or_else(|| org_not_found("gallery print not found"))
     })

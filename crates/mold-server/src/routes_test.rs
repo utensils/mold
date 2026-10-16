@@ -22757,6 +22757,84 @@ mod tests {
     /// keeps its identity through trash and restore: the archive retires the
     /// exact entry on trash, listings never resurrect it, and restore re-homes
     /// the same provenance (non-synthetic metadata) rather than re-scanning.
+    /// A cache hit hands out the cached index itself, never a deep copy of
+    /// an index that grows with the library — and a single-print read over
+    /// HTTP answers exactly the listing's element for that print.
+    #[tokio::test]
+    async fn committed_archive_reads_share_the_cache_and_single_reads_match_the_listing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _db) = organized_state(dir.path());
+        let gate = state.gallery_publication_gate.clone();
+        let app = app_with_state(state);
+        let bytes = minimal_png();
+        let metadata = output_metadata("archived provenance");
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::put("/api/gallery/import/print.png")
+                    .header("content-type", "application/vnd.mold.gallery-import")
+                    .body(Body::from(gallery_import_body(Some(&metadata), &bytes)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let first = gate.committed_archive_index(dir.path()).unwrap();
+        let second = gate.committed_archive_index(dir.path()).unwrap();
+        assert!(first.get("print.png").is_some());
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &second),
+            "a cache hit shares the index rather than cloning it"
+        );
+        let authority =
+            crate::batch_transaction::acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let locked = gate
+            .shared_committed_archive_index_while_locked(authority.canonical_root(), &authority)
+            .unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &locked),
+            "the locked read shares it too"
+        );
+        drop(authority);
+        let entry = gate
+            .validated_transfer_entry(dir.path(), "print.png")
+            .unwrap()
+            .expect("the archived print offers a transfer entry");
+        assert_eq!(entry.record.filename, "print.png");
+
+        let listing = json_body(
+            app.clone()
+                .oneshot(empty_request("GET", "/api/gallery"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let single = json_body(
+            app.clone()
+                .oneshot(empty_request("GET", "/api/gallery?filename=print.png"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let expected = listing
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|image| image["filename"] == "print.png")
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(expected.len(), 1);
+        assert_eq!(single, serde_json::Value::Array(expected));
+        let absent = json_body(
+            app.oneshot(empty_request("GET", "/api/gallery?filename=absent.png"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(absent, serde_json::json!([]));
+    }
+
     #[tokio::test]
     async fn gallery_trash_and_restore_preserve_committed_archive_identity() {
         let dir = tempfile::tempdir().unwrap();

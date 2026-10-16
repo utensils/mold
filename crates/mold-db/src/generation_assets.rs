@@ -148,40 +148,94 @@ pub fn list_for_generation(
     db: &MetadataDb,
     generation_id: i64,
 ) -> Result<Vec<GenerationAssetRecord>> {
+    Ok(list_for_generations(db, &[generation_id])?
+        .remove(&generation_id)
+        .unwrap_or_default())
+}
+
+/// Recorded scan versions for `generation_ids`, keyed by id. An id that was
+/// never scanned is absent.
+pub fn scan_versions_for(
+    db: &MetadataDb,
+    generation_ids: &[i64],
+) -> Result<std::collections::HashMap<i64, String>> {
     db.with_conn(|conn| {
-        let mut statement = conn.prepare(
-            "SELECT asset_id, role, display_name, media_type, size_bytes,
-                    sha256, width, height, storage_kind, locator
-               FROM generation_assets
-              WHERE generation_id = ?1
-              ORDER BY role COLLATE NOCASE, asset_id",
-        )?;
-        let rows = statement.query_map(params![generation_id], |row| {
-            let kind: String = row.get(8)?;
-            let locator: String = row.get(9)?;
-            Ok(GenerationAssetRecord {
-                asset: mold_core::GenerationAsset {
-                    asset_id: row.get(0)?,
-                    role: row.get(1)?,
-                    display_name: row.get(2)?,
-                    media_type: row.get(3)?,
-                    size_bytes: row.get::<_, i64>(4)?.try_into().map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            4,
-                            rusqlite::types::Type::Integer,
-                            Box::new(error),
-                        )
-                    })?,
-                    sha256: row.get(5)?,
-                    width: row.get::<_, Option<i64>>(6)?.map(|value| value as u32),
-                    height: row.get::<_, Option<i64>>(7)?.map(|value| value as u32),
-                },
-                storage: AssetStorage::from_columns(&kind, locator)?,
-            })
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        let mut out = std::collections::HashMap::new();
+        for chunk in generation_ids.chunks(crate::db::FILENAME_IN_CHUNK) {
+            let sql = format!(
+                "SELECT generation_id, media_version FROM generation_asset_scans
+                  WHERE generation_id IN ({})",
+                id_placeholders(chunk.len())
+            );
+            let mut statement = conn.prepare(&sql)?;
+            let rows = statement.query_map(rusqlite::params_from_iter(chunk), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (id, version) = row?;
+                out.insert(id, version);
+            }
+        }
+        Ok(out)
     })
+}
+
+/// Asset inventories for `generation_ids`, keyed by id, each in the order
+/// [`list_for_generation`] returns. An id with no assets is absent.
+pub fn list_for_generations(
+    db: &MetadataDb,
+    generation_ids: &[i64],
+) -> Result<std::collections::HashMap<i64, Vec<GenerationAssetRecord>>> {
+    db.with_conn(|conn| {
+        let mut out: std::collections::HashMap<i64, Vec<GenerationAssetRecord>> =
+            std::collections::HashMap::new();
+        for chunk in generation_ids.chunks(crate::db::FILENAME_IN_CHUNK) {
+            let sql = format!(
+                "SELECT generation_id, asset_id, role, display_name, media_type, size_bytes,
+                        sha256, width, height, storage_kind, locator
+                   FROM generation_assets
+                  WHERE generation_id IN ({})
+                  ORDER BY generation_id, role COLLATE NOCASE, asset_id",
+                id_placeholders(chunk.len())
+            );
+            let mut statement = conn.prepare(&sql)?;
+            let rows = statement.query_map(rusqlite::params_from_iter(chunk), |row| {
+                let kind: String = row.get(9)?;
+                let locator: String = row.get(10)?;
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    GenerationAssetRecord {
+                        asset: mold_core::GenerationAsset {
+                            asset_id: row.get(1)?,
+                            role: row.get(2)?,
+                            display_name: row.get(3)?,
+                            media_type: row.get(4)?,
+                            size_bytes: row.get::<_, i64>(5)?.try_into().map_err(|error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    5,
+                                    rusqlite::types::Type::Integer,
+                                    Box::new(error),
+                                )
+                            })?,
+                            sha256: row.get(6)?,
+                            width: row.get::<_, Option<i64>>(7)?.map(|value| value as u32),
+                            height: row.get::<_, Option<i64>>(8)?.map(|value| value as u32),
+                        },
+                        storage: AssetStorage::from_columns(&kind, locator)?,
+                    },
+                ))
+            })?;
+            for row in rows {
+                let (id, record) = row?;
+                out.entry(id).or_default().push(record);
+            }
+        }
+        Ok(out)
+    })
+}
+
+fn id_placeholders(count: usize) -> String {
+    vec!["?"; count].join(", ")
 }
 
 #[cfg(test)]
@@ -240,6 +294,14 @@ mod tests {
                 .map(|r| r.asset.asset_id.as_str())
                 .collect::<Vec<_>>(),
             ["albedo", "mr"]
+        );
+
+        let batched = list_for_generations(&db, &[id, id + 1000]).unwrap();
+        assert_eq!(batched.len(), 1, "an id with no assets is absent");
+        assert_eq!(batched[&id], listed);
+        assert_eq!(
+            scan_versions_for(&db, &[id, id + 1000]).unwrap(),
+            std::collections::HashMap::from([(id, "1:123".to_string())])
         );
 
         replace_for_generation(&db, id, "2:123", &[asset("albedo", "base_color")]).unwrap();
