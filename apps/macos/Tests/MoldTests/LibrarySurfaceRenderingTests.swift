@@ -9,10 +9,11 @@ import Testing
 @MainActor struct LibrarySurfaceRenderingTests {
     @Test(arguments: ["Preparing 2,348 prints…", nil] as [String?])
     func activeSyncUsesOneStatusRow(progress: String?) throws {
-        let session = LibrarySyncSession(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        defaults.set(true, forKey: LibrarySyncSession.keepInSyncKey)
+        let session = LibrarySyncSession(defaults: defaults)
         let library = LibraryStore(hosts: HostStore(hosts: []), syncSession: session)
-        session.start(in: library)
-        defer { session.stop(in: library) }
+        #expect(session.keepInSync)
         library.localSaveRunning = true
         library.localSaveProgress = progress
         let active = ImageRenderer(content: LibraryActivityStatus().environment(library))
@@ -25,7 +26,7 @@ import Testing
         let baseline = ImageRenderer(content: LibraryActivityStatus().environment(single))
         baseline.proposedSize = active.proposedSize
         #expect(activeImage.height == (try #require(baseline.cgImage)).height,
-                "Recurring sync must not add a second banner during a transfer")
+                "Keep in Sync must not add a second banner during a transfer")
         let bitmap = NSBitmapImageRep(cgImage: activeImage)
         try #require(bitmap.representation(using: .png, properties: [:]))
             .write(to: URL(fileURLWithPath: "/tmp/mac-library-sync-active.png"))
@@ -57,11 +58,10 @@ import Testing
         let emptyHosts = HostStore(hosts: [destination]) { _ in backend }
         emptyHosts.reachability[destination.id] = .up(FakeFixtures.serverStatus())
         let emptyLibrary = LibraryStore(hosts: emptyHosts, syncSession: session)
-        session.start(in: emptyLibrary)
-        await settle { session.nextRun != nil }
-        defer { session.stop(in: emptyLibrary) }
+        session.syncNow(in: emptyLibrary)
+        await settle { emptyLibrary.localSaveTask == nil && !emptyLibrary.localSaveRunning }
         emptyLibrary.localSaveReport = "Sync complete. All prints are already saved on This Mac."
-        try await capture(LibraryActivityStatus().environment(emptyLibrary), name: "mac-library-sync-complete-countdown", height: 180)
+        try await capture(LibraryActivityStatus().environment(emptyLibrary), name: "mac-library-sync-complete", height: 180)
         try await capture(LibrarySyncReportSheet().environment(emptyLibrary), name: "mac-library-sync-clean-details", height: 180)
         emptyLibrary.localSaveFailures = ["Legacy fixture.mov: Original input is unavailable on the source machine."]
         emptyLibrary.localSaveIssueKeys = ["fixture": "fixture-unchanged-issue"]
@@ -74,9 +74,7 @@ import Testing
         emptyLibrary.syncIssueAcknowledgment = true
         try await capture(LibraryActivityStatus().environment(emptyLibrary), name: "mac-library-sync-acknowledged-banner", height: 180)
         #expect(!emptyLibrary.localSaveAlertPresented, "A successful sync does not demand acknowledgment")
-        #expect(session.isEnabled)
-        session.stop(in: emptyLibrary)
-        #expect(!session.isEnabled)
+        #expect(!session.keepInSync, "One Sync press never turns on automatic sync")
     }
 
     private func capture<V: View>(_ content: V, name: String, height: CGFloat) async throws {

@@ -16,10 +16,7 @@ struct LibraryActivityStatus: View {
         return VStack(spacing: 0) {
             if let progress = status.localSaveProgress {
                 bulkStatusRow(progress) {
-                    Button("Stop Sync") {
-                        library.syncSession.stop(in: library)
-                        library.localSaveStopRequested = true
-                    }
+                    Button("Stop Sync") { library.syncSession.stop(in: library) }
                         .disabled(status.localSaveStopRequested)
                 }
             }
@@ -30,18 +27,6 @@ struct LibraryActivityStatus: View {
                     Text(status.syncReport).lineLimit(3)
                     Spacer()
                     Button("Details") { library.localSaveAlertPresented = true }
-                }.padding(12).background(.bar)
-            }
-            if status.syncEnabled, status.localSaveProgress == nil {
-                HStack {
-                    if let next = status.syncNextRun {
-                        TimelineView(.periodic(from: .now, by: 1)) { context in
-                            let minutes = max(0, Int(ceil(next.timeIntervalSince(context.date) / 60)))
-                            Text("Next sync in \(minutes) \(minutes == 1 ? "minute" : "minutes")")
-                        }
-                    } else { Text("Sync every 5 minutes during this session") }
-                    Spacer()
-                    Button("Stop Sync") { library.syncSession.stop(in: library) }
                 }.padding(12).background(.bar)
             }
             if let progress = status.bulkProgress {
@@ -90,8 +75,6 @@ private struct LibraryActivitySnapshot {
     let localSaveStopRequested: Bool
     let syncReport: String
     let syncHasIssues: Bool
-    let syncEnabled: Bool
-    let syncNextRun: Date?
     let bulkProgress: String?
     let bulkEmptying: Bool
     let bulkStopRequested: Bool
@@ -101,7 +84,7 @@ private struct LibraryActivitySnapshot {
     let bulkRunning: Bool
 
     var isEmpty: Bool {
-        localSaveProgress == nil && syncReport.isEmpty && !syncEnabled && bulkProgress == nil && mutationProgress == nil
+        localSaveProgress == nil && syncReport.isEmpty && bulkProgress == nil && mutationProgress == nil
             && activities.isEmpty && (bulkResult == nil || bulkRunning)
     }
 
@@ -110,8 +93,6 @@ private struct LibraryActivitySnapshot {
         localSaveStopRequested = library.localSaveStopRequested
         syncReport = library.syncBannerReport
         syncHasIssues = library.syncHasUnacknowledgedIssues
-        syncEnabled = library.syncSession.isEnabled
-        syncNextRun = library.syncSession.nextRun
         bulkProgress = library.bulkProgress
         bulkEmptying = library.bulkEmptying
         bulkStopRequested = library.bulkStopRequested

@@ -31,13 +31,20 @@ extension LibraryPane {
             .help("Choose the order of prints in this shelf")
         }
         ToolbarItem {
-            Button {
-                library.syncSession.start(in: library)
+            Menu {
+                Toggle("Keep This Mac in Sync", isOn: Binding(
+                    get: { library.syncSession.keepInSync },
+                    set: { library.syncSession.setKeepInSync($0, in: library) }))
+                    .help("Copy new and changed remote prints to this Mac as machines announce them.")
             } label: {
-                Label(library.syncSession.isEnabled ? "Sync Enabled" : "Sync All to This Mac", systemImage: "arrow.down.to.line.compact")
+                Label(library.syncSession.keepInSync ? "Keeping This Mac in Sync" : "Sync All to This Mac",
+                      systemImage: library.syncSession.keepInSync
+                          ? "arrow.triangle.2.circlepath" : "arrow.down.to.line.compact")
+            } primaryAction: {
+                library.syncSession.syncNow(in: library)
             }
-            .help("Copy remote media and collections now and every five minutes during this app session. Removed local copies stay removed.")
-            .disabled(library.syncSession.isEnabled || library.localSaveRunning || library.localSaveTask != nil
+            .help("Copy remote media and collections to this Mac now. Removed local copies stay removed. Use the menu to keep this Mac in sync automatically.")
+            .disabled(library.localSaveRunning || library.localSaveTask != nil
                 || !hosts.hosts.contains { $0.id != MoldEngine.localHostID })
         }
         ToolbarItem {

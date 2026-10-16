@@ -16,9 +16,9 @@ struct LibrarySettings: View {
 
     private var machine: MoldHost? { hosts.machine(selected: selectedMachine) }
 
-    private var intervalBinding: Binding<Int> {
-        Binding(get: { library.syncSession.intervalMinutes },
-                set: { library.syncSession.intervalMinutes = $0 })
+    private var keepInSyncBinding: Binding<Bool> {
+        Binding(get: { library.syncSession.keepInSync },
+                set: { library.syncSession.setKeepInSync($0, in: library) })
     }
 
     var body: some View {
@@ -28,17 +28,8 @@ struct LibrarySettings: View {
                     .help("Group chronological views by day. Turn off for one continuous grid.")
             }
             Section("Library Sync on This Mac") {
-                LabeledContent("Check every") {
-                    HStack {
-                        TextField("Minutes", value: intervalBinding, format: .number)
-                            .textFieldStyle(.roundedBorder).frame(width: 80)
-                            .accessibilityLabel("Library sync interval in minutes")
-                        Text("minutes")
-                        Stepper("Minutes", value: intervalBinding, in: 1...1440)
-                            .labelsHidden().fixedSize()
-                    }
-                }
-                Text("Sync starts when enabled in Library and repeats after each run finishes.")
+                Toggle("Keep this Mac in sync", isOn: keepInSyncBinding)
+                Text("Off: Library ▸ Sync All to This Mac copies remote prints once, when you press it. On: new and changed prints are copied as soon as each machine announces them.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             SettingsPaneBody(hosts: hosts, store: store, machine: machine) { machine in

@@ -832,10 +832,12 @@ Collection visibility is shared by slug across machines, including existing
 replicas; pending hide/show edits retry when their original machines return.
 Media actions on a machine-filtered view affect only its displayed copies.
 
-**Sync All to This Mac** starts an immediate copy and repeats at the interval selected in Settings (five minutes by default)
-for this app session. The Library status shows completion, issues and the next
-run. During a transfer, one progress banner replaces the recurring-sync countdown,
-with a single **Stop Sync** control. **Stop Sync** ends repeats and lets active transfers settle. Successful runs
+**Sync All to This Mac** copies once, when you press it. Its menu's **Keep This Mac in Sync**
+(also in Settings ▸ Library, off by default, remembered between launches) copies new and
+changed prints as soon as each machine announces them, with one catch-up when a machine
+connects; there is no timer. The Library status shows completion and issues. During a
+transfer, one progress banner offers a single **Stop Sync** control, which ends the run and
+any follow-up queued behind it and lets active transfers settle. Quitting stops a running sync. Successful runs
 need no confirmation. **Details** keeps the full report available. **Done**, Return, and Escape dismiss
 the report. **Never show me this again for these sources.** acknowledges unchanged
 source issues, including legacy prints with unavailable original inputs. These notices
@@ -874,7 +876,7 @@ Library New badges and unread counts are saved on each client independently. Med
 
 Queue rows keep a stable height as previews and progress arrive, preserving the scroll position while browsing. Preview reads share a bounded cache across row reuse.
 
-Library Settings accepts a sync interval from one minute to one day. Interrupted syncs remember acknowledged outputs before retained-input and organization work; retries repair the remaining work without copying the output again. Updated hosts batch verification of unchanged copies; older hosts preserve the full retained-input checks. Progress counts checked, copied, already-local and failed prints separately.
+Interrupted syncs remember acknowledged outputs before retained-input and organization work; retries repair the remaining work without copying the output again. Updated hosts batch verification of unchanged copies; older hosts preserve the full retained-input checks. Progress counts checked, copied, already-local and failed prints separately.
 
 ### Move queued work to another machine
 

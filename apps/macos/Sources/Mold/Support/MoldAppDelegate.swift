@@ -19,6 +19,9 @@ final class MoldAppDelegate: NSObject, NSApplicationDelegate {
     /// the app being active is an APPLICATION fact, and a window closing must
     /// not take the fleet's only unprompted reconciliation with it.
     var heartbeat: HostHeartbeat?
+    /// Library Sync must stop transferring before the engine drains: an
+    /// upload still in flight holds the drain open (or races it).
+    var library: LibraryStore?
     /// The "Finishing…" panel and the one-time reply to macOS.
     let quit = EngineQuit()
     /// Retains cold-launch clicks until the SwiftUI scene can apply them.
@@ -67,6 +70,7 @@ final class MoldAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         remotePairing?.shutdown()
+        if let library { library.syncSession.cancelForQuit(in: library) }
         // The caches are disposable and local, so they go first and without
         // ceremony: whatever they hold can be fetched again. BOTH of them --
         // the thumbnails are a second on-disk copy of somebody's library, and

@@ -195,10 +195,11 @@ inventory. **All Machines** keeps the merged view available. Hidden collection
 visibility is shared across same-slug replicas, and pending hide/show changes
 retry when their original machines reconnect.
 
-**Sync All to This Mac** copies now and repeats at the interval selected in Settings (five minutes by default) for this app
-session. Completion appears in the Library status; the countdown and **Stop Sync**
-make the next run explicit. During transfers, a single progress banner and
-**Stop Sync** button replace the countdown. **Done**, Return, and Escape close Sync Details;
+**Sync All to This Mac** copies once, when you press it. Turn on **Keep This Mac in Sync**
+(the button's menu, or Settings ▸ Library; off by default) to copy new and changed prints as
+soon as each machine announces them, plus one catch-up when a machine connects. There is
+no timer. Completion appears in the Library status. During transfers, a single progress
+banner offers **Stop Sync**; quitting Mold stops a running sync. **Done**, Return, and Escape close Sync Details;
 reports without issues or source notices omit acknowledgment controls. **Details** offers
 **Never show me this again for these sources.** for unchanged source issues, including
 legacy prints whose original inputs are unavailable. Acknowledged notices disappear
@@ -214,9 +215,9 @@ Queue row buttons, contextual menus, the Queue menu and Job Details share the sa
 
 Also Running offers Cancel for reported long-clip chains when the machine permits it, and Resume for paused chains. Clip-upscale controls also check that the machine is connected and the displayed job is still current before acting. Durable authored sequences remain managed in the machine's web app.
 
-Library Settings remembers the sync interval between launches; enabling Sync remains specific to the current app session. Changing the interval restarts the pending countdown. Sync reports checking existing copies separately from copying outputs. Updated hosts provide batched retained-input evidence so unchanged verified copies can skip individual transfer probes; older hosts continue checking retained inputs so late repairs are not missed.
+Library Settings remembers **Keep This Mac in Sync** between launches. Sync reports checking existing copies separately from copying outputs. Updated hosts provide batched retained-input evidence so unchanged verified copies can skip individual transfer probes; older hosts continue checking retained inputs so late repairs are not missed.
 
-Queue rows keep their height while previews and render progress load, preserving the scroll position. Interrupted Library syncs resume from acknowledged output copies and repair remaining retained-input or organization work. The interval accepts one minute to one day.
+Queue rows keep their height while previews and render progress load, preserving the scroll position. Interrupted Library syncs resume from acknowledged output copies and repair remaining retained-input or organization work.
 
 Queue rows keep a neutral image placeholder when a job has no source image, matching
 the native iOS queue. Successfully restored local input files remain usable after

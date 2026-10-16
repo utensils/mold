@@ -1,80 +1,89 @@
 import Foundation
 
-/// Copying is opt-in for the current application session. The timer belongs to
-/// the store, so changing destinations does not silently stop it.
+/// Library Sync runs when asked. "Sync All to This Mac" is one run; the
+/// opt-in "Keep This Mac in Sync" mode mirrors again whenever a remote
+/// machine announces a gallery change (and once when it is turned on or a
+/// machine reconnects). There is no timer: an idle fleet costs nothing.
 @MainActor
 @Observable
 final class LibrarySyncSession {
-    private(set) var isEnabled = false
-    private(set) var nextRun: Date?
-    private var task: Task<Void, Never>?
-    private var generation = UUID()
+    /// The persisted "Keep This Mac in Sync" choice. Off by default.
+    private(set) var keepInSync: Bool
+    /// A change arrived while a run was in flight; one more run follows it.
+    private(set) var rerunPending = false
+    private var debounceTask: Task<Void, Never>?
     private let defaults: UserDefaults
-    private var interval: TimeInterval
-    private var waitTask: Task<Void, Never>?
-    private static let intervalKey = "library.syncIntervalMinutes.v1"
-    var intervalMinutes: Int {
-        get { Int((interval / 60).rounded()) }
-        set {
-            interval = Double(min(1440, max(1, newValue))) * 60
-            defaults.set(intervalMinutes, forKey: Self.intervalKey)
-            if nextRun != nil {
-                nextRun = Date().addingTimeInterval(interval)
-                waitTask?.cancel()
-            }
-        }
-    }
+    private let debounce: Duration
+    static let keepInSyncKey = "library.keepInSync.v1"
     private var acknowledged: Set<String>
     private static let issueKey = "library.acknowledgedSyncIssues.v1"
 
-    init(defaults: UserDefaults = AppStorageSuite.defaults, interval: TimeInterval? = nil) {
+    init(defaults: UserDefaults = AppStorageSuite.defaults, debounce: Duration = .seconds(2)) {
         self.defaults = defaults
-        let persisted = defaults.object(forKey: Self.intervalKey) as? Int ?? 5
-        self.interval = interval ?? Double(min(1440, max(1, persisted))) * 60
+        self.debounce = debounce
+        keepInSync = defaults.bool(forKey: Self.keepInSyncKey)
         // Older releases persisted multiple source hashes as one colon-joined
         // token. Expand those receipts without forgetting acknowledged sources.
         acknowledged = Set((defaults.stringArray(forKey: Self.issueKey) ?? [])
             .flatMap { $0.split(separator: ":").map(String.init) })
     }
 
-    func start(in library: LibraryStore) {
-        guard !isEnabled, library.localSaveTask == nil, !library.localSaveRunning else { return }
-        isEnabled = true
-        generation = UUID()
-        let current = generation
-        task = Task { [weak self, weak library] in
-            while !Task.isCancelled, self?.isEnabled == true, self?.generation == current {
-                // A selected Save can be running when the timer wakes. Wait
-                // for the following cycle rather than overlap transfer runs.
-                if library?.localSaveRunning == false, library?.localSaveTask == nil {
-                    await library?.syncAllLocally()
-                }
-                guard let interval = self?.interval, self?.isEnabled == true, self?.generation == current else { break }
-                self?.nextRun = Date().addingTimeInterval(interval)
-                repeat {
-                    guard let self, let deadline = self.nextRun else { break }
-                    let wait = Task<Void, Never> { do { try await Task.sleep(for: .seconds(max(0, deadline.timeIntervalSinceNow))) } catch {} }
-                    self.waitTask = wait
-                    await wait.value
-                    guard self.generation == current else { return }
-                    self.waitTask = nil
-                } while !Task.isCancelled && self?.isEnabled == true && (self?.nextRun?.timeIntervalSinceNow ?? 0) > 0
-                guard self?.generation == current else { return }
-                self?.nextRun = nil
-            }
-            if self?.generation == current {
-                self?.nextRun = nil
-                self?.task = nil
+    /// One run now. A run already in flight is never overlapped.
+    func syncNow(in library: LibraryStore) {
+        guard library.localSaveTask == nil, !library.localSaveRunning else { return }
+        library.localSaveTask = Task { [weak self, weak library] in
+            await library?.syncAllLocally()
+            guard let self, let library else { return }
+            if self.rerunPending, self.keepInSync {
+                self.rerunPending = false
+                self.syncNow(in: library)
             }
         }
     }
 
+    func setKeepInSync(_ enabled: Bool, in library: LibraryStore) {
+        keepInSync = enabled
+        defaults.set(enabled, forKey: Self.keepInSyncKey)
+        if enabled { syncNow(in: library) } else {
+            debounceTask?.cancel()
+            debounceTask = nil
+            rerunPending = false
+        }
+    }
+
+    /// A remote machine announced a gallery change (or reconnected). Bursts
+    /// coalesce into one run after `debounce`; a change landing mid-run queues
+    /// exactly one follow-up run.
+    func noteRemoteChange(in library: LibraryStore) {
+        guard keepInSync else { return }
+        debounceTask?.cancel()
+        debounceTask = Task { [weak self, weak library, debounce] in
+            do { try await Task.sleep(for: debounce) } catch { return }
+            guard let self, let library, self.keepInSync else { return }
+            self.debounceTask = nil
+            if library.localSaveTask != nil || library.localSaveRunning {
+                self.rerunPending = true
+            } else {
+                self.syncNow(in: library)
+            }
+        }
+    }
+
+    /// Stops the current run and anything queued behind it. "Keep This Mac in
+    /// Sync" stays as chosen; the next remote change starts a fresh run.
     func stop(in library: LibraryStore) {
-        isEnabled = false
-        nextRun = nil
-        waitTask?.cancel()
-        if library.localSaveRunning { library.localSaveStopRequested = true }
-        else { task?.cancel(); task = nil }
+        debounceTask?.cancel()
+        debounceTask = nil
+        rerunPending = false
+        if library.localSaveRunning || library.localSaveTask != nil {
+            library.localSaveStopRequested = true
+        }
+    }
+
+    /// Quit: nothing may keep transferring while the engine drains.
+    func cancelForQuit(in library: LibraryStore) {
+        stop(in: library)
+        library.localSaveTask?.cancel()
     }
 
     func hasNewIssues(_ keys: [String]) -> Bool {

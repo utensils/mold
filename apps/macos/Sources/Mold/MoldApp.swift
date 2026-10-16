@@ -62,6 +62,7 @@ struct MoldApp: App {
         delegate.materializer = stores.materializer
         delegate.thumbnails = stores.thumbnails
         delegate.landedPrints = stores.landedPrints
+        delegate.library = stores.library
         // Library's persisted unread ledger owns the Dock count. LandedPrints
         // still delivers notifications, but must not overwrite that count.
         // `applicationDidBecomeActive` has already fired by the time this

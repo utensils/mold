@@ -24,7 +24,7 @@ host identity or grants. Produce a Regular QR only after the listener reports it
 bound direct origin. Mode changes require a new pairing or a distinct Regular credential;
 never prefill or probe with the former Secure key. Preserve one physical machine record.
 
-Active Library sync progress replaces the recurring-session countdown banner.
+Active Library sync progress uses one status banner; there is no countdown.
 Expose one Stop Sync control during transfers, including their finishing phase.
 
 Boundary-frame fit controls remain available for last-only inputs. Fit active
@@ -103,8 +103,11 @@ partial/offline writes, fences superseded edits and routes, and repairs mixed
 hidden replicas; protect logical hidden media before pruning copies for display.
 A fresh read must confirm a visibility write before retiring its pending intent.
 
-Library Sync is opt-in for the current app session: immediate run, configurable
-non-overlapping repeats (app-local Settings, 1–1440 minutes, default five), visible next-run/completion status and Stop. Successful
+Library Sync runs once per press. Repeating is the persisted, off-by-default
+"Keep This Mac in Sync" toggle (toolbar menu + Settings ▸ Library): remote
+`.gallery`, `.resyncRequired` and `.authority` frames (GalleryLive) debounce into one
+non-overlapping run, and a change mid-run queues exactly one follow-up. No timer.
+Stop drops the queued follow-up; quit cancels the run before the engine drains. Successful
 runs never require a completion sheet. Repeat issue acknowledgment is bound to
 origin route/instance, output version/recipe and exact error, never authentication
 or connectivity failures; preserve retries and inspectable details. Sync must not

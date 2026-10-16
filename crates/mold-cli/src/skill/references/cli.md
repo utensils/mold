@@ -796,7 +796,7 @@ complete authored-sequence replay is a separate workflow. Unsupported or damaged
 
 Image sizing is automatic for supported roles: model reference pixel budgets describe engine processing, not a requirement to manually shrink original pictures. Identity photographs and oversized ordered-reference groups are bounded before transport; original files remain untouched. Decode/download/body ceilings, formats, counts and unsupported roles still apply.
 
-Native Mac Library Sync has a configurable app-local interval (1–1440 minutes, default five) and remains session opt-in. Its progress distinguishes checking existing copies from copying outputs. Updated servers expose authenticated `GET /api/gallery/sync-checkpoint` for bounded per-print archive and retained-input revisions; clients must preserve ordinary retained-input repair when this additive contract is unavailable.
+Native Mac Library Sync runs once per press; the persisted, opt-in Keep This Mac in Sync mode re-runs (debounced, non-overlapping) on remote gallery events and reconnects, never on a timer. Its progress distinguishes checking existing copies from copying outputs. Updated servers expose authenticated `GET /api/gallery/sync-checkpoint` for bounded per-print archive and retained-input revisions; clients must preserve ordinary retained-input repair when this additive contract is unavailable.
 
 Library unread history is local to each native, browser, desktop and mobile-shell client. Only successfully displayed viewer media becomes read; entering Library and refreshes preserve unread items. Newly paired machines establish an initial baseline. Mac queue rows retain their geometry while previews and progress load.
 

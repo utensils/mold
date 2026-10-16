@@ -22,6 +22,15 @@ final class GalleryLive {
 
     /// One machine's frame.
     func apply(_ event: MoldEvent, from host: MoldHost.ID, in store: LibraryStore) {
+        // "Keep This Mac in Sync" follows remote machines' own announcements:
+        // a gallery change, a dropped-delta marker, or a (re)connect, which is
+        // the catch-up for whatever happened while the stream was down.
+        if host != MoldEngine.localHostID {
+            switch event {
+            case .authority, .resyncRequired, .gallery: store.syncSession.noteRemoteChange(in: store)
+            case .deviceStateChanged, .job, .queue: break
+            }
+        }
         switch event {
         case .authority:
             break
