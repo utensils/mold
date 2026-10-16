@@ -104,10 +104,13 @@ hidden replicas; protect logical hidden media before pruning copies for display.
 A fresh read must confirm a visibility write before retiring its pending intent.
 
 Library Sync runs once per press. Repeating is the persisted, off-by-default
-"Keep This Mac in Sync" toggle (toolbar menu + Settings ▸ Library): remote
-`.gallery`, `.resyncRequired` and `.authority` frames (GalleryLive) debounce into one
-non-overlapping run, and a change mid-run queues exactly one follow-up. No timer.
-Stop drops the queued follow-up; quit cancels the run before the engine drains. Successful
+"Keep This Mac in Sync" toggle (toolbar menu + Settings ▸ Library): a remote
+machine's first connect (`.authority`, forwarded once by HostStore), reconnect
+(`.resyncRequired`) and non-echo `.gallery` frames debounce into one
+non-overlapping run; a change or press mid-run (Sync or Save) queues exactly one
+follow-up, read by `runFinished`. Automatic runs never raise the engine-down
+alert -- they wait for This Mac's engine to connect. No timer. Stop drops the
+queued follow-up; quit cancels the run and blocks new ones before the drain. Successful
 runs never require a completion sheet. Repeat issue acknowledgment is bound to
 origin route/instance, output version/recipe and exact error, never authentication
 or connectivity failures; preserve retries and inspectable details. Sync must not

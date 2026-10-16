@@ -44,8 +44,10 @@ extension LibraryPane {
                 library.syncSession.syncNow(in: library)
             }
             .help("Copy remote media and collections to this Mac now. Removed local copies stay removed. Use the menu to keep this Mac in sync automatically.")
-            .disabled(library.localSaveRunning || library.localSaveTask != nil
-                || !hosts.hosts.contains { $0.id != MoldEngine.localHostID })
+            // Not disabled while a run is in flight: the toggle must stay
+            // reachable, and a press mid-run is guarded (queued with Keep in
+            // Sync on, otherwise ignored) by `syncNow` itself.
+            .disabled(!hosts.hosts.contains { $0.id != MoldEngine.localHostID })
         }
         ToolbarItem {
             Slider(value: $navigation.edge, in: 88...260) { Text("Thumbnail size") }

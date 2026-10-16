@@ -67,54 +67,109 @@ struct LibrarySyncSessionTests {
         #expect(backend.callCount("gallery") - before == oneRun, "six announcements, one run")
     }
 
+    // Busy runs are simulated by holding `localSaveRunning` rather than by a
+    // backend delay, so the ordering under test never races a timer.
+
     @Test func aChangeDuringARunQueuesExactlyOneFollowUp() async throws {
         let (session, library, backend) = bench(keepInSync: true)
-        backend.delays["gallery"] = .milliseconds(30)
-        // What one run reads, measured rather than assumed.
-        var start = backend.callCount("gallery")
-        session.syncNow(in: library)
-        await idle(library)
-        let perRun = backend.callCount("gallery") - start
-        #expect(perRun > 0)
-
-        start = backend.callCount("gallery")
-        session.syncNow(in: library)
-        await settle { library.localSaveRunning }
+        library.localSaveRunning = true
         for _ in 0 ..< 3 { session.noteRemoteChange(in: library) }
         await settle { session.rerunPending }
         #expect(session.rerunPending)
-        await settle { backend.callCount("gallery") - start >= 2 * perRun && library.localSaveTask == nil }
-        try await Task.sleep(for: .milliseconds(80))
-        await idle(library)
-        #expect(backend.callCount("gallery") - start == 2 * perRun, "three changes mid-run, one follow-up")
+        #expect(library.localSaveTask == nil, "never overlaps the run in flight")
+        let before = backend.callCount("gallery")
+        library.localSaveRunning = false
+        session.runFinished(in: library)
         #expect(!session.rerunPending)
+        #expect(library.localSaveTask != nil, "the one follow-up starts as the run ends")
+        await idle(library)
+        let oneRun = backend.callCount("gallery") - before
+        #expect(oneRun > 0)
+        try await Task.sleep(for: .milliseconds(60))
+        #expect(backend.callCount("gallery") - before == oneRun)
+    }
+
+    @Test func aPressDuringARunQueuesAFollowUpOnlyWithKeepInSync() {
+        let (off, offLibrary, _) = bench()
+        offLibrary.localSaveRunning = true
+        off.syncNow(in: offLibrary)
+        #expect(!off.rerunPending)
+        let (on, onLibrary, _) = bench(keepInSync: true)
+        onLibrary.localSaveRunning = true
+        on.syncNow(in: onLibrary)
+        #expect(on.rerunPending)
     }
 
     @Test func stopDropsTheQueuedFollowUpButKeepsTheChoice() async throws {
         let (session, library, backend) = bench(keepInSync: true)
-        backend.delays["gallery"] = .milliseconds(30)
-        session.syncNow(in: library)
-        await settle { library.localSaveRunning }
+        library.localSaveRunning = true
         session.noteRemoteChange(in: library)
-        try await Task.sleep(for: .milliseconds(30))
+        await settle { session.rerunPending }
         session.stop(in: library)
         #expect(!session.rerunPending)
-        await idle(library)
+        #expect(library.localSaveStopRequested)
+        library.localSaveRunning = false
         let reads = backend.callCount("gallery")
-        try await Task.sleep(for: .milliseconds(80))
+        session.runFinished(in: library)
+        #expect(library.localSaveTask == nil)
+        try await Task.sleep(for: .milliseconds(60))
         #expect(backend.callCount("gallery") == reads)
         #expect(session.keepInSync)
     }
 
-    @Test func quitCancelsTheRunAndPendingWork() async {
+    @Test func quitCancelsTheRunAndBlocksNewOnes() async throws {
         let (session, library, backend) = bench(keepInSync: true)
-        backend.delays["gallery"] = .milliseconds(50)
-        session.syncNow(in: library)
-        await settle { library.localSaveRunning }
+        library.localSaveRunning = true
+        session.noteRemoteChange(in: library)
+        await settle { session.rerunPending }
         session.cancelForQuit(in: library)
-        #expect(library.localSaveStopRequested || library.localSaveTask?.isCancelled == true)
-        await idle(library)
         #expect(!session.rerunPending)
+        library.localSaveRunning = false
+        let reads = backend.callCount("gallery")
+        session.noteRemoteChange(in: library)
+        session.syncNow(in: library)
+        session.runFinished(in: library)
+        try await Task.sleep(for: .milliseconds(60))
+        #expect(library.localSaveTask == nil)
+        #expect(backend.callCount("gallery") == reads, "nothing starts once quitting")
+    }
+
+    @Test func turningKeepInSyncOnCatchesUpImmediately() async {
+        let (session, library, backend) = bench()
+        let before = backend.callCount("gallery")
+        session.setKeepInSync(true, in: library)
+        await settle { backend.callCount("gallery") > before }
+        await idle(library)
+        #expect(backend.callCount("gallery") > before)
+    }
+
+    @Test func anAutomaticRunWaitsForThisMacsEngineInsteadOfAlerting() async throws {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let backend = FakeBackend(host: local)
+        let hosts = HostStore(hosts: [local]) { _ in backend }
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        defaults.set(true, forKey: LibrarySyncSession.keepInSyncKey)
+        let session = LibrarySyncSession(defaults: defaults, debounce: .milliseconds(10))
+        let library = LibraryStore(hosts: hosts, syncSession: session)
+        session.noteRemoteChange(in: library)
+        await settle { session.waitingForLocalEngine }
+        #expect(session.waitingForLocalEngine)
+        #expect(!library.localSaveAlertPresented)
+        #expect(library.localSaveTask == nil)
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let before = backend.callCount("gallery")
+        session.localEngineAvailable(in: library)
+        await settle { backend.callCount("gallery") > before }
+        await idle(library)
+        #expect(!session.waitingForLocalEngine)
+        #expect(backend.callCount("gallery") > before)
+    }
+
+    @Test func theRetiredIntervalSettingIsRemoved() {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        defaults.set(12, forKey: LibrarySyncSession.retiredIntervalKey)
+        _ = LibrarySyncSession(defaults: defaults)
+        #expect(defaults.object(forKey: LibrarySyncSession.retiredIntervalKey) == nil)
     }
 
     @Test func acknowledgmentsOnlySuppressExactIssuesAndCanBeReset() throws {

@@ -12,9 +12,13 @@ final class LibrarySyncSession {
     /// A change arrived while a run was in flight; one more run follows it.
     private(set) var rerunPending = false
     private var debounceTask: Task<Void, Never>?
+    /// An automatic run is waiting for This Mac's engine to connect.
+    private(set) var waitingForLocalEngine = false
+    private var terminating = false
     private let defaults: UserDefaults
     private let debounce: Duration
     static let keepInSyncKey = "library.keepInSync.v1"
+    static let retiredIntervalKey = "library.syncIntervalMinutes.v1"
     private var acknowledged: Set<String>
     private static let issueKey = "library.acknowledgedSyncIssues.v1"
 
@@ -22,51 +26,78 @@ final class LibrarySyncSession {
         self.defaults = defaults
         self.debounce = debounce
         keepInSync = defaults.bool(forKey: Self.keepInSyncKey)
+        // Retired with the timer; nothing reads it any more.
+        defaults.removeObject(forKey: Self.retiredIntervalKey)
         // Older releases persisted multiple source hashes as one colon-joined
         // token. Expand those receipts without forgetting acknowledged sources.
         acknowledged = Set((defaults.stringArray(forKey: Self.issueKey) ?? [])
             .flatMap { $0.split(separator: ":").map(String.init) })
     }
 
-    /// One run now. A run already in flight is never overlapped.
+    /// One run now. A run already in flight is never overlapped: with Keep in
+    /// Sync on, the press queues one follow-up instead of being dropped.
     func syncNow(in library: LibraryStore) {
-        guard library.localSaveTask == nil, !library.localSaveRunning else { return }
-        library.localSaveTask = Task { [weak self, weak library] in
+        guard !terminating else { return }
+        guard library.localSaveTask == nil, !library.localSaveRunning else {
+            if keepInSync { rerunPending = true }
+            return
+        }
+        // A Stop that landed after an earlier run's last check would
+        // otherwise end this one before it starts.
+        library.localSaveStopRequested = false
+        library.localSaveTask = Task { [weak library] in
             await library?.syncAllLocally()
-            guard let self, let library else { return }
-            if self.rerunPending, self.keepInSync {
-                self.rerunPending = false
-                self.syncNow(in: library)
-            }
         }
     }
 
     func setKeepInSync(_ enabled: Bool, in library: LibraryStore) {
         keepInSync = enabled
         defaults.set(enabled, forKey: Self.keepInSyncKey)
-        if enabled { syncNow(in: library) } else {
+        if enabled { noteRemoteChange(in: library, after: .zero) } else {
             debounceTask?.cancel()
             debounceTask = nil
             rerunPending = false
+            waitingForLocalEngine = false
         }
     }
 
-    /// A remote machine announced a gallery change (or reconnected). Bursts
+    /// A remote machine announced a gallery change (or connected). Bursts
     /// coalesce into one run after `debounce`; a change landing mid-run queues
-    /// exactly one follow-up run.
+    /// exactly one follow-up. An automatic run never raises the "start This
+    /// Mac's engine" alert: it waits for the engine to connect instead.
     func noteRemoteChange(in library: LibraryStore) {
-        guard keepInSync else { return }
+        noteRemoteChange(in: library, after: debounce)
+    }
+
+    private func noteRemoteChange(in library: LibraryStore, after delay: Duration) {
+        guard keepInSync, !terminating else { return }
         debounceTask?.cancel()
-        debounceTask = Task { [weak self, weak library, debounce] in
-            do { try await Task.sleep(for: debounce) } catch { return }
-            guard let self, let library, self.keepInSync else { return }
+        debounceTask = Task { [weak self, weak library] in
+            if delay > .zero { do { try await Task.sleep(for: delay) } catch { return } }
+            guard let self, let library, self.keepInSync, !self.terminating else { return }
             self.debounceTask = nil
-            if library.localSaveTask != nil || library.localSaveRunning {
-                self.rerunPending = true
-            } else {
-                self.syncNow(in: library)
+            guard let local = library.hosts.host(MoldEngine.localHostID), library.hosts.isUp(local) else {
+                self.waitingForLocalEngine = true
+                return
             }
+            self.syncNow(in: library)
         }
+    }
+
+    /// This Mac's engine connected: release a run that was waiting for it.
+    func localEngineAvailable(in library: LibraryStore) {
+        guard waitingForLocalEngine else { return }
+        waitingForLocalEngine = false
+        noteRemoteChange(in: library)
+    }
+
+    /// Every finished copy run -- Sync or an explicit Save -- ends here, so a
+    /// change that arrived while it ran is never stranded.
+    func runFinished(in library: LibraryStore) {
+        guard rerunPending else { return }
+        rerunPending = false
+        guard keepInSync, !terminating else { return }
+        syncNow(in: library)
     }
 
     /// Stops the current run and anything queued behind it. "Keep This Mac in
@@ -80,8 +111,10 @@ final class LibrarySyncSession {
         }
     }
 
-    /// Quit: nothing may keep transferring while the engine drains.
+    /// Quit: nothing may keep transferring -- or start -- while the engine
+    /// drains.
     func cancelForQuit(in library: LibraryStore) {
+        terminating = true
         stop(in: library)
         library.localSaveTask?.cancel()
     }
