@@ -146,6 +146,9 @@ fn build_rows_from(
     let mut built = BTreeMap::new();
     let mut listed_rows = Vec::new();
     let mut images = Vec::new();
+    // The requested name each image answers, so the result is keyed by what
+    // the caller asked for even if a record's own filename disagreed.
+    let mut image_names = Vec::new();
     for name in names {
         if built.contains_key(name) {
             continue;
@@ -171,12 +174,13 @@ fn build_rows_from(
             listed_rows.push(row.clone());
         }
         built.insert(name.clone(), None);
+        image_names.push(name.clone());
         images.push(image);
     }
     crate::generation_assets::attach_to_images(db, dir, &listed_rows, &mut images);
-    for mut image in images {
+    for (name, mut image) in image_names.into_iter().zip(images) {
         crate::thumbnails::stamp_poster_revision(&mut image);
-        built.insert(image.filename.clone(), Some(image));
+        built.insert(name, Some(image));
     }
     Ok(built)
 }
@@ -336,6 +340,17 @@ mod tests {
             entry(record(&dir, "archive-only.png", 2_000_000)),
         );
         archive.retired_names.insert("retired.png".into());
+        // Retired AND still carried in `entries`: retirement must win.
+        archive.entries.insert(
+            "retired.png".into(),
+            entry(record(&dir, "retired.png", 4_000_000)),
+        );
+        // Trashed in the DB yet present in the archive: the archive re-adds
+        // it and the organization overlay must still drop it from Library.
+        archive.entries.insert(
+            "trashed.png".into(),
+            entry(record(&dir, "trashed.png", 5_000_000)),
+        );
         archive.quarantined_names.insert("quarantined.png".into());
         archive.entries.insert(
             "quarantined.png".into(),

@@ -152,16 +152,16 @@ fn attach_batched(
         .iter()
         .filter_map(|(_, _, outcome)| outcome.as_ref().ok().copied().flatten())
         .collect::<Vec<_>>();
-    let mut inventories = mold_db::generation_assets::list_for_generations(db, &ready)?;
+    let inventories = mold_db::generation_assets::list_for_generations(db, &ready)?;
     for (position, record, outcome) in outcomes {
         match outcome {
             Ok(Some(id)) => {
+                // `get`, not `remove`: two images naming one generation must
+                // both carry its inventory, as the per-row reads did.
                 images[position].assets = inventories
-                    .remove(&id)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|record| record.asset)
-                    .collect();
+                    .get(&id)
+                    .map(|records| records.iter().map(|record| record.asset.clone()).collect())
+                    .unwrap_or_default();
             }
             Ok(None) => images[position].assets = Vec::new(),
             Err(error) => {
