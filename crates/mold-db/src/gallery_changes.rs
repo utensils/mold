@@ -30,8 +30,22 @@
 //! when the feed is read, because the committed-archive overlay can keep a
 //! name visible after its DB row is gone.
 //!
-//! Sequence numbers are global across directories and strictly increasing;
-//! SQLite's single writer makes them visible in commit order. `epoch` is
+//! Sequence numbers are global across directories and strictly increasing.
+//!
+//! **Invariant: commit order == seq order.** A seq is only ever read from
+//! `next_seq` and assigned inside a statement that already holds SQLite's
+//! write lock: the triggers fire AFTER their row write (the writer took the
+//! lock to make it), and [`touch`], [`gc_tombstones`] and
+//! [`record_effective_retention`] run under `transact_immediate`. A deferred
+//! transaction that read `next_seq` from a snapshot older than another
+//! writer's commit cannot then write — WAL answers `SQLITE_BUSY_SNAPSHOT` —
+//! so no writer can assign a seq lower than one already committed, and a
+//! reader paging by seq never skips a change that commits later (pinned by
+//! `seqs_follow_commit_order_across_connections`). Read the feed with
+//! [`changes_page`], which takes the state and the rows from ONE snapshot;
+//! [`feed_state`] + [`changes_since`] are two snapshots.
+//!
+//! `epoch` is
 //! minted by the migration, so a recreated database (corruption recovery
 //! rebuilds the schema through migrations) always answers a new one.
 
@@ -131,6 +145,7 @@ pub fn tombstone_cutoff_ms(retention_days: u32, now_ms: i64) -> i64 {
 }
 
 /// The feed's epoch, collection floor, and highest assigned sequence.
+/// Not atomic with [`changes_since`]; a feed reader uses [`changes_page`].
 pub fn feed_state(db: &MetadataDb) -> Result<FeedState> {
     db.with_conn(|conn| {
         Ok(conn.query_row(
@@ -150,6 +165,7 @@ pub fn feed_state(db: &MetadataDb) -> Result<FeedState> {
 /// Dirty names in `output_dir` changed after `since_seq`, oldest change
 /// first, at most `limit`. Keyset paging: pass the last returned seq as the
 /// next `since_seq`. Seqs are unique, so a page boundary never splits one.
+/// Not atomic with [`feed_state`]; a feed reader uses [`changes_page`].
 pub fn changes_since(
     db: &MetadataDb,
     output_dir: &Path,
@@ -170,6 +186,80 @@ pub fn changes_since(
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    })
+}
+
+/// One page of the feed, read from a single snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangesPage {
+    pub epoch: String,
+    pub min_seq: i64,
+    pub max_seq: i64,
+    /// Dirty names with `seq > since_seq`, oldest change first.
+    pub changes: Vec<(String, i64)>,
+    /// More rows exist past this page.
+    pub more: bool,
+}
+
+impl ChangesPage {
+    /// The cursor to resume from: the last returned row's seq while `more`,
+    /// else the in-snapshot `max_seq` (nothing in this directory is newer in
+    /// that snapshot; jumping there skips only other directories' seqs).
+    pub fn next_cursor(&self, since_seq: i64) -> i64 {
+        match (self.more, self.changes.last()) {
+            (true, Some((_, seq))) => *seq,
+            (true, None) => since_seq,
+            (false, _) => self.max_seq.max(since_seq),
+        }
+    }
+}
+
+/// [`feed_state`] and [`changes_since`] in ONE read transaction on one
+/// connection, so a commit from another connection (the CLI, a second
+/// server) between the two reads cannot raise `max_seq` past rows this page
+/// never saw. The next cursor is the last returned row's seq, or the
+/// in-transaction `max_seq` only when `more == false`
+/// ([`ChangesPage::next_cursor`]).
+pub fn changes_page(
+    db: &MetadataDb,
+    output_dir: &Path,
+    since_seq: i64,
+    limit: usize,
+) -> Result<ChangesPage> {
+    let dir_key = canonical_dir_string(output_dir);
+    let fetch = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
+    db.with_conn(|conn| {
+        // DEFERRED: the snapshot is fixed at the first read below and both
+        // statements see it.
+        let tx = conn.unchecked_transaction()?;
+        let (epoch, min_seq, max_seq) = tx.query_row(
+            "SELECT epoch, min_seq, next_seq - 1 FROM gallery_feed_meta WHERE singleton = 1",
+            [],
+            |r| Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        let mut changes = {
+            let mut stmt = tx.prepare(
+                "SELECT filename, seq FROM gallery_changes
+                 WHERE output_dir = ?1 AND seq > ?2
+                 ORDER BY seq ASC LIMIT ?3",
+            )?;
+            let rows = stmt
+                .query_map(params![dir_key, since_seq, fetch], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        tx.commit()?;
+        let more = changes.len() > limit;
+        changes.truncate(limit);
+        Ok(ChangesPage {
+            epoch,
+            min_seq,
+            max_seq,
+            changes,
+            more,
+        })
     })
 }
 
@@ -792,6 +882,175 @@ mod tests {
         assert!(gc_tombstones(&db, dir(), &HashSet::new(), i64::MAX).is_err());
         assert_eq!(names_after(&db, 0), vec!["gone.png"]);
         assert_eq!(feed_state(&db).unwrap().min_seq, 0);
+    }
+
+    #[test]
+    fn tag_merge_marks_the_members_of_the_merged_tag() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        seed(&db, &["a.png", "b.png", "c.png"]);
+        db.add_tags(dir(), "a.png", &["owls".into()]).unwrap();
+        db.add_tags(dir(), "b.png", &["birds".into()]).unwrap();
+        let before = max_seq(&db);
+        // `birds` exists, so this is the merge path: move links, drop `owls`.
+        db.rename_tag("owls", "birds").unwrap();
+        assert_eq!(names_after(&db, before), vec!["a.png"]);
+        assert_eq!(
+            db.print_organization(dir(), "a.png").unwrap().unwrap().tags,
+            vec!["birds".to_string()]
+        );
+    }
+
+    #[test]
+    fn collection_delete_cascade_marks_members() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        seed(&db, &["a.png", "b.png", "c.png"]);
+        let collection = db.create_collection("Birds", None).unwrap();
+        db.collection_add(&collection.id, dir(), &["a.png".into(), "b.png".into()])
+            .unwrap();
+        let before = max_seq(&db);
+        assert!(db.delete_collection(&collection.id).unwrap());
+        assert_eq!(names_after(&db, before), vec!["a.png", "b.png"]);
+    }
+
+    #[test]
+    fn tag_delete_cascade_marks_members() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        seed(&db, &["a.png", "b.png", "c.png"]);
+        db.add_tags(dir(), "a.png", &["owls".into()]).unwrap();
+        db.add_tags(dir(), "c.png", &["owls".into()]).unwrap();
+        let before = max_seq(&db);
+        assert!(db.delete_tag("owls").unwrap());
+        assert_eq!(names_after(&db, before), vec!["a.png", "c.png"]);
+    }
+
+    #[test]
+    fn bulk_favorite_and_titles_mark_every_row() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        seed(&db, &["a.png", "b.png", "c.png", "d.png"]);
+        let names: Vec<String> = ["a.png", "b.png", "c.png"]
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+        let none = || crate::BulkOrganize {
+            favorite: None,
+            add_tags: None,
+            remove_tags: None,
+            add_to_collections: None,
+            remove_from_collections: None,
+        };
+        let before = max_seq(&db);
+        db.organize_bulk(
+            dir(),
+            &names,
+            crate::BulkOrganize {
+                favorite: Some(true),
+                ..none()
+            },
+        )
+        .unwrap();
+        assert_eq!(names_after(&db, before), names);
+        let before = max_seq(&db);
+        db.mutate_bulk(
+            dir(),
+            &[
+                ("a.png".into(), Some("One".into())),
+                ("d.png".into(), Some("Four".into())),
+            ],
+            &[],
+            none(),
+        )
+        .unwrap();
+        assert_eq!(names_after(&db, before), vec!["a.png", "d.png"]);
+    }
+
+    #[test]
+    fn changes_page_reports_more_and_the_next_cursor() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let names: Vec<String> = (0..5).map(|i| format!("{i}.png")).collect();
+        touch(&db, dir(), &names).unwrap();
+        touch(&db, Path::new("/tmp/other-dir"), &["x.png"]).unwrap();
+        let state = feed_state(&db).unwrap();
+
+        let first = changes_page(&db, dir(), 0, 3).unwrap();
+        assert!(first.more);
+        assert_eq!(first.changes.len(), 3);
+        assert_eq!(first.epoch, state.epoch);
+        assert_eq!(first.max_seq, state.max_seq);
+        let cursor = first.next_cursor(0);
+        assert_eq!(cursor, first.changes[2].1);
+
+        let second = changes_page(&db, dir(), cursor, 3).unwrap();
+        assert!(!second.more);
+        assert_eq!(second.changes.len(), 2);
+        // Exhausted: the cursor jumps to max_seq (past the other dir's seq).
+        assert_eq!(second.next_cursor(cursor), state.max_seq);
+        let third = changes_page(&db, dir(), state.max_seq, 3).unwrap();
+        assert!(third.changes.is_empty() && !third.more);
+        assert_eq!(third.next_cursor(state.max_seq), state.max_seq);
+
+        // A later change is seen from that cursor.
+        touch(&db, dir(), &["0.png"]).unwrap();
+        let fourth = changes_page(&db, dir(), state.max_seq, 3).unwrap();
+        assert_eq!(
+            fourth.changes,
+            vec![("0.png".to_string(), state.max_seq + 1)]
+        );
+    }
+
+    #[test]
+    fn seqs_follow_commit_order_across_connections() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("mold.db");
+        let a = MetadataDb::open(&path).unwrap();
+        let b = std::sync::Arc::new(MetadataDb::open(&path).unwrap());
+
+        // A writer holding the lock blocks the other connection's write.
+        a.with_conn(|conn| {
+            conn.execute_batch("BEGIN IMMEDIATE")?;
+            mark_names(conn, &canonical_dir_string(dir()), &["first.png"])?;
+            Ok(())
+        })
+        .unwrap();
+        let writer = {
+            let b = b.clone();
+            std::thread::spawn(move || {
+                let started = std::time::Instant::now();
+                touch(&b, dir(), &["second.png"]).unwrap();
+                started.elapsed()
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        a.with_conn(|conn| Ok(conn.execute_batch("COMMIT")?))
+            .unwrap();
+        let waited = writer.join().unwrap();
+        assert!(
+            waited >= std::time::Duration::from_millis(250),
+            "the second writer must wait for the first commit, waited {waited:?}"
+        );
+        let rows = changes_since(&a, dir(), 0, 10).unwrap();
+        assert_eq!(
+            rows.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["first.png", "second.png"]
+        );
+        assert!(rows[0].1 < rows[1].1);
+
+        // A stale read snapshot can never write: WAL refuses it.
+        let stale = Connection::open(&path).unwrap();
+        stale.execute_batch("BEGIN DEFERRED").unwrap();
+        let seen: i64 = stale
+            .query_row("SELECT next_seq FROM gallery_feed_meta", [], |r| r.get(0))
+            .unwrap();
+        touch(&b, dir(), &["third.png"]).unwrap();
+        let refused = stale.execute(
+            "UPDATE gallery_feed_meta SET next_seq = ?1 WHERE singleton = 1",
+            params![seen + 1],
+        );
+        let code = match refused {
+            Err(rusqlite::Error::SqliteFailure(e, _)) => e.code,
+            other => panic!("a stale-snapshot write must fail, got {other:?}"),
+        };
+        assert_eq!(code, rusqlite::ErrorCode::DatabaseBusy);
+        stale.execute_batch("ROLLBACK").unwrap();
     }
 
     #[test]

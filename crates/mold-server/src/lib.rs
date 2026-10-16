@@ -1258,6 +1258,27 @@ async fn run_server_inner(
             // drop rows whose backing files are missing. Runs on a blocking
             // worker so it never stalls the request path even on large dirs.
             if state.metadata_db.is_some() {
+                // Record the trash retention in force (env override included)
+                // before serving, so a restart that changed
+                // `MOLD_GALLERY_TRASH_RETENTION_DAYS` marks every trashed row
+                // (`purge_at` moved) before the first feed read. The sweeper
+                // repeats it each pass.
+                let retention_db = state.metadata_db.clone();
+                let retention_days = config.gallery.effective_trash_retention_days();
+                match tokio::task::spawn_blocking(move || {
+                    retention_db.as_ref().as_ref().map(|db| {
+                        mold_db::gallery_changes::record_effective_retention(db, retention_days)
+                    })
+                })
+                .await
+                {
+                    Ok(Some(Err(error))) => tracing::warn!(
+                        error = %format!("{error:#}"),
+                        "could not record the effective trash retention for the gallery change feed"
+                    ),
+                    Err(error) => tracing::warn!(%error, "trash retention record task failed"),
+                    Ok(_) => {}
+                }
                 let db_arc = state.metadata_db.clone();
                 let dir = output_dir.clone();
                 let gallery_gate = state.gallery_publication_gate.clone();
