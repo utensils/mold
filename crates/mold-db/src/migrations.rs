@@ -696,6 +696,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         kind: MigrationKind::Sql("CREATE TABLE secure_bootstrap(singleton INTEGER PRIMARY KEY CHECK(singleton=1),bootstrap_id TEXT NOT NULL,digest TEXT NOT NULL,server_instance_id TEXT NOT NULL);"),
     },
     Migration { version: 42, kind: MigrationKind::Sql(V42_REGULAR_CLIENTS) },
+    Migration {
+        version: 43,
+        kind: MigrationKind::Rust(create_gallery_change_log),
+    },
 ];
 
 const V42_REGULAR_CLIENTS: &str = "
@@ -967,7 +971,7 @@ DELETE FROM settings WHERE key LIKE 'tui.%';
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 42;
+pub const SCHEMA_VERSION: i64 = 43;
 
 /// Downloadable files that belong to one gallery print. The generation row
 /// remains the lifecycle authority, so permanent deletion cascades while
@@ -1230,6 +1234,189 @@ fn add_generation_job_lookup_indexes(tx: &Transaction<'_>) -> Result<()> {
         END;
         "#,
     )?;
+    Ok(())
+}
+
+/// The current wall clock in ms, as every v43 trigger stamps it.
+const V43_NOW_MS: &str = "CAST(strftime('%s','now') AS INTEGER) * 1000";
+
+/// `generations` columns the v43 UPDATE guard compares. FROZEN: this is the
+/// schema as of v43. A later visible column gets its own migration that
+/// recreates `gallery_changes_generations_update` (see
+/// `crate::gallery_changes::GENERATIONS_VISIBLE_COLUMNS`).
+const V43_VISIBLE_COLUMNS: &[&str] = &[
+    "filename",
+    "output_dir",
+    "created_at_ms",
+    "file_mtime_ms",
+    "file_size_bytes",
+    "format",
+    "model",
+    "prompt",
+    "negative_prompt",
+    "original_prompt",
+    "seed",
+    "steps",
+    "guidance",
+    "width",
+    "height",
+    "strength",
+    "scheduler",
+    "lora",
+    "lora_scale",
+    "frames",
+    "fps",
+    "metadata_version",
+    "generation_time_ms",
+    "backend",
+    "hostname",
+    "source",
+    "metadata_synthetic",
+    "metadata_json",
+    "title",
+    "favorite",
+    "trashed_at_ms",
+];
+
+/// Trigger body that marks one `(dir, name)` dirty with the next seq.
+///
+/// DELETE-then-INSERT, never `INSERT OR REPLACE`: SQLite lets the conflict
+/// policy of the statement that FIRED a trigger override the trigger's own,
+/// so an outer `INSERT ... ON CONFLICT DO UPDATE` (every upsert) turned the
+/// `OR REPLACE` back into ABORT.
+fn v43_mark_one(dir: &str, name: &str) -> String {
+    format!(
+        "DELETE FROM gallery_changes WHERE output_dir = {dir} AND filename = {name};
+         INSERT INTO gallery_changes (output_dir, filename, seq, changed_at_ms)
+         VALUES ({dir}, {name},
+                 (SELECT next_seq FROM gallery_feed_meta WHERE singleton = 1), {V43_NOW_MS});
+         UPDATE gallery_feed_meta SET next_seq = next_seq + 1 WHERE singleton = 1;"
+    )
+}
+
+/// Trigger body that marks every `generations g` row selected by `from` (a
+/// `FROM ... WHERE ...` clause), one distinct seq per row.
+fn v43_mark_many(from: &str) -> String {
+    format!(
+        "DELETE FROM gallery_changes
+          WHERE (output_dir, filename) IN (SELECT g.output_dir, g.filename {from});
+         INSERT INTO gallery_changes (output_dir, filename, seq, changed_at_ms)
+         SELECT g.output_dir, g.filename,
+                (SELECT next_seq FROM gallery_feed_meta WHERE singleton = 1)
+                  + ROW_NUMBER() OVER (ORDER BY g.id) - 1,
+                {V43_NOW_MS}
+           {from};
+         UPDATE gallery_feed_meta
+            SET next_seq = next_seq + (SELECT COUNT(*) {from})
+          WHERE singleton = 1;"
+    )
+}
+
+/// v43: the gallery change log — `gallery_feed_meta` (epoch, seq counter,
+/// GC floor, last effective trash retention) and the `gallery_changes`
+/// dirty set, plus the guarded triggers that mark every writer's changes.
+/// See `crate::gallery_changes` for the contract.
+///
+/// The epoch is minted HERE (column default), so every recreated database —
+/// corruption recovery rebuilds the schema through these migrations — gets a
+/// new one. Every existing row is backfilled with a seq.
+fn create_gallery_change_log(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(&format!(
+        r#"
+        CREATE TABLE gallery_feed_meta (
+            singleton                INTEGER PRIMARY KEY CHECK (singleton = 1),
+            epoch                    TEXT    NOT NULL DEFAULT (lower(hex(randomblob(16)))),
+            next_seq                 INTEGER NOT NULL,
+            min_seq                  INTEGER NOT NULL DEFAULT 0,
+            effective_retention_days INTEGER
+        );
+
+        CREATE TABLE gallery_changes (
+            output_dir    TEXT    NOT NULL,
+            filename      TEXT    NOT NULL,
+            seq           INTEGER NOT NULL,
+            changed_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (output_dir, filename)
+        );
+        CREATE INDEX idx_gallery_changes_dir_seq ON gallery_changes(output_dir, seq);
+
+        INSERT INTO gallery_changes (output_dir, filename, seq, changed_at_ms)
+        SELECT output_dir, filename, ROW_NUMBER() OVER (ORDER BY id), {now}
+          FROM generations;
+        INSERT INTO gallery_feed_meta (singleton, next_seq)
+        SELECT 1, COALESCE(MAX(seq), 0) + 1 FROM gallery_changes;
+        "#,
+        now = V43_NOW_MS,
+    ))?;
+
+    let guard = V43_VISIBLE_COLUMNS
+        .iter()
+        .map(|c| format!("NEW.{c} IS NOT OLD.{c}"))
+        .collect::<Vec<_>>()
+        .join("\n             OR ");
+    let parent_exists = |col: &str| format!("EXISTS (SELECT 1 FROM generations WHERE id = {col})");
+    let parent = |col: &str| v43_mark_many(&format!("FROM generations g WHERE g.id = {col}"));
+    let trashed = v43_mark_many("FROM generations g WHERE g.trashed_at_ms IS NOT NULL");
+    let key = "'gallery.trash_retention_days'";
+    let mut sql = String::new();
+    sql.push_str(&format!(
+        "CREATE TRIGGER gallery_changes_generations_insert AFTER INSERT ON generations
+         BEGIN {} END;
+         CREATE TRIGGER gallery_changes_generations_delete AFTER DELETE ON generations
+         BEGIN {} END;
+         CREATE TRIGGER gallery_changes_generations_update AFTER UPDATE ON generations
+         WHEN {guard}
+         BEGIN {} END;
+         CREATE TRIGGER gallery_changes_generations_rename AFTER UPDATE OF filename, output_dir ON generations
+         WHEN NEW.filename IS NOT OLD.filename OR NEW.output_dir IS NOT OLD.output_dir
+         BEGIN {} END;
+        ",
+        v43_mark_one("NEW.output_dir", "NEW.filename"),
+        v43_mark_one("OLD.output_dir", "OLD.filename"),
+        v43_mark_one("NEW.output_dir", "NEW.filename"),
+        v43_mark_one("OLD.output_dir", "OLD.filename"),
+    ));
+    for (table, other) in [
+        ("generation_tags", "tag_id"),
+        ("collection_items", "collection_id"),
+    ] {
+        sql.push_str(&format!(
+            "CREATE TRIGGER gallery_changes_{table}_insert AFTER INSERT ON {table}
+             WHEN {new_exists} BEGIN {new} END;
+             CREATE TRIGGER gallery_changes_{table}_delete AFTER DELETE ON {table}
+             WHEN {old_exists} BEGIN {old} END;
+             CREATE TRIGGER gallery_changes_{table}_update_new AFTER UPDATE OF generation_id, {other} ON {table}
+             WHEN {new_exists} BEGIN {new} END;
+             CREATE TRIGGER gallery_changes_{table}_update_old AFTER UPDATE OF generation_id ON {table}
+             WHEN NEW.generation_id IS NOT OLD.generation_id AND {old_exists} BEGIN {old} END;
+            ",
+            new_exists = parent_exists("NEW.generation_id"),
+            old_exists = parent_exists("OLD.generation_id"),
+            new = parent("NEW.generation_id"),
+            old = parent("OLD.generation_id"),
+        ));
+    }
+    sql.push_str(&format!(
+        "CREATE TRIGGER gallery_changes_tags_rename AFTER UPDATE OF name ON tags
+         WHEN NEW.name IS NOT OLD.name COLLATE BINARY
+         BEGIN {} END;
+         CREATE TRIGGER gallery_changes_retention_insert AFTER INSERT ON settings
+         WHEN NEW.key = {key}
+         BEGIN {trashed} END;
+         CREATE TRIGGER gallery_changes_retention_update AFTER UPDATE ON settings
+         WHEN (NEW.key = {key} OR OLD.key = {key})
+          AND (NEW.key IS NOT OLD.key OR NEW.value IS NOT OLD.value)
+         BEGIN {trashed} END;
+         CREATE TRIGGER gallery_changes_retention_delete AFTER DELETE ON settings
+         WHEN OLD.key = {key}
+         BEGIN {trashed} END;
+        ",
+        v43_mark_many(
+            "FROM generation_tags gt JOIN generations g ON g.id = gt.generation_id \
+             WHERE gt.tag_id = NEW.id"
+        ),
+    ));
+    tx.execute_batch(&sql)?;
     Ok(())
 }
 
@@ -1880,7 +2067,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 42);
+        assert_eq!(SCHEMA_VERSION, 43);
         assert!(table_exists(&conn, "device_preferences"));
         assert!(table_exists(&conn, "mesh_workflow_jobs"));
         assert!(table_exists(&conn, "mesh_workflow_stages"));
@@ -2036,7 +2223,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 42);
+        assert_eq!(SCHEMA_VERSION, 43);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -2173,7 +2360,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 42);
+        assert_eq!(SCHEMA_VERSION, 43);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -2512,7 +2699,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 42);
+        assert_eq!(SCHEMA_VERSION, 43);
     }
 
     #[test]

@@ -1408,12 +1408,19 @@ pub(crate) async fn sweep_trash_once(state: &AppState) -> anyhow::Result<TrashSw
     }
     let remaining_dir = dir.clone();
     let remaining_db = db.clone();
+    let feed_gate = gate.clone();
     let gallery_reader = gate.read().await;
     let remaining = tokio::task::spawn_blocking(move || -> anyhow::Result<u64> {
         let _gallery_reader = gallery_reader;
         let Some(db) = remaining_db.as_ref().as_ref() else {
             return Ok(0);
         };
+        // The change feed's upkeep rides the same pass, under the same
+        // reader (no publication can move the archive or the rows mid-GC).
+        // A failure is logged and never fails the retention sweep.
+        if let Err(error) = maintain_change_feed(db, &feed_gate, &remaining_dir, retention) {
+            tracing::warn!(error = %format!("{error:#}"), "gallery change feed upkeep failed");
+        }
         Ok(db.list_trashed(Some(&remaining_dir))?.len() as u64)
     })
     .await??;
@@ -1421,6 +1428,49 @@ pub(crate) async fn sweep_trash_once(state: &AppState) -> anyhow::Result<TrashSw
         purged: count,
         remaining,
     })
+}
+
+/// Gallery change-feed upkeep, run by every retention sweep (startup, then
+/// hourly). Caller holds the gallery publication READER.
+///
+/// 1. Records the trash retention actually in force — the env override
+///    included — so a restart that changes `MOLD_GALLERY_TRASH_RETENTION_DAYS`
+///    marks every trashed row (their `purge_at` moved). DB writes of the key
+///    are already marked by the `settings` trigger.
+/// 2. Collects tombstones older than the retention window. `keep` is every
+///    name the committed archive still lists: an archive-only print has no
+///    DB row, and dropping its dirty row would lose it from the feed.
+fn maintain_change_feed(
+    db: &MetadataDb,
+    gate: &GalleryPublicationGate,
+    dir: &Path,
+    retention_days: u32,
+) -> anyhow::Result<()> {
+    if mold_db::gallery_changes::record_effective_retention(db, retention_days)? {
+        tracing::debug!(
+            retention_days,
+            "gallery change feed marked trashed rows for a new effective retention"
+        );
+    }
+    let keep: std::collections::HashSet<String> = gate
+        .committed_archive_index(dir)?
+        .entries
+        .keys()
+        .cloned()
+        .collect();
+    let cutoff = mold_db::gallery_changes::tombstone_cutoff_ms(
+        retention_days,
+        mold_core::time::now_epoch_ms(),
+    );
+    let outcome = mold_db::gallery_changes::gc_tombstones(db, dir, &keep, cutoff)?;
+    if outcome.deleted > 0 {
+        tracing::info!(
+            deleted = outcome.deleted,
+            min_seq = outcome.min_seq,
+            "gallery change feed collected tombstones"
+        );
+    }
+    Ok(())
 }
 
 /// Background retention sweeper: one pass at startup (after `ready`
@@ -1465,6 +1515,52 @@ pub(crate) fn spawn_trash_sweeper(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gallery_change_feed_upkeep_records_retention_and_collects_old_tombstones() {
+        use mold_db::gallery_changes::{changes_since, feed_state};
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let db = MetadataDb::open_in_memory().unwrap();
+        let req: mold_core::GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"an owl","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0}"#,
+        )
+        .unwrap();
+        for name in ["gone.png", "trashed.png"] {
+            db.upsert(&mold_db::GenerationRecord::from_save(
+                dir,
+                name,
+                mold_core::OutputFormat::Png,
+                mold_core::OutputMetadata::from_generate_request(&req, 1, None, "test"),
+                mold_db::RecordSource::Server,
+                1,
+            ))
+            .unwrap();
+        }
+        db.mark_trashed(dir, "trashed.png", 1).unwrap();
+        db.delete(dir, "gone.png").unwrap();
+        db.with_conn(|conn| {
+            conn.execute("UPDATE gallery_changes SET changed_at_ms = 0", [])?;
+            Ok(())
+        })
+        .unwrap();
+        let gate = GalleryPublicationGate::default();
+
+        maintain_change_feed(&db, &gate, dir, 30).unwrap();
+
+        let names: Vec<String> = changes_since(&db, dir, 0, 100)
+            .unwrap()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(names, vec!["trashed.png".to_string()]);
+        let state = feed_state(&db).unwrap();
+        assert!(state.min_seq > 0, "collecting a tombstone raises min_seq");
+        // The second pass at the same retention marks nothing new.
+        let before = feed_state(&db).unwrap().max_seq;
+        maintain_change_feed(&db, &gate, dir, 30).unwrap();
+        assert_eq!(feed_state(&db).unwrap().max_seq, before);
+    }
 
     #[tokio::test]
     async fn detached_blocking_mutation_keeps_its_owned_gallery_writer() {
