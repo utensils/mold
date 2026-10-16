@@ -39,16 +39,22 @@ extension LibraryStore {
 
     /// The same change, applied to the rows on screen.
     func mutate(_ edit: PrintEdit) {
+        var touched: [PrintID] = []
+        writingRows = true
         for (hostID, filenames) in edit.targets {
             let names = Set(filenames)
             perHost[hostID] = (perHost[hostID] ?? []).map { entry in
                 guard names.contains(entry.print.filename) else { return entry }
                 var mutable = GalleryPrint.Mutable(entry.print)
                 edit.change.applied(to: &mutable, collectionID: collectionID(edit.change, hostID))
+                touched.append(entry.id)
                 return entry.replacingPrint(mutable.build())
             }
         }
-        rebuild()
+        writingRows = false
+        // An organization edit never changes a print's merge identity, so
+        // this is an in-place patch of the touched tiles, not a re-merge.
+        changedLive(touched)
     }
 
     /// This machine's own id for the shelf a change is about, if it has one.
@@ -58,8 +64,11 @@ extension LibraryStore {
     }
 
     /// This machine's own collections, or a report if it refused to say.
+    /// Leaves every machine's listing validators alone: a membership change
+    /// changes the rows, so the machine's own ETag (a digest of the listing)
+    /// already differs -- clearing them forced a full re-read of every
+    /// machine's index for one collection edit.
     func reloadCollections() async {
-        etags.removeAll()
         let destinations: [(host: MoldHost, client: any MoldBackend)] = hosts.hosts.map {
             ($0, hosts.backend(for: $0))
         }

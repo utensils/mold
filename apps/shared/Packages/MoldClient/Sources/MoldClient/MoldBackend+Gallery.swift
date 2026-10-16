@@ -7,6 +7,9 @@ public protocol MoldGalleryBackend: Sendable {
     func gallerySyncCheckpoint() async throws -> GallerySyncCheckpoint?
     func gallery(etag: String?) async throws -> Fetched<[GalleryPrint]>
     func trashedPrints(etag: String?) async throws -> Fetched<[GalleryPrint]>
+    /// One page of the gallery change log (`capabilities.gallery.changes_feed`).
+    /// `since` is the previous page's opaque cursor; nil asks for a snapshot.
+    func galleryChanges(since cursor: String?, limit: Int) async throws -> GalleryChangesPage
     func patch(_ filename: String, with patch: GalleryPatch) async throws
     /// Replay-safe by `operationId`, so a retry cannot double-apply.
     func mutate(_ mutation: GalleryBulkMutation) async throws
@@ -65,6 +68,12 @@ public extension MoldGalleryBackend {
     }
 
     func gallerySyncCheckpoint() async throws -> GallerySyncCheckpoint? { nil }
+
+    /// A backend with no feed answers exactly as an older machine does, which
+    /// `GalleryReplica` reads as "use the full listing this time".
+    func galleryChanges(since cursor: String?, limit: Int) async throws -> GalleryChangesPage {
+        throw MoldClientError.http(status: 404, code: nil, message: nil)
+    }
 
     func deleteTrashed(_ filenames: [String]) async throws {
         throw MoldClientError.http(status: 409, code: "GALLERY_TRASH_DELETE_UNSUPPORTED", message: "Update this machine before permanently deleting selected trash.")

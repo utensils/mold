@@ -91,9 +91,34 @@ public enum JustifiedLayout {
     private var width = 0.0
     private var height = 0.0
     private var sections: [Section] = []
+    private var revision: Int?
+    /// How many times geometry was actually laid out. What a test asserts on.
+    public private(set) var layouts = 0
     public init() {}
+
+    /// Keyed by the sections' own revision (`LibraryShowingCache.derivations`)
+    /// rather than by comparing every print in them: at 30K prints the deep
+    /// comparison ran on every redraw, selection changes included.
+    public func resolve(_ source: [LibrarySection], revision: Int, width: Double,
+                        targetHeight: Double) -> [Section] {
+        if self.revision == revision, self.width == width, height == targetHeight,
+           self.source.count == source.count, self.source.first?.id == source.first?.id {
+            return sections
+        }
+        layout(source, width: width, targetHeight: targetHeight)
+        self.revision = revision
+        return sections
+    }
+
     public func resolve(_ source: [LibrarySection], width: Double, targetHeight: Double) -> [Section] {
         if self.width == width, height == targetHeight, self.source == source { return sections }
+        layout(source, width: width, targetHeight: targetHeight)
+        revision = nil
+        return sections
+    }
+
+    private func layout(_ source: [LibrarySection], width: Double, targetHeight: Double) {
+        layouts += 1
         self.source = source
         self.width = width
         height = targetHeight
@@ -106,6 +131,5 @@ public enum JustifiedLayout {
                 }, height: row.height, top: row.top)
             })
         }
-        return sections
     }
 }

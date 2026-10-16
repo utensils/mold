@@ -52,7 +52,7 @@ struct LibraryMergeStoreTests {
         }
         here.prints = [titled("Kitty")]
         there.prints = [titled("Cat"), FakeFixtures.print("dog.png")]
-        library.etags.removeAll()
+        library.invalidateListings()
         await library.refresh()
         let manager = UndoManager()
         manager.groupsByEvent = false

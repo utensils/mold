@@ -44,6 +44,13 @@ final class GalleryLive {
         case .job, .queue:
             break
         case .resyncRequired:
+            // A machine with a change log lost nothing: its log still holds
+            // every change the dropped frames described, so catching up is an
+            // ordinary pull from the replica's cursor.
+            if store.followsFeed(host) {
+                store.tickle(host)
+                return
+            }
             // The stream admitted it dropped deltas, so nothing on screen for
             // this machine can be trusted. Reading the listing again is the
             // only honest repair -- the events that would have told us what
@@ -69,12 +76,15 @@ final class GalleryLive {
         guard !echo.isEcho(change, on: host,
                            pending: store.mutations.outbox.chain(for: host)) else { return }
         if host != MoldEngine.localHostID { store.syncSession.noteRemoteChange(in: store) }
+        if store.followsFeed(host) {
+            follow(change, from: host, in: store)
+            return
+        }
 
         switch change {
         case let .updated(filename, row), let .restored(filename, row):
             if store.bulkTargets.contains(PrintID(host: host, filename: filename)) {
-                store.etags[host] = nil
-                store.trashEtags[host] = nil
+                store.invalidateListings([host])
                 return
             }
             if let row { replace(filename, with: row, on: host, in: store) } else {
@@ -92,23 +102,39 @@ final class GalleryLive {
             // Both take the print out of the live listing. The trash is its
             // own scope with its own ETag, so it re-reads when it is opened.
             if store.bulkTargets.contains(PrintID(host: host, filename: filename)) {
-                store.etags[host] = nil
-                store.trashEtags[host] = nil
+                store.invalidateListings([host])
                 return
             }
             drop(filename, on: host, in: store)
-            store.trashEtags.removeAll()
+            store.invalidateListings([host], .trash)
         case .collectionsChanged:
             Task { await store.reloadCollections() }
         }
     }
 
+    /// A machine with a change log: every frame is a reason to pull, never
+    /// a row to splice in -- the log is the authority for what the row is,
+    /// and the replica's single flight turns a burst into one read.
+    private func follow(_ change: MoldEvent.Gallery, from host: MoldHost.ID, in store: LibraryStore) {
+        switch change {
+        case let .updated(filename, _), let .restored(filename, _), let .removed(filename),
+             let .trashed(filename):
+            // The bulk task re-reads the machine once it is done.
+            if store.bulkTargets.contains(PrintID(host: host, filename: filename)) { return }
+        case let .added(_, _, imported):
+            if imported && host == MoldEngine.localHostID && store.localSaveSuppressImports { return }
+        case .collectionsChanged:
+            Task { await store.reloadCollections() }
+        }
+        store.tickle(host)
+    }
+
     private func replace(_ filename: String, with print: GalleryPrint,
                          on host: MoldHost.ID, in store: LibraryStore) {
-        store.perHost[host] = (store.perHost[host] ?? []).map {
+        store.writeLive(host, (store.perHost[host] ?? []).map {
             $0.print.filename == filename ? $0.replacingPrint(print) : $0
-        }
-        store.rebuild()
+        })
+        store.changedLive([PrintID(host: host, filename: filename)])
     }
 
     /// Adds a print this machine just reported.
@@ -121,34 +147,36 @@ final class GalleryLive {
         var list = store.perHost[host] ?? []
         guard !list.contains(where: { $0.print.filename == print.filename }) else { return }
         list.append(LibraryEntry(host: machine, print: print))
-        store.perHost[host] = list
-        store.rebuild()
+        store.writeLive(host, list)
+        store.changedLive([PrintID(host: host, filename: print.filename)])
     }
 
     private func drop(_ filename: String, on host: MoldHost.ID, in store: LibraryStore) {
         guard (store.perHost[host] ?? []).contains(where: { $0.print.filename == filename }) else { return }
-        store.perHost[host] = (store.perHost[host] ?? []).filter { $0.print.filename != filename }
-        store.rebuild()
+        store.writeLive(host, (store.perHost[host] ?? []).filter { $0.print.filename != filename })
+        store.changedLive([], removed: [PrintID(host: host, filename: filename)])
     }
 
-    /// Reads one machine's listing again and re-applies whatever is still
-    /// queued for it. Its ETag goes first, or the machine answers 304 and the
-    /// repair repairs nothing.
+    /// Reads one machine again and re-applies whatever is still queued for
+    /// it. A FULL pull: the replica hands back its whole state as a reset
+    /// even when nothing changed, which is what undoes an optimistic edit the
+    /// machine refused. On a machine without a change log it is a fresh
+    /// listing (the validator goes first, or the machine answers 304).
     ///
     /// Always replays the outbox, even on the plain re-list a `.resyncRequired`
     /// event asks for -- re-listing without replaying could drop an edit still
     /// in flight, the same defect the outbox's own repair exists to avoid.
+    /// `absorb` does the replay, before the timeline settles.
     func relist(_ id: MoldHost.ID, in store: LibraryStore) async {
         guard let machine = store.hosts.host(id),
               let client = store.hosts.backend(for: id) else { return }
-        store.etags[id] = nil
         // What this machine had when we ASKED, which is what tells its answer
         // apart from what happened while the answer was in flight. See
         // `RelistMerge`.
-        let asked = Set((store.perHost[id] ?? []).map(\.print.filename))
-        let fetched: Fetched<[GalleryPrint]>
+        store.relistAsked[id] = Set((store.perHost[id] ?? []).map(\.print.filename))
+        defer { store.relistAsked[id] = nil }
         do {
-            fetched = try await client.gallery(etag: nil)
+            try await store.replica(for: machine).pull(store.pullRequest(id, .live, full: true), using: client)
         } catch {
             // The repair itself failing is the one thing the person has to be
             // told about: this machine's rows are known-stale and nothing
@@ -157,13 +185,7 @@ final class GalleryLive {
             store.hosts.report(error, on: id, doing: "list its prints")
             return
         }
-        guard case let .fresh(prints, etag) = fetched else { return }
-        if let etag { store.etags[id] = etag }
-        store.perHost[id] = RelistMerge.merged(
-            answer: prints.map { LibraryEntry(host: machine, print: $0) },
-            onScreen: store.perHost[id] ?? [], asked: asked)
         store.hosts.succeeded(on: id, doing: "list its prints")
-        store.mutations.replayPending(on: id, in: store)
-        store.rebuild()
+        store.settleTimelines()
     }
 }

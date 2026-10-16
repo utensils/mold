@@ -93,6 +93,8 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     nonisolated(unsafe) var galleryPrintResponder: (@MainActor (String) async throws -> GalleryPrint?)?
     nonisolated(unsafe) var galleryETags: [String?] = []
     nonisolated(unsafe) var conditionalGallery = false
+    /// The change log `galleryChanges` answers from. See `FakeBackend+Feed`.
+    nonisolated(unsafe) var feed = FakeFeedLog()
     nonisolated(unsafe) var syncCheckpoint: [String: String]?
     let noRetainedMedia: Bool
     /// Every filename an inventory was asked for, in call order -- which is

@@ -10,33 +10,7 @@ extension LibraryStore {
     // MARK: - Trash
 
     func refreshTrash() async {
-        await withTaskGroup(of: (MoldHost, Result<Fetched<[GalleryPrint]>, Error>).self) { group in
-            for host in hosts.hosts {
-                let client = hosts.backend(for: host)
-                let etag = trashEtags[host.id]
-                group.addTask {
-                    do { return (host, .success(try await client.trashedPrints(etag: etag))) }
-                    catch { return (host, .failure(error)) }
-                }
-            }
-            for await (host, result) in group {
-                guard !Task.isCancelled, hosts.host(host.id) == host else { continue }
-                switch result {
-                case let .success(.fresh(prints, etag)):
-                    trashPerHost[host.id] = prints.map { LibraryEntry(host: host, print: $0) }
-                    if let etag { trashEtags[host.id] = etag }
-                    // Scoped: this passive listing runs right after
-                    // `emptyTrash` too, and must not clear what THAT reported.
-                    hosts.succeeded(on: host.id, doing: "list its trash")
-                case .success(.notModified):
-                    hosts.succeeded(on: host.id, doing: "list its trash")
-                case let .failure(error):
-                    hosts.report(error, on: host.id, doing: "list its trash")
-                }
-            }
-        }
-        rebuildTrash()
-        rows.bump()
+        await pullAll(.trash, doing: "list its trash")
     }
 
     // MARK: - Mutations

@@ -236,3 +236,25 @@ Older invalidated source-only snapshots may become independent only after fresh
 origin route/instance and archive/output verification plus a singleton source-image
 inventory. Preserve local bytes; never mint authority, replace attachments, or
 waive hidden inputs and stale/cancelled responses during this migration.
+
+**Library replicas.** `LibraryStore` reads each machine through one MoldClient
+`GalleryReplica`, keyed by the exact `MoldHost` record (a changed route/key is a
+new replica; a delta read through the old record is discarded on arrival). The
+feed is used only when `capabilities.gallery.changes_feed.protocol_version == 1`;
+404/405/`503 GALLERY_FEED_NOT_READY` falls back to the conditional listings for
+that pull. The replica owns the listing ETags (`invalidateListings`, never a
+store-side ETag map) and delivers deltas in revision order through its sink
+BEFORE `pull()` returns; `absorb` only edits `perHost`/`trashPerHost`, replays
+the outbox, and notes ids, and whoever started the pull calls
+`settleTimelines()`. A nil delta must not bump `rows` or re-sort. Single flight is
+per lane (feed, live listing, trash listing): a tickle mid-pull queues exactly
+one follow-up; cancelling the caller that started a pull changes nothing. On a
+feed machine gallery frames and `resyncRequired` only `tickle` the replica (echo
+suppression, bulk targets and import suppression still apply first); legacy
+machines keep in-place frame application, `RelistGate` and `RelistMerge`.
+`relist` is a FULL pull (a reset even when unchanged) so a refused optimistic
+edit is undone. `LibraryTimeline` patches in place only when a full merge could
+not differ (unchanged merge identity/order key, no shared filename/identity/link,
+no key tie); otherwise it rebuilds. A direct `perHost` write outside those paths
+marks the timeline for a full rebuild. Tests construct `LibraryStore` without a
+`replicaStore`; only `AppStores` persists to Application Support.

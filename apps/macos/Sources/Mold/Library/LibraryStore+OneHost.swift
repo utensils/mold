@@ -13,14 +13,12 @@ extension LibraryStore {
     func refresh(on host: MoldHost.ID) async {
         guard let machine = hosts.host(host) else { return }
         let client = hosts.backend(for: machine)
-        let etag = etags[host]
-        let result: Result<Fetched<[GalleryPrint]>, Error>
         do {
-            result = .success(try await client.gallery(etag: etag))
+            try await replica(for: machine).pull(pullRequest(host, .live), using: client)
+            if hosts.host(host) == machine { hosts.succeeded(on: host, doing: "list its prints") }
         } catch {
-            result = .failure(error)
+            if hosts.host(host) == machine { hosts.report(error, on: host, doing: "list its prints") }
         }
-        apply(result, for: machine)
-        rebuild()
+        settleTimelines()
     }
 }

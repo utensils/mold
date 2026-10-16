@@ -3,10 +3,13 @@ import MoldClient
 
 /// Every machine's prints, in one timeline.
 ///
-/// `GET /api/gallery` has no pagination: a host answers with its entire index
-/// in one array. So the app holds each host's index whole, merges them, and
-/// filters locally -- and refreshes by ETag, which a live host answers with a
-/// 304 and zero bytes instead of re-serializing 1.2 MB.
+/// Each machine is followed by its own `GalleryReplica` (off the main actor):
+/// by cursor through `GET /api/gallery/changes` where the machine advertises
+/// `gallery.changes_feed`, otherwise through the conditional full listing.
+/// Either way a refresh hands back a `ReplicaDelta` -- or nothing, in which
+/// case the merged timeline is not touched at all -- and the delta is applied
+/// to `perHost` / `trashPerHost` and patched into the timelines
+/// (`LibraryTimeline`) without a re-merge wherever a merge could not differ.
 @MainActor
 @Observable
 final class LibraryStore {
@@ -50,11 +53,32 @@ final class LibraryStore {
     /// does not cross that file boundary.
     internal(set) var trashed: [LibraryEntry] = [] { didSet { sourceAccessRevision &+= 1 } }
 
-    var perHost: [MoldHost.ID: [LibraryEntry]] = [:]
-    var trashPerHost: [MoldHost.ID: [LibraryEntry]] = [:]
+    /// One machine's rows as shown, optimistic edits included. A write from
+    /// outside the store's own delta paths (a test, a bulk reconcile) marks
+    /// the timeline for a full rebuild at its next settle.
+    var perHost: [MoldHost.ID: [LibraryEntry]] = [:] {
+        didSet { if !writingRows { pendingLive.full = true } }
+    }
+    var trashPerHost: [MoldHost.ID: [LibraryEntry]] = [:] {
+        didSet { if !writingRows { pendingTrash.full = true } }
+    }
     var syncListings: [String: SyncListingSnapshot] = [:]
-    var etags: [MoldHost.ID: String] = [:]
-    var trashEtags: [MoldHost.ID: String] = [:]
+
+    /// Each machine's replica, with the exact machine record (route, key) it
+    /// reads through. See `LibraryStore+Replica`.
+    @ObservationIgnored var replicas: [MoldHost.ID: (host: MoldHost, replica: GalleryReplica)] = [:]
+    @ObservationIgnored let replicaStore: GalleryReplicaStore?
+    /// What a machine had when a repairing re-list ASKED, so its reset can
+    /// keep a print that landed while the answer was in flight (`RelistMerge`).
+    @ObservationIgnored var relistAsked: [MoldHost.ID: Set<String>] = [:]
+    /// The merged timelines and their copy -> tile indexes.
+    @ObservationIgnored var liveTimeline = LibraryTimeline(order: .newestFirst)
+    @ObservationIgnored var trashTimeline = LibraryTimeline(order: .recentlyTrashedFirst)
+    /// Rows changed since the timelines were last settled.
+    @ObservationIgnored var pendingLive = PendingRows()
+    @ObservationIgnored var pendingTrash = PendingRows()
+    @ObservationIgnored var writingRows = false
+    @ObservationIgnored var deferredSettles = 0
 
     /// Collections as each MACHINE holds them. A collection's id is that
     /// machine's, so these are never merged in storage -- only when they are
@@ -104,10 +128,14 @@ final class LibraryStore {
     /// How many times the rows have changed. See `LibraryRevision`.
     let rows = LibraryRevision()
 
-    init(hosts: HostStore, syncSession: LibrarySyncSession = LibrarySyncSession(), readDefaults: UserDefaults = AppStorageSuite.defaults) {
+    /// `replicaStore` nil keeps replicas in memory only -- every test's
+    /// default, so no test writes the real Application Support.
+    init(hosts: HostStore, syncSession: LibrarySyncSession = LibrarySyncSession(),
+         readDefaults: UserDefaults = AppStorageSuite.defaults, replicaStore: GalleryReplicaStore? = nil) {
         self.hosts = hosts
         self.syncSession = syncSession
         self.readDefaults = readDefaults
+        self.replicaStore = replicaStore
         unreadMedia = LibraryUnreadLedger.load(from: readDefaults)
         unreadMedia.retainHosts(Set(hosts.hosts.map(\.id)))
         unreadMedia.save(to: readDefaults)
@@ -123,29 +151,15 @@ final class LibraryStore {
         }
     }
 
-    /// Prints from every host, newest first.
+    /// Prints from every host, newest first. A machine whose replica reports
+    /// no change leaves the timeline exactly as it was.
     func refresh() async {
         loads += 1
         defer { loads -= 1 }
         // A machine that was removed must not keep contributing prints to a
         // merged timeline nobody can attribute them from.
         prune(to: hosts.hosts)
-
-        await withTaskGroup(of: (MoldHost, Result<Fetched<[GalleryPrint]>, Error>).self) { group in
-            for host in hosts.hosts {
-                let client = hosts.backend(for: host)
-                let etag = etags[host.id]
-                group.addTask {
-                    do { return (host, .success(try await client.gallery(etag: etag))) }
-                    catch { return (host, .failure(error)) }
-                }
-            }
-            for await (host, result) in group {
-                guard !Task.isCancelled, hosts.host(host.id) == host else { continue }
-                apply(result, for: host)
-            }
-        }
-        rebuild()
+        await pullAll(.live, doing: "list its prints")
     }
 
     /// Independent sidebar data starts together: a slow image index or trash
@@ -156,27 +170,5 @@ final class LibraryStore {
         async let trash: Void = refreshTrash()
         async let organization: Void = refreshOrganization()
         _ = await (prints, trash, organization)
-    }
-
-    /// Not `private`: `LibraryStore+OneHost.swift` re-reads a single machine
-    /// through it, and `private` does not cross a file boundary.
-    func apply(_ result: Result<Fetched<[GalleryPrint]>, Error>, for host: MoldHost) {
-        switch result {
-        case let .success(.fresh(prints, etag)):
-            if let etag { etags[host.id] = etag }
-            perHost[host.id] = prints.map { LibraryEntry(host: host, print: $0) }
-            // Scoped: `refresh` is also `reload`'s own passive listing, run
-            // right after other actions, and must not clear what one of
-            // THOSE just reported.
-            hosts.succeeded(on: host.id, doing: "list its prints")
-        case .success(.notModified):
-            // Nothing changed. Keeping the cached rows is the whole point of
-            // having asked conditionally.
-            hosts.succeeded(on: host.id, doing: "list its prints")
-        case let .failure(error):
-            // A host going down must not erase what it already showed us --
-            // the other machines' prints stay, and so do this one's.
-            hosts.report(error, on: host.id, doing: "list its prints")
-        }
     }
 }
