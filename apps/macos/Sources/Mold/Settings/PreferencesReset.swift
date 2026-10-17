@@ -55,7 +55,9 @@ enum PreferencesReset {
     /// somebody's setup. `pendingBatches` and `pendingChainJobs` are in-flight
     /// recovery bookkeeping, not preferences -- clearing them strands a batch
     /// or a chain the app is still waiting on. Library sync copy records and
-    /// pending organization are recovery bookkeeping too. The Keychain migration flag is
+    /// pending organization are recovery bookkeeping too: they now live in
+    /// `LibrarySyncRecords`' own file, and the three legacy defaults keys
+    /// below are only read once, migrated and removed. The Keychain migration flag is
     /// a fact about this install: clearing it would re-read the old Keychain
     /// items and could resurrect a key the person has since removed.
     ///
@@ -81,6 +83,8 @@ enum PreferencesReset {
         "notifyRenders",
         "mediaCacheMegabytes",
         "updateChannel",
+        // Legacy Library Sync bookkeeping: read once by LibrarySyncRecords'
+        // migration, then removed. A reset must not discard it first.
         "librarySyncCopiesV1",
         "librarySyncPendingOrganizationV1",
         "hosts",
@@ -101,9 +105,12 @@ enum PreferencesReset {
         "videoPlaybackRepeat",
     ]
 
-    /// Per-copy recovery receipts have dynamically derived suffixes. They are
-    /// transfer bookkeeping, and clearing them would discard resume evidence.
-    static let keptPrefixes: Set<String> = ["librarySyncCompletedCopyV1."]
+    /// Key families with dynamically derived suffixes that this app still
+    /// writes. None today: Library Sync's per-copy receipts
+    /// (`librarySyncCompletedCopyV1.*`) now go to `LibrarySyncRecords`'
+    /// journal, and the legacy family is only read once, migrated and
+    /// removed -- `reset` never touched it either way.
+    static let keptPrefixes: Set<String> = []
 
     static func reset(in defaults: UserDefaults) {
         for key in keys { defaults.removeObject(forKey: key) }

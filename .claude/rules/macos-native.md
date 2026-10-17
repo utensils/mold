@@ -204,6 +204,47 @@ snapshot even when Generate is no longer mounted.
 
 **Local-sync stages.** Keep source discovery, destination preparation, planning, transfer, organization, final checkpoint verification and reporting as explicit typed stages. Preserve backend call order, durable output receipts before retained-input transfer, route/instance fencing, intentionally removed copies and per-file/per-collection failure exclusions. A stage extraction must retain the LocalSave and SyncSession regression suites, including final-checkpoint ordering.
 
+**Sync costs O(changes).** Discovery pulls every source replica concurrently
+(`.all` for Sync All, so tombstones know both partitions) and reads one
+`ReplicaMirrorView` per machine. An explicit Sync All press
+(`syncNow`, `syncAllLocally(fullPlan: true)`) plans EVERY print, skipping only on
+matching source+destination checkpoint evidence (one GET per machine, cached
+digests: still nothing per print when unchanged). Keep in Sync's automatic runs
+(`fullPlan: false`) consider only names in
+`GalleryReplica.changedNames(since:)` from each source's persisted mirror
+cursor (`LibrarySyncRecords.SourceCursor`, keyed by host, route-checked with the
+origin context), plus the bucket's retry set, pending organization, and names
+This Mac's own log changed (mapped back through the records). A nil answer
+(new epoch after relaunch, trimmed log, route/instance change) is a full plan,
+exactly the old behaviour, as is a bucket whose `lastFullPlan` is over 24 h
+old. A retained-input-only change with no row change is found by the next
+press or full plan, never later than a day. Machines a run could not read keep
+their source cursor, and This Mac's changes to their copies go to retry (or the
+destination cursor stays put when those names are unknown). Every considered key not sealed this run goes into
+retry; cursors advance only on an unstopped run, and the destination cursor
+advances past this run's own imports while carrying any name in that stretch it
+did not seal. Receipts come from the import answer (`LocalSyncRecord(receipt:)`,
+`provisional`, never tokens) and are journaled with `synchronize()` before any
+retained input moves -- a receipt that cannot be written fails the item. No
+per-print `galleryPrint`, and lane refill never waits on bookkeeping. A
+provisional record never matches by facts: it links only through the
+occupied-name byte comparison, unless this same run upgraded it from the
+refreshed listing. Checkpoints are the bounded `gallerySyncCheckpoint(filenames:)`
+for considered/touched names (the whole GET only for full plans; 404/405 falls
+back inside MoldClient). Records live in `LibrarySyncRecords` (Application
+Support `LibrarySync/records.json` + `journal.jsonl`, buckets per destination
+instance, one-time migration of the legacy defaults keys, tombstone pruning only
+when source and copy are gone from both partitions). A document that cannot be
+read (corrupt or newer version) is moved to `records.json.unreadable-<ms>`, never
+overwritten, and blocks Sync All with a reported issue until that file is
+removed. Each `LibraryStore` defaults to its own memory-only store; tests that
+"relaunch" pass two stores over one temporary directory. Links refresh once per run, never per receipt. Recipe
+digests are cached per host/filename/media version/raw-recipe SHA-256 (rows
+without raw bytes are not cached). Collection visibility is one
+pass under the cancellable `VisibilityWriterLock` with one inventory assignment; progress
+publishes at most ~10 Hz. A non-echo remote replica delta (`absorb`, outside a
+run) calls `noteRemoteChange`.
+
 **Encrypted remote access.** Remote host additions claim a version 2 pairing link and persist public pins/grants separately from SecretStore credentials. The shared MoldClient transport and media loader are mandatory for all remote requests. Only numeric loopback reaches the embedded API directly. Remote Access opt-in opens the secure LAN WebSocket listener and a Lambda connector using the server’s existing owner-only `secure/host.identity`; discovery is public metadata, not owner enrollment. Publish the validated WSS endpoint into ConnectionAddresses before producing a QR. Stop closes cloud and LAN channels. Never expose the operator bearer, retain old cloud owner tokens, restore plaintext remote fallback or replay lost mutations. Native builds automatically build the GPU-free Rust XCFramework, including remote-only builds. Tests must use an isolated app bundle ID while an installed host is running.
 
 Source reuse stays discoverable in inspector cards and original viewers through the same declared button/context action list. A native chooser offers only connected, installed, runtime-ready compatible recipes; explicitly adopt the selected recipe once, without reconciling through the default. Revalidate source access before changing the draft, and dismiss original details on successful staging.

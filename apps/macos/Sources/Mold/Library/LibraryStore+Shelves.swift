@@ -53,10 +53,9 @@ extension LibraryStore {
     }
 
     func reconcileCollectionVisibility() async {
-        guard !reconcilingCollectionVisibility else { return }
-        reconcilingCollectionVisibility = true
+        guard visibilityWriters.tryAcquire() else { return }
         defer {
-            reconcilingCollectionVisibility = false
+            visibilityWriters.release()
             refreshUnreadMedia()
             collectionVisibility.persist(to: AppStorageSuite.defaults, key: "library.collectionVisibility")
         }
