@@ -3,8 +3,11 @@ import MoldClient
 
 // Library Sync's planning stage: which prints to look at, and what each needs.
 //
-// Sync All considers only what changed since each source's persisted mirror
-// cursor -- the replica's change log -- plus the retry set (anything a run did
+// An explicit Sync All press plans every print, skipping only on matching
+// source and destination checkpoint evidence (one checkpoint read per
+// machine, cached recipe digests: still nothing per print when nothing
+// changed). Keep in Sync's automatic runs consider only what changed since
+// each source's persisted mirror cursor -- the replica's change log -- plus the retry set (anything a run did
 // not seal), pending organization, and names This Mac's own log says changed.
 // Everything else is a sealed copy that nothing has touched since, so a run
 // in which nothing changed does no per-print work at all. A cursor the log
@@ -12,8 +15,13 @@ import MoldClient
 // print, exactly as before.
 @MainActor
 extension LibraryStore {
+    /// How stale the last full plan may be before a cursor-scoped run plans
+    /// everything anyway: what a source-side retained-input change with no
+    /// gallery change waits for at most.
+    static let fullPlanInterval: TimeInterval = 24 * 60 * 60
+
     func planMirrorWork(_ sources: MirrorSources, destination: MirrorDestination,
-                        syncAll: Bool) async -> MirrorWorkPlan {
+                        syncAll: Bool, fullPlan requestedFull: Bool = true) async -> MirrorWorkPlan {
         let local = destination.host
         let records = destination.records
         let bucket = destination.bucket
@@ -23,6 +31,8 @@ extension LibraryStore {
         var unchanged = 0
         var unchangedKeptRemoved = 0
         let reverse = syncAll ? syncRecords.sourceKeys(copiedAs: destination.instance) : [:]
+        let staleFullPlan = bucket.lastFullPlan.map { Date().timeIntervalSince($0) > Self.fullPlanInterval } ?? true
+        let planEverything = requestedFull || staleFullPlan
 
         if !syncAll {
             for entry in sources.selected {
@@ -43,7 +53,7 @@ extension LibraryStore {
             }
             for hostID in sources.hosts.keys.sorted() {
                 guard let source = sources.hosts[hostID] else { continue }
-                guard let changed = source.changed, let localChanged = destination.changed else {
+                guard !planEverything, let changed = source.changed, let localChanged = destination.changed else {
                     fullHosts.insert(hostID)
                     consideredPairs += source.candidates.map { (hostID, $0) }
                     continue
@@ -154,6 +164,14 @@ extension LibraryStore {
                 requestedName = boundedMirrorName(
                     original, marker: target.hostID.uuidString.lowercased())
             }
+            // A receipt proves only the name an import answered with: its
+            // copy links through the occupied-name byte comparison.
+            if syncAll, let cached = records[sourceKey], cached.provisional == true,
+               destination.view.live(cached.destinationFilename) != nil {
+                work.append(MirrorWorkItem(index: index, target: target, filename: cached.destinationFilename,
+                                           occupied: true, cachedFilename: nil))
+                continue
+            }
             if syncAll,
                let cached = records[sourceKey],
                let existing = destination.view.live(cached.destinationFilename),
@@ -184,7 +202,9 @@ extension LibraryStore {
 
         return MirrorWorkPlan(
             targets: targets, items: work, cachedCopies: cachedCopies, keptRemoved: keptRemoved,
-            unchanged: unchanged, considered: Set(targets.map(\.key)), settled: settled,
+            unchanged: unchanged,
+            plannedEverything: syncAll && fullHosts.count == sources.hosts.count && sources.hostErrors.isEmpty,
+            considered: Set(targets.map(\.key)), settled: settled,
             keptRemovedKeys: keptRemovedKeys, unresolvedCollections: unresolvedCollections,
             sourceCheckpoints: sourceCheckpoints,
             tombstones: syncAll ? tombstones(sources, destination: destination, fullHosts: fullHosts) : [],

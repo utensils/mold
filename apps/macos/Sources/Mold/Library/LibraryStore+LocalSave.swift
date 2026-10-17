@@ -19,6 +19,8 @@ struct MirrorResult: Sendable {
     let error: String?
     var sourceMedia: RetainedSourceMedia.MirrorResult = .complete
     var repeatAcknowledgable = false
+    /// This run wrote an output receipt for it (even if it then failed).
+    var receipted = false
 }
 
 /// Each stage receives the captured authority it needs and returns its own result.
@@ -82,12 +84,12 @@ struct MirrorReceipts: Sendable {
     let records: LibrarySyncRecords
     let instance: String?
 
-    func markPending(_ key: String, _ filename: String) async {
-        await records.markPending(key, filename: filename, instance: instance)
+    func markPending(_ key: String, _ filename: String) async throws {
+        try await records.markPending(key, filename: filename, instance: instance)
     }
 
-    func receipt(_ record: LocalSyncRecord, key: String) async {
-        await records.checkpoint(record, key: key, instance: instance)
+    func receipt(_ record: LocalSyncRecord, key: String) async throws {
+        try await records.checkpoint(record, key: key, instance: instance)
     }
 }
 
@@ -103,6 +105,8 @@ struct MirrorWorkPlan {
     let keptRemoved: Int
     /// Unconsidered prints already here (cursor-scoped plans only).
     let unchanged: Int
+    /// Every discovered machine was planned in full.
+    let plannedEverything: Bool
     /// Every source key this plan looked at.
     let considered: Set<String>
     /// Considered keys that need no further work: cached, or kept removed.
@@ -142,6 +146,8 @@ struct MirrorAssignments {
 
 struct MirrorCopies {
     let successful: [MirrorCopy]
+    /// Source keys whose output receipt this run wrote.
+    let receipted: Set<String>
     let assignments: MirrorAssignments
     let transferred: Int
     let alreadyLocal: Int
@@ -231,6 +237,7 @@ func repairCachedSources(_ target: MirrorTarget, to destination: any MoldBackend
 private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
                     as requestedName: String, occupied: Bool,
                     knownPrints: ReplicaMirrorView?, receipts: MirrorReceipts?) async -> MirrorResult {
+    var receipted = false
     do {
         guard await target.isCurrent() else { throw MoldClientError.unreachable(routeChanged) }
         try checkSyncStagingSpace(for: target.print)
@@ -271,25 +278,27 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
         guard await target.isCurrent() else { throw MoldClientError.unreachable(routeChanged) }
         let item = try await LibraryMirrorFiles.importDescriptor(for: target.print, file: file)
         guard await target.isCurrent() else { throw MoldClientError.unreachable(routeChanged) }
-        await receipts?.markPending(target.key, filename)
+        try await receipts?.markPending(target.key, filename)
         // The server may commit the file before its response is lost; the
         // pending marker stays for the next fresh listing either way.
         let imported = try await destination.importPrint(item, as: filename)
-        if imported != filename { await receipts?.markPending(target.key, imported) }
+        if imported != filename { try await receipts?.markPending(target.key, imported) }
         // The import's answer proves the copy's name: that is the durable
         // output receipt, written before the retained-input transfer. No
         // checkpoint tokens means a resume MUST repair retained inputs
-        // before declaring the copy complete.
+        // before declaring the copy complete. A receipt that cannot be made
+        // durable fails the item here, before any retained input moves.
         if let receipts, let receipt = LocalSyncRecord(receipt: target.print, from: target.hostID, as: imported,
                                                        destinationInstance: receipts.instance) {
-            await receipts.receipt(receipt, key: target.key)
+            try await receipts.receipt(receipt, key: target.key)
+            receipted = true
         }
         let sourceMedia = try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
             from: target.source, to: destination, as: imported, expectedSourceArchiveIdentity: sourceIdentity, downloadedOutput: file)
-        return MirrorResult(filename: imported, alreadyLocal: false, error: nil, sourceMedia: sourceMedia)
+        return MirrorResult(filename: imported, alreadyLocal: false, error: nil, sourceMedia: sourceMedia, receipted: true)
     } catch {
         return MirrorResult(filename: nil, alreadyLocal: false,
-                            error: error.sentence, repeatAcknowledgable: canAcknowledgeSyncError(error))
+                            error: error.sentence, repeatAcknowledgable: canAcknowledgeSyncError(error), receipted: receipted)
     }
 }
 
@@ -319,8 +328,11 @@ extension LibraryStore {
         syncSession.runFinished(in: self)
     }
 
-    func syncAllLocally() async {
-        await mirrorLocally([], syncAll: true)
+    /// `fullPlan`: an explicit press plans every print, skipping only on
+    /// matching source and destination checkpoint evidence; Keep in Sync's
+    /// automatic runs pass false and plan from each machine's cursor.
+    func syncAllLocally(fullPlan: Bool = true) async {
+        await mirrorLocally([], syncAll: true, fullPlan: fullPlan)
         syncSession.runFinished(in: self)
     }
 
@@ -335,7 +347,7 @@ extension LibraryStore {
 
     var syncStopped: Bool { Task.isCancelled || localSaveStopRequested }
 
-    private func mirrorLocally(_ selection: [LibraryEntry], syncAll: Bool) async {
+    private func mirrorLocally(_ selection: [LibraryEntry], syncAll: Bool, fullPlan: Bool = true) async {
         guard !localSaveRunning else { return }
         localSaveRunning = true
         defer { localSaveRunning = false }
@@ -349,6 +361,13 @@ extension LibraryStore {
         guard let local = hosts.host(MoldEngine.localHostID), hosts.isUp(local) else {
             localSaveReport = "Start This Mac’s engine to save remote prints in its Library."
             localSaveFailures = []
+            localSaveAlertPresented = true
+            return
+        }
+        // Never on an empty stand-in for records this build cannot read.
+        if syncAll, let blocked = syncRecords.blockedReason {
+            localSaveReport = "Sync All is paused."
+            localSaveFailures = [blocked]
             localSaveAlertPresented = true
             return
         }
@@ -381,7 +400,7 @@ extension LibraryStore {
             localSaveAlertPresented = true
             return
         }
-        let plan = await planMirrorWork(sources, destination: prepared, syncAll: syncAll)
+        let plan = await planMirrorWork(sources, destination: prepared, syncAll: syncAll, fullPlan: fullPlan)
         let copies = await copyMirrorWork(plan, sources: sources, prepared: prepared, syncAll: syncAll)
         let organization = await organizeMirrorCopies(copies.assignments, destination: prepared.backend)
         var failures = copies.failures + organization.failures
@@ -422,6 +441,7 @@ extension LibraryStore {
         var favoriteFiles: [String] = []
         var tagFiles: [String: [String]] = [:]
         var successfulCopies: [MirrorCopy] = []
+        var receipted: Set<String> = []
         var alreadyLocal = plan.unchanged
         var transferred = 0
         var completed = 0
@@ -482,6 +502,7 @@ extension LibraryStore {
                 refill(stopped: syncStopped)
                 completed += 1
                 let target = targets[index]
+                if result.receipted { receipted.insert(target.key) }
                 if let name = result.filename {
                     if result.sourceMedia == .legacyInputsUnavailable {
                         let notice = "\(hosts.name(of: target.hostID) ?? target.hostID.uuidString) · \(target.print.filename): Original inputs are unavailable; the finished file is saved."
@@ -498,7 +519,12 @@ extension LibraryStore {
                     if syncAll, let receipts, syncedCopies[target.key]?.destinationFilename != name,
                        let receipt = LocalSyncRecord(receipt: target.print, from: target.hostID, as: name,
                                                      destinationInstance: prepared.instance) {
-                        await receipts.receipt(receipt, key: target.key)
+                        do {
+                            try await receipts.receipt(receipt, key: target.key)
+                            receipted.insert(target.key)
+                        } catch {
+                            failures.append("\(target.print.filename): its sync receipt could not be saved: \(error.sentence)")
+                        }
                     }
                 } else {
                     let failure = "\(target.print.filename): \(result.error ?? "save failed")"
@@ -513,7 +539,7 @@ extension LibraryStore {
             failures.append("Save stopped. Remaining prints were not transferred.")
         }
 
-        return MirrorCopies(successful: successfulCopies,
+        return MirrorCopies(successful: successfulCopies, receipted: receipted,
             assignments: MirrorAssignments(collectionNames: collectionNames, collectionFiles: collectionFiles,
                 titles: titleAssignments, favorites: favoriteFiles, tags: tagFiles),
             transferred: transferred, alreadyLocal: alreadyLocal, failures: failures)

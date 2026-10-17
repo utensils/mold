@@ -48,17 +48,21 @@ nonisolated struct LocalSyncRecord: Codable, Sendable, Equatable {
     }
 
     /// SHA-256 of the canonical recipe, cached per (host, filename, media
-    /// version) plus the typed recipe's hash, so an edited recipe is never
-    /// stale. Canonicalizing re-parses and re-serializes the recipe, which a
-    /// plan must not repeat for every print on every run.
+    /// version, digest of the exact raw recipe bytes): canonicalizing
+    /// re-parses and re-serializes the recipe, which a plan must not repeat
+    /// for every print on every run, and the raw digest makes an edited
+    /// recipe a different key rather than a stale hit. A row without raw
+    /// recipe bytes is never cached.
     static func recipe(_ print: GalleryPrint, host: MoldHost.ID) -> String? {
         let cacheKey = cacheKey(print, host: host)
-        if let cached = recipeCache.withLock({ $0[cacheKey] }) { return cached }
+        if let cacheKey, let cached = recipeCache.withLock({ $0[cacheKey] }) { return cached }
         guard let encoded = print.canonicalMetadataJSON else { return nil }
         let digest = SHA256.hash(data: encoded).map { String(format: "%02x", $0) }.joined()
-        recipeCache.withLock { cache in
-            if cache.count >= recipeCacheLimit { cache.removeAll(keepingCapacity: true) }
-            cache[cacheKey] = digest
+        if let cacheKey {
+            recipeCache.withLock { cache in
+                if cache.count >= recipeCacheLimit { cache.removeAll(keepingCapacity: true) }
+                cache[cacheKey] = digest
+            }
         }
         return digest
     }
@@ -67,12 +71,13 @@ nonisolated struct LocalSyncRecord: Codable, Sendable, Equatable {
     private static let recipeCache = Mutex<[String: String]>([:])
     /// Whether this print's digest is cached. For tests.
     static func recipeCached(_ print: GalleryPrint, host: MoldHost.ID) -> Bool {
-        recipeCache.withLock { $0[cacheKey(print, host: host)] != nil }
+        guard let key = cacheKey(print, host: host) else { return false }
+        return recipeCache.withLock { $0[key] != nil }
     }
 
-    private static func cacheKey(_ print: GalleryPrint, host: MoldHost.ID) -> String {
-        [host.uuidString, print.filename, print.mediaVersion ?? "-", String(print.timestamp),
-         String(print.metadata.hashValue), print.rawMetadataAvailable ? "raw" : "typed"].joined(separator: "\u{1F}")
+    private static func cacheKey(_ print: GalleryPrint, host: MoldHost.ID) -> String? {
+        guard let raw = print.rawMetadataDigest else { return nil }
+        return [host.uuidString, print.filename, print.mediaVersion ?? "-", raw].joined(separator: "\u{1F}")
     }
 
     func matches(source: GalleryPrint, from sourceHost: MoldHost.ID,
@@ -80,15 +85,9 @@ nonisolated struct LocalSyncRecord: Codable, Sendable, Equatable {
         guard source.mediaVersion == sourceVersion, source.timestamp == sourceTimestamp,
               source.sizeBytes == sourceSize, local.filename == destinationFilename
         else { return false }
-        if provisional == true {
-            // The receipt names the copy the import answered with; its own
-            // listed facts are compared under mirror compatibility, as an
-            // existing copy is before byte comparison.
-            return Self.recipe(source, host: sourceHost) == sourceRecipe
-                && local.sizeBytes == sourceSize && local.timestamp == source.timestamp
-                && RetainedSourceMedia.mirrorMetadataMatches(source.canonicalMetadataJSON, local.canonicalMetadataJSON)
-                && (source.metadataSynthetic ?? false) == (local.metadataSynthetic ?? false)
-        }
+        // A receipt names the copy an import answered with, nothing more: it
+        // links only through the occupied-name byte comparison.
+        guard provisional != true else { return false }
         return local.mediaVersion == destinationVersion
             && local.timestamp == destinationTimestamp
             && local.sizeBytes == destinationSize

@@ -137,7 +137,7 @@ final class LibraryStore {
     /// default, so no test writes the real Application Support.
     init(hosts: HostStore, syncSession: LibrarySyncSession = LibrarySyncSession(),
          readDefaults: UserDefaults = AppStorageSuite.defaults, replicaStore: GalleryReplicaStore? = nil,
-         syncRecords: LibrarySyncRecords = .processLocal) {
+         syncRecords: LibrarySyncRecords = LibrarySyncRecords()) {
         self.hosts = hosts
         self.syncRecords = syncRecords
         self.syncSession = syncSession

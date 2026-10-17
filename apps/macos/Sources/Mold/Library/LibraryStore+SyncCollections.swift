@@ -7,7 +7,9 @@ import MoldClient
 @MainActor
 final class VisibilityWriterLock {
     private(set) var isHeld = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var waiters: [(id: UUID, continuation: CheckedContinuation<Void, any Error>)] = []
+    /// Cancellations that arrived before their waiter was queued.
+    private var cancelled: Set<UUID> = []
 
     func tryAcquire() -> Bool {
         guard !isHeld else { return false }
@@ -15,18 +17,47 @@ final class VisibilityWriterLock {
         return true
     }
 
-    func acquire() async {
+    /// Waits its turn; a cancelled waiter leaves the queue and throws,
+    /// never holding the lock.
+    func acquire() async throws {
+        try Task.checkCancellation()
         guard isHeld else {
             isHeld = true
             return
         }
-        await withCheckedContinuation { waiters.append($0) }
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                MainActor.assumeIsolated { self.enqueue(id, continuation) }
+            }
+        } onCancel: {
+            Task { @MainActor in self.cancel(id) }
+        }
+    }
+
+    private func enqueue(_ id: UUID, _ continuation: CheckedContinuation<Void, any Error>) {
+        if cancelled.remove(id) != nil {
+            continuation.resume(throwing: CancellationError())
+        } else {
+            waiters.append((id, continuation))
+        }
+    }
+
+    private func cancel(_ id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else {
+            cancelled.insert(id)
+            return
+        }
+        waiters.remove(at: index).continuation.resume(throwing: CancellationError())
     }
 
     /// Hands the lock straight to the next waiter, if there is one.
     func release() {
-        if waiters.isEmpty { isHeld = false } else { waiters.removeFirst().resume() }
+        if waiters.isEmpty { isHeld = false } else { waiters.removeFirst().continuation.resume() }
     }
+
+    /// Waiters queued now. For tests.
+    var waiting: Int { waiters.count }
 }
 
 struct CollectionVisibilitySync {
@@ -49,7 +80,12 @@ extension LibraryStore {
     ) async -> CollectionVisibilitySync {
         var result = CollectionVisibilitySync()
         guard !shelves.isEmpty else { return result }
-        await visibilityWriters.acquire()
+        do {
+            try await visibilityWriters.acquire()
+        } catch {
+            result.failures = shelves.map { ($0.0.slug, "Sync stopped before its visibility was checked.") }
+            return result
+        }
         defer { visibilityWriters.release() }
         for (collection, fallbackHidden) in shelves {
             do {

@@ -79,14 +79,13 @@ struct LibraryLocalSaveTests {
         let probes = target.callCount("gallerySyncCheckpoint")
         let imports = target.importedNames.count
         target.delays["gallerySyncCheckpoint"] = .milliseconds(100)
-        let relaunched = LibraryStore(hosts: hosts)
-        let run = Task { await relaunched.syncAllLocally() }
+        let run = Task { await library.syncAllLocally() }
         await settle { target.callCount("gallerySyncCheckpoint") > probes }
         var replacement = remote
         replacement.baseURL = URL(string: "http://replacement-checkpoint-origin")!
         hosts.hosts = [local, replacement]
         await run.value
-        #expect(relaunched.localSaveFailures.contains { $0.contains("machine route changed") })
+        #expect(library.localSaveFailures.contains { $0.contains("machine route changed") })
         #expect(target.importedNames.count == imports)
     }
 
@@ -113,9 +112,12 @@ struct LibraryLocalSaveTests {
         #expect(source.galleryETags.last! == "fake-etag")
         #expect(source.callCount("retainedMediaTransferOffer") == probes)
         source.syncCheckpoint = [print.filename: "source-v2"]
-        await library.syncAllLocally()
+        // Keep in Sync's automatic run plans from the cursor: the row did not
+        // change, so it is not re-verified...
+        await library.syncAllLocally(fullPlan: false)
         #expect(source.callCount("retainedMediaTransferOffer") == probes, "an unchanged row is not re-verified")
-        await LibraryStore(hosts: hosts).syncAllLocally()
+        // ...but a press plans every print against fresh checkpoint evidence.
+        await library.syncAllLocally()
         #expect(source.callCount("retainedMediaTransferOffer") > probes)
     }
 
@@ -138,11 +140,13 @@ struct LibraryLocalSaveTests {
         target.refuses.insert("mutate")
         let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? target : source }
         hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
-        await LibraryStore(hosts: hosts).syncAllLocally()
+        let files = relaunchDirectory()
+        defer { try? FileManager.default.removeItem(at: files) }
+        await LibraryStore(hosts: hosts, syncRecords: LibrarySyncRecords(directory: files)).syncAllLocally()
         let downloads = source.callCount("mediaFile")
         #expect(downloads == 1)
         target.refuses.remove("mutate")
-        await LibraryStore(hosts: hosts).syncAllLocally()
+        await LibraryStore(hosts: hosts, syncRecords: LibrarySyncRecords(directory: files)).syncAllLocally()
         #expect(source.callCount("mediaFile") == downloads)
         #expect(target.mutationRequests.contains { $0.favorite == true })
     }
@@ -167,12 +171,14 @@ struct LibraryLocalSaveTests {
         }
         let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? target : source }
         hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
-        let first = LibraryStore(hosts: hosts)
+        let files = relaunchDirectory()
+        defer { try? FileManager.default.removeItem(at: files) }
+        let first = LibraryStore(hosts: hosts, syncRecords: LibrarySyncRecords(directory: files))
         await first.syncAllLocally()
         #expect(!first.localSaveFailures.isEmpty)
         let downloads = source.callCount("mediaFile")
         failRetained = false
-        let resumed = LibraryStore(hosts: hosts)
+        let resumed = LibraryStore(hosts: hosts, syncRecords: LibrarySyncRecords(directory: files))
         await resumed.syncAllLocally()
         #expect(resumed.localSaveFailures.isEmpty)
         #expect(source.callCount("mediaFile") == downloads)
@@ -477,6 +483,11 @@ struct LibraryLocalSaveTests {
         #expect(target.importedNames == [print.filename])
         #expect(target.retainedTransfers.count == 1)
         #expect(library.localSaveFailures.isEmpty)
+    }
+
+    /// Where a "relaunch" reads back what the first launch wrote.
+    private func relaunchDirectory() -> URL {
+        FileManager.default.temporaryDirectory.appending(path: "mold-sync-relaunch-\(UUID().uuidString)")
     }
 
     private func host(_ name: String) -> MoldHost {

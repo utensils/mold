@@ -58,13 +58,13 @@ struct LibrarySyncRecordsTests {
         #expect(relaunched.pending("\(host.uuidString):pending.png", instance: "local-1") == "pending.png")
     }
 
-    @Test func aReceiptIsDurableBeforeAnyCompaction() async {
+    @Test func aReceiptIsDurableBeforeAnyCompaction() async throws {
         let directory = scratch()
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = LibrarySyncRecords(directory: directory, migrating: nil)
         let receipt = LocalSyncRecord(receipt: print("landed.png"), from: UUID(), as: "landed.png", destinationInstance: "i")!
-        await store.checkpoint(receipt, key: "k", instance: "i")
-        await store.markPending("k", filename: "landed.png", instance: "i")
+        try await store.checkpoint(receipt, key: "k", instance: "i")
+        try await store.markPending("k", filename: "landed.png", instance: "i")
         // A crash now: a new process reads the journal.
         let relaunched = LibrarySyncRecords(directory: directory, migrating: nil)
         #expect(relaunched.records("i")["k"] == receipt)
@@ -76,8 +76,8 @@ struct LibrarySyncRecordsTests {
         let directory = scratch()
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = LibrarySyncRecords(directory: directory, migrating: nil)
-        await store.checkpoint(record("a.png", instance: "i"), key: "a", instance: "i")
-        await store.checkpoint(record("b.png", instance: "i"), key: "b", instance: "i")
+        try await store.checkpoint(record("a.png", instance: "i"), key: "a", instance: "i")
+        try await store.checkpoint(record("b.png", instance: "i"), key: "b", instance: "i")
         let links = store.linksRevision
         var outcome = LibrarySyncRecords.RunOutcome()
         outcome.removed = ["b"]
@@ -93,11 +93,34 @@ struct LibrarySyncRecordsTests {
         #expect(relaunched.bucket("i").retry == ["a"])
     }
 
-    @Test func receiptsDoNotInvalidateLinksUntilTheRunFinishes() async {
+    @Test(arguments: ["{not json", #"{"version":2,"seq":0,"buckets":{}}"#])
+    func anUnreadableDocumentIsSetAsideAndNeverOverwritten(_ contents: String) async throws {
+        let directory = scratch()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data(contents.utf8).write(to: directory.appending(path: "records.json"))
+        let store = LibrarySyncRecords(directory: directory, migrating: nil)
+        #expect(store.blockedReason != nil)
+        #expect(store.records("i").isEmpty)
+        let receipt = LocalSyncRecord(receipt: print("x.png"), from: UUID(), as: "x.png", destinationInstance: "i")!
+        await #expect(throws: (any Error).self) { try await store.checkpoint(receipt, key: "k", instance: "i") }
+        await store.finishRun(.init(), instance: "i")
+        await store.flush()
+        let names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        #expect(!names.contains("records.json"), "nothing replaced the unreadable document")
+        let aside = try #require(names.first { $0.hasPrefix("records.json.unreadable-") })
+        #expect(try Data(contentsOf: directory.appending(path: aside)) == Data(contents.utf8))
+        // A relaunch is still blocked until the set-aside file is dealt with.
+        #expect(LibrarySyncRecords(directory: directory, migrating: nil).blockedReason != nil)
+        try FileManager.default.removeItem(at: directory.appending(path: aside))
+        #expect(LibrarySyncRecords(directory: directory, migrating: nil).blockedReason == nil)
+    }
+
+    @Test func receiptsDoNotInvalidateLinksUntilTheRunFinishes() async throws {
         let store = LibrarySyncRecords(directory: nil, migrating: nil)
         let local = UUID()
         let before = store.links(localHost: local, instance: "i")
-        await store.checkpoint(record("a.png", instance: "i"), key: "\(UUID().uuidString):a.png", instance: "i")
+        try await store.checkpoint(record("a.png", instance: "i"), key: "\(UUID().uuidString):a.png", instance: "i")
         #expect(store.links(localHost: local, instance: "i") == before)
         await store.finishRun(.init(), instance: "i")
         #expect(store.links(localHost: local, instance: "i").count == 2)
@@ -105,11 +128,19 @@ struct LibrarySyncRecordsTests {
 
     @Test func recipeDigestsAreCachedPerMediaVersion() {
         let host = UUID()
-        #expect(!LocalSyncRecord.recipeCached(print("cached.png"), host: host))
-        let first = LocalSyncRecord.recipe(print("cached.png"), host: host)
-        #expect(LocalSyncRecord.recipeCached(print("cached.png"), host: host))
-        #expect(LocalSyncRecord.recipe(print("cached.png"), host: host) == first)
-        // Another machine's same-named print is never answered from this one.
-        #expect(!LocalSyncRecord.recipeCached(print("cached.png"), host: UUID()))
+        let wire = print("cached.png").carryingRawMetadata(Data(#"{"prompt":"fox"}"#.utf8))
+        #expect(!LocalSyncRecord.recipeCached(wire, host: host))
+        let first = LocalSyncRecord.recipe(wire, host: host)
+        #expect(LocalSyncRecord.recipeCached(wire, host: host))
+        #expect(LocalSyncRecord.recipe(wire, host: host) == first)
+        // Another machine's same-named print is never answered from this one,
+        // an edited recipe at the same media version is another key, and a
+        // row without raw recipe bytes is never cached at all.
+        #expect(!LocalSyncRecord.recipeCached(wire, host: UUID()))
+        let edited = print("cached.png").carryingRawMetadata(Data(#"{"prompt":"owl"}"#.utf8))
+        #expect(!LocalSyncRecord.recipeCached(edited, host: host))
+        #expect(LocalSyncRecord.recipe(edited, host: host) != first)
+        _ = LocalSyncRecord.recipe(print("typed.png"), host: host)
+        #expect(!LocalSyncRecord.recipeCached(print("typed.png"), host: host))
     }
 }

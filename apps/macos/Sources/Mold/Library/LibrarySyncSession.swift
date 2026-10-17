@@ -11,6 +11,8 @@ final class LibrarySyncSession {
     private(set) var keepInSync: Bool
     /// A change arrived while a run was in flight; one more run follows it.
     private(set) var rerunPending = false
+    /// The queued follow-up was a press: it plans every print.
+    private var rerunFull = false
     private var debounceTask: Task<Void, Never>?
     /// An automatic run is waiting for This Mac's engine to connect.
     private(set) var waitingForLocalEngine = false
@@ -36,17 +38,25 @@ final class LibrarySyncSession {
 
     /// One run now. A run already in flight is never overlapped: with Keep in
     /// Sync on, the press queues one follow-up instead of being dropped.
+    /// A press plans every print; Keep in Sync's own runs plan from cursors.
     func syncNow(in library: LibraryStore) {
+        start(in: library, fullPlan: true)
+    }
+
+    private func start(in library: LibraryStore, fullPlan: Bool) {
         guard !terminating else { return }
         guard library.localSaveTask == nil, !library.localSaveRunning else {
-            if keepInSync { rerunPending = true }
+            if keepInSync {
+                rerunPending = true
+                rerunFull = rerunFull || fullPlan
+            }
             return
         }
         // A Stop that landed after an earlier run's last check would
         // otherwise end this one before it starts.
         library.localSaveStopRequested = false
         library.localSaveTask = Task { [weak library] in
-            await library?.syncAllLocally()
+            await library?.syncAllLocally(fullPlan: fullPlan)
         }
     }
 
@@ -80,7 +90,7 @@ final class LibrarySyncSession {
                 self.waitingForLocalEngine = true
                 return
             }
-            self.syncNow(in: library)
+            self.start(in: library, fullPlan: false)
         }
     }
 
@@ -96,8 +106,10 @@ final class LibrarySyncSession {
     func runFinished(in library: LibraryStore) {
         guard rerunPending else { return }
         rerunPending = false
+        let full = rerunFull
+        rerunFull = false
         guard keepInSync, !terminating else { return }
-        syncNow(in: library)
+        start(in: library, fullPlan: full)
     }
 
     /// Stops the current run and anything queued behind it. "Keep This Mac in
@@ -106,6 +118,7 @@ final class LibrarySyncSession {
         debounceTask?.cancel()
         debounceTask = nil
         rerunPending = false
+        rerunFull = false
         if library.localSaveRunning || library.localSaveTask != nil {
             library.localSaveStopRequested = true
         }

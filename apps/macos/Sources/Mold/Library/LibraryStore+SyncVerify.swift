@@ -112,12 +112,30 @@ extension LibraryStore {
             }
         }
 
+        // A receipt this run wrote, for a copy the refreshed listing now
+        // shows, becomes a listed record: what the next run compares facts
+        // against instead of downloading the output again. Unsealed (no
+        // tokens), so it is still retried; a receipt from an earlier run that
+        // never reached this point stays a receipt.
+        let targetsByKey = Dictionary(plan.targets.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
+        for key in copies.receipted where outcome.records[key] == nil {
+            guard let target = targetsByKey[key],
+                  let receipt = syncRecords.records(instance)[key], receipt.provisional == true,
+                  let row = refreshed.live(receipt.destinationFilename),
+                  let listed = LocalSyncRecord(source: target.print, from: target.hostID, local: row,
+                                               on: local.id, destinationInstance: instance)
+            else { continue }
+            outcome.records[key] = listed
+        }
+
         outcome.settled.formUnion(plan.settled)
         outcome.retried = plan.considered.subtracting(outcome.settled)
         outcome.removed = plan.tombstones
         outcome.keptRemoved = plan.keptRemovedKeys
         outcome.reconsidered = plan.considered
-        if !syncStopped {
+        let stopped = syncStopped
+        if !stopped, plan.plannedEverything { outcome.fullPlan = Date() }
+        if !stopped {
             for (hostID, source) in sources.hosts {
                 outcome.sourceCursors[hostID.uuidString] = .init(cursor: source.view.cursor, route: source.originContext)
             }
@@ -126,9 +144,27 @@ extension LibraryStore {
             // planned from. Advance over them, but carry every name in that
             // stretch it did not just seal -- a foreign change among them is
             // still owed a look.
-            if hosts.instanceID(of: local.id) == instance,
+            //
+            // Machines this run could not read never planned This Mac's
+            // changes to their copies: owe those to the retry set, or keep
+            // the destination cursor where it was when the names are unknown.
+            let unread = Set(hosts.hosts.map(\.id)).subtracting(sources.hosts.keys).subtracting([local.id])
+                .union(sources.hostErrors.keys)
+            let reverse = syncRecords.sourceKeys(copiedAs: instance)
+            func oweUnread(_ names: Set<String>) {
+                for name in names {
+                    for key in reverse[name] ?? [] {
+                        if let origin = LocalSyncRecord.source(of: key), unread.contains(origin.host) { outcome.retried.insert(key) }
+                    }
+                    for hostID in unread { outcome.retried.insert(LocalSyncRecord.key(hostID: hostID, filename: name)) }
+                }
+            }
+            if !unread.isEmpty, let before = prepared.changed { oweUnread(before) }
+            if !unread.isEmpty, prepared.changed == nil {
+                // Keep the old cursor: the next readable run plans from it.
+            } else if hosts.instanceID(of: local.id) == instance,
                let between = await localReplica.changedNames(since: prepared.view.cursor) {
-                let reverse = syncRecords.sourceKeys(copiedAs: instance)
+                if !unread.isEmpty { oweUnread(between) }
                 for name in between where !sealedDestination.contains(name) {
                     outcome.retried.formUnion(reverse[name] ?? [])
                     for (hostID, source) in sources.hosts where source.view.live(name) != nil {

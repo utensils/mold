@@ -4,12 +4,18 @@ import MoldClient
 /// Library Sync's bookkeeping, per destination instance: the origin-to-local
 /// copy records, pending organization, each source's mirror cursor and the
 /// retry set. A JSON document in Application Support, written off the main
-/// actor; per-copy receipts go to an append-only journal first, so a receipt
-/// is durable before the retained-input transfer that follows it without
-/// rewriting the whole document per print.
+/// actor; per-copy receipts go to an append-only, synchronized journal first,
+/// so a receipt is durable before the retained-input transfer that follows it
+/// without rewriting the whole document per print.
 ///
-/// `processLocal` (every test's default) keeps it in memory: like replicas,
-/// only `AppStores` persists to Application Support.
+/// Without a directory it lives in memory only -- every test's default, one
+/// fresh store per `LibraryStore`. Only `AppStores` persists to Application
+/// Support.
+///
+/// A document this build cannot read (corrupt, or written by a newer
+/// release) is moved aside, never overwritten, and the store is `blocked`:
+/// it writes nothing and Sync All refuses to run on its empty stand-in --
+/// an empty record set would recreate every copy deliberately removed here.
 @MainActor
 final class LibrarySyncRecords {
     /// One source's position in its replica, and the route it was read through.
@@ -23,7 +29,7 @@ final class LibrarySyncRecords {
     nonisolated struct Bucket: Codable, Equatable, Sendable {
         var records: [String: LocalSyncRecord] = [:]
         var pending: [String: String] = [:]
-        /// Per source key (`host|instance`).
+        /// Per source host.
         var cursors: [String: SourceCursor] = [:]
         var destinationCursor: SourceCursor?
         /// Source keys a cursor-scoped plan must consider again.
@@ -31,6 +37,9 @@ final class LibrarySyncRecords {
         /// Source keys last found kept removed from This Mac, so an
         /// unconsidered one is still reported as such.
         var keptRemoved: Set<String> = []
+        /// When a run last planned every print. Cursor-scoped runs fall back
+        /// to a full plan once this is a day old.
+        var lastFullPlan: Date?
     }
 
     nonisolated struct Document: Codable, Equatable, Sendable {
@@ -51,8 +60,6 @@ final class LibrarySyncRecords {
         let entry: JournalEntry
     }
 
-    static let processLocal = LibrarySyncRecords(directory: nil, migrating: nil)
-
     /// Application Support (the throwaway one under native UAT), migrating
     /// what older releases kept in the defaults suite.
     static func standard() -> LibrarySyncRecords {
@@ -68,6 +75,8 @@ final class LibrarySyncRecords {
     private var loaded = false
     private var nextSeq = 1
     private var compactTask: Task<Void, Never>?
+    /// Where an unreadable document was moved; non-nil means blocked.
+    private var unreadable: URL?
     /// Bumped when links may have changed: on load and once per finished run,
     /// never per copied print.
     private(set) var linksRevision = 0
@@ -75,7 +84,7 @@ final class LibrarySyncRecords {
     private var reverseCache: (revision: Int, bucket: String, index: [String: [String]])?
     private var recordsRevision = 0
 
-    init(directory: URL?, migrating defaults: UserDefaults?) {
+    init(directory: URL? = nil, migrating defaults: UserDefaults? = nil) {
         journal = directory.map(LibrarySyncJournal.init)
         migrationDefaults = defaults
     }
@@ -85,10 +94,23 @@ final class LibrarySyncRecords {
     private func load() {
         guard !loaded else { return }
         loaded = true
-        var read: (Document, Int) = journal?.load() ?? (Document(), 0)
-        if let migrationDefaults { Self.migrate(from: migrationDefaults, into: &read.0, journal: journal) }
-        nextSeq = max(read.0.seq, read.1) + 1
-        doc = read.0
+        guard let journal else { return }
+        switch journal.load() {
+        case let .ready(document, newest):
+            var read = document
+            if let migrationDefaults { Self.migrate(from: migrationDefaults, into: &read, journal: journal) }
+            nextSeq = max(read.seq, newest) + 1
+            doc = read
+        case let .unreadable(movedTo):
+            unreadable = movedTo
+        }
+    }
+
+    /// Why Sync All must not run, or nil. See the type's note.
+    var blockedReason: String? {
+        load()
+        guard let unreadable else { return nil }
+        return "This Mac’s Library Sync records could not be read (\(unreadable.lastPathComponent) was set aside). Sync All is paused so copies you removed here are not recreated; remove that file from \(unreadable.deletingLastPathComponent().path) to start over."
     }
 
     static func bucketKey(_ instance: String?) -> String { instance ?? "" }
@@ -117,9 +139,10 @@ final class LibrarySyncRecords {
     /// Destination filename -> the source keys whose copy it is.
     func sourceKeys(copiedAs instance: String?) -> [String: [String]] {
         let key = Self.bucketKey(instance)
+        adopt(instance)
         if let cached = reverseCache, cached.revision == recordsRevision, cached.bucket == key { return cached.index }
         var index: [String: [String]] = [:]
-        for (source, record) in bucket(instance).records { index[record.destinationFilename, default: []].append(source) }
+        for (source, record) in doc.buckets[key]?.records ?? [:] { index[record.destinationFilename, default: []].append(source) }
         reverseCache = (recordsRevision, key, index)
         return index
     }
@@ -145,14 +168,22 @@ final class LibrarySyncRecords {
 
     // MARK: - Durable per-copy writes
 
-    /// An output receipt or a sealed record, durable before this returns.
-    /// Links are left alone until the run finishes (`finishRun`).
-    func checkpoint(_ record: LocalSyncRecord, key: String, instance: String?) async {
+    /// An output receipt or a sealed record, durable on disk before this
+    /// returns -- or it throws and nothing changed. Links are left alone
+    /// until the run finishes (`finishRun`).
+    func checkpoint(_ record: LocalSyncRecord, key: String, instance: String?) async throws {
         let bucketKey = Self.bucketKey(instance)
         adopt(instance)
+        let previous = doc.buckets[bucketKey]?.records[key]
         doc.buckets[bucketKey, default: Bucket()].records[key] = record
         recordsRevision += 1
-        await append(.record(bucket: bucketKey, key: key, record: record))
+        do {
+            try await append(.record(bucket: bucketKey, key: key, record: record))
+        } catch {
+            doc.buckets[bucketKey]?.records[key] = previous
+            recordsRevision += 1
+            throw error
+        }
     }
 
     func pending(_ key: String, instance: String?) -> String? {
@@ -160,12 +191,18 @@ final class LibrarySyncRecords {
         return doc.buckets[Self.bucketKey(instance)]?.pending[key]
     }
 
-    func markPending(_ key: String, filename: String, instance: String?) async {
+    func markPending(_ key: String, filename: String, instance: String?) async throws {
         let bucketKey = Self.bucketKey(instance)
         adopt(instance)
-        guard doc.buckets[bucketKey]?.pending[key] != filename else { return }
+        let previous = doc.buckets[bucketKey]?.pending[key]
+        guard previous != filename else { return }
         doc.buckets[bucketKey, default: Bucket()].pending[key] = filename
-        await append(.pending(bucket: bucketKey, key: key, filename: filename))
+        do {
+            try await append(.pending(bucket: bucketKey, key: key, filename: filename))
+        } catch {
+            doc.buckets[bucketKey]?.pending[key] = previous
+            throw error
+        }
     }
 
     // MARK: - A finished run
@@ -181,6 +218,8 @@ final class LibrarySyncRecords {
         var keptRemoved: Set<String> = []
         /// Every key the run looked at: its kept-removed state is now known.
         var reconsidered: Set<String> = []
+        /// Set when this run planned every print and was not stopped.
+        var fullPlan: Date?
     }
 
     /// Applies one run's outcome and writes the document now (off main).
@@ -192,17 +231,17 @@ final class LibrarySyncRecords {
         for removed in outcome.removed {
             bucket.records[removed] = nil
             bucket.pending[removed] = nil
-            bucket.retry.remove(removed)
         }
-        bucket.retry.subtract(outcome.removed)
         for cleared in outcome.clearedPending { bucket.pending[cleared] = nil }
         bucket.cursors.merge(outcome.sourceCursors) { _, new in new }
         if let destination = outcome.destinationCursor { bucket.destinationCursor = destination }
         bucket.retry.subtract(outcome.settled)
         bucket.retry.formUnion(outcome.retried)
+        bucket.retry.subtract(outcome.removed)
         bucket.keptRemoved.subtract(outcome.reconsidered)
         bucket.keptRemoved.formUnion(outcome.keptRemoved)
         bucket.keptRemoved.subtract(outcome.removed)
+        if let fullPlan = outcome.fullPlan { bucket.lastFullPlan = fullPlan }
         doc.buckets[key] = bucket
         doc.lastBucket = key
         recordsRevision += 1
@@ -212,11 +251,16 @@ final class LibrarySyncRecords {
 
     // MARK: - Persistence
 
-    private func append(_ entry: JournalEntry) async {
+    struct Blocked: LocalizedError {
+        var errorDescription: String? { "This Mac’s Library Sync records could not be read, so nothing new is recorded." }
+    }
+
+    private func append(_ entry: JournalEntry) async throws {
         guard let journal else { return }
+        guard unreadable == nil else { throw Blocked() }
         let seq = nextSeq
         nextSeq += 1
-        await journal.append(JournalLine(seq: seq, entry: entry))
+        try await journal.append(JournalLine(seq: seq, entry: entry))
         scheduleCompaction()
     }
 
@@ -233,8 +277,8 @@ final class LibrarySyncRecords {
     func flush() async {
         compactTask?.cancel()
         compactTask = nil
-        guard let journal else { return }
         load()
+        guard let journal, unreadable == nil else { return }
         doc.seq = nextSeq - 1
         await journal.compact(doc)
     }
@@ -282,7 +326,7 @@ final class LibrarySyncRecords {
 }
 
 /// The files behind `LibrarySyncRecords`: `records.json`, written atomically,
-/// and `journal.jsonl`, one appended line per receipt since.
+/// and `journal.jsonl`, one synchronized line per receipt since.
 actor LibrarySyncJournal {
     nonisolated let directory: URL
     private var compactedSeq = 0
@@ -294,14 +338,36 @@ actor LibrarySyncJournal {
 
     nonisolated var documentURL: URL { directory.appending(path: "records.json") }
     nonisolated var journalURL: URL { directory.appending(path: "journal.jsonl") }
+    nonisolated static let unreadablePrefix = "records.json.unreadable-"
+
+    enum Loaded {
+        case ready(LibrarySyncRecords.Document, newest: Int)
+        /// The document this build cannot read, where it now is.
+        case unreadable(URL)
+    }
 
     /// The document with every journal line newer than it replayed, and the
-    /// newest sequence number seen.
-    nonisolated func load() -> (LibrarySyncRecords.Document, Int) {
-        var document = (try? Data(contentsOf: documentURL))
-            .flatMap { try? MoldJSON.localDecoder.decode(LibrarySyncRecords.Document.self, from: $0) }
-            .flatMap { $0.version == LibrarySyncRecords.Document.currentVersion ? $0 : nil }
-            ?? LibrarySyncRecords.Document()
+    /// newest sequence number seen. A document that exists but cannot be
+    /// read -- or a set-aside one with no readable successor -- blocks.
+    nonisolated func load() -> Loaded {
+        let files = FileManager.default
+        var document = LibrarySyncRecords.Document()
+        if let data = try? Data(contentsOf: documentURL) {
+            guard let read = try? MoldJSON.localDecoder.decode(LibrarySyncRecords.Document.self, from: data),
+                  read.version == LibrarySyncRecords.Document.currentVersion else {
+                let stamp = Int(Date().timeIntervalSince1970 * 1000)
+                let aside = directory.appending(path: Self.unreadablePrefix + String(stamp))
+                if (try? files.moveItem(at: documentURL, to: aside)) == nil {
+                    return .unreadable(documentURL)
+                }
+                return .unreadable(aside)
+            }
+            document = read
+        } else if let aside = (try? files.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil))?
+            .first(where: { $0.lastPathComponent.hasPrefix(Self.unreadablePrefix) }) {
+            // Set aside by an earlier launch and not resolved yet.
+            return .unreadable(aside)
+        }
         var newest = document.seq
         let lines = (try? Data(contentsOf: journalURL)).map { $0.split(separator: UInt8(ascii: "\n")) } ?? []
         for line in lines {
@@ -315,21 +381,27 @@ actor LibrarySyncJournal {
                 document.buckets[bucket, default: .init()].pending[key] = filename
             }
         }
-        return (document, newest)
+        return .ready(document, newest: newest)
     }
 
-    func append(_ line: LibrarySyncRecords.JournalLine) {
-        guard line.seq > compactedSeq, var data = try? MoldJSON.localEncoder.encode(line) else { return }
+    /// Appends one line and synchronizes it to disk, or throws.
+    func append(_ line: LibrarySyncRecords.JournalLine) throws {
+        guard line.seq > compactedSeq else { return }
+        var data = try MoldJSON.localEncoder.encode(line)
         data.append(UInt8(ascii: "\n"))
-        tail.append(line)
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        if !FileManager.default.fileExists(atPath: journalURL.path) {
-            FileManager.default.createFile(atPath: journalURL.path, contents: nil)
+        let files = FileManager.default
+        try files.createDirectory(at: directory, withIntermediateDirectories: true)
+        if !files.fileExists(atPath: journalURL.path) {
+            guard files.createFile(atPath: journalURL.path, contents: nil) else {
+                throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: journalURL.path])
+            }
         }
-        guard let handle = try? FileHandle(forWritingTo: journalURL) else { return }
+        let handle = try FileHandle(forWritingTo: journalURL)
         defer { try? handle.close() }
-        _ = try? handle.seekToEnd()
-        try? handle.write(contentsOf: data)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: data)
+        try handle.synchronize()
+        tail.append(line)
     }
 
     func compact(_ document: LibrarySyncRecords.Document) {
