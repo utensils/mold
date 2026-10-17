@@ -170,15 +170,66 @@ struct OfflineLibraryTests {
 
     // MARK: - Saved listing
 
-    @Test func aSavedListingReadsBackExactly() throws {
+    /// What builds before replicas saved: the whole listing, beside the
+    /// collections. Written as such a build wrote it.
+    private func saveLegacy(_ snapshots: LibrarySnapshots, _ prints: [GalleryPrint], etag: String? = "e1",
+                            collections: [Collection]? = nil, for id: UUID) throws {
+        let legacy = LibrarySnapshot.Legacy(prints: prints, trashed: nil, collections: collections,
+                                            etag: etag, trashEtag: nil)
+        try FileManager.default.createDirectory(at: snapshots.directory, withIntermediateDirectories: true)
+        try MoldJSON.localEncoder.encode(legacy).write(to: snapshots.directory.appending(path: "\(id.uuidString).json"))
+    }
+
+    @Test func savedCollectionsReadBackExactly() throws {
         let store = LibrarySnapshots(directory: temp("snapshots"))
         let id = UUID()
-        let snapshot = LibrarySnapshot(prints: [try print("a.png", version: "v1"), try print("b.png")],
-                                       trashed: [], collections: nil, etag: "e1", trashEtag: nil)
+        let snapshot = LibrarySnapshot(collections: [Collection(id: "c1", name: "Owls", slug: "owls")])
         store.save(snapshot, for: id)
         #expect(store.load(id) == snapshot)
         store.remove(id)
         #expect(store.load(id) == nil)
+    }
+
+    /// An update keeps the offline Library: the old listing becomes the
+    /// replica's saved state once, and the file keeps only its collections.
+    @Test func anOlderBuildsSavedListingMovesIntoTheReplicaOnce() async throws {
+        let snapshots = LibrarySnapshots(directory: temp("snapshots"))
+        let id = UUID()
+        let shelf = Collection(id: "c1", name: "Owls", slug: "owls")
+        try saveLegacy(snapshots, [try print("owl.png", version: "v1")], collections: [shelf], for: id)
+        snapshots.migrate(id, from: snapshots.generation)
+        #expect(snapshots.load(id) == LibrarySnapshot(collections: [shelf]))
+        let restored = try #require(await GalleryReplica(hostID: id, store: snapshots.replicas).restoreSaved())
+        #expect(restored.live.map(\.filename) == ["owl.png"])
+        // Already migrated: a second pass changes nothing.
+        snapshots.migrate(id, from: snapshots.generation)
+        #expect(snapshots.load(id) == LibrarySnapshot(collections: [shelf]))
+    }
+
+    /// A seed that could not be written leaves the old listing where it is:
+    /// the only copy of those rows is never overwritten.
+    @Test func aFailedSeedKeepsTheOldListing() throws {
+        let snapshots = LibrarySnapshots(directory: temp("snapshots"))
+        let id = UUID()
+        try saveLegacy(snapshots, [try print("owl.png", version: "v1")], for: id)
+        // A file where the replicas directory should be: the seed cannot write.
+        try Data().write(to: snapshots.replicas.directory)
+        snapshots.migrate(id, from: snapshots.generation)
+        let raw = try Data(contentsOf: snapshots.directory.appending(path: "\(id.uuidString).json"))
+        #expect(try MoldJSON.localDecoder.decode(LibrarySnapshot.Legacy.self, from: raw).prints.map(\.filename)
+                == ["owl.png"])
+    }
+
+    /// A migration queued before Clear Cache purges writes nothing after it.
+    @Test func aMigrationFromBeforeAPurgeWritesNothing() throws {
+        let snapshots = LibrarySnapshots(directory: temp("snapshots"))
+        let id = UUID()
+        try saveLegacy(snapshots, [try print("owl.png", version: "v1")], for: id)
+        let before = snapshots.generation
+        snapshots.purge()
+        try saveLegacy(snapshots, [try print("owl.png", version: "v1")], for: id)
+        snapshots.migrate(id, from: before)
+        #expect(!snapshots.replicas.hasSaved(id))
     }
 
     @Test func clearingOfflineLibraryRemovesSavedListingsAndOfflineRows() async throws {
@@ -186,8 +237,7 @@ struct OfflineLibraryTests {
         let hosts = try await hosts(fake, up: false)
         let snapshots = LibrarySnapshots(directory: temp("snapshots"))
         let id = hosts.hosts[0].id
-        snapshots.save(LibrarySnapshot(prints: [try print("owl.png", version: "v1")], trashed: nil,
-                                       collections: nil, etag: "e1", trashEtag: nil), for: id)
+        try saveLegacy(snapshots, [try print("owl.png", version: "v1")], for: id)
         let library = LibraryStore(hosts: hosts, snapshots: snapshots)
         await library.restoreSaved()
         #expect(library.pool.count == 1)
@@ -199,17 +249,19 @@ struct OfflineLibraryTests {
         #expect(library.knownTags.isEmpty)
     }
 
-    @Test func aRestoreStartedBeforeClearCannotBringOfflineRowsBack() async throws {
+    @Test func aRestoreRacingClearCannotBringOfflineRowsBack() async throws {
         let fake = FakeBackend()
         let hosts = try await hosts(fake, up: false)
         let snapshots = LibrarySnapshots(directory: temp("snapshots"))
+        try saveLegacy(snapshots, [try print("stale.png", version: "v1")], etag: "old", for: hosts.hosts[0].id)
         let library = LibraryStore(hosts: hosts, snapshots: snapshots)
-        let saved = LibrarySnapshot(prints: [try print("stale.png", version: "v1")], trashed: nil,
-                                    collections: nil, etag: "old", trashEtag: nil)
-        await library.clearOfflineCache()
-        library.acceptRestored([(hosts.hosts[0].id, saved)], from: 0)
+        async let restoring: Void = library.restoreSaved()
+        async let clearing: Void = library.clearOfflineCache()
+        _ = await (restoring, clearing)
         #expect(library.pool.isEmpty)
         #expect(library.knownTags.isEmpty)
+        await library.restoreSaved()
+        #expect(library.pool.isEmpty, "nothing saved survived the clear")
     }
 
     /// With the machine down, the Library still shows its saved prints and
@@ -218,8 +270,7 @@ struct OfflineLibraryTests {
         let fake = FakeBackend()
         let hosts = try await hosts(fake, up: false)
         let snapshots = LibrarySnapshots(directory: temp("snapshots"))
-        snapshots.save(LibrarySnapshot(prints: [try print("owl.png", version: "v1")], trashed: nil,
-                                       collections: nil, etag: "e1", trashEtag: nil), for: hosts.hosts[0].id)
+        try saveLegacy(snapshots, [try print("owl.png", version: "v1")], for: hosts.hosts[0].id)
         let library = LibraryStore(hosts: hosts, snapshots: snapshots)
         await library.restoreSaved()
         await library.reload()
@@ -241,8 +292,7 @@ struct OfflineLibraryTests {
         let hosts = HostStore(list: file, credentials: HostStoreTests.MemoryCredentials(), makeBackend: { _ in fake })
         try hosts.add(name: "hal9000", address: "10.0.0.9", apiKey: nil, makeDefault: true)
         let snapshots = LibrarySnapshots(directory: temp("snapshots"))
-        snapshots.save(LibrarySnapshot(prints: [try print("owl.png", version: "v1")], trashed: nil,
-                                       collections: nil, etag: nil, trashEtag: nil), for: hosts.hosts[0].id)
+        try saveLegacy(snapshots, [try print("owl.png", version: "v1")], etag: nil, for: hosts.hosts[0].id)
         let library = LibraryStore(hosts: hosts, snapshots: snapshots)
         await library.restoreSaved()
         #expect(library.pool.count == 1)
@@ -261,8 +311,8 @@ struct OfflineLibraryTests {
         #expect(fake.count("gallery(etag:)") == 1)
         await library.waitForSnapshotWrites()
         let id = hosts.hosts[0].id
-        #expect(snapshots.load(id)?.prints.map(\.filename) == ["new.png"])
-        #expect(snapshots.load(id)?.etag == "e2")
+        let saved = try #require(await GalleryReplica(hostID: id, store: snapshots.replicas).restoreSaved())
+        #expect(saved.live.map(\.filename) == ["new.png"])
         #expect(library.offlineHosts.isEmpty)
     }
 

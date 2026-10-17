@@ -116,6 +116,13 @@ final class CompanionStores {
         pauseStreams()
         activities.enteredBackground()
         scheduleRefresh()
+        // The replicas save on a debounce; iOS may end a suspended app
+        // before it fires. Asked for time, so the write is not frozen halfway.
+        let saving = UIApplication.shared.beginBackgroundTask(withName: "Save Library")
+        Task { [library] in
+            await library.waitForSnapshotWrites()
+            UIApplication.shared.endBackgroundTask(saving)
+        }
         Task { await widgets.refresh() }
         nearby.stop()
         let ids = hosts.hosts.map(\.id)

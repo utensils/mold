@@ -47,17 +47,32 @@ extension LibraryStore {
     private func show(_ edit: PrintEdit) {
         let ids = collectionIDs(for: edit.change)
         for (host, filenames) in edit.targets {
-            let wanted = Set(filenames)
-            updateLive(host) { prints in
-                prints.map { print in
-                    guard wanted.contains(print.filename) else { return print }
-                    var mutable = GalleryPrint.Mutable(print)
-                    edit.change.applied(to: &mutable, collectionID: ids[host])
-                    return mutable.build()
-                }
+            applyLocally(edit.change, to: filenames, on: host, collectionID: ids[host])
+        }
+        settleTimelines()
+    }
+
+    /// One change to one machine's rows, in place: settled as a patch.
+    private func applyLocally(_ change: PrintChange, to filenames: [String], on host: MoldHost.ID,
+                              collectionID: String?) {
+        let wanted = Set(filenames)
+        updateLive(host) { prints in
+            prints.map { print in
+                guard wanted.contains(print.filename) else { return print }
+                var mutable = GalleryPrint.Mutable(print)
+                change.applied(to: &mutable, collectionID: collectionID)
+                return mutable.build()
             }
         }
-        rebuildNow()
+    }
+
+    /// Edits still on their way to a machine, put back over rows just read
+    /// from it -- which predate them. Locally only; nothing is re-sent.
+    func replayPending(on host: MoldHost.ID) {
+        for pending in outbox.chain(for: host) {
+            applyLocally(pending.change, to: pending.filenames, on: host,
+                         collectionID: collectionIDs(for: pending.change)[host])
+        }
     }
 
     /// Waits (up to 15 s, the outbox's whole retry ladder) until every
@@ -77,7 +92,10 @@ extension LibraryStore {
             while true {
                 switch outbox.next(for: id) {
                 case .idle:
-                    if touchedCollections { await reload(id) }
+                    if touchedCollections {
+                        collectionsStale.insert(id)
+                        await reload(id)
+                    }
                     return
                 case let .send(entry):
                     if case .collection = entry.change { touchedCollections = true }
@@ -90,7 +108,9 @@ extension LibraryStore {
                     if let host = hosts.host(id) {
                         hosts.report(host, doing: entry.change.verb, lastFailure[id] ?? CancellationError())
                     }
-                    await reload(id)
+                    // A FULL read: the machine's rows did not change, so only
+                    // a whole hand-over undoes what was shown optimistically.
+                    await reload(id, full: true)
                 }
             }
         }
