@@ -10,6 +10,10 @@ public struct LibraryShowing: Sendable {
     public let visible: [LibraryEntry]
     public let sections: [LibrarySection]
     public let selected: [LibraryEntry]
+    /// Which derivation of `LibraryShowingCache` these lists are, when they
+    /// came from one: a key geometry can cache on instead of comparing every
+    /// print (`JustifiedLibraryLayout.resolve(_:revision:width:targetHeight:)`).
+    public var derivation: Int?
 
     /// The three lists as a cache already has them, with only the selection
     /// applied. See `LibraryShowingCache`: a pass that moved the cursor must

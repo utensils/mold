@@ -21,6 +21,9 @@ struct LibraryGrid: View {
     let returnToPrint: PrintID?
     let onReturnRestored: () -> Void
     let onOpen: (PrintID) -> Void
+    /// `LibraryShowing.derivation`: geometry is cached on it rather than on a
+    /// comparison of every print in `sections`.
+    var sectionsRevision: Int?
     @Environment(LibraryStore.self) private var library
 
     /// Not `private`: the cursor the keyboard drives is built in
@@ -45,7 +48,7 @@ struct LibraryGrid: View {
         let selectedPlan = selectedTargets.isEmpty ? nil : LibraryMenu(
             targets: selectedTargets, scope: scope, actions: actions, shelves: shelves,
             enclosingShelf: enclosingShelf, trashCount: trashCount, open: {}).plan
-        let laidSections = layout.resolve(sections, width: width, targetHeight: edge)
+        let laidSections = laidOut()
         return ScrollViewReader { scroller in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: JustifiedLayout.gap) {
@@ -148,12 +151,17 @@ struct LibraryGrid: View {
         Self.visibleAnchor(in: entries, visibleRowIDs: visibleIDs)
     }
 
+    private func laidOut() -> [JustifiedLibraryLayout.Section] {
+        guard let sectionsRevision else { return layout.resolve(sections, width: width, targetHeight: edge) }
+        return layout.resolve(sections, revision: sectionsRevision, width: width, targetHeight: edge)
+    }
+
     static func visibleAnchor(in entries: [LibraryEntry], visibleRowIDs: Set<PrintID>) -> PrintID? {
         entries.first { visibleRowIDs.contains($0.id) }?.id
     }
 
     private func rowAnchor(_ id: PrintID) -> PrintID {
-        for section in layout.resolve(sections, width: width, targetHeight: edge) {
+        for section in laidOut() {
             for row in section.rows where row.items.contains(where: { section.source.items[$0.index].id == id }) {
                 return row.id
             }
@@ -163,7 +171,7 @@ struct LibraryGrid: View {
 
     /// Geometry, rather than a guessed column count, owns vertical arrows.
     var cursor: LibraryCursor {
-        LibraryCursor(rows: layout.resolve(sections, width: width, targetHeight: edge).flatMap { section in
+        LibraryCursor(rows: laidOut().flatMap { section in
             section.rows.map { row in
                 row.items.map { (section.source.items[$0.index].id, $0.x + $0.width / 2) }
             }

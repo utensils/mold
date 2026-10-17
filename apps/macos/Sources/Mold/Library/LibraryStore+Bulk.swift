@@ -94,8 +94,7 @@ extension LibraryStore {
                 }
             }
             guard attempted, hosts.host(host.id) == host else { continue }
-            etags[host.id] = nil
-            trashEtags[host.id] = nil
+            invalidateListings([host.id])
             bulkProgress = "Checking \(host.name) — \(completed.formatted()) of \(total.formatted()) copies confirmed"
             if !(await reconcileBulk(host: host, client: client)) { reconciliationFailed = true }
         }
@@ -147,8 +146,7 @@ extension LibraryStore {
                 }
             }
             guard hosts.host(host.id) == host else { continue }
-            etags[host.id] = nil
-            trashEtags[host.id] = nil
+            invalidateListings([host.id])
             bulkProgress = "Checking \(host.name) after emptying its Trash…"
             if !(await reconcileBulk(host: host, client: client)) { failed = true }
         }
@@ -163,9 +161,8 @@ extension LibraryStore {
         do {
             let live = try await client.gallery(etag: nil)
             guard hosts.host(host.id) == host else { return false }
-            if case let .fresh(prints, etag) = live {
+            if case let .fresh(prints, _) = live {
                 perHost[host.id] = prints.map { LibraryEntry(host: host, print: $0) }
-                etags[host.id] = etag
                 mutations.replayPending(on: host.id, in: self)
                 rebuild()
             }
@@ -176,9 +173,8 @@ extension LibraryStore {
         do {
             let trash = try await client.trashedPrints(etag: nil)
             guard hosts.host(host.id) == host else { return false }
-            if case let .fresh(prints, etag) = trash {
+            if case let .fresh(prints, _) = trash {
                 trashPerHost[host.id] = prints.map { LibraryEntry(host: host, print: $0) }
-                trashEtags[host.id] = etag
                 rebuildTrash()
             }
         } catch {

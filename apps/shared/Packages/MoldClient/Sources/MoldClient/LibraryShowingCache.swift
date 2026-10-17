@@ -67,8 +67,10 @@ public final class LibraryShowingCache {
                 .map { ($0.element.id, $0.offset) })
             derivations += 1
         }
-        return LibraryShowing(pool: derived.pool, visible: derived.visible,
-                              sections: derived.sections, selected: selected(selection))
+        var showing = LibraryShowing(pool: derived.pool, visible: derived.visible,
+                                     sections: derived.sections, selected: selected(selection))
+        showing.derivation = derivations
+        return showing
     }
 
     private func selected(_ selection: Set<PrintID>) -> [LibraryEntry] {

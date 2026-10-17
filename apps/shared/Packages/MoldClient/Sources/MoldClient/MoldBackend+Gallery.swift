@@ -5,8 +5,15 @@ public protocol MoldGalleryBackend: Sendable {
     /// Pass the previous `etag` to let the host answer `.notModified`.
     func galleryPrint(_ filename: String) async throws -> GalleryPrint?
     func gallerySyncCheckpoint() async throws -> GallerySyncCheckpoint?
+    /// The checkpoint for exactly these prints (`POST /api/gallery/sync-checkpoint`),
+    /// so verifying what a mirror touched costs those names, not the library.
+    /// Same answer shape as the GET; an older machine falls back to the GET.
+    func gallerySyncCheckpoint(filenames: [String]) async throws -> GallerySyncCheckpoint?
     func gallery(etag: String?) async throws -> Fetched<[GalleryPrint]>
     func trashedPrints(etag: String?) async throws -> Fetched<[GalleryPrint]>
+    /// One page of the gallery change log (`capabilities.gallery.changes_feed`).
+    /// `since` is the previous page's opaque cursor; nil asks for a snapshot.
+    func galleryChanges(since cursor: String?, limit: Int) async throws -> GalleryChangesPage
     func patch(_ filename: String, with patch: GalleryPatch) async throws
     /// Replay-safe by `operationId`, so a retry cannot double-apply.
     func mutate(_ mutation: GalleryBulkMutation) async throws
@@ -50,6 +57,20 @@ public struct GallerySyncCheckpoint: Codable, Sendable {
     public init(protocolVersion: Int = 1, instanceId: String, revisions: [String: String]) {
         self.protocolVersion = protocolVersion; self.instanceId = instanceId; self.revisions = revisions
     }
+
+    /// The same checkpoint naming only `filenames`.
+    public func restricted(to filenames: some Sequence<String>) -> GallerySyncCheckpoint {
+        var kept: [String: String] = [:]
+        for name in filenames { if let revision = revisions[name] { kept[name] = revision } }
+        return GallerySyncCheckpoint(protocolVersion: protocolVersion, instanceId: instanceId, revisions: kept)
+    }
+
+    /// Two answers about disjoint names from one instance, as one.
+    func merged(with other: GallerySyncCheckpoint) -> GallerySyncCheckpoint? {
+        guard other.instanceId == instanceId, other.protocolVersion == protocolVersion else { return nil }
+        return GallerySyncCheckpoint(protocolVersion: protocolVersion, instanceId: instanceId,
+                                     revisions: revisions.merging(other.revisions) { first, _ in first })
+    }
 }
 
 public extension MoldGalleryBackend {
@@ -65,6 +86,17 @@ public extension MoldGalleryBackend {
     }
 
     func gallerySyncCheckpoint() async throws -> GallerySyncCheckpoint? { nil }
+
+    /// A backend without the bounded route answers from the whole checkpoint.
+    func gallerySyncCheckpoint(filenames: [String]) async throws -> GallerySyncCheckpoint? {
+        try await gallerySyncCheckpoint()?.restricted(to: filenames)
+    }
+
+    /// A backend with no feed answers exactly as an older machine does, which
+    /// `GalleryReplica` reads as "use the full listing this time".
+    func galleryChanges(since cursor: String?, limit: Int) async throws -> GalleryChangesPage {
+        throw MoldClientError.http(status: 404, code: nil, message: nil)
+    }
 
     func deleteTrashed(_ filenames: [String]) async throws {
         throw MoldClientError.http(status: 409, code: "GALLERY_TRASH_DELETE_UNSUPPORTED", message: "Update this machine before permanently deleting selected trash.")

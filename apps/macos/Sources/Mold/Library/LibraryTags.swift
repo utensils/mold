@@ -153,7 +153,7 @@ final class LibraryTags {
     private func reload(
         _ destinations: [(host: MoldHost, client: any MoldBackend)], in store: LibraryStore
     ) async {
-        store.etags.removeAll()
+        store.invalidateListings()
         for (host, client) in destinations {
             guard store.hosts.host(host.id) == host else { continue }
             do {

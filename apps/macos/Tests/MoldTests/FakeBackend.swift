@@ -53,6 +53,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     var calls: [String] { callsLock.withLock { recorded } }
     nonisolated(unsafe) private var recorded: [String] = []
     private let callsLock = NSLock()
+    private let importsLock = NSLock()
     /// Route names that answer with a refusal (a 409) however they are
     /// planted -- a REFUSAL, not an unreachable machine, so a store test can
     /// still pin the verb its report was keyed on.
@@ -93,7 +94,14 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     nonisolated(unsafe) var galleryPrintResponder: (@MainActor (String) async throws -> GalleryPrint?)?
     nonisolated(unsafe) var galleryETags: [String?] = []
     nonisolated(unsafe) var conditionalGallery = false
+    /// The change log `galleryChanges` answers from. See `FakeBackend+Feed`.
+    nonisolated(unsafe) var feed = FakeFeedLog()
     nonisolated(unsafe) var syncCheckpoint: [String: String]?
+    nonisolated(unsafe) var boundedCheckpointUnsupported = false
+    nonisolated(unsafe) var boundedCheckpointRequests: [[String]] = []
+    /// What the gallery lists once an import lands, as a real machine would.
+    /// Nil keeps the old behaviour: imports are recorded, never listed.
+    nonisolated(unsafe) var listsImports: (@Sendable (String) -> GalleryPrint?)?
     let noRetainedMedia: Bool
     /// Every filename an inventory was asked for, in call order -- which is
     /// how a test pins that EVERY known copy of a print was probed.
@@ -1016,9 +1024,17 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         if importFailures.contains(filename) {
             throw MoldClientError.http(status: 409, code: "NAME_COLLISION", message: "A different print owns that name.")
         }
-        importedNames.append(filename)
-        importedItems.append(item)
-        importedMedia.append(try item.fileURL.map { try Data(contentsOf: $0) } ?? item.file)
+        let bytes = try item.fileURL.map { try Data(contentsOf: $0) } ?? item.file
+        // Library Sync imports from up to three lanes at once.
+        importsLock.withLock {
+            importedNames.append(filename)
+            importedItems.append(item)
+            importedMedia.append(bytes)
+            if let row = listsImports?(filename) {
+                prints.removeAll { $0.filename == filename }
+                prints.append(row)
+            }
+        }
         return filename
     }
     func media(_ filename: String, trashed: Bool) async throws -> Data {

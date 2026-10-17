@@ -39,6 +39,8 @@ public struct GalleryCapabilities: Codable, Hashable, Sendable {
     public let rowEvents: Bool?
     public let persistsOutputs: Bool?
     public let trash: TrashCapabilities?
+    /// `GET /api/gallery/changes`. See `GalleryChangesPage`.
+    public let changesFeed: GalleryChangesFeedCapability?
 }
 
 public struct TrashCapabilities: Codable, Hashable, Sendable {

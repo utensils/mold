@@ -499,6 +499,8 @@ by its opaque id. A print that predates retention, or whose conditioning was
 recorded only as text, answers `unavailable_legacy` — that is a fact about the
 print, not damage.
 
+To keep a copy of a host's library current over HTTP, page `GET /api/gallery/changes?since=<cursor>` (advertised as `capabilities.gallery.changes_feed`) instead of re-reading `GET /api/gallery`: it returns only rows changed since the opaque cursor, with `removed` tombstones and `reset` when the replica must be rebuilt.
+
 Retained source media stays attached while any generated library output references it, including trashed outputs. Native library copies transfer those sources with the output and report incomplete copies when a server cannot preserve them. Existing local copies can be repaired by saving again. Native Mac Save Locally/Sync All can save verified finished outputs whose original inputs are explicitly unavailable legacy media; the summary discloses unavailable inputs separately from output-copy failures. This does not restore missing originals or permit corrupt/authentication failures. Newly completed jobs with identical retained input sets share encrypted media storage; provenance remains per-job. This does not merge different accompanying inputs or migrate historical outputs.
 
 ```bash

@@ -204,6 +204,47 @@ snapshot even when Generate is no longer mounted.
 
 **Local-sync stages.** Keep source discovery, destination preparation, planning, transfer, organization, final checkpoint verification and reporting as explicit typed stages. Preserve backend call order, durable output receipts before retained-input transfer, route/instance fencing, intentionally removed copies and per-file/per-collection failure exclusions. A stage extraction must retain the LocalSave and SyncSession regression suites, including final-checkpoint ordering.
 
+**Sync costs O(changes).** Discovery pulls every source replica concurrently
+(`.all` for Sync All, so tombstones know both partitions) and reads one
+`ReplicaMirrorView` per machine. An explicit Sync All press
+(`syncNow`, `syncAllLocally(fullPlan: true)`) plans EVERY print, skipping only on
+matching source+destination checkpoint evidence (one GET per machine, cached
+digests: still nothing per print when unchanged). Keep in Sync's automatic runs
+(`fullPlan: false`) consider only names in
+`GalleryReplica.changedNames(since:)` from each source's persisted mirror
+cursor (`LibrarySyncRecords.SourceCursor`, keyed by host, route-checked with the
+origin context), plus the bucket's retry set, pending organization, and names
+This Mac's own log changed (mapped back through the records). A nil answer
+(new epoch after relaunch, trimmed log, route/instance change) is a full plan,
+exactly the old behaviour, as is a bucket whose `lastFullPlan` is over 24 h
+old. A retained-input-only change with no row change is found by the next
+press or full plan, never later than a day. Machines a run could not read keep
+their source cursor, and This Mac's changes to their copies go to retry (or the
+destination cursor stays put when those names are unknown). Every considered key not sealed this run goes into
+retry; cursors advance only on an unstopped run, and the destination cursor
+advances past this run's own imports while carrying any name in that stretch it
+did not seal. Receipts come from the import answer (`LocalSyncRecord(receipt:)`,
+`provisional`, never tokens) and are journaled with `synchronize()` before any
+retained input moves -- a receipt that cannot be written fails the item. No
+per-print `galleryPrint`, and lane refill never waits on bookkeeping. A
+provisional record never matches by facts: it links only through the
+occupied-name byte comparison, unless this same run upgraded it from the
+refreshed listing. Checkpoints are the bounded `gallerySyncCheckpoint(filenames:)`
+for considered/touched names (the whole GET only for full plans; 404/405 falls
+back inside MoldClient). Records live in `LibrarySyncRecords` (Application
+Support `LibrarySync/records.json` + `journal.jsonl`, buckets per destination
+instance, one-time migration of the legacy defaults keys, tombstone pruning only
+when source and copy are gone from both partitions). A document that cannot be
+read (corrupt or newer version) is moved to `records.json.unreadable-<ms>`, never
+overwritten, and blocks Sync All with a reported issue until that file is
+removed. Each `LibraryStore` defaults to its own memory-only store; tests that
+"relaunch" pass two stores over one temporary directory. Links refresh once per run, never per receipt. Recipe
+digests are cached per host/filename/media version/raw-recipe SHA-256 (rows
+without raw bytes are not cached). Collection visibility is one
+pass under the cancellable `VisibilityWriterLock` with one inventory assignment; progress
+publishes at most ~10 Hz. A non-echo remote replica delta (`absorb`, outside a
+run) calls `noteRemoteChange`.
+
 **Encrypted remote access.** Remote host additions claim a version 2 pairing link and persist public pins/grants separately from SecretStore credentials. The shared MoldClient transport and media loader are mandatory for all remote requests. Only numeric loopback reaches the embedded API directly. Remote Access opt-in opens the secure LAN WebSocket listener and a Lambda connector using the server’s existing owner-only `secure/host.identity`; discovery is public metadata, not owner enrollment. Publish the validated WSS endpoint into ConnectionAddresses before producing a QR. Stop closes cloud and LAN channels. Never expose the operator bearer, retain old cloud owner tokens, restore plaintext remote fallback or replay lost mutations. Native builds automatically build the GPU-free Rust XCFramework, including remote-only builds. Tests must use an isolated app bundle ID while an installed host is running.
 
 Source reuse stays discoverable in inspector cards and original viewers through the same declared button/context action list. A native chooser offers only connected, installed, runtime-ready compatible recipes; explicitly adopt the selected recipe once, without reconciling through the default. Revalidate source access before changing the draft, and dismiss original details on successful staging.
@@ -236,3 +277,33 @@ Older invalidated source-only snapshots may become independent only after fresh
 origin route/instance and archive/output verification plus a singleton source-image
 inventory. Preserve local bytes; never mint authority, replace attachments, or
 waive hidden inputs and stale/cancelled responses during this migration.
+
+**Library replicas.** `LibraryStore` reads each machine through one MoldClient
+`GalleryReplica`, kept across route changes and replaced only when the API key,
+connection mode or server instance identity changes. Every pull carries the exact
+record it read through (`Pull.origin`); `absorb` refuses a delta whose origin is
+no longer the current record and calls `redeliver()` so the next pull is a reset.
+A legacy frame spliced into `perHost` must call `spliced` (`GalleryReplica.forget`)
+so the next listing re-emits those names; a `.restored` frame for a missing row
+inserts it. Listing answers carry per-partition generations (an older answer
+landing last is dropped) and feed pages commit once at the end (no rollback).
+Replica files live in Caches, are never rewritten after `discard()`, are pruned
+for removed machines, store only the raw recipe, debounce 5 s and flush on quit. The
+feed is used only when `capabilities.gallery.changes_feed.protocol_version == 1`;
+404/405/`503 GALLERY_FEED_NOT_READY` falls back to the conditional listings for
+that pull. The replica owns the listing ETags (`invalidateListings`, never a
+store-side ETag map) and delivers deltas in revision order through its sink
+BEFORE `pull()` returns; `absorb` only edits `perHost`/`trashPerHost`, replays
+the outbox, and notes ids, and whoever started the pull calls
+`settleTimelines()`. A nil delta must not bump `rows` or re-sort. Single flight is
+per lane (feed, live listing, trash listing): a tickle mid-pull queues exactly
+one follow-up; cancelling the caller that started a pull changes nothing. On a
+feed machine gallery frames and `resyncRequired` only `tickle` the replica (echo
+suppression, bulk targets and import suppression still apply first); legacy
+machines keep in-place frame application, `RelistGate` and `RelistMerge`.
+`relist` is a FULL pull (a reset even when unchanged) so a refused optimistic
+edit is undone. `LibraryTimeline` patches in place only when a full merge could
+not differ (unchanged merge identity/order key, no shared filename/identity/link,
+no key tie); otherwise it rebuilds. The legacy trash LISTING, not `trashedAt`, decides a row's partition (`ReplicaDelta.inTrash`). A direct `perHost` write outside those paths
+marks the timeline for a full rebuild. Tests construct `LibraryStore` without a
+`replicaStore`; only `AppStores` persists to Application Support.

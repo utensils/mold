@@ -57,7 +57,7 @@ final class AppStores {
         hosts = HostStore(hosts: HostStore.seededHosts())
         engine.dropsItsMachine(from: hosts)
         engine.adoptsItsMachine(into: hosts)
-        library = LibraryStore(hosts: hosts)
+        library = LibraryStore(hosts: hosts, replicaStore: .standard(), syncRecords: .standard())
         models = ModelStore(hosts: hosts)
         queue = QueueStore(hosts: hosts)
         transfers = TransferStore(hosts: hosts, queue: queue)
