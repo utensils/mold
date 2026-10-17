@@ -82,7 +82,11 @@ extension LibraryStore {
     /// `rows.bump()` -- when nothing changed.
     func settleTimelines() {
         guard deferredSettles == 0 else { return }
-        let links = pendingLive.isEmpty && pendingTrash.isEmpty ? [:] : syncLinks()
+        // A sync record linking two copies changes the merge with no row
+        // changing at all, so the links are compared on every settle.
+        let links = syncLinks()
+        if links != liveTimeline.links { pendingLive.full = true }
+        if links != trashTimeline.links { pendingTrash.full = true }
         if pendingLive.full {
             rebuild()
         } else if !pendingLive.isEmpty {

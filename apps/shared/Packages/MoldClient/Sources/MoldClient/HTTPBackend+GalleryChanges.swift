@@ -35,7 +35,7 @@ public extension HTTPBackend {
             guard let image = row["image"] as? [String: Any],
                   let name = image["filename"] as? String,
                   let metadata = image["metadata"] as? [String: Any],
-                  let encoded = try? JSONSerialization.data(withJSONObject: metadata) else { continue }
+                  let encoded = try? JSONSerialization.data(withJSONObject: metadata, options: .sortedKeys) else { continue }
             raw[name] = encoded
         }
         let changes = page.changes.map { change -> GalleryChange in

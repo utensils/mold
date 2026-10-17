@@ -33,9 +33,14 @@ public struct ReplicaDelta: Sendable, Equatable {
     /// LISTING decides that, not the row's fields: an older machine's trash
     /// row need not carry `trashed_at`. Defaults to the rows' `trashedAt`.
     public let inTrash: Set<String>
+    /// The `Pull.origin` of the request that produced this delta, so a
+    /// consumer can refuse an answer read through a route it has since
+    /// replaced (and ask for `redeliver()`).
+    public let origin: String?
 
     public init(upserted: [GalleryPrint], removed: [String], reset: Bool, revision: Int,
-                scope: Scope = .all, inTrash: Set<String>? = nil) {
+                scope: Scope = .all, inTrash: Set<String>? = nil, origin: String? = nil) {
+        self.origin = origin
         self.upserted = upserted
         self.removed = removed
         self.reset = reset
@@ -61,22 +66,28 @@ public extension GalleryReplica {
         /// Deliver the whole state as a reset even if nothing changed: the
         /// repair after an optimistic edit the machine refused.
         public var full: Bool
+        /// Opaque to the replica; copied onto the delta. Merged pulls keep
+        /// the latest caller's.
+        public var origin: String?
 
-        public init(useFeed: Bool, scope: ReplicaDelta.Scope = .all, full: Bool = false) {
+        public init(useFeed: Bool, scope: ReplicaDelta.Scope = .all, full: Bool = false,
+                    origin: String? = nil) {
             self.useFeed = useFeed
             self.scope = scope
             self.full = full
+            self.origin = origin
         }
 
         public static let feed = Pull(useFeed: true)
 
-        public static func legacy(_ scope: ReplicaDelta.Scope, full: Bool = false) -> Pull {
-            Pull(useFeed: false, scope: scope, full: full)
+        public static func legacy(_ scope: ReplicaDelta.Scope, full: Bool = false,
+                                  origin: String? = nil) -> Pull {
+            Pull(useFeed: false, scope: scope, full: full, origin: origin)
         }
 
         func merged(with other: Pull) -> Pull {
             Pull(useFeed: useFeed || other.useFeed, scope: scope.union(other.scope),
-                 full: full || other.full)
+                 full: full || other.full, origin: other.origin ?? origin)
         }
     }
 }

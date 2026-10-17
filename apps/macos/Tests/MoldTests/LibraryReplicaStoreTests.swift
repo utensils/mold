@@ -88,6 +88,44 @@ struct LibraryReplicaStoreTests {
         #expect(row?.print.isFavorite == true)
     }
 
+    /// A machine with no change log: frames are spliced in place, so the
+    /// replica must not keep believing its last listing. Trash then Put Back
+    /// arriving as frames leaves the print showing, and the next listing --
+    /// which is identical to the last one -- still repairs a splice the
+    /// machine never agreed with.
+    @Test func framesSplicedOnAListingMachineCannotOutliveTheNextListing() async {
+        let (library, fake, machine, hosts) = await bench(feed: false)
+        func send(_ change: MoldEvent.Gallery) { hosts.listeners.forEach { $0(machine.id, .gallery(change)) } }
+        send(.trashed(filename: "a.png"))
+        send(.restored(filename: "a.png", row: FakeFixtures.print("a.png")))
+        #expect(Set(library.items.map(\.print.filename)) == ["a.png", "b.png"])
+        await library.refresh()
+        #expect(Set(library.items.map(\.print.filename)) == ["a.png", "b.png"])
+
+        // A frame the machine's listing contradicts: "b.png" never left.
+        send(.trashed(filename: "b.png"))
+        #expect(library.items.map(\.print.filename) == ["a.png"])
+        await library.refresh()
+        #expect(Set(library.items.map(\.print.filename)) == ["a.png", "b.png"])
+        #expect(fake.callCount("galleryChanges") == 0)
+    }
+
+    @Test func anAnswerReadThroughAReplacedRouteIsRefusedThenHandedOverWhole() async {
+        let (library, fake, machine, hosts) = await bench(feed: false)
+        fake.prints.append(FakeFixtures.print("c.png"))
+        fake.delays["gallery"] = .milliseconds(200)
+        let refresh = Task { await library.refresh() }
+        await settle { fake.callCount("gallery") == 2 }
+        var moved = machine
+        moved.baseURL = URL(string: "http://moved")!
+        hosts.hosts = [moved]
+        await refresh.value
+        #expect(!library.items.contains { $0.print.filename == "c.png" })
+        fake.delays["gallery"] = nil
+        await library.refresh()
+        #expect(Set(library.items.map(\.print.filename)) == ["a.png", "b.png", "c.png"])
+    }
+
     @Test func lookupsFindEveryCopyThroughTheIndex() async {
         let (library, _, machine, _) = await bench(feed: false)
         let id = PrintID(host: machine.id, filename: "b.png")

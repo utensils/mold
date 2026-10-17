@@ -87,7 +87,15 @@ final class GalleryLive {
                 store.invalidateListings([host])
                 return
             }
-            if let row { replace(filename, with: row, on: host, in: store) } else {
+            if let row {
+                // A restore brings back a row this machine's timeline dropped
+                // when it was trashed, so a missing row is an insert.
+                if case .restored = change, !(store.perHost[host] ?? []).contains(where: { $0.print.filename == filename }) {
+                    insert(row, on: host, in: store)
+                } else {
+                    replace(filename, with: row, on: host, in: store)
+                }
+            } else {
                 Task { await relists.run(host) { await relist(host, in: store) } }
             }
         case let .added(_, row, imported):
@@ -119,7 +127,9 @@ final class GalleryLive {
         switch change {
         case let .updated(filename, _), let .restored(filename, _), let .removed(filename),
              let .trashed(filename):
-            // The bulk task re-reads the machine once it is done.
+            // Our own bulk run's echo: `runBulk` re-reads this machine once,
+            // through `reconcileBulk`, when it is done -- a pull per frame of a
+            // 1,000-print trash would be 1,000 catch-ups racing that read.
             if store.bulkTargets.contains(PrintID(host: host, filename: filename)) { return }
         case let .added(_, _, imported):
             if imported && host == MoldEngine.localHostID && store.localSaveSuppressImports { return }
@@ -134,6 +144,7 @@ final class GalleryLive {
         store.writeLive(host, (store.perHost[host] ?? []).map {
             $0.print.filename == filename ? $0.replacingPrint(print) : $0
         })
+        store.spliced(host, [filename])
         store.changedLive([PrintID(host: host, filename: filename)])
     }
 
@@ -148,12 +159,14 @@ final class GalleryLive {
         guard !list.contains(where: { $0.print.filename == print.filename }) else { return }
         list.append(LibraryEntry(host: machine, print: print))
         store.writeLive(host, list)
+        store.spliced(host, [print.filename])
         store.changedLive([PrintID(host: host, filename: print.filename)])
     }
 
     private func drop(_ filename: String, on host: MoldHost.ID, in store: LibraryStore) {
         guard (store.perHost[host] ?? []).contains(where: { $0.print.filename == filename }) else { return }
         store.writeLive(host, (store.perHost[host] ?? []).filter { $0.print.filename != filename })
+        store.spliced(host, [filename])
         store.changedLive([], removed: [PrintID(host: host, filename: filename)])
     }
 
@@ -176,7 +189,7 @@ final class GalleryLive {
         store.relistAsked[id] = Set((store.perHost[id] ?? []).map(\.print.filename))
         defer { store.relistAsked[id] = nil }
         do {
-            try await store.replica(for: machine).pull(store.pullRequest(id, .live, full: true), using: client)
+            try await store.replica(for: machine).pull(store.pullRequest(machine, .live, full: true), using: client)
         } catch {
             // The repair itself failing is the one thing the person has to be
             // told about: this machine's rows are known-stale and nothing

@@ -10,17 +10,36 @@ import MoldClient
 // of five machines is one settle rather than five merges.
 @MainActor
 extension LibraryStore {
-    /// The replica reading through exactly this machine record. A changed
-    /// route or key is a new replica (resuming from the saved file when it is
-    /// the same server), and an answer read through the OLD record is
-    /// discarded on arrival -- the rule every listing here has always had.
+    /// The replica for this machine. Kept across route changes -- a roaming
+    /// address or a refreshed endpoint list is the same gallery -- and
+    /// replaced only when the credential or the server identity changes,
+    /// which may be another gallery altogether. Each pull is stamped with the
+    /// exact record it read through (`origin`), and `absorb` refuses an
+    /// answer read through a record that has since been replaced -- the rule
+    /// every listing here has always had -- asking the replica to hand its
+    /// whole state over again next time instead.
     func replica(for host: MoldHost) -> GalleryReplica {
-        if let existing = replicas[host.id], existing.host == host { return existing.replica }
-        let replica = GalleryReplica(hostID: host.id, store: replicaStore) { [weak self] delta in
-            await self?.absorb(delta, from: host)
+        let identity = Self.replicaIdentity(host)
+        if let existing = replicas[host.id], existing.identity == identity { return existing.replica }
+        let id = host.id
+        let replica = GalleryReplica(hostID: id, store: replicaStore) { [weak self] delta in
+            await self?.absorb(delta, on: id)
         }
-        replicas[host.id] = (host, replica)
+        replicas[id] = (identity, replica)
         return replica
+    }
+
+    static func replicaIdentity(_ host: MoldHost) -> String {
+        "\(host.apiKey ?? "")|\(host.connectionMode)|\(host.connectionInstanceID ?? "")"
+    }
+
+    /// The record a pull read through. In-process only, like the fence.
+    static func origin(_ host: MoldHost) -> String { String(host.hashValue) }
+
+    /// A live frame spliced these rows in place; the replica must not believe
+    /// it still knows them (see `GalleryReplica.forget`).
+    func spliced(_ host: MoldHost.ID, _ names: [String]) {
+        replicas[host]?.replica.forget(names)
     }
 
     /// Whether this machine is followed by its change log rather than listed.
@@ -28,8 +47,10 @@ extension LibraryStore {
         hosts.capabilities[host]?.hasGalleryChangesFeed == true
     }
 
-    func pullRequest(_ host: MoldHost.ID, _ scope: ReplicaDelta.Scope, full: Bool = false) -> GalleryReplica.Pull {
-        followsFeed(host) ? GalleryReplica.Pull(useFeed: true, full: full) : .legacy(scope, full: full)
+    func pullRequest(_ host: MoldHost, _ scope: ReplicaDelta.Scope, full: Bool = false) -> GalleryReplica.Pull {
+        let origin = Self.origin(host)
+        return followsFeed(host.id) ? GalleryReplica.Pull(useFeed: true, full: full, origin: origin)
+            : .legacy(scope, full: full, origin: origin)
     }
 
     /// Every machine at once; the timelines settle once all have answered.
@@ -38,7 +59,7 @@ extension LibraryStore {
             for host in hosts.hosts {
                 let replica = replica(for: host)
                 let client = hosts.backend(for: host)
-                let request = pullRequest(host.id, scope)
+                let request = pullRequest(host, scope)
                 group.addTask {
                     do {
                         try await replica.pull(request, using: client)
@@ -65,7 +86,7 @@ extension LibraryStore {
         guard let machine = hosts.host(id) else { return }
         let replica = replica(for: machine)
         let client = hosts.backend(for: machine)
-        let request = pullRequest(id, .all)
+        let request = pullRequest(machine, .all)
         Task {
             do {
                 try await replica.pull(request, using: client)
@@ -85,9 +106,12 @@ extension LibraryStore {
 
     /// Applies one delta to a machine's rows. Never touches the timelines --
     /// see `settleTimelines`.
-    func absorb(_ delta: ReplicaDelta, from machine: MoldHost) {
-        let id = machine.id
-        guard hosts.host(id) == machine else { return }
+    func absorb(_ delta: ReplicaDelta, on id: MoldHost.ID) {
+        guard let machine = hosts.host(id) else { return }
+        guard delta.origin == nil || delta.origin == Self.origin(machine) else {
+            replicas[id]?.replica.redeliver()
+            return
+        }
         writingRows = true
         defer { writingRows = false }
         let entries = delta.upserted.map { LibraryEntry(host: machine, print: $0) }
@@ -146,9 +170,20 @@ extension LibraryStore {
 
     /// A machine left the list: its replica, and its saved file, go with it.
     func discardReplicas(keeping live: Set<MoldHost.ID>) {
+        var removed = false
         for (id, entry) in replicas where !live.contains(id) {
             replicas[id] = nil
+            removed = true
             Task { await entry.replica.discard() }
         }
+        // And any file a machine removed in an earlier launch left behind.
+        guard let replicaStore, removed || !prunedReplicaFiles else { return }
+        prunedReplicaFiles = true
+        Task.detached(priority: .utility) { replicaStore.prune(keeping: live) }
+    }
+
+    /// Writes every replica's state now, for quitting.
+    func flushReplicas() async {
+        for (_, entry) in replicas { await entry.replica.flush() }
     }
 }

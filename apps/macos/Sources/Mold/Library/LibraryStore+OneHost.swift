@@ -14,7 +14,7 @@ extension LibraryStore {
         guard let machine = hosts.host(host) else { return }
         let client = hosts.backend(for: machine)
         do {
-            try await replica(for: machine).pull(pullRequest(host, .live), using: client)
+            try await replica(for: machine).pull(pullRequest(machine, .live), using: client)
             if hosts.host(host) == machine { hosts.succeeded(on: host, doing: "list its prints") }
         } catch {
             if hosts.host(host) == machine { hosts.report(error, on: host, doing: "list its prints") }

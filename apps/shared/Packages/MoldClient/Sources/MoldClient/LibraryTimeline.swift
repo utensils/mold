@@ -25,7 +25,9 @@ public struct LibraryTimeline: Sendable {
     private var positions: [PrintID: Int] = [:]
     private var filenames: [String: Int] = [:]
     private var identities: [String: Int] = [:]
-    private var links: [PrintID: PrintID] = [:]
+    /// The sync links the tiles were merged with. A different set is a
+    /// re-merge, never a patch.
+    public private(set) var links: [PrintID: PrintID] = [:]
     private var linked: Set<PrintID> = []
 
     public init(order: Order = .newestFirst) { self.order = order }
@@ -77,6 +79,7 @@ public struct LibraryTimeline: Sendable {
         // full merge, which an insertion cannot reproduce; two new rows can
         // still match each other.
         guard inserts.allSatisfy({ !hasTile(keyed: key($0.print)) }),
+              Set(inserts.map { key($0.print) }).count == inserts.count,
               Set(inserts.map(\.print.filename)).count == inserts.count,
               Set(inserts.compactMap { LibraryMerge.identity(of: $0.print) }).count
                 == inserts.compactMap({ LibraryMerge.identity(of: $0.print) }).count

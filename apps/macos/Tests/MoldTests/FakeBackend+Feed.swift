@@ -43,7 +43,8 @@ extension FakeBackend {
         }
         feed.seen = current
         var after = 0
-        var reset = false
+        // Like the server: a cursor-less request is a rebuild from zero.
+        var reset = cursor == nil
         if let cursor {
             let parts = cursor.split(separator: ":").compactMap { Int($0) }
             if parts.count == 2, parts[0] == feed.epoch, parts[1] <= feed.seq { after = parts[1] } else { reset = true }

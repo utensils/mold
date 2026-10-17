@@ -238,8 +238,16 @@ inventory. Preserve local bytes; never mint authority, replace attachments, or
 waive hidden inputs and stale/cancelled responses during this migration.
 
 **Library replicas.** `LibraryStore` reads each machine through one MoldClient
-`GalleryReplica`, keyed by the exact `MoldHost` record (a changed route/key is a
-new replica; a delta read through the old record is discarded on arrival). The
+`GalleryReplica`, kept across route changes and replaced only when the API key,
+connection mode or server instance identity changes. Every pull carries the exact
+record it read through (`Pull.origin`); `absorb` refuses a delta whose origin is
+no longer the current record and calls `redeliver()` so the next pull is a reset.
+A legacy frame spliced into `perHost` must call `spliced` (`GalleryReplica.forget`)
+so the next listing re-emits those names; a `.restored` frame for a missing row
+inserts it. Listing answers carry per-partition generations (an older answer
+landing last is dropped) and feed pages commit once at the end (no rollback).
+Replica files live in Caches, are never rewritten after `discard()`, are pruned
+for removed machines, store only the raw recipe, debounce 5 s and flush on quit. The
 feed is used only when `capabilities.gallery.changes_feed.protocol_version == 1`;
 404/405/`503 GALLERY_FEED_NOT_READY` falls back to the conditional listings for
 that pull. The replica owns the listing ETags (`invalidateListings`, never a

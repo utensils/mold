@@ -20,13 +20,17 @@ public final class FakeGalleryFeed: Sendable {
         /// Name -> latest sequence. Removed names stay as tombstones.
         var dirty: [String: Int] = [:]
         var notReady = false
+        var snapshotsSayReset: Bool
         var pages: [String?] = []
     }
 
     private let state: Mutex<State>
 
-    public init(instanceID: String = "instance-1", rows: [GalleryPrint] = []) {
-        state = Mutex(State(instanceID: instanceID))
+    /// `snapshotsSayReset`: the server answers a cursor-less request with
+    /// `reset: true` (it is rebuilding the client from sequence zero); false
+    /// is the contract's other legal reading, kept so both stay covered.
+    public init(instanceID: String = "instance-1", rows: [GalleryPrint] = [], snapshotsSayReset: Bool = true) {
+        state = Mutex(State(instanceID: instanceID, snapshotsSayReset: snapshotsSayReset))
         for row in rows { upsert(row) }
     }
 
@@ -77,7 +81,7 @@ public final class FakeGalleryFeed: Sendable {
                 throw MoldClientError.http(status: 503, code: "GALLERY_FEED_NOT_READY", message: "not ready")
             }
             var after = 0
-            var reset = false
+            var reset = cursor == nil && state.snapshotsSayReset
             if let cursor {
                 let parts = cursor.split(separator: ":").compactMap { Int($0) }
                 if parts.count == 2, parts[0] == state.epoch, parts[1] <= state.seq {

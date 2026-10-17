@@ -13,10 +13,16 @@ public struct GalleryReplicaStore: Sendable {
 
     public init(directory: URL) { self.directory = directory }
 
-    /// Application Support's own folder for them (the throwaway one under
-    /// native UAT, exactly as `SecretStore` resolves it).
+    /// In Caches: everything here is rebuilt by reading the machine again, so
+    /// it has no business in a backup. The folder is the app's own (the
+    /// throwaway one under native UAT, as `SecretStore` resolves it).
     public static func standard() -> GalleryReplicaStore {
-        GalleryReplicaStore(directory: SecretStore.applicationSupport().appending(path: "GalleryReplicas"))
+        let fresh = SecretStore.applicationSupport().lastPathComponent == SecretStore.freshDirectoryName
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? URL.homeDirectory.appending(path: "Library/Caches")
+        return GalleryReplicaStore(directory: caches
+            .appending(path: fresh ? SecretStore.freshDirectoryName : SecretStore.directoryName)
+            .appending(path: "GalleryReplicas"))
     }
 
     /// The saved state, versioned so a later format can refuse an older one.
@@ -35,9 +41,53 @@ public struct GalleryReplicaStore: Sendable {
 
     /// A row plus the original recipe JSON `GalleryPrint` does not encode,
     /// which a cross-machine import needs byte for byte.
+    ///
+    /// Where the raw recipe exists it is the ONLY copy stored -- the typed
+    /// metadata is decoded from it on load, as from the wire -- so a 30K-row
+    /// file does not hold every recipe twice.
     struct Row: Codable {
         var print: GalleryPrint
         var rawMetadata: Data?
+
+        private enum CodingKeys: String, CodingKey { case print, rawMetadata }
+        private static let blank = (try? MoldJSON.decoder.decode(OutputMetadata.self, from: Data("{}".utf8)))
+
+        init(print: GalleryPrint, rawMetadata: Data?) {
+            self.print = print
+            self.rawMetadata = rawMetadata
+        }
+
+        init(from decoder: any Decoder) throws {
+            let row = try decoder.container(keyedBy: CodingKeys.self)
+            let stored = try row.decode(GalleryPrint.self, forKey: .print)
+            rawMetadata = try row.decodeIfPresent(Data.self, forKey: .rawMetadata)
+            if let rawMetadata, let metadata = try? MoldJSON.decoder.decode(OutputMetadata.self, from: rawMetadata) {
+                print = stored.replacing(metadata: metadata, raw: rawMetadata)
+            } else {
+                print = stored
+            }
+        }
+
+        func encode(to encoder: any Encoder) throws {
+            var row = encoder.container(keyedBy: CodingKeys.self)
+            if let rawMetadata, let blank = Self.blank {
+                try row.encode(print.replacing(metadata: blank, raw: nil), forKey: .print)
+                try row.encode(rawMetadata, forKey: .rawMetadata)
+            } else {
+                try row.encode(print, forKey: .print)
+            }
+        }
+    }
+
+    /// Deletes every saved replica whose machine is no longer in the list.
+    public func prune(keeping hostIDs: Set<UUID>) {
+        guard let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        else { return }
+        for file in files where file.pathExtension == "json" {
+            guard let id = UUID(uuidString: file.deletingPathExtension().lastPathComponent),
+                  !hostIDs.contains(id) else { continue }
+            try? FileManager.default.removeItem(at: file)
+        }
     }
 
     func load(_ hostID: UUID) -> Snapshot? {
@@ -71,7 +121,7 @@ extension GalleryReplica {
         restored.reserveCapacity(snapshot.rows.count)
         for row in snapshot.rows {
             var print = row.print
-            print.rawMetadataJSON = row.rawMetadata
+            if print.rawMetadataJSON == nil { print.rawMetadataJSON = row.rawMetadata }
             restored[print.filename] = print
         }
         rows = restored
@@ -99,8 +149,12 @@ extension GalleryReplica {
         persistNow()
     }
 
+    /// Whether this replica was discarded (its machine removed).
+    public var isDiscarded: Bool { discarded }
+
     /// Forgets everything, on disk too: the machine was removed.
     public func discard() {
+        discarded = true
         saveTask?.cancel()
         saveTask = nil
         rows = [:]
@@ -116,12 +170,22 @@ extension GalleryReplica {
 
     func persistNow() {
         saveTask = nil
-        guard let store, loaded else { return }
+        guard let store, loaded, !discarded else { return }
         let snapshot = GalleryReplicaStore.Snapshot(
             hostID: hostID, instanceID: instanceID, cursor: cursor, liveETag: liveETag, trashETag: trashETag,
             rows: rows.values.sorted { $0.filename < $1.filename }
                 .map { GalleryReplicaStore.Row(print: $0, rawMetadata: $0.rawMetadataJSON) },
             listedInTrash: listedInTrash.sorted())
         try? store.save(snapshot)
+    }
+}
+
+extension GalleryPrint {
+    func replacing(metadata: OutputMetadata, raw: Data?) -> GalleryPrint {
+        GalleryPrint(
+            filename: filename, assets: assets, metadata: metadata, timestamp: timestamp, format: format,
+            sizeBytes: sizeBytes, mediaVersion: mediaVersion, title: title, tags: tags, favorite: favorite,
+            collections: collections, trashedAt: trashedAt, purgeAt: purgeAt,
+            metadataSynthetic: metadataSynthetic, rawMetadataJSON: raw)
     }
 }

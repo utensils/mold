@@ -48,6 +48,15 @@ public actor GalleryReplica {
     var sink: Sink?
     var saveTask: Task<Void, Never>?
     private nonisolated let invalidations = Mutex<ReplicaDelta.Scope>([])
+    private nonisolated let forgotten = Mutex<Set<String>>([])
+    private nonisolated let redeliveries = Mutex(false)
+    /// Per listing partition: how many reads have started, and the newest one
+    /// whose answer was applied. An answer older than the applied one is
+    /// dropped, so two lanes (or a feed commit) can never land out of order.
+    var listingsStarted: [Int: Int] = [:]
+    var listingsApplied: [Int: Int] = [:]
+    /// Removed for good: nothing may write the file again.
+    var discarded = false
 
     /// One flight per lane: the feed, or one legacy listing scope. Two
     /// listings are separate lanes so a slow trash listing never holds the
@@ -61,7 +70,7 @@ public actor GalleryReplica {
     private var flights: [Int: Flight] = [:]
 
     public init(hostID: UUID, store: GalleryReplicaStore? = nil,
-                saveDelay: Duration = .seconds(1), pageLimit: Int = 2_000, sink: Sink? = nil) {
+                saveDelay: Duration = .seconds(5), pageLimit: Int = 2_000, sink: Sink? = nil) {
         self.hostID = hostID
         self.store = store
         self.saveDelay = saveDelay
@@ -76,6 +85,21 @@ public actor GalleryReplica {
     /// rows diverge must not have to hop to say so.
     public nonisolated func invalidateValidators(_ scope: ReplicaDelta.Scope = .all) {
         invalidations.withLock { $0.formUnion(scope) }
+    }
+
+    /// The consumer changed these names on its own (a live frame spliced into
+    /// what it shows). The next pull re-reads its listings in full and emits
+    /// each of them as it is then -- present or gone -- so a splice the
+    /// machine does not agree with can never outlive the next refresh.
+    public nonisolated func forget(_ names: some Sequence<String>) {
+        forgotten.withLock { $0.formUnion(names) }
+        invalidateValidators()
+    }
+
+    /// The consumer dropped a delta (read through a route it has since
+    /// replaced): hand it the whole state again on the next pull.
+    public nonisolated func redeliver() {
+        redeliveries.withLock { $0 = true }
     }
 
     /// Reads what changed since the last pull. `nil` when nothing did.
@@ -140,17 +164,29 @@ public actor GalleryReplica {
         }
         if forced.contains(.live) { liveETag = nil }
         if forced.contains(.trash) { trashETag = nil }
-        let outcome: Outcome
-        if request.useFeed {
-            do {
-                outcome = try await followFeed(using: backend)
-            } catch let error where Self.fallsBackToListing(error) {
-                outcome = try await relist(.all, full: request.full, using: backend)
-            }
-        } else {
-            outcome = try await relist(request.scope, full: request.full, using: backend)
+        let spliced = forgotten.withLock { names in
+            defer { names = [] }
+            return names
         }
-        guard let delta = delta(for: outcome, full: request.full) else { return nil }
+        if redeliveries.withLock({ flag in defer { flag = false }; return flag }) { deliveredScopes = [] }
+        var outcome: Outcome
+        do {
+            if request.useFeed {
+                do {
+                    outcome = try await followFeed(using: backend)
+                } catch let error where Self.fallsBackToListing(error) {
+                    outcome = try await relist(.all, full: request.full, using: backend)
+                }
+            } else {
+                outcome = try await relist(request.scope, full: request.full, using: backend)
+            }
+        } catch {
+            // Still owed: the next pull re-reads and emits them.
+            if !spliced.isEmpty { forget(spliced) }
+            throw error
+        }
+        outcome.forced = spliced
+        guard let delta = delta(for: outcome, full: request.full, origin: request.origin) else { return nil }
         if let sink { await sink(delta) }
         return delta
     }

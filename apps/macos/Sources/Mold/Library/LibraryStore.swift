@@ -66,7 +66,8 @@ final class LibraryStore {
 
     /// Each machine's replica, with the exact machine record (route, key) it
     /// reads through. See `LibraryStore+Replica`.
-    @ObservationIgnored var replicas: [MoldHost.ID: (host: MoldHost, replica: GalleryReplica)] = [:]
+    @ObservationIgnored var replicas: [MoldHost.ID: (identity: String, replica: GalleryReplica)] = [:]
+    @ObservationIgnored var prunedReplicaFiles = false
     @ObservationIgnored let replicaStore: GalleryReplicaStore?
     /// What a machine had when a repairing re-list ASKED, so its reset can
     /// keep a print that landed while the answer was in flight (`RelistMerge`).
