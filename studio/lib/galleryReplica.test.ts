@@ -10,6 +10,7 @@ import {
   type GalleryReplicaTransport,
   type PersistedGalleryReplica,
 } from "./galleryReplica";
+import { parseGalleryChangesPage } from "../api/galleryChanges";
 
 interface Row {
   filename: string;
@@ -589,7 +590,8 @@ describe.skipIf(fixtures === null)(
             calls.push(since);
             const next = pages.shift();
             if (!next) throw new Error("fixture exhausted");
-            return next;
+            // Through the wire parser, exactly as the HTTP transport reads it.
+            return parseGalleryChangesPage<Row>(next);
           },
           legacyLibrary: async () => [],
         };

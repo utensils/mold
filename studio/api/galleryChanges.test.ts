@@ -3,6 +3,7 @@ import {
   fetchGalleryChanges,
   galleryChangesFeedAdvertised,
   galleryChangesPath,
+  parseGalleryChangesPage,
   httpGalleryReplicaTransport,
 } from "./galleryChanges";
 import {
@@ -32,6 +33,36 @@ describe("gallery changes client", () => {
     ).toBe(false);
     expect(galleryChangesFeedAdvertised({ gallery: {} })).toBe(false);
     expect(galleryChangesFeedAdvertised(null)).toBe(false);
+  });
+
+  it("reads pages the way mold_core's serde defaults do", () => {
+    // `changes` and `removed` are `#[serde(default)]` in GalleryChangesPage /
+    // GalleryChange: an absent field is an empty list / false.
+    const page = parseGalleryChangesPage({
+      protocol_version: 1,
+      instance_id: "i",
+      cursor: "c",
+      more: false,
+      reset: true,
+    });
+    expect(page.changes).toEqual([]);
+    const withChange = parseGalleryChangesPage<{
+      filename: string;
+      timestamp: number;
+    }>({
+      protocol_version: 1,
+      instance_id: "i",
+      cursor: "c",
+      more: false,
+      reset: false,
+      changes: [
+        { filename: "a.png", image: { filename: "a.png", timestamp: 1 } },
+      ],
+    });
+    expect(withChange.changes[0]?.removed).toBe(false);
+    expect(() => parseGalleryChangesPage({ protocol_version: 2 })).toThrow(
+      GalleryFeedUnavailableError,
+    );
   });
 
   it("omits since for a snapshot and encodes an opaque cursor", () => {

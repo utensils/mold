@@ -69,10 +69,18 @@ export function parseGalleryChangesPage<Row extends GalleryReplicaRow>(
     typeof page.cursor !== "string" ||
     typeof page.more !== "boolean" ||
     typeof page.reset !== "boolean" ||
-    !Array.isArray(page.changes)
+    (page.changes !== undefined && !Array.isArray(page.changes))
   )
     throw new GalleryFeedUnavailableError("unsupported");
-  return page as GalleryChangesPage<Row>;
+  // `mold_core::GalleryChangesPage.changes` and `GalleryChange.removed` are
+  // `#[serde(default)]`: absent reads as `[]` / `false`.
+  return {
+    ...(page as GalleryChangesPage<Row>),
+    changes: (page.changes ?? []).map((change) => ({
+      ...change,
+      removed: change.removed === true,
+    })),
+  };
 }
 
 /** Map a feed refusal to the replica's fallback signal; rethrow the rest. */
