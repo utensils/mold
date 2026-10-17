@@ -196,7 +196,7 @@ identity, serialize mirror and reconciliation writers, and reject snapshots
 older than a visibility edit. A fresh listing confirms convergence; a PATCH
 response alone does not supersede a newer edit.
 
-Library mirror checkpoints use authenticated `GET /api/gallery/sync-checkpoint`. Per-print opaque revisions bind archive facts and retained-member manifests independently of the output media version; corrupt or missing manifest evidence cannot establish trust. Client skip decisions require matching source and destination evidence, current route/instance identities and output records. Checkpoints batch metadata work; they do not claim an O(1) delta feed. Older or oversized unsupported responses retain the full repair path.
+Library mirror checkpoints use authenticated `GET /api/gallery/sync-checkpoint`. Per-print opaque revisions bind archive facts and retained-member manifests independently of the output media version; corrupt or missing manifest evidence cannot establish trust. Client skip decisions require matching source and destination evidence, current route/instance identities and output records. Checkpoints batch metadata work; they do not claim an O(1) delta feed. Older or oversized unsupported responses retain the full repair path. The native Mac mirror asks the bounded `POST /api/gallery/sync-checkpoint {filenames}` (same answer shape, at most 2,000 names per request) for the names it plans or touched; 404/405 falls back to the GET restricted to those names, and a full plan still uses the GET.
 
 Source Media browsing is a read-only projection of existing output ownership.
 `POST /api/gallery/source-media/inventory` accepts at most 100 exact filenames

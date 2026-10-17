@@ -19,13 +19,10 @@ struct LibraryLocalSaveTests {
         source.mediaAnswer = Data([1, 2, 3])
         source.syncCheckpoint = [print.filename: "source-v1"]
         target.syncCheckpoint = [print.filename: "local-v1"]
-        target.galleryPrintResponder = { _ in
-            if !target.importedNames.isEmpty { target.prints = [print] }
-            return target.prints.first
-        }
+        target.listsImports = { _ in print }
         var changedDuringVerification = false
         source.retainedTransferOfferResponder = { _ in
-            if target.callCount("gallerySyncCheckpoint") == 2 {
+            if target.callCount("boundedSyncCheckpoint") == 1 {
                 changedDuringVerification = true
                 target.syncCheckpoint = [print.filename: "local-v2"]
             }
@@ -42,12 +39,16 @@ struct LibraryLocalSaveTests {
         #expect(changedDuringVerification)
         let calls = target.calls
         let imported = try #require(calls.firstIndex(of: "importPrint"))
-        let receipt = try #require(calls.firstIndex(of: "galleryPrint"))
         let organized = try #require(calls.firstIndex(of: "mutate"))
-        let checkpoints = calls.indices.filter { calls[$0] == "gallerySyncCheckpoint" }
+        let checkpoints = calls.indices.filter { calls[$0] == "gallerySyncCheckpoint" || calls[$0] == "boundedSyncCheckpoint" }
         #expect(checkpoints.count == 3)
-        #expect(imported < receipt && receipt < organized)
+        #expect(imported < organized)
+        // The output receipt is the import's own answer: no listing read.
+        #expect(!calls.contains("galleryPrint"))
+        #expect(library.syncRecords.records(hosts.instanceID(of: local.id))[
+            "\(remote.id.uuidString):\(print.filename)"]?.destinationFilename == print.filename)
         #expect(checkpoints.filter { $0 > organized }.count == 2)
+        #expect(target.boundedCheckpointRequests.suffix(2).allSatisfy { $0 == [print.filename] })
 
         let probes = source.callCount("retainedMediaTransferOffer")
         await library.syncAllLocally()
@@ -78,13 +79,14 @@ struct LibraryLocalSaveTests {
         let probes = target.callCount("gallerySyncCheckpoint")
         let imports = target.importedNames.count
         target.delays["gallerySyncCheckpoint"] = .milliseconds(100)
-        let run = Task { await library.syncAllLocally() }
+        let relaunched = LibraryStore(hosts: hosts)
+        let run = Task { await relaunched.syncAllLocally() }
         await settle { target.callCount("gallerySyncCheckpoint") > probes }
         var replacement = remote
         replacement.baseURL = URL(string: "http://replacement-checkpoint-origin")!
         hosts.hosts = [local, replacement]
         await run.value
-        #expect(library.localSaveFailures.contains { $0.contains("machine route changed") })
+        #expect(relaunched.localSaveFailures.contains { $0.contains("machine route changed") })
         #expect(target.importedNames.count == imports)
     }
 
@@ -112,6 +114,8 @@ struct LibraryLocalSaveTests {
         #expect(source.callCount("retainedMediaTransferOffer") == probes)
         source.syncCheckpoint = [print.filename: "source-v2"]
         await library.syncAllLocally()
+        #expect(source.callCount("retainedMediaTransferOffer") == probes, "an unchanged row is not re-verified")
+        await LibraryStore(hosts: hosts).syncAllLocally()
         #expect(source.callCount("retainedMediaTransferOffer") > probes)
     }
 
@@ -151,10 +155,7 @@ struct LibraryLocalSaveTests {
         let print = versionedPrint("output-receipt.png", prompt: "fox")
         source.prints = [print]
         source.mediaAnswer = Data([1, 2, 3])
-        target.galleryPrintResponder = { _ in
-            if !target.importedNames.isEmpty { target.prints = [print] }
-            return target.prints.first
-        }
+        target.listsImports = { _ in print }
         var failRetained = true
         source.retainedTransferOfferResponder = { _ in
             if failRetained && !target.importedNames.isEmpty {

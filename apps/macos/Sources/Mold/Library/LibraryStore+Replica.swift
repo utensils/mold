@@ -152,6 +152,12 @@ extension LibraryStore {
         deferredSettles += 1
         mutations.replayPending(on: id, in: self)
         deferredSettles -= 1
+        // "Keep This Mac in Sync" follows a remote replica's deltas: the run
+        // it starts plans only the names that just changed (its cursor). A
+        // run's own discovery pulls are not a reason for another run.
+        if id != MoldEngine.localHostID, !localSaveRunning, !delta.upserted.isEmpty || !delta.removed.isEmpty {
+            syncSession.noteRemoteChange(in: self)
+        }
     }
 
     /// One pass over a machine's rows, however many changed.

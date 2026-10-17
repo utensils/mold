@@ -217,6 +217,11 @@ Also Running offers Cancel for reported long-clip chains when the machine permit
 
 Library Settings remembers **Keep This Mac in Sync** between launches. Sync reports checking existing copies separately from copying outputs. Updated hosts provide batched retained-input evidence so unchanged verified copies can skip individual transfer probes; older hosts continue checking retained inputs so late repairs are not missed.
 
+Sync reads every machine at once and only looks at what changed since its last
+run, plus anything a previous run left unfinished, so a sync with nothing new
+finishes without checking each print again. The first sync after Mold Studio
+relaunches checks everything once.
+
 Queue rows keep their height while previews and render progress load, preserving the scroll position. Interrupted Library syncs resume from acknowledged output copies and repair remaining retained-input or organization work.
 
 Queue rows keep a neutral image placeholder when a job has no source image, matching
