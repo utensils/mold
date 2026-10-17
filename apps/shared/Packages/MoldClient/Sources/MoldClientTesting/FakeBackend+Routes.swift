@@ -56,6 +56,7 @@ extension FakeBackend {
 
     public func gallery(etag: String?) async throws -> Fetched<[GalleryPrint]> { try await respond("gallery(etag:)", [etag]) }
     public func trashedPrints(etag: String?) async throws -> Fetched<[GalleryPrint]> { try await respond("trashedPrints(etag:)", [etag]) }
+    public func galleryChanges(since cursor: String?, limit: Int) async throws -> GalleryChangesPage { try await respond("galleryChanges(since:limit:)", [cursor, limit]) }
     public func patch(_ filename: String, with patch: GalleryPatch) async throws { let _: Void = try await respond("patch(_:with:)", [filename, patch]) }
     public func mutate(_ mutation: GalleryBulkMutation) async throws { let _: Void = try await respond("mutate(_:)", [mutation]) }
     public func trash(_ filenames: [String]) async throws { let _: Void = try await respond("trash(_:)", [filenames]) }

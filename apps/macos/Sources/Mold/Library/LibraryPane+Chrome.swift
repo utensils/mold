@@ -88,7 +88,8 @@ extension LibraryPane {
                 returnToPrint: gridReturn?.scope == navigation.scope && gridReturn?.query == navigation.query
                     ? gridReturn?.id : nil,
                 onReturnRestored: { gridReturn = nil },
-                onOpen: { gridViewport.cover(); gridReturn = nil; viewerOrder = showing.visible; viewing = $0 }
+                onOpen: { gridViewport.cover(); gridReturn = nil; viewerOrder = showing.visible; viewing = $0 },
+                sectionsRevision: showing.derivation
             )
             .id(LibraryGridContext(scope: navigation.scope, query: navigation.query))
         }

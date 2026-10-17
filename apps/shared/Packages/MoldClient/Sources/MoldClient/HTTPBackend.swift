@@ -92,7 +92,9 @@ public struct HTTPBackend: MoldBackend {
             for row in rawRows {
                 guard let name = row["filename"] as? String,
                       let metadata = row["metadata"] as? [String: Any] else { continue }
-                rawByName[name] = try JSONSerialization.data(withJSONObject: metadata)
+                // Sorted, so two reads of an unchanged row compare equal
+                // (`GalleryReplica` diffs rows by value).
+                rawByName[name] = try JSONSerialization.data(withJSONObject: metadata, options: .sortedKeys)
             }
             let prints = listing.prints.map { print in
                 var print = print

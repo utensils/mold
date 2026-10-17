@@ -236,3 +236,33 @@ Older invalidated source-only snapshots may become independent only after fresh
 origin route/instance and archive/output verification plus a singleton source-image
 inventory. Preserve local bytes; never mint authority, replace attachments, or
 waive hidden inputs and stale/cancelled responses during this migration.
+
+**Library replicas.** `LibraryStore` reads each machine through one MoldClient
+`GalleryReplica`, kept across route changes and replaced only when the API key,
+connection mode or server instance identity changes. Every pull carries the exact
+record it read through (`Pull.origin`); `absorb` refuses a delta whose origin is
+no longer the current record and calls `redeliver()` so the next pull is a reset.
+A legacy frame spliced into `perHost` must call `spliced` (`GalleryReplica.forget`)
+so the next listing re-emits those names; a `.restored` frame for a missing row
+inserts it. Listing answers carry per-partition generations (an older answer
+landing last is dropped) and feed pages commit once at the end (no rollback).
+Replica files live in Caches, are never rewritten after `discard()`, are pruned
+for removed machines, store only the raw recipe, debounce 5 s and flush on quit. The
+feed is used only when `capabilities.gallery.changes_feed.protocol_version == 1`;
+404/405/`503 GALLERY_FEED_NOT_READY` falls back to the conditional listings for
+that pull. The replica owns the listing ETags (`invalidateListings`, never a
+store-side ETag map) and delivers deltas in revision order through its sink
+BEFORE `pull()` returns; `absorb` only edits `perHost`/`trashPerHost`, replays
+the outbox, and notes ids, and whoever started the pull calls
+`settleTimelines()`. A nil delta must not bump `rows` or re-sort. Single flight is
+per lane (feed, live listing, trash listing): a tickle mid-pull queues exactly
+one follow-up; cancelling the caller that started a pull changes nothing. On a
+feed machine gallery frames and `resyncRequired` only `tickle` the replica (echo
+suppression, bulk targets and import suppression still apply first); legacy
+machines keep in-place frame application, `RelistGate` and `RelistMerge`.
+`relist` is a FULL pull (a reset even when unchanged) so a refused optimistic
+edit is undone. `LibraryTimeline` patches in place only when a full merge could
+not differ (unchanged merge identity/order key, no shared filename/identity/link,
+no key tie); otherwise it rebuilds. The legacy trash LISTING, not `trashedAt`, decides a row's partition (`ReplicaDelta.inTrash`). A direct `perHost` write outside those paths
+marks the timeline for a full rebuild. Tests construct `LibraryStore` without a
+`replicaStore`; only `AppStores` persists to Application Support.
