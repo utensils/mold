@@ -457,7 +457,6 @@ import {
 } from "./libraryOrganization";
 import {
   captureCachedHostFence,
-  clearCachedGalleryHosts,
   createThumbnailRouteGenerationRegistry,
   evictCachedGalleryMedia,
   evictCachedGalleryMediaEntry,
@@ -470,7 +469,6 @@ import {
   pruneCachedGalleryMedia,
   removeCachedGalleryPrints,
   removeCachedGalleryRows,
-  storeCachedGallery,
   storeCachedGalleryMedia,
   storeCachedHostPresentation,
   validGalleryThumbnailBlob,
@@ -478,6 +476,11 @@ import {
   type CachedHostPresentation,
   type MobileThumbnailTier,
 } from "./galleryCache";
+import {
+  clearMobileGalleryHosts,
+  hydratedMobileGalleryReplica,
+  pullMobileGalleryReplica,
+} from "./galleryReplicas";
 import {
   MOBILE_GALLERY_COLUMNS_MAX,
   MOBILE_GALLERY_COLUMNS_MIN,
@@ -5171,11 +5174,11 @@ function updateHostStatus(payload: {
     if (recordMobileHostStatus(host, payload.status) === "instance_mismatch") {
       retireMobileHostAuthority(host.id);
       pruneHostOrganization(host.id);
-      void clearCachedGalleryHosts([priorCacheKey]);
+      void clearMobileGalleryHosts([priorCacheKey]);
       return false;
     }
     const nextCacheKey = host.instanceId?.trim() || host.id;
-    if (priorCacheKey !== nextCacheKey) void clearCachedGalleryHosts([priorCacheKey]);
+    if (priorCacheKey !== nextCacheKey) void clearMobileGalleryHosts([priorCacheKey]);
     captureHostTelemetry(host.id, payload.status);
     const aliases = mergeMobileHostsByInstanceId(hosts.value);
     if (aliases.dropped.length > 0) {
@@ -5417,7 +5420,7 @@ async function removeHost(id: string): Promise<void> {
   if (removedCatalogHost) catalogHostId.value = connectedHosts.value[0]?.id ?? "";
   persistHosts();
   if (removedHost) {
-    void clearCachedGalleryHosts([
+    void clearMobileGalleryHosts([
       removedHost.instanceId?.trim() || removedHost.id,
       removedHost.id,
     ]);
@@ -5476,7 +5479,7 @@ async function refreshModels(): Promise<boolean> {
       return false;
     }
     const nextCacheKey = mobileGalleryCacheKey(host);
-    if (priorCacheKey !== nextCacheKey) await clearCachedGalleryHosts([priorCacheKey]);
+    if (priorCacheKey !== nextCacheKey) await clearMobileGalleryHosts([priorCacheKey]);
     expandCapabilities[hostId] = capabilities?.expand;
     serverCapabilities[hostId] = capabilities;
     // Keep auxiliary entries for the Upscale and ControlNet pickers, while
@@ -8446,12 +8449,20 @@ async function performGalleryRefresh(): Promise<void> {
         ),
       ]);
       try {
-        [prints, capabilities] = await Promise.all([
-          apiJsonTo<MobileGalleryImage[]>(target, "/api/gallery", {
+        // The host's replica answers the listing: O(delta) where the host
+        // serves the change feed, the plain `/api/gallery` otherwise. It
+        // persists to IndexedDB itself, and only when something changed.
+        const [replica, answered] = await Promise.all([
+          pullMobileGalleryReplica({
+            cacheKey,
+            target,
+            capabilities: () => serverCapabilities[host.id],
             signal: controller.signal,
           }),
           capabilitiesRead,
         ]);
+        prints = [...replica.live()];
+        capabilities = answered;
       } finally {
         clearTimeout(timeout);
       }
@@ -8465,7 +8476,6 @@ async function performGalleryRefresh(): Promise<void> {
         throw new Error("Gallery host identity changed while refreshing");
       }
       if (capabilities !== undefined) serverCapabilities[host.id] = capabilities;
-      await storeCachedGallery(cacheKey, prints, cacheFence);
       if (!isCachedHostFenceCurrent(cacheFence)) {
         throw new Error("Gallery changed while refreshing");
       }
@@ -11737,16 +11747,25 @@ async function observeMobileGalleryArrivals(): Promise<void> {
   unreadObserverBusy = true;
   const observingHosts = connectedHosts.value;
   try {
+    // Each host's replica: hydrated once from IndexedDB (no per-tick cache
+    // read), then pulled — O(delta) on a host serving the change feed,
+    // where the old observer re-downloaded every listing every 10 s.
+    const routeFor = (host: MobileHost) => ({
+      cacheKey: mobileGalleryCacheKey(host),
+      target: mobileHostTarget(host),
+      capabilities: () => serverCapabilities[host.id],
+      signal: AbortSignal.timeout(GALLERY_HOST_TIMEOUT_MS),
+    });
     const cached = await Promise.all(
       observingHosts.map(async (host) => {
-        const cacheKey = mobileGalleryCacheKey(host);
-        const target = mobileHostTarget(host);
-        return (await loadCachedGallery(cacheKey).catch(() => [])).map((print) => ({
+        const route = routeFor(host);
+        const replica = await hydratedMobileGalleryReplica(route).catch(() => null);
+        return (replica?.live() ?? []).map((print) => ({
           ...print,
           hostId: host.id,
           hostName: host.name,
-          cacheKey,
-          target,
+          cacheKey: route.cacheKey,
+          target: route.target,
         }));
       }),
     );
@@ -11754,10 +11773,9 @@ async function observeMobileGalleryArrivals(): Promise<void> {
     observeMobileLibraryMedia(cached.flat());
     const inventories = await Promise.allSettled(
       observingHosts.map(async (host) => {
-        const target = mobileHostTarget(host);
-        const prints = await apiJsonTo<MobileGalleryImage[]>(target, "/api/gallery", {
-          signal: AbortSignal.timeout(GALLERY_HOST_TIMEOUT_MS),
-        });
+        const route = routeFor(host);
+        const target = route.target;
+        const prints = (await pullMobileGalleryReplica(route)).live();
         const current = connectedHosts.value.find((candidate) => candidate.id === host.id);
         if (!current || mobileGalleryCacheKey(current) !== mobileGalleryCacheKey(host))
           throw new Error("Machine changed during gallery observation");

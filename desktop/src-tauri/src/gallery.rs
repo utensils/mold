@@ -512,6 +512,99 @@ pub async fn local_gallery_list(
     })
 }
 
+/// One page of this device's gallery change feed, for the frontend replica.
+///
+/// While the local server runs this is `GET /api/gallery/changes` over the
+/// same authenticated HTTP authority as [`local_gallery_list`] and the page
+/// is forwarded verbatim (the replica owns the protocol). Anything that is
+/// not a page says WHY in `unavailable`, so the replica answers from
+/// `local_gallery_list` instead: `offline` while the lifecycle proves the
+/// server Off (there is no feed authority without it), `not_ready` for the
+/// server's `503 GALLERY_FEED_NOT_READY`, `unsupported` for a `404`/`405`
+/// (an adopted older `mold serve`).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalGalleryChanges {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    page: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unavailable: Option<&'static str>,
+    target: Option<LocalGalleryTarget>,
+}
+
+/// Map a feed refusal to the replica's fallback reason; `None` = a real error.
+fn feed_unavailable_reason(status: reqwest::StatusCode, body: &str) -> Option<&'static str> {
+    let code = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value["code"].as_str().map(str::to_string));
+    if status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+        && code.as_deref() == Some("GALLERY_FEED_NOT_READY")
+    {
+        return Some("not_ready");
+    }
+    if code.as_deref() == Some("GALLERY_FEED_UNSUPPORTED")
+        || status == reqwest::StatusCode::NOT_FOUND
+        || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+    {
+        return Some("unsupported");
+    }
+    None
+}
+
+#[tauri::command]
+pub async fn local_gallery_changes(
+    state: tauri::State<'_, AppState>,
+    since: Option<String>,
+    limit: Option<u32>,
+) -> Result<LocalGalleryChanges, String> {
+    let authority = local_gallery_authority(&state).await;
+    let LocalGalleryAuthority::Server(info) = authority else {
+        return Ok(LocalGalleryChanges {
+            page: None,
+            unavailable: Some("offline"),
+            target: None,
+        });
+    };
+    let target = LocalGalleryTarget::from_server(&info)?;
+    let mut query: Vec<(&str, String)> =
+        vec![("limit", limit.unwrap_or(500).clamp(1, 2000).to_string())];
+    if let Some(since) = since {
+        query.push(("since", since));
+    }
+    let response = reqwest::Client::new()
+        .get(server_url(&info, "/api/gallery/changes"))
+        .query(&query)
+        .header("X-Api-Key", api_key(&info)?)
+        .secure_send()
+        .await
+        .map_err(|error| format!("Couldn't reach the local gallery server: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        if let Some(reason) = feed_unavailable_reason(status, &body) {
+            return Ok(LocalGalleryChanges {
+                page: None,
+                unavailable: Some(reason),
+                target: Some(target),
+            });
+        }
+        return Err(serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| value["error"].as_str().map(str::to_string))
+            .filter(|message| !message.is_empty())
+            .unwrap_or_else(|| format!("Local gallery server returned {status}.")));
+    }
+    let page = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| format!("Invalid local gallery change page: {error}"))?;
+    Ok(LocalGalleryChanges {
+        page: Some(page),
+        unavailable: None,
+        target: Some(target),
+    })
+}
+
 /// The trashed prints of this device's gallery (`GET /api/gallery?view=trash`
 /// while the local server runs; the `.trash/` rows otherwise). Same snapshot
 /// shape as [`local_gallery_list`] so the store reuses one reader.
@@ -2632,6 +2725,39 @@ mod tests {
             original_operator_configuration: None,
             secrets: crate::secrets::SecretStore::new(dir.path().to_path_buf()),
         })
+    }
+
+    #[test]
+    fn feed_refusals_map_to_the_replica_fallback_reasons() {
+        use reqwest::StatusCode;
+        assert_eq!(
+            feed_unavailable_reason(
+                StatusCode::SERVICE_UNAVAILABLE,
+                r#"{"error":"warming","code":"GALLERY_FEED_NOT_READY"}"#
+            ),
+            Some("not_ready")
+        );
+        assert_eq!(
+            feed_unavailable_reason(
+                StatusCode::NOT_FOUND,
+                r#"{"error":"no db","code":"GALLERY_FEED_UNSUPPORTED"}"#
+            ),
+            Some("unsupported")
+        );
+        // An older adopted `mold serve` has no route at all.
+        assert_eq!(
+            feed_unavailable_reason(StatusCode::NOT_FOUND, ""),
+            Some("unsupported")
+        );
+        // A plain 503 or 500 is a real failure, never a silent fallback.
+        assert_eq!(
+            feed_unavailable_reason(StatusCode::SERVICE_UNAVAILABLE, "{}"),
+            None
+        );
+        assert_eq!(
+            feed_unavailable_reason(StatusCode::INTERNAL_SERVER_ERROR, "{}"),
+            None
+        );
     }
 
     #[test]

@@ -77,6 +77,40 @@ describe("events subscription", () => {
     );
   });
 
+  it("tickles another machine's bucket on its gallery frames and reports the stream live", async () => {
+    vi.mocked(fetchServerCapabilities).mockResolvedValue(caps(true));
+    const gallery = connectWithBucket();
+    const { useHostsStore } = await import("./hosts");
+    useHostsStore().extras.push({
+      id: "workstation-7680",
+      label: "workstation",
+      url: "http://workstation:7680",
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
+    const tickle = vi.spyOn(gallery, "tickleHost").mockImplementation(() => undefined);
+    const apply = vi.spyOn(gallery, "applyAdded");
+    const events = useEventsStore();
+    await events.subscribe();
+    const call = vi
+      .mocked(sseStream)
+      .mock.calls.find(([, options]) => options?.target?.baseUrl === "http://workstation:7680");
+    expect(call).toBeTruthy();
+    const options = call![1]!;
+    expect(events.isLive("workstation-7680")).toBe(false);
+    options.onOpen?.(new Response());
+    expect(events.isLive("workstation-7680")).toBe(true);
+    expect(tickle).toHaveBeenCalledWith("workstation-7680");
+    tickle.mockClear();
+    options.onEvent?.("message", JSON.stringify({ type: "gallery_updated", filename: "a.png" }));
+    options.onEvent?.("resync_required", "{}");
+    expect(tickle.mock.calls).toEqual([["workstation-7680"], ["workstation-7680"]]);
+    // A secondary's frame is never applied as if it were the primary's.
+    expect(apply).not.toHaveBeenCalled();
+  });
+
   it("refetches authoritative queue/device state on connect and invalidation events", async () => {
     vi.mocked(fetchServerCapabilities).mockResolvedValue(caps(true));
     connectWithBucket();

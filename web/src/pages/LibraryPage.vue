@@ -82,6 +82,7 @@ import {
 import {
   decorateEntries,
   fetchMergedGallery,
+  indexLogicalCopies,
   mergeLogicalEntries,
   printKey,
   type HostGalleryImage,
@@ -116,9 +117,13 @@ import {
   originHost,
 } from "../lib/hostRegistry";
 import {
+  hostApiTarget,
   hostCapabilities,
   hostDeleteGalleryImage,
+  hostGallery,
 } from "../components/machines/hostClient";
+import { subscribeToGalleryTickles } from "../lib/deviceEvents";
+import type { GalleryImage as HostListingRow } from "../types";
 import {
   createFramewiseUpscale,
   findRecoverableFramewiseUpscale,
@@ -494,8 +499,17 @@ const scopeRaw = computed<HostGalleryImage[]>(() =>
   scope.value === "trash" ? trashRaw.value : rawEntries.value,
 );
 
+/* Per-print lookups are answered from indexes built ONCE per data change
+ * (`indexLogicalCopies`), never by re-grouping the gallery per call — bulk
+ * actions over k selected prints were O(k·n). */
+const rawCopyIndex = computed(() => indexLogicalCopies(rawEntries.value));
+const trashCopyIndex = computed(() => indexLogicalCopies(trashRaw.value));
+const scopeCopyIndex = computed(() =>
+  scope.value === "trash" ? trashCopyIndex.value : rawCopyIndex.value,
+);
+
 function entryForKey(key: string): HostGalleryImage | null {
-  return scopeRaw.value.find((e) => keyOf(e) === key) ?? null;
+  return scopeCopyIndex.value.entryByKey.get(key) ?? null;
 }
 
 /*
@@ -660,7 +674,7 @@ function allCopiesTrash(entry: GalleryImage | null): boolean {
 const unread = useLibraryUnread();
 const fresh = computed(() => {
   const freshKeys = new Set<string>();
-  for (const group of groupLogicalGalleryPrints(rawEntries.value)) {
+  for (const group of rawCopyIndex.value.groups) {
     const keys = group.copies.map(keyOf);
     if (unread.ledger.isUnread(keys))
       for (const key of keys) freshKeys.add(key);
@@ -750,12 +764,7 @@ function deleteRouted(entry: GalleryImage): Promise<void> {
 }
 
 function copiesOf(entry: GalleryImage): HostGalleryImage[] {
-  const key = keyOf(entry);
-  return (
-    groupLogicalGalleryPrints(scopeRaw.value).find((group) =>
-      group.copies.some((copy) => keyOf(copy) === key),
-    )?.copies ?? []
-  );
+  return scopeCopyIndex.value.copiesByKey.get(keyOf(entry)) ?? [];
 }
 
 /** Mutations target only copies on the explicitly selected machine. */
@@ -1676,7 +1685,7 @@ watch(
       return;
     const shown = new Set(filtered.value.map(keyOf));
     libraryVisit.capture(
-      groupLogicalGalleryPrints(rawEntries.value)
+      rawCopyIndex.value.groups
         .filter((group) => group.copies.some((copy) => shown.has(keyOf(copy))))
         .map((group) => group.copies.map(keyOf)),
     );
@@ -1733,13 +1742,42 @@ const emptyKind = computed<
 });
 
 let refreshInFlight: Promise<void> | null = null;
+/** A tickle arrived while a refresh ran: run exactly one more pass. */
+let refreshAgain = false;
+/** What the last applied refresh was built from: each host's replica view
+ * (identity-stable while unchanged) plus the local overlays. Equal inputs
+ * mean the merge, sort and every derived index would come out the same. */
+let appliedGallery: {
+  listings: Map<string, readonly HostListingRow[]>;
+  raw: HostGalleryImage[];
+  pending: Set<string>;
+} | null = null;
+function sameListings(
+  next: Map<string, readonly HostListingRow[]>,
+  prior: Map<string, readonly HostListingRow[]>,
+): boolean {
+  if (next.size !== prior.size) return false;
+  for (const [hostId, rows] of next)
+    if (prior.get(hostId) !== rows) return false;
+  return true;
+}
 async function performRefresh() {
+  lastRefreshAt = Date.now();
   loading.value = true;
   errorMessage.value = null;
   try {
     const hosts = listHosts();
+    const listings = new Map<string, readonly HostListingRow[]>();
     const [merged, organization, upscaleCapabilities] = await Promise.all([
-      fetchMergedGallery(hosts),
+      // Each host's replica pulls (O(delta) on a feed host, a conditional
+      // listing otherwise); the organization's trash read joins that pull.
+      fetchMergedGallery(hosts, async (host) => {
+        const rows = await hostGallery(host, undefined, "library", {
+          refresh: true,
+        });
+        listings.set(host.id, rows);
+        return rows;
+      }),
       fetchOrganization(hosts, undefined, undefined, snapshots.value).catch(
         () => null,
       ),
@@ -1797,18 +1835,31 @@ async function performRefresh() {
         return now - (copy.trashed_at ?? now) <= PENDING_TRASH_MAX_AGE_SECS;
       });
     }
-    // Never resurrect prints whose optimistic removal still waits out its
-    // undo window — the server lists them live until the commit fires.
-    rawEntries.value =
-      pendingRemovalKeys.value.size > 0
-        ? merged.rawEntries.filter(
-            (e) => !pendingRemovalKeys.value.has(keyOf(e)),
-          )
-        : merged.rawEntries;
-    syncLogicalEntries();
+    const unchanged =
+      appliedGallery !== null &&
+      listings.size === merged.reachableHostIds.length &&
+      appliedGallery.raw === rawEntries.value &&
+      appliedGallery.pending === pendingRemovalKeys.value &&
+      sameListings(listings, appliedGallery.listings);
+    if (!unchanged) {
+      // Never resurrect prints whose optimistic removal still waits out its
+      // undo window — the server lists them live until the commit fires.
+      rawEntries.value =
+        pendingRemovalKeys.value.size > 0
+          ? merged.rawEntries.filter(
+              (e) => !pendingRemovalKeys.value.has(keyOf(e)),
+            )
+          : merged.rawEntries;
+      syncLogicalEntries();
+      unread.observe(merged.rawEntries, merged.reachableHostIds);
+      appliedGallery = {
+        listings,
+        raw: rawEntries.value,
+        pending: pendingRemovalKeys.value,
+      };
+    }
     unreachableHostIds.value = merged.unreachableHostIds;
     remoteHostCount.value = merged.remoteHostCount;
-    unread.observe(merged.rawEntries, merged.reachableHostIds);
     // Only a total wipe-out (no host answered) is an error; one box down just
     // shows an "unreachable" note while the rest render.
     if (
@@ -1824,14 +1875,27 @@ async function performRefresh() {
   }
 }
 
+/** Single-flight: a call during a pass joins it. */
 function refresh(): Promise<void> {
   if (refreshInFlight) return refreshInFlight;
-  const operation = performRefresh();
+  const operation = (async () => {
+    do {
+      refreshAgain = false;
+      await performRefresh();
+    } while (refreshAgain);
+  })();
   refreshInFlight = operation;
   void operation.finally(() => {
     if (refreshInFlight === operation) refreshInFlight = null;
   });
   return operation;
+}
+
+/** Evidence of a change that may postdate the pass in flight (an SSE
+ * tickle) queues exactly ONE coalesced follow-up pass instead of joining. */
+function refreshAfterChange(): Promise<void> {
+  if (refreshInFlight) refreshAgain = true;
+  return refresh();
 }
 
 // Honest count line: "all machines" only when remotes are actually connected,
@@ -1903,10 +1967,11 @@ function markViewed(entry: GalleryImage) {
     keyOf(selected.value) !== keyOf(entry)
   )
     return;
-  const group = groupLogicalGalleryPrints(rawEntries.value).find((group) =>
-    group.copies.some((copy) => keyOf(copy) === keyOf(entry)),
+  unread.view(
+    rawCopyIndex.value.copiesByKey.get(keyOf(entry)) ?? [
+      entry as HostGalleryImage,
+    ],
   );
-  unread.view(group?.copies ?? [entry as HostGalleryImage]);
 }
 
 function printQuery(item: GalleryImage) {
@@ -2762,6 +2827,66 @@ let disposed = false;
 function refreshWhenVisible() {
   if (!disposed && !document.hidden) void refresh();
 }
+
+/*
+ * Live updates: every host's `/api/events` gallery frames (and resyncs) are
+ * TICKLES that pull its replica — O(delta) where the host serves the change
+ * feed. The 10 s poll remains only as the fallback: it runs while any host
+ * has no live stream, and otherwise once a minute as a safety net.
+ */
+const POLL_MS = 10_000;
+const LIVE_SAFETY_POLL_MS = 60_000;
+const galleryStreams = new Map<
+  string,
+  { abort: AbortController; live: boolean }
+>();
+let lastRefreshAt = 0;
+let tickleTimer: ReturnType<typeof setTimeout> | null = null;
+function tickleGallery() {
+  if (disposed || tickleTimer) return;
+  // Coalesce a burst (a batch landing, a bulk edit) into one pull.
+  tickleTimer = setTimeout(() => {
+    tickleTimer = null;
+    if (!disposed && !document.hidden) void refreshAfterChange();
+  }, 250);
+}
+function streamKey(host: HostEntryLike): string {
+  return [host.id, host.url, host.apiKey ?? "", host.connectionMode ?? ""]
+    .map((part) => encodeURIComponent(part))
+    .join("|");
+}
+type HostEntryLike = ReturnType<typeof listHosts>[number];
+function syncGalleryStreams() {
+  if (disposed) return;
+  const wanted = new Map(listHosts().map((host) => [streamKey(host), host]));
+  for (const [key, stream] of galleryStreams) {
+    if (wanted.has(key)) continue;
+    stream.abort.abort();
+    galleryStreams.delete(key);
+  }
+  for (const [key, host] of wanted) {
+    if (galleryStreams.has(key)) continue;
+    const stream = { abort: new AbortController(), live: false };
+    galleryStreams.set(key, stream);
+    subscribeToGalleryTickles(
+      hostApiTarget(host),
+      stream.abort.signal,
+      tickleGallery,
+      (live) => {
+        stream.live = live;
+      },
+    );
+  }
+}
+function pollTick() {
+  if (document.hidden) return;
+  syncGalleryStreams();
+  const allLive =
+    galleryStreams.size > 0 &&
+    [...galleryStreams.values()].every((stream) => stream.live);
+  if (allLive && Date.now() - lastRefreshAt < LIVE_SAFETY_POLL_MS) return;
+  void refresh();
+}
 onMounted(async () => {
   document.addEventListener("visibilitychange", refreshWhenVisible);
   window.addEventListener("online", refreshWhenVisible);
@@ -2774,9 +2899,8 @@ onMounted(async () => {
   await nextTick();
   const position = sessionScrollPosition(WEB_LIBRARY_SCROLL_KEY);
   window.scrollTo({ top: position.top, left: position.left });
-  refreshTimer = setInterval(() => {
-    if (!document.hidden) void refresh();
-  }, 10_000);
+  syncGalleryStreams();
+  refreshTimer = setInterval(pollTick, POLL_MS);
 });
 onBeforeUnmount(() => {
   disposed = true;
@@ -2784,6 +2908,9 @@ onBeforeUnmount(() => {
   window.removeEventListener("online", refreshWhenVisible);
   stopUpscalePoll();
   if (refreshTimer) clearInterval(refreshTimer);
+  if (tickleTimer) clearTimeout(tickleTimer);
+  for (const stream of galleryStreams.values()) stream.abort.abort();
+  galleryStreams.clear();
 });
 </script>
 

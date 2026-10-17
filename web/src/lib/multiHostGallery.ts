@@ -12,7 +12,10 @@
  * trash stamps — D1/D2): a print tagged on one box and favorited on another
  * reads as both. Mutations still route to the concrete copies.
  */
-import { groupLogicalGalleryPrints } from "@studio/lib/galleryPrintIdentity";
+import {
+  groupLogicalGalleryPrints,
+  type LogicalGalleryPrintGroup,
+} from "@studio/lib/galleryPrintIdentity";
 import {
   unionOrganization,
   type CollectionSlugResolver,
@@ -61,6 +64,36 @@ export function makePrintKey(hostId: string, filename: string): string {
 /** `makePrintKey` for a gallery entry; an untagged entry is the origin's. */
 export function printKey(entry: { hostId?: string; filename: string }): string {
   return makePrintKey(entry.hostId ?? ORIGIN_HOST_ID, entry.filename);
+}
+
+/** Every lookup the Library makes per print, built ONCE per data change:
+ * the logical groups, each physical copy's group, and the first copy per
+ * print key. Replaces per-call `groupLogicalGalleryPrints(...).find(...)`
+ * scans, which made bulk actions O(k·n). */
+export interface LogicalCopyIndex {
+  groups: LogicalGalleryPrintGroup<HostGalleryImage>[];
+  /** print key → every copy of that key's logical print. */
+  copiesByKey: Map<string, HostGalleryImage[]>;
+  /** print key → the first physical row listed under it. */
+  entryByKey: Map<string, HostGalleryImage>;
+}
+
+export function indexLogicalCopies(
+  raw: readonly HostGalleryImage[],
+): LogicalCopyIndex {
+  const groups = groupLogicalGalleryPrints(raw);
+  const copiesByKey = new Map<string, HostGalleryImage[]>();
+  const entryByKey = new Map<string, HostGalleryImage>();
+  for (const entry of raw) {
+    const key = printKey(entry);
+    if (!entryByKey.has(key)) entryByKey.set(key, entry);
+  }
+  for (const group of groups)
+    for (const copy of group.copies) {
+      const key = printKey(copy);
+      if (!copiesByKey.has(key)) copiesByKey.set(key, group.copies);
+    }
+  return { groups, copiesByKey, entryByKey };
 }
 
 export type HostGalleryFetcher = (host: HostEntry) => Promise<GalleryImage[]>;

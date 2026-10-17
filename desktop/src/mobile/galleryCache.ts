@@ -71,7 +71,25 @@ type CachedMediaKey = [string, string, string, MobileThumbnailTier];
 interface CachedGalleryRecord {
   hostId: string;
   updatedAt: number;
+  /** Library rows, newest first (what a cold Library paints). */
   prints: GalleryImage[];
+  /** The gallery replica's resume point beside them: its feed cursor, the
+   * instance that issued it, and the trashed rows. Absent on a record any
+   * other writer (an optimistic patch or removal) saved, which is what drops
+   * the cursor and makes the next pull re-snapshot rather than resume over
+   * rows the server never sent. */
+  replica?: {
+    cursor: string | null;
+    instanceId: string | null;
+    trash: GalleryImage[];
+  };
+}
+
+/** The persisted half of a `GalleryReplica` (`@studio/lib/galleryReplica`). */
+export interface CachedGalleryReplica {
+  cursor: string | null;
+  instanceId: string | null;
+  rows: GalleryImage[];
 }
 
 /** Non-secret host state needed to interpret a saved print while its machine
@@ -299,6 +317,59 @@ export async function storeCachedGallery(
   await requestFromStore(GALLERIES_STORE, "readwrite", (store) =>
     fence.hostId === hostId && (hostMutationVersions.get(hostId) ?? 0) === fence.version
       ? store.put({ hostId, updatedAt: Date.now(), prints: bounded })
+      : store.get(hostId),
+  );
+}
+
+/** Rows + resume point for a host's replica. A record saved without one
+ * (an older build, an optimistic edit) still paints, with no cursor. */
+export async function loadCachedGalleryReplica(
+  hostId: string,
+): Promise<CachedGalleryReplica | null> {
+  const record = await requestFromStore<CachedGalleryRecord>(GALLERIES_STORE, "readonly", (store) =>
+    store.get(hostId),
+  );
+  if (!record || !Array.isArray(record.prints)) return null;
+  const replica = record.replica;
+  if (!replica || !Array.isArray(replica.trash))
+    return { cursor: null, instanceId: null, rows: record.prints };
+  return {
+    cursor: typeof replica.cursor === "string" ? replica.cursor : null,
+    instanceId: typeof replica.instanceId === "string" ? replica.instanceId : null,
+    rows: [...record.prints, ...replica.trash],
+  };
+}
+
+/** Persist a replica after a pull that CHANGED something (the replica never
+ * calls this for an idle pull, so an unchanged Library is never rewritten).
+ * A record bounded below the replica's size keeps its rows but drops the
+ * cursor — resuming over missing rows would never bring them back. */
+export async function storeCachedGalleryReplica(
+  hostId: string,
+  state: CachedGalleryReplica,
+  fence: CachedHostFence = captureCachedHostFence(hostId),
+): Promise<void> {
+  const live: GalleryImage[] = [];
+  const trash: GalleryImage[] = [];
+  for (const row of state.rows) (row.trashed_at == null ? live : trash).push(row);
+  live.sort((left, right) => right.timestamp - left.timestamp);
+  trash.sort(
+    (left, right) => (right.trashed_at ?? right.timestamp) - (left.trashed_at ?? left.timestamp),
+  );
+  const truncated = live.length > MAX_PRINTS_PER_HOST || trash.length > MAX_PRINTS_PER_HOST;
+  const record: CachedGalleryRecord = {
+    hostId,
+    updatedAt: Date.now(),
+    prints: live.slice(0, MAX_PRINTS_PER_HOST),
+    replica: {
+      cursor: truncated ? null : state.cursor,
+      instanceId: state.instanceId,
+      trash: trash.slice(0, MAX_PRINTS_PER_HOST),
+    },
+  };
+  await requestFromStore(GALLERIES_STORE, "readwrite", (store) =>
+    fence.hostId === hostId && (hostMutationVersions.get(hostId) ?? 0) === fence.version
+      ? store.put(record)
       : store.get(hostId),
   );
 }

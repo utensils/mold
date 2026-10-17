@@ -9,7 +9,7 @@ import {
 } from "@studio/lib/collectionVisibility";
 import { defineStore } from "pinia";
 import { markRaw, toRaw } from "vue";
-import { apiFetchTo, conditionalApiJsonTo, type ApiTarget } from "../lib/api/client";
+import { apiFetchTo, type ApiTarget } from "../lib/api/client";
 import { isTransportFailure } from "../lib/api/errors";
 import {
   evictHostMedia,
@@ -21,6 +21,15 @@ import {
   type GallerySource,
 } from "../lib/gallery/media";
 import { ipc } from "../lib/ipc";
+import {
+  bucketReplicaSlot,
+  localBucketReplica,
+  remoteBucketReplica,
+  replicaStamp,
+  retainBucketReplicas,
+  type BucketReplicaSlot,
+} from "../lib/gallery/replicas";
+import { isTrashedRow } from "@studio/lib/galleryReplica";
 import { PLATFORM_UI } from "../lib/platform";
 import { useHostsStore, type HostView } from "./hosts";
 import type { Collection, GalleryImage, ServerEvent, TagCount } from "../lib/api/types";
@@ -80,6 +89,18 @@ export type {
 /** Collapse a burst of row-less gallery_added events into one refetch. */
 const REFETCH_DEBOUNCE_MS = 500;
 let refetchTimer: ReturnType<typeof setTimeout> | null = null;
+/** A bucket whose stream is live still re-reads at least this often. */
+const LIVE_BUCKET_SAFETY_MS = 60_000;
+/** Buckets asked to refetch (a tickle) while a fetch was already running. */
+const refetchAgain = new WeakMap<object, Set<string>>();
+function refetchAgainFor(owner: object): Set<string> {
+  let keys = refetchAgain.get(owner);
+  if (!keys) {
+    keys = new Set();
+    refetchAgain.set(owner, keys);
+  }
+  return keys;
+}
 
 /** Library header scope: the grid, the favourites, the albums shelf, or
  *  the trash. Never a sixth workspace — it lives inside Library. */
@@ -138,6 +159,8 @@ export interface GalleryBucket {
   authorityTarget?: ApiTarget | null;
   authorityResolved?: boolean;
   instanceId?: string | null;
+  /** The replica revision these rows reflect (`replicaStamp`). */
+  replicaStamp?: string;
 }
 
 /** A bucket that should exist right now. */
@@ -1030,11 +1053,25 @@ export const useGalleryStore = defineStore("gallery", {
         if (!keys.has(key)) delete this.tagsByHost[key];
       }
       if (this.filter !== "all" && !keys.has(this.filter)) this.filter = "all";
+      retainBucketReplicas(toRaw(this), keys);
     },
-    /** Fetch one bucket. Errors land on the bucket, never on siblings. */
-    async fetchBucket(key: string) {
+    /**
+     * Fetch one bucket. Errors land on the bucket, never on siblings.
+     *
+     * The bucket reads through its replica (`lib/gallery/replicas.ts`): a
+     * host serving the change feed answers O(delta) and the delta is applied
+     * row by row through `insertRow` / `replaceRow` / `takeRow`; an idle
+     * pull (a 304, an empty page) touches nothing at all. A listing answer
+     * (an older host, an engine that is Off) or a rebuilt replica replaces
+     * the rows wholesale, as before. `again` (a tickle) queues one more
+     * fetch when one is already running instead of being dropped.
+     */
+    async fetchBucket(key: string, options: { again?: boolean } = {}) {
       const bucket = this.ensureBucket(key);
-      if (bucket.loading) return;
+      if (bucket.loading) {
+        if (options.again) refetchAgainFor(toRaw(this)).add(key);
+        return;
+      }
       bucket.loading = true;
       bucket.error = null;
       const previousSource = this.mediaSourceOf(key);
@@ -1042,16 +1079,18 @@ export const useGalleryStore = defineStore("gallery", {
       try {
         // Resolve the origin at call time: a key backed by a live host reads
         // that host's /api/gallery; the bare "local" key is this Mac via IPC.
-        let items: GalleryImage[];
+        let slot: BucketReplicaSlot;
         let authorityTarget: ApiTarget | null;
+        const capabilities = () => useHostsStore().capabilities[key];
         if (key === "local") {
-          const snapshot = await ipc.localGalleryList();
-          items = snapshot.images;
-          authorityTarget = snapshot.target;
+          slot = localBucketReplica(toRaw(this), capabilities);
+          await slot.replica.pull();
+          authorityTarget = slot.authority.target;
         } else {
           const target = this.targetOf(key);
           if (!target) throw new Error("Host is not connected.");
-          items = await conditionalApiJsonTo<GalleryImage[]>(target, "/api/gallery");
+          slot = remoteBucketReplica(toRaw(this), key, target, capturedInstance, capabilities);
+          await slot.replica.pull();
           authorityTarget = target;
           const current = this.targetOfOrNull(key);
           if (
@@ -1081,12 +1120,50 @@ export const useGalleryStore = defineStore("gallery", {
           bucket.authorityResolved &&
           (bucket.authorityTarget?.baseUrl !== authorityTarget?.baseUrl ||
             bucket.authorityTarget?.apiKey !== authorityTarget?.apiKey);
-        // A 304 hands back the very array already in the bucket. Nothing
-        // changed, so nothing downstream (merge, indexes, layout, every
-        // tile) may be invalidated — assigning the same rows again would
-        // re-run all of it on every 15 s poll of every host. A changed
-        // authority still falls through: its cached media must be evicted.
-        if (bucket.loaded && !authorityChanged && toRaw(bucket.items) === items) return;
+        const stamp = replicaStamp(slot);
+        // An idle pull (a 304, an empty feed page) changed nothing, so
+        // nothing downstream (merge, indexes, layout, every tile) may be
+        // invalidated — assigning the same rows again would re-run all of
+        // it on every poll of every host. A changed authority still falls
+        // through: its cached media must be evicted.
+        if (bucket.loaded && !authorityChanged && bucket.replicaStamp === stamp) {
+          slot.pending = [];
+          slot.pendingBase = stamp;
+          return;
+        }
+        const pending = slot.pending;
+        const incremental =
+          bucket.loaded &&
+          !authorityChanged &&
+          bucket.replicaStamp !== undefined &&
+          bucket.replicaStamp === slot.pendingBase &&
+          pending.length > 0 &&
+          pending.every((delta) => delta.source === "feed" && !delta.reset);
+        slot.pending = [];
+        slot.pendingBase = stamp;
+        bucket.authorityTarget = authorityTarget;
+        bucket.authorityResolved = true;
+        if (incremental) {
+          for (const delta of pending) this.applyReplicaDelta(key, delta.upserted, delta.removed);
+          bucket.replicaStamp = stamp;
+          return;
+        }
+        // Newest first, like a print drawer (the replica's library order).
+        // A COPY: SSE frames splice the bucket, never the replica's view.
+        const items = [...slot.replica.live()];
+        // A replica's FIRST read of rows the bucket already shows (a seeded
+        // or SSE-current bucket) is the same snapshot: keep the array so no
+        // index or tile is rebuilt for it.
+        const current = toRaw(bucket.items);
+        if (
+          bucket.loaded &&
+          !authorityChanged &&
+          current.length === items.length &&
+          current.every((row, index) => toRaw(row) === items[index])
+        ) {
+          bucket.replicaStamp = stamp;
+          return;
+        }
         // Prints that vanished out-of-band (deleted by another client) must
         // release their cached blob URLs — the media cache only evicts on
         // explicit remove()/host teardown otherwise.
@@ -1096,17 +1173,51 @@ export const useGalleryStore = defineStore("gallery", {
           evictMedia(galleryMediaPath(old.filename, previousSource, true), key);
           evictMedia(galleryMediaPath(old.filename, previousSource), key);
         }
-        bucket.authorityTarget = authorityTarget;
-        bucket.authorityResolved = true;
-        // Newest first, like a print drawer.
-        bucket.items = rawRows(items.sort((a, b) => b.timestamp - a.timestamp));
+        bucket.items = rawRows(items);
+        bucket.replicaStamp = stamp;
         bucket.loaded = true;
         if (resetLocalCollections && authorityTarget) await this.fetchCollections("local");
       } catch (err) {
         bucket.error = String(err);
       } finally {
         bucket.loading = false;
+        if (refetchAgainFor(toRaw(this)).delete(key)) void this.fetchBucket(key);
       }
+    },
+    /**
+     * Apply one replica delta to a loaded bucket (and its trash bucket when
+     * the Trash has been read): a live row is replaced in place or inserted
+     * newest-first, a trashed row hops into the trash, a removed name leaves
+     * both and releases its media. Idempotent against rows SSE frames
+     * already applied.
+     */
+    applyReplicaDelta(key: string, upserted: readonly GalleryImage[], removed: readonly string[]) {
+      const bucket = this.buckets[key];
+      if (!bucket) return;
+      const trash = this.trashBuckets[key]?.loaded ? this.trashBuckets[key] : undefined;
+      for (const row of upserted) {
+        if (isTrashedRow(row)) {
+          takeRow(bucket, row.filename);
+          if (trash && !replaceRow(trash, row)) insertTrashRow(trash, row);
+        } else {
+          takeRow(trash, row.filename);
+          if (!replaceRow(bucket, row)) insertRow(bucket, row);
+        }
+      }
+      for (const filename of removed) {
+        const live = takeRow(bucket, filename);
+        const trashed = takeRow(trash, filename);
+        if (live || trashed) this.evictItemMedia(key, filename);
+      }
+    },
+    /**
+     * An SSE gallery frame or resync from a machine whose rows are not
+     * applied from the frame itself: pull its replica (O(delta) on a feed
+     * host). Only loaded buckets refresh — a tickle never force-loads one.
+     */
+    tickleHost(hostId: string) {
+      if (!this.buckets[hostId]?.loaded) return;
+      void this.fetchBucket(hostId, { again: true });
     },
     /** (Re)fetch every current source. */
     async fetchAll() {
@@ -1118,13 +1229,23 @@ export const useGalleryStore = defineStore("gallery", {
     /**
      * Gallery-view poll: refetch every non-primary bucket (the primary stays
      * live over SSE / the events fallback poller). Sources that appeared
-     * mid-session get their first fetch here too.
+     * mid-session get their first fetch here too. A bucket whose machine
+     * holds a live `/api/events` stream (`isLive`) is tickled by its gallery
+     * frames instead, and re-read here only as a once-a-minute safety net.
      */
-    async pollExtras() {
+    async pollExtras(isLive: (key: string) => boolean = () => false) {
       this.syncBuckets();
       const primaryId = useHostsStore().primaryHost?.id ?? null;
+      const now = Date.now();
       await Promise.all(
-        this.sources.filter((s) => s.key !== primaryId).map((s) => this.fetchBucket(s.key)),
+        this.sources
+          .filter((s) => s.key !== primaryId)
+          .filter((s) => {
+            if (!this.buckets[s.key]?.loaded || !isLive(s.key)) return true;
+            const settled = bucketReplicaSlot(toRaw(this), s.key)?.replica.settledAt ?? 0;
+            return now - settled >= LIVE_BUCKET_SAFETY_MS;
+          })
+          .map((s) => this.fetchBucket(s.key)),
       );
     },
     /**

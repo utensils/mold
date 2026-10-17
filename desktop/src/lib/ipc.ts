@@ -93,6 +93,13 @@ export interface LocalGallerySnapshot {
   retentionDays?: number;
 }
 
+/** `local_gallery_changes`: a feed page, or why there is none. */
+export interface LocalGalleryChanges {
+  page?: unknown;
+  unavailable?: "offline" | "not_ready" | "unsupported";
+  target: ApiTarget | null;
+}
+
 /** A remote host the app has connected to before (most recent first). */
 export interface SavedHost {
   connectionMode?: ConnectionMode | undefined;
@@ -358,6 +365,14 @@ export const ipc = {
   localGalleryDelete(filename: string): Promise<void> {
     if (!inTauri()) return Promise.resolve();
     return invoke<void>("local_gallery_delete", { filename });
+  },
+  /** One page of this device's gallery change feed (`GET
+   * /api/gallery/changes` while the local server runs). `unavailable` says
+   * why there is no page — `offline` (engine Off), `not_ready`, or
+   * `unsupported` — and the replica answers from `localGalleryList`. */
+  localGalleryChanges(since: string | null, limit: number): Promise<LocalGalleryChanges> {
+    if (!inTauri()) return Promise.resolve({ unavailable: "offline", target: null });
+    return invoke<LocalGalleryChanges>("local_gallery_changes", { since, limit });
   },
   /** This device's trashed prints (`GET /api/gallery?view=trash` while the
    * local server runs; the native `.trash/` listing when it is Off). */

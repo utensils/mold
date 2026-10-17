@@ -107,6 +107,7 @@ import {
 } from "@studio/api/videoUpscale";
 import { useAppPrefsStore } from "../stores/appPrefs";
 import { useHostsStore } from "../stores/hosts";
+import { useEventsStore } from "../stores/events";
 import {
   defaultUpscaler,
   framewiseProgress,
@@ -118,7 +119,9 @@ import type { MeshExportGeometryCapabilities } from "@studio/lib/meshExport";
 
 const GAP = 2;
 const PAD = 0;
-/** Extra hosts have no SSE — their buckets poll while the view is open. */
+/** Extra hosts' buckets poll while the view is open — only those whose
+ * `/api/events` stream is down; a live stream tickles its bucket instead
+ * (`gallery.pollExtras` keeps a once-a-minute safety read). */
 const EXTRA_POLL_MS = 15_000;
 /** Tags offered in the tile menu's Tags ▸ submenu. */
 const MENU_TAG_LIMIT = 12;
@@ -130,6 +133,7 @@ const DESKTOP_LIBRARY_SCROLL_KEY = "desktop:library";
 const router = useRouter();
 const route = useRoute();
 const gallery = useGalleryStore();
+const events = useEventsStore();
 const hosts = useHostsStore();
 const appPrefs = useAppPrefsStore();
 const models = useModelStore();
@@ -2759,7 +2763,10 @@ onMounted(() => {
   window.addEventListener("pageshow", remeasureLibraryAfterResume);
   window.addEventListener("focus", remeasureLibraryAfterResume);
   document.addEventListener("visibilitychange", remeasureLibraryAfterResume);
-  pollTimer = setInterval(() => void gallery.pollExtras(), EXTRA_POLL_MS);
+  pollTimer = setInterval(
+    () => void gallery.pollExtras((key) => events.isLive(key)),
+    EXTRA_POLL_MS,
+  );
   if (scrollEl.value) {
     containerWidth.value = scrollEl.value.clientWidth;
     resizeObserver = new ResizeObserver((observed) => {
