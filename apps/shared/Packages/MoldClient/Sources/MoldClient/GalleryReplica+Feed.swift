@@ -107,6 +107,7 @@ extension GalleryReplica {
         let scope = outcome.scope
         if full || outcome.serverReset || !deliveredScopes.isSuperset(of: scope) {
             revision += 1
+            logChange(outcome.changed.union(outcome.forced))
             deliveredScopes.formUnion(scope)
             let whole = rows.values.filter { scope.covers(trash: isTrash($0.filename)) }
                 .sorted { $0.filename < $1.filename }
@@ -125,6 +126,7 @@ extension GalleryReplica {
         }
         guard !upserted.isEmpty || !removed.isEmpty else { return nil }
         revision += 1
+        logChange(upserted.map(\.filename) + removed)
         return ReplicaDelta(upserted: upserted, removed: removed, reset: false, revision: revision, scope: scope,
                             inTrash: Set(upserted.map(\.filename).filter(isTrash)), origin: origin)
     }

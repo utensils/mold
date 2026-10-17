@@ -878,6 +878,23 @@ Queue rows keep a stable height as previews and progress arrive, preserving the 
 
 Interrupted syncs remember acknowledged outputs before retained-input and organization work; retries repair the remaining work without copying the output again. Updated hosts batch verification of unchanged copies; older hosts preserve the full retained-input checks. Progress counts checked, copied, already-local and failed prints separately.
 
+Sync costs what changed. Every machine is read at once through its replica.
+Pressing **Sync All** checks every print against each machine's checkpoint (one
+read per machine), and Keep This Mac in Sync's automatic runs plan only the
+prints that changed since that machine's last mirrored revision, plus anything a
+previous run did not finish (failures, missing checkpoint evidence, pending
+organization) and copies This Mac's own gallery changed; either way a run where
+nothing changed asks nothing per print, and an automatic run checks everything
+again once a day. Copy receipts come
+from the import's answer, never a per-print listing read, and final verification
+asks the bounded `POST /api/gallery/sync-checkpoint` only for the prints it
+touched (an older machine answers through the full checkpoint). Copy records
+live in Application Support (`LibrarySync/records.json`, receipts journaled
+beside it), migrated once from the old preferences keys; a record whose source
+and copy are both gone for good is pruned. If that file cannot be read it is set
+aside, never overwritten, and Sync All pauses with an explanation rather than
+recreating copies you removed.
+
 ### Move queued work to another machine
 
 When another connected machine can generate, **Move to…** is available on queued, paused, and held jobs until the source machine begins rendering. The prompt, seed, settings, and retained reference media move together. The destination must accept the job before the original is removed. Older servers support Held-only moves. Jobs that depend on machine-local LoRAs or workflows are refused without moving them.

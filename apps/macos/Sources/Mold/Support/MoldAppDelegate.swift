@@ -75,6 +75,9 @@ final class MoldAppDelegate: NSObject, NSApplicationDelegate {
             // Each replica's debounced save, now: a relaunch resumes from the
             // newest cursor. Best effort -- the files are a cache.
             Task { await library.flushReplicas() }
+            // And Library Sync's records: receipts are already journaled;
+            // this folds the journal into the document.
+            Task { await library.flushSyncRecords() }
         }
         // The caches are disposable and local, so they go first and without
         // ceremony: whatever they hold can be fetched again. BOTH of them --

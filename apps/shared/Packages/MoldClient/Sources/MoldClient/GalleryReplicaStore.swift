@@ -209,6 +209,9 @@ extension GalleryReplica {
         trashETag = nil
         listedInTrash = []
         deliveredScopes = []
+        changeLog = []
+        changeLogNames = 0
+        changeLogFloor = revision + 1
         loaded = true
         store?.remove(hostID)
     }

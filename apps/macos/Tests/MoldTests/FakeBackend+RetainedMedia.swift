@@ -19,6 +19,18 @@ extension FakeBackend {
         return syncCheckpoint.map { GallerySyncCheckpoint(instanceId: host.id.uuidString, revisions: $0) }
     }
 
+    /// The bounded `POST` checkpoint. `boundedCheckpointUnsupported` plays an
+    /// older server: the client's 404 fallback answers from the whole GET.
+    func gallerySyncCheckpoint(filenames: [String]) async throws -> GallerySyncCheckpoint? {
+        try record("boundedSyncCheckpoint")
+        await pause("boundedSyncCheckpoint")
+        boundedCheckpointRequests.append(filenames)
+        if boundedCheckpointUnsupported { return try await gallerySyncCheckpoint()?.restricted(to: filenames) }
+        return syncCheckpoint.map {
+            GallerySyncCheckpoint(instanceId: host.id.uuidString, revisions: $0).restricted(to: filenames)
+        }
+    }
+
     func retainedMediaTransferOffer(for filename: String) async throws -> RetainedSourceMedia.TransferOffer {
         try record("retainedMediaTransferOffer")
         if let retainedTransferOfferResponder { return try await retainedTransferOfferResponder(filename) }

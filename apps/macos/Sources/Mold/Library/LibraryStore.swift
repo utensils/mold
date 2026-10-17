@@ -62,7 +62,6 @@ final class LibraryStore {
     var trashPerHost: [MoldHost.ID: [LibraryEntry]] = [:] {
         didSet { if !writingRows { pendingTrash.full = true } }
     }
-    var syncListings: [String: SyncListingSnapshot] = [:]
 
     /// Each machine's replica, with the exact machine record (route, key) it
     /// reads through. See `LibraryStore+Replica`.
@@ -87,7 +86,8 @@ final class LibraryStore {
     var collectionsPerHost: [MoldHost.ID: [Collection]] = [:] { didSet { sourceAccessRevision &+= 1 } }
     var collectionInventoryAvailable: Set<MoldHost.ID> = []
     let collectionVisibility = CollectionVisibilityLedger.load(from: AppStorageSuite.defaults, key: "library.collectionVisibility")
-    var reconcilingCollectionVisibility = false
+    /// One collection-visibility writer at a time. See `VisibilityWriterLock`.
+    @ObservationIgnored let visibilityWriters = VisibilityWriterLock()
 
     /// The tag index, and renaming or deleting a tag everywhere. See
     /// `LibraryTags`.
@@ -117,6 +117,10 @@ final class LibraryStore {
     var localSaveRunning = false
     var localSaveSuppressImports = false
     var localSaveProgress: String?
+    /// When `localSaveProgress` last changed, for its ~10 Hz throttle.
+    @ObservationIgnored var localSaveProgressPublished: ContinuousClock.Instant?
+    /// Library Sync's copy records, cursors and retry set.
+    @ObservationIgnored let syncRecords: LibrarySyncRecords
     var localSaveTask: Task<Void, Never>?
     var localSaveStopRequested = false
     var localSaveReport = ""
@@ -132,8 +136,10 @@ final class LibraryStore {
     /// `replicaStore` nil keeps replicas in memory only -- every test's
     /// default, so no test writes the real Application Support.
     init(hosts: HostStore, syncSession: LibrarySyncSession = LibrarySyncSession(),
-         readDefaults: UserDefaults = AppStorageSuite.defaults, replicaStore: GalleryReplicaStore? = nil) {
+         readDefaults: UserDefaults = AppStorageSuite.defaults, replicaStore: GalleryReplicaStore? = nil,
+         syncRecords: LibrarySyncRecords = LibrarySyncRecords()) {
         self.hosts = hosts
+        self.syncRecords = syncRecords
         self.syncSession = syncSession
         self.readDefaults = readDefaults
         self.replicaStore = replicaStore

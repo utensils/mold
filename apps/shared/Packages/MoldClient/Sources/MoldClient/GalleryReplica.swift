@@ -60,6 +60,18 @@ public actor GalleryReplica {
     var listingsApplied: [Int: Int] = [:]
     /// Removed for good: nothing may write the file again.
     var discarded = false
+    /// Which names each delivered revision touched, oldest first, bounded by
+    /// `changeLogLimit` names. What a mirror reads to plan only what changed
+    /// since its own cursor (`changedNames(since:)`).
+    var changeLog: [(revision: Int, names: [String])] = []
+    var changeLogNames = 0
+    /// The oldest revision the log can still answer from.
+    var changeLogFloor = 0
+    let changeLogLimit: Int
+    /// This replica object, as opposed to another one for the same machine
+    /// (a relaunch, a credential or instance change). Revisions restart with
+    /// each, so a cursor naming another epoch can only mean "start over".
+    public nonisolated let epoch = UUID()
 
     /// One flight per lane: the feed, or one legacy listing scope. Two
     /// listings are separate lanes so a slow trash listing never holds the
@@ -73,8 +85,10 @@ public actor GalleryReplica {
     private var flights: [Int: Flight] = [:]
 
     public init(hostID: UUID, store: GalleryReplicaStore? = nil,
-                saveDelay: Duration = .seconds(5), pageLimit: Int = 2_000, sink: Sink? = nil) {
+                saveDelay: Duration = .seconds(5), pageLimit: Int = 2_000,
+                changeLogLimit: Int = 100_000, sink: Sink? = nil) {
         self.hostID = hostID
+        self.changeLogLimit = changeLogLimit
         self.store = store
         self.saveDelay = saveDelay
         self.pageLimit = pageLimit
