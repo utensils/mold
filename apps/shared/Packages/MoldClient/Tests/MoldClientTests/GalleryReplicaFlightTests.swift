@@ -128,6 +128,30 @@ struct GalleryReplicaFlightTests {
         #expect(trash.scope == .trash)
     }
 
+    /// The trash LISTING is what puts a row in Recently Deleted, whatever its
+    /// fields say -- an older machine, or a row it never stamped, is still a
+    /// trashed print, and moving between listings with identical fields is
+    /// still a change.
+    @Test func theTrashListingDecidesItsPartition() async throws {
+        let unstamped = PrintFixtures.print("cat.png")
+        let listings = Listings(trash: [unstamped])
+        let backend = FakeBackend()
+        backend.stub("gallery(etag:)") { _ in Fetched.fresh(listings.live, etag: nil) }
+        backend.stub("trashedPrints(etag:)") { _ in Fetched.fresh(listings.trash, etag: nil) }
+        let replica = GalleryReplica(hostID: UUID())
+        let first = try #require(try await replica.pull(.legacy(.all), using: backend))
+        #expect(first.trashed.map(\.filename) == ["cat.png"])
+        #expect(first.live.isEmpty)
+        // A live-only listing that does not name it does not remove it.
+        #expect(try await replica.pull(.legacy(.live), using: backend) == nil)
+        // Put back: same fields, other listing.
+        listings.trash = []
+        listings.live = [unstamped]
+        let restored = try #require(try await replica.pull(.legacy(.all), using: backend))
+        #expect(restored.live.map(\.filename) == ["cat.png"])
+        #expect(restored.trashed.isEmpty)
+    }
+
     @Test func aFullPullRepairsEvenWhenNothingChanged() async throws {
         let feed = FakeGalleryFeed(rows: GalleryReplicaTests.rows(["a"]))
         let backend = GalleryReplicaTests.feedBackend(feed)
@@ -178,6 +202,22 @@ struct GalleryReplicaFlightTests {
         #expect(delta.reset)
         #expect(delta.upserted.map(\.filename) == ["a"])
         #expect(await after.instanceID == "instance-2")
+    }
+}
+
+/// Two planted listings a test edits between pulls.
+final class Listings: @unchecked Sendable {
+    private let lock = NSLock()
+    private var liveRows: [GalleryPrint]
+    private var trashRows: [GalleryPrint]
+    init(live: [GalleryPrint] = [], trash: [GalleryPrint] = []) { liveRows = live; trashRows = trash }
+    var live: [GalleryPrint] {
+        get { lock.withLock { liveRows } }
+        set { lock.withLock { liveRows = newValue } }
+    }
+    var trash: [GalleryPrint] {
+        get { lock.withLock { trashRows } }
+        set { lock.withLock { trashRows = newValue } }
     }
 }
 

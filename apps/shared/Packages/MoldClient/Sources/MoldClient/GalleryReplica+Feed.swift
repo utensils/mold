@@ -7,11 +7,18 @@ extension GalleryReplica {
     struct Outcome {
         var changed: Set<String> = []
         var previous: [String: GalleryPrint?] = [:]
+        /// Each touched name's partition before the pull.
+        var previousTrash: [String: Bool] = [:]
+        var previousListed: [String: Bool] = [:]
         var serverReset = false
         var scope: ReplicaDelta.Scope
 
-        mutating func record(_ name: String, was old: GalleryPrint?) {
-            if previous[name] == nil { previous[name] = .some(old) }
+        mutating func record(_ name: String, was old: GalleryPrint?, trash: Bool, listed: Bool) {
+            if previous[name] == nil {
+                previous[name] = .some(old)
+                previousTrash[name] = trash
+                previousListed[name] = listed
+            }
             changed.insert(name)
         }
     }
@@ -48,8 +55,10 @@ extension GalleryReplica {
                     if snapshot != nil {
                         snapshot?[change.filename] = change.image
                     } else {
-                        outcome.record(change.filename, was: rows[change.filename])
+                        note(change.filename, in: &outcome)
                         rows[change.filename] = change.image
+                        // The feed's row says which partition it is in.
+                        listedInTrash.remove(change.filename)
                     }
                 }
                 if page.more, page.cursor == since { throw MoldClientError.malformedResponse }
@@ -76,13 +85,26 @@ extension GalleryReplica {
 
     /// Replaces `rows` with a full snapshot, recording only real differences.
     func adopt(_ snapshot: [String: GalleryPrint], into outcome: inout Outcome) {
-        for (name, old) in rows where snapshot[name] != old { outcome.record(name, was: old) }
-        for name in snapshot.keys where rows[name] == nil { outcome.record(name, was: nil) }
+        for (name, old) in rows where snapshot[name] != old || listedInTrash.contains(name) {
+            note(name, in: &outcome)
+        }
+        for name in snapshot.keys where rows[name] == nil { note(name, in: &outcome) }
         rows = snapshot
+        listedInTrash = []
+    }
+
+    /// Records a name's value and partition before this pull first touches it.
+    func note(_ name: String, in outcome: inout Outcome) {
+        outcome.record(name, was: rows[name], trash: isTrash(name), listed: listedInTrash.contains(name))
     }
 
     func rollback(_ outcome: inout Outcome) {
         for (name, old) in outcome.previous { rows[name] = old }
+        for (name, listed) in outcome.previousListed {
+            if listed { listedInTrash.insert(name) } else { listedInTrash.remove(name) }
+        }
+        outcome.previousTrash = [:]
+        outcome.previousListed = [:]
         outcome.previous = [:]
         outcome.changed = []
     }
@@ -93,19 +115,22 @@ extension GalleryReplica {
         if full || outcome.serverReset || !deliveredScopes.isSuperset(of: scope) {
             revision += 1
             deliveredScopes.formUnion(scope)
-            let whole = rows.values.filter { scope.covers($0) }.sorted { $0.filename < $1.filename }
-            return ReplicaDelta(upserted: whole, removed: [], reset: true, revision: revision, scope: scope)
+            let whole = rows.values.filter { scope.covers(trash: isTrash($0.filename)) }
+                .sorted { $0.filename < $1.filename }
+            return ReplicaDelta(upserted: whole, removed: [], reset: true, revision: revision, scope: scope,
+                                inTrash: Set(whole.map(\.filename).filter(isTrash)))
         }
         var upserted: [GalleryPrint] = []
         var removed: [String] = []
         for name in outcome.changed.sorted() {
             let old = outcome.previous[name] ?? nil
             let new = rows[name]
-            guard old != new else { continue }
+            guard old != new || outcome.previousTrash[name] != isTrash(name) else { continue }
             if let new { upserted.append(new) } else { removed.append(name) }
         }
         guard !upserted.isEmpty || !removed.isEmpty else { return nil }
         revision += 1
-        return ReplicaDelta(upserted: upserted, removed: removed, reset: false, revision: revision, scope: scope)
+        return ReplicaDelta(upserted: upserted, removed: removed, reset: false, revision: revision, scope: scope,
+                            inTrash: Set(upserted.map(\.filename).filter(isTrash)))
     }
 }

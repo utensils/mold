@@ -91,8 +91,10 @@ extension LibraryStore {
         writingRows = true
         defer { writingRows = false }
         let entries = delta.upserted.map { LibraryEntry(host: machine, print: $0) }
-        let live = entries.filter { $0.print.trashedAt == nil }
-        let trash = entries.filter { $0.print.trashedAt != nil }
+        // The replica says which partition each row is in (`inTrash`): an
+        // older machine's trash listing need not stamp `trashed_at`.
+        let live = entries.filter { !delta.inTrash.contains($0.print.filename) }
+        let trash = entries.filter { delta.inTrash.contains($0.print.filename) }
         let removed = Set(delta.removed)
         if delta.scope.contains(.live) || !entries.isEmpty {
             let current = perHost[id] ?? []

@@ -122,7 +122,9 @@ extension LibraryStore {
         var changed: [LibraryEntry] = []
         var gone = Array(pending.removed)
         for id in pending.upserted {
-            if let entry = lookup[id.host]?[id.filename], (entry.print.trashedAt == nil) == live {
+            // The live timeline holds only unstamped rows (`rebuild`'s own
+            // filter); the trash holds whatever its listing put there.
+            if let entry = lookup[id.host]?[id.filename], !live || entry.print.trashedAt == nil {
                 changed.append(entry)
             } else {
                 gone.append(id)

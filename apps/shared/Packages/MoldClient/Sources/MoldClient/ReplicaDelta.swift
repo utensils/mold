@@ -17,9 +17,7 @@ public struct ReplicaDelta: Sendable, Equatable {
         public static let trash = Scope(rawValue: 2)
         public static let all: Scope = [.live, .trash]
 
-        func covers(_ print: GalleryPrint) -> Bool {
-            contains(print.trashedAt == nil ? .live : .trash)
-        }
+        func covers(trash: Bool) -> Bool { contains(trash ? .trash : .live) }
     }
 
     public let upserted: [GalleryPrint]
@@ -31,20 +29,25 @@ public struct ReplicaDelta: Sendable, Equatable {
     /// What this delta speaks for. The feed always answers for both; a legacy
     /// pull answers for the listings it actually read.
     public let scope: Scope
+    /// Which upserted names belong in Recently Deleted. The machine's trash
+    /// LISTING decides that, not the row's fields: an older machine's trash
+    /// row need not carry `trashed_at`. Defaults to the rows' `trashedAt`.
+    public let inTrash: Set<String>
 
     public init(upserted: [GalleryPrint], removed: [String], reset: Bool, revision: Int,
-                scope: Scope = .all) {
+                scope: Scope = .all, inTrash: Set<String>? = nil) {
         self.upserted = upserted
         self.removed = removed
         self.reset = reset
         self.revision = revision
         self.scope = scope
+        self.inTrash = inTrash ?? Set(upserted.filter { $0.trashedAt != nil }.map(\.filename))
     }
 
     /// Changed rows that belong in the live timeline.
-    public var live: [GalleryPrint] { upserted.filter { $0.trashedAt == nil } }
+    public var live: [GalleryPrint] { upserted.filter { !inTrash.contains($0.filename) } }
     /// Changed rows that belong in Recently Deleted.
-    public var trashed: [GalleryPrint] { upserted.filter { $0.trashedAt != nil } }
+    public var trashed: [GalleryPrint] { upserted.filter { inTrash.contains($0.filename) } }
 }
 
 public extension GalleryReplica {

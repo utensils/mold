@@ -29,6 +29,8 @@ public struct GalleryReplicaStore: Sendable {
         var liveETag: String?
         var trashETag: String?
         var rows: [Row]
+        /// Names the legacy trash listing put in Recently Deleted.
+        var listedInTrash: [String]?
     }
 
     /// A row plus the original recipe JSON `GalleryPrint` does not encode,
@@ -77,6 +79,7 @@ extension GalleryReplica {
         instanceID = snapshot.instanceID
         liveETag = snapshot.liveETag
         trashETag = snapshot.trashETag
+        listedInTrash = Set(snapshot.listedInTrash ?? [])
     }
 
     /// Debounced: a burst of pulls writes the file once, with the latest state.
@@ -105,6 +108,7 @@ extension GalleryReplica {
         instanceID = nil
         liveETag = nil
         trashETag = nil
+        listedInTrash = []
         deliveredScopes = []
         loaded = true
         store?.remove(hostID)
@@ -116,7 +120,8 @@ extension GalleryReplica {
         let snapshot = GalleryReplicaStore.Snapshot(
             hostID: hostID, instanceID: instanceID, cursor: cursor, liveETag: liveETag, trashETag: trashETag,
             rows: rows.values.sorted { $0.filename < $1.filename }
-                .map { GalleryReplicaStore.Row(print: $0, rawMetadata: $0.rawMetadataJSON) })
+                .map { GalleryReplicaStore.Row(print: $0, rawMetadata: $0.rawMetadataJSON) },
+            listedInTrash: listedInTrash.sorted())
         try? store.save(snapshot)
     }
 }

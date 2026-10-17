@@ -37,6 +37,8 @@ public actor GalleryReplica {
 
     var liveETag: String?
     var trashETag: String?
+    /// Names the legacy trash listing named, whatever their `trashedAt`.
+    var listedInTrash: Set<String> = []
     var revision = 0
     /// What this process has already been handed whole. The first delta for
     /// a partition is always a reset, so a consumer starts from the replica's
@@ -151,6 +153,11 @@ public actor GalleryReplica {
         guard let delta = delta(for: outcome, full: request.full) else { return nil }
         if let sink { await sink(delta) }
         return delta
+    }
+
+    /// Which partition a row is in: the trash listing's word, else its fields.
+    func isTrash(_ name: String) -> Bool {
+        listedInTrash.contains(name) || rows[name]?.trashedAt != nil
     }
 
     /// A machine without the route, or whose log is still being built.

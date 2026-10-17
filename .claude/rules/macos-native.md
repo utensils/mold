@@ -255,6 +255,6 @@ machines keep in-place frame application, `RelistGate` and `RelistMerge`.
 `relist` is a FULL pull (a reset even when unchanged) so a refused optimistic
 edit is undone. `LibraryTimeline` patches in place only when a full merge could
 not differ (unchanged merge identity/order key, no shared filename/identity/link,
-no key tie); otherwise it rebuilds. A direct `perHost` write outside those paths
+no key tie); otherwise it rebuilds. The legacy trash LISTING, not `trashedAt`, decides a row's partition (`ReplicaDelta.inTrash`). A direct `perHost` write outside those paths
 marks the timeline for a full rebuild. Tests construct `LibraryStore` without a
 `replicaStore`; only `AppStores` persists to Application Support.

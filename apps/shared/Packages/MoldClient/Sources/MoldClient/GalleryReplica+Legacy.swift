@@ -43,19 +43,19 @@ extension GalleryReplica {
                         into outcome: inout Outcome) {
         var named = Set<String>()
         named.reserveCapacity(prints.count)
+        let trash = partition == .trash
         for print in prints {
             named.insert(print.filename)
-            let old = rows[print.filename]
-            guard old != print else { continue }
-            outcome.record(print.filename, was: old)
+            guard rows[print.filename] != print || isTrash(print.filename) != trash else { continue }
+            note(print.filename, in: &outcome)
             rows[print.filename] = print
+            if trash { listedInTrash.insert(print.filename) } else { listedInTrash.remove(print.filename) }
         }
-        let gone = rows.compactMap { name, row in
-            partition.covers(row) && !named.contains(name) ? name : nil
-        }
+        let gone = rows.keys.filter { partition.covers(trash: isTrash($0)) && !named.contains($0) }
         for name in gone {
-            outcome.record(name, was: rows[name])
+            note(name, in: &outcome)
             rows[name] = nil
+            listedInTrash.remove(name)
         }
     }
 }
