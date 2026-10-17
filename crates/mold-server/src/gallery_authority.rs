@@ -212,16 +212,74 @@ fn authority_dir(root: &Path) -> PathBuf {
     legacy_authority_dir(root)
 }
 
-/// An opaque identity for the authority store `root` resolves to: its
-/// directory's path plus file identity (device and inode on Unix, creation
-/// time elsewhere). A store deleted and re-created — even one that reaches
-/// the same generation — gets a new identity, which is what lets the change
-/// feed's projector and the listing validator tell it apart from the store
-/// they last saw. Moving between the v2 and v3 directories changes it too
-/// (one extra re-mark, never a missed one). Empty when there is no store.
+/// The file, INSIDE the resolved authority directory, holding that store's
+/// random identity. Never in the gallery root or directly in the
+/// transaction root: every mold validates `.mold-batch-transactions` as an
+/// inventory of directories, and the authority directory is opened by known
+/// filenames only, so an extra file here is invisible to older builds.
+const STORE_ID_FILE: &str = "feed-store-id";
+
+/// An opaque identity for the authority store `root` resolves to. A store
+/// deleted and re-created — even one that reaches the same generation — gets
+/// a new identity, which is what lets the change feed's projector and the
+/// listing validator tell it apart from the store they last saw.
+///
+/// It is a random id written ONCE, owner-private, into the store's own
+/// directory the first time the store is seen (published with a hard link,
+/// so a racing reader sees either no file or the whole id). File-system
+/// identity is NOT used when that works: FUSE, SMB and sshfs mounts do not
+/// keep inode numbers stable, which would re-mark every name on every feed
+/// read and never let the listing ETag settle. Path plus device/inode is
+/// only the fallback for a store whose directory cannot be written. Moving
+/// between the v2 and v3 directories changes it (one extra re-mark, never a
+/// missed one). Empty when there is no store.
 pub(crate) fn store_identity(root: &Path) -> String {
     let dir = authority_dir(root);
-    let Ok(metadata) = fs::metadata(&dir) else {
+    if !dir.is_dir() {
+        return String::new();
+    }
+    let path = dir.join(STORE_ID_FILE);
+    let read = |path: &Path| {
+        fs::read_to_string(path)
+            .ok()
+            .map(|text| text.trim().to_string())
+            .filter(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+    };
+    if let Some(id) = read(&path) {
+        return format!("id:{id}");
+    }
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let staging = dir.join(format!(".{STORE_ID_FILE}.{id}.tmp"));
+    let published = (|| -> std::io::Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&staging)?;
+        file.write_all(id.as_bytes())?;
+        file.sync_all()?;
+        // Fails if another process published first; its id then wins.
+        let linked = fs::hard_link(&staging, &path);
+        let _ = fs::remove_file(&staging);
+        match linked {
+            Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => Err(error),
+            _ => Ok(()),
+        }
+    })();
+    if published.is_ok() {
+        if let Some(id) = read(&path) {
+            return format!("id:{id}");
+        }
+    }
+    let _ = fs::remove_file(&staging);
+    file_system_identity(&dir)
+}
+
+fn file_system_identity(dir: &Path) -> String {
+    let Ok(metadata) = fs::metadata(dir) else {
         return String::new();
     };
     #[cfg(unix)]
@@ -236,7 +294,7 @@ pub(crate) fn store_identity(root: &Path) -> String {
         .and_then(|created| created.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|elapsed| elapsed.as_nanos().to_string())
         .unwrap_or_default();
-    format!("{}|{file_identity}", dir.display())
+    format!("fs:{}|{file_identity}", dir.display())
 }
 
 fn legacy_authority_dir(root: &Path) -> PathBuf {
@@ -5440,5 +5498,67 @@ mod tests {
             "publish_batch",
             Vec::new(),
         );
+    }
+
+    /// The store identity is a random id persisted in the store's own
+    /// directory: stable across reads, reopen and commits (no reliance on
+    /// inode numbers), owner-private, and new for a recreated store.
+    #[test]
+    fn store_identity_is_persisted_stable_and_new_for_a_recreated_store() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(store_identity(dir.path()), "", "no store, no identity");
+        let first = {
+            let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+            let loaded =
+                load_or_initialize(dir.path(), &guard, || Ok(CommittedArchiveIndex::default()))
+                    .unwrap();
+            let id = store_identity(dir.path());
+            assert!(id.starts_with("id:"), "{id}");
+            assert_eq!(store_identity(dir.path()), id);
+            let mut index = loaded.index;
+            commit_snapshot(
+                dir.path(),
+                &guard,
+                loaded.generation,
+                &mut index,
+                "publish_batch",
+                Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(store_identity(dir.path()), id, "a commit keeps it");
+            id
+        };
+        // Reopened (a new lock, a fresh recovery): the same id.
+        {
+            let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+            load_or_initialize(dir.path(), &guard, || Ok(CommittedArchiveIndex::default()))
+                .unwrap();
+        }
+        assert_eq!(store_identity(dir.path()), first);
+        let file = authority_dir(dir.path()).join(STORE_ID_FILE);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        // No staging leftovers beside it.
+        assert!(fs::read_dir(authority_dir(dir.path()))
+            .unwrap()
+            .filter_map(Result::ok)
+            .all(|entry| !entry.file_name().to_string_lossy().ends_with(".tmp")));
+        // A recreated store is a different store.
+        fs::remove_dir_all(authority_dir(dir.path())).unwrap();
+        forget_authority_tail(&canonical_root(dir.path()));
+        {
+            let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+            load_or_initialize(dir.path(), &guard, || Ok(CommittedArchiveIndex::default()))
+                .unwrap();
+        }
+        let recreated = store_identity(dir.path());
+        assert!(recreated.starts_with("id:"));
+        assert_ne!(recreated, first);
     }
 }

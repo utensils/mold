@@ -48,9 +48,10 @@ fn epoch(db: &MetadataDb) -> String {
 
 /// What the startup reconcile records when it finishes.
 fn mark_ready(state: &AppState, dir: &Path) {
-    state
-        .gallery_feed_readiness
-        .finish_with_db(state.metadata_db.as_ref().as_ref(), dir);
+    state.gallery_feed_readiness.finish(
+        dir,
+        GalleryFeedReadiness::epoch_of(state.metadata_db.as_ref().as_ref()),
+    );
 }
 
 async fn fixture() -> Fixture {
@@ -1258,3 +1259,100 @@ const GOLDEN_ROW: &str = r#"{
   "title": "Golden",
   "trashed_at": 1700000100
 }"#;
+
+/// The output directory does not exist when the read starts; another
+/// process creates it, publishes an archive-only print and projects it
+/// before the page is read. Built from the empty archive that print would
+/// ship as a removal and the cursor would pass it.
+#[tokio::test]
+async fn a_directory_created_under_a_read_is_re_read_not_shipped_as_removals() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = std::fs::canonicalize(home.path()).unwrap().join("output");
+    let mut state = AppState::for_tests();
+    state.metadata_db = std::sync::Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+    state.config.write().await.output_dir = Some(dir.to_string_lossy().into());
+    mark_ready(&state, &dir);
+    let fx = Fixture {
+        state,
+        _gallery: home,
+        dir: dir.clone(),
+    };
+    let foreign = fx.state.clone();
+    let hook_dir = dir.clone();
+    install_feed_hook(&dir, move || {
+        std::fs::create_dir_all(&hook_dir).unwrap();
+        let guard = crate::batch_transaction::acquire_gallery_bookkeeping_lock(&hook_dir).unwrap();
+        let loaded = crate::gallery_authority::load_or_initialize(&hook_dir, &guard, || {
+            Ok(Default::default())
+        })
+        .unwrap();
+        let mut index = loaded.index;
+        let mut ghost = record("ghost.png", 5);
+        ghost.output_dir = hook_dir.to_string_lossy().into_owned();
+        index.entries.insert(
+            "ghost.png".into(),
+            crate::batch_transaction::CommittedArchiveEntry {
+                identity: crate::batch_transaction::ArchivedChildIdentity {
+                    parent_id: "foreign".into(),
+                    attempt_generation: 0,
+                    child_index: 0,
+                    final_name: "ghost.png".into(),
+                    checksum_sha256: "0".repeat(64),
+                    size_bytes: 1,
+                },
+                record: ghost,
+                facts: None,
+                retained_media: Vec::new(),
+            },
+        );
+        crate::gallery_authority::commit_snapshot(
+            &hook_dir,
+            &guard,
+            loaded.generation,
+            &mut index,
+            "publish_batch",
+            Vec::new(),
+        )
+        .unwrap();
+        drop(guard);
+        crate::gallery_authority::forget_archive_commit_log(&hook_dir);
+        let db = foreign.metadata_db.as_ref().as_ref().unwrap();
+        let snapshot = foreign
+            .gallery_publication_gate
+            .committed_archive_snapshot(&hook_dir)
+            .unwrap();
+        project_archive_changes(db, &hook_dir, &snapshot).unwrap();
+    });
+    let mut replica = Replica::new();
+    pull(&fx, &mut replica, None, None).await;
+    assert!(
+        replica.contains_key("ghost.png"),
+        "the print published under the read is delivered, not removed"
+    );
+}
+
+/// The epoch is captured BEFORE the reconcile: a rebuild in the middle of
+/// it leaves the new database not ready.
+#[test]
+fn readiness_is_for_the_epoch_the_reconcile_started_against() {
+    let db = MetadataDb::open_in_memory().unwrap();
+    let readiness = GalleryFeedReadiness::default();
+    let dir = Path::new("/tmp/readiness-epoch");
+    let before = GalleryFeedReadiness::epoch_of(Some(&db));
+    db.with_conn(|conn| {
+        conn.execute(
+            "UPDATE gallery_feed_meta SET epoch = 'rebuilt-mid-reconcile'",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    readiness.finish(dir, before.clone());
+    assert!(readiness.is_ready(dir, &before));
+    assert!(!readiness.is_ready(dir, "rebuilt-mid-reconcile"));
+    assert!(readiness.claim_reconcile(dir, "rebuilt-mid-reconcile"));
+    assert!(
+        !readiness.is_ready(dir, ""),
+        "an unknown epoch is never ready"
+    );
+}

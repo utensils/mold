@@ -1295,6 +1295,10 @@ async fn run_server_inner(
                     // allowing listings/media reads to remain available.
                     let _reader = gallery_gate.read().await;
                     let join = tokio::task::spawn_blocking(move || {
+                        // The epoch this reconcile reads into, taken BEFORE it.
+                        let epoch = crate::gallery_changes_api::GalleryFeedReadiness::epoch_of(
+                            db_arc.as_ref().as_ref(),
+                        );
                         let outcome = if let Some(db) = db_arc.as_ref() {
                             db.reconcile(&dir)
                         } else {
@@ -1302,7 +1306,7 @@ async fn run_server_inner(
                         };
                         // Ready against the DB this reconcile read into; a
                         // later corruption rebuild (new epoch) is not.
-                        feed_readiness.finish_with_db(db_arc.as_ref().as_ref(), &ready_dir);
+                        feed_readiness.finish(&ready_dir, epoch);
                         outcome
                     })
                     .await;

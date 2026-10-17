@@ -131,13 +131,17 @@ fn reindex(
                 index_failure_marks()
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner())
-                    .remove(&key);
+                    .retain(|(dir, name, _), _| dir != &key.0 || name != &key.1);
                 true
             }
             Err(_) => {
                 let mut marks = index_failure_marks()
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner());
+                // A newer media version supersedes the old one's count.
+                marks.retain(|(dir, name, version), _| {
+                    dir != &key.0 || name != &key.1 || version == &key.2
+                });
                 let count = marks.entry(key).or_default();
                 *count = count.saturating_add(1);
                 *count <= INDEX_FAILURE_MARKS

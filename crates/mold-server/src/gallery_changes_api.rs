@@ -173,13 +173,14 @@ impl GalleryFeedReadiness {
         inner.ready.insert(key, epoch);
     }
 
-    /// [`Self::finish`] with the epoch read from `db` now. Blocking.
-    pub(crate) fn finish_with_db(&self, db: Option<&MetadataDb>, dir: &Path) {
-        let epoch = db
-            .and_then(|db| mold_db::gallery_changes::feed_state(db).ok())
+    /// The epoch a reconcile is about to run against. Read it BEFORE the
+    /// reconcile and pass it to [`Self::finish`]: a corruption rebuild in the
+    /// middle of the reconcile then leaves the NEW epoch not ready, rather
+    /// than blessing a database the reconcile never read into. Blocking.
+    pub(crate) fn epoch_of(db: Option<&MetadataDb>) -> String {
+        db.and_then(|db| mold_db::gallery_changes::feed_state(db).ok())
             .map(|state| state.epoch)
-            .unwrap_or_default();
-        self.finish(dir, epoch);
+            .unwrap_or_default()
     }
 
     pub(crate) fn is_ready(&self, dir: &Path, epoch: &str) -> bool {
@@ -218,13 +219,14 @@ fn spawn_reconcile(state: &AppState, dir: PathBuf) {
         let reconcile_dir = dir.clone();
         let outcome = tokio::task::spawn_blocking(move || {
             let db = db.as_ref().as_ref();
+            let epoch = GalleryFeedReadiness::epoch_of(db);
             let outcome = match db {
                 Some(db) if reconcile_dir.is_dir() => db.reconcile(&reconcile_dir).map(|_| ()),
                 _ => Ok(()),
             };
             // A directory that does not exist yet has nothing to reconcile:
             // it is ready, and empty.
-            readiness.finish_with_db(db, &reconcile_dir);
+            readiness.finish(&reconcile_dir, epoch);
             outcome
         })
         .await;
@@ -354,30 +356,38 @@ fn run_feed_hook(dir: &Path) {
     }
 }
 
-/// How many times a page is re-read because the archive moved under it.
-const MAX_ARCHIVE_RETRIES: usize = 8;
-
-/// The archive kept moving for every retry of one page.
-#[derive(Debug)]
-pub(crate) struct FeedBusy;
-
-impl std::fmt::Display for FeedBusy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("the gallery archive kept changing while a change-feed page was read")
+/// The committed archive of `dir`, or an empty one when the directory does
+/// not exist (nothing published yet, nothing to lock).
+fn archive_snapshot(
+    gate: &GalleryPublicationGate,
+    dir: &Path,
+) -> anyhow::Result<CommittedArchiveSnapshot> {
+    if dir.is_dir() {
+        return gate.committed_archive_snapshot(dir);
     }
+    Ok(CommittedArchiveSnapshot {
+        root: dir.to_path_buf(),
+        generation: None,
+        store_id: String::new(),
+        index: Default::default(),
+    })
 }
-
-impl std::error::Error for FeedBusy {}
 
 /// One feed page for `dir`. The caller holds the gallery publication READER.
 ///
-/// The rows are built from the archive snapshot that was projected BEFORE
-/// the page was read, which is only sound if that snapshot is still the
-/// committed one AFTER the read: another process sharing `mold.db` can
-/// commit and project in between, putting a mark for a change the snapshot
-/// predates into this page — and the cursor would then carry the client
-/// past it for good. So the archive identity is re-read after the page, and
-/// a moved archive re-projects and re-reads (bounded; [`FeedBusy`] after).
+/// Two archive reads, in this order, and both are load-bearing:
+///
+/// 1. BEFORE the page: project that snapshot, so every archive change
+///    committed up to it has a seq above every cursor handed out earlier.
+/// 2. AFTER the page: build the rows from a FRESH snapshot. Another process
+///    sharing `mold.db` (the CLI, a second server) can commit and project
+///    between the projection and the page read — or create the output
+///    directory and publish into it — putting a mark into this page for a
+///    change the first snapshot predates. Built from that snapshot, the row
+///    would be stale (or a removal built from nothing) and the cursor would
+///    carry the client past the mark for good. A snapshot taken after the
+///    page is at least as new as every mark in it; a change it shows that
+///    is not in the page is marked later, with a higher seq.
 pub(crate) fn feed_page(
     db: &MetadataDb,
     gate: &GalleryPublicationGate,
@@ -394,88 +404,64 @@ pub(crate) fn feed_page(
         .map(str::trim)
         .filter(|raw| !raw.is_empty())
         .map(Cursor::decode);
-    for _ in 0..MAX_ARCHIVE_RETRIES {
-        let exists = dir.is_dir();
-        let snapshot = if exists {
-            gate.committed_archive_snapshot(dir)?
-        } else {
-            // Nothing published yet: an empty archive, and nothing to lock.
-            CommittedArchiveSnapshot {
-                root: dir.to_path_buf(),
-                generation: None,
-                store_id: String::new(),
-                index: Default::default(),
-            }
-        };
-        project_archive_changes(db, dir, &snapshot)?;
-        #[cfg(test)]
-        run_feed_hook(dir);
 
-        // A client without a cursor has nothing to merge into: it REPLACES
-        // its replica, so the snapshot's first page says `reset`.
-        let (mut since_seq, mut reset) = match &cursor {
-            None | Some(None) => (0, true),
-            Some(Some(cursor)) if cursor.dir != dir_token || cursor.format != format => (0, true),
-            Some(Some(cursor)) => (cursor.seq, false),
-        };
-        let mut page = mold_db::gallery_changes::changes_page(db, dir, since_seq, limit)?;
-        if let Some(Some(cursor)) = &cursor {
-            if !reset
-                && (cursor.epoch != page.epoch
-                    || cursor.seq < page.min_seq
-                    || cursor.seq > page.max_seq)
-            {
-                reset = true;
-                since_seq = 0;
-                page = mold_db::gallery_changes::changes_page(db, dir, 0, limit)?;
-            }
-        }
-        if exists {
-            let now = gate.committed_archive_identity(dir)?;
-            if now != (snapshot.generation, snapshot.store_id.clone()) {
-                tracing::debug!(
-                    from = ?snapshot.generation,
-                    to = ?now.0,
-                    "gallery archive moved while a change-feed page was read; re-reading"
-                );
-                continue;
-            }
-        }
+    project_archive_changes(db, dir, &archive_snapshot(gate, dir)?)?;
+    #[cfg(test)]
+    run_feed_hook(dir);
 
-        let names = page
-            .changes
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>();
-        let mut rows =
-            crate::gallery_rows::build_feed_rows(db, &snapshot.index, dir, &names, retention_days)?;
-        let changes = names
-            .into_iter()
-            .map(|filename| {
-                let image = rows.remove(&filename).flatten();
-                GalleryChange {
-                    removed: image.is_none(),
-                    filename,
-                    image,
-                }
-            })
-            .collect();
-        let cursor = Cursor {
-            epoch: page.epoch.clone(),
-            dir: dir_token,
-            format,
-            seq: page.next_cursor(since_seq),
-        };
-        return Ok(GalleryChangesPage {
-            protocol_version: GALLERY_CHANGES_PROTOCOL_VERSION,
-            instance_id: instance_id.to_string(),
-            cursor: cursor.encode(),
-            more: page.more,
-            reset,
-            changes,
-        });
+    // A client without a cursor has nothing to merge into: it REPLACES its
+    // replica, so the snapshot's first page says `reset`.
+    let (mut since_seq, mut reset) = match &cursor {
+        None | Some(None) => (0, true),
+        Some(Some(cursor)) if cursor.dir != dir_token || cursor.format != format => (0, true),
+        Some(Some(cursor)) => (cursor.seq, false),
+    };
+    let mut page = mold_db::gallery_changes::changes_page(db, dir, since_seq, limit)?;
+    if let Some(Some(cursor)) = &cursor {
+        if !reset
+            && (cursor.epoch != page.epoch
+                || cursor.seq < page.min_seq
+                || cursor.seq > page.max_seq)
+        {
+            reset = true;
+            since_seq = 0;
+            page = mold_db::gallery_changes::changes_page(db, dir, 0, limit)?;
+        }
     }
-    Err(FeedBusy.into())
+
+    let build = archive_snapshot(gate, dir)?;
+    let names = page
+        .changes
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let mut rows =
+        crate::gallery_rows::build_feed_rows(db, &build.index, dir, &names, retention_days)?;
+    let changes = names
+        .into_iter()
+        .map(|filename| {
+            let image = rows.remove(&filename).flatten();
+            GalleryChange {
+                removed: image.is_none(),
+                filename,
+                image,
+            }
+        })
+        .collect();
+    let cursor = Cursor {
+        epoch: page.epoch.clone(),
+        dir: dir_token,
+        format,
+        seq: page.next_cursor(since_seq),
+    };
+    Ok(GalleryChangesPage {
+        protocol_version: GALLERY_CHANGES_PROTOCOL_VERSION,
+        instance_id: instance_id.to_string(),
+        cursor: cursor.encode(),
+        more: page.more,
+        reset,
+        changes,
+    })
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -505,7 +491,6 @@ enum FeedAnswer {
     NotReady {
         claimed: bool,
     },
-    Busy,
 }
 
 /// `GET /api/gallery/changes?since=<cursor>&limit=<n>`.
@@ -545,7 +530,7 @@ pub(crate) async fn gallery_changes(
                 claimed: readiness.claim_reconcile(&blocking_dir, &epoch),
             });
         }
-        match feed_page(
+        feed_page(
             db,
             &gate,
             &blocking_dir,
@@ -553,11 +538,8 @@ pub(crate) async fn gallery_changes(
             limit,
             retention_days,
             &instance_id,
-        ) {
-            Ok(page) => Ok(FeedAnswer::Page(page)),
-            Err(error) if error.is::<FeedBusy>() => Ok(FeedAnswer::Busy),
-            Err(error) => Err(error),
-        }
+        )
+        .map(FeedAnswer::Page)
     })
     .await
     .map_err(|e| ApiError::internal(format!("gallery change feed task failed: {e}")))?
@@ -571,9 +553,6 @@ pub(crate) async fn gallery_changes(
             return Err(not_ready(
                 "the gallery is still being reconciled; retry shortly",
             ));
-        }
-        FeedAnswer::Busy => {
-            return Err(not_ready("the gallery is changing quickly; retry shortly"));
         }
     };
     let mut headers = HeaderMap::new();
