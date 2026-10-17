@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   fetchMergedGallery,
+  indexLogicalCopies,
   makePrintKey,
   mergeLogicalEntries,
   printKey,
@@ -235,5 +236,24 @@ describe("printKey", () => {
   it("stays stable for the same entry", () => {
     const entry = { hostId: "bender", filename: "cat.png" };
     expect(printKey(entry)).toBe(printKey({ ...entry }));
+  });
+});
+
+describe("indexLogicalCopies", () => {
+  it("answers copies and entries per key exactly as the old scans did", () => {
+    const rows = [
+      { ...img("same.png", 10), hostId: "a", hostLabel: "A" },
+      { ...img("same.png", 10), hostId: "b", hostLabel: "B" },
+      { ...img("solo.png", 5), hostId: "a", hostLabel: "A" },
+    ];
+    const index = indexLogicalCopies(rows);
+    expect(index.groups).toHaveLength(2);
+    expect(index.copiesByKey.get("b|same.png")?.map((c) => c.hostId)).toEqual([
+      "a",
+      "b",
+    ]);
+    expect(index.copiesByKey.get("a|solo.png")).toHaveLength(1);
+    expect(index.entryByKey.get("a|same.png")).toBe(rows[0]);
+    expect(index.copiesByKey.get("c|missing.png")).toBeUndefined();
   });
 });

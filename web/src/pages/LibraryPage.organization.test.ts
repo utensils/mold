@@ -97,6 +97,8 @@ vi.mock("../components/machines/hostClient", () => ({
     apiKey: host.apiKey ?? null,
   }),
 }));
+// Live gallery tickles are exercised in LibraryPage.test.ts.
+vi.mock("../lib/deviceEvents", () => ({ subscribeToGalleryTickles: vi.fn() }));
 vi.mock("../lib/galleryMedia", () => ({
   fetchGalleryBlob: vi.fn(),
   resolveThumbnailSrc: vi.fn(async () => ""),

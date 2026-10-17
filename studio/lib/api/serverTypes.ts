@@ -573,6 +573,10 @@ export interface GalleryCapabilities {
   /** A saved print reads back byte-for-byte from
    * `GET /api/gallery/image/{filename}`. Absent means an older server. */
   persists_outputs?: boolean;
+  /** `GET /api/gallery/changes` is served (read it through
+   * `galleryChangesFeedAdvertised`). Absent means an older server, a
+   * DB-less one, or a disabled output directory: keep the full listing. */
+  changes_feed?: { protocol_version: number } | null;
 }
 
 export type GpuWorkerState = "idle" | "generating" | "loading" | "degraded";

@@ -9,6 +9,10 @@ const PRESENTATIONS_STORE = "host-presentations";
 const STATS_STORE = "cache-stats";
 const THUMBNAIL_STATS_ID = "thumbnail";
 const MAX_PRINTS_PER_HOST = 4_000;
+/** A replica's whole state persists up to this many rows per host (library
+ * beyond the paint list rides `replica.overflow`), so a large library keeps
+ * its cursor across cold starts instead of re-snapshotting every launch. */
+const MAX_REPLICA_ROWS_PER_HOST = 50_000;
 const MAX_THUMBNAIL_RECORDS = 4_000;
 const MAX_THUMBNAIL_BYTES = 256 * 1024 * 1024;
 export const MAX_CACHED_THUMBNAIL_BYTES = 2 * 1024 * 1024;
@@ -71,7 +75,28 @@ type CachedMediaKey = [string, string, string, MobileThumbnailTier];
 interface CachedGalleryRecord {
   hostId: string;
   updatedAt: number;
+  /** Library rows, newest first (what a cold Library paints). */
   prints: GalleryImage[];
+  /** The gallery replica's resume point beside them: its feed cursor, the
+   * instance that issued it, and the trashed rows. Absent on a record any
+   * other writer (an optimistic patch or removal) saved, which is what drops
+   * the cursor and makes the next pull re-snapshot rather than resume over
+   * rows the server never sent. */
+  replica?: {
+    cursor: string | null;
+    instanceId: string | null;
+    trash: GalleryImage[];
+    /** Library rows past the paint list's cap. Never painted cold, but part
+     * of the state the cursor describes. */
+    overflow?: GalleryImage[];
+  };
+}
+
+/** The persisted half of a `GalleryReplica` (`@studio/lib/galleryReplica`). */
+export interface CachedGalleryReplica {
+  cursor: string | null;
+  instanceId: string | null;
+  rows: GalleryImage[];
 }
 
 /** Non-secret host state needed to interpret a saved print while its machine
@@ -299,6 +324,71 @@ export async function storeCachedGallery(
   await requestFromStore(GALLERIES_STORE, "readwrite", (store) =>
     fence.hostId === hostId && (hostMutationVersions.get(hostId) ?? 0) === fence.version
       ? store.put({ hostId, updatedAt: Date.now(), prints: bounded })
+      : store.get(hostId),
+  );
+}
+
+/** Rows + resume point for a host's replica. A record saved without one
+ * (an older build, an optimistic edit) still paints, with no cursor. */
+export async function loadCachedGalleryReplica(
+  hostId: string,
+): Promise<CachedGalleryReplica | null> {
+  const record = await requestFromStore<CachedGalleryRecord>(GALLERIES_STORE, "readonly", (store) =>
+    store.get(hostId),
+  );
+  if (!record || !Array.isArray(record.prints)) return null;
+  const replica = record.replica;
+  if (!replica || !Array.isArray(replica.trash))
+    return { cursor: null, instanceId: null, rows: record.prints };
+  return {
+    cursor: typeof replica.cursor === "string" ? replica.cursor : null,
+    instanceId: typeof replica.instanceId === "string" ? replica.instanceId : null,
+    rows: [
+      ...record.prints,
+      ...(Array.isArray(replica.overflow) ? replica.overflow : []),
+      ...replica.trash,
+    ],
+  };
+}
+
+/** Persist a replica after a pull that CHANGED something (the replica never
+ * calls this for an idle pull, so an unchanged Library is never rewritten).
+ * The paint list stays bounded (`MAX_PRINTS_PER_HOST`); the rest of the
+ * library rides `replica.overflow`, so the cursor persists with EVERY row it
+ * describes. Only a replica past `MAX_REPLICA_ROWS_PER_HOST` is truncated,
+ * and then the cursor is dropped — resuming over rows that were not saved
+ * would never bring them back, so that host re-snapshots instead. */
+export async function storeCachedGalleryReplica(
+  hostId: string,
+  state: CachedGalleryReplica,
+  fence: CachedHostFence = captureCachedHostFence(hostId),
+): Promise<void> {
+  const live: GalleryImage[] = [];
+  const trash: GalleryImage[] = [];
+  for (const row of state.rows) (row.trashed_at == null ? live : trash).push(row);
+  live.sort((left, right) => right.timestamp - left.timestamp);
+  trash.sort(
+    (left, right) => (right.trashed_at ?? right.timestamp) - (left.trashed_at ?? left.timestamp),
+  );
+  const complete = live.length + trash.length <= MAX_REPLICA_ROWS_PER_HOST;
+  const keptLive = complete ? live : live.slice(0, MAX_REPLICA_ROWS_PER_HOST);
+  const keptTrash = complete
+    ? trash
+    : trash.slice(0, Math.max(0, MAX_REPLICA_ROWS_PER_HOST - keptLive.length));
+  const record: CachedGalleryRecord = {
+    hostId,
+    updatedAt: Date.now(),
+    prints: keptLive.slice(0, MAX_PRINTS_PER_HOST),
+    replica: {
+      cursor: complete ? state.cursor : null,
+      instanceId: state.instanceId,
+      trash: keptTrash,
+      overflow: keptLive.slice(MAX_PRINTS_PER_HOST),
+    },
+  };
+  await requestFromStore(GALLERIES_STORE, "readwrite", (store) =>
+    fence.hostId === hostId && (hostMutationVersions.get(hostId) ?? 0) === fence.version
+      ? store.put(record)
       : store.get(hostId),
   );
 }

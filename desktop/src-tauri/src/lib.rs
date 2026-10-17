@@ -215,6 +215,7 @@ pub fn run() {
             updater::install_pending_update,
             gallery::local_gallery_list,
             gallery::local_gallery_delete,
+            gallery::local_gallery_changes,
             gallery::local_gallery_trash_list,
             gallery::local_gallery_restore,
             gallery::local_gallery_delete_forever,

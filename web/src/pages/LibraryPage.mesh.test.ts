@@ -48,6 +48,8 @@ vi.mock("../components/machines/hostClient", () => ({
   }),
 }));
 
+// Live gallery tickles are exercised in LibraryPage.test.ts.
+vi.mock("../lib/deviceEvents", () => ({ subscribeToGalleryTickles: vi.fn() }));
 vi.mock("../lib/galleryMedia", () => ({ fetchGalleryBlob: vi.fn() }));
 
 vi.mock("../lib/multiHostGallery", async () => {

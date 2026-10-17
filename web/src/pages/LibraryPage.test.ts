@@ -18,11 +18,16 @@ import {
 import type { GalleryImage } from "../types";
 import { clearSessionScrollForTests } from "@studio/lib/libraryOrganization";
 
-const { listGalleryMock, deleteMock, fetchModelsMock } = vi.hoisted(() => ({
-  listGalleryMock: vi.fn(),
-  deleteMock: vi.fn(),
-  fetchModelsMock: vi.fn(),
-}));
+const { listGalleryMock, deleteMock, fetchModelsMock, galleryTickles } =
+  vi.hoisted(() => ({
+    listGalleryMock: vi.fn(),
+    deleteMock: vi.fn(),
+    fetchModelsMock: vi.fn(),
+    galleryTickles: [] as Array<{
+      tickle: () => void;
+      onLive?: (live: boolean) => void;
+    }>,
+  }));
 const { hostDeleteMock, fetchBlobMock, hostCapabilitiesMock, hostGalleryMock } =
   vi.hoisted(() => ({
     hostDeleteMock: vi.fn(),
@@ -102,6 +107,16 @@ vi.mock("../components/machines/hostClient", () => ({
   }),
 }));
 
+vi.mock("../lib/deviceEvents", () => ({
+  subscribeToGalleryTickles: (
+    _target: unknown,
+    _signal: AbortSignal,
+    tickle: () => void,
+    onLive?: (live: boolean) => void,
+  ) => {
+    galleryTickles.push({ tickle, ...(onLive ? { onLive } : {}) });
+  },
+}));
 vi.mock("../lib/galleryMedia", () => ({
   fetchGalleryBlob: fetchBlobMock,
 }));
@@ -1048,6 +1063,27 @@ describe("LibraryPage", () => {
     expect("typedPhrase" in options).toBe(false);
     expect(deleteMock).toHaveBeenCalledWith("cat.png");
     expect(deleteMock).toHaveBeenCalledWith("dog.png");
+  });
+
+  it("an SSE gallery tickle pulls the replicas once, coalescing a burst", async () => {
+    galleryTickles.length = 0;
+    const wrapper = await mounted();
+    expect(galleryTickles.length).toBeGreaterThan(0);
+    const calls = listGalleryMock.mock.calls.length;
+    const fresh = makeEntry("tickled.png", "arrived live", "flux-dev:fp16", 9);
+    listGalleryMock.mockResolvedValue([fresh, cat, dog]);
+    vi.useFakeTimers();
+    try {
+      galleryTickles[0]!.tickle();
+      galleryTickles[0]!.tickle();
+      galleryTickles[0]!.tickle();
+      await vi.advanceTimersByTimeAsync(300);
+    } finally {
+      vi.useRealTimers();
+    }
+    await flushPromises();
+    expect(listGalleryMock.mock.calls.length).toBe(calls + 1);
+    expect(wrapper.find("[data-test='grid-count']").text()).toBe("3");
   });
 
   it("badges prints that arrive on a later refresh as fresh", async () => {

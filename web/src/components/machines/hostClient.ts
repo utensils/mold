@@ -41,12 +41,16 @@ import {
   type CatalogDownloadResponse,
 } from "../../api";
 import {
-  conditionalApiJsonTo,
   ApiError,
   parseCurrentServerStatus,
   type ApiTarget,
 } from "@studio/api/client";
 import type { GalleryView } from "@studio/lib/api/galleryOrganization";
+import {
+  galleryChangesFeedAdvertised,
+  httpGalleryReplicaTransport,
+} from "@studio/api/galleryChanges";
+import { GalleryReplica } from "@studio/lib/galleryReplica";
 import type { ConfigValue } from "@studio/api/config";
 import {
   listDevices,
@@ -210,22 +214,130 @@ export function hostApiTarget(host: HostEntry): ApiTarget {
   };
 }
 
-/** One host's gallery (`GET /api/gallery[?view=trash]`), with its
- * `x-api-key`. Used by the multi-host gallery merge. Works for the origin
- * too (empty `host.url`). The default `library` view keeps the bare path so
- * older hosts, which know no `view` parameter, behave exactly as before. */
-export function hostGallery(
+type WebGalleryRow = import("../../types").GalleryImage;
+
+/** How long a host's capability answer decides feed-vs-listing. */
+const REPLICA_CAPABILITY_TTL_MS = 60_000;
+/** A read within this window of a finished pull reuses it: the library and
+ * trash reads of one refresh are one round of requests. Change evidence
+ * (an SSE tickle) pulls the replica directly and is never swallowed. */
+const HOST_GALLERY_READ_FRESH_MS = 2_000;
+interface ReplicaSlot {
+  hostId: string;
+  replica: GalleryReplica<WebGalleryRow>;
+}
+const galleryReplicas = new Map<string, ReplicaSlot>();
+
+function replicaKey(host: HostEntry): string {
+  return [host.id, host.url, host.apiKey ?? "", host.connectionMode ?? ""]
+    .map((part) => encodeURIComponent(part))
+    .join("|");
+}
+
+/**
+ * The one in-memory gallery replica for this host route (id + URL + key +
+ * connection mode — a re-keyed or re-pointed host gets a fresh one). It
+ * follows `GET /api/gallery/changes` when the host advertises
+ * `gallery.changes_feed`, else the conditional `/api/gallery` (+
+ * `?view=trash` on a trash-capable host) listings, so a pull is O(delta)
+ * wherever the server allows it.
+ */
+function hostGalleryReplica(host: HostEntry): GalleryReplica<WebGalleryRow> {
+  const key = replicaKey(host);
+  const existing = galleryReplicas.get(key);
+  if (existing) return existing.replica;
+  // A re-keyed route replaces its predecessor; a host that left the
+  // registry takes its replica with it.
+  const registered = new Set([
+    ORIGIN_HOST_ID,
+    host.id,
+    ...listStoredHosts().map((stored) => stored.id),
+  ]);
+  for (const [other, slot] of galleryReplicas) {
+    if (slot.hostId !== host.id && registered.has(slot.hostId)) continue;
+    slot.replica.dispose();
+    galleryReplicas.delete(other);
+  }
+  let capabilities: { at: number; value: Promise<HostCapabilities> } | null =
+    null;
+  // Only an ANSWER is cached: a failed probe is forgotten at once, so a
+  // transient failure never pins the listing path for the whole TTL.
+  const caps = (): Promise<HostCapabilities> => {
+    const now = Date.now();
+    if (!capabilities || now - capabilities.at > REPLICA_CAPABILITY_TTL_MS) {
+      const entry = {
+        at: now,
+        value: getJson<HostCapabilities>(host, "/api/capabilities"),
+      };
+      capabilities = entry;
+      entry.value.catch(() => {
+        if (capabilities === entry) capabilities = null;
+      });
+    }
+    return capabilities.value.catch(() => DEFAULT_CAPABILITIES);
+  };
+  const replica = new GalleryReplica<WebGalleryRow>(
+    httpGalleryReplicaTransport<WebGalleryRow>(hostApiTarget(host), {
+      feedSupported: async () => galleryChangesFeedAdvertised(await caps()),
+      listTrash: async () => (await caps()).gallery?.trash?.enabled === true,
+    }),
+  );
+  galleryReplicas.set(key, { hostId: host.id, replica });
+  return replica;
+}
+
+/** The CALLER stops waiting when its signal aborts; the shared pull keeps
+ * running for the replica's other readers. */
+function untilAborted<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return work;
+  if (signal.aborted)
+    return Promise.reject(
+      signal.reason ?? new DOMException("Aborted", "AbortError"),
+    );
+  return new Promise<T>((resolve, reject) => {
+    const abort = () =>
+      reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", abort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener("abort", abort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      },
+    );
+  });
+}
+
+/** One host's gallery view (`library` or `trash`), read from its replica.
+ * Used by the multi-host gallery merge; works for the origin too (empty
+ * `host.url`). A read JOINS a pull already in flight, so the library and
+ * trash reads of one refresh cost one round of requests. The returned array
+ * is the replica's memoized view — the identical array across reads until
+ * something changed, so a caller can skip all work on an idle pull. A trash read rejects when the host's trash was not
+ * listed this pull, so callers never treat a held copy as fresh evidence. */
+export async function hostGallery(
   host: HostEntry,
   signal?: AbortSignal,
   view: GalleryView = "library",
-) {
-  const path =
-    view === "library" ? "/api/gallery" : `/api/gallery?view=${view}`;
-  return conditionalApiJsonTo<import("../../types").GalleryImage[]>(
-    hostApiTarget(host),
-    path,
-    { signal },
-  );
+  options: { refresh?: boolean } = {},
+): Promise<WebGalleryRow[]> {
+  const replica = hostGalleryReplica(host);
+  // `refresh` carries change evidence (a tickle, a mutation, a poll tick):
+  // it always pulls, coalescing behind a pull in flight.
+  if (options.refresh) await untilAborted(replica.pull(), signal);
+  else if (
+    replica.pulling ||
+    Date.now() - replica.settledAt > HOST_GALLERY_READ_FRESH_MS
+  )
+    await untilAborted(replica.join(), signal);
+  if (view === "trash") {
+    if (!replica.trashFresh) throw new Error("Trash listing unavailable.");
+    return replica.trash() as WebGalleryRow[];
+  }
+  return replica.live() as WebGalleryRow[];
 }
 
 /** One effective config row on a host (`GET /api/config/:key`). */

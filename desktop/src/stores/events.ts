@@ -18,6 +18,8 @@ type HostStream = {
   abort: AbortController;
   /** The machine this stream was opened against, as `hostIdentity` spells it. */
   identity: string;
+  /** The stream has opened (frames are flowing) since it was created. */
+  open?: boolean;
 };
 
 type Subscription = {
@@ -228,7 +230,17 @@ export const useEventsStore = defineStore("events", {
         retry: true,
         terminalHttpStatuses: [401, 403, 404],
         onOpen: () => {
+          const stream = subscriptionFor(this).streams.get(hostId);
+          if (stream?.abort === abort) stream.open = true;
           if (this.isPrimary(hostId)) this.refreshAuthoritativePrimary();
+          // Frames missed while this stream was down are repaired by one
+          // replica pull (O(delta) on a host serving the change feed).
+          useGalleryStore().tickleHost(hostId);
+        },
+        // Reconnecting is not live: the Library poll covers the gap.
+        onDisconnect: () => {
+          const stream = subscriptionFor(this).streams.get(hostId);
+          if (stream?.abort === abort) stream.open = false;
         },
         onEvent: (event, data) => {
           useGenerationStore().onDurableEvent(hostId, event, data);
@@ -237,6 +249,7 @@ export const useEventsStore = defineStore("events", {
               { baseUrl, apiKey, ...(connectionMode ? { connectionMode } : {}) },
               { type: "resync_required" },
             );
+            useGalleryStore().tickleHost(hostId);
           }
           if (event !== "event" && event !== "message") return;
           let frame: ServerEvent;
@@ -259,8 +272,13 @@ export const useEventsStore = defineStore("events", {
           else if (frame.type === "gallery_trashed" || frame.type === "gallery_removed")
             useLandedPrintsStore().forgetLanded(frame.filename);
           if (this.isPrimary(hostId)) this.apply(frame);
+          // Another machine's gallery frames are TICKLES: its bucket pulls
+          // its replica rather than applying the frame.
+          else if (frame.type.startsWith("gallery_")) useGalleryStore().tickleHost(hostId);
         },
         onClose: () => {
+          const current = subscriptionFor(this).streams.get(hostId);
+          if (current?.abort === abort) current.open = false;
           if (abort.signal.aborted) return;
           // `retry: true` means reaching here at all is the end of this
           // machine's stream, not a blip: a terminal status threw. Remember
@@ -275,6 +293,12 @@ export const useEventsStore = defineStore("events", {
           useGenerationStore().onDurableEventClose(hostId);
         },
       });
+    },
+    /** This machine's `/api/events` stream is open, so its gallery frames
+     * keep its bucket current and the Library's poll can stand down. */
+    isLive(hostId: string): boolean {
+      const stream = subscriptionFor(this).streams.get(hostId);
+      return stream?.open === true && !stream.abort.signal.aborted;
     },
     isPrimary(hostId: string): boolean {
       return useHostsStore().primaryHost?.id === hostId;

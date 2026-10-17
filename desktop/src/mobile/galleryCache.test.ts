@@ -8,6 +8,7 @@ import {
   type CachedGalleryMediaRef,
   loadCachedGallery,
   loadCachedGalleryMedia,
+  loadCachedGalleryReplica,
   loadCachedHostPresentation,
   clearCachedGalleryHosts,
   patchCachedGalleryPrints,
@@ -16,6 +17,7 @@ import {
   removeCachedGalleryRows,
   storeCachedGallery,
   storeCachedGalleryMedia,
+  storeCachedGalleryReplica,
   storeCachedHostPresentation,
 } from "./galleryCache";
 import type { ModelEntry } from "../lib/api/types";
@@ -81,6 +83,60 @@ describe("mobile gallery cache", () => {
     expect(restored[0]?.filename).toBe("4004.png");
     expect(restored.at(-1)?.filename).toBe("5.png");
     expect(JSON.stringify(restored)).not.toContain("apiKey");
+  });
+
+  it("round-trips a replica's cursor and trash beside the painted library", async () => {
+    const trashed = { ...print("gone.png", 5), trashed_at: 50 };
+    await storeCachedGalleryReplica("instance-r", {
+      cursor: "c9",
+      instanceId: "instance-r",
+      rows: [print("old.png", 1), trashed, print("new.png", 9)],
+    });
+    // The library paint path still sees only live rows, newest first.
+    expect((await loadCachedGallery("instance-r")).map((p) => p.filename)).toEqual([
+      "new.png",
+      "old.png",
+    ]);
+    const replica = await loadCachedGalleryReplica("instance-r");
+    expect(replica?.cursor).toBe("c9");
+    expect(replica?.instanceId).toBe("instance-r");
+    expect(replica?.rows.map((p) => p.filename).sort()).toEqual(["gone.png", "new.png", "old.png"]);
+  });
+
+  it("keeps a large library's cursor: rows past the paint cap persist too", async () => {
+    const rows = Array.from({ length: 4_500 }, (_, i) => print(`p${i}.png`, i));
+    await storeCachedGalleryReplica("instance-big", {
+      cursor: "c-big",
+      instanceId: "instance-big",
+      rows,
+    });
+    expect(await loadCachedGallery("instance-big")).toHaveLength(4_000);
+    const replica = await loadCachedGalleryReplica("instance-big");
+    expect(replica?.cursor).toBe("c-big");
+    expect(replica?.rows).toHaveLength(4_500);
+  });
+
+  it("drops the replica cursor when another writer saves the record", async () => {
+    await storeCachedGalleryReplica("instance-p", {
+      cursor: "c1",
+      instanceId: "instance-p",
+      rows: [print("a.png", 1)],
+    });
+    await patchCachedGalleryPrints("instance-p", [{ filename: "a.png", patch: { title: "T" } }]);
+    const replica = await loadCachedGalleryReplica("instance-p");
+    expect(replica?.cursor).toBeNull();
+    expect(replica?.rows[0]?.title).toBe("T");
+  });
+
+  it("refuses a replica write that a host clear overtook", async () => {
+    const fence = captureCachedHostFence("instance-c");
+    await clearCachedGalleryHosts(["instance-c"]);
+    await storeCachedGalleryReplica(
+      "instance-c",
+      { cursor: "c1", instanceId: "instance-c", rows: [print("a.png", 1)] },
+      fence,
+    );
+    expect(await loadCachedGalleryReplica("instance-c")).toBeNull();
   });
 
   it("round-trips thumbnail blobs for offline browsing", async () => {

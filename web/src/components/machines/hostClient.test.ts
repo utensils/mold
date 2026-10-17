@@ -512,24 +512,135 @@ describe("hostClient library organization plumbing", () => {
     });
   });
 
+  /** Route the replica's reads by URL: capabilities, the feed, listings. */
+  function galleryRoutes(capabilities: unknown, listing: unknown[] = []) {
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/capabilities")) return ok(capabilities);
+      if (url.includes("/api/gallery/changes"))
+        return ok({
+          protocol_version: 1,
+          instance_id: "inst",
+          cursor: "c1",
+          more: false,
+          reset: false,
+          changes: listing.map((image) => ({
+            filename: (image as { filename: string }).filename,
+            removed: false,
+            image,
+          })),
+        });
+      return ok(listing);
+    });
+  }
+
   it("lists the trash view with the host's key", async () => {
     const { hostGallery } = await import("./hostClient");
-    fetchMock.mockResolvedValueOnce(ok([]));
-    await hostGallery(remote, undefined, "trash");
-    const [url, init] = fetchMock.mock.calls[0]!;
-    expect(url).toBe("http://192.168.1.20:7680/api/gallery?view=trash");
-    expect(new Headers((init as RequestInit).headers).get("x-api-key")).toBe(
-      "sekret",
+    galleryRoutes({
+      gallery: {
+        can_delete: true,
+        trash: { enabled: true, retention_days: 30 },
+      },
+    });
+    await hostGallery({ ...remote, id: "trash-host" }, undefined, "trash");
+    const trashCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).endsWith("/api/gallery?view=trash"),
     );
+    expect(trashCall?.[0]).toBe(
+      "http://192.168.1.20:7680/api/gallery?view=trash",
+    );
+    expect(
+      new Headers((trashCall![1] as RequestInit).headers).get("x-api-key"),
+    ).toBe("sekret");
   });
 
   it("keeps the bare gallery path for the default library view", async () => {
     const { hostGallery } = await import("./hostClient");
-    fetchMock.mockResolvedValueOnce(ok([]));
-    await hostGallery(keyless);
-    expect(fetchMock.mock.calls[0]![0]).toBe(
-      "http://localhost:7680/api/gallery",
+    galleryRoutes({ gallery: { can_delete: true } });
+    await hostGallery({ ...keyless, id: "bare-host" });
+    const urls = fetchMock.mock.calls.map(([url]) => String(url));
+    expect(urls).toContain("http://localhost:7680/api/gallery");
+    expect(urls.some((url) => url.includes("view=trash"))).toBe(false);
+  });
+
+  it("follows the change feed when the host advertises it, joining reads", async () => {
+    const { hostGallery } = await import("./hostClient");
+    galleryRoutes(
+      {
+        gallery: {
+          can_delete: true,
+          trash: { enabled: true, retention_days: 30 },
+          changes_feed: { protocol_version: 1 },
+        },
+      },
+      [
+        { filename: "live.png", timestamp: 2, metadata: {} },
+        { filename: "gone.png", timestamp: 1, metadata: {}, trashed_at: 5 },
+      ],
     );
+    const host = { ...remote, id: "feed-host" };
+    const [live, trash] = await Promise.all([
+      hostGallery(host),
+      hostGallery(host, undefined, "trash"),
+    ]);
+    expect(live.map((row) => row.filename)).toEqual(["live.png"]);
+    expect(trash.map((row) => row.filename)).toEqual(["gone.png"]);
+    const urls = fetchMock.mock.calls.map(([url]) => String(url));
+    expect(urls.filter((url) => url.includes("/api/gallery/changes"))).toEqual([
+      "http://192.168.1.20:7680/api/gallery/changes?limit=500",
+    ]);
+    expect(urls.some((url) => url.endsWith("/api/gallery"))).toBe(false);
+    // An idle re-read inside the freshness window costs nothing and hands
+    // back the identical array.
+    const calls = fetchMock.mock.calls.length;
+    expect(await hostGallery(host)).toBe(live);
+    expect(fetchMock.mock.calls.length).toBe(calls);
+  });
+
+  it("forgets a failed capability probe instead of pinning the listing", async () => {
+    const { hostGallery } = await import("./hostClient");
+    let capsCalls = 0;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/capabilities")) {
+        capsCalls += 1;
+        if (capsCalls === 1) return failed(503);
+        return ok({
+          gallery: { can_delete: true, changes_feed: { protocol_version: 1 } },
+        });
+      }
+      if (url.includes("/api/gallery/changes"))
+        return ok({
+          protocol_version: 1,
+          instance_id: "i",
+          cursor: "c1",
+          more: false,
+          reset: false,
+          changes: [],
+        });
+      return ok([]);
+    });
+    const host = { ...remote, id: "flaky-caps-host" };
+    await hostGallery(host, undefined, "library", { refresh: true });
+    await hostGallery(host, undefined, "library", { refresh: true });
+    expect(capsCalls).toBe(2);
+    expect(
+      fetchMock.mock.calls.some(([url]) =>
+        String(url).includes("/api/gallery/changes"),
+      ),
+    ).toBe(true);
+  });
+
+  it("stops waiting when the caller aborts", async () => {
+    const { hostGallery } = await import("./hostClient");
+    fetchMock.mockImplementation(() => new Promise(() => undefined));
+    const controller = new AbortController();
+    const read = hostGallery(
+      { ...remote, id: "abort-host" },
+      controller.signal,
+    );
+    controller.abort();
+    await expect(read).rejects.toBeTruthy();
   });
 
   it("reads and writes one config key on a specific host", async () => {
