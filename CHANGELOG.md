@@ -11,6 +11,76 @@ Pull requests do not edit the `[Unreleased]` section directly: each adds a
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-10-17
+
+- **Libraries follow only what changed.** The web Library, the desktop app
+  (every connected machine and this device) and the phone now keep a per-host
+  gallery replica that reads the server's change feed, so a refresh or a live
+  update downloads only the prints that changed instead of the whole gallery.
+  Gallery events from every machine trigger those pulls, the web and desktop
+  polls stand down while a machine's live stream is up, an unchanged Library
+  does no work at all (and the phone no longer rewrites its saved Library),
+  and older servers keep the full listing they use today. Bulk actions on the
+  web Library no longer slow down with library size.
+- **iPhone and iPad Library follows each machine's gallery change feed.** Mold
+  Studio Companion now keeps one replica per machine, as the Mac app does:
+  where a machine advertises `capabilities.gallery.changes_feed` it reads only
+  the prints that changed since its saved cursor, and older machines keep the
+  conditional listings, diffed into the same changes. Gallery events no longer
+  re-read the whole machine; a burst of them is one coalesced catch-up, a
+  return to the foreground pulls once, and a refresh that finds nothing new no
+  longer redraws the grid. New and edited prints are applied without
+  re-merging the whole library, collections are re-read only when something
+  says they changed, and the offline Library moves into the replicas' saved
+  state on first launch after the update.
+- **Mac Library Sync costs what changed, not the whole library.** Sync All
+  and Keep This Mac in Sync now read every machine at once through its gallery
+  replica. Keep This Mac in Sync plans only the prints that changed since its
+  last run (plus anything still owed a retry, and a full check once a day); a
+  Sync All press verifies every print against one checkpoint read per
+  machine. Either way a run where nothing changed asks no machine anything per
+  print. Copy receipts come from the import's own answer, synchronized to disk
+  before retained inputs move, instead of a per-print listing read; final
+  verification asks the bounded `POST /api/gallery/sync-checkpoint` for just
+  the touched prints (older machines fall back to the full checkpoint); and
+  copy records moved out of the preferences suite into their own file, written
+  off the main thread, with a one-time migration and pruning of copies gone
+  from both sides. An unreadable records file is set aside and pauses Sync All
+  instead of recreating copies you removed. Collection visibility is synced in
+  one pass and progress updates at most ten times a second.
+- **Mac Library follows each machine's gallery change feed.** Mold Studio keeps
+  one replica per machine: where a machine advertises
+  `capabilities.gallery.changes_feed` it reads only the prints that changed
+  since its saved cursor (resumed across relaunches), live gallery events and
+  reconnects become one coalesced catch-up instead of a rebuild per event, and
+  a refresh that finds nothing new no longer redraws or re-sorts the grid.
+  Older machines keep the conditional full listing, diffed into the same
+  changes. Tile lookups, small edits and new prints no longer re-merge the
+  whole library, grid geometry is cached per derived section revision, and
+  reloading collections no longer forces every machine to re-send its index.
+- **Gallery change feed for faster library refresh.** New
+  `GET /api/gallery/changes?since=<cursor>` returns only the prints that
+  changed since a client's last read (trash included, with removals and a
+  `reset` signal), advertised as `capabilities.gallery.changes_feed`, so
+  library clients can stay current without re-downloading the whole gallery.
+  `POST /api/gallery/sync-checkpoint` answers the mirror checkpoint for just
+  the named prints, and an unchanged `GET /api/gallery` now answers `304`
+  without rebuilding the listing, which makes every existing client's idle
+  poll cheap.
+- **Faster single-print reads.** `GET /api/gallery?filename=` now reads only
+  that print's row, organization, and assets instead of building the whole
+  library and filtering it, and gallery archive lookups (including Library
+  mirror transfer offers) share the cached archive index instead of copying
+  it on every read. Responses are unchanged.
+- **Library Sync no longer repeats on a timer.** On the native Mac app, Sync All to This
+  Mac now copies once per press. The new opt-in **Keep This Mac in Sync** toggle (toolbar
+  menu or Settings ▸ Library, off by default) copies new and changed prints as soon as each
+  machine announces them, with bursts coalesced into one run and no overlapping runs.
+  Quitting Mold now stops a running sync instead of holding the engine drain open.
+- **Visible native Mac Library filters.** Machine and media filters now display their current selections, with consistent native menus, selection checkmarks and accessible labels.
+- **Reliable native Mac source restore.** Fully materialized source files remain independent local attachments across prompt edits and relaunch, without a stale archive warning. Unresolved remote references and missing snapshots remain protected.
+- **Balanced native queue previews.** macOS and iOS show a quiet image placeholder for jobs without a source image, with distinct loading and unavailable descriptions and stable thumbnail space.
+
 ## [0.36.0] - 2026-10-12
 
 - Fixed the native iOS queue's Cancel Batch button hit target and accessibility frame to cover its full 44-point height.
@@ -6540,7 +6610,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.36.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.37.0...HEAD
+[0.37.0]: https://github.com/utensils/mold/compare/v0.36.0...v0.37.0
 [0.36.0]: https://github.com/utensils/mold/compare/v0.35.0...v0.36.0
 [0.35.0]: https://github.com/utensils/mold/compare/v0.34.0...v0.35.0
 [0.34.0]: https://github.com/utensils/mold/compare/v0.33.0...v0.34.0
