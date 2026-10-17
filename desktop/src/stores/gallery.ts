@@ -1545,6 +1545,9 @@ export const useGalleryStore = defineStore("gallery", {
       const key = useHostsStore().primaryHost?.id ?? null;
       const bucket = key ? this.buckets[key] : undefined;
       if (!key || !bucket?.loaded) return;
+      // A fetch already in flight read before this frame and may overwrite
+      // it; queue one more read so the frame is never lost.
+      if (bucket.loading) refetchAgainFor(toRaw(this)).add(key);
       if (!ev.image) {
         this.schedulePrimaryRefetch();
         return;
@@ -1577,6 +1580,9 @@ export const useGalleryStore = defineStore("gallery", {
       const key = useHostsStore().primaryHost?.id ?? null;
       const bucket = key ? this.buckets[key] : undefined;
       if (!key || !bucket?.loaded) return;
+      // A fetch already in flight read before this frame and may overwrite
+      // it; queue one more read so the frame is never lost.
+      if (bucket.loading) refetchAgainFor(toRaw(this)).add(key);
       const image = ev.image ?? null;
       if (!image) {
         this.schedulePrimaryRefetch();
@@ -1599,6 +1605,9 @@ export const useGalleryStore = defineStore("gallery", {
       const key = useHostsStore().primaryHost?.id ?? null;
       const bucket = key ? this.buckets[key] : undefined;
       if (!key || !bucket?.loaded) return;
+      // A fetch already in flight read before this frame and may overwrite
+      // it; queue one more read so the frame is never lost.
+      if (bucket.loading) refetchAgainFor(toRaw(this)).add(key);
       const row = takeRow(bucket, filename);
       const trash = this.trashBuckets[key];
       if (!trash?.loaded) return;
@@ -1617,6 +1626,9 @@ export const useGalleryStore = defineStore("gallery", {
       const key = useHostsStore().primaryHost?.id ?? null;
       const bucket = key ? this.buckets[key] : undefined;
       if (!key || !bucket?.loaded) return;
+      // A fetch already in flight read before this frame and may overwrite
+      // it; queue one more read so the frame is never lost.
+      if (bucket.loading) refetchAgainFor(toRaw(this)).add(key);
       const trashed = takeRow(this.trashBuckets[key], ev.filename);
       const image = ev.image ?? null;
       if (image) {
@@ -1641,6 +1653,9 @@ export const useGalleryStore = defineStore("gallery", {
       const key = useHostsStore().primaryHost?.id ?? null;
       const bucket = key ? this.buckets[key] : undefined;
       if (!key || !bucket?.loaded) return;
+      // A fetch already in flight read before this frame and may overwrite
+      // it; queue one more read so the frame is never lost.
+      if (bucket.loading) refetchAgainFor(toRaw(this)).add(key);
       const live = takeRow(bucket, filename);
       const trashed = takeRow(this.trashBuckets[key], filename);
       if (!live && !trashed) return;

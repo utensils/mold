@@ -32,14 +32,15 @@ export interface MobileReplicaRoute {
   cacheKey: string;
   target: ApiTarget;
   capabilities: () => ServerCapabilities | null | undefined;
-  /** The deadline the caller's reads run under (its own abort controller). */
-  signal: AbortSignal;
+  /** Deadline for EACH request (every feed page gets its own), so a large
+   * library's multi-page rebuild is never cut off by one shared timer. */
+  timeoutMs: number;
 }
 
 interface Slot {
   identity: string;
   replica: GalleryReplica<MobileGalleryImage>;
-  /** The latest caller's route: its deadline and cache fence. */
+  /** The latest caller's route (capabilities, per-request deadline). */
   route: MobileReplicaRoute;
   fence: CachedHostFence;
 }
@@ -73,10 +74,12 @@ function slotFor(route: MobileReplicaRoute): Slot {
       feedSupported: () => galleryChangesFeedAdvertised(slot.route.capabilities() ?? undefined),
       changes: (since, limit) =>
         fetchGalleryChanges<MobileGalleryImage>(target, since, limit, {
-          signal: slot.route.signal,
+          signal: AbortSignal.timeout(slot.route.timeoutMs),
         }),
       legacyLibrary: () =>
-        apiJsonTo<MobileGalleryImage[]>(target, "/api/gallery", { signal: slot.route.signal }),
+        apiJsonTo<MobileGalleryImage[]>(target, "/api/gallery", {
+          signal: AbortSignal.timeout(slot.route.timeoutMs),
+        }),
     },
     { persistence },
   );

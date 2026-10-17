@@ -41,7 +41,7 @@ function route(cacheKey: string, capabilities: unknown = feedCaps) {
     cacheKey,
     target: { baseUrl: "https://workstation.example", apiKey: null },
     capabilities: () => capabilities as never,
-    signal: new AbortController().signal,
+    timeoutMs: 9_000,
   };
 }
 const feedPage = (changes: unknown[], cursor: string) => ({
@@ -74,6 +74,24 @@ describe("phone gallery replicas", () => {
     answers.push(feedPage([], "c1"));
     await pullMobileGalleryReplica(route("inst-a"));
     expect(urls[1]).toContain("since=c1");
+  });
+
+  it("gives every feed page its own deadline, so a long rebuild can finish", async () => {
+    const page1 = {
+      ...feedPage([{ filename: "a.png", removed: false, image: row("a.png", 1) }], "p1"),
+      more: true,
+    };
+    answers.push(
+      page1,
+      feedPage([{ filename: "b.png", removed: false, image: row("b.png", 2) }], "p2"),
+    );
+    const replica = await pullMobileGalleryReplica(route("inst-pages"));
+    const fetchMock = vi.mocked(globalThis.fetch);
+    const signals = fetchMock.mock.calls.map(([, init]) => (init as RequestInit).signal);
+    expect(signals).toHaveLength(2);
+    expect(signals[0]).toBeInstanceOf(AbortSignal);
+    expect(signals[0]).not.toBe(signals[1]);
+    expect(replica.size).toBe(2);
   });
 
   it("never rewrites the record for an idle pull", async () => {

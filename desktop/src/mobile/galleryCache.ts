@@ -9,6 +9,10 @@ const PRESENTATIONS_STORE = "host-presentations";
 const STATS_STORE = "cache-stats";
 const THUMBNAIL_STATS_ID = "thumbnail";
 const MAX_PRINTS_PER_HOST = 4_000;
+/** A replica's whole state persists up to this many rows per host (library
+ * beyond the paint list rides `replica.overflow`), so a large library keeps
+ * its cursor across cold starts instead of re-snapshotting every launch. */
+const MAX_REPLICA_ROWS_PER_HOST = 50_000;
 const MAX_THUMBNAIL_RECORDS = 4_000;
 const MAX_THUMBNAIL_BYTES = 256 * 1024 * 1024;
 export const MAX_CACHED_THUMBNAIL_BYTES = 2 * 1024 * 1024;
@@ -82,6 +86,9 @@ interface CachedGalleryRecord {
     cursor: string | null;
     instanceId: string | null;
     trash: GalleryImage[];
+    /** Library rows past the paint list's cap. Never painted cold, but part
+     * of the state the cursor describes. */
+    overflow?: GalleryImage[];
   };
 }
 
@@ -336,14 +343,21 @@ export async function loadCachedGalleryReplica(
   return {
     cursor: typeof replica.cursor === "string" ? replica.cursor : null,
     instanceId: typeof replica.instanceId === "string" ? replica.instanceId : null,
-    rows: [...record.prints, ...replica.trash],
+    rows: [
+      ...record.prints,
+      ...(Array.isArray(replica.overflow) ? replica.overflow : []),
+      ...replica.trash,
+    ],
   };
 }
 
 /** Persist a replica after a pull that CHANGED something (the replica never
  * calls this for an idle pull, so an unchanged Library is never rewritten).
- * A record bounded below the replica's size keeps its rows but drops the
- * cursor — resuming over missing rows would never bring them back. */
+ * The paint list stays bounded (`MAX_PRINTS_PER_HOST`); the rest of the
+ * library rides `replica.overflow`, so the cursor persists with EVERY row it
+ * describes. Only a replica past `MAX_REPLICA_ROWS_PER_HOST` is truncated,
+ * and then the cursor is dropped — resuming over rows that were not saved
+ * would never bring them back, so that host re-snapshots instead. */
 export async function storeCachedGalleryReplica(
   hostId: string,
   state: CachedGalleryReplica,
@@ -356,15 +370,20 @@ export async function storeCachedGalleryReplica(
   trash.sort(
     (left, right) => (right.trashed_at ?? right.timestamp) - (left.trashed_at ?? left.timestamp),
   );
-  const truncated = live.length > MAX_PRINTS_PER_HOST || trash.length > MAX_PRINTS_PER_HOST;
+  const complete = live.length + trash.length <= MAX_REPLICA_ROWS_PER_HOST;
+  const keptLive = complete ? live : live.slice(0, MAX_REPLICA_ROWS_PER_HOST);
+  const keptTrash = complete
+    ? trash
+    : trash.slice(0, Math.max(0, MAX_REPLICA_ROWS_PER_HOST - keptLive.length));
   const record: CachedGalleryRecord = {
     hostId,
     updatedAt: Date.now(),
-    prints: live.slice(0, MAX_PRINTS_PER_HOST),
+    prints: keptLive.slice(0, MAX_PRINTS_PER_HOST),
     replica: {
-      cursor: truncated ? null : state.cursor,
+      cursor: complete ? state.cursor : null,
       instanceId: state.instanceId,
-      trash: trash.slice(0, MAX_PRINTS_PER_HOST),
+      trash: keptTrash,
+      overflow: keptLive.slice(MAX_PRINTS_PER_HOST),
     },
   };
   await requestFromStore(GALLERIES_STORE, "readwrite", (store) =>

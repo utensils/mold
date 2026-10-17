@@ -237,6 +237,11 @@ export const useEventsStore = defineStore("events", {
           // replica pull (O(delta) on a host serving the change feed).
           useGalleryStore().tickleHost(hostId);
         },
+        // Reconnecting is not live: the Library poll covers the gap.
+        onDisconnect: () => {
+          const stream = subscriptionFor(this).streams.get(hostId);
+          if (stream?.abort === abort) stream.open = false;
+        },
         onEvent: (event, data) => {
           useGenerationStore().onDurableEvent(hostId, event, data);
           if (event === "resync_required" && !abort.signal.aborted) {
@@ -272,6 +277,8 @@ export const useEventsStore = defineStore("events", {
           else if (frame.type.startsWith("gallery_")) useGalleryStore().tickleHost(hostId);
         },
         onClose: () => {
+          const current = subscriptionFor(this).streams.get(hostId);
+          if (current?.abort === abort) current.open = false;
           if (abort.signal.aborted) return;
           // `retry: true` means reaching here at all is the end of this
           // machine's stream, not a blip: a terminal status threw. Remember

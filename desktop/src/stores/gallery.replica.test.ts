@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { toRaw } from "vue";
 import { conditionalApiJsonTo } from "../lib/api/client";
+import { ipc } from "../lib/ipc";
 import { evictMedia } from "../lib/gallery/media";
 import { useConnectionStore } from "./connection";
 import { useGalleryStore } from "./gallery";
@@ -172,6 +173,35 @@ describe("replica-fed buckets", () => {
       expect(gallery.buckets[HOST]!.items.map((r) => r.filename)).toEqual(["b.png", "a.png"]),
     );
     expect(conditionalApiJsonTo).toHaveBeenCalledTimes(2);
+  });
+
+  it("a primary frame applied during a fetch is not lost to that older read", async () => {
+    connect(false);
+    const gallery = useGalleryStore();
+    vi.mocked(ipc.localGalleryList).mockResolvedValue({ images: [img("a.png", 1)], target: null });
+    await gallery.fetchBucket("local");
+    let release!: (value: { images: GalleryImage[]; target: null }) => void;
+    vi.mocked(ipc.localGalleryList).mockReturnValueOnce(
+      new Promise((resolve) => (release = resolve)) as never,
+    );
+    const stale = gallery.fetchBucket("local");
+    gallery.applyAdded({
+      type: "gallery_added",
+      filename: "b.png",
+      image: img("b.png", 2),
+    } as never);
+    // The server already lists the new print by the time a follow-up reads.
+    vi.mocked(ipc.localGalleryList).mockResolvedValue({
+      images: [img("a.png", 1, { title: "T" }), img("b.png", 2)],
+      target: null,
+    });
+    // The read that started BEFORE the frame changed something else, so it
+    // replaces the rows wholesale — without the frame's print.
+    release({ images: [img("a.png", 1, { title: "T" })], target: null });
+    await stale;
+    await vi.waitFor(() =>
+      expect(gallery.buckets.local!.items.map((r) => r.filename)).toEqual(["b.png", "a.png"]),
+    );
   });
 
   it("the Library poll stands down for a machine whose stream is live", async () => {

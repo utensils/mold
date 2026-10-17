@@ -597,6 +597,52 @@ describe("hostClient library organization plumbing", () => {
     expect(fetchMock.mock.calls.length).toBe(calls);
   });
 
+  it("forgets a failed capability probe instead of pinning the listing", async () => {
+    const { hostGallery } = await import("./hostClient");
+    let capsCalls = 0;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/capabilities")) {
+        capsCalls += 1;
+        if (capsCalls === 1) return failed(503);
+        return ok({
+          gallery: { can_delete: true, changes_feed: { protocol_version: 1 } },
+        });
+      }
+      if (url.includes("/api/gallery/changes"))
+        return ok({
+          protocol_version: 1,
+          instance_id: "i",
+          cursor: "c1",
+          more: false,
+          reset: false,
+          changes: [],
+        });
+      return ok([]);
+    });
+    const host = { ...remote, id: "flaky-caps-host" };
+    await hostGallery(host, undefined, "library", { refresh: true });
+    await hostGallery(host, undefined, "library", { refresh: true });
+    expect(capsCalls).toBe(2);
+    expect(
+      fetchMock.mock.calls.some(([url]) =>
+        String(url).includes("/api/gallery/changes"),
+      ),
+    ).toBe(true);
+  });
+
+  it("stops waiting when the caller aborts", async () => {
+    const { hostGallery } = await import("./hostClient");
+    fetchMock.mockImplementation(() => new Promise(() => undefined));
+    const controller = new AbortController();
+    const read = hostGallery(
+      { ...remote, id: "abort-host" },
+      controller.signal,
+    );
+    controller.abort();
+    await expect(read).rejects.toBeTruthy();
+  });
+
   it("reads and writes one config key on a specific host", async () => {
     const { hostConfigValue, hostWriteConfig } = await import("./hostClient");
     fetchMock.mockResolvedValueOnce(

@@ -199,6 +199,18 @@ describe("GalleryReplica — feed", () => {
     expect(replica.cursor).toBe("n1");
   });
 
+  it("a page that claims more without advancing fails without removals", async () => {
+    const { transport, pages } = feedTransport([
+      page([up(row("a.png", 1)), up(row("b.png", 2))], "c1"),
+    ]);
+    const replica = new GalleryReplica(transport);
+    await replica.pull();
+    pages.push(page([], "c1", { more: true, reset: true }));
+    await expect(replica.pull()).rejects.toThrow(/did not advance/);
+    expect(replica.cursor).toBeNull();
+    expect(replica.size).toBe(2);
+  });
+
   it("a failure mid-snapshot keeps applied rows and re-snapshots next time", async () => {
     const pages = [page([up(row("a.png", 1))], "s1", { more: true })];
     let fail = true;
@@ -341,6 +353,61 @@ describe("GalleryReplica — legacy", () => {
     expect(delta?.upserted.map((r) => r.filename)).toEqual(["b.png"]);
     expect(replica.trash()).toHaveLength(1);
     expect(replica.trashFresh).toBe(false);
+  });
+
+  it("partitions by trash-listing provenance, not only trashed_at", async () => {
+    // Older servers (and rows organized before trash stamping) list a print
+    // under ?view=trash without `trashed_at`.
+    const unstamped = row("t.png", 4);
+    const { transport, state } = legacyTransport(
+      [row("a.png", 1)],
+      [unstamped],
+    );
+    const replica = new GalleryReplica(transport);
+    await replica.pull();
+    expect(replica.live().map((r) => r.filename)).toEqual(["a.png"]);
+    expect(replica.trash().map((r) => r.filename)).toEqual(["t.png"]);
+    expect(replica.isTrashed("t.png")).toBe(true);
+    // A failed trash listing preserves it in the trash — never the Library.
+    transport.legacyTrash = async () => {
+      throw new Error("trash down");
+    };
+    state.library = [row("a.png", 1), row("b.png", 2)];
+    const delta = await replica.pull();
+    expect(delta?.removed).toEqual([]);
+    expect(replica.live().map((r) => r.filename)).toEqual(["b.png", "a.png"]);
+    expect(replica.trash().map((r) => r.filename)).toEqual(["t.png"]);
+  });
+
+  it("a membership flip with identical content is still a change", async () => {
+    const same = row("x.png", 3);
+    const { transport, state } = legacyTransport([same], []);
+    const replica = new GalleryReplica(transport);
+    await replica.pull();
+    state.library = [];
+    state.trash = [row("x.png", 3)];
+    const delta = await replica.pull();
+    expect(delta?.upserted.map((r) => r.filename)).toEqual(["x.png"]);
+    expect(replica.live()).toEqual([]);
+    expect(replica.trash().map((r) => r.filename)).toEqual(["x.png"]);
+  });
+
+  it("a feed row clears a name the trash listing put in the trash", async () => {
+    let feed = false;
+    const transport: GalleryReplicaTransport<Row> = {
+      feedSupported: () => feed,
+      changes: async () => page([up(row("t.png", 4))], "c1"),
+      legacyLibrary: async () => [],
+      legacyTrash: async () => [row("t.png", 4)],
+    };
+    const replica = new GalleryReplica(transport);
+    await replica.pull();
+    expect(replica.trash()).toHaveLength(1);
+    feed = true;
+    const delta = await replica.pull();
+    expect(delta?.upserted.map((r) => r.filename)).toEqual(["t.png"]);
+    expect(replica.live().map((r) => r.filename)).toEqual(["t.png"]);
+    expect(replica.isTrashed("t.png")).toBe(false);
   });
 
   it("an unlisted trash is preserved, never reported removed", async () => {

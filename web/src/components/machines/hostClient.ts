@@ -246,18 +246,35 @@ function hostGalleryReplica(host: HostEntry): GalleryReplica<WebGalleryRow> {
   const key = replicaKey(host);
   const existing = galleryReplicas.get(key);
   if (existing) return existing.replica;
+  // A re-keyed route replaces its predecessor; a host that left the
+  // registry takes its replica with it.
+  const registered = new Set([
+    ORIGIN_HOST_ID,
+    host.id,
+    ...listStoredHosts().map((stored) => stored.id),
+  ]);
   for (const [other, slot] of galleryReplicas) {
-    if (slot.hostId !== host.id) continue;
+    if (slot.hostId !== host.id && registered.has(slot.hostId)) continue;
     slot.replica.dispose();
     galleryReplicas.delete(other);
   }
   let capabilities: { at: number; value: Promise<HostCapabilities> } | null =
     null;
-  const caps = () => {
+  // Only an ANSWER is cached: a failed probe is forgotten at once, so a
+  // transient failure never pins the listing path for the whole TTL.
+  const caps = (): Promise<HostCapabilities> => {
     const now = Date.now();
-    if (!capabilities || now - capabilities.at > REPLICA_CAPABILITY_TTL_MS)
-      capabilities = { at: now, value: hostCapabilities(host) };
-    return capabilities.value;
+    if (!capabilities || now - capabilities.at > REPLICA_CAPABILITY_TTL_MS) {
+      const entry = {
+        at: now,
+        value: getJson<HostCapabilities>(host, "/api/capabilities"),
+      };
+      capabilities = entry;
+      entry.value.catch(() => {
+        if (capabilities === entry) capabilities = null;
+      });
+    }
+    return capabilities.value.catch(() => DEFAULT_CAPABILITIES);
   };
   const replica = new GalleryReplica<WebGalleryRow>(
     httpGalleryReplicaTransport<WebGalleryRow>(hostApiTarget(host), {
@@ -269,6 +286,31 @@ function hostGalleryReplica(host: HostEntry): GalleryReplica<WebGalleryRow> {
   return replica;
 }
 
+/** The CALLER stops waiting when its signal aborts; the shared pull keeps
+ * running for the replica's other readers. */
+function untilAborted<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return work;
+  if (signal.aborted)
+    return Promise.reject(
+      signal.reason ?? new DOMException("Aborted", "AbortError"),
+    );
+  return new Promise<T>((resolve, reject) => {
+    const abort = () =>
+      reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", abort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener("abort", abort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      },
+    );
+  });
+}
+
 /** One host's gallery view (`library` or `trash`), read from its replica.
  * Used by the multi-host gallery merge; works for the origin too (empty
  * `host.url`). A read JOINS a pull already in flight, so the library and
@@ -278,19 +320,19 @@ function hostGalleryReplica(host: HostEntry): GalleryReplica<WebGalleryRow> {
  * listed this pull, so callers never treat a held copy as fresh evidence. */
 export async function hostGallery(
   host: HostEntry,
-  _signal?: AbortSignal,
+  signal?: AbortSignal,
   view: GalleryView = "library",
   options: { refresh?: boolean } = {},
 ): Promise<WebGalleryRow[]> {
   const replica = hostGalleryReplica(host);
   // `refresh` carries change evidence (a tickle, a mutation, a poll tick):
   // it always pulls, coalescing behind a pull in flight.
-  if (options.refresh) await replica.pull();
+  if (options.refresh) await untilAborted(replica.pull(), signal);
   else if (
     replica.pulling ||
     Date.now() - replica.settledAt > HOST_GALLERY_READ_FRESH_MS
   )
-    await replica.join();
+    await untilAborted(replica.join(), signal);
   if (view === "trash") {
     if (!replica.trashFresh) throw new Error("Trash listing unavailable.");
     return replica.trash() as WebGalleryRow[];

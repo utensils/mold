@@ -193,10 +193,20 @@ export function isTrashedRow(row: GalleryReplicaRow): boolean {
   return row.trashed_at !== undefined && row.trashed_at !== null;
 }
 
+class FeedStalledError extends Error {
+  constructor() {
+    super("Gallery change feed did not advance its cursor.");
+    this.name = "FeedStalledError";
+  }
+}
+
 /** Accumulates the pre-change value of every name a pull touches, so the
  * final delta is an exact O(k) diff however many pages it took. */
 class TouchLedger<Row> {
   readonly prior = new Map<string, Row | undefined>();
+  /** Names whose library/trash membership flipped with no content change
+   * (a trash-listing row without `trashed_at`): still a change. */
+  readonly moved = new Set<string>();
   note(filename: string, value: Row | undefined) {
     if (!this.prior.has(filename)) this.prior.set(filename, value);
   }
@@ -209,6 +219,11 @@ export class GalleryReplica<Row extends GalleryReplicaRow> {
   private revisionValue = 0;
   private modeValue: "feed" | "legacy" | null = null;
   private trashFreshValue = false;
+  /** Names the last successful `?view=trash` listing returned. A legacy
+   * trash row need not carry `trashed_at` (older servers omit it), so the
+   * partition is by PROVENANCE as well as by stamp; a feed row for the name
+   * clears it (feed rows always say where they live). */
+  private trashNames = new Set<string>();
   private lastLibrary: readonly Row[] | null = null;
   private lastTrash: readonly Row[] | null = null;
   private liveCache: { revision: number; rows: Row[] } | null = null;
@@ -267,12 +282,22 @@ export class GalleryReplica<Row extends GalleryReplicaRow> {
     return this.byName;
   }
 
+  /** Whether this print lives in the trash (stamped, or listed there). */
+  isTrashed(filename: string): boolean {
+    const row = this.byName.get(filename);
+    return row !== undefined && this.inTrash(row);
+  }
+
+  private inTrash(row: Row): boolean {
+    return isTrashedRow(row) || this.trashNames.has(row.filename);
+  }
+
   /** Library rows, newest first. Memoized per revision. */
   live(): readonly Row[] {
     if (this.liveCache?.revision !== this.revisionValue) {
       const rows: Row[] = [];
       for (const row of this.byName.values())
-        if (!isTrashedRow(row)) rows.push(row);
+        if (!this.inTrash(row)) rows.push(row);
       rows.sort(compareLibraryRows);
       this.liveCache = { revision: this.revisionValue, rows };
     }
@@ -284,7 +309,7 @@ export class GalleryReplica<Row extends GalleryReplicaRow> {
     if (this.trashCache?.revision !== this.revisionValue) {
       const rows: Row[] = [];
       for (const row of this.byName.values())
-        if (isTrashedRow(row)) rows.push(row);
+        if (this.inTrash(row)) rows.push(row);
       rows.sort(compareTrashRows);
       this.trashCache = { revision: this.revisionValue, rows };
     }
@@ -338,6 +363,7 @@ export class GalleryReplica<Row extends GalleryReplicaRow> {
   dispose(): void {
     this.disposed = true;
     this.byName.clear();
+    this.trashNames.clear();
     this.cursorValue = null;
     this.instance = null;
     this.lastLibrary = null;
@@ -414,8 +440,15 @@ export class GalleryReplica<Row extends GalleryReplicaRow> {
           stale = new Set(this.byName.keys());
         }
         this.instance = answer.instance_id;
+        if (answer.more && answer.cursor === since)
+          // A page that claims more without advancing would loop forever;
+          // treat it as a failure (the catch drops the cursor, and the
+          // stale set dies unapplied, so nothing is removed).
+          throw new FeedStalledError();
         for (const change of answer.changes) {
           stale?.delete(change.filename);
+          if (this.trashNames.delete(change.filename))
+            ledger.moved.add(change.filename);
           const prior = this.byName.get(change.filename);
           if (change.removed || !change.image) {
             if (prior === undefined) continue;
@@ -428,9 +461,8 @@ export class GalleryReplica<Row extends GalleryReplicaRow> {
         }
         this.cursorValue = answer.cursor;
         applied = true;
-        const looped = answer.more && answer.cursor === since;
         since = answer.cursor;
-        if (!answer.more || looped) {
+        if (!answer.more) {
           if (stale) {
             for (const filename of stale) {
               ledger.note(filename, this.byName.get(filename));
@@ -445,8 +477,10 @@ export class GalleryReplica<Row extends GalleryReplicaRow> {
       if (rebuilding) this.cursorValue = null;
     } catch (error) {
       // Mid-snapshot failure: rows applied so far are fresh, but the stale
-      // set dies with this pull, so the next pull must snapshot again.
-      if (rebuilding) this.cursorValue = null;
+      // set dies with this pull, so the next pull must snapshot again. A
+      // feed that stopped advancing is not trusted to resume either.
+      if (rebuilding || error instanceof FeedStalledError)
+        this.cursorValue = null;
       if (applied || ledger.prior.size > 0) {
         this.modeValue = "feed";
         await this.finish(ledger, reset, "feed", startCursor);
@@ -484,11 +518,28 @@ export class GalleryReplica<Row extends GalleryReplicaRow> {
     this.lastTrash = trash;
     const ledger = new TouchLedger<Row>();
     const next = new Map<string, Row>();
-    if (trash !== null) for (const row of trash) next.set(row.filename, row);
+    const nextTrash = new Set<string>();
+    if (trash !== null)
+      for (const row of trash) {
+        next.set(row.filename, row);
+        nextTrash.add(row.filename);
+      }
     else
+      // Not listed this pull: keep what we hold in the trash, by stamp or
+      // by the provenance of the last listing that did answer.
       for (const row of this.byName.values())
-        if (isTrashedRow(row)) next.set(row.filename, row);
-    for (const row of library) next.set(row.filename, row);
+        if (this.inTrash(row)) {
+          next.set(row.filename, row);
+          if (this.trashNames.has(row.filename)) nextTrash.add(row.filename);
+        }
+    for (const row of library) {
+      next.set(row.filename, row);
+      nextTrash.delete(row.filename);
+    }
+    for (const name of new Set([...this.trashNames, ...nextTrash]))
+      if (this.trashNames.has(name) !== nextTrash.has(name))
+        ledger.moved.add(name);
+    this.trashNames = nextTrash;
     for (const [filename, prior] of this.byName) {
       if (!next.has(filename)) {
         ledger.note(filename, prior);
@@ -512,12 +563,18 @@ export class GalleryReplica<Row extends GalleryReplicaRow> {
   ): Promise<ReplicaDelta<Row> | null> {
     const upserted: Row[] = [];
     const removed: string[] = [];
+    for (const filename of ledger.moved)
+      if (!ledger.prior.has(filename))
+        ledger.prior.set(filename, this.byName.get(filename));
     for (const [filename, prior] of ledger.prior) {
       const now = this.byName.get(filename);
       if (now === undefined) {
         if (prior !== undefined) removed.push(filename);
       } else if (prior === undefined || !galleryRowsEqual(prior, now)) {
         upserted.push(now);
+      } else if (ledger.moved.has(filename)) {
+        if (prior !== now) this.byName.set(filename, prior);
+        upserted.push(prior);
       } else if (prior !== now) {
         // Equal content, new object: keep the old one so identity-keyed
         // consumers (reactive rows, thumbnail URLs) see no change at all.

@@ -103,6 +103,19 @@ describe("mobile gallery cache", () => {
     expect(replica?.rows.map((p) => p.filename).sort()).toEqual(["gone.png", "new.png", "old.png"]);
   });
 
+  it("keeps a large library's cursor: rows past the paint cap persist too", async () => {
+    const rows = Array.from({ length: 4_500 }, (_, i) => print(`p${i}.png`, i));
+    await storeCachedGalleryReplica("instance-big", {
+      cursor: "c-big",
+      instanceId: "instance-big",
+      rows,
+    });
+    expect(await loadCachedGallery("instance-big")).toHaveLength(4_000);
+    const replica = await loadCachedGalleryReplica("instance-big");
+    expect(replica?.cursor).toBe("c-big");
+    expect(replica?.rows).toHaveLength(4_500);
+  });
+
   it("drops the replica cursor when another writer saves the record", async () => {
     await storeCachedGalleryReplica("instance-p", {
       cursor: "c1",

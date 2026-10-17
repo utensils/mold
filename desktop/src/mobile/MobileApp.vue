@@ -8457,7 +8457,7 @@ async function performGalleryRefresh(): Promise<void> {
             cacheKey,
             target,
             capabilities: () => serverCapabilities[host.id],
-            signal: controller.signal,
+            timeoutMs: GALLERY_HOST_TIMEOUT_MS,
           }),
           capabilitiesRead,
         ]);
@@ -11754,7 +11754,7 @@ async function observeMobileGalleryArrivals(): Promise<void> {
       cacheKey: mobileGalleryCacheKey(host),
       target: mobileHostTarget(host),
       capabilities: () => serverCapabilities[host.id],
-      signal: AbortSignal.timeout(GALLERY_HOST_TIMEOUT_MS),
+      timeoutMs: GALLERY_HOST_TIMEOUT_MS,
     });
     const cached = await Promise.all(
       observingHosts.map(async (host) => {

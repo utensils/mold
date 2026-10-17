@@ -17,6 +17,9 @@ export interface StreamOptions {
   onOpenError?: (error: Error) => void;
   /** Called when the stream ends or errors after retries. */
   onClose?: (error: Error | null) => void;
+  /** An opened stream dropped and is retrying (`retry: true`); `onOpen`
+   * fires again when it reconnects. */
+  onDisconnect?: () => void;
   /** Retry transient drops (default true for GET snapshots-first streams). */
   retry?: boolean;
   /** HTTP responses that are configuration errors, not reconnectable drops. */
@@ -87,8 +90,10 @@ export async function sseStream(path: string, options: StreamOptions): Promise<v
         options.onEvent(msg.event || "message", msg.data);
       },
       onclose() {
-        if (retriable && !options.signal.aborted)
+        if (retriable && !options.signal.aborted) {
+          options.onDisconnect?.();
           throw new Error("Event stream closed; reconnecting.");
+        }
       },
       onerror(err) {
         const error = err instanceof Error ? err : new Error(String(err));
@@ -99,6 +104,7 @@ export async function sseStream(path: string, options: StreamOptions): Promise<v
         const status = (error as Error & { status?: number }).status;
         if (status !== undefined && options.terminalHttpStatuses?.includes(status)) throw error;
         if (!retriable) throw error;
+        options.onDisconnect?.();
         // returning undefined lets fetchEventSource retry with backoff
       },
     });

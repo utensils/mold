@@ -107,6 +107,11 @@ describe("events subscription", () => {
     options.onEvent?.("message", JSON.stringify({ type: "gallery_updated", filename: "a.png" }));
     options.onEvent?.("resync_required", "{}");
     expect(tickle.mock.calls).toEqual([["workstation-7680"], ["workstation-7680"]]);
+    // A dropped connection (retrying) is not live: the Library poll resumes.
+    options.onDisconnect?.();
+    expect(events.isLive("workstation-7680")).toBe(false);
+    options.onOpen?.(new Response());
+    expect(events.isLive("workstation-7680")).toBe(true);
     // A secondary's frame is never applied as if it were the primary's.
     expect(apply).not.toHaveBeenCalled();
   });
