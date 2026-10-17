@@ -80,6 +80,15 @@ public actor GalleryReplica {
 
     public func setSink(_ sink: Sink?) { self.sink = sink }
 
+    /// Starts from a known state, as a relaunch from a saved file would --
+    /// what a contract replay needs to begin mid-feed.
+    func seed(_ seeded: [GalleryPrint], cursor: String?, instanceID: String?) {
+        loaded = true
+        rows = Dictionary(seeded.map { ($0.filename, $0) }, uniquingKeysWith: { $1 })
+        self.cursor = cursor
+        self.instanceID = instanceID
+    }
+
     /// Forgets the listing validators, so the next legacy read is a full one.
     /// Synchronous on purpose: a main-actor caller that has just made its
     /// rows diverge must not have to hop to say so.
