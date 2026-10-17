@@ -14,7 +14,7 @@ description = "Model-discovery catalog for mold — live HF + Civitai proxy with
 name = "mold_catalog"
 
 [dependencies]
-mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.36.0" }
+mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.37.0" }
 unicode-normalization-alignments = "0.1.12"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
