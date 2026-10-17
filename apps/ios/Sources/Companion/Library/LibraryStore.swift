@@ -5,8 +5,10 @@ import MoldClient
 ///
 /// Holds DATA only: which shelf a window shows, what it searched for and what
 /// it selected are that window's own state. A print held on several machines
-/// is one entry (`LibraryMerge`, the Mac's rule). Listings are fetched with
-/// the machine's ETag, so an unchanged library costs a 304 and no decoding.
+/// is one entry (`LibraryMerge`, the Mac's rule). Each machine is read through
+/// one MoldClient `GalleryReplica` (`LibraryStore+Replica`): its change feed
+/// where it has one, else its conditional listings, so an unchanged library
+/// costs a feed page or a 304 and a change costs the rows that changed.
 @Observable
 final class LibraryStore {
     let sourceMediaCatalog = SourceMediaCatalog()
@@ -26,7 +28,7 @@ final class LibraryStore {
     }
 
     func markViewed(_ id: PrintID) {
-        if let entry = pool.first(where: { $0.everyCopy.contains { $0.id == id } }) { unreadMedia.view(entry) }
+        if let entry = liveTimeline.tile(containing: id) { unreadMedia.view(entry) }
         else { unreadMedia.view(id) }
         unreadMedia.save(to: readDefaults)
         unreadCountChanged?(unreadCount)
@@ -37,14 +39,14 @@ final class LibraryStore {
     var reconcilingCollectionVisibility = false
     var collectionInventory: [MoldHost.ID: [Collection]] { collections }
 
-
-
-    private(set) var pool: [LibraryEntry] = [] { didSet { sourceAccessRevision &+= 1 } }
-    private(set) var trashPool: [LibraryEntry] = [] { didSet { sourceAccessRevision &+= 1 } }
+    var pool: [LibraryEntry] = [] { didSet { sourceAccessRevision &+= 1 } }
+    var trashPool: [LibraryEntry] = [] { didSet { sourceAccessRevision &+= 1 } }
     private(set) var shelves: [CollectionShelf] = [] { didSet { sourceAccessRevision &+= 1 } }
-    private(set) var knownTags: [String] = []
-    /// Bumped whenever the pool changes; `LibraryShowingCache` keys on it.
-    private(set) var revision = 0
+    var knownTags: [String] = []
+    /// Bumped whenever the pool, the trash or the shelves change -- and only
+    /// then: a pull that changed nothing leaves it alone. `LibraryShowingCache`
+    /// keys on it.
+    var revision = 0
     private(set) var isLoading = false
     /// Machines whose prints are showing from this device's saved copy
     /// because they are not answering right now.
@@ -60,18 +62,32 @@ final class LibraryStore {
     }
     /// Told when a machine's library is dropped (the machine was removed).
     @ObservationIgnored var forgot: ((MoldHost.ID) -> Void)?
-    /// The last snapshot write per machine: the next waits for it, so two
+    /// The last collections write per machine: the next waits for it, so two
     /// quick listings can never land on disk in the wrong order.
-    @ObservationIgnored private var writes: [MoldHost.ID: Task<Void, Never>] = [:]
-    @ObservationIgnored private var cacheEpoch = 0
+    @ObservationIgnored var writes: [MoldHost.ID: Task<Void, Never>] = [:]
+    /// Bumped by Clear Cache: a replica, restore or listing begun before it
+    /// may not put anything back.
+    @ObservationIgnored var cacheEpoch = 0
 
     @ObservationIgnored let hosts: HostStore
-    @ObservationIgnored private var live: [MoldHost.ID: [GalleryPrint]] = [:]
-    @ObservationIgnored private var trashed: [MoldHost.ID: [GalleryPrint]] = [:]
-    @ObservationIgnored private var collections: [MoldHost.ID: [Collection]] = [:]
-    @ObservationIgnored private var etags: [MoldHost.ID: String] = [:]
-    @ObservationIgnored private var trashEtags: [MoldHost.ID: String] = [:]
-    @ObservationIgnored private var pending: [MoldHost.ID: Task<Void, Never>] = [:]
+    /// Each machine's rows as shown, optimistic edits included.
+    @ObservationIgnored var live: [MoldHost.ID: [GalleryPrint]] = [:]
+    @ObservationIgnored var trashed: [MoldHost.ID: [GalleryPrint]] = [:]
+    @ObservationIgnored var collections: [MoldHost.ID: [Collection]] = [:]
+    /// Each machine's replica and the record identity it was made for.
+    @ObservationIgnored var replicas: [MoldHost.ID: (identity: String, replica: GalleryReplica)] = [:]
+    @ObservationIgnored var prunedReplicaFiles = false
+    /// The merged timelines and their copy -> tile indexes, and what changed
+    /// in the rows since they were last settled.
+    @ObservationIgnored var liveTimeline = LibraryTimeline(order: .newestFirst)
+    @ObservationIgnored var trashTimeline = LibraryTimeline(order: .recentlyTrashedFirst)
+    @ObservationIgnored var pendingLive = PendingRows()
+    @ObservationIgnored var pendingTrash = PendingRows()
+    /// Machines whose collections must be read again (an organization delta,
+    /// a `collectionsChanged` frame, missed events), not on every pull.
+    @ObservationIgnored var collectionsStale: Set<MoldHost.ID> = []
+    /// A coalescing pause in front of an event's pull, per machine.
+    @ObservationIgnored var tickles: [MoldHost.ID: Task<Void, Never>] = [:]
     @ObservationIgnored let snapshots: LibrarySnapshots
     // Edits (`LibraryStore+Edits`).
     @ObservationIgnored var outbox = MutationOutbox()
@@ -93,144 +109,92 @@ final class LibraryStore {
     }
 
     /// The saved copy of every machine's library, shown before any machine is
-    /// asked (and when none answers). Decoded off the main thread.
+    /// asked (and when none answers). Each replica decodes its own file off
+    /// the main thread, once; after the first launch this is nothing.
     func restoreSaved() async {
-        // Only machines not already listed: after the first launch this is
-        // nothing, and nothing is decoded.
-        let ids = hosts.hosts.map(\.id).filter { live[$0] == nil }
-        guard !ids.isEmpty else { return }
         let epoch = cacheEpoch
+        let ids = hosts.hosts.map(\.id).filter { collections[$0] == nil }
         let snapshots = snapshots
         let saved = await Task.detached(priority: .userInitiated) {
-            ids.compactMap { id in snapshots.load(id).map { (id, $0) } }
+            ids.compactMap { id in
+                snapshots.migrate(id)
+                return snapshots.load(id).map { (id, $0) }
+            }
         }.value
-        acceptRestored(saved, from: epoch)
-    }
-
-    /// The detached decoder may finish after Clear Cache. Only its original
-    /// cache generation is allowed to put those rows and ETags back in memory.
-    func acceptRestored(_ saved: [(MoldHost.ID, LibrarySnapshot)], from epoch: Int) {
         guard epoch == cacheEpoch else { return }
-        for (id, snapshot) in saved where live[id] == nil {
-            live[id] = snapshot.prints
-            trashed[id] = snapshot.trashed
-            collections[id] = snapshot.collections
-            etags[id] = snapshot.etag
-            trashEtags[id] = snapshot.trashEtag
-        }
-        if !saved.isEmpty { rebuild() }
+        for (id, snapshot) in saved where collections[id] == nil { collections[id] = snapshot.collections }
+        if !saved.isEmpty { refreshShelves() }
+        let restoring = hosts.hosts.map { replica(for: $0) }
+        for replica in restoring { await replica.restoreSaved() }
+        settleTimelines()
     }
 
-    /// Every machine that answers, at once; one merge at the end.
+    /// Every machine that answers, at once; one settle at the end. This is
+    /// the reconcile -- pull to refresh, a return to the foreground, a
+    /// background wake -- after which frames may have been missed, so it
+    /// reads collections too.
     func reload() async {
         isLoading = true
         defer { isLoading = false }
-        let targets = hosts.upHosts
-        await withTaskGroup(of: Void.self) { group in
-            for host in targets { group.addTask { await self.fetch(host) } }
-        }
         // A machine that left the list leaves the grid. One that stopped
         // answering keeps its saved prints (`offlineHosts`).
-        let present = Set(hosts.hosts.map(\.id))
-        for id in Set(live.keys).subtracting(present) { forget(id) }
-        rebuild()
+        prune(to: hosts.hosts)
+        let targets = hosts.upHosts
+        collectionsStale.formUnion(targets.map(\.id))
+        await withTaskGroup(of: Void.self) { group in
+            for host in targets { group.addTask { await self.pull(host) } }
+        }
+        settleTimelines()
         await reconcileCollectionVisibility()
     }
 
-    func reload(_ id: MoldHost.ID) async {
+    /// One machine, after something this app did there (or an event).
+    /// `full` delivers its whole state even when unchanged: the repair after
+    /// an optimistic edit the machine refused.
+    func reload(_ id: MoldHost.ID, full: Bool = false) async {
         guard let host = hosts.host(id), hosts.isUp(host) else { return }
-        await fetch(host)
-        rebuild()
+        await pull(host, full: full)
+        settleTimelines()
         await reconcileCollectionVisibility()
     }
 
-    /// Clear the device's saved listings, including their ETags. Prints from
-    /// machines still answering remain on screen until the next refresh;
-    /// offline-only prints leave immediately because their saved copy is gone.
+    /// Clear the device's saved listings, including their validators. Prints
+    /// from machines still answering remain on screen until the next
+    /// refresh; offline-only prints leave immediately because their saved
+    /// copy is gone.
     func clearOfflineCache() async {
         cacheEpoch += 1
-        for task in pending.values { task.cancel() }
-        pending.removeAll()
-        await waitForSnapshotWrites()
+        for task in tickles.values { task.cancel() }
+        tickles.removeAll()
+        // Only the collections writes: flushing a replica about to be
+        // discarded would write its whole file just to delete it.
+        let pendingWrites = Array(writes.values)
+        for task in pendingWrites { await task.value }
         writes.removeAll()
+        let dropped = replicas.values.map(\.replica)
+        replicas.removeAll()
+        for replica in dropped { await replica.discard() }
         snapshots.purge()
-        etags.removeAll()
-        trashEtags.removeAll()
         for host in hosts.hosts where !hosts.isUp(host) {
             live[host.id] = nil
             trashed[host.id] = nil
             collections[host.id] = nil
         }
-        rebuild()
+        rebuildNow()
     }
 
-    /// Await the writes already queued when this barrier starts. Capturing
-    /// their tasks keeps later listings from changing what completion means.
+    /// Await the writes already queued when this barrier starts, and write
+    /// every replica's state now. Capturing the tasks keeps later listings
+    /// from changing what completion means.
     func waitForSnapshotWrites() async {
         let pendingWrites = Array(writes.values)
         for task in pendingWrites { await task.value }
+        for entry in replicas.values { await entry.replica.flush() }
     }
 
-    private func fetch(_ host: MoldHost) async {
-        let client = hosts.backend(for: host)
-        let epoch = cacheEpoch
-        var changed = false
-        defer { if changed && epoch == cacheEpoch { saveSnapshot(host.id) } }
-        do {
-            let gallery = try await client.gallery(etag: etags[host.id])
-            guard epoch == cacheEpoch, hosts.host(host.id) == host, !Task.isCancelled else { return }
-            switch gallery {
-            case let .fresh(prints, etag):
-                live[host.id] = prints
-                etags[host.id] = etag
-                changed = true
-            case .notModified:
-                break
-            }
-            if hosts.capabilities[host.id]?.trashEnabled == true {
-                let trash = try await client.trashedPrints(etag: trashEtags[host.id])
-                guard epoch == cacheEpoch, hosts.host(host.id) == host, !Task.isCancelled else { return }
-                switch trash {
-                case let .fresh(prints, etag):
-                    trashed[host.id] = prints
-                    trashEtags[host.id] = etag
-                    changed = true
-                case .notModified:
-                    break
-                }
-            }
-            if canOrganize(on: host.id) {
-                let visibilityGeneration = collectionVisibility.generation
-                let fresh = try await client.collections()
-                guard epoch == cacheEpoch, hosts.host(host.id) == host,
-                      collectionVisibility.generation == visibilityGeneration else { return }
-                collectionInventoryAvailable.insert(host.id)
-                if fresh != collections[host.id] { collections[host.id] = fresh; changed = true }
-            }
-            hosts.clearFailures(for: host.id, doing: String(localized: "list its prints"))
-        } catch is CancellationError {
-            // Foreground navigation and coalesced gallery events can end a
-            // refresh after prints loaded. Cancellation is not a host failure.
-        } catch {
-            guard epoch == cacheEpoch, hosts.host(host.id) == host, !Task.isCancelled else { return }
-            collectionInventoryAvailable.remove(host.id)
-            hosts.report(host, doing: String(localized: "list its prints"), error)
-        }
-    }
-
-    private func forget(_ id: MoldHost.ID) {
-        collectionInventoryAvailable.remove(id)
-        live[id] = nil; trashed[id] = nil; collections[id] = nil
-        etags[id] = nil; trashEtags[id] = nil
-        snapshots.remove(id)
-        forgot?(id)
-    }
-
-    /// Written off the main thread; a listing is small, but not free.
-    private func saveSnapshot(_ id: MoldHost.ID) {
-        guard let prints = live[id] else { return }
-        let snapshot = LibrarySnapshot(prints: prints, trashed: trashed[id], collections: collections[id],
-                                       etag: etags[id], trashEtag: trashEtags[id])
+    /// Collections written off the main thread, when they change.
+    func saveCollections(_ id: MoldHost.ID) {
+        let snapshot = LibrarySnapshot(collections: collections[id])
         let snapshots = snapshots
         let previous = writes[id]
         writes[id] = Task.detached(priority: .utility) {
@@ -239,27 +203,43 @@ final class LibraryStore {
         }
     }
 
-    /// For an edit shown before the machine confirms it.
+    /// For an edit shown before the machine confirms it. A change that keeps
+    /// every row in place is settled as a patch; anything else re-merges.
     func updateLive(_ id: MoldHost.ID, _ change: ([GalleryPrint]) -> [GalleryPrint]) {
-        if let prints = live[id] { live[id] = change(prints) }
-        if let prints = trashed[id] { trashed[id] = change(prints) }
+        if let prints = live[id] { live[id] = change(prints); note(prints, live[id] ?? [], on: id, trash: false) }
+        if let prints = trashed[id] { trashed[id] = change(prints); note(prints, trashed[id] ?? [], on: id, trash: true) }
+    }
+
+    private func note(_ old: [GalleryPrint], _ new: [GalleryPrint], on id: MoldHost.ID, trash: Bool) {
+        guard old.count == new.count, zip(old, new).allSatisfy({ $0.filename == $1.filename }) else {
+            if trash { pendingTrash.full = true } else { pendingLive.full = true }
+            return
+        }
+        let changed = zip(old, new).filter { $0 != $1 }.map { PrintID(host: id, filename: $1.filename) }
+        if trash { pendingTrash.note(changed) } else { pendingLive.note(changed) }
     }
 
     func acceptCollection(_ collection: Collection, on hostID: MoldHost.ID) {
         collections[hostID] = collections[hostID]?.map { $0.id == collection.id ? collection : $0 }
-        rebuild()
+        refreshShelves()
     }
 
-    func rebuildNow() { rebuild() }
+    /// Everything from scratch. For what no delta describes (Clear Cache).
+    func rebuildNow() {
+        pendingLive.full = true
+        pendingTrash.full = true
+        settleTimelines()
+        refreshShelves()
+    }
 
-    private func rebuild() {
-        pool = merged(live)
-        trashPool = merged(trashed)
-        shelves = CollectionShelf.merge(collections).map {
+    /// The shelves, from the collections and the visibility ledger. Only a
+    /// real difference re-renders.
+    func refreshShelves() {
+        let fresh = CollectionShelf.merge(collections).map {
             $0.overriding(hidden: collectionVisibility.desiredHidden(slug: $0.slug, fallback: $0.hidden))
         }
-        knownTags = Array(Set(pool.flatMap(\.tags)))
-            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        guard fresh != shelves else { return }
+        shelves = fresh
         refreshUnreadMedia()
         revision += 1
     }
@@ -274,26 +254,21 @@ final class LibraryStore {
         if unreadMedia.count != previous.count { unreadCountChanged?(unreadCount) }
     }
 
-    /// In machine-list order, so the merge is stable across reloads.
-    private func merged(_ perHost: [MoldHost.ID: [GalleryPrint]]) -> [LibraryEntry] {
-        let entries = hosts.hosts.flatMap { host in
-            (perHost[host.id] ?? []).map { LibraryEntry(host: host, print: $0) }
-        }
-        return LibraryMerge.merge(entries, localHost: nil)
-    }
-
-    /// A gallery event on one machine re-reads that machine, coalesced: a
-    /// batch of four prints is one reload, not four.
+    /// A gallery event on one machine tickles its replica, coalesced: frames
+    /// arriving within the pause share one pull, and a pull that starts
+    /// later answers for them too (`pull` drops the pause).
     private func heard(_ event: MoldEvent, from id: MoldHost.ID) {
         switch event {
-        case .gallery, .resyncRequired:
+        case .gallery(.collectionsChanged):
+            collectionsStale.insert(id)
+            tickle(id)
+        case .resyncRequired:
             sourceMediaChanged(event, host: id)
-            pending[id]?.cancel()
-            pending[id] = Task { [weak self] in
-                try? await Task.sleep(for: .milliseconds(300))
-                guard !Task.isCancelled else { return }
-                await self?.reload(id)
-            }
+            collectionsStale.insert(id)
+            tickle(id)
+        case .gallery:
+            sourceMediaChanged(event, host: id)
+            tickle(id)
         default:
             break
         }

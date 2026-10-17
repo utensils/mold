@@ -27,7 +27,32 @@ owner resumes test gating.
 
 **Never register `mold://`.** The Tauri app owns it and iOS resolves a shared scheme arbitrarily. The companion's scheme is `moldstudio://`. The pairing webpage can hand its unchanged fragment to `moldstudio://pair#…`; accept only the exact `pair` authority with no credentials, port, path or query and reuse the universal-link payload validation. Never put invitations in a URL query. Bound the in-app paste field to three scrolling lines so long Secure codes do not hide Pair. Pairing QRs are universal links, `https://utensils.io/mold/pair#<form-encoded payload>` (the payload in the FRAGMENT, never the query, so it never reaches the web server): the app claims `applinks:utensils.io` (the `apple-app-site-association` lives in `utensils/utensils.github.io` `public/.well-known/`), an opened link lands in `PairingLinkSheet` and is claimed only when the person taps Pair, and `utensils.io/mold/pair` (`website/pair.md`) is the page for a phone without the app. Producers and parsers on both sides (`studio/api/pairing.ts`, MoldClient's `MobilePairingPayload`) are held to `studio/api/pairing.fixtures.json`; change the format there first. Only version 2 payloads are accepted. Absent `mode` means Secure; its claim signatures bind the one-use invitation to the completed Noise handshake and device keys through encrypted `POST /api/pairing/claim`. Explicit Regular payloads carry `mode: regular`, a direct HTTP(S) origin and `pairing_token`; redeem only against that approved origin through `/api/pairing/regular/claim`. Regular supports LAN, VPN and WAN, never Mold proxy. Camera-scanned Regular codes name their mode and direct address before an explicit Pair claim. Persist the selected mode in `MoldHost` and machine metadata so queued work and media retain it. Existing direct records without mode or pins remain Regular; new choices default Secure. Switching mode needs a fresh pairing or a separate Regular credential, never the previous Secure API key. Keep one physical machine row; regular requests never adopt discovered routes or fall back to proxy.
 
-**Library offline and thumbnails.** Machines serve thumbnails at `size=256` or `512` only (anything else is a 422 and an empty tile): `ThumbnailLoader.bucket` never asks for more; the viewer reads the full print (`original(for:)`), not the thumbnail route. Listings are saved per machine (`LibrarySnapshots`, the app's strategy-free coders) and restored before any machine is asked; pictures live in Application Support/offline (excluded from backup), bounded by `OfflineLimit`. The grid's pinch is `PinchRecognizer` (UIKit), not `MagnifyGesture`.
+**Library offline and thumbnails.** Machines serve thumbnails at `size=256` or `512` only (anything else is a 422 and an empty tile): `ThumbnailLoader.bucket` never asks for more; the viewer reads the full print (`original(for:)`), not the thumbnail route. Each machine's rows are saved by its `GalleryReplica` (`LibrarySnapshots.replicas`, beside a collections-only `LibrarySnapshot` per machine, the app's strategy-free coders) and restored before any machine is asked (`GalleryReplica.restoreSaved`); pictures live in Application Support/offline (excluded from backup), bounded by `OfflineLimit`. The grid's pinch is `PinchRecognizer` (UIKit), not `MagnifyGesture`.
+
+**Library replicas.** `LibraryStore` reads each machine through one MoldClient
+`GalleryReplica` with the Mac's contract (`macos-native.md`): kept across route
+changes, replaced only when the API key, connection mode or server instance
+changes; every pull carries `Pull.origin` and `absorb` refuses a stale origin
+with `redeliver()`; a Clear Cache epoch fences replicas, restores and listings
+begun before it. The feed is used only when `hasGalleryChangesFeed`; otherwise
+the conditional listings (trash only when `trashEnabled`). The replica's
+`inTrash`, not `trashedAt`, decides a row's partition. Deltas reach `absorb`
+before `pull()` returns; `absorb` only edits `live`/`trashed`, replays the
+outbox's pending edits and notes ids, and whoever started the pull calls
+`settleTimelines()` (`LibraryTimeline` patch, else a full merge). A nil delta
+must not reassign `pool` or bump `revision`; shelves re-render only when
+`refreshShelves` finds a difference. SSE `.gallery`/`.resyncRequired` frames
+only `tickle` (a 300 ms pause, then one pull; any pull starting first answers
+for them), never a full reload. Collections are re-read only when stale: first
+listing this launch, `collectionsChanged`, resync, a reset or a delta touching
+a filed row, the outbox's collection edits, and the fleet `reload()` reconcile
+(pull to refresh, foreground, `BGAppRefreshTask`). An outbox give-up is a FULL
+pull so a refused optimistic edit is undone. Replica files live under
+Application Support/offline/library/replicas (not Caches: they are the offline
+Library), are flushed on entering the background and after a background
+refresh, discarded with their machine, and pruned once per launch. Older
+builds' whole-listing snapshots are migrated once (`LibrarySnapshots.migrate`
+-> `GalleryReplicaStore.seedIfAbsent`), keeping their validators.
 
 **Library.** Every edit goes through `LibraryStore.apply` -> `PrintEdit.plan` over `everyCopy` -> the shared `MutationOutbox` (optimistic, retried with the same operation id, re-read on give-up); never a hand-rolled request per print. A recipe's output kind is `GenerationRecipe.makes` (GLB -> 3-D, time axis -> clip), never a family list.
 

@@ -90,6 +90,25 @@ public struct GalleryReplicaStore: Sendable {
         }
     }
 
+    /// Writes a starting state for a machine that has no saved replica yet:
+    /// the one-time migration from listings an app saved on its own. The
+    /// validators are kept, so an unchanged machine still answers `304`, and
+    /// `trashed` names stay in Recently Deleted whatever their `trashedAt`.
+    /// Never overwrites a replica's own file; answers whether it wrote.
+    @discardableResult
+    public func seedIfAbsent(_ hostID: UUID, live: [GalleryPrint], trashed: [GalleryPrint],
+                             liveETag: String?, trashETag: String?) -> Bool {
+        guard !FileManager.default.fileExists(atPath: file(hostID).path) else { return false }
+        var rows: [String: GalleryPrint] = [:]
+        for print in live + trashed { rows[print.filename] = print }
+        let snapshot = Snapshot(
+            hostID: hostID, instanceID: nil, cursor: nil, liveETag: liveETag, trashETag: trashETag,
+            rows: rows.values.sorted { $0.filename < $1.filename }
+                .map { Row(print: $0, rawMetadata: $0.rawMetadataJSON) },
+            listedInTrash: Set(trashed.map(\.filename)).sorted())
+        return (try? save(snapshot)) != nil
+    }
+
     func load(_ hostID: UUID) -> Snapshot? {
         guard let data = try? Data(contentsOf: file(hostID)),
               let snapshot = try? MoldJSON.localDecoder.decode(Snapshot.self, from: data),
@@ -130,6 +149,20 @@ extension GalleryReplica {
         liveETag = snapshot.liveETag
         trashETag = snapshot.trashETag
         listedInTrash = Set(snapshot.listedInTrash ?? [])
+    }
+
+    /// The saved state, handed over whole -- through the sink, as a reset --
+    /// before the machine is asked: what an app shows offline, or while the
+    /// first pull is on its way. Once only, and never after a pull has
+    /// already delivered: from then on the consumer holds the replica's
+    /// state and only deltas follow. Nil when nothing was saved.
+    @discardableResult
+    public func restoreSaved() async -> ReplicaDelta? {
+        ensureLoaded()
+        guard !discarded, deliveredScopes.isEmpty, !rows.isEmpty,
+              let delta = delta(for: Outcome(scope: .all), full: true) else { return nil }
+        if let sink { await sink(delta) }
+        return delta
     }
 
     /// Debounced: a burst of pulls writes the file once, with the latest state.

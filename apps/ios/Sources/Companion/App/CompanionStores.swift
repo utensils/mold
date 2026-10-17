@@ -116,6 +116,9 @@ final class CompanionStores {
         pauseStreams()
         activities.enteredBackground()
         scheduleRefresh()
+        // The replicas save on a debounce; iOS may end a suspended app
+        // before it fires.
+        Task { [library] in await library.waitForSnapshotWrites() }
         Task { await widgets.refresh() }
         nearby.stop()
         let ids = hosts.hosts.map(\.id)
