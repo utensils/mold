@@ -70,6 +70,39 @@ fn ensure_indexed(
     reindex(db, output_dir, record, id, &version)
 }
 
+/// How many times an index FAILURE re-marks a print in the gallery change
+/// feed per media version (per process) before it stops: enough for a
+/// transient failure to be retried on the next feed pull, few enough that a
+/// permanently unreadable mesh lets the feed settle.
+const INDEX_FAILURE_MARKS: u8 = 3;
+
+/// `(canonical dir, filename, media version)` → failed index attempts.
+type IndexFailureMarks = std::collections::HashMap<(String, String, String), u8>;
+
+fn index_failure_marks() -> &'static std::sync::Mutex<IndexFailureMarks> {
+    static MARKS: std::sync::OnceLock<std::sync::Mutex<IndexFailureMarks>> =
+        std::sync::OnceLock::new();
+    MARKS.get_or_init(Default::default)
+}
+
+/// Index one print's assets, and tell the gallery change feed when the
+/// row's `assets` may have changed with no other write.
+///
+/// Inventories are indexed lazily while rows are BUILT, so no trigger can
+/// see them (a trigger would make every read write). Instead:
+///
+/// - a GLB inventory written here marks the print, so a row already sent
+///   with an older (or failed, empty) inventory is sent again. A scan is
+///   written once per `media_version` (`scan_is_current`), so this happens
+///   at most once per media version and the feed reaches a fixed point after
+///   one extra pull. Non-mesh prints always index to nothing and are never
+///   marked.
+/// - a FAILED index (the row went out with `assets: []`) marks the print a
+///   bounded number of times ([`INDEX_FAILURE_MARKS`]), so the next pull
+///   retries it; a mesh that never reads stops being re-marked.
+///
+/// The marks also move `max_seq`, which is what keeps the legacy listing's
+/// cheap validator honest about `assets`.
 fn reindex(
     db: &mold_db::MetadataDb,
     output_dir: &Path,
@@ -77,13 +110,57 @@ fn reindex(
     id: i64,
     version: &str,
 ) -> anyhow::Result<()> {
-    let records = if record.format == mold_core::OutputFormat::Glb {
-        let bytes = std::fs::read(print_path(output_dir, record))?;
-        inventory_from_glb(&record.filename, &bytes)?
-    } else {
-        Vec::new()
-    };
-    mold_db::generation_assets::replace_for_generation(db, id, version, &records)
+    let mesh = record.format == mold_core::OutputFormat::Glb;
+    let outcome = (|| {
+        let records = if mesh {
+            let bytes = std::fs::read(print_path(output_dir, record))?;
+            inventory_from_glb(&record.filename, &bytes)?
+        } else {
+            Vec::new()
+        };
+        mold_db::generation_assets::replace_for_generation(db, id, version, &records)
+    })();
+    if mesh {
+        let key = (
+            mold_db::canonical_dir_string(output_dir),
+            record.filename.clone(),
+            version.to_string(),
+        );
+        let mark = match &outcome {
+            Ok(()) => {
+                index_failure_marks()
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .retain(|(dir, name, _), _| dir != &key.0 || name != &key.1);
+                true
+            }
+            Err(_) => {
+                let mut marks = index_failure_marks()
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                // A newer media version supersedes the old one's count.
+                marks.retain(|(dir, name, version), _| {
+                    dir != &key.0 || name != &key.1 || version == &key.2
+                });
+                let count = marks.entry(key).or_default();
+                *count = count.saturating_add(1);
+                *count <= INDEX_FAILURE_MARKS
+            }
+        };
+        if mark {
+            if let Err(error) = mold_db::gallery_changes::touch(
+                db,
+                output_dir,
+                std::slice::from_ref(&record.filename),
+            ) {
+                tracing::debug!(
+                    filename = %record.filename,
+                    "could not mark a re-indexed print in the gallery change feed: {error:#}"
+                );
+            }
+        }
+    }
+    outcome
 }
 
 /// Attach each image's durable asset inventory, indexing any row whose scan

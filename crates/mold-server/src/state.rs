@@ -442,6 +442,10 @@ pub struct AppState {
     /// mutator. Batch commits take the writer side until files, DB rows, and
     /// the durable manifest agree.
     pub gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate,
+    /// Which output directories have finished their reconcile, so
+    /// `GET /api/gallery/changes` (and the listing's cheap validator) may
+    /// trust the metadata DB for them.
+    pub gallery_feed_readiness: Arc<crate::gallery_changes_api::GalleryFeedReadiness>,
     /// Durable chain-job runner handle. `None` when DB-backed chain jobs are
     /// unavailable; chain-job API handlers return 503 in that state.
     pub chain_jobs: Option<Arc<crate::chain_job_runner::ChainJobRunnerHandle>>,
@@ -747,6 +751,7 @@ impl AppState {
             queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
             generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
+            gallery_feed_readiness: Arc::default(),
             chain_jobs: None,
             mesh_workflows: None,
             downloads: DownloadQueue::new(),
@@ -825,6 +830,7 @@ impl AppState {
             queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
             generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
+            gallery_feed_readiness: Arc::default(),
             chain_jobs: None,
             mesh_workflows: None,
             downloads: DownloadQueue::new(),
@@ -916,6 +922,7 @@ impl AppState {
             queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
             generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
+            gallery_feed_readiness: Arc::default(),
             chain_jobs: None,
             mesh_workflows: None,
             downloads: DownloadQueue::new(),
@@ -974,6 +981,7 @@ impl AppState {
             queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
             generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
+            gallery_feed_readiness: Arc::default(),
             chain_jobs: None,
             mesh_workflows: None,
             downloads: DownloadQueue::new(),
@@ -1029,6 +1037,7 @@ impl AppState {
             queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
             generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
+            gallery_feed_readiness: Arc::default(),
             chain_jobs: None,
             mesh_workflows: None,
             downloads: DownloadQueue::new(),

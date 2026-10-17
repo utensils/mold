@@ -1452,12 +1452,18 @@ fn maintain_change_feed(
             "gallery change feed marked trashed rows for a new effective retention"
         );
     }
-    let keep: std::collections::HashSet<String> = gate
-        .committed_archive_index(dir)?
-        .entries
-        .keys()
-        .cloned()
-        .collect();
+    // Project the archive FIRST, from the same snapshot the keep set comes
+    // from: a name the archive changed but nobody has projected yet must get
+    // its fresh mark before the collector decides it is an old tombstone.
+    let snapshot = gate.committed_archive_snapshot(dir)?;
+    crate::gallery_changes_api::project_archive_changes(db, dir, &snapshot)?;
+    // Every name the archive has an opinion about (live, retired,
+    // quarantined): an archive-only print has no DB row, and dropping its
+    // dirty row would lose it from the feed.
+    let keep: std::collections::HashSet<String> =
+        crate::gallery_changes_api::archive_names(&snapshot)
+            .into_iter()
+            .collect();
     let cutoff = mold_db::gallery_changes::tombstone_cutoff_ms(
         retention_days,
         mold_core::time::now_epoch_ms(),

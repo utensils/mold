@@ -134,8 +134,7 @@ final class LibraryStore {
     let rows = LibraryRevision()
 
     /// `replicaStore` nil keeps replicas in memory only -- every test's
-    /// default, so no test writes the real Application Support. Likewise
-    /// `syncRecords`: `.processLocal` is memory only.
+    /// default, so no test writes the real Application Support.
     init(hosts: HostStore, syncSession: LibrarySyncSession = LibrarySyncSession(),
          readDefaults: UserDefaults = AppStorageSuite.defaults, replicaStore: GalleryReplicaStore? = nil,
          syncRecords: LibrarySyncRecords = .processLocal) {

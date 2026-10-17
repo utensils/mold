@@ -12,6 +12,8 @@ clients, and custom integrations on one generation contract.
 | `GET`    | `/api/queue/:id/input-thumbnail?index=N`            | key           | Exact submitted image member as a private 320-pixel preview                                                                                                                                                                                                                                                  |
 | `GET`    | `/api/queue/:id/input-original?index=N`             | key           | Exact full-sized submitted image, WAV or MP4; explicit index required, 64 MiB bound                                                                                                                                                                                                                          |
 | `GET`    | `/api/gallery/sync-checkpoint`                      | key           | Read-only per-print archive and retained-input revisions for incremental mirror verification                                                                                                                                                                                                                 |
+| `GET`    | `/api/gallery/changes`                              | key           | Compacted change feed (`?since=<cursor>&limit=<n>`, default 500, max 2000): rows changed since the cursor, trash rows included, `removed` tombstones, `reset` to rebuild; `503 GALLERY_FEED_NOT_READY` until reconcile finishes                                                                              |
+| `POST`   | `/api/gallery/sync-checkpoint`                      | key           | The checkpoint for at most 2000 named filenames (`{"filenames": [...]}`): exactly the GET entries for those prints                                                                                                                                                                                           |
 | `GET`    | `/api/queue/:id/transfer/reservation`               | key           | Recover a pending destination-bound transfer identity                                                                                                                                                                                                                                                        |
 | `POST`   | `/api/queue/:id/transfer/reserve`                   | key           | Reserve queued, paused, or held source work before rendering starts                                                                                                                                                                                                                                          |
 | `POST`   | `/api/queue/:id/transfer/seal`                      | key           | Seal a reservation before destination admission                                                                                                                                                                                                                                                              |
@@ -204,7 +206,9 @@ would silently drop and render without.
 
 `gallery` describes what this host's Library can do: `can_delete` (always
 true), `trash: { enabled, retention_days }`, `organize`, `bulk_mutations`,
-`media_version`, `conditional_get`, `row_events`, and `persists_outputs`.
+`media_version`, `conditional_get`, `row_events`, `persists_outputs`, and
+`changes_feed: { protocol_version }` (the [change feed](#change-feed); absent
+under `MOLD_DB_DISABLE=1`, with output off, and on older servers).
 `trash.enabled` and `organize` are false whenever the metadata DB is disabled
 (`MOLD_DB_DISABLE=1`) or gallery output is off, and a client that sees them
 false must hide every organization control and keep the hard-delete wording.
@@ -1186,7 +1190,11 @@ narrows to one print. The listing supports conditional GET — it sends an
 does no work on an unchanged gallery — and every row carries `media_version`,
 the identity clients key a thumbnail or media cache on. Both are advertised as
 `capabilities.gallery.conditional_get` and `.media_version`. Thumbnails carry
-their own per-rendition ETag.
+their own per-rendition ETag. Once the startup reconcile has finished, the
+whole-library ETag is a weak validator (`W/"g1-…"`) derived from the change
+log and the archive generation rather than from the body, so an unchanged
+library answers `304` without building the listing at all; `?filename=` and
+the DB-less fallback keep the body-hash ETag.
 
 A row may carry `assets[]`: `{asset_id, role, display_name, media_type,
 size_bytes, sha256, width?, height?}`. These are files logically owned by that
@@ -1197,6 +1205,57 @@ headers and verifies its size and digest before answering. The database table
 is a repairable index: the committed GLB remains the archive authority, so a
 reconciled or restored gallery can recreate the same inventory. Trash keeps
 the entries; permanent deletion cascades them with the generation row.
+
+### Change feed
+
+`GET /api/gallery/changes?since=<cursor>&limit=<n>` pages the library's
+change log, so a client keeps a replica current in O(changes) instead of
+re-reading the whole listing. It is advertised as
+`capabilities.gallery.changes_feed = {"protocol_version": 1}`; absence (an
+older server, `MOLD_DB_DISABLE=1`, or a disabled output directory) means
+keep the full listing.
+
+```json
+{
+  "protocol_version": 1,
+  "instance_id": "…",
+  "cursor": "opaque",
+  "more": false,
+  "reset": false,
+  "changes": [
+    {
+      "filename": "a.png",
+      "removed": false,
+      "image": { "filename": "a.png", "…": "…" }
+    },
+    { "filename": "gone.png", "removed": true }
+  ]
+}
+```
+
+- Omit `since` for a full snapshot; it pages through the same path (default
+  `limit` 500, max 2000). Loop while `more`, passing each page's `cursor` back
+  as `since`. Cursors are opaque.
+- Each change carries the row exactly as the listing would show it now, or
+  `removed: true` when neither the library nor the trash lists it. Trashed
+  prints arrive with `trashed_at` (and `purge_at`), so one feed serves both
+  views; sort by `(timestamp desc, filename)`.
+- `reset: true` means the cursor no longer describes this feed — another
+  database, a changed output directory, a newer row format, or a cursor past
+  the tombstone horizon. The page restarts from the beginning: rebuild the
+  replica from it, dropping rows it does not see again. The first page of a
+  cursor-less snapshot always says `reset: true`, so a client that lost its
+  cursor replaces its replica rather than merging into it.
+- `503 GALLERY_FEED_NOT_READY` until the reconcile has finished for the
+  output directory (again after a metadata DB rebuilt from corruption);
+  retry. Responses are `private, no-store`, with the
+  listing's authentication.
+- `POST /api/gallery/sync-checkpoint {"filenames": [...]}` (at most 2000)
+  answers exactly the `GET /api/gallery/sync-checkpoint` entries for those
+  prints, for a mirror verifying only what it touched.
+
+Replay fixtures shared by every client live in
+`docs/contracts/gallery-changes-v1.json`.
 
 ### Library organization
 

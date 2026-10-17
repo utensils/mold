@@ -381,6 +381,116 @@ pub fn record_effective_retention(db: &MetadataDb, days: u32) -> Result<bool> {
     })
 }
 
+/// The committed-archive state the projector last marked for a directory
+/// (schema v44): the archive generation AND the identity of the store that
+/// generation belongs to, so a store recreated at the same generation is
+/// never mistaken for the one already projected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveMark {
+    pub generation: u64,
+    /// Opaque identity of the authority store (empty when unknown).
+    pub store_id: String,
+}
+
+/// What the projector last recorded for `output_dir`, or `None` when it
+/// never has.
+pub fn projected_archive(db: &MetadataDb, output_dir: &Path) -> Result<Option<ArchiveMark>> {
+    let dir_key = canonical_dir_string(output_dir);
+    db.with_conn(|conn| read_mark(conn, &dir_key))
+}
+
+fn read_mark(conn: &Connection, dir_key: &str) -> Result<Option<ArchiveMark>> {
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row(
+            "SELECT generation, store_id FROM gallery_archive_projection WHERE output_dir = ?1",
+            params![dir_key],
+            |r| {
+                Ok(ArchiveMark {
+                    generation: r.get::<_, i64>(0)?.max(0) as u64,
+                    store_id: r.get(1)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// What [`project_archive`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveProjection {
+    /// `current` was already the projected state; nothing was marked.
+    Unchanged,
+    /// Names were marked and `current` recorded. `everything` is the
+    /// O(n) fallback: every archive name plus every name the dirty set
+    /// already knows for the directory.
+    Marked { marked: u64, everything: bool },
+}
+
+/// Mark the committed archive's changes into the feed and record
+/// `current` as projected — in ONE immediate transaction, so a recorded
+/// state always has its marks (a crash between them re-projects).
+///
+/// `expected` is the projected state the caller read, and `changed` the
+/// names its in-process commit log holds for exactly the gap from
+/// `expected` to `current` in the SAME store. When the log does not cover
+/// the gap (`changed == None`: a foreign writer, a crash, a cold start), the
+/// store identity differs, or another projector moved the stored state
+/// meanwhile, NOTHING proves which names changed, so every name is
+/// re-marked: `archive_names()` (the committed archive's) together with
+/// every name the dirty set already knows for this directory — which is
+/// what catches an archive-only print a foreign writer removed, a name the
+/// current archive no longer lists. Over-marking only costs clients a
+/// re-read; a missed mark loses a change forever.
+pub fn project_archive<F>(
+    db: &MetadataDb,
+    output_dir: &Path,
+    expected: Option<&ArchiveMark>,
+    current: &ArchiveMark,
+    changed: Option<&[String]>,
+    archive_names: F,
+) -> Result<ArchiveProjection>
+where
+    F: FnOnce() -> Vec<String>,
+{
+    let dir_key = canonical_dir_string(output_dir);
+    let generation_i = i64::try_from(current.generation).unwrap_or(i64::MAX);
+    db.transact_immediate(|conn| {
+        let stored = read_mark(conn, &dir_key)?;
+        if stored.as_ref() == Some(current) {
+            return Ok(ArchiveProjection::Unchanged);
+        }
+        let incremental = changed.filter(|_| {
+            stored.is_some()
+                && stored.as_ref() == expected
+                && stored.as_ref().is_some_and(|s| s.store_id == current.store_id)
+        });
+        let (marked, everything) = match incremental {
+            Some(names) => (mark_names(conn, &dir_key, names)?, false),
+            None => {
+                let mut all: std::collections::BTreeSet<String> =
+                    archive_names().into_iter().collect();
+                let mut stmt =
+                    conn.prepare("SELECT filename FROM gallery_changes WHERE output_dir = ?1")?;
+                for name in stmt.query_map(params![dir_key], |r| r.get::<_, String>(0))? {
+                    all.insert(name?);
+                }
+                let all = all.into_iter().collect::<Vec<_>>();
+                (mark_names(conn, &dir_key, &all)?, true)
+            }
+        };
+        conn.execute(
+            "INSERT INTO gallery_archive_projection (output_dir, generation, store_id, projected_at_ms)
+             VALUES (?1, ?2, ?3, CAST(strftime('%s','now') AS INTEGER) * 1000)
+             ON CONFLICT(output_dir) DO UPDATE SET
+                generation = excluded.generation,
+                store_id = excluded.store_id,
+                projected_at_ms = excluded.projected_at_ms",
+            params![dir_key, generation_i, current.store_id],
+        )?;
+        Ok(ArchiveProjection::Marked { marked, everything })
+    })
+}
+
 fn mark_names<S: AsRef<str>>(conn: &Connection, dir_key: &str, filenames: &[S]) -> Result<u64> {
     let mut seen = HashSet::new();
     let mut marked = 0u64;
@@ -1145,5 +1255,166 @@ mod tests {
                 "{column} must not be guarded"
             );
         }
+    }
+
+    fn m(generation: u64) -> ArchiveMark {
+        ArchiveMark {
+            generation,
+            store_id: "store-a".into(),
+        }
+    }
+
+    #[test]
+    fn a_recreated_store_at_the_same_generation_remarks_everything() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        seed(&db, &["row.png"]);
+        project_archive(&db, dir(), None, &m(3), None, Vec::new).unwrap();
+        let since = max_seq(&db);
+        let other = ArchiveMark {
+            generation: 3,
+            store_id: "store-b".into(),
+        };
+        let outcome = project_archive(&db, dir(), Some(&m(3)), &other, Some(&names(&[])), || {
+            names(&["a.png"])
+        })
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            ArchiveProjection::Marked {
+                everything: true,
+                ..
+            }
+        ));
+        assert_eq!(names_after(&db, since), names(&["a.png", "row.png"]));
+        assert_eq!(projected_archive(&db, dir()).unwrap(), Some(other));
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn the_first_projection_remarks_every_archive_and_known_name() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        seed(&db, &["row.png"]);
+        let since = max_seq(&db);
+        assert_eq!(
+            projected_archive(&db, dir()).unwrap().map(|m| m.generation),
+            None
+        );
+        let outcome = project_archive(
+            &db,
+            dir(),
+            None,
+            &m(7),
+            Some(&names(&["ignored.png"])),
+            || names(&["archive-only.png"]),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            ArchiveProjection::Marked {
+                marked: 2,
+                everything: true
+            }
+        );
+        // Every known dirty name (the DB row) and every archive name, never
+        // the incremental list: nothing proves which names changed.
+        assert_eq!(
+            names_after(&db, since),
+            names(&["archive-only.png", "row.png"])
+        );
+        assert_eq!(
+            projected_archive(&db, dir()).unwrap().map(|m| m.generation),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn a_covered_projection_marks_only_the_named_changes() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        seed(&db, &["row.png"]);
+        project_archive(&db, dir(), None, &m(1), None, Vec::new).unwrap();
+        let since = max_seq(&db);
+        let outcome = project_archive(
+            &db,
+            dir(),
+            Some(&m(1)),
+            &m(3),
+            Some(&names(&["new.png"])),
+            || panic!("a covered gap never lists the archive"),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            ArchiveProjection::Marked {
+                marked: 1,
+                everything: false
+            }
+        );
+        assert_eq!(names_after(&db, since), names(&["new.png"]));
+        assert_eq!(
+            projected_archive(&db, dir()).unwrap().map(|m| m.generation),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn an_already_projected_generation_marks_nothing() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        project_archive(&db, dir(), None, &m(4), None, Vec::new).unwrap();
+        assert!(!marks(&db, || {
+            assert_eq!(
+                project_archive(
+                    &db,
+                    dir(),
+                    Some(&m(4)),
+                    &m(4),
+                    Some(&names(&["x.png"])),
+                    Vec::new
+                )
+                .unwrap(),
+                ArchiveProjection::Unchanged
+            );
+        }));
+    }
+
+    #[test]
+    fn a_projection_racing_another_projector_remarks_everything() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        seed(&db, &["row.png"]);
+        project_archive(&db, dir(), None, &m(2), None, Vec::new).unwrap();
+        // Someone else moved the stored generation since the caller read it:
+        // the caller's names describe a gap that no longer starts there.
+        let since = max_seq(&db);
+        let outcome = project_archive(
+            &db,
+            dir(),
+            Some(&m(1)),
+            &m(5),
+            Some(&names(&["a.png"])),
+            || names(&["b.png"]),
+        )
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            ArchiveProjection::Marked {
+                everything: true,
+                ..
+            }
+        ));
+        assert_eq!(names_after(&db, since), names(&["b.png", "row.png"]));
+    }
+
+    #[test]
+    fn projections_are_per_directory() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        project_archive(&db, dir(), None, &m(9), None, Vec::new).unwrap();
+        assert_eq!(
+            projected_archive(&db, Path::new("/tmp/elsewhere"))
+                .unwrap()
+                .map(|m| m.generation),
+            None
+        );
     }
 }
