@@ -1243,9 +1243,12 @@ keep the full listing.
 - `reset: true` means the cursor no longer describes this feed — another
   database, a changed output directory, a newer row format, or a cursor past
   the tombstone horizon. The page restarts from the beginning: rebuild the
-  replica from it, dropping rows it does not see again.
-- `503 GALLERY_FEED_NOT_READY` until the startup reconcile has finished for
-  the output directory; retry. Responses are `private, no-store`, with the
+  replica from it, dropping rows it does not see again. The first page of a
+  cursor-less snapshot always says `reset: true`, so a client that lost its
+  cursor replaces its replica rather than merging into it.
+- `503 GALLERY_FEED_NOT_READY` until the reconcile has finished for the
+  output directory (again after a metadata DB rebuilt from corruption), or
+  briefly while the archive changes faster than a page can be read; retry. Responses are `private, no-store`, with the
   listing's authentication.
 - `POST /api/gallery/sync-checkpoint {"filenames": [...]}` (at most 2000)
   answers exactly the `GET /api/gallery/sync-checkpoint` entries for those

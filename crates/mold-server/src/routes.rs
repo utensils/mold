@@ -10924,15 +10924,17 @@ async fn list_gallery(
         // answers 304 without reading a single row. Only for the whole
         // listing of a reconciled directory; `?filename=` and every
         // non-DB exit keep the body-hash ETag.
-        let validator = if only.is_none() && state.gallery_feed_readiness.is_ready(&output_dir) {
+        let validator = if only.is_none() {
             let db_arc = db_arc.clone();
             let dir = dir.clone();
             let gate = gallery_archive.clone();
+            let readiness = state.gallery_feed_readiness.clone();
             tokio::task::spawn_blocking(move || {
                 db_arc.as_ref().as_ref().and_then(|db| {
                     crate::gallery_changes_api::listing_validator(
                         db,
                         &gate,
+                        &readiness,
                         &dir,
                         view == GalleryView::Library,
                         retention_days,

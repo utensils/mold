@@ -2,7 +2,7 @@
   "protocol_version": 1,
   "description": "Replay fixtures for GET /api/gallery/changes (protocol 1). Each scenario starts a replica holding `initial` filenames, pulls `pages` in order starting from `since` (null = no cursor, a full snapshot), and must end holding exactly the `expected` filenames, each with at least the listed field values, resuming from `final_cursor`. Cursors are opaque strings: clients store and echo them, never parse them.",
   "client_rules": [
-    "A page with reset=true discards every row the replica holds before applying that page; the pages that follow continue normally.",
+    "A page with reset=true discards every row the replica holds before applying that page; the pages that follow continue normally. The first page of a cursor-less snapshot always says reset=true: a client that lost its cursor replaces its replica, never merges into it.",
     "A change with an image upserts the row by filename; a change with removed=true (and no image) deletes it. Removals of unknown names are ignored.",
     "Loop while more=true, passing each page's cursor as the next since. Persist the cursor only after applying the page it came with.",
     "Rows with trashed_at belong to the trash; rows without it to the library. Clients sort by (timestamp desc, filename)."
@@ -18,7 +18,7 @@
           "instance_id": "fixture-instance",
           "cursor": "snapshot-2",
           "more": true,
-          "reset": false,
+          "reset": true,
           "changes": [
             {
               "filename": "a.png",

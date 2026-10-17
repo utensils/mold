@@ -212,6 +212,33 @@ fn authority_dir(root: &Path) -> PathBuf {
     legacy_authority_dir(root)
 }
 
+/// An opaque identity for the authority store `root` resolves to: its
+/// directory's path plus file identity (device and inode on Unix, creation
+/// time elsewhere). A store deleted and re-created — even one that reaches
+/// the same generation — gets a new identity, which is what lets the change
+/// feed's projector and the listing validator tell it apart from the store
+/// they last saw. Moving between the v2 and v3 directories changes it too
+/// (one extra re-mark, never a missed one). Empty when there is no store.
+pub(crate) fn store_identity(root: &Path) -> String {
+    let dir = authority_dir(root);
+    let Ok(metadata) = fs::metadata(&dir) else {
+        return String::new();
+    };
+    #[cfg(unix)]
+    let file_identity = {
+        use std::os::unix::fs::MetadataExt;
+        format!("{}:{}", metadata.dev(), metadata.ino())
+    };
+    #[cfg(not(unix))]
+    let file_identity = metadata
+        .created()
+        .ok()
+        .and_then(|created| created.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|elapsed| elapsed.as_nanos().to_string())
+        .unwrap_or_default();
+    format!("{}|{file_identity}", dir.display())
+}
+
 fn legacy_authority_dir(root: &Path) -> PathBuf {
     root.join(crate::batch_transaction::TRANSACTION_DIR)
         .join(AUTHORITY_DIR)
@@ -2439,6 +2466,63 @@ fn visible_name_changes(
     names
 }
 
+/// Test-build enforcement of the contract the projector (and the v3 delta
+/// log) rest on: a commit that edits an entry's RECORD in place — the part
+/// a gallery row is built from — must name it. Every commit in every test
+/// is checked against the previous commit this process made to the same
+/// root. Retained-media pins, file facts and the retirement epoch maps are
+/// deliberately not compared: no client-visible row is derived from them
+/// (`is_retired` reads `retired_names` / `entries` / `quarantined_names`
+/// only; the epochs only schedule when a retirement is forgotten, which
+/// itself removes a `retired_names` key and so is a key change).
+#[cfg(test)]
+fn assert_in_place_record_edits_are_named(
+    root: &Path,
+    from: u64,
+    to: u64,
+    index: &CommittedArchiveIndex,
+    named: &std::collections::BTreeSet<String>,
+) {
+    type Records = std::collections::BTreeMap<String, serde_json::Value>;
+    static PREVIOUS: std::sync::Mutex<
+        std::collections::BTreeMap<PathBuf, (u64, Records, Records)>,
+    > = std::sync::Mutex::new(std::collections::BTreeMap::new());
+    // Bounded so a large performance fixture does not pay for the check.
+    if index.entries.len() + index.retired_entries.len() > 2_000 {
+        return;
+    }
+    let records = |map: &std::collections::BTreeMap<String, CommittedArchiveEntry>| -> Records {
+        map.iter()
+            .map(|(name, entry)| {
+                (
+                    name.clone(),
+                    serde_json::to_value(&entry.record).unwrap_or_default(),
+                )
+            })
+            .collect()
+    };
+    let live = records(&index.entries);
+    let retired = records(&index.retired_entries);
+    let mut previous = PREVIOUS.lock().unwrap_or_else(|poison| poison.into_inner());
+    if let Some((generation, before_live, before_retired)) = previous.get(root) {
+        if *generation == from {
+            for (before, after) in [(before_live, &live), (before_retired, &retired)] {
+                for (name, record) in after {
+                    if before.get(name).is_some_and(|old| old != record) {
+                        assert!(
+                            named.contains(name),
+                            "commit {from}->{to} edited the archive record of {name} in place \
+                             without naming it in exact_names; the change feed would never \
+                             re-send it"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    previous.insert(root.to_path_buf(), (to, live, retired));
+}
+
 /// Record a commit that has LANDED (marker durable). Called only at the end
 /// of a successful [`commit_snapshot`], so a failed or torn commit can never
 /// be projected.
@@ -2778,6 +2862,14 @@ pub(crate) fn commit_snapshot(
     // The commit has landed: the marker naming `generation` is durable.
     // Only now may the change feed learn which names it touched.
     let feed_names = visible_name_changes(&current.keys, &tail.keys, &exact_names_for_feed);
+    #[cfg(test)]
+    assert_in_place_record_edits_are_named(
+        root,
+        expected_generation,
+        generation,
+        index,
+        &feed_names,
+    );
     remember_authority_tail(root, tail);
     record_archive_commit(root, expected_generation, generation, feed_names);
     Ok(generation)
@@ -5218,6 +5310,135 @@ mod tests {
                 .unwrap()
                 .generation,
             0
+        );
+    }
+
+    fn feed_entry(name: &str, prompt: &str) -> CommittedArchiveEntry {
+        let mut record = GenerationRecord::from_save(
+            Path::new("/tmp"),
+            name,
+            OutputFormat::Png,
+            mold_db::metadata_io::synthesize_from_filename(name, 1),
+            RecordSource::Server,
+            1,
+        );
+        record.metadata.prompt = prompt.to_string();
+        CommittedArchiveEntry {
+            identity: ArchivedChildIdentity {
+                parent_id: format!("parent-{name}"),
+                attempt_generation: 0,
+                child_index: 0,
+                final_name: name.to_string(),
+                checksum_sha256: "0".repeat(64),
+                size_bytes: 1,
+            },
+            record,
+            facts: None,
+            retained_media: Vec::new(),
+        }
+    }
+
+    fn canonical_root(dir: &Path) -> PathBuf {
+        fs::canonicalize(dir).unwrap()
+    }
+
+    /// The change feed's projector reads what `commit_snapshot` logged:
+    /// adds, removes, retirements, quarantines and NAMED in-place edits,
+    /// chained by generation, and nothing across a gap it did not see.
+    #[test]
+    fn landed_commits_log_every_visible_name_change_by_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let initial =
+            load_or_initialize(dir.path(), &guard, || Ok(CommittedArchiveIndex::default()))
+                .unwrap();
+        let root = canonical_root(dir.path());
+        let mut index = initial.index;
+        index
+            .entries
+            .insert("a.png".into(), feed_entry("a.png", "one"));
+        index
+            .entries
+            .insert("b.png".into(), feed_entry("b.png", "one"));
+        let g1 = commit_snapshot(
+            dir.path(),
+            &guard,
+            initial.generation,
+            &mut index,
+            "publish_batch",
+            Vec::new(),
+        )
+        .unwrap();
+        index.entries.remove("b.png");
+        index.retired_names.insert("b.png".into());
+        index.quarantined_names.insert("q.png".into());
+        index
+            .entries
+            .insert("a.png".into(), feed_entry("a.png", "two"));
+        let g2 = commit_snapshot(
+            dir.path(),
+            &guard,
+            g1,
+            &mut index,
+            "publish_batch",
+            vec!["a.png".into()],
+        )
+        .unwrap();
+        let names = |from, to| {
+            archive_changes_between(&root, from, to)
+                .map(|names| names.into_iter().collect::<Vec<_>>())
+        };
+        assert_eq!(
+            names(initial.generation, g1),
+            Some(vec!["a.png".into(), "b.png".into()])
+        );
+        assert_eq!(
+            names(g1, g2),
+            Some(vec!["a.png".into(), "b.png".into(), "q.png".into()])
+        );
+        assert_eq!(
+            names(initial.generation, g2).map(|n| n.len()),
+            Some(3),
+            "a contiguous chain unions"
+        );
+        assert_eq!(names(g2, g2 + 1), None, "a generation nobody logged");
+        forget_archive_commit_log(&root);
+        assert_eq!(names(g1, g2), None, "another process's commits are a gap");
+    }
+
+    /// The contract the projector rests on, enforced in every test build:
+    /// an in-place record edit that is not named is refused.
+    #[test]
+    #[should_panic(expected = "without naming it in exact_names")]
+    fn an_unnamed_in_place_record_edit_is_refused_in_test_builds() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let initial =
+            load_or_initialize(dir.path(), &guard, || Ok(CommittedArchiveIndex::default()))
+                .unwrap();
+        let mut index = initial.index;
+        index
+            .entries
+            .insert("a.png".into(), feed_entry("a.png", "one"));
+        let g1 = commit_snapshot(
+            dir.path(),
+            &guard,
+            initial.generation,
+            &mut index,
+            "publish_batch",
+            Vec::new(),
+        )
+        .unwrap();
+        index
+            .entries
+            .insert("a.png".into(), feed_entry("a.png", "edited"));
+        let _ = commit_snapshot(
+            dir.path(),
+            &guard,
+            g1,
+            &mut index,
+            "publish_batch",
+            Vec::new(),
         );
     }
 }

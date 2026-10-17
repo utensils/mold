@@ -79,6 +79,8 @@ pub(crate) struct CommittedArchiveSnapshot {
     pub(crate) root: PathBuf,
     /// `None` when the gallery has no authority store yet.
     pub(crate) generation: Option<u64>,
+    /// `gallery_authority::store_identity` of the store read.
+    pub(crate) store_id: String,
     pub(crate) index: Arc<CommittedArchiveIndex>,
 }
 
@@ -265,6 +267,7 @@ impl GalleryPublicationGate {
             return Ok(CommittedArchiveSnapshot {
                 root: key,
                 generation: None,
+                store_id: String::new(),
                 index: Arc::new(CommittedArchiveIndex::default()),
             });
         };
@@ -277,6 +280,7 @@ impl GalleryPublicationGate {
             .map(|cached| cached.index.clone())
         {
             return Ok(CommittedArchiveSnapshot {
+                store_id: crate::gallery_authority::store_identity(&key),
                 root: key,
                 generation: Some(generation),
                 index,
@@ -292,20 +296,28 @@ impl GalleryPublicationGate {
         let index = Arc::new(loaded.index);
         self.install_shared_committed_archive_index(output_dir, loaded.generation, index.clone());
         Ok(CommittedArchiveSnapshot {
+            store_id: crate::gallery_authority::store_identity(&key),
             root: key,
             generation: Some(generation),
             index,
         })
     }
 
-    /// The committed archive generation alone: the marker read, never the
-    /// index. What the legacy listing's cheap validator keys on.
-    pub(crate) fn committed_archive_generation(
+    /// The committed archive generation and store identity alone, under one
+    /// bookkeeping lock: the marker read, never the index. What the change
+    /// feed re-checks after reading a page, and what the legacy listing's
+    /// cheap validator keys on.
+    pub(crate) fn committed_archive_identity(
         &self,
         output_dir: &Path,
-    ) -> anyhow::Result<Option<u64>> {
+    ) -> anyhow::Result<(Option<u64>, String)> {
         let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
-        crate::gallery_authority::read_generation(output_dir, &bookkeeping)
+        let generation = crate::gallery_authority::read_generation(output_dir, &bookkeeping)?;
+        let store_id = match generation {
+            Some(_) => crate::gallery_authority::store_identity(bookkeeping.canonical_root()),
+            None => String::new(),
+        };
+        Ok((generation, store_id))
     }
 
     pub(crate) fn retained_media_for_item(

@@ -42,6 +42,17 @@ impl Fixture {
     }
 }
 
+fn epoch(db: &MetadataDb) -> String {
+    mold_db::gallery_changes::feed_state(db).unwrap().epoch
+}
+
+/// What the startup reconcile records when it finishes.
+fn mark_ready(state: &AppState, dir: &Path) {
+    state
+        .gallery_feed_readiness
+        .finish_with_db(state.metadata_db.as_ref().as_ref(), dir);
+}
+
 async fn fixture() -> Fixture {
     let gallery = tempfile::tempdir().unwrap();
     let dir = std::fs::canonicalize(gallery.path()).unwrap();
@@ -52,7 +63,7 @@ async fn fixture() -> Fixture {
         config.output_dir = Some(dir.to_string_lossy().into());
         config.gallery.trash_retention_days = 30;
     }
-    state.gallery_feed_readiness.finish(&dir);
+    mark_ready(&state, &dir);
     Fixture {
         state,
         _gallery: gallery,
@@ -174,7 +185,10 @@ async fn pull(
 async fn snapshot(fx: &Fixture, limit: Option<usize>) -> (Replica, String) {
     let mut replica = Replica::new();
     let (cursor, reset) = pull(fx, &mut replica, None, limit).await;
-    assert!(!reset, "a cursor-less snapshot never resets");
+    assert!(
+        reset,
+        "a cursor-less snapshot replaces the replica: its first page resets"
+    );
     (replica, cursor)
 }
 
@@ -385,7 +399,11 @@ async fn run_history(seed: u64, steps: usize) -> Vec<String> {
     // filesystem scan (an empty DB directory is "not indexed").
     publish(&fx, "keeper.png", 1).await;
     let (mut incremental, mut cursor) = snapshot(&fx, None).await;
-    assert_same("initial", &incremental, &listing(&fx).await);
+    let mut previous_expected = listing(&fx).await;
+    assert_same("initial", &incremental, &previous_expected);
+    let mut previous_validators = validators(&fx).await;
+    // Every (cursor, replica) a client could still be holding.
+    let mut checkpoints = vec![(cursor.clone(), incremental.clone())];
     let mut history = Vec::new();
     let mut applied = Vec::new();
     for step in 0..steps {
@@ -400,16 +418,55 @@ async fn run_history(seed: u64, steps: usize) -> Vec<String> {
         };
         history.push(done);
         applied.push(format!("{op:?}"));
+        // The legacy validator is read BEFORE the listing is built, as the
+        // route does.
+        let current_validators = validators(&fx).await;
         let expected = listing(&fx).await;
         let label = format!("seed {seed} step {step} after {history:?}");
+        if expected != previous_expected {
+            assert_ne!(
+                current_validators, previous_validators,
+                "{label}: the listing changed but its cheap ETag did not"
+            );
+        }
         let (full, _) = snapshot(&fx, Some([3, 7, 500][step % 3])).await;
         assert_same(&format!("{label} (snapshot)"), &full, &expected);
         let (next, reset) = pull(&fx, &mut incremental, Some(cursor.clone()), None).await;
         assert!(!reset, "{label}: an ordinary delta never resets");
         assert_same(&format!("{label} (incremental)"), &incremental, &expected);
+        // A client that last synced at a RANDOM earlier point converges too.
+        let (old_cursor, mut old_replica) = rng.pick(&checkpoints).unwrap().clone();
+        let (_, reset) = pull(&fx, &mut old_replica, Some(old_cursor), Some(4)).await;
+        assert!(!reset, "{label}: an earlier cursor never resets");
+        assert_same(
+            &format!("{label} (from an earlier cursor)"),
+            &old_replica,
+            &expected,
+        );
         cursor = next;
+        checkpoints.push((cursor.clone(), incremental.clone()));
+        previous_expected = expected;
+        previous_validators = validators(&fx).await;
     }
     applied
+}
+
+/// The legacy listing's cheap validators for both views, as the route
+/// computes them.
+async fn validators(fx: &Fixture) -> (Option<String>, Option<String>) {
+    let retention = fx.retention().await;
+    let validator = |library| {
+        listing_validator(
+            fx.db(),
+            fx.gate(),
+            &fx.state.gallery_feed_readiness,
+            &fx.dir,
+            library,
+            retention,
+        )
+        .unwrap()
+    };
+    (validator(true), validator(false))
 }
 
 #[tokio::test]
@@ -574,7 +631,7 @@ async fn a_changed_output_dir_resets_the_cursor() {
     let other = tempfile::tempdir().unwrap();
     let other_dir = std::fs::canonicalize(other.path()).unwrap();
     fx.state.config.write().await.output_dir = Some(other_dir.to_string_lossy().into());
-    fx.state.gallery_feed_readiness.finish(&other_dir);
+    mark_ready(&fx.state, &other_dir);
     let moved = page(&fx, Some(&cursor), None).await;
     assert!(moved.reset);
     assert!(moved.changes.is_empty(), "the new directory has no prints");
@@ -595,7 +652,7 @@ async fn the_feed_answers_503_until_the_directory_is_reconciled() {
     };
     let error = page_raw(&fx, None, None).await.unwrap_err();
     assert_eq!(error.code, GALLERY_FEED_NOT_READY);
-    fx.state.gallery_feed_readiness.finish(&dir);
+    mark_ready(&fx.state, &dir);
     assert!(page_raw(&fx, None, None).await.is_ok());
 }
 
@@ -616,7 +673,11 @@ async fn a_directory_nobody_reconciled_is_reconciled_on_demand() {
         GALLERY_FEED_NOT_READY
     );
     for _ in 0..200 {
-        if fx.state.gallery_feed_readiness.is_ready(&dir) {
+        if fx
+            .state
+            .gallery_feed_readiness
+            .is_ready(&dir, &epoch(fx.db()))
+        {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -882,3 +943,318 @@ fn cursors_round_trip_and_reject_anything_else() {
     let negative = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("g1.a.b.c.-1");
     assert_eq!(Cursor::decode(&negative), None);
 }
+
+/// Another process (the CLI, a second server sharing `mold.db`) commits an
+/// archive change AND projects it in the window between this feed read's
+/// projection and its page read. The page then carries that name's fresh
+/// mark; built from the stale snapshot, the row would be wrong and the
+/// cursor would carry the client past the mark for good.
+#[tokio::test]
+async fn a_foreign_commit_between_projection_and_page_is_never_skipped() {
+    let fx = fixture().await;
+    publish(&fx, "keeper.png", 1).await;
+    publish(&fx, "x.png", 2).await;
+    // Archive-only: retiring it later writes nothing to the DB.
+    fx.db().delete(&fx.dir, "x.png").unwrap();
+    let (mut replica, cursor) = snapshot(&fx, None).await;
+    assert!(replica.contains_key("x.png"));
+
+    let foreign = fx.state.clone();
+    let dir = fx.dir.clone();
+    install_feed_hook(&fx.dir, move || {
+        let db = foreign.metadata_db.as_ref().as_ref().unwrap();
+        let gate = &foreign.gallery_publication_gate;
+        crate::gallery_trash::hard_delete_live_print_blocking(&dir, "x.png", Some(db), gate, None)
+            .unwrap();
+        // This process never saw that commit…
+        crate::gallery_authority::forget_archive_commit_log(&dir);
+        // …and the other process projects it before our page is read.
+        let snapshot = gate.committed_archive_snapshot(&dir).unwrap();
+        project_archive_changes(db, &dir, &snapshot).unwrap();
+    });
+    let (cursor, _) = pull(&fx, &mut replica, Some(cursor), None).await;
+    let expected = listing(&fx).await;
+    assert!(!expected.contains_key("x.png"));
+    assert_same("after the foreign commit", &replica, &expected);
+    // And nothing is left owed to the client.
+    let (_, _) = pull(&fx, &mut replica, Some(cursor), None).await;
+    assert_same("one pull later", &replica, &expected);
+}
+
+/// Projectors racing each other (several readers, commits landing between
+/// them, this process's log forgotten midway) still converge on the listing.
+#[tokio::test]
+async fn concurrent_projectors_converge() {
+    let fx = fixture().await;
+    publish(&fx, "keeper.png", 1).await;
+    for n in 0..8 {
+        publish(&fx, &format!("c{n}.png"), 10 + n).await;
+    }
+    let (mut early, early_cursor) = snapshot(&fx, None).await;
+    for n in 0..4 {
+        fx.db().delete(&fx.dir, &format!("c{n}.png")).unwrap();
+    }
+    let retention = fx.retention().await;
+    let instance = fx.state.instance_id.to_string();
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            scope.spawn(|| {
+                for _ in 0..5 {
+                    feed_page(fx.db(), fx.gate(), &fx.dir, None, 3, retention, &instance).unwrap();
+                }
+            });
+        }
+        scope.spawn(|| {
+            for n in 0..4 {
+                crate::gallery_trash::hard_delete_live_print_blocking(
+                    &fx.dir,
+                    &format!("c{n}.png"),
+                    Some(fx.db()),
+                    fx.gate(),
+                    None,
+                )
+                .unwrap();
+                if n == 1 {
+                    crate::gallery_authority::forget_archive_commit_log(&fx.dir);
+                }
+            }
+        });
+    });
+    let expected = listing(&fx).await;
+    let (full, _) = snapshot(&fx, Some(2)).await;
+    assert_same("snapshot", &full, &expected);
+    pull(&fx, &mut early, Some(early_cursor), None).await;
+    assert_same("from before the race", &early, &expected);
+}
+
+fn textured_glb() -> Vec<u8> {
+    use mold_inference::hunyuan3d::{glb, mesh::Mesh};
+    let png = |rgb| {
+        let image = image::RgbImage::from_pixel(2, 2, image::Rgb(rgb));
+        let mut bytes = Vec::new();
+        image
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        bytes
+    };
+    glb::write_glb(
+        &Mesh {
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            faces: vec![[0, 1, 2]],
+            normals: None,
+            vertex_colors: None,
+            uvs: Some(vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]),
+        },
+        &glb::GlbMaterial {
+            base_color_texture: Some(png([12, 34, 56])),
+            metallic_roughness_texture: Some(png([78, 90, 123])),
+            normal_texture: Some(png([128, 128, 255])),
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap()
+}
+
+fn mesh_row(dir: &Path, name: &str) -> GenerationRecord {
+    let mut record = GenerationRecord::from_save(
+        dir,
+        name,
+        OutputFormat::Glb,
+        mold_db::metadata_io::synthesize_from_filename(name, 1_700_000_000),
+        RecordSource::Server,
+        1_700_000_000_000,
+    );
+    record.file_mtime_ms = Some(1_700_000_000_000);
+    record.file_size_bytes = Some(4096);
+    record
+}
+
+/// Pull until the feed has nothing more to say, then prove it says nothing
+/// twice in a row: lazily indexed assets must not make reads write forever.
+async fn settle(fx: &Fixture, replica: &mut Replica, mut cursor: String) -> (String, usize) {
+    let mut quiet = 0;
+    for pulls in 1..=10 {
+        let page = page(fx, Some(&cursor), None).await;
+        assert!(!page.more && !page.reset);
+        let changed = !page.changes.is_empty();
+        apply_page(replica, &page);
+        cursor = page.cursor;
+        quiet = if changed { 0 } else { quiet + 1 };
+        if quiet == 2 {
+            return (cursor, pulls);
+        }
+    }
+    panic!("the feed never reached a fixed point");
+}
+
+#[tokio::test]
+async fn a_mesh_whose_index_failed_is_redelivered_and_the_feed_settles() {
+    let fx = fixture().await;
+    publish(&fx, "keeper.png", 1).await;
+    // A mesh row whose file is not there yet: its first index fails and the
+    // row goes out with no assets.
+    fx.db().upsert(&mesh_row(&fx.dir, "chair.glb")).unwrap();
+    // A mesh that can never be read: it must not keep the feed busy.
+    fx.db().upsert(&mesh_row(&fx.dir, "broken.glb")).unwrap();
+    std::fs::write(fx.dir.join("broken.glb"), b"not a glb").unwrap();
+    let (mut replica, cursor) = snapshot(&fx, None).await;
+    assert_eq!(replica["chair.glb"].get("assets"), None);
+
+    std::fs::write(fx.dir.join("chair.glb"), textured_glb()).unwrap();
+    let (cursor, _) = settle(&fx, &mut replica, cursor).await;
+    assert_eq!(
+        replica["chair.glb"]["assets"].as_array().map(Vec::len),
+        Some(3),
+        "the inventory indexed after a failure is re-sent"
+    );
+    assert_same("settled", &replica, &listing(&fx).await);
+    // The legacy validator is stable once settled, and listing builds no
+    // longer write.
+    let before = validators(&fx).await;
+    listing(&fx).await;
+    listing(&fx).await;
+    assert_eq!(validators(&fx).await, before);
+    let quiet = page(&fx, Some(&cursor), None).await;
+    assert!(quiet.changes.is_empty());
+}
+
+#[tokio::test]
+async fn a_fresh_snapshot_of_meshes_reaches_a_fixed_point() {
+    let fx = fixture().await;
+    publish(&fx, "keeper.png", 1).await;
+    fx.db().upsert(&mesh_row(&fx.dir, "chair.glb")).unwrap();
+    std::fs::write(fx.dir.join("chair.glb"), textured_glb()).unwrap();
+    let (mut replica, cursor) = snapshot(&fx, None).await;
+    let (_, pulls) = settle(&fx, &mut replica, cursor).await;
+    assert!(pulls <= 3, "one extra delivery at most, took {pulls} pulls");
+    assert_same("settled", &replica, &listing(&fx).await);
+}
+
+/// A corruption rebuild recreates `mold.db` with a new epoch and no rows;
+/// the feed must not serve that as a library until it is reconciled again.
+#[tokio::test]
+async fn a_rebuilt_database_is_not_ready_until_reconciled_again() {
+    let fx = fixture().await;
+    publish(&fx, "a.png", 1).await;
+    assert!(page_raw(&fx, None, None).await.is_ok());
+    fx.db()
+        .with_conn(|conn| {
+            conn.execute(
+                "UPDATE gallery_feed_meta SET epoch = 'rebuilt-after-corruption'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        page_raw(&fx, None, None).await.unwrap_err().code,
+        GALLERY_FEED_NOT_READY
+    );
+    assert_eq!(validators(&fx).await, (None, None), "nor the cheap ETag");
+    for _ in 0..200 {
+        if fx
+            .state
+            .gallery_feed_readiness
+            .is_ready(&fx.dir, "rebuilt-after-corruption")
+        {
+            assert!(page_raw(&fx, None, None).await.is_ok());
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("the re-claimed reconcile never finished");
+}
+
+#[tokio::test]
+async fn a_fresh_host_with_no_output_dir_is_ready_and_empty() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = std::fs::canonicalize(home.path()).unwrap().join("output");
+    let mut state = AppState::for_tests();
+    state.metadata_db = std::sync::Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+    state.config.write().await.output_dir = Some(dir.to_string_lossy().into());
+    let fx = Fixture {
+        state,
+        _gallery: home,
+        dir: dir.clone(),
+    };
+    assert_eq!(
+        page_raw(&fx, None, None).await.unwrap_err().code,
+        GALLERY_FEED_NOT_READY
+    );
+    for _ in 0..200 {
+        if let Ok(page) = page_raw(&fx, None, None).await {
+            assert!(page.changes.is_empty() && page.reset && !page.more);
+            assert!(!dir.exists(), "a read never creates the directory");
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("a missing output directory stayed not-ready");
+}
+
+/// Pins how a gallery row is derived. If this changes for an existing print
+/// (a new field, a different fallback, a new stamp), every replica holding
+/// the old shape is stale with no seq to tell it: bump `ROW_FORMAT` and
+/// update the expectation together.
+#[test]
+fn the_row_derivation_is_pinned_to_row_format() {
+    assert_eq!(ROW_FORMAT, 1, "bump the golden row below with ROW_FORMAT");
+    let dir = Path::new("/golden-gallery");
+    let db = MetadataDb::open_in_memory().unwrap();
+    let mut row = record("golden.png", 1_700_000_000_000);
+    row.output_dir = dir.to_string_lossy().into_owned();
+    row.file_mtime_ms = Some(1_700_000_001_000);
+    row.file_size_bytes = Some(2048);
+    db.upsert(&row).unwrap();
+    db.set_title(dir, "golden.png", Some("Golden")).unwrap();
+    db.set_favorite(dir, "golden.png", true).unwrap();
+    db.add_tags(dir, "golden.png", &["b".to_string(), "A".to_string()])
+        .unwrap();
+    db.mark_trashed(dir, "golden.png", 1_700_000_100_000)
+        .unwrap();
+    let rows = crate::gallery_rows::build_feed_rows(
+        &db,
+        &Default::default(),
+        dir,
+        &["golden.png".to_string()],
+        30,
+    )
+    .unwrap();
+    let actual = serde_json::to_value(rows["golden.png"].as_ref().unwrap()).unwrap();
+    let expected: serde_json::Value = serde_json::from_str(GOLDEN_ROW).unwrap();
+    assert_eq!(
+        actual, expected,
+        "the gallery row derivation changed: bump ROW_FORMAT\n{actual:#}"
+    );
+}
+
+const GOLDEN_ROW: &str = r#"{
+  "favorite": true,
+  "filename": "golden.png",
+  "format": "png",
+  "media_version": "1700000001000:2048",
+  "metadata": {
+    "generation_height": 64,
+    "generation_width": 64,
+    "guidance": 1.0,
+    "height": 64,
+    "model": "test",
+    "output_mode": "one-shot",
+    "pipeline_requested": false,
+    "prompt": "prompt for golden.png",
+    "seed": 1,
+    "steps": 1,
+    "version": "test",
+    "width": 64
+  },
+  "purge_at": 1702592100,
+  "size_bytes": 2048,
+  "tags": ["A", "b"],
+  "timestamp": 1700000001,
+  "title": "Golden",
+  "trashed_at": 1700000100
+}"#;

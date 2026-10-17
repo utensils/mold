@@ -19,7 +19,7 @@
 //! outside `[min_seq, max_seq]`, gets `reset: true` and a page from the
 //! beginning.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use axum::{
@@ -29,7 +29,7 @@ use axum::{
 };
 use base64::Engine as _;
 use mold_core::{GalleryChange, GalleryChangesPage, GALLERY_CHANGES_PROTOCOL_VERSION};
-use mold_db::gallery_changes::ArchiveProjection;
+use mold_db::gallery_changes::{ArchiveMark, ArchiveProjection};
 use mold_db::MetadataDb;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -112,9 +112,16 @@ impl Cursor {
     }
 }
 
-/// Whether startup reconcile has finished for an output directory. The feed
-/// answers `503 GALLERY_FEED_NOT_READY` until it has: before it, the DB can
-/// be missing rows the listing's filesystem fallback would show.
+/// Whether reconcile has finished for an output directory, against the
+/// metadata DB as it is NOW. The feed answers `503 GALLERY_FEED_NOT_READY`
+/// until it has: before it, the DB can be missing rows the listing's
+/// filesystem fallback would show.
+///
+/// Readiness is recorded together with the feed `epoch` the reconcile ran
+/// against. A corruption rebuild recreates `mold.db` (new epoch, rows not yet
+/// re-read from disk), so a stale epoch is NOT ready and re-claims a
+/// reconcile; otherwise the feed would reset clients onto an archive-only
+/// view and they would drop every DB-only print.
 #[derive(Debug, Default)]
 pub struct GalleryFeedReadiness {
     inner: std::sync::Mutex<ReadinessInner>,
@@ -122,12 +129,26 @@ pub struct GalleryFeedReadiness {
 
 #[derive(Debug, Default)]
 struct ReadinessInner {
-    ready: HashSet<PathBuf>,
-    reconciling: HashSet<PathBuf>,
+    /// Directory key → the epoch its reconcile finished against.
+    ready: HashMap<String, String>,
+    reconciling: HashSet<String>,
 }
 
-fn readiness_key(dir: &Path) -> PathBuf {
-    std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
+/// One key per directory whether or not it exists yet: canonical when it
+/// does, else its canonical parent joined with its name, so a directory
+/// created after `begin` keeps its key.
+fn readiness_key(dir: &Path) -> String {
+    if let Ok(canonical) = std::fs::canonicalize(dir) {
+        return canonical.to_string_lossy().into_owned();
+    }
+    match (dir.parent(), dir.file_name()) {
+        (Some(parent), Some(name)) => std::fs::canonicalize(parent)
+            .map(|parent| parent.join(name))
+            .unwrap_or_else(|_| dir.to_path_buf())
+            .to_string_lossy()
+            .into_owned(),
+        _ => dir.to_string_lossy().into_owned(),
+    }
 }
 
 impl GalleryFeedReadiness {
@@ -142,27 +163,43 @@ impl GalleryFeedReadiness {
         self.lock().reconciling.insert(readiness_key(dir));
     }
 
-    /// The reconcile of `dir` has finished (successfully or not: a failed
-    /// reconcile leaves the DB exactly as authoritative as the listing
-    /// treats it).
-    pub(crate) fn finish(&self, dir: &Path) {
+    /// The reconcile of `dir` has finished against the DB whose feed epoch
+    /// is `epoch` (successfully or not: a failed reconcile leaves the DB
+    /// exactly as authoritative as the listing treats it).
+    pub(crate) fn finish(&self, dir: &Path, epoch: String) {
         let key = readiness_key(dir);
         let mut inner = self.lock();
         inner.reconciling.remove(&key);
-        inner.ready.insert(key);
+        inner.ready.insert(key, epoch);
     }
 
-    pub(crate) fn is_ready(&self, dir: &Path) -> bool {
-        self.lock().ready.contains(&readiness_key(dir))
+    /// [`Self::finish`] with the epoch read from `db` now. Blocking.
+    pub(crate) fn finish_with_db(&self, db: Option<&MetadataDb>, dir: &Path) {
+        let epoch = db
+            .and_then(|db| mold_db::gallery_changes::feed_state(db).ok())
+            .map(|state| state.epoch)
+            .unwrap_or_default();
+        self.finish(dir, epoch);
     }
 
-    /// Claim the reconcile of a directory nobody has reconciled or is
-    /// reconciling — an `output_dir` changed through the config API after
-    /// startup. True exactly once per such directory.
-    fn claim_reconcile(&self, dir: &Path) -> bool {
+    pub(crate) fn is_ready(&self, dir: &Path, epoch: &str) -> bool {
+        !epoch.is_empty()
+            && self
+                .lock()
+                .ready
+                .get(&readiness_key(dir))
+                .is_some_and(|ready| ready == epoch)
+    }
+
+    /// Claim the reconcile of a directory that is not ready for `epoch` and
+    /// that nobody is reconciling — an `output_dir` changed after startup, or
+    /// a DB rebuilt after corruption. True once per such claim.
+    fn claim_reconcile(&self, dir: &Path, epoch: &str) -> bool {
         let key = readiness_key(dir);
         let mut inner = self.lock();
-        if inner.ready.contains(&key) || inner.reconciling.contains(&key) {
+        if inner.reconciling.contains(&key)
+            || inner.ready.get(&key).is_some_and(|ready| ready == epoch)
+        {
             return false;
         }
         inner.reconciling.insert(key);
@@ -170,8 +207,8 @@ impl GalleryFeedReadiness {
     }
 }
 
-/// Reconcile a directory the server did not reconcile at startup, then mark
-/// it ready. Same work and lock as the startup reconcile.
+/// Reconcile a directory that is not ready for the current DB, then mark it
+/// ready. Same work and lock as the startup reconcile.
 fn spawn_reconcile(state: &AppState, dir: PathBuf) {
     let db = state.metadata_db.clone();
     let gate = state.gallery_publication_gate.clone();
@@ -179,9 +216,16 @@ fn spawn_reconcile(state: &AppState, dir: PathBuf) {
     tokio::spawn(async move {
         let _reader = gate.read().await;
         let reconcile_dir = dir.clone();
-        let outcome = tokio::task::spawn_blocking(move || match db.as_ref() {
-            Some(db) => db.reconcile(&reconcile_dir).map(|_| ()),
-            None => Ok(()),
+        let outcome = tokio::task::spawn_blocking(move || {
+            let db = db.as_ref().as_ref();
+            let outcome = match db {
+                Some(db) if reconcile_dir.is_dir() => db.reconcile(&reconcile_dir).map(|_| ()),
+                _ => Ok(()),
+            };
+            // A directory that does not exist yet has nothing to reconcile:
+            // it is ready, and empty.
+            readiness.finish_with_db(db, &reconcile_dir);
+            outcome
         })
         .await;
         match outcome {
@@ -195,12 +239,11 @@ fn spawn_reconcile(state: &AppState, dir: PathBuf) {
                 tracing::warn!(dir = %dir.display(), %error, "gallery reconcile task failed")
             }
         }
-        readiness.finish(&dir);
     });
 }
 
 /// Every name the committed archive has an opinion about.
-fn archive_names(snapshot: &CommittedArchiveSnapshot) -> Vec<String> {
+pub(crate) fn archive_names(snapshot: &CommittedArchiveSnapshot) -> Vec<String> {
     let index = &snapshot.index;
     let mut names = index
         .entries
@@ -233,24 +276,33 @@ pub(crate) fn project_archive_changes(
     let Some(generation) = snapshot.generation else {
         return Ok(ArchiveProjection::Unchanged);
     };
+    let current = ArchiveMark {
+        generation,
+        store_id: snapshot.store_id.clone(),
+    };
     let _serial = PROJECTION_LOCK
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    let stored = mold_db::gallery_changes::projected_archive_generation(db, dir)?;
-    if stored == Some(generation) {
+    let stored = mold_db::gallery_changes::projected_archive(db, dir)?;
+    if stored.as_ref() == Some(&current) {
         return Ok(ArchiveProjection::Unchanged);
     }
     let changed = stored
-        .filter(|from| *from < generation)
+        .as_ref()
+        .filter(|from| from.generation < generation && from.store_id == current.store_id)
         .and_then(|from| {
-            crate::gallery_authority::archive_changes_between(&snapshot.root, from, generation)
+            crate::gallery_authority::archive_changes_between(
+                &snapshot.root,
+                from.generation,
+                generation,
+            )
         })
         .map(|names| names.into_iter().collect::<Vec<_>>());
     let outcome = mold_db::gallery_changes::project_archive(
         db,
         dir,
-        stored,
-        generation,
+        stored.as_ref(),
+        &current,
         changed.as_deref(),
         || archive_names(snapshot),
     )?;
@@ -263,14 +315,69 @@ pub(crate) fn project_archive_changes(
         tracing::info!(
             marked,
             generation,
-            previous = ?stored,
+            previous = ?stored.map(|mark| mark.generation),
             "gallery change feed re-marked every name: the archive generation was not covered by this process's commit log"
         );
     }
     Ok(outcome)
 }
 
+/// Test seam: runs between the projection and the page read of the next
+/// `feed_page` for a directory, standing in for another process that
+/// commits (and projects) in exactly that window.
+#[cfg(test)]
+type FeedHook = Box<dyn FnOnce() + Send>;
+
+#[cfg(test)]
+static FEED_HOOKS: std::sync::Mutex<Vec<(String, FeedHook)>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) fn install_feed_hook(dir: &Path, hook: impl FnOnce() + Send + 'static) {
+    FEED_HOOKS
+        .lock()
+        .unwrap()
+        .push((mold_db::canonical_dir_string(dir), Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_feed_hook(dir: &Path) {
+    let key = mold_db::canonical_dir_string(dir);
+    let hook = {
+        let mut hooks = FEED_HOOKS.lock().unwrap();
+        hooks
+            .iter()
+            .position(|(dir, _)| *dir == key)
+            .map(|at| hooks.remove(at).1)
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+/// How many times a page is re-read because the archive moved under it.
+const MAX_ARCHIVE_RETRIES: usize = 8;
+
+/// The archive kept moving for every retry of one page.
+#[derive(Debug)]
+pub(crate) struct FeedBusy;
+
+impl std::fmt::Display for FeedBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the gallery archive kept changing while a change-feed page was read")
+    }
+}
+
+impl std::error::Error for FeedBusy {}
+
 /// One feed page for `dir`. The caller holds the gallery publication READER.
+///
+/// The rows are built from the archive snapshot that was projected BEFORE
+/// the page was read, which is only sound if that snapshot is still the
+/// committed one AFTER the read: another process sharing `mold.db` can
+/// commit and project in between, putting a mark for a change the snapshot
+/// predates into this page — and the cursor would then carry the client
+/// past it for good. So the archive identity is re-read after the page, and
+/// a moved archive re-projects and re-reads (bounded; [`FeedBusy`] after).
 pub(crate) fn feed_page(
     db: &MetadataDb,
     gate: &GalleryPublicationGate,
@@ -281,66 +388,94 @@ pub(crate) fn feed_page(
     instance_id: &str,
 ) -> anyhow::Result<GalleryChangesPage> {
     let limit = limit.clamp(1, MAX_LIMIT);
-    let snapshot = gate.committed_archive_snapshot(dir)?;
-    project_archive_changes(db, dir, &snapshot)?;
     let dir_token = dir_token(dir);
     let format = row_format_token();
-
     let cursor = since
         .map(str::trim)
         .filter(|raw| !raw.is_empty())
         .map(Cursor::decode);
-    let (mut since_seq, mut reset) = match &cursor {
-        None => (0, false),
-        Some(None) => (0, true),
-        Some(Some(cursor)) if cursor.dir != dir_token || cursor.format != format => (0, true),
-        Some(Some(cursor)) => (cursor.seq, false),
-    };
-    let mut page = mold_db::gallery_changes::changes_page(db, dir, since_seq, limit)?;
-    if let Some(Some(cursor)) = &cursor {
-        if !reset
-            && (cursor.epoch != page.epoch
-                || cursor.seq < page.min_seq
-                || cursor.seq > page.max_seq)
-        {
-            reset = true;
-            since_seq = 0;
-            page = mold_db::gallery_changes::changes_page(db, dir, 0, limit)?;
-        }
-    }
-
-    let names = page
-        .changes
-        .iter()
-        .map(|(name, _)| name.clone())
-        .collect::<Vec<_>>();
-    let mut rows =
-        crate::gallery_rows::build_feed_rows(db, &snapshot.index, dir, &names, retention_days)?;
-    let changes = names
-        .into_iter()
-        .map(|filename| {
-            let image = rows.remove(&filename).flatten();
-            GalleryChange {
-                removed: image.is_none(),
-                filename,
-                image,
+    for _ in 0..MAX_ARCHIVE_RETRIES {
+        let exists = dir.is_dir();
+        let snapshot = if exists {
+            gate.committed_archive_snapshot(dir)?
+        } else {
+            // Nothing published yet: an empty archive, and nothing to lock.
+            CommittedArchiveSnapshot {
+                root: dir.to_path_buf(),
+                generation: None,
+                store_id: String::new(),
+                index: Default::default(),
             }
-        })
-        .collect();
-    let cursor = Cursor {
-        epoch: page.epoch.clone(),
-        dir: dir_token,
-        format,
-        seq: page.next_cursor(since_seq),
-    };
-    Ok(GalleryChangesPage {
-        protocol_version: GALLERY_CHANGES_PROTOCOL_VERSION,
-        instance_id: instance_id.to_string(),
-        cursor: cursor.encode(),
-        more: page.more,
-        reset,
-        changes,
-    })
+        };
+        project_archive_changes(db, dir, &snapshot)?;
+        #[cfg(test)]
+        run_feed_hook(dir);
+
+        // A client without a cursor has nothing to merge into: it REPLACES
+        // its replica, so the snapshot's first page says `reset`.
+        let (mut since_seq, mut reset) = match &cursor {
+            None | Some(None) => (0, true),
+            Some(Some(cursor)) if cursor.dir != dir_token || cursor.format != format => (0, true),
+            Some(Some(cursor)) => (cursor.seq, false),
+        };
+        let mut page = mold_db::gallery_changes::changes_page(db, dir, since_seq, limit)?;
+        if let Some(Some(cursor)) = &cursor {
+            if !reset
+                && (cursor.epoch != page.epoch
+                    || cursor.seq < page.min_seq
+                    || cursor.seq > page.max_seq)
+            {
+                reset = true;
+                since_seq = 0;
+                page = mold_db::gallery_changes::changes_page(db, dir, 0, limit)?;
+            }
+        }
+        if exists {
+            let now = gate.committed_archive_identity(dir)?;
+            if now != (snapshot.generation, snapshot.store_id.clone()) {
+                tracing::debug!(
+                    from = ?snapshot.generation,
+                    to = ?now.0,
+                    "gallery archive moved while a change-feed page was read; re-reading"
+                );
+                continue;
+            }
+        }
+
+        let names = page
+            .changes
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        let mut rows =
+            crate::gallery_rows::build_feed_rows(db, &snapshot.index, dir, &names, retention_days)?;
+        let changes = names
+            .into_iter()
+            .map(|filename| {
+                let image = rows.remove(&filename).flatten();
+                GalleryChange {
+                    removed: image.is_none(),
+                    filename,
+                    image,
+                }
+            })
+            .collect();
+        let cursor = Cursor {
+            epoch: page.epoch.clone(),
+            dir: dir_token,
+            format,
+            seq: page.next_cursor(since_seq),
+        };
+        return Ok(GalleryChangesPage {
+            protocol_version: GALLERY_CHANGES_PROTOCOL_VERSION,
+            instance_id: instance_id.to_string(),
+            cursor: cursor.encode(),
+            more: page.more,
+            reset,
+            changes,
+        });
+    }
+    Err(FeedBusy.into())
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -353,6 +488,24 @@ pub(crate) struct ChangesQuery {
 
 fn unsupported(message: &str) -> ApiError {
     ApiError::with_code(message, GALLERY_FEED_UNSUPPORTED, StatusCode::NOT_FOUND)
+}
+
+fn not_ready(message: &str) -> ApiError {
+    ApiError::with_code(
+        message,
+        GALLERY_FEED_NOT_READY,
+        StatusCode::SERVICE_UNAVAILABLE,
+    )
+}
+
+enum FeedAnswer {
+    Page(GalleryChangesPage),
+    /// Not reconciled for the current DB; `claimed` means this request
+    /// starts the reconcile.
+    NotReady {
+        claimed: bool,
+    },
+    Busy,
 }
 
 /// `GET /api/gallery/changes?since=<cursor>&limit=<n>`.
@@ -374,48 +527,55 @@ pub(crate) async fn gallery_changes(
     let dir = config.effective_output_dir();
     let retention_days = config.gallery.effective_trash_retention_days();
     drop(config);
-    if !state.gallery_feed_readiness.is_ready(&dir) {
-        if dir.is_dir() && state.gallery_feed_readiness.claim_reconcile(&dir) {
-            spawn_reconcile(&state, dir.clone());
-        }
-        return Err(ApiError::with_code(
-            "the gallery is still being reconciled; retry shortly",
-            GALLERY_FEED_NOT_READY,
-            StatusCode::SERVICE_UNAVAILABLE,
-        ));
-    }
-    if !dir.is_dir() {
-        // Nothing to read yet (the listing answers an empty list here);
-        // never create the directory from a read.
-        return Err(ApiError::with_code(
-            "the gallery output directory does not exist yet",
-            GALLERY_FEED_NOT_READY,
-            StatusCode::SERVICE_UNAVAILABLE,
-        ));
-    }
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT);
     let since = query.since;
     let instance_id = state.instance_id.to_string();
     let db = state.metadata_db.clone();
     let gate = state.gallery_publication_gate.clone();
-    let page = tokio::task::spawn_blocking(move || {
+    let readiness = state.gallery_feed_readiness.clone();
+    let blocking_dir = dir.clone();
+    let answer = tokio::task::spawn_blocking(move || -> anyhow::Result<FeedAnswer> {
         let db = db
             .as_ref()
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("metadata DB is unavailable"))?;
-        feed_page(
+        let epoch = mold_db::gallery_changes::feed_state(db)?.epoch;
+        if !readiness.is_ready(&blocking_dir, &epoch) {
+            return Ok(FeedAnswer::NotReady {
+                claimed: readiness.claim_reconcile(&blocking_dir, &epoch),
+            });
+        }
+        match feed_page(
             db,
             &gate,
-            &dir,
+            &blocking_dir,
             since.as_deref(),
             limit,
             retention_days,
             &instance_id,
-        )
+        ) {
+            Ok(page) => Ok(FeedAnswer::Page(page)),
+            Err(error) if error.is::<FeedBusy>() => Ok(FeedAnswer::Busy),
+            Err(error) => Err(error),
+        }
     })
     .await
     .map_err(|e| ApiError::internal(format!("gallery change feed task failed: {e}")))?
     .map_err(|e| ApiError::internal(format!("gallery change feed failed: {e:#}")))?;
+    let page = match answer {
+        FeedAnswer::Page(page) => page,
+        FeedAnswer::NotReady { claimed } => {
+            if claimed {
+                spawn_reconcile(&state, dir);
+            }
+            return Err(not_ready(
+                "the gallery is still being reconciled; retry shortly",
+            ));
+        }
+        FeedAnswer::Busy => {
+            return Err(not_ready("the gallery is changing quickly; retry shortly"));
+        }
+    };
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CACHE_CONTROL,
@@ -428,48 +588,43 @@ pub(crate) async fn gallery_changes(
 /// body is a function of, read WITHOUT building it.
 ///
 /// - `epoch` and `max_seq` cover every DB-side change (triggers bump the seq
-///   in the same transaction as the change, for every writer).
-/// - the committed-archive `generation` covers the archive overlay
-///   (retire, quarantine, archive-only entries, records that win over rows).
+///   in the same transaction as the change, for every writer) and the
+///   lazily indexed asset inventories: a GLB inventory write, and a bounded
+///   number of index failures, mark the print (`generation_assets`).
+/// - the committed-archive `generation` and store identity cover the
+///   archive overlay (retire, quarantine, archive-only entries, records that
+///   win over rows), including a store recreated at the same generation.
 /// - `retention` covers `purge_at`; `view` and the directory pick the body;
 ///   the row-format token and the crate version cover derivations the code
 ///   changes without any data changing.
 ///
-/// `None` whenever the listing would not come from the DB (feed not ready,
-/// directory not indexed), so the caller keeps the body-hash ETag there.
+/// `None` whenever the listing would not come from the DB (not reconciled
+/// for this DB, directory not indexed), so the caller keeps the body-hash
+/// ETag there.
 pub(crate) fn listing_validator(
     db: &MetadataDb,
     gate: &GalleryPublicationGate,
+    readiness: &GalleryFeedReadiness,
     dir: &Path,
     library_view: bool,
     retention_days: u32,
 ) -> anyhow::Result<Option<String>> {
+    let state = mold_db::gallery_changes::feed_state(db)?;
+    if !readiness.is_ready(dir, &state.epoch) {
+        return Ok(None);
+    }
     if library_view && !db.has_rows_for_dir(dir)? {
         return Ok(None);
     }
-    let state = mold_db::gallery_changes::feed_state(db)?;
-    let generation = gate.committed_archive_generation(dir)?;
-    // Asset inventories are indexed lazily WHILE a listing is built, with no
-    // seq (a trigger there would make reads write changes). A scan that
-    // failed once and succeeds later changes `assets` with no other change,
-    // so the count of recorded scans is part of the validator: every
-    // successful index adds a row (a media change that replaces one also
-    // bumps the seq through `generations`).
-    let asset_scans: i64 = db.with_conn(|conn| {
-        Ok(
-            conn.query_row("SELECT COUNT(*) FROM generation_asset_scans", [], |r| {
-                r.get(0)
-            })?,
-        )
-    })?;
+    let (generation, store_id) = gate.committed_archive_identity(dir)?;
     let mut hasher = Sha256::new();
     hasher.update(
         format!(
-            "{}|{}|{}|{:?}|{}|{}|{}|{}|{}",
+            "{}|{}|{:?}|{}|{}|{}|{}|{}|{}",
             state.epoch,
             state.max_seq,
-            asset_scans,
             generation,
+            store_id,
             if library_view { "library" } else { "trash" },
             row_format_token(),
             retention_days,

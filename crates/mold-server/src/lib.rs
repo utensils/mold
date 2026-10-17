@@ -1295,11 +1295,15 @@ async fn run_server_inner(
                     // allowing listings/media reads to remain available.
                     let _reader = gallery_gate.read().await;
                     let join = tokio::task::spawn_blocking(move || {
-                        if let Some(db) = db_arc.as_ref() {
+                        let outcome = if let Some(db) = db_arc.as_ref() {
                             db.reconcile(&dir)
                         } else {
                             Ok(mold_db::ReconcileStats::default())
-                        }
+                        };
+                        // Ready against the DB this reconcile read into; a
+                        // later corruption rebuild (new epoch) is not.
+                        feed_readiness.finish_with_db(db_arc.as_ref().as_ref(), &ready_dir);
+                        outcome
                     })
                     .await;
                     match join {
@@ -1316,7 +1320,6 @@ async fn run_server_inner(
                         Ok(Err(e)) => tracing::warn!("metadata DB reconcile failed: {e:#}"),
                         Err(e) => tracing::warn!("metadata DB reconcile task join error: {e}"),
                     }
-                    feed_readiness.finish(&ready_dir);
                     let _ = reconciled_tx.send(());
                 }));
                 trash_sweeper_handle = Some(gallery_trash::spawn_trash_sweeper(

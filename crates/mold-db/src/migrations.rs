@@ -714,6 +714,7 @@ const V44_GALLERY_ARCHIVE_PROJECTION: &str = "
 CREATE TABLE gallery_archive_projection (
     output_dir      TEXT    PRIMARY KEY,
     generation      INTEGER NOT NULL,
+    store_id        TEXT    NOT NULL DEFAULT '',
     projected_at_ms INTEGER NOT NULL
 );
 ";
