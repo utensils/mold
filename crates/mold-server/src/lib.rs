@@ -18,6 +18,7 @@ mod durable_admission_authority;
 mod durable_disposition;
 mod durable_generation_settlement;
 pub mod gallery_authority;
+mod gallery_changes_api;
 mod gallery_media_transfer;
 mod gallery_source_cache;
 mod gallery_source_media;
@@ -1283,17 +1284,30 @@ async fn run_server_inner(
                 let dir = output_dir.clone();
                 let gallery_gate = state.gallery_publication_gate.clone();
                 let (reconciled_tx, reconciled_rx) = tokio::sync::oneshot::channel::<()>();
+                // The change feed answers 503 for this directory until the
+                // reconcile below has finished.
+                let feed_readiness = state.gallery_feed_readiness.clone();
+                feed_readiness.begin(&output_dir);
+                let ready_dir = output_dir.clone();
                 gallery_reconcile_handle = Some(tokio::spawn(async move {
                     // Reconcile mutates SQLite but only observes gallery
                     // files. The shared side keeps publication atomic while
                     // allowing listings/media reads to remain available.
                     let _reader = gallery_gate.read().await;
                     let join = tokio::task::spawn_blocking(move || {
-                        if let Some(db) = db_arc.as_ref() {
+                        // The epoch this reconcile reads into, taken BEFORE it.
+                        let epoch = crate::gallery_changes_api::GalleryFeedReadiness::epoch_of(
+                            db_arc.as_ref().as_ref(),
+                        );
+                        let outcome = if let Some(db) = db_arc.as_ref() {
                             db.reconcile(&dir)
                         } else {
                             Ok(mold_db::ReconcileStats::default())
-                        }
+                        };
+                        // Ready against the DB this reconcile read into; a
+                        // later corruption rebuild (new epoch) is not.
+                        feed_readiness.finish(&ready_dir, epoch);
+                        outcome
                     })
                     .await;
                     match join {
