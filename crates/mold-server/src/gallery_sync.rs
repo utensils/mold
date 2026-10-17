@@ -5,7 +5,7 @@ use axum::{
     http::{header, HeaderMap, HeaderValue, StatusCode},
     Json,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -41,13 +41,100 @@ pub(crate) async fn checkpoint(
     let root = config.effective_output_dir();
     drop(config);
     let instance_id = state.instance_id.to_string();
-    let revisions = tokio::task::spawn_blocking(move || {
-        let index = state
-            .gallery_publication_gate
-            .committed_archive_index(&root)
-            .map_err(|e| ApiError::internal(format!("gallery authority read failed: {e:#}")))?;
-        let mut revisions = BTreeMap::new();
-        for (name, entry) in &index.entries {
+    let revisions = tokio::task::spawn_blocking(move || revisions_for(&state, &root, None))
+        .await
+        .map_err(|e| ApiError::internal(format!("gallery checkpoint task failed: {e}")))??;
+    Ok(checkpoint_response(instance_id, revisions))
+}
+
+/// The most filenames one bounded checkpoint may name.
+pub(crate) const MAX_CHECKPOINT_FILENAMES: usize = 2000;
+
+/// `POST /api/gallery/sync-checkpoint` body.
+#[derive(Debug, Deserialize)]
+pub(crate) struct BoundedCheckpointRequest {
+    filenames: Vec<String>,
+}
+
+/// `POST /api/gallery/sync-checkpoint {filenames}`: the GET's answer for
+/// exactly the named prints (at most [`MAX_CHECKPOINT_FILENAMES`]), so a
+/// mirror verifying what it just touched pays for those names only. A name
+/// the GET would omit is omitted here too.
+pub(crate) async fn bounded_checkpoint(
+    State(state): State<AppState>,
+    auth: Option<Extension<crate::auth::AuthState>>,
+    authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
+    Json(request): Json<BoundedCheckpointRequest>,
+) -> Result<(HeaderMap, Json<Checkpoint>), ApiError> {
+    if !crate::gallery_source_media::private_media_authorized(auth.as_ref(), authenticated.as_ref())
+    {
+        return Err(ApiError::with_code(
+            "API-key authentication required",
+            "RETAINED_SOURCE_MEDIA_AUTH_REQUIRED",
+            StatusCode::UNAUTHORIZED,
+        ));
+    }
+    if request.filenames.len() > MAX_CHECKPOINT_FILENAMES {
+        return Err(ApiError::validation(format!(
+            "a sync checkpoint names at most {MAX_CHECKPOINT_FILENAMES} filenames"
+        )));
+    }
+    let _publication = state.gallery_publication_gate.read().await;
+    let config = state.config.read().await;
+    if state.is_output_disabled(&config) {
+        return Err(ApiError::not_found("image output is disabled"));
+    }
+    let root = config.effective_output_dir();
+    drop(config);
+    let instance_id = state.instance_id.to_string();
+    let names = request.filenames;
+    let revisions = tokio::task::spawn_blocking(move || revisions_for(&state, &root, Some(&names)))
+        .await
+        .map_err(|e| ApiError::internal(format!("gallery checkpoint task failed: {e}")))??;
+    Ok(checkpoint_response(instance_id, revisions))
+}
+
+fn checkpoint_response(
+    instance_id: String,
+    revisions: BTreeMap<String, String>,
+) -> (HeaderMap, Json<Checkpoint>) {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    (
+        headers,
+        Json(Checkpoint {
+            protocol_version: 1,
+            instance_id,
+            revisions,
+        }),
+    )
+}
+
+/// Revisions for every committed print (`only == None`) or for the named
+/// ones. Each print is judged on its own, so a bounded answer is exactly the
+/// matching subset of the whole one.
+fn revisions_for(
+    state: &AppState,
+    root: &std::path::Path,
+    only: Option<&[String]>,
+) -> Result<BTreeMap<String, String>, ApiError> {
+    let index = state
+        .gallery_publication_gate
+        .committed_archive_index(root)
+        .map_err(|e| ApiError::internal(format!("gallery authority read failed: {e:#}")))?;
+    let selected: Vec<(&String, &crate::batch_transaction::CommittedArchiveEntry)> = match only {
+        None => index.entries.iter().collect(),
+        Some(names) => names
+            .iter()
+            .filter_map(|name| index.entries.get_key_value(name))
+            .collect(),
+    };
+    let mut revisions = BTreeMap::new();
+    {
+        for (name, entry) in selected {
             if index.get(name).is_none() {
                 continue;
             }
@@ -65,7 +152,7 @@ pub(crate) async fn checkpoint(
                 continue;
             }
             let Some(media) = crate::gallery_source_media::resolve_members_from_pins(
-                &state,
+                state,
                 entry.identity.clone(),
                 entry.retained_media.clone(),
             )?
@@ -87,23 +174,8 @@ pub(crate) async fn checkpoint(
             })?;
             revisions.insert(name.clone(), revision(&bytes));
         }
-        Ok::<_, ApiError>(revisions)
-    })
-    .await
-    .map_err(|e| ApiError::internal(format!("gallery checkpoint task failed: {e}")))??;
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-store"),
-    );
-    Ok((
-        headers,
-        Json(Checkpoint {
-            protocol_version: 1,
-            instance_id,
-            revisions,
-        }),
-    ))
+    }
+    Ok(revisions)
 }
 
 #[cfg(test)]
@@ -147,6 +219,60 @@ mod tests {
                 .unwrap()
         );
     }
+    #[tokio::test]
+    async fn a_bounded_checkpoint_equals_the_full_one_for_the_named_prints() {
+        let (state, _home, gallery) = fixture().await;
+        for name in ["a.png", "b.png", "c.png"] {
+            publish(&state, gallery.path(), name).await;
+        }
+        let full = checkpoint(State(state.clone()), None, None)
+            .await
+            .unwrap()
+            .1
+             .0;
+        assert_eq!(full.revisions.len(), 3);
+        let request = |names: &[&str]| {
+            Json(BoundedCheckpointRequest {
+                filenames: names.iter().map(|n| n.to_string()).collect(),
+            })
+        };
+        let (headers, Json(bounded)) = bounded_checkpoint(
+            State(state.clone()),
+            None,
+            None,
+            request(&["c.png", "a.png", "missing.png", "a.png"]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(headers[header::CACHE_CONTROL], "private, no-store");
+        assert_eq!(bounded.protocol_version, full.protocol_version);
+        assert_eq!(bounded.instance_id, full.instance_id);
+        let expected = full
+            .revisions
+            .iter()
+            .filter(|(name, _)| ["a.png", "c.png"].contains(&name.as_str()))
+            .map(|(name, revision)| (name.clone(), revision.clone()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(bounded.revisions, expected);
+
+        let too_many = vec!["x.png"; MAX_CHECKPOINT_FILENAMES + 1];
+        let error = bounded_checkpoint(State(state.clone()), None, None, request(&too_many))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "VALIDATION_ERROR");
+        let keyed = Some(Extension(Some(std::sync::Arc::new(
+            crate::auth::ApiKeySet::new(std::collections::HashSet::from([
+                "fixture-key".to_string()
+            ])),
+        ))));
+        assert!(
+            bounded_checkpoint(State(state), keyed, None, request(&["a.png"]))
+                .await
+                .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn changed_output_facts_are_omitted_without_hashing_output() {
         let (state, _home, gallery) = fixture().await;

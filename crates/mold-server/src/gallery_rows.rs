@@ -36,6 +36,68 @@ thread_local! {
         const { std::cell::Cell::new(0) };
 }
 
+/// Whole-directory listings built per directory, across threads — a handler
+/// builds on a blocking worker, which a thread-local cannot see.
+#[cfg(test)]
+static FULL_BUILDS_BY_DIR: std::sync::Mutex<BTreeMap<std::path::PathBuf, usize>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+#[cfg(test)]
+fn count_full_build_for_dir(dir: &Path) {
+    *FULL_BUILDS_BY_DIR
+        .lock()
+        .unwrap()
+        .entry(dir.to_path_buf())
+        .or_default() += 1;
+}
+
+/// How many whole-directory listings have been built for `dir`.
+#[cfg(test)]
+pub(crate) fn full_builds_for_dir(dir: &Path) -> usize {
+    FULL_BUILDS_BY_DIR
+        .lock()
+        .unwrap()
+        .get(dir)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// The change feed's row for each of `names`: the library row if the
+/// library lists it, else the trash row (with `trashed_at` / `purge_at`) if
+/// the trash lists it, else `None` (a removal). The two views are disjoint —
+/// the library drops every DB-trashed print and the trash lists only those —
+/// so this is exactly "the listing of library ∪ trash", per name.
+pub(crate) fn build_feed_rows(
+    db: &MetadataDb,
+    archive: &CommittedArchiveIndex,
+    dir: &Path,
+    names: &[String],
+    retention_days: u32,
+) -> anyhow::Result<BTreeMap<String, Option<GalleryImage>>> {
+    let mut built = build_rows(
+        db,
+        Some(archive),
+        dir,
+        names,
+        GalleryView::Library,
+        retention_days,
+    )?;
+    let unlisted = built
+        .iter()
+        .filter(|(_, image)| image.is_none())
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    if !unlisted.is_empty() {
+        let trashed = build_rows(db, None, dir, &unlisted, GalleryView::Trash, retention_days)?;
+        for (name, image) in trashed {
+            if image.is_some() {
+                built.insert(name, image);
+            }
+        }
+    }
+    Ok(built)
+}
+
 /// The listing for `GET /api/gallery`, answered from the metadata DB.
 ///
 /// `only` narrows it to one print through [`build_rows`] without building
@@ -79,6 +141,8 @@ fn full_listing(
 ) -> anyhow::Result<Option<Vec<GalleryImage>>> {
     #[cfg(test)]
     FULL_LISTING_BUILDS.with(|count| count.set(count.get() + 1));
+    #[cfg(test)]
+    count_full_build_for_dir(dir);
     let organization = db
         .organization_for_dir(dir)
         .map_err(|e| anyhow::anyhow!("gallery organization query failed: {e}"))?;

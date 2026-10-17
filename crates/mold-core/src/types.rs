@@ -11065,6 +11065,45 @@ pub struct GalleryImage {
     pub assets: Vec<GenerationAsset>,
 }
 
+/// The wire version of `GET /api/gallery/changes`
+/// (`capabilities.gallery.changes_feed.protocol_version`).
+pub const GALLERY_CHANGES_PROTOCOL_VERSION: u32 = 1;
+
+/// One print in a `GET /api/gallery/changes` page: its row as the listing
+/// would show it NOW, or `removed` when no listing (library or trash) shows
+/// it any more.
+///
+/// A trashed print carries its row with `trashed_at` (and `purge_at`), so a
+/// client splits live and trash itself from ONE feed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GalleryChange {
+    pub filename: String,
+    #[serde(default)]
+    pub removed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<GalleryImage>,
+}
+
+/// `GET /api/gallery/changes?since=<cursor>&limit=<n>`: one page of the
+/// compacted gallery change feed.
+///
+/// `cursor` is opaque; pass it back as `since`. `more` means another page is
+/// ready now. `reset` means the `since` cursor no longer describes this
+/// feed (another database, output directory, row format, or a cursor past
+/// the tombstone horizon): the page restarts from the beginning and the
+/// client must rebuild its replica from it, dropping prints it does not see
+/// again.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GalleryChangesPage {
+    pub protocol_version: u32,
+    pub instance_id: String,
+    pub cursor: String,
+    pub more: bool,
+    pub reset: bool,
+    #[serde(default)]
+    pub changes: Vec<GalleryChange>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GenerationAsset {
     /// Stable, item-scoped identifier used by the asset download route.
@@ -11706,6 +11745,18 @@ pub struct GalleryCapabilities {
     /// is disabled — there is nothing to read back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persists_outputs: Option<bool>,
+    /// `GET /api/gallery/changes` (the compacted change feed) and
+    /// `POST /api/gallery/sync-checkpoint` are served. Absent means an OLDER
+    /// SERVER, `MOLD_DB_DISABLE`, or a disabled output directory; clients
+    /// keep the full listing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes_feed: Option<GalleryChangesFeedCapabilities>,
+}
+
+/// `capabilities.gallery.changes_feed`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GalleryChangesFeedCapabilities {
+    pub protocol_version: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -14144,6 +14195,7 @@ mod server_event_tests {
             conditional_get: true,
             row_events: true,
             persists_outputs: Some(true),
+            changes_feed: None,
         };
         let wire = serde_json::to_value(&full).unwrap();
         assert_eq!(
@@ -14162,6 +14214,46 @@ mod server_event_tests {
         let back: GalleryCapabilities = serde_json::from_value(wire).unwrap();
         assert_eq!(back.trash.unwrap().retention_days, 30);
         assert!(back.organize);
+        assert_eq!(back.changes_feed, None, "absent reads as an older server");
+    }
+
+    #[test]
+    fn gallery_changes_feed_capability_and_page_round_trip() {
+        let caps: GalleryCapabilities = serde_json::from_value(serde_json::json!({
+            "can_delete": true,
+            "changes_feed": {"protocol_version": 1}
+        }))
+        .unwrap();
+        assert_eq!(
+            caps.changes_feed,
+            Some(GalleryChangesFeedCapabilities {
+                protocol_version: GALLERY_CHANGES_PROTOCOL_VERSION
+            })
+        );
+        let page: GalleryChangesPage = serde_json::from_value(serde_json::json!({
+            "protocol_version": 1,
+            "instance_id": "i",
+            "cursor": "c",
+            "more": false,
+            "reset": true,
+            "changes": [
+                {"filename": "gone.png", "removed": true},
+                {"filename": "a.png", "removed": false, "image": {
+                    "filename": "a.png",
+                    "metadata": serde_json::to_value(organized_gallery_image().metadata).unwrap(),
+                    "timestamp": 1
+                }}
+            ]
+        }))
+        .unwrap();
+        assert!(page.reset && !page.more);
+        assert!(page.changes[0].removed && page.changes[0].image.is_none());
+        assert_eq!(page.changes[1].image.as_ref().unwrap().filename, "a.png");
+        let wire = serde_json::to_value(&page.changes[0]).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"filename": "gone.png", "removed": true})
+        );
     }
 
     #[test]
