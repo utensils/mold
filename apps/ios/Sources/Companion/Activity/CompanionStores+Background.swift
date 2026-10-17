@@ -27,6 +27,7 @@ extension CompanionStores {
         async let library: Void = library.reload()
         async let queue: Void = queue.reload()
         _ = await (library, queue)
+        await self.library.waitForSnapshotWrites()
         notifier.iconBadge.update(self.library.unreadCount, allowPrompt: false)
         await notifier.iconBadge.flush()
         await widgets.refresh()

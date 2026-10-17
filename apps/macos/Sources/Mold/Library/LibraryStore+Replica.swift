@@ -21,6 +21,9 @@ extension LibraryStore {
     func replica(for host: MoldHost) -> GalleryReplica {
         let identity = Self.replicaIdentity(host)
         if let existing = replicas[host.id], existing.identity == identity { return existing.replica }
+        // A replaced replica shares its successor's file: it must never save
+        // again, or its pending debounced write lands the previous gallery.
+        replicas[host.id]?.replica.retire()
         let id = host.id
         let replica = GalleryReplica(hostID: id, store: replicaStore) { [weak self] delta in
             await self?.absorb(delta, on: id)
@@ -110,6 +113,9 @@ extension LibraryStore {
         guard let machine = hosts.host(id) else { return }
         guard delta.origin == nil || delta.origin == Self.origin(machine) else {
             replicas[id]?.replica.redeliver()
+            // Through the current record, so the redelivery is not left
+            // waiting for the next unrelated event.
+            tickle(id)
             return
         }
         writingRows = true
@@ -190,6 +196,6 @@ extension LibraryStore {
 
     /// Writes every replica's state now, for quitting.
     func flushReplicas() async {
-        for (_, entry) in replicas { await entry.replica.flush() }
+        for (_, entry) in replicas { await entry.replica.flushIfDirty() }
     }
 }

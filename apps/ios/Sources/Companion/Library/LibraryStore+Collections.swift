@@ -35,7 +35,7 @@ extension LibraryStore {
     func setShelfHidden(_ shelf: CollectionShelf, hidden: Bool) async {
         collectionVisibility.set(shelf.slug, hidden: hidden, hosts: hosts.hosts)
         collectionVisibility.persist(to: .standard, key: "library.collectionVisibility")
-        rebuildNow()
+        refreshShelves()
         await reconcileCollectionVisibility()
     }
 
@@ -45,7 +45,7 @@ extension LibraryStore {
         defer {
             reconcilingCollectionVisibility = false
             collectionVisibility.persist(to: .standard, key: "library.collectionVisibility")
-            rebuildNow()
+            refreshShelves()
         }
         await collectionVisibility.reconcile(hosts: { self.hosts.hosts },
             collections: { self.collectionInventory }, available: { self.collectionInventoryAvailable }) { host, collection, hidden in

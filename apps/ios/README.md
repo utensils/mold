@@ -66,7 +66,10 @@ Reverse the sweep to shorten it, or hold near a grid edge to scroll further.
 Vertical swipes still scroll, and tapping selections keeps the viewport put.
 Status notices sit above the grid without covering date headings or prints.
 Its cached listing and images load before
-the machines respond. Closing a print restores the exact viewport, including
+the machines respond. Each machine is followed through its gallery change feed
+when it offers one (older machines through their conditional listings), so a
+refresh, a new print or a burst of gallery events reads only what changed, and a
+refresh that finds nothing new leaves the grid untouched. Closing a print restores the exact viewport, including
 partially visible tiles. Scrolling uses cached gallery projections and the viewer
 loads only nearby pages, so large libraries stay responsive. Clips play
 only while their page is selected in the viewer. Settings → Video Playback controls autoplay (on initially) and repeat (off initially); leaving the viewer or backgrounding pauses playback. Settings is available from Generate, Library and Machines;
