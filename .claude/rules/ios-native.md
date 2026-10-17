@@ -49,10 +49,17 @@ a filed row, the outbox's collection edits, and the fleet `reload()` reconcile
 (pull to refresh, foreground, `BGAppRefreshTask`). An outbox give-up is a FULL
 pull so a refused optimistic edit is undone. Replica files live under
 Application Support/offline/library/replicas (not Caches: they are the offline
-Library), are flushed on entering the background and after a background
-refresh, discarded with their machine, and pruned once per launch. Older
-builds' whole-listing snapshots are migrated once (`LibrarySnapshots.migrate`
--> `GalleryReplicaStore.seedIfAbsent`), keeping their validators.
+Library), are flushed (`flushIfDirty`, inside a background task) on entering
+the background and after a background refresh, and deleted only for a machine
+this session saw removed -- never by sweeping the directory against the host
+list, which reads empty before first unlock. A replaced replica is `retire()`d
+so its pending save cannot land over its successor's file. A stale-origin
+delta `redeliver()`s and tickles; a cancelled pull re-arms the tickle it took
+over. Older builds' whole-listing snapshots are migrated once
+(`LibrarySnapshots.migrate` -> `GalleryReplicaStore.seedIfAbsent`, keeping
+their validators); the old file is rewritten only once a replica file exists,
+under the lock Clear Cache's purge takes, so a queued migration never writes
+after a purge.
 
 **Library.** Every edit goes through `LibraryStore.apply` -> `PrintEdit.plan` over `everyCopy` -> the shared `MutationOutbox` (optimistic, retried with the same operation id, re-read on give-up); never a hand-rolled request per print. A recipe's output kind is `GenerationRecipe.makes` (GLB -> 3-D, time axis -> clip), never a family list.
 

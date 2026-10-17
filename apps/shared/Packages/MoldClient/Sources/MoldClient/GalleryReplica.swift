@@ -50,6 +50,9 @@ public actor GalleryReplica {
     private nonisolated let invalidations = Mutex<ReplicaDelta.Scope>([])
     private nonisolated let forgotten = Mutex<Set<String>>([])
     private nonisolated let redeliveries = Mutex(false)
+    /// Replaced by a successor for the same machine: never write the shared
+    /// file again (see `retire()`).
+    nonisolated let retired = Mutex(false)
     /// Per listing partition: how many reads have started, and the newest one
     /// whose answer was applied. An answer older than the applied one is
     /// dropped, so two lanes (or a feed commit) can never land out of order.
@@ -103,6 +106,14 @@ public actor GalleryReplica {
     public nonisolated func forget(_ names: some Sequence<String>) {
         forgotten.withLock { $0.formUnion(names) }
         invalidateValidators()
+    }
+
+    /// A new replica for the same machine (another key or server identity)
+    /// takes over its file. Synchronous, so the caller can create the
+    /// successor at once: from now on this one never writes, and a debounced
+    /// save still pending is dropped rather than landing over the successor's.
+    public nonisolated func retire() {
+        retired.withLock { $0 = true }
     }
 
     /// The consumer dropped a delta (read through a route it has since

@@ -109,6 +109,11 @@ public struct GalleryReplicaStore: Sendable {
         return (try? save(snapshot)) != nil
     }
 
+    /// Whether a replica file exists for this machine (readable or not).
+    public func hasSaved(_ hostID: UUID) -> Bool {
+        FileManager.default.fileExists(atPath: file(hostID).path)
+    }
+
     func load(_ hostID: UUID) -> Snapshot? {
         guard let data = try? Data(contentsOf: file(hostID)),
               let snapshot = try? MoldJSON.localDecoder.decode(Snapshot.self, from: data),
@@ -182,6 +187,13 @@ extension GalleryReplica {
         persistNow()
     }
 
+    /// Writes now only if a debounced save is pending: what quitting and
+    /// backgrounding call, so an unchanged 30K-row replica is not rewritten.
+    public func flushIfDirty() {
+        guard saveTask != nil else { return }
+        flush()
+    }
+
     /// Whether this replica was discarded (its machine removed).
     public var isDiscarded: Bool { discarded }
 
@@ -203,7 +215,7 @@ extension GalleryReplica {
 
     func persistNow() {
         saveTask = nil
-        guard let store, loaded, !discarded else { return }
+        guard let store, loaded, !discarded, !retired.withLock({ $0 }) else { return }
         let snapshot = GalleryReplicaStore.Snapshot(
             hostID: hostID, instanceID: instanceID, cursor: cursor, liveETag: liveETag, trashETag: trashETag,
             rows: rows.values.sorted { $0.filename < $1.filename }

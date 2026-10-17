@@ -30,7 +30,11 @@ extension LibraryStore {
     /// or server instance changes, which may be another gallery altogether.
     func replica(for host: MoldHost) -> GalleryReplica {
         let identity = Self.replicaIdentity(host)
-        if let existing = replicas[host.id], existing.identity == identity { return existing.replica }
+        if let existing = replicas[host.id] {
+            if existing.identity == identity { return existing.replica }
+            // Its pending save must not land over the successor's file.
+            existing.replica.retire()
+        }
         let id = host.id
         let epoch = cacheEpoch
         let replica = GalleryReplica(hostID: id, store: snapshots.replicas) { [weak self] delta in
@@ -73,7 +77,8 @@ extension LibraryStore {
     /// Reads one machine through its replica. Never settles: callers do.
     func pull(_ host: MoldHost, full: Bool = false) async {
         // A pull starting now answers every frame heard before it.
-        tickles.removeValue(forKey: host.id)?.cancel()
+        let answering = tickles.removeValue(forKey: host.id)
+        answering?.cancel()
         let epoch = cacheEpoch
         let client = hosts.backend(for: host)
         let doing = String(localized: "list its prints")
@@ -86,7 +91,9 @@ extension LibraryStore {
             hosts.clearFailures(for: host.id, doing: doing)
         } catch is CancellationError {
             // Foreground navigation can end a refresh after prints loaded.
-            // Cancellation is not a host failure.
+            // Cancellation is not a host failure -- but the frames this pull
+            // took over are still unanswered.
+            if answering != nil, epoch == cacheEpoch, hosts.host(host.id) == host { tickle(host.id) }
         } catch {
             guard epoch == cacheEpoch, hosts.host(host.id) == host, !Task.isCancelled else { return }
             collectionInventoryAvailable.remove(host.id)
@@ -114,6 +121,9 @@ extension LibraryStore {
         guard delta.origin == nil || delta.origin == Self.origin(machine) else {
             // Read through a record since replaced: hand everything over again.
             replicas[id]?.replica.redeliver()
+            // And read through the current record now, rather than waiting
+            // for the next unrelated frame.
+            tickle(id)
             return
         }
         let liveRows = delta.live, trashRows = delta.trashed
@@ -153,10 +163,12 @@ extension LibraryStore {
     /// count or cover): a reset, or a row that is or was filed somewhere.
     private func organizes(_ delta: ReplicaDelta, on id: MoldHost.ID) -> Bool {
         if delta.reset || delta.upserted.contains(where: { !($0.collections ?? []).isEmpty }) { return true }
-        guard !delta.removed.isEmpty else { return false }
-        let gone = Set(delta.removed)
+        // A row taken OUT of its last collection, or removed while filed:
+        // only its prior row says so.
+        let touched = Set(delta.removed).union(delta.upserted.map(\.filename))
+        guard !touched.isEmpty else { return false }
         return ((live[id] ?? []) + (trashed[id] ?? [])).contains {
-            gone.contains($0.filename) && !($0.collections ?? []).isEmpty
+            touched.contains($0.filename) && !($0.collections ?? []).isEmpty
         }
     }
 
@@ -229,17 +241,16 @@ extension LibraryStore {
     }
 
     /// Machines that left the list leave the grid; their replicas, saved
-    /// files and pictures go with them -- and, once per launch, any file a
-    /// machine removed in an earlier launch left behind.
+    /// files and pictures go with them.
     func prune(to hostList: [MoldHost]) {
         let present = Set(hostList.map(\.id))
         let gone = Set(live.keys).union(trashed.keys).union(collections.keys).union(replicas.keys)
             .subtracting(present)
         for id in gone { forget(id) }
-        guard !prunedReplicaFiles || !gone.isEmpty else { return }
-        prunedReplicaFiles = true
-        let snapshots = snapshots
-        Task.detached(priority: .utility) { snapshots.prune(keeping: present) }
+        // Deliberately no sweep of the directory against `hostList`: an empty
+        // list can mean "not readable yet" (a prewarmed launch before first
+        // unlock), and a sweep would then delete every machine's offline
+        // Library. Only a machine this session saw leave loses its files.
     }
 
     private func forget(_ id: MoldHost.ID) {

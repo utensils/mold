@@ -197,13 +197,39 @@ struct OfflineLibraryTests {
         let id = UUID()
         let shelf = Collection(id: "c1", name: "Owls", slug: "owls")
         try saveLegacy(snapshots, [try print("owl.png", version: "v1")], collections: [shelf], for: id)
-        snapshots.migrate(id)
+        snapshots.migrate(id, from: snapshots.generation)
         #expect(snapshots.load(id) == LibrarySnapshot(collections: [shelf]))
         let restored = try #require(await GalleryReplica(hostID: id, store: snapshots.replicas).restoreSaved())
         #expect(restored.live.map(\.filename) == ["owl.png"])
         // Already migrated: a second pass changes nothing.
-        snapshots.migrate(id)
+        snapshots.migrate(id, from: snapshots.generation)
         #expect(snapshots.load(id) == LibrarySnapshot(collections: [shelf]))
+    }
+
+    /// A seed that could not be written leaves the old listing where it is:
+    /// the only copy of those rows is never overwritten.
+    @Test func aFailedSeedKeepsTheOldListing() throws {
+        let snapshots = LibrarySnapshots(directory: temp("snapshots"))
+        let id = UUID()
+        try saveLegacy(snapshots, [try print("owl.png", version: "v1")], for: id)
+        // A file where the replicas directory should be: the seed cannot write.
+        try Data().write(to: snapshots.replicas.directory)
+        snapshots.migrate(id, from: snapshots.generation)
+        let raw = try Data(contentsOf: snapshots.directory.appending(path: "\(id.uuidString).json"))
+        #expect(try MoldJSON.localDecoder.decode(LibrarySnapshot.Legacy.self, from: raw).prints.map(\.filename)
+                == ["owl.png"])
+    }
+
+    /// A migration queued before Clear Cache purges writes nothing after it.
+    @Test func aMigrationFromBeforeAPurgeWritesNothing() throws {
+        let snapshots = LibrarySnapshots(directory: temp("snapshots"))
+        let id = UUID()
+        try saveLegacy(snapshots, [try print("owl.png", version: "v1")], for: id)
+        let before = snapshots.generation
+        snapshots.purge()
+        try saveLegacy(snapshots, [try print("owl.png", version: "v1")], for: id)
+        snapshots.migrate(id, from: before)
+        #expect(!snapshots.replicas.hasSaved(id))
     }
 
     @Test func clearingOfflineLibraryRemovesSavedListingsAndOfflineRows() async throws {

@@ -169,6 +169,11 @@ struct LibraryReplicaTests {
                 (library.live[host.id] ?? []).map { LibraryEntry(host: host, print: $0) }
             }, localHost: nil)
             #expect(library.pool == full.tiles, "step \(step)")
+            var fullTrash = LibraryTimeline(order: .recentlyTrashedFirst)
+            fullTrash.rebuild(hosts.hosts.flatMap { host in
+                (library.trashed[host.id] ?? []).map { LibraryEntry(host: host, print: $0) }
+            }, localHost: nil)
+            #expect(library.trashPool == fullTrash.tiles, "step \(step)")
         }
     }
 
@@ -222,8 +227,41 @@ struct LibraryReplicaTests {
         #expect(library.pool.map(\.print.filename) == ["b.png"])
         #expect(forgotten == [gone])
         #expect(snapshots.load(gone) == nil)
-        try await Task.sleep(for: .milliseconds(50))
-        #expect(await GalleryReplica(hostID: gone, store: snapshots.replicas).restoreSaved() == nil)
+        // The discarded replica's own removal is asynchronous; the file is
+        // already gone either way, and nothing may write it back.
+        #expect(!snapshots.replicas.hasSaved(gone))
+        await library.waitForSnapshotWrites()
+        #expect(!snapshots.replicas.hasSaved(gone))
+    }
+
+    /// A launch that cannot read its machine list yet (prewarmed before
+    /// first unlock) sees no machines. That must never cost the offline
+    /// Library of the machines it could not read.
+    @Test func anEmptyMachineListDeletesNoSavedLibrary() async throws {
+        let snapshots = LibrarySnapshots(directory: temp("lib"))
+        let saved = UUID()
+        #expect(snapshots.replicas.seedIfAbsent(saved, live: [try row("a.png")], trashed: [],
+                                                liveETag: "e1", trashETag: nil))
+        snapshots.save(LibrarySnapshot(collections: [Collection(id: "c", name: "C", slug: "c")]), for: saved)
+        let (library, _) = try await machines([], snapshots: snapshots)
+        await library.restoreSaved()
+        await library.reload()
+        await library.waitForSnapshotWrites()
+        #expect(snapshots.replicas.hasSaved(saved))
+        #expect(snapshots.load(saved) != nil)
+    }
+
+    /// Clear Cache keeps the shelves of machines still answering on disk.
+    @Test func clearingTheCacheKeepsAnsweringMachinesCollections() async throws {
+        let snapshots = LibrarySnapshots(directory: temp("lib"))
+        let (_, fake) = feedMachine([try row("a.png")])
+        fake.stub("collections()", returning: [Collection(id: "c", name: "C", slug: "c")])
+        let (library, hosts) = try await machines([("alpha", fake, true)], snapshots: snapshots)
+        await library.reload()
+        await library.clearOfflineCache()
+        await library.waitForSnapshotWrites()
+        #expect(snapshots.load(hosts.hosts[0].id)?.collections?.map(\.id) == ["c"])
+        #expect(library.pool.count == 1, "an answering machine's prints stay on screen")
     }
 }
 

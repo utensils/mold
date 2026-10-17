@@ -1,5 +1,6 @@
 import Foundation
 import MoldClient
+import Synchronization
 
 /// One machine's collections as last listed, kept on this device so shelves
 /// show at once on launch and stay browsable with no connection. Its PRINTS
@@ -25,6 +26,16 @@ nonisolated struct LibrarySnapshot: Codable, Equatable {
 /// backup), all written with the app's own strategy-free coders.
 nonisolated struct LibrarySnapshots: Sendable {
     let directory: URL
+    /// Clear Cache's generation, and the lock a migration and a purge share:
+    /// a migration begun before a purge can never write after it.
+    let gate = Gate()
+
+    final class Gate: Sendable {
+        let generation = Mutex(0)
+    }
+
+    /// What `migrate(_:from:)` must still find for its writes to happen.
+    nonisolated var generation: Int { gate.generation.withLock { $0 } }
 
     static let standard = LibrarySnapshots(directory: ThumbnailLoader.defaultDirectory.appending(path: "library"))
 
@@ -47,12 +58,19 @@ nonisolated struct LibrarySnapshots: Sendable {
     /// Once per machine, after an update: an older build's saved listing
     /// becomes the replica's starting state (validators kept, so an unchanged
     /// machine still answers 304) and the file keeps only its collections.
-    nonisolated func migrate(_ id: UUID) {
-        guard let data = try? Data(contentsOf: file(id)),
-              let legacy = try? MoldJSON.localDecoder.decode(LibrarySnapshot.Legacy.self, from: data) else { return }
-        replicas.seedIfAbsent(id, live: legacy.prints, trashed: legacy.trashed ?? [],
-                              liveETag: legacy.etag, trashETag: legacy.trashEtag)
-        save(LibrarySnapshot(collections: legacy.collections), for: id)
+    nonisolated func migrate(_ id: UUID, from generation: Int) {
+        gate.generation.withLock { current in
+            guard current == generation,
+                  let data = try? Data(contentsOf: file(id)),
+                  let legacy = try? MoldJSON.localDecoder.decode(LibrarySnapshot.Legacy.self, from: data)
+            else { return }
+            // Only once the rows are safe in a replica file -- seeded now, or
+            // already there -- may the listing leave this one.
+            let seeded = replicas.seedIfAbsent(id, live: legacy.prints, trashed: legacy.trashed ?? [],
+                                               liveETag: legacy.etag, trashETag: legacy.trashEtag)
+            guard seeded || replicas.hasSaved(id) else { return }
+            save(LibrarySnapshot(collections: legacy.collections), for: id)
+        }
     }
 
     /// The machine was removed: its collections and its replica go.
@@ -74,7 +92,10 @@ nonisolated struct LibrarySnapshots: Sendable {
     }
 
     nonisolated func purge() {
-        try? FileManager.default.removeItem(at: directory)
+        gate.generation.withLock { generation in
+            generation += 1
+            try? FileManager.default.removeItem(at: directory)
+        }
     }
 
     nonisolated var diskBytes: Int64 {

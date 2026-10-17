@@ -59,6 +59,40 @@ struct GalleryReplicaRestoreTests {
         #expect(await replica.restoreSaved() == nil)
     }
 
+    @Test func flushIfDirtyWritesOnlyAPendingSave() async throws {
+        let directory = directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = GalleryReplicaStore(directory: directory)
+        let host = UUID()
+        let replica = GalleryReplica(hostID: host, store: store, saveDelay: .seconds(60))
+        await replica.flushIfDirty()
+        #expect(!store.hasSaved(host), "nothing pending, nothing written")
+        let feed = FakeGalleryFeed(rows: GalleryReplicaTests.rows(["a"]))
+        try await replica.pull(using: GalleryReplicaTests.feedBackend(feed))
+        await replica.flushIfDirty()
+        #expect(store.load(host)?.rows.map(\.print.filename) == ["a"])
+        try FileManager.default.removeItem(at: directory)
+        await replica.flushIfDirty()
+        #expect(!store.hasSaved(host), "already written: not written again")
+    }
+
+    @Test func aRetiredReplicaNeverWritesOverItsSuccessor() async throws {
+        let directory = directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = GalleryReplicaStore(directory: directory)
+        let host = UUID()
+        let old = GalleryReplica(hostID: host, store: store, saveDelay: .milliseconds(20))
+        try await old.pull(using: GalleryReplicaTests.feedBackend(FakeGalleryFeed(rows: GalleryReplicaTests.rows(["old"]))))
+        old.retire()
+        let successor = GalleryReplica(hostID: host, store: store)
+        try await successor.pull(using: GalleryReplicaTests.feedBackend(
+            FakeGalleryFeed(instanceID: "instance-2", rows: GalleryReplicaTests.rows(["new"]))))
+        await successor.flush()
+        await old.flush()
+        await old.flushIfDirty()
+        #expect(store.load(host)?.rows.map(\.print.filename) == ["new"])
+    }
+
     @Test func aSeedBecomesTheSavedStateAndKeepsTheTrashListingsWord() async throws {
         let directory = directory()
         defer { try? FileManager.default.removeItem(at: directory) }

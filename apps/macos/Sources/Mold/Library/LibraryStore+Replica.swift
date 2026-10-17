@@ -110,6 +110,9 @@ extension LibraryStore {
         guard let machine = hosts.host(id) else { return }
         guard delta.origin == nil || delta.origin == Self.origin(machine) else {
             replicas[id]?.replica.redeliver()
+            // Through the current record, so the redelivery is not left
+            // waiting for the next unrelated event.
+            tickle(id)
             return
         }
         writingRows = true
@@ -184,6 +187,6 @@ extension LibraryStore {
 
     /// Writes every replica's state now, for quitting.
     func flushReplicas() async {
-        for (_, entry) in replicas { await entry.replica.flush() }
+        for (_, entry) in replicas { await entry.replica.flushIfDirty() }
     }
 }

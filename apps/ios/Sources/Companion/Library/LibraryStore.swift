@@ -76,7 +76,6 @@ final class LibraryStore {
     @ObservationIgnored var collections: [MoldHost.ID: [Collection]] = [:]
     /// Each machine's replica and the record identity it was made for.
     @ObservationIgnored var replicas: [MoldHost.ID: (identity: String, replica: GalleryReplica)] = [:]
-    @ObservationIgnored var prunedReplicaFiles = false
     /// The merged timelines and their copy -> tile indexes, and what changed
     /// in the rows since they were last settled.
     @ObservationIgnored var liveTimeline = LibraryTimeline(order: .newestFirst)
@@ -115,9 +114,12 @@ final class LibraryStore {
         let epoch = cacheEpoch
         let ids = hosts.hosts.map(\.id).filter { collections[$0] == nil }
         let snapshots = snapshots
+        // Taken here, before the hop: a Clear Cache that purges while the
+        // migration is queued makes it write nothing.
+        let generation = snapshots.generation
         let saved = await Task.detached(priority: .userInitiated) {
             ids.compactMap { id in
-                snapshots.migrate(id)
+                snapshots.migrate(id, from: generation)
                 return snapshots.load(id).map { (id, $0) }
             }
         }.value
@@ -175,21 +177,28 @@ final class LibraryStore {
         replicas.removeAll()
         for replica in dropped { await replica.discard() }
         snapshots.purge()
-        for host in hosts.hosts where !hosts.isUp(host) {
-            live[host.id] = nil
-            trashed[host.id] = nil
-            collections[host.id] = nil
+        for host in hosts.hosts {
+            if hosts.isUp(host) {
+                // Still shown, so still saved: shelves stay browsable if the
+                // machine goes away before its next listing.
+                if collections[host.id] != nil { saveCollections(host.id) }
+            } else {
+                live[host.id] = nil
+                trashed[host.id] = nil
+                collections[host.id] = nil
+            }
         }
         rebuildNow()
     }
 
     /// Await the writes already queued when this barrier starts, and write
-    /// every replica's state now. Capturing the tasks keeps later listings
-    /// from changing what completion means.
+    /// now every replica with a save pending (an unchanged one is not
+    /// rewritten). Capturing the tasks keeps later listings from changing
+    /// what completion means.
     func waitForSnapshotWrites() async {
         let pendingWrites = Array(writes.values)
         for task in pendingWrites { await task.value }
-        for entry in replicas.values { await entry.replica.flush() }
+        for entry in replicas.values { await entry.replica.flushIfDirty() }
     }
 
     /// Collections written off the main thread, when they change.
