@@ -165,6 +165,15 @@ It feeds `mold_core::client::resolve_target`: `--host` > `MOLD_HOST` > default
 host > localhost. CLI clients go through `control::client_for_host`, which
 prints address redirects on stderr; only non-CLI `from_env` may fall back.
 
+CLI pairing: `mold host invite` prints the shared pairing link and
+`mold host add` takes it. `mold_secure_client::link` must stay byte-compatible
+with `studio/api/pairing.fixtures.json` (`mobilePairingUrl` field order and
+`URLSearchParams` encoding; every fixture payload encodes to its exact link);
+change the fixture and all three ports together. `mold host add URL` exchanges
+an operator key for the client's own grant by claiming the session at once; an
+operator key is never written to a client profile. `mold pair` / `mold pairing
+create` are hidden aliases.
+
 Browser pairing-change notifications carry the exact namespace and whether
 credential authority changed. Route discovery and certificate renewal must not
 close established encrypted channels. Removal/replacement closes only that

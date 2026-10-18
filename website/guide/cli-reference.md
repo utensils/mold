@@ -899,8 +899,50 @@ See [mold runpod CLI](/deployment/runpod-cli).
 
 ## `mold host`
 
-Manage the saved hosts that `--host` and `MOLD_HOST` accept by name. Pairing
-(`mold pair`, `mold runpod create`) saves each one under the host's own name
+Pair with hosts and manage the saved hosts that `--host` and `MOLD_HOST` accept
+by name.
+
+```bash
+# On the host (any shell with its operator key): print a one-use pairing link.
+mold host invite
+mold host invite --qr            # also draw it as a QR code for a phone
+# On the client: paste it.
+mold host add 'https://utensils.io/mold/pair#version=2&...'
+mold host add - < link.txt       # or read it from stdin
+# Or pair from the host's URL and an API key.
+mold host add http://10.0.0.8:7680 --name workstation --api-key-file /private/key
+```
+
+`mold host invite` prints only the link on stdout (the expiry, the host's public
+signing key and a hint go to stderr). The link is the same one the macOS app,
+Studio and the iPhone app show: it pairs a phone, Studio, or the CLI, expires in
+two minutes and is spent the moment a client claims it.
+`--regular --direct-url URL` invites a Regular direct client, `--output FILE` writes the owner-only
+invitation file instead of printing a link, and `--relay-url WSS_URL` binds a
+separately supervised connector. It uses the operator key from `--api-key-file`,
+`MOLD_API_KEY` (or `@owner-only-key-file`), or this home's operator credential.
+
+`mold host add` takes the link, a file holding it, the JSON invitation, or `-`
+for stdin; with no argument on a terminal it asks. With a host URL instead it
+asks the host for an invitation with the key from `--api-key-file`,
+`--api-key-stdin`, `MOLD_API_KEY`, or a hidden prompt:
+
+| The host answers                                   | `mold host add`                                                                                   |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| an invitation (the key is the operator key)        | claims it at once: this client gets its own revocable grant, and the operator key is never stored |
+| `PAIRING_OPERATOR_REQUIRED` (an app or device key) | checks the key with one authenticated read, then saves it as Regular                              |
+| `PAIRING_UNAVAILABLE` (authentication off)         | saves a Regular connection with no key                                                            |
+| `401`                                              | stops: the key was rejected                                                                       |
+| anything else                                      | stops and suggests `mold host invite` on the host                                                 |
+
+`--regular` asks for a Regular invitation for that exact URL (the host must
+allow direct access). `--name` saves it under that name (it must be free, or
+already belong to the same server), `--default` makes it the default host, and
+`--device-name` sets how this client appears in the host's paired-device list
+(default `Mold CLI on <this machine>`). It then checks the host once and prints
+`Try: mold ps --host NAME`.
+
+Pairing (`mold host add`, `mold runpod create`) saves each host under its own name
 (or the pod's), made unique with a `-2` suffix when needed; pairing the same
 server again under a new address replaces its entry and keeps its name and
 default. A pairing saved by
@@ -924,7 +966,7 @@ Regular, and the mode selection) and clears the default if it pointed there.
 It does not revoke the device on the host; do that from the host's paired
 clients list.
 
-## `mold relay`, `mold pairing`, and `mold pair`
+## `mold relay`
 
 All remote connections use pinned end-to-end encryption. An authenticated
 headless `mold serve` starts its connector automatically when
@@ -932,21 +974,17 @@ headless `mold serve` starts its connector automatically when
 host's public signing key. `MOLD_PUBLIC_URL` advertises its paired origin.
 
 ```bash
-# On the host, export a one-use invitation to a private file.
-mold pairing create --output "$MOLD_HOME/secure/invitation.json"
-# On the client, consume the privately transferred file.
-mold pair --invite-file /private/invitation.json --name "My laptop"
 # Optional separate connector instead of the server-managed connector.
 mold relay connect --relay-url wss://gateway.example --target 127.0.0.1:7680
 ```
 
-`pairing create` uses the local operator `MOLD_API_KEY`, accepts an explicit
-numeric loopback `--target`, and never prints invitation secrets. `pair` stores
-its per-device identity and grant in the owner-only client store, under a host
-name it prints; use it with `--host NAME`, `MOLD_HOST=NAME`, or
-`mold host use NAME`. Old transport/token flags and `relay serve` are removed;
-upgrade and pair again. See [encrypted remote connections](/deployment/relay)
-for secure headless setup, native/browser media adapters and streaming limits.
+Pair clients with [`mold host invite` and `mold host add`](#mold-host). The
+older `mold pairing create` and `mold pair` still work with every flag they had
+(`mold pair --invite-file` also reads a file holding a link) and are hidden
+aliases of those commands. Old transport/token flags and `relay serve` are
+removed; upgrade and pair again. See
+[encrypted remote connections](/deployment/relay) for secure headless setup,
+native/browser media adapters and streaming limits.
 
 ## `mold lambda`
 

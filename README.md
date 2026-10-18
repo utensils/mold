@@ -276,8 +276,8 @@ Run the engine where the GPU lives and connect from another machine:
 
 ```bash
 mold serve  # authenticated GPU host; enable Remote Access or configure its relay
-mold pairing create --output "$MOLD_HOME/secure/invitation.json"  # on the host
-mold pair --invite-file /private/invitation.json  # on the client; prints the host's saved name
+mold host invite                     # on the host: prints a one-use pairing link
+mold host add '<link>'               # on the client; saves the host under its name
 mold run "a cat" --host workstation  # or MOLD_HOST=workstation, or mold host use workstation
 ```
 
@@ -287,9 +287,9 @@ private one-use invitation and receives its own revocable grant. The Lambda
 relay carries ciphertext; prompts, API credentials and media remain encrypted
 between client and host. Old proxy credentials require an upgrade and fresh
 pairing. Hosts may also opt into Regular direct HTTP access. Create a separate
-Regular invitation with `mold pairing create --mode regular --direct-url
+Regular invitation with `mold host invite --regular --direct-url
 http://HOST:7680 --output /private/regular-invitation.json`, then claim it with
-`mold pair --invite-file /private/regular-invitation.json --name 'My app'`.
+`mold host add /private/regular-invitation.json --device-name 'My app'`.
 Each app receives its own persistent device key; REST apps send it in
 `X-API-Key`. Keep the host operator key private and authentication enabled.
 See the [persistent REST app-key guide](https://utensils.io/mold/deployment/relay#a-persistent-key-for-your-rest-app)
