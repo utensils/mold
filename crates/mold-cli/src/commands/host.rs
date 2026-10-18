@@ -315,8 +315,8 @@ async fn pair_invitation_with(
         .or_else(|| text("hostname"))
         .unwrap_or_default();
     let instance = text("instance_id").filter(|v| !v.is_empty());
-    let base = text("base_url").context("invitation has no base_url")?;
     if invitation["mode"] == "regular" {
+        let base = text("base_url").context("invitation has no base_url")?;
         let origin = mold_secure_client::regular_origin(&base)?;
         // Decide the name before the claim spends the one-use invitation.
         let (name, superseded) = choose_name(
@@ -336,6 +336,7 @@ async fn pair_invitation_with(
             mode: ConnectionMode::Regular,
         });
     }
+    // `PairingInvite` reads `base_url` or a legacy file's `origin` alias.
     let invite: mold_secure_client::PairingInvite = serde_json::from_value(invitation)?;
     let (name, superseded) = choose_name(
         requested,
@@ -1140,6 +1141,46 @@ mod tests {
                 "{status}"
             );
         }
+    }
+
+    /// A legacy Secure invitation file names its host with the `origin`
+    /// alias `PairingInvite` accepts; only a Regular one needs `base_url`.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_legacy_secure_invitation_with_origin_reaches_the_claim() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("MOLD_HOME");
+        std::env::set_var("MOLD_HOME", home.path());
+        let legacy = serde_json::json!({
+            "protocol": 1,
+            "origin": "https://workstation.example",
+            "namespace": "00",
+            "host_key": "00".repeat(32),
+            "host_noise_key": "00".repeat(32),
+            "host_binding_signature": "00".repeat(64),
+            "invite_seed": "00".repeat(32),
+            "invite": {
+                "id": "i", "signingKey": "00", "expiresAt": 0, "epoch": 0, "signature": "00"
+            }
+        });
+        let Err(error) =
+            pair_invitation_with(legacy, None, "laptop", &reqwest::Client::new()).await
+        else {
+            panic!("a forged invitation must not pair");
+        };
+        let error = error.to_string();
+        match previous {
+            Some(value) => std::env::set_var("MOLD_HOME", value),
+            None => std::env::remove_var("MOLD_HOME"),
+        }
+        assert!(!error.contains("base_url"), "{error}");
+        assert!(
+            error.contains("new protocol3 invitation required"),
+            "{error}"
+        );
     }
 
     #[test]
