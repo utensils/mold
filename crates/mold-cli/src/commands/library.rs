@@ -81,6 +81,25 @@ async fn run_remote(action: LibraryAction, client: &MoldClient) -> Result<()> {
             .await
         }
         LibraryAction::Trash { filenames } => library_trash(client, &filenames).await,
+        LibraryAction::Download {
+            filenames,
+            output,
+            latest,
+            trash,
+            force,
+        } => {
+            super::library_download::run(
+                client,
+                super::library_download::Request {
+                    filenames,
+                    output,
+                    latest,
+                    trash,
+                    force,
+                },
+            )
+            .await
+        }
         LibraryAction::Export {
             filename,
             format,
@@ -102,6 +121,9 @@ async fn run_remote(action: LibraryAction, client: &MoldClient) -> Result<()> {
         }
     }
 }
+
+/// The line `mold library list` ends with on a terminal.
+const DOWNLOAD_HINT: &str = "Download: mold library download <name>";
 
 #[derive(Debug)]
 struct ListOptions {
@@ -175,6 +197,10 @@ async fn library_list(client: &MoldClient, options: ListOptions) -> Result<()> {
             "{}",
             render_listing(&page, total, options.offset, &collections)
         );
+        // A hint for a person, not for a pipe.
+        if !page.is_empty() && io::stdout().is_terminal() {
+            println!("{}", DOWNLOAD_HINT.dimmed());
+        }
     }
     Ok(())
 }

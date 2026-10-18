@@ -74,6 +74,10 @@ auto` to preserve useful alpha and remove opaque backgrounds, `on` to
   IDs, defaults, dimensions, frame grids, or runtime availability.
 - For ordinary CLI, queue, server, library, and remote-host workflows, read
   [`{{reference_prefix}}/cli.md`]({{reference_prefix}}/cli.md).
+- To hand the user a print's file, list it and download the original:
+  `mold library list --json`, then `mold library download NAME` (a unique
+  prefix works; `-o DIR/`, `-o -` for stdout, `--latest N`). Never decode MCP
+  base64 for this.
 - Before credentials, paid cloud resources, deletion, cancellation, purge, or
   service lifecycle changes, read
   [`{{reference_prefix}}/safety.md`]({{reference_prefix}}/safety.md).
