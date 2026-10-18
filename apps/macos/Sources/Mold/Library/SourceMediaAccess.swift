@@ -2,6 +2,11 @@ import MoldClient
 import SwiftUI
 
 extension LibraryStore {
+    /// Includes hide-only receipt links, which may change without row edits.
+    var sourcePrivacyRevision: Int {
+        sourceAccessRevision &+ (hiddenCollectionIDs.isEmpty ? 0 : syncRecords.privacyRevision)
+    }
+
     func sourceMediaChanged(_ event: MoldEvent, host: UUID) {
         let filename: String?
         switch event {
@@ -18,7 +23,7 @@ extension LibraryStore {
         Task { await SourceMediaPreview.invalidate(host: host, filename: filename) }
     }
     var sourceAccess: SourceMediaAccessIndex.Snapshot {
-        sourceAccessIndex.snapshot(key: .init(revision: sourceAccessRevision,
+        sourceAccessIndex.snapshot(key: .init(revision: sourcePrivacyRevision,
             visibility: collectionVisibility.generation, hosts: hosts.hosts, instances: hosts.instanceIDs)) {
             let currentShelves = shelves
             let visible = LibraryScope.all.resolve(LibraryQuery(), shelves: currentShelves,

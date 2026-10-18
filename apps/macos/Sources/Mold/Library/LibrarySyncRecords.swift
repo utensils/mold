@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import MoldClient
 
 /// Library Sync's bookkeeping, per destination instance: the origin-to-local
@@ -83,6 +84,16 @@ final class LibrarySyncRecords {
     private var linkCache: (revision: Int, bucket: String, authority: [UUID: String]?, links: [PrintID: PrintID])?
     private var reverseCache: (revision: Int, bucket: String, index: [String: [String]])?
     private var recordsRevision = 0
+    private let privacyChanges = LibrarySyncPrivacyRevision()
+    /// Observable hide-only identity revision; ordinary bookkeeping does not
+    /// invalidate source previews/indexes one write at a time.
+    var privacyRevision: Int { privacyChanges.value }
+
+    private func privacyEdge(_ record: LocalSyncRecord?) -> [String]? {
+        record.map { [$0.destinationHost?.uuidString ?? "", $0.destinationFilename,
+            $0.sourceRoute ?? "", $0.destinationRoute ?? "", $0.destinationInstance ?? ""] }
+    }
+
     private var lineageCache: (revision: Int, authority: [UUID: String]?, incoming: [PrintID: [(key: String, record: LocalSyncRecord)]])?
     private var componentCache: (revision: Int, authority: [UUID: String]?, members: [PrintID: [PrintID]])?
     private var privacyCache: (revision: Int, authority: [UUID: String]?, links: [PrintID: PrintID])?
@@ -133,6 +144,7 @@ final class LibrarySyncRecords {
         doc.buckets[key, default: Bucket()].pending.merge(legacy.pending) { mine, _ in mine }
         doc.buckets[key, default: Bucket()].retry.formUnion(legacy.retry)
         recordsRevision += 1
+        privacyChanges.value &+= 1
         linksRevision += 1
         scheduleCompaction()
     }
@@ -285,11 +297,13 @@ final class LibrarySyncRecords {
         let previous = doc.buckets[bucketKey]?.records[key]
         doc.buckets[bucketKey, default: Bucket()].records[key] = record
         recordsRevision += 1
+        if privacyEdge(previous) != privacyEdge(record) { privacyChanges.value &+= 1 }
         do {
             try await append(.record(bucket: bucketKey, key: key, record: record))
         } catch {
             doc.buckets[bucketKey]?.records[key] = previous
             recordsRevision += 1
+            if privacyEdge(previous) != privacyEdge(record) { privacyChanges.value &+= 1 }
             throw error
         }
     }
@@ -353,6 +367,7 @@ final class LibrarySyncRecords {
         doc.buckets[key] = bucket
         doc.lastBucket = key
         recordsRevision += 1
+        privacyChanges.value &+= 1
         linksRevision += 1
         await flush()
     }
@@ -536,4 +551,13 @@ actor LibrarySyncJournal {
             return false
         }
     }
+}
+
+
+/// Observation stays narrowly on the privacy identity clock; journal caches
+/// and document mutations must not become view dependencies.
+@MainActor
+@Observable
+private final class LibrarySyncPrivacyRevision {
+    var value = 0
 }

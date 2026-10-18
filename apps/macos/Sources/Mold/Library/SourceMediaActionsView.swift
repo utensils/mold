@@ -37,7 +37,7 @@ struct SourceMediaActionsView<Content: View, Extra: View>: View {
                 if requested == action && !Task.isCancelled { requested = nil }
             }
         }
-        .onChange(of: library.sourceAccessRevision) {
+        .onChange(of: library.sourcePrivacyRevision) {
             if !library.allowsSource(authority, detail: !gallery) { sharing.clear(); requested = nil }
         }
         .onChange(of: library.sourceMediaCatalog.contentRevision(for: owner.id)) { sharing.clear(); requested = nil }

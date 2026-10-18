@@ -49,6 +49,7 @@ import { useRoute, useRouter } from "vue-router";
 import { observeLibraryCopyAuthority } from "../lib/libraryCopyAuthority";
 import { copyGalleryPrint, type CopyMachine } from "@studio/api/galleryCopy";
 import {
+  confirmedPhysicalCopyPrivacyKeys,
   provisionalCopyPrivacy,
   type ProvisionalCopyPrivacy,
 } from "@studio/lib/copyPrivacy";
@@ -1951,7 +1952,9 @@ async function performRefresh() {
     }
     unreachableHostIds.value = merged.unreachableHostIds;
     remoteHostCount.value = merged.remoteHostCount;
-    await loadCopyPrivacy(physicalHiddenKeys.value);
+    await loadCopyPrivacy(
+      confirmedPhysicalCopyPrivacyKeys(rawEntries.value, organization ?? []),
+    );
     // Only a total wipe-out (no host answered) is an error; one box down just
     // shows an "unreachable" note while the rest render.
     if (

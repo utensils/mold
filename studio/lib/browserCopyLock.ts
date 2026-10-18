@@ -70,7 +70,7 @@ export async function browserCopyLock<T>(
         if (work) void work.catch(() => undefined).then(() => reject(error));
         else reject(error);
       };
-      const store = transaction.objectStore(transaction.objectStoreNames[0]);
+      const store = transaction.objectStore("lock");
       const keepAlive = () => {
         const request = store.get("lock");
         request.onsuccess = () => {

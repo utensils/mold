@@ -641,7 +641,9 @@ extension LibraryStore {
 
     /// Conservative hide-only receipt links never enter the ordinary merge graph.
     func syncPrivacyLinks() -> [PrintID: PrintID] {
-        syncRecords.privacyLinks(localHost: MoldEngine.localHostID,
+        guard !hiddenCollectionIDs.isEmpty else { return [:] }
+        _ = syncRecords.privacyRevision
+        return syncRecords.privacyLinks(localHost: MoldEngine.localHostID,
             instance: hosts.instanceID(of: MoldEngine.localHostID), authority: syncAuthority)
     }
 

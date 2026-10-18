@@ -736,8 +736,8 @@ export const useGalleryStore = defineStore("gallery", {
                 {
                   id: host.id,
                   url: host.baseUrl,
-                  instanceId: host.instanceId ?? undefined,
-                  connectionMode: host.connectionMode,
+                  ...(host.instanceId ? { instanceId: host.instanceId } : {}),
+                  ...(host.connectionMode ? { connectionMode: host.connectionMode } : {}),
                 },
               ]
             : [],

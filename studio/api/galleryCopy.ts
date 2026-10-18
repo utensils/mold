@@ -39,7 +39,9 @@ export function copyGalleryPrint(options: CopyOptions): Promise<CopyReceipt> {
       options.journal.runExclusive
         ? options.journal.runExclusive(
             (lockSignal) =>
-              transfer({ ...options, signal: lockSignal ?? options.signal }),
+              transfer(
+                lockSignal ? { ...options, signal: lockSignal } : options,
+              ),
             options.signal,
           )
         : transfer(options),

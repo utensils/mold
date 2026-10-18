@@ -63,3 +63,54 @@ it("keeps completed quarantine until a fresh physical privacy inventory confirms
     [],
   );
 });
+
+it("does not release a renamed destination from a peer's logical-group hidden membership", async () => {
+  const { confirmedPhysicalCopyPrivacyKeys } =
+    await import("@studio/lib/copyPrivacy");
+  const rows = [
+    {
+      hostId: "source",
+      filename: "source.png",
+      collections: ["private-source"],
+    },
+    {
+      hostId: "destination",
+      filename: "renamed.png",
+      collections: [] as string[],
+    },
+  ];
+  const hosts = [
+    {
+      hostId: "source",
+      collectionsListingOk: true,
+      collections: [{ id: "private-source", hidden: true }],
+    },
+    {
+      hostId: "destination",
+      collectionsListingOk: true,
+      collections: [{ id: "private-destination", hidden: false }],
+    },
+  ];
+  const complete = {
+    ...evidence[0]!,
+    stage: "complete",
+    sourceOrganization: { item: {}, collections: [{ hidden: true }] },
+  } as unknown as import("@studio/api/galleryCopy").CopyReceipt;
+  const confirmed = () => confirmedPhysicalCopyPrivacyKeys(rows, hosts);
+  expect(confirmed()).toEqual(new Set(["source|source.png"]));
+  expect(
+    retainCopyPrivacyUntilConfirmed([], evidence, { complete }, confirmed()),
+  ).toEqual(evidence);
+  rows[1]!.collections = ["private-destination"];
+  expect(
+    retainCopyPrivacyUntilConfirmed([], evidence, { complete }, confirmed()),
+  ).toEqual(evidence);
+  hosts[1]!.collections[0]!.hidden = true;
+  expect(
+    retainCopyPrivacyUntilConfirmed([], evidence, { complete }, confirmed()),
+  ).toEqual([]);
+  hosts[1]!.collectionsListingOk = false;
+  expect(
+    retainCopyPrivacyUntilConfirmed([], evidence, { complete }, confirmed()),
+  ).toEqual(evidence);
+});

@@ -100,3 +100,34 @@ export function retainCopyPrivacyUntilConfirmed(
   }
   return result;
 }
+
+/** Confirm privacy only from a row's own successfully listed host inventory.
+ * Logical replica grouping can hide a peer but cannot prove its membership. */
+export function confirmedPhysicalCopyPrivacyKeys(
+  rows: readonly { hostId: string; filename: string; collections?: string[] }[],
+  hosts: readonly {
+    hostId: string;
+    collectionsListingOk?: boolean;
+    collections: readonly { id: string; hidden?: boolean }[];
+  }[],
+): Set<string> {
+  const hiddenByHost = new Map(
+    hosts
+      .filter((host) => host.collectionsListingOk === true)
+      .map((host) => [
+        host.hostId,
+        new Set(
+          host.collections
+            .filter((collection) => collection.hidden === true)
+            .map((collection) => collection.id),
+        ),
+      ]),
+  );
+  return new Set(
+    rows
+      .filter((row) =>
+        row.collections?.some((id) => hiddenByHost.get(row.hostId)?.has(id)),
+      )
+      .map((row) => `${row.hostId}|${row.filename}`),
+  );
+}
