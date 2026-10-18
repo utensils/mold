@@ -231,24 +231,50 @@ pub async fn add(options: AddOptions) -> Result<()> {
 /// A pairing link, a file holding one, or the JSON invitation; `None` for
 /// anything else (a plain host URL).
 fn invitation_input(input: &str) -> Result<Option<serde_json::Value>> {
-    let path = Path::new(input);
-    let text = if !input.contains("://") && path.is_file() {
-        let bytes = mold_secure_client::read_private(path)?;
-        Zeroizing::new(String::from_utf8(bytes.to_vec()).context("invitation file is not text")?)
-    } else {
-        Zeroizing::new(input.to_string())
+    let text = match file_argument(input) {
+        Some(path) => {
+            let bytes = pairing::read_private_explained(&path, "invitation file")?;
+            Zeroizing::new(
+                String::from_utf8(bytes.to_vec()).context("invitation file is not text")?,
+            )
+        }
+        None => Zeroizing::new(input.to_string()),
     };
     let looks_like_invitation = text.trim_start().starts_with('{')
         || text.contains('#')
         || text.trim_start().starts_with("moldstudio:");
     if !looks_like_invitation {
         anyhow::ensure!(
-            !path.is_file(),
+            file_argument(input).is_none(),
             "{input} does not hold a Mold pairing link or invitation"
         );
         return Ok(None);
     }
     Ok(Some(mold_secure_client::parse_pairing_link(&text)?))
+}
+
+/// The file an argument names: only a spelled path (absolute, `./`, `~/`,
+/// or one with a separator) and never a URL, so `mold host add workstation`
+/// is the host `workstation`, never a file of that name here.
+fn file_argument(input: &str) -> Option<PathBuf> {
+    if input.contains("://") || input.starts_with('{') || input.starts_with("moldstudio:") {
+        return None;
+    }
+    let spelled = input.starts_with('.')
+        || input.starts_with('~')
+        || input.contains(std::path::MAIN_SEPARATOR)
+        || input.contains('/')
+        || Path::new(input).is_absolute();
+    if !spelled {
+        return None;
+    }
+    Some(match input.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default()
+            .join(rest),
+        None => PathBuf::from(input),
+    })
 }
 
 /// A pairing that was just saved.
@@ -381,16 +407,42 @@ fn key_outcome(status: u16, code: &str, regular: bool) -> Result<KeyOutcome> {
     })
 }
 
+/// Whether pairing with `origin` may go ahead, and whether to warn: https,
+/// loopback and Tailscale (WireGuard) are private paths; plain HTTP to any
+/// other address is refused for Secure (the invitation would be readable
+/// on the network) and allowed, with a warning, for an explicit Regular
+/// direct connection.
+fn plain_http_policy(origin: &str, regular: bool) -> Result<bool> {
+    let Ok(url) = reqwest::Url::parse(origin) else {
+        return Ok(false);
+    };
+    let machine = url.host_str().unwrap_or_default();
+    if url.scheme() != "http"
+        || crate::control::is_loopback_host(origin)
+        || mold_secure_client::hosts::is_tailscale_address(machine)
+    {
+        return Ok(false);
+    }
+    anyhow::ensure!(
+        regular,
+        "refusing to start a Secure pairing over plain HTTP to {origin}: the invitation would cross the network unencrypted. Use the host's https:// address, add --regular for a direct HTTP connection, or run `mold host invite` on the host and pair with its link"
+    );
+    Ok(true)
+}
+
 async fn add_with_key(input: &str, options: &AddOptions, device: &str) -> Result<()> {
     let base = mold_secure_client::hosts::normalize_address(input);
     let origin = mold_secure_client::regular_origin(&base).with_context(|| {
         format!("{input} is neither a pairing link nor a credential-free http(s) host URL")
     })?;
+    // Settle everything that can be refused locally before the host is asked.
+    if let Some(name) = options.name.as_deref() {
+        let name = name.trim().to_ascii_lowercase();
+        hosts::validate_name(&name)?;
+    }
+    let warn = plain_http_policy(&origin, options.regular)?;
     let key = api_key(options)?;
-    if origin.starts_with("http://")
-        && !crate::control::is_loopback_host(&origin)
-        && !key.is_empty()
-    {
+    if warn {
         eprintln!(
             "{} the key and the invitation it buys travel unencrypted to {origin}; prefer https, or `mold host invite` on the host",
             theme::icon_warn()
@@ -404,11 +456,28 @@ async fn add_with_key(input: &str, options: &AddOptions, device: &str) -> Result
                 "run `mold host invite` on the host and paste its link into `mold host add`",
             )
         })?;
-    let (status, code, session) = match reply {
-        SessionReply::Created(value) => (200, String::new(), Some(value)),
-        SessionReply::Refused { status, code } => (status, code, None),
+    let (status, code, message, session) = match reply {
+        SessionReply::Created(value) => (200, String::new(), String::new(), Some(value)),
+        SessionReply::Refused {
+            status,
+            code,
+            message,
+        } => (status, code, message, None),
     };
-    let added = match key_outcome(status, &code, options.regular)? {
+    let outcome = key_outcome(status, &code, options.regular)?;
+    if outcome == KeyOutcome::SaveKeyless && !answers_without_a_key(&origin).await {
+        // PAIRING_UNAVAILABLE also means "auth on, Secure pairing not set
+        // up"; only a host that answers keyless has authentication off.
+        bail!(
+            "the host can't create a pairing right now ({code}{}); run `mold host invite` on the host and pair with its link",
+            if message.is_empty() {
+                String::new()
+            } else {
+                format!(": {message}")
+            }
+        );
+    }
+    let added = match outcome {
         KeyOutcome::Claim => {
             // Claimed at once: this client gets its own revocable grant and
             // the operator key is dropped, never written anywhere.
@@ -427,6 +496,28 @@ async fn add_with_key(input: &str, options: &AddOptions, device: &str) -> Result
     finish(added, options.default).await
 }
 
+/// A pairing/probe client: no proxy and no redirects, like the session
+/// request, so credentials only ever reach the origin named.
+fn direct_client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?)
+}
+
+/// Whether `GET /api/status` succeeds with no key at all.
+async fn answers_without_a_key(origin: &str) -> bool {
+    let Ok(client) = direct_client() else {
+        return false;
+    };
+    client
+        .get(format!("{origin}/api/status"))
+        .send()
+        .await
+        .is_ok_and(|response| response.status().is_success())
+}
+
 /// Save a Regular connection with an app/device key (or none, for a host
 /// with authentication off), after one authenticated read proves it.
 async fn save_key(
@@ -437,10 +528,7 @@ async fn save_key(
     let key = key.filter(|k| !k.is_empty());
     // Directly, as the saved Regular connection will talk: no pairing for
     // this origin exists yet, so the normal client cannot be used here.
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(10))
-        .build()?;
+    let client = direct_client()?;
     let mut request = client.get(format!("{origin}/api/status"));
     if let Some(key) = key.as_deref() {
         request = request.header("x-api-key", key.as_str());
@@ -498,23 +586,25 @@ pub(crate) async fn add_manual_regular(
     .await
 }
 
-/// The key for `host add URL`: `--api-key-file`, `--api-key-stdin`,
-/// `MOLD_API_KEY`, else a hidden prompt. Empty is allowed: it asks a host
-/// with authentication off to say so.
+/// The key for `host add URL`: `--api-key-file`, `--api-key-stdin`, else a
+/// hidden prompt — never `MOLD_API_KEY`, which on a host is its own operator
+/// key. A typed key may be `@owner-only-key-file`. Empty is allowed: it asks
+/// a host with authentication off to say so.
 fn api_key(options: &AddOptions) -> Result<Zeroizing<String>> {
     if let Some(path) = &options.api_key_file {
         return pairing::read_key_file(path);
     }
-    if options.api_key_stdin {
-        return read_line(&mut std::io::stdin().lock());
+    let typed = if options.api_key_stdin {
+        read_line(&mut std::io::stdin().lock())?
+    } else if std::io::stdin().is_terminal() {
+        prompt("API key (empty if the host has authentication off): ", true)?
+    } else {
+        return Ok(Zeroizing::new(String::new()));
+    };
+    match typed.strip_prefix('@') {
+        Some(path) => pairing::read_key_file(Path::new(path)),
+        None => Ok(typed),
     }
-    if let Ok(value) = std::env::var("MOLD_API_KEY") {
-        return Ok(Zeroizing::new(value.trim().to_string()));
-    }
-    if std::io::stdin().is_terminal() {
-        return prompt("API key (empty if the host has authentication off): ", true);
-    }
-    Ok(Zeroizing::new(String::new()))
 }
 
 fn read_line(input: &mut impl BufRead) -> Result<Zeroizing<String>> {
@@ -638,25 +728,30 @@ pub async fn invite(options: InviteOptions) -> Result<()> {
         options.api_key_file.as_deref(),
     )
     .await?;
-    let link = Zeroizing::new(mold_secure_client::pairing_link(&value)?);
-    match &options.output {
-        Some(output) => {
+    // The link is built only when it is shown; --output never depends on
+    // the encoder.
+    let link = (options.output.is_none() || options.qr)
+        .then(|| mold_secure_client::pairing_link(&value).map(Zeroizing::new))
+        .transpose()?;
+    match (&options.output, &link) {
+        (Some(output), _) => {
             pairing::write_invitation_file(output, &value)?;
             eprintln!(
-                "Pairing invitation saved to {}. On the client run `mold host add {}` within two minutes.",
+                "Pairing invitation saved to {}. Transfer it privately; on the client run `mold host add {}` within two minutes.",
                 output.display(),
                 output.display()
             );
         }
-        None => {
+        (None, Some(link)) => {
             println!("{}", link.as_str());
-            eprintln!("One-use pairing link; it expires in two minutes. On the client: mold host add '<link>'");
+            eprintln!("One-use pairing link; it expires in two minutes. On the client run `mold host add` and paste it.");
         }
+        (None, None) => unreachable!("a link is built whenever there is no --output"),
     }
     if let Some(key) = value["host_key"].as_str() {
         eprintln!("Host public signing key: {key}");
     }
-    if options.qr {
+    if let Some(link) = link.filter(|_| options.qr) {
         eprintln!("{}", render_qr(&link)?);
     }
     Ok(())
@@ -822,6 +917,54 @@ mod tests {
         assert_eq!(name, "workstation");
         assert_eq!(superseded.unwrap().origin, "http://10.0.0.8:7680");
         assert_eq!(automatic.unwrap().0, "lab-box");
+    }
+
+    /// https, loopback and Tailscale are private paths; plain HTTP to a LAN
+    /// address is refused for Secure and warned about for Regular.
+    #[test]
+    fn plain_http_is_refused_for_secure_and_warned_for_regular() {
+        for origin in [
+            "https://192.168.1.5",
+            "http://127.0.0.1:7680",
+            "http://localhost:7680",
+            "http://100.105.134.43:7680",
+            "http://[fd7a:115c:a1e0::43]:7680",
+        ] {
+            assert!(!plain_http_policy(origin, false).unwrap(), "{origin}");
+            assert!(!plain_http_policy(origin, true).unwrap(), "{origin}");
+        }
+        for origin in [
+            "http://192.168.1.5:7680",
+            "http://172.17.0.1:7680",
+            "http://10.0.0.8:7680",
+            "http://workstation:7680",
+        ] {
+            let error = plain_http_policy(origin, false).unwrap_err().to_string();
+            assert!(
+                error.contains("plain HTTP") && error.contains("--regular"),
+                "{error}"
+            );
+            assert!(plain_http_policy(origin, true).unwrap(), "{origin}");
+        }
+    }
+
+    #[test]
+    fn only_a_spelled_path_is_read_as_a_file() {
+        for host in ["workstation", "workstation:7680", "http://x/y", "10.0.0.8"] {
+            assert_eq!(file_argument(host), None, "{host}");
+        }
+        for path in [
+            "./invite.txt",
+            "../invite.txt",
+            "/private/invite.txt",
+            "dir/invite.txt",
+        ] {
+            assert_eq!(file_argument(path), Some(PathBuf::from(path)), "{path}");
+        }
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        assert_eq!(file_argument("~/invite.txt"), Some(home.join("invite.txt")));
     }
 
     #[test]

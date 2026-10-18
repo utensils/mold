@@ -708,9 +708,10 @@ fn machine_of(address: &str) -> Option<String> {
     )
 }
 
-/// Tailscale's CGNAT IPv4 range and its IPv6 ULA prefix.
-fn is_tailscale_address(machine: &str) -> bool {
-    match machine.parse::<std::net::IpAddr>() {
+/// Tailscale's CGNAT IPv4 range (100.64.0.0/10) and its IPv6 ULA prefix
+/// (fd7a:115c:a1e0::/48): a WireGuard-encrypted path even over plain HTTP.
+pub fn is_tailscale_address(machine: &str) -> bool {
+    match machine.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
         Ok(std::net::IpAddr::V4(v4)) => {
             let [a, b, ..] = v4.octets();
             a == 100 && (64..128).contains(&b)

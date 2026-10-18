@@ -10,8 +10,13 @@ use zeroize::Zeroizing;
 pub(crate) enum SessionReply {
     /// A one-use invitation (the raw session response).
     Created(serde_json::Value),
-    /// A refusal, with the API error `code` when the body carried one.
-    Refused { status: u16, code: String },
+    /// A refusal, with the API error `code` and message when the body
+    /// carried them.
+    Refused {
+        status: u16,
+        code: String,
+        message: String,
+    },
 }
 
 /// Ask `base_url` for a pairing session with `key` (sent as `X-API-Key`
@@ -53,20 +58,19 @@ pub(crate) async fn request_session(
     if status.is_success() {
         return Ok(SessionReply::Created(serde_json::from_slice(&bytes)?));
     }
-    let code = serde_json::from_slice::<serde_json::Value>(&bytes)
-        .ok()
-        .and_then(|body| body["code"].as_str().map(str::to_owned))
-        .unwrap_or_default();
+    let body = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default();
+    let field = |key: &str| body[key].as_str().unwrap_or_default().to_owned();
     Ok(SessionReply::Refused {
         status: status.as_u16(),
-        code,
+        code: field("code"),
+        message: field("error"),
     })
 }
 
 /// The first usable key in an owner-only key file: the first line that is
 /// neither blank nor a `#` comment.
 pub(crate) fn read_key_file(path: &Path) -> Result<Zeroizing<String>> {
-    let bytes = mold_secure_client::read_private(path)?;
+    let bytes = read_private_explained(path, "key file")?;
     Ok(Zeroizing::new(
         std::str::from_utf8(&bytes)?
             .lines()
@@ -104,6 +108,51 @@ pub(crate) fn operator_key(api_key_file: Option<&Path>) -> Result<Zeroizing<Stri
     ))
 }
 
+/// [`mold_secure_client::read_private`], saying which owner-only rule a
+/// refused file or its folder breaks and how to fix it. The check itself
+/// is unchanged.
+pub(crate) fn read_private_explained(path: &Path, what: &str) -> Result<Zeroizing<Vec<u8>>> {
+    mold_secure_client::read_private(path).map_err(|error| match private_file_problem(path) {
+        Some(problem) => anyhow::anyhow!("{what} {problem}"),
+        None => error.context(format!("cannot read {what} {}", path.display())),
+    })
+}
+
+/// The first owner-only rule `path` or its folder breaks, in words.
+#[cfg(unix)]
+fn private_file_problem(path: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: getuid has no preconditions.
+    let me = unsafe { libc::getuid() };
+    let file = std::fs::symlink_metadata(path).ok()?;
+    let folder_path = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let folder = std::fs::metadata(folder_path).ok()?;
+    let (file_shown, folder_shown) = (path.display(), folder_path.display());
+    Some(if file.file_type().is_symlink() {
+        format!("{file_shown} is a symlink; pass the file itself")
+    } else if file.uid() != me {
+        format!("{file_shown} must be owned by you")
+    } else if file.mode() & 0o077 != 0 {
+        format!("{file_shown} must be private (chmod 600 {file_shown})")
+    } else if file.nlink() > 1 {
+        format!("{file_shown} has other hard links; copy it to a new file")
+    } else if folder.uid() != me {
+        format!("{file_shown} is in a folder you do not own ({folder_shown})")
+    } else if folder.mode() & 0o077 != 0 {
+        format!("{file_shown}'s folder {folder_shown} must be private (chmod 700 {folder_shown})")
+    } else {
+        return None;
+    })
+}
+
+#[cfg(not(unix))]
+fn private_file_problem(_path: &Path) -> Option<String> {
+    None
+}
+
 /// A canonical invitation from this authenticated local host, as the value
 /// `mold host add` / [`mold_secure_client::pairing_link`] take.
 pub(crate) async fn create_invitation(
@@ -136,7 +185,7 @@ pub(crate) async fn create_invitation(
         .context("cannot contact the local Mold host")?
     {
         SessionReply::Created(value) => value,
-        SessionReply::Refused { status, code } => bail!(
+        SessionReply::Refused { status, code, .. } => bail!(
             "host refused pairing ({status}{}); use its operator credential",
             if code.is_empty() {
                 String::new()

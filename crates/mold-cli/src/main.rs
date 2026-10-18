@@ -4279,7 +4279,7 @@ async fn run(
             }
             let path =
                 invite_file.context("use --invite-file or explicit --mode regular --direct-url")?;
-            let bytes = mold_secure_client::read_private(&path)?;
+            let bytes = commands::pairing::read_private_explained(&path, "invitation file")?;
             let invitation = mold_secure_client::parse_pairing_link(
                 std::str::from_utf8(&bytes).context("invitation file is not text")?,
             )?;

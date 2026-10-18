@@ -3208,3 +3208,137 @@ async fn host_invite_prints_only_the_link() {
         .stdout(predicate::str::is_empty());
     assert!(file.exists());
 }
+
+/// A Secure pairing session is never asked for over plain HTTP to a LAN
+/// address: the invitation would cross the network readable. Nothing is
+/// sent; the refusal names the safe alternatives.
+#[cfg(unix)]
+#[test]
+fn host_add_refuses_secure_pairing_over_plain_lan_http() {
+    let env = TestEnv::new();
+    env.cmd()
+        .args([
+            "host",
+            "add",
+            "http://192.168.77.250:7680",
+            "--api-key-stdin",
+        ])
+        .write_stdin("operator\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("plain HTTP"))
+        .stderr(predicate::str::contains("https://"))
+        .stderr(predicate::str::contains("mold host invite"));
+}
+
+/// 503 PAIRING_UNAVAILABLE means "authentication is off" only when the
+/// host also answers without a key; otherwise it is a host that cannot
+/// pair right now, and nothing is saved.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn host_add_does_not_mistake_an_unavailable_pairing_for_auth_off() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+    let env = TestEnv::new();
+    let server = wiremock::MockServer::start().await;
+    refuse_sessions(&server, 503, "PAIRING_UNAVAILABLE").await;
+    Mock::given(method("GET"))
+        .and(path("/api/status"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    env.cmd()
+        .args(["host", "add", &server.uri(), "--api-key-stdin"])
+        .write_stdin("\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("can't create a pairing right now"))
+        .stderr(predicate::str::contains("PAIRING_UNAVAILABLE"));
+    assert!(!env.home.join("secure/clients").exists());
+}
+
+/// `host add` never picks up MOLD_API_KEY (often the operator key of the
+/// host this machine itself serves): the key comes only from a flag, stdin,
+/// or the prompt.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn host_add_ignores_mold_api_key() {
+    use wiremock::matchers::{header_exists, method, path};
+    use wiremock::{Mock, ResponseTemplate};
+    let env = TestEnv::new();
+    let server = wiremock::MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/pairing/sessions"))
+        .and(header_exists("x-api-key"))
+        .respond_with(ResponseTemplate::new(500))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    refuse_sessions(&server, 503, "PAIRING_UNAVAILABLE").await;
+    mount_status(&server).await;
+    env.cmd()
+        .env("MOLD_API_KEY", "local-operator-key")
+        .args(["host", "add", &server.uri(), "--name", "open-box"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Added open-box (regular)"));
+    assert!(!saved_client_files(&env).contains("local-operator-key"));
+}
+
+/// A bad `--name` is refused before the host is contacted.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn host_add_checks_the_name_before_contacting_the_host() {
+    let env = TestEnv::new();
+    let server = wiremock::MockServer::start().await;
+    env.cmd()
+        .args([
+            "host",
+            "add",
+            &server.uri(),
+            "--name",
+            "Bad.Name",
+            "--api-key-stdin",
+        ])
+        .write_stdin("key\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("host names are"));
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+/// A bare word is a host, never a file in the working directory, and an
+/// invitation file in a world-readable folder is refused naming the fix.
+#[cfg(unix)]
+#[test]
+fn host_add_reads_files_only_by_path_and_explains_private_files() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = TestEnv::new();
+    let cwd = env.home.join("cwd");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::write(cwd.join("workstation"), "not a link").unwrap();
+    env.cmd()
+        .current_dir(&cwd)
+        .args(["host", "add", "workstation", "--regular", "--api-key-stdin"])
+        .write_stdin("\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("workstation:7680"))
+        .stderr(predicate::str::contains("does not hold").not());
+
+    let open = env.home.join("open");
+    std::fs::create_dir_all(&open).unwrap();
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let invite = open.join("invite.txt");
+    std::fs::write(&invite, "https://utensils.io/mold/pair#version=2").unwrap();
+    std::fs::set_permissions(&invite, std::fs::Permissions::from_mode(0o600)).unwrap();
+    env.cmd()
+        .args(["host", "add"])
+        .arg(&invite)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(format!(
+            "chmod 700 {}",
+            open.display()
+        )));
+}
