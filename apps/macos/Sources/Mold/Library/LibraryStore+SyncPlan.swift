@@ -140,7 +140,9 @@ extension LibraryStore {
                                             self?.hosts.host(sourceHost.id) == sourceHost && self?.hosts.host(local.id) == local
                                                 && self?.hosts.instanceID(of: sourceHost.id) == sourceInstance
                                                 && self?.hosts.instanceID(of: local.id) == destinationInstance
-                                        }, collections: names, privacyOnly: source.view.isTrash(name) || (syncAll && syncRecords.verifiedOrigin(of: sourceID, authority: syncAuthority) != nil)))
+                                        }, collections: names, privacyOnly: source.view.isTrash(name) || (syncAll
+                                            && syncRecords.verifiedOrigin(of: sourceID, authority: syncAuthority) != nil
+                                            && syncRecords.verifiedCopy(of: sourceID, on: local.id, authority: syncAuthority) != nil)))
         }
 
         // Checkpoints for exactly what is considered: the whole GET only where

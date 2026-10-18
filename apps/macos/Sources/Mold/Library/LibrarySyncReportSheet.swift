@@ -8,7 +8,7 @@ struct LibrarySyncReportSheet: View {
     var body: some View {
         @Bindable var library = library
         VStack(alignment: .leading, spacing: 16) {
-            Text("Sync to This Mac").font(.title2.bold())
+            Text("Library Sync").font(.title2.bold())
             Text(library.localSaveReport).fixedSize(horizontal: false, vertical: true)
             if !library.localSaveFailures.isEmpty || !library.localSaveNotices.isEmpty {
                 Text("Issues").font(.headline)

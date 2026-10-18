@@ -116,5 +116,9 @@ extension LibraryVisibilityTests {
         #expect(!library.allowsSource(authority))
         #expect(library.sourceAccessIndex.derivations == derivations + 1,
             "organization-only journal writes must not re-project all source owners")
+        let protectedRevision = library.sourcePrivacyRevision
+        library.collectionsPerHost = [:]
+        #expect(library.sourcePrivacyRevision != protectedRevision,
+            "removing the final hidden shelf must not alias a receipt privacy revision")
     }
 }

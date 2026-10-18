@@ -860,7 +860,10 @@ copy lineage connects fan-out and forwarded copies without sending echoed edits 
 the origin. Hidden evidence includes originals in Trash before machine filtering; only
 authoritative permanent removal clears that evidence. Explicit Copy reads verified
 component hosts for privacy evidence and the original’s current organization when
-available. Automatic runs also revisit an unchanged original when a forwarded copy’s
+available. If the original is offline or in Trash, Sync All can back up a surviving
+forwarded copy to a new destination using the original’s last verified organization;
+backup-only edits do not become original organization. Previously removed verified
+destination copies remain removed. Automatic runs also revisit an unchanged original when a forwarded copy’s
 privacy membership changes. A newly imported output retains its initial-organization
 obligation across interruption, so retry cannot mistake unfinished filing for a local edit.
 Route- and installation-bound output receipts also protect collision-renamed hidden

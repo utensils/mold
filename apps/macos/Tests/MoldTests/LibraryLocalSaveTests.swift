@@ -1239,4 +1239,36 @@ struct LibraryLocalSaveTests {
         #expect(library.syncRecords.verifiedOrigin(of: PrintID(host: origin.id, filename: original.filename), authority: library.syncAuthority) == nil)
     }
 
+    @Test func syncBacksUpSoleForwardedCopyWhileRootIsOfflineWithoutPromotingBackupEdits() async {
+        let origin = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let backup = host("sole-forwarded-backup"), destination = host("sole-forwarded-destination")
+        let machines = [origin, backup, destination]
+        let backends = Dictionary(uniqueKeysWithValues: machines.map {
+            ($0.id, FakeBackend(host: $0, noRetainedMedia: true, syncOrganization: true))
+        })
+        var original = GalleryPrint.Mutable(versionedPrint("sole-forwarded.png", prompt: "fox"))
+        original.title = "Original title"; original.tags = ["original"]
+        backends[origin.id]!.prints = [original.build()]
+        for backend in backends.values { backend.mediaAnswer = Data([1, 2, 3]) }
+        let hosts = HostStore(hosts: machines) { backends[$0.id]! }
+        for machine in machines { hosts.reachability[machine.id] = .up(FakeFixtures.serverStatus()) }
+        let library = LibraryStore(hosts: hosts)
+        await library.syncAll(to: backup)
+        var edited = GalleryPrint.Mutable(backends[backup.id]!.prints[0])
+        edited.title = "Backup-only edit"; edited.tags = ["original", "backup-only"]
+        backends[backup.id]!.prints = [edited.build()]
+        backends[origin.id]!.plantedErrors["gallery"] = MoldClientError.unreachable("original offline")
+        await library.syncAll(to: destination)
+        #expect(backends[destination.id]!.importedNames == ["sole-forwarded.png"])
+        #expect(backends[destination.id]!.prints.first?.title == "Original title")
+        #expect(backends[destination.id]!.prints.first?.tagList == ["original"])
+        let copiedID = PrintID(host: destination.id, filename: "sole-forwarded.png")
+        #expect(library.syncRecords.verifiedOrigin(of: copiedID, authority: library.syncAuthority)
+            == LocalSyncRecord.key(hostID: origin.id, filename: "sole-forwarded.png"))
+        backends[destination.id]!.prints = []
+        await library.syncAll(to: destination)
+        #expect(backends[destination.id]!.importedNames.count == 1,
+            "a deliberately removed verified forwarded backup must stay removed")
+    }
+
 }
