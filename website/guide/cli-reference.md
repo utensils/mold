@@ -453,9 +453,11 @@ By default each file lands in the current directory under its own name; `-o`
 names the file for one print, a directory (ending in `/`, or one that exists)
 for any number, or `-` for stdout (one print). `--latest N` takes the newest N
 prints instead of names. Existing files are refused before anything is
-downloaded unless `--force` is given. Each file streams to `<name>.part` and is
-renamed when complete, with a progress bar when stderr is a terminal; a failed
-or interrupted download leaves no `.part` behind, the rest of the batch still
+downloaded unless `--force` is given. Each file streams to a new hidden
+`.<name>.XXXXXX.part` beside it and is moved into place when complete, never
+over a file that appeared meanwhile (unless `--force`), with a progress bar
+when stderr is a terminal; a failed or interrupted download removes its own
+partial file and nothing else, the rest of the batch still
 runs, and the command exits non-zero if any print failed. It works against any
 host `--host` names, with no local fallback. `mold library list` ends with a
 `Download: mold library download <name>` hint on a terminal.

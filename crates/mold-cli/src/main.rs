@@ -1182,8 +1182,8 @@ Examples:
   mold library download old.png --trash                    A print in the trash
 
 Existing files are never overwritten unless --force is given; that is checked
-before anything is downloaded. Each file is written to <name>.part and renamed
-when complete.")]
+before anything is downloaded, and again when a finished file is moved into
+place. Each file is written to a new hidden .<name>.XXXXXX.part beside it.")]
     Download {
         /// Print filenames, or unique prefixes of them
         #[arg(value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]

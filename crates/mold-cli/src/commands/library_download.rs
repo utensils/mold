@@ -2,8 +2,9 @@
 //!
 //! Names resolve against the host's listing (a unique prefix is enough, an
 //! exact name always wins), every destination is checked before anything is
-//! fetched, and each file streams to `<dest>.part`, is synced, then renamed,
-//! so an interrupted download never leaves a file that looks complete.
+//! fetched, and each file streams to a new partial file beside it, is synced,
+//! then moved into place without clobbering, so an interrupted download never
+//! leaves a file that looks complete.
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -193,7 +194,7 @@ async fn download_files(
     let total = files.len();
     let mut failed = Vec::new();
     for (name, dest) in files {
-        match download_one(client, &name, &dest, trash).await {
+        match download_one(client, &name, &dest, trash, force).await {
             Ok(size) => eprintln!(
                 "Saved {} ({})",
                 dest.display(),
@@ -215,20 +216,20 @@ async fn download_files(
     Ok(())
 }
 
-/// Stream one print to `<dest>.part`, sync it, and rename it into place.
-/// The partial file is removed on any failure, and by the Ctrl-C handler
-/// while one is in flight.
-async fn download_one(client: &MoldClient, name: &str, dest: &Path, trash: bool) -> Result<u64> {
-    if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("could not create {}", parent.display()))?;
-    }
-    let part = partial_path(dest);
+/// Stream one print to a new partial file beside `dest`, sync it, and
+/// publish it. The partial file is removed on any failure (dropping it
+/// deletes it), and by the Ctrl-C handler while one is in flight.
+async fn download_one(
+    client: &MoldClient,
+    name: &str,
+    dest: &Path,
+    trash: bool,
+    force: bool,
+) -> Result<u64> {
+    let partial = create_partial(dest)?;
+    set_in_flight(Some(partial.path().to_path_buf()));
     let result = async {
-        let mut file = tokio::fs::File::create(&part)
-            .await
-            .with_context(|| format!("could not create {}", part.display()))?;
-        set_in_flight(Some(part.clone()));
+        let mut file = tokio::fs::File::from_std(partial.as_file().try_clone()?);
         let bar = Progress::new(name, true);
         let size = client
             .download_gallery_image(name, trash, &mut file, |done, total| {
@@ -237,27 +238,64 @@ async fn download_one(client: &MoldClient, name: &str, dest: &Path, trash: bool)
             .await?;
         bar.finish();
         file.sync_all().await?;
-        drop(file);
-        tokio::fs::rename(&part, dest)
-            .await
-            .with_context(|| format!("could not move the download into {}", dest.display()))?;
-        Ok(size)
+        Ok::<_, anyhow::Error>(size)
     }
     .await;
     set_in_flight(None);
-    if result.is_err() {
-        let _ = std::fs::remove_file(&part);
+    let size = result?;
+    publish(partial, dest, force)?;
+    Ok(size)
+}
+
+/// A new partial file in `dest`'s directory, created exclusively under a
+/// random name (`.NAME.XXXXXX.part`): never an existing file or a symlink,
+/// and never shared with a concurrent download. Its mode follows the umask
+/// like any other output.
+fn create_partial(dest: &Path) -> Result<tempfile::NamedTempFile> {
+    let dir = match dest.parent().filter(|p| !p.as_os_str().is_empty()) {
+        Some(parent) => {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("could not create {}", parent.display()))?;
+            parent
+        }
+        None => Path::new("."),
+    };
+    let name = dest.file_name().unwrap_or_default().to_string_lossy();
+    let prefix = format!(".{name}.");
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(&prefix).suffix(".part");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o666));
     }
-    result
+    builder
+        .tempfile_in(dir)
+        .with_context(|| format!("could not create a partial download in {}", dir.display()))
 }
 
-fn partial_path(dest: &Path) -> PathBuf {
-    let mut name = dest.file_name().unwrap_or_default().to_os_string();
-    name.push(".part");
-    dest.with_file_name(name)
+/// Move a finished download into place. Without `force` the move never
+/// replaces a file (one may have appeared while downloading); with it, the
+/// download replaces whatever is there.
+fn publish(partial: tempfile::NamedTempFile, dest: &Path, force: bool) -> Result<()> {
+    let outcome = if force {
+        partial.persist(dest)
+    } else {
+        partial.persist_noclobber(dest)
+    };
+    match outcome {
+        Ok(_) => Ok(()),
+        Err(error) if !force && error.error.kind() == std::io::ErrorKind::AlreadyExists => bail!(
+            "{} appeared while downloading; pass --force to overwrite it",
+            dest.display()
+        ),
+        Err(error) => Err(anyhow::Error::from(error.error))
+            .with_context(|| format!("could not move the download into {}", dest.display())),
+    }
 }
 
-/// The `.part` file being written right now, for the Ctrl-C handler.
+/// The partial file this run is writing right now (and only that one), for
+/// the Ctrl-C handler.
 static IN_FLIGHT: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 fn set_in_flight(path: Option<PathBuf>) {
@@ -431,11 +469,78 @@ mod tests {
         }
     }
 
+    /// The partial file is this run's own: a new, randomly named file in
+    /// the destination's directory, never an existing `.part` or a symlink.
+    #[cfg(unix)]
     #[test]
-    fn the_partial_file_sits_beside_its_destination() {
-        assert_eq!(
-            partial_path(Path::new("renders/a.png")),
-            PathBuf::from("renders/a.png.part")
+    fn the_partial_file_is_new_and_never_an_existing_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("a.png");
+        std::fs::write(dir.path().join("a.png.part"), b"someone else's").unwrap();
+        let target = dir.path().join("elsewhere");
+        std::fs::write(&target, b"do not touch").unwrap();
+        std::os::unix::fs::symlink(&target, dir.path().join(".a.png.part")).unwrap();
+        let first = create_partial(&dest).unwrap();
+        let second = create_partial(&dest).unwrap();
+        assert_ne!(
+            first.path(),
+            second.path(),
+            "concurrent runs never share one"
         );
+        for partial in [&first, &second] {
+            assert_eq!(partial.path().parent(), Some(dir.path()));
+            let name = partial.path().file_name().unwrap().to_str().unwrap();
+            assert!(
+                name.starts_with(".a.png.") && name.ends_with(".part"),
+                "{name}"
+            );
+        }
+        drop((first, second));
+        assert_eq!(
+            std::fs::read(dir.path().join("a.png.part")).unwrap(),
+            b"someone else's"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"do not touch");
+        assert!(std::fs::symlink_metadata(dir.path().join(".a.png.part")).is_ok());
+        assert!(!dest.exists());
+    }
+
+    /// Publishing never clobbers a file that appeared while downloading,
+    /// unless --force; with it the download replaces the file.
+    #[test]
+    fn publishing_does_not_clobber_without_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("a.png");
+        let partial = create_partial(&dest).unwrap();
+        std::fs::write(partial.path(), b"downloaded").unwrap();
+        std::fs::write(&dest, b"appeared meanwhile").unwrap();
+        let error = publish(partial, &dest, false).unwrap_err().to_string();
+        assert!(
+            error.contains("appeared while downloading") && error.contains("--force"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), b"appeared meanwhile");
+        let leftovers = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".part")
+            })
+            .count();
+        assert_eq!(leftovers, 0, "the refused partial file is removed");
+
+        let partial = create_partial(&dest).unwrap();
+        std::fs::write(partial.path(), b"downloaded").unwrap();
+        publish(partial, &dest, true).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"downloaded");
+
+        let fresh = dir.path().join("b.png");
+        let partial = create_partial(&fresh).unwrap();
+        std::fs::write(partial.path(), b"new").unwrap();
+        publish(partial, &fresh, false).unwrap();
+        assert_eq!(std::fs::read(&fresh).unwrap(), b"new");
     }
 }

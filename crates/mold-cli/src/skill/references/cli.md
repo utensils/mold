@@ -481,7 +481,8 @@ mold library collection delete night-owls --yes
 To hand a print to the user (or another tool), download its original file
 instead of decoding MCP base64: list, then download by name or by a unique
 prefix of it. Nothing is overwritten unless `--force` is given; `-o -` streams
-to stdout. Each file arrives as `<name>.part` and is renamed when complete.
+to stdout. Each file arrives as a hidden partial file and is moved into place
+when complete, never over a file that appeared meanwhile.
 
 ```bash
 mold library list --limit 5 --json
