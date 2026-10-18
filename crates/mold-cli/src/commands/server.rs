@@ -277,14 +277,14 @@ pub(crate) enum StatusTarget {
         /// The URL names this machine, so when nothing answers there the
         /// local process scan can still explain why — an unmanaged `mold
         /// serve` is the usual reason. Never set for another host: that would
-        /// answer a question about `plato` with facts about this laptop.
+        /// answer a question about `workstation` with facts about this laptop.
         local_fallback: bool,
     },
 }
 
 /// `--host` / `MOLD_HOST` names the server the user is asking about, but the
 /// PID file only ever describes *this* machine's daemon. Without this
-/// mapping, `MOLD_HOST=plato mold server status` answered "No server running"
+/// mapping, `MOLD_HOST=workstation mold server status` answered "No server running"
 /// about a host it never contacted.
 ///
 /// Only the managed daemon's own address keeps the PID reading: a loopback
@@ -311,9 +311,23 @@ pub(crate) fn status_target(host: Option<&str>, managed_port: Option<u16>) -> St
     }
 }
 
+/// [`status_target`] for a `--host` selector: a saved name (or an address
+/// redirected to a saved origin) is resolved first, so both the local/remote
+/// classification and the request use the origin it names.
+pub(crate) fn resolve_status_target(
+    host: Option<&str>,
+    managed_port: Option<u16>,
+) -> Result<StatusTarget> {
+    let Some(host) = host.map(str::trim).filter(|host| !host.is_empty()) else {
+        return Ok(StatusTarget::LocalManaged);
+    };
+    let origin = crate::control::resolve_target(Some(host))?;
+    Ok(status_target(Some(&origin), managed_port))
+}
+
 pub async fn run_status(host: Option<String>) -> Result<()> {
     let managed = read_pid_file();
-    match status_target(host.as_deref(), managed.as_ref().map(|srv| srv.port)) {
+    match resolve_status_target(host.as_deref(), managed.as_ref().map(|srv| srv.port))? {
         StatusTarget::Remote {
             url,
             local_fallback,
@@ -654,17 +668,51 @@ mod tests {
     #[test]
     fn an_explicit_remote_host_is_probed_over_http() {
         assert_eq!(
-            status_target(Some("plato"), None),
-            remote("http://plato:7680", false)
+            status_target(Some("workstation"), None),
+            remote("http://workstation:7680", false)
         );
         assert_eq!(
-            status_target(Some("http://plato:7680"), Some(7680)),
-            remote("http://plato:7680", false)
+            status_target(Some("http://workstation:7680"), Some(7680)),
+            remote("http://workstation:7680", false)
         );
         assert_eq!(
-            status_target(Some("plato:8080"), None),
-            remote("http://plato:8080", false)
+            status_target(Some("workstation:8080"), None),
+            remote("http://workstation:8080", false)
         );
+    }
+
+    /// A saved name is resolved before it is classified: `workstation` saved
+    /// at another origin is probed THERE, never as `http://workstation:7680`,
+    /// and a saved name for this machine's managed daemon reads its PID file.
+    #[test]
+    fn a_saved_host_name_is_resolved_before_it_is_classified() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("MOLD_HOME");
+        std::env::set_var("MOLD_HOME", home.path());
+        for (name, origin) in [
+            ("workstation", "http://10.0.0.8:7680"),
+            ("here", "http://127.0.0.1:7680"),
+        ] {
+            mold_secure_client::save_regular_host(&mold_secure_client::RegularHost {
+                origin: origin.into(),
+                name: Some(name.into()),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        let workstation = resolve_status_target(Some("workstation"), None);
+        let here = resolve_status_target(Some("here"), Some(7680));
+        let missing = resolve_status_target(None, Some(7680));
+        match previous {
+            Some(value) => std::env::set_var("MOLD_HOME", value),
+            None => std::env::remove_var("MOLD_HOME"),
+        }
+        assert_eq!(workstation.unwrap(), remote("http://10.0.0.8:7680", false));
+        assert_eq!(here.unwrap(), StatusTarget::LocalManaged);
+        assert_eq!(missing.unwrap(), StatusTarget::LocalManaged);
     }
 
     #[test]

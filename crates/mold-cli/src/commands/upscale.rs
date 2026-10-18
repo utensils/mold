@@ -119,9 +119,15 @@ async fn upscale_local(
     config: &Config,
     preview: bool,
 ) -> Result<()> {
-    // Auto-pull if model not downloaded
+    // Auto-pull if model not downloaded. This is a prerequisite of LOCAL
+    // inference, so it always downloads here, never on the selected host;
+    // one pull, then the reloaded config either has the model or the
+    // lookup below says it does not.
     let model_name = &req.model;
-    if !config.models.contains_key(model_name) {
+    let reloaded;
+    let config = if config.models.contains_key(model_name) {
+        config
+    } else {
         eprintln!(
             "{} Model '{}' not found locally, pulling...",
             theme::icon_info(),
@@ -132,20 +138,12 @@ async fn upscale_local(
             &mold_core::download::PullOptions::default(),
             &[],
             None,
-            false,
+            true,
         )
         .await?;
-        // Reload config after pull
-        return Box::pin(upscale_local(
-            req,
-            image_path,
-            output,
-            format,
-            &Config::load_or_default(),
-            preview,
-        ))
-        .await;
-    }
+        reloaded = Config::load_or_default();
+        &reloaded
+    };
 
     // Get model weights path from config
     let model_cfg = config
