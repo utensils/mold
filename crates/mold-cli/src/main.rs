@@ -2446,7 +2446,8 @@ Examples:
 
 Use with LM Studio by adding a stdio MCP entry whose command is the mold binary
 and whose args are [\"mcp\", \"--host\", \"http://localhost:7680\"]. Run
-`mold serve` separately before calling generation tools.")]
+`mold serve` separately before calling generation tools. For Claude Desktop,
+`mold skill install claude-desktop` adds this entry for you.")]
     Mcp,
 
     /// Manage a background mold server daemon (start, stop, status; discover in mDNS builds)
@@ -3269,6 +3270,8 @@ fn local_only_command(command: &Commands) -> Option<&'static str> {
             ServerAction::Status => unreachable!("server status takes --host"),
         },
         Commands::Info { model: Some(_), .. } => "info MODEL",
+        // Only the Claude Desktop connector talks to a host: `--host` pins it.
+        Commands::Skill(args) if args.takes_host() => return None,
         Commands::Skill(_) => "skill",
         Commands::Serve { .. } => "serve",
         Commands::Chain { .. } => "chain",
@@ -3494,7 +3497,9 @@ async fn run(
     // configured external MOLD_HOME is offline or the inference stack cannot
     // initialize. It only reads/writes the explicitly selected skill paths.
     if let Commands::Skill(args) = &cli.command {
-        return skill::run(args);
+        // A typed `--host` only; MOLD_HOST is invisible to Claude Desktop.
+        let host = cli.host.as_deref().filter(|_| host_typed);
+        return skill::run(args, host);
     }
     // Privileged machine administration must never open user Config/DB paths.
     if let Commands::System { action } = &cli.command {
@@ -4897,6 +4902,14 @@ mod tests {
             &["video-upscale", "list", "--host", "workstation"],
             &["video-upscale", "status", "job-1", "--host", "workstation"],
             &["runpod", "run", "a cat", "--host", "workstation"],
+            // It pins the Claude Desktop connector to that host.
+            &[
+                "skill",
+                "install",
+                "claude-desktop",
+                "--host",
+                "workstation",
+            ],
             #[cfg(feature = "discord")]
             &["discord", "--host", "workstation"],
         ] {
@@ -4947,6 +4960,7 @@ mod tests {
             &["config", "list", "--host", "workstation"],
             &["completions", "zsh", "--host", "workstation"],
             &["skill", "--host", "workstation", "list"],
+            &["skill", "install", "claude", "--host", "workstation"],
             &["version", "--host", "workstation"],
             &["rm", "flux-dev:q4", "--host", "workstation"],
             &["stats", "--host", "workstation"],

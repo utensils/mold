@@ -1130,6 +1130,8 @@ mold skill uninstall --project
 mold skill show
 mold skill show codex
 mold skill show codex references/prompting/families/flux2.md
+mold skill install claude-desktop
+mold skill install claude-desktop --host workstation --no-open
 ```
 
 Supported targets match nxv: `claude`, `codex`, `pi`, `openclaw`, `copilot`,
@@ -1147,6 +1149,17 @@ rules (see [Prompting Guides](/guide/prompting)). All agent renderers install
 the same canonical prompting files byte-for-byte. A hashed
 `.mold-skill.json` inventory lets later versions remove stale managed files
 while preserving user-added files; uninstall follows that same inventory.
+
+`claude-desktop` is different, because Claude Desktop keeps skills on the
+claude.ai account and not in a folder. It writes `~/Downloads/mold-skill.zip`
+(override with `--output`) for **Customize > Skills > Add**. It also adds a
+local `mold mcp` connector to `claude_desktop_config.json`, backing up the
+previous file. The connector uses the default host, or the one given with
+`--host`; `--no-connector` skips it. Finally it opens the Skills page, unless
+you pass `--no-open`. The Desktop skill tells Claude to use the connector's
+tools, because Desktop chat runs in a cloud sandbox with no `mold` binary. It
+refuses to overwrite files or config entries it did not write unless you pass
+`--force`. See [Claude Desktop](/guide/claude-desktop).
 
 `mold skill show` prints the portable rendered `SKILL.md`. Add an agent name to
 inspect its adapter, and optionally a bundle-relative path to print a supporting

@@ -1,6 +1,6 @@
 # Mold media generation
 
-Use `mold` to generate and transform images, video, and audio locally or on a
+{{surface_preamble}}Use `mold` to generate and transform images, video, and audio locally or on a
 remote Mold server. Inspect the installed binary before relying on remembered
 flags or model limits:
 

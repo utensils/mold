@@ -3236,6 +3236,7 @@ dependencies = [
  "walkdir",
  "wiremock",
  "zeroize",
+ "zip",
 ]
 
 [[package]]
