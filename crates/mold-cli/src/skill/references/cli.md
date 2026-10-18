@@ -478,6 +478,20 @@ mold library collection update night-owls --name "Owls at night"
 mold library collection delete night-owls --yes
 ```
 
+To hand a print to the user (or another tool), download its original file
+instead of decoding MCP base64: list, then download by name or by a unique
+prefix of it. Nothing is overwritten unless `--force` is given; `-o -` streams
+to stdout. Each file arrives as `<name>.part` and is renamed when complete.
+
+```bash
+mold library list --limit 5 --json
+mold library download mold-flux-dev-q4-1700000000000.png
+mold library download mold-flux-dev-q4-17 -o renders/
+mold library download --latest 3 -o renders/
+mold library download mold-wan-clip-1700000000001.mp4 -o - > clip.mp4
+mold library download old-print.png --trash --host workstation
+```
+
 Deletion is two-stage. `mold library trash` moves live prints into the
 recoverable trash, and `mold trash restore` brings them back. `mold trash
 delete` is the permanent one: it acts on live and trashed prints alike and

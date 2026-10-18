@@ -18,6 +18,7 @@ pub mod info;
 pub mod jobs;
 pub mod lambda;
 pub mod library;
+pub(crate) mod library_download;
 pub mod licenses;
 pub mod list;
 pub(crate) mod local_engine;

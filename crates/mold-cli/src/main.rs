@@ -1169,6 +1169,40 @@ pub enum LibraryAction {
         #[arg(long)]
         json: bool,
     },
+    /// Download prints' original files from the host
+    #[command(
+        group(clap::ArgGroup::new("what").required(true).args(["filenames", "latest"])),
+        after_long_help = "\
+Examples:
+  mold library download mold-flux-dev-1700000000000.png   Saved as ./mold-flux-dev-1700000000000.png
+  mold library download mold-flux-dev-17                  A unique prefix of the name works
+  mold library download a.png b.mp4 -o renders/            Several into a directory
+  mold library download clip.mp4 -o - | mpv -              To stdout
+  mold library download --latest 3                         The newest three prints
+  mold library download old.png --trash                    A print in the trash
+
+Existing files are never overwritten unless --force is given; that is checked
+before anything is downloaded. Each file is written to <name>.part and renamed
+when complete.")]
+    Download {
+        /// Print filenames, or unique prefixes of them
+        #[arg(value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
+        filenames: Vec<String>,
+        /// Where to save: a file (one print), a directory (`dir/` or an
+        /// existing directory), or `-` for stdout (one print)
+        #[arg(short, long, value_name = "PATH")]
+        output: Option<String>,
+        /// Download the newest N live prints instead of naming them
+        #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "1",
+              conflicts_with = "filenames")]
+        latest: Option<usize>,
+        /// Look the names up in the trash and download the trashed prints
+        #[arg(long)]
+        trash: bool,
+        /// Overwrite files that already exist
+        #[arg(long)]
+        force: bool,
+    },
     /// Show one print's metadata and optionally preview it inline
     Show {
         #[arg(value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
@@ -3331,6 +3365,8 @@ async fn async_main(
         if commands::generate::cancel_active_local_h3() {
             return;
         }
+        // An interrupted `mold library download` leaves no half-written file.
+        commands::library_download::remove_partial_download();
         // Clear the line to remove any progress bar artifacts
         eprint!("\r\x1b[2K");
         // A forced-local render holds this gallery's writer lease; hand it
@@ -4836,6 +4872,7 @@ mod tests {
             &["unload", "--host", "workstation"],
             &["queue", "list", "--host", "workstation"],
             &["library", "list", "--host", "workstation"],
+            &["library", "download", "a.png", "--host", "workstation"],
             &["trash", "list", "--host", "workstation"],
             &["pull", "flux-schnell:q8", "--host", "workstation"],
             &["list", "--host", "workstation"],
@@ -4936,6 +4973,44 @@ mod tests {
             // The environment is not a typed flag: MOLD_HOST stays ignored.
             assert!(reject_misplaced_host(&cli.command, false).is_ok());
         }
+    }
+
+    #[test]
+    fn library_download_parses() {
+        match parse(&[
+            "library", "download", "a.png", "b.mp4", "-o", "out/", "--force",
+        ])
+        .command
+        {
+            Commands::Library {
+                action:
+                    LibraryAction::Download {
+                        filenames,
+                        output,
+                        latest,
+                        trash,
+                        force,
+                    },
+            } => {
+                assert_eq!(filenames, ["a.png", "b.mp4"]);
+                assert_eq!(output.as_deref(), Some("out/"));
+                assert_eq!(latest, None);
+                assert!(force && !trash);
+            }
+            _ => panic!("expected library download"),
+        }
+        match parse(&["library", "download", "--latest"]).command {
+            Commands::Library {
+                action: LibraryAction::Download { latest, .. },
+            } => assert_eq!(latest, Some(1)),
+            _ => panic!("expected library download"),
+        }
+        assert!(try_parse(&["library", "download", "--latest", "3", "--trash"]).is_ok());
+        assert!(
+            try_parse(&["library", "download"]).is_err(),
+            "a name or --latest"
+        );
+        assert!(try_parse(&["library", "download", "a.png", "--latest", "2"]).is_err());
     }
 
     #[test]

@@ -3395,3 +3395,276 @@ fn host_add_reads_files_only_by_path_and_explains_private_files() {
             open.display()
         )));
 }
+
+/// A host with three prints whose bytes are their names, plus one trashed
+/// print, for `mold library download`.
+async fn download_host() -> wiremock::MockServer {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/gallery"))
+        .and(query_param("view", "trash"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([library_row(
+                "binned-owl.png",
+                4,
+                &[]
+            )])),
+        )
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/gallery"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            library_row("mold-flux-owl-1.png", 1, &[]),
+            library_row("mold-flux-owl-2.png", 2, &[]),
+            library_row("mold-wan-clip-3.mp4", 3, &[]),
+        ])))
+        .mount(&server)
+        .await;
+    for name in [
+        "mold-flux-owl-1.png",
+        "mold-flux-owl-2.png",
+        "mold-wan-clip-3.mp4",
+    ] {
+        Mock::given(method("GET"))
+            .and(path(format!("/api/gallery/image/{name}")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(name.as_bytes().to_vec()))
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/api/gallery/image/binned-owl.png"))
+        .and(query_param("view", "trash"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"binned-owl.png".to_vec()))
+        .mount(&server)
+        .await;
+    server
+}
+
+fn image_requests(requests: &[wiremock::Request]) -> usize {
+    requests
+        .iter()
+        .filter(|r| r.url.path().starts_with("/api/gallery/image/"))
+        .count()
+}
+
+/// `mold library download` saves the original bytes under the print's own
+/// name, resolves a unique prefix, refuses to overwrite before any transfer
+/// and overwrites with --force.
+#[tokio::test(flavor = "multi_thread")]
+async fn library_download_saves_prints_and_never_overwrites_unasked() {
+    let env = TestEnv::new();
+    let server = download_host().await;
+    let cwd = env.home.join("downloads");
+    std::fs::create_dir_all(&cwd).unwrap();
+    env.cmd()
+        .current_dir(&cwd)
+        .env("MOLD_HOST", server.uri())
+        .args(["library", "download", "mold-wan"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Saved"));
+    assert_eq!(
+        std::fs::read(cwd.join("mold-wan-clip-3.mp4")).unwrap(),
+        b"mold-wan-clip-3.mp4"
+    );
+    assert!(!cwd.join("mold-wan-clip-3.mp4.part").exists());
+
+    std::fs::write(cwd.join("mold-flux-owl-1.png"), b"mine").unwrap();
+    let before = image_requests(&server.received_requests().await.unwrap());
+    env.cmd()
+        .current_dir(&cwd)
+        .env("MOLD_HOST", server.uri())
+        .args(["library", "download", "mold-flux-owl-1.png"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--force"));
+    assert_eq!(
+        std::fs::read(cwd.join("mold-flux-owl-1.png")).unwrap(),
+        b"mine"
+    );
+    assert_eq!(
+        image_requests(&server.received_requests().await.unwrap()),
+        before,
+        "nothing is fetched when a destination is refused"
+    );
+    env.cmd()
+        .current_dir(&cwd)
+        .env("MOLD_HOST", server.uri())
+        .args(["library", "download", "mold-flux-owl-1.png", "--force"])
+        .assert()
+        .success();
+    assert_eq!(
+        std::fs::read(cwd.join("mold-flux-owl-1.png")).unwrap(),
+        b"mold-flux-owl-1.png"
+    );
+
+    // An ambiguous prefix names its matches; an unknown name is an error.
+    env.cmd()
+        .current_dir(&cwd)
+        .env("MOLD_HOST", server.uri())
+        .args(["library", "download", "mold-flux"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("mold-flux-owl-1.png"))
+        .stderr(predicate::str::contains("mold-flux-owl-2.png"));
+    env.cmd()
+        .current_dir(&cwd)
+        .env("MOLD_HOST", server.uri())
+        .args(["library", "download", "nothing-like-it"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("nothing-like-it"));
+}
+
+/// `-o` names a file, a directory, or `-` for stdout; several prints need a
+/// directory; `--latest N` takes the newest live prints; `--trash` reads the
+/// trash.
+#[tokio::test(flavor = "multi_thread")]
+async fn library_download_output_forms_latest_and_trash() {
+    let env = TestEnv::new();
+    let server = download_host().await;
+    let cwd = env.home.join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let run = |args: &[&str]| {
+        let mut cmd = env.cmd();
+        cmd.current_dir(&cwd)
+            .env("MOLD_HOST", server.uri())
+            .args(args);
+        cmd
+    };
+    run(&[
+        "library",
+        "download",
+        "mold-wan-clip-3.mp4",
+        "-o",
+        "clip.mp4",
+    ])
+    .assert()
+    .success();
+    assert_eq!(
+        std::fs::read(cwd.join("clip.mp4")).unwrap(),
+        b"mold-wan-clip-3.mp4"
+    );
+
+    run(&[
+        "library",
+        "download",
+        "mold-flux-owl-1.png",
+        "mold-flux-owl-2.png",
+        "-o",
+        "renders/",
+    ])
+    .assert()
+    .success();
+    for name in ["mold-flux-owl-1.png", "mold-flux-owl-2.png"] {
+        assert_eq!(
+            std::fs::read(cwd.join("renders").join(name)).unwrap(),
+            name.as_bytes()
+        );
+    }
+    run(&[
+        "library",
+        "download",
+        "mold-flux-owl-1.png",
+        "mold-flux-owl-2.png",
+        "-o",
+        "one.png",
+    ])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("directory"));
+
+    let stdout = run(&["library", "download", "mold-flux-owl-2.png", "-o", "-"])
+        .output()
+        .unwrap();
+    assert!(stdout.status.success());
+    assert_eq!(stdout.stdout, b"mold-flux-owl-2.png");
+    run(&[
+        "library",
+        "download",
+        "mold-flux-owl-1.png",
+        "mold-flux-owl-2.png",
+        "-o",
+        "-",
+    ])
+    .assert()
+    .failure();
+
+    std::fs::create_dir_all(cwd.join("newest")).unwrap();
+    run(&["library", "download", "--latest", "2", "-o", "newest"])
+        .assert()
+        .success();
+    let mut newest: Vec<String> = std::fs::read_dir(cwd.join("newest"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    newest.sort();
+    assert_eq!(newest, ["mold-flux-owl-2.png", "mold-wan-clip-3.mp4"]);
+
+    run(&["library", "download", "binned", "--trash", "-o", "-"])
+        .assert()
+        .success()
+        .stdout(predicate::eq(b"binned-owl.png" as &[u8]));
+}
+
+/// A failure mid-batch leaves no `.part` behind, the other prints still
+/// arrive, and the command exits non-zero.
+#[tokio::test(flavor = "multi_thread")]
+async fn library_download_cleans_up_a_failed_print_and_reports_it() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/gallery"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            library_row("first.png", 1, &[]),
+            library_row("vanished.png", 2, &[]),
+            library_row("third.png", 3, &[]),
+        ])))
+        .mount(&server)
+        .await;
+    for name in ["first.png", "third.png"] {
+        Mock::given(method("GET"))
+            .and(path(format!("/api/gallery/image/{name}")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(name.as_bytes().to_vec()))
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/api/gallery/image/vanished.png"))
+        .respond_with(
+            ResponseTemplate::new(404)
+                .set_body_json(serde_json::json!({"error": "not found", "code": "NOT_FOUND"})),
+        )
+        .mount(&server)
+        .await;
+    let cwd = env.home.join("batch");
+    std::fs::create_dir_all(&cwd).unwrap();
+    env.cmd()
+        .current_dir(&cwd)
+        .env("MOLD_HOST", server.uri())
+        .args([
+            "library",
+            "download",
+            "first.png",
+            "vanished.png",
+            "third.png",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("vanished.png"))
+        .stderr(predicate::str::contains("1 of 3"));
+    assert!(cwd.join("first.png").exists());
+    assert!(cwd.join("third.png").exists());
+    let leftovers: Vec<_> = std::fs::read_dir(&cwd)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.ends_with(".part") || n == "vanished.png")
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
