@@ -84,7 +84,7 @@ fn local_statuses() -> Result<Vec<mold_core::ThirdPartyLicenseStatus>> {
 /// machine's consent under another machine's name is the bug this module
 /// exists to prevent.
 pub async fn accept(ids: &[String], local: bool, host: Option<&str>) -> Result<()> {
-    let ctx = CliContext::new(host);
+    let ctx = CliContext::new(host)?;
     let host = ctx.client().host().to_string();
 
     // Show the terms the RECORDING machine pins, not merely the ones this
@@ -175,7 +175,7 @@ pub async fn accept(ids: &[String], local: bool, host: Option<&str>) -> Result<(
 }
 
 pub async fn run(local: bool, host: Option<&str>) -> Result<()> {
-    let ctx = CliContext::new(host);
+    let ctx = CliContext::new(host)?;
     let host = ctx.client().host().to_string();
 
     let (licenses, source) = if local {

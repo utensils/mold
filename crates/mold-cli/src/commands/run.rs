@@ -596,7 +596,7 @@ async fn resolve_source_image_contract(
     if local {
         return None;
     }
-    let client = crate::control::client_for_host(host);
+    let client = crate::control::client_for_host(host).ok()?;
     let models = client.list_models_extended().await.ok()?;
     let resolved = mold_core::manifest::resolve_model_name(model);
     models
@@ -1783,7 +1783,7 @@ pub async fn run(
 
         let variations = batch.max(1) as usize;
         let model_family = super::expand::resolve_family_from_config(&model, &config);
-        let expand_context = crate::control::CliContext::new(host.as_deref());
+        let expand_context = crate::control::CliContext::new(host.as_deref())?;
         let client = expand_context.client();
         let expand_req = mold_core::ExpandRequest {
             prompt: prompt.clone(),

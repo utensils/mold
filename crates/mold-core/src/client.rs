@@ -164,16 +164,36 @@ impl MoldClient {
     }
 
     /// The client for `MOLD_HOST`, else the default saved host, else
-    /// localhost. See [`resolve_host`].
+    /// localhost. See [`resolve_target`].
+    ///
+    /// Infallible for non-CLI callers: when the saved hosts cannot be read
+    /// it warns and uses `MOLD_HOST` as typed (or localhost). The CLI calls
+    /// [`MoldClient::for_host`] so that error stops the command instead.
     pub fn from_env() -> Self {
-        Self::for_host(None)
+        Self::for_host(None).unwrap_or_else(|error| {
+            tracing::warn!("{error:#}");
+            let fallback = std::env::var("MOLD_HOST")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map_or_else(
+                    || mold_secure_client::hosts::LOCAL_HOST.to_string(),
+                    |value| normalize_host(&value),
+                );
+            Self::with_env_key(&fallback)
+        })
     }
 
     /// The client for `host` (a `--host` value: a saved name or an address),
     /// falling back like [`MoldClient::from_env`] when it is `None`, with
-    /// `MOLD_API_KEY` when set.
-    pub fn for_host(host: Option<&str>) -> Self {
-        let origin = resolve_host(host);
+    /// `MOLD_API_KEY` when set. Fails when the name cannot be resolved
+    /// safely; see [`resolve_target`].
+    pub fn for_host(host: Option<&str>) -> Result<Self> {
+        Ok(Self::with_env_key(&resolve_target(host)?.origin))
+    }
+
+    /// A client for an already-resolved origin, with `MOLD_API_KEY` when set.
+    pub fn with_env_key(origin: &str) -> Self {
+        let origin = normalize_host(origin);
         let api_key = std::env::var("MOLD_API_KEY").ok().filter(|k| !k.is_empty());
         let (client, api_key_configured) = build_client(api_key.as_deref());
         Self {
@@ -3740,29 +3760,81 @@ pub fn normalize_host(input: &str) -> String {
     mold_secure_client::hosts::normalize_address(input)
 }
 
-/// The base URL a CLI-style caller targets.
+/// The machine a CLI-style caller targets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostTarget {
+    /// Normalized base URL.
+    pub origin: String,
+    /// What the caller typed, when it was an address that resolved to a
+    /// different saved origin (a Tailscale endpoint). Callers that talk to
+    /// a person should say so; see [`HostTarget::redirect_note`].
+    pub redirected_from: Option<String>,
+    /// The saved host name, when one was matched.
+    pub name: Option<String>,
+}
+
+impl HostTarget {
+    /// `100.105.134.43 → workstation (https://…)`, for an address that was
+    /// sent to another origin.
+    pub fn redirect_note(&self) -> Option<String> {
+        let from = self.redirected_from.as_deref()?;
+        Some(format!(
+            "{from} → {} ({})",
+            self.name.as_deref().unwrap_or("saved host"),
+            self.origin
+        ))
+    }
+}
+
+/// Resolve the machine a CLI-style caller targets.
 ///
 /// Precedence: `explicit` (a `--host` flag) > `MOLD_HOST` > the default saved
 /// host (`mold host use`) > `http://localhost:7680`. A saved host name, a
-/// saved origin, or an address one of its advertised endpoints carries
-/// resolves to that host's paired origin (`mold_secure_client::hosts::resolve`);
-/// anything else is normalized as typed.
-pub fn resolve_host(explicit: Option<&str>) -> String {
+/// saved origin, or a Tailscale address the host advertised resolves to that
+/// host's paired origin (`mold_secure_client::hosts::resolve`); anything else
+/// is normalized as typed. Errors when a name is ambiguous, when a bare name
+/// matches nothing while some saved host could not be read, or when the
+/// default host cannot be read.
+pub fn resolve_target(explicit: Option<&str>) -> Result<HostTarget> {
     let given = |value: &String| !value.trim().is_empty();
     let named = explicit
         .map(str::to_owned)
         .filter(given)
         .or_else(|| std::env::var("MOLD_HOST").ok().filter(given));
-    match named {
-        Some(input) => {
-            mold_secure_client::hosts::resolve(&input).unwrap_or_else(|| normalize_host(&input))
-        }
-        None => mold_secure_client::hosts::default()
-            .ok()
-            .flatten()
-            .map(|host| host.origin)
-            .unwrap_or_else(|| mold_secure_client::hosts::LOCAL_HOST.to_string()),
-    }
+    let Some(input) = named else {
+        let default = mold_secure_client::hosts::default()
+            .context("cannot read the default host (`mold host use --clear` resets it)")?;
+        return Ok(match default {
+            Some(host) => HostTarget {
+                origin: host.origin,
+                redirected_from: None,
+                name: Some(host.name),
+            },
+            None => HostTarget {
+                origin: mold_secure_client::hosts::LOCAL_HOST.to_string(),
+                redirected_from: None,
+                name: None,
+            },
+        });
+    };
+    Ok(match mold_secure_client::hosts::resolve(&input)? {
+        Some(found) => HostTarget {
+            redirected_from: (found.via == mold_secure_client::hosts::Match::Tailscale)
+                .then(|| input.trim().to_string()),
+            origin: found.origin,
+            name: Some(found.name),
+        },
+        None => HostTarget {
+            origin: normalize_host(&input),
+            redirected_from: None,
+            name: None,
+        },
+    })
+}
+
+/// The base URL of [`resolve_target`].
+pub fn resolve_host(explicit: Option<&str>) -> Result<String> {
+    Ok(resolve_target(explicit)?.origin)
 }
 
 pub(crate) fn encode_path_segment(raw: &str) -> String {
@@ -4095,24 +4167,67 @@ mod tests {
         };
 
         // Nothing configured: localhost.
-        assert_eq!(resolve_host(None), "http://localhost:7680");
+        assert_eq!(resolve_host(None).unwrap(), "http://localhost:7680");
         mold_secure_client::hosts::set_default("workstation").unwrap();
         // The default host fills in when nothing names one ...
-        assert_eq!(resolve_host(None), saved);
-        assert_eq!(resolve_host(Some("  ")), saved);
+        assert_eq!(resolve_host(None).unwrap(), saved);
+        assert_eq!(resolve_host(Some("  ")).unwrap(), saved);
         // ... MOLD_HOST beats it, and a name works there too ...
         set_env(Some("other-box"));
-        assert_eq!(resolve_host(None), "http://other-box:7680");
+        assert_eq!(resolve_host(None).unwrap(), "http://other-box:7680");
         set_env(Some("Workstation"));
-        assert_eq!(resolve_host(None), saved);
+        assert_eq!(resolve_host(None).unwrap(), saved);
         // ... and an explicit --host beats MOLD_HOST.
-        assert_eq!(resolve_host(Some("third:8080")), "http://third:8080");
-        assert_eq!(resolve_host(Some("10.20.30.40")), saved);
+        assert_eq!(
+            resolve_host(Some("third:8080")).unwrap(),
+            "http://third:8080"
+        );
+        assert_eq!(resolve_host(Some("10.20.30.40")).unwrap(), saved);
         set_env(None);
-        assert_eq!(MoldClient::for_host(Some("workstation")).host(), saved);
+        assert_eq!(
+            MoldClient::for_host(Some("workstation")).unwrap().host(),
+            saved
+        );
         assert_eq!(MoldClient::from_env().host(), saved);
         mold_secure_client::hosts::clear_default().unwrap();
         assert_eq!(MoldClient::from_env().host(), "http://localhost:7680");
+
+        // A Tailscale address the host advertised is redirected, and says so.
+        let relay = "https://ab12cd34ef.mold-link.urandom.io";
+        let mut paired = mold_secure_client::prepare_bootstrap("precedence", "cli")
+            .unwrap()
+            .profile(relay)
+            .unwrap();
+        paired.name = Some("relayed".into());
+        paired.endpoints = vec![mold_secure_client::Endpoint {
+            url: "http://100.70.0.1:7680".into(),
+            kind: "tailscale".into(),
+        }];
+        mold_secure_client::save_pairing(&paired).unwrap();
+        let target = resolve_target(Some("100.70.0.1")).unwrap();
+        assert_eq!(target.origin, relay);
+        assert_eq!(
+            target.redirect_note().as_deref(),
+            Some(format!("100.70.0.1 → relayed ({relay})").as_str())
+        );
+        assert_eq!(
+            resolve_target(Some("relayed")).unwrap().redirect_note(),
+            None
+        );
+        assert_eq!(resolve_target(Some(saved)).unwrap().redirect_note(), None);
+
+        // An unreadable profile: a bare name that matches nothing is an
+        // error (for from_env too, which then warns and uses it as typed).
+        let broken = std::path::Path::new(&std::env::var_os("MOLD_HOME").unwrap())
+            .join("secure/clients")
+            .join(format!("{}.json", "ab".repeat(32)));
+        mold_secure_client::write_invitation(&broken, &serde_json::json!("garbage")).unwrap();
+        assert!(resolve_host(Some("hal9000")).is_err());
+        assert!(MoldClient::for_host(Some("hal9000")).is_err());
+        set_env(Some("hal9000"));
+        assert_eq!(MoldClient::from_env().host(), "http://hal9000:7680");
+        set_env(None);
+        assert_eq!(resolve_host(Some("workstation")).unwrap(), saved);
     }
 
     #[test]

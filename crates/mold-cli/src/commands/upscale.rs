@@ -82,7 +82,7 @@ pub async fn run(
 
     // Try server first (unless --local)
     if !local {
-        let client = crate::control::client_for_host(host.as_deref());
+        let client = crate::control::client_for_host(host.as_deref())?;
         match client.upscale(&req).await {
             Ok(resp) => {
                 return write_output(

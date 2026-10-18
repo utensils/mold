@@ -17,7 +17,7 @@ use crate::TrashAction;
 const TRASH_VIEW: &str = "trash";
 
 pub async fn run(action: TrashAction, host: Option<&str>) -> Result<()> {
-    let client = crate::control::client_for_host(host);
+    let client = crate::control::client_for_host(host)?;
     match action {
         TrashAction::List { json } => trash_list(&client, json).await,
         TrashAction::Restore { filenames } => trash_restore(&client, &filenames).await,

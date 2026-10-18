@@ -8,7 +8,7 @@ use crate::procinfo;
 use crate::theme;
 
 pub async fn run(host: Option<&str>) -> Result<()> {
-    let ctx = CliContext::new(host);
+    let ctx = CliContext::new(host)?;
 
     match ctx.client().server_status().await {
         Ok(status) => {

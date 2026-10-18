@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 type Socket = crate::object_socket::ObjectSocket;
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Endpoint {
     pub url: String,
     pub kind: String,

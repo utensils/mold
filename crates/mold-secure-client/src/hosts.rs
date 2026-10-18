@@ -11,18 +11,23 @@
 //! is addressable without being rewritten: the slug of the host's reported
 //! hostname, else `runpod-<pod>` for a RunPod proxy origin, `relay-<8 hex>`
 //! for a managed-proxy origin, or the slug of the origin's first DNS label
-//! (`host-<ip>` for an address). Stored names win over derived ones; any
-//! remaining collision takes a `-2`, `-3`, ... suffix in origin order.
+//! (`host-<ip>` for an address). Derived names are never suffixed, because a
+//! suffix would move to another host after a removal: a derived name two
+//! hosts share, or one a stored name already holds, is listed as ambiguous
+//! and resolves to an error. [`persist_derived_names`] (run by the explicit
+//! `mold host` commands) writes each unambiguous derived name into its
+//! profile, so from then on it is a stored name, and stored names never move.
 //!
-//! Listing reads metadata only. Credentials are never parsed out of the
-//! profile here, and a profile that cannot be read is skipped rather than
-//! failing every command that resolves a host.
+//! Listing reads metadata only; credentials are never parsed out of a
+//! profile here. A profile that cannot be read is skipped and reported, and
+//! a bare name that finds nothing while one was skipped is an error rather
+//! than a DNS lookup that might reach a different machine.
 use crate::{ConnectionMode, Endpoint};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 /// The default target when nothing names a host.
@@ -40,11 +45,39 @@ pub struct SavedHost {
     pub mode: ConnectionMode,
     pub instance_id: Option<String>,
     pub hostname: Option<String>,
-    /// Endpoint URLs the host advertised when it was paired (Secure only).
-    pub endpoints: Vec<String>,
-    /// False when `name` was derived because the profile stores none (or a
-    /// stored name lost a collision).
+    /// Endpoints the host advertised when it was paired (Secure only).
+    pub endpoints: Vec<Endpoint>,
+    /// True when `name` is stored in the profile and no other host holds it.
     pub named: bool,
+    /// True when another saved host lists under the same name, so the name
+    /// resolves to an error until one is renamed or re-paired.
+    pub ambiguous: bool,
+}
+
+/// How [`resolve`] matched its input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Match {
+    /// A saved host name.
+    Name,
+    /// The exact origin the host's credentials are filed under.
+    Origin,
+    /// A Tailscale address the host advertised: the caller typed an address
+    /// and is being sent to a different origin, so it should say so.
+    Tailscale,
+}
+
+/// A resolved saved host.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Resolved {
+    pub origin: String,
+    pub name: String,
+    pub via: Match,
+}
+
+/// Every saved host plus the profile files that could not be read.
+struct Scan {
+    hosts: Vec<SavedHost>,
+    skipped: Vec<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -152,13 +185,25 @@ pub fn list() -> Result<Vec<SavedHost>> {
 }
 
 pub fn list_at(root: &Path) -> Result<Vec<SavedHost>> {
+    Ok(scan_at(root)?.hosts)
+}
+
+fn scan_at(root: &Path) -> Result<Scan> {
     let mut entries: BTreeMap<String, Entry> = BTreeMap::new();
-    if !root.try_exists()? {
-        return Ok(Vec::new());
+    let mut skipped = Vec::new();
+    if !root
+        .try_exists()
+        .with_context(|| format!("cannot read saved hosts in {}", root.display()))?
+    {
+        return Ok(Scan {
+            hosts: Vec::new(),
+            skipped,
+        });
     }
     let mut modes = BTreeMap::new();
-    for item in std::fs::read_dir(root)? {
-        let path = item?.path();
+    let unreadable = || format!("cannot read saved hosts in {}", root.display());
+    for item in std::fs::read_dir(root).with_context(unreadable)? {
+        let path = item.with_context(unreadable)?.path();
         let Some(file) = path.file_name().and_then(|v| v.to_str()) else {
             continue;
         };
@@ -166,10 +211,14 @@ pub fn list_at(root: &Path) -> Result<Vec<SavedHost>> {
             .strip_prefix("regular-")
             .and_then(|v| v.strip_suffix(".mode"))
         {
-            if let Ok(bytes) = crate::read_private(&path) {
-                if let Ok(mode) = serde_json::from_slice::<ConnectionMode>(&bytes) {
+            match crate::read_private(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<ConnectionMode>(&bytes).ok())
+            {
+                Some(mode) => {
                     modes.insert(digest.to_string(), mode);
                 }
+                None => skipped.push(path),
             }
             continue;
         }
@@ -180,14 +229,14 @@ pub fn list_at(root: &Path) -> Result<Vec<SavedHost>> {
             Some(digest) => (true, digest),
             None => (false, stem),
         };
-        let Some(meta) = read_meta(&path) else {
-            continue;
-        };
         // A profile is filed under the digest of its own origin; one that
         // claims another origin is not this host's credential.
-        if crate::store::origin_digest(&meta.origin) != digest {
+        let Some(meta) =
+            read_meta(&path).filter(|m| crate::store::origin_digest(&m.origin) == digest)
+        else {
+            skipped.push(path);
             continue;
-        }
+        };
         let entry = entries.entry(meta.origin.clone()).or_default();
         if regular {
             entry.regular = Some(meta);
@@ -198,7 +247,11 @@ pub fn list_at(root: &Path) -> Result<Vec<SavedHost>> {
     for (origin, entry) in entries.iter_mut() {
         entry.mode = modes.get(&crate::store::origin_digest(origin)).copied();
     }
-    Ok(assign_names(entries))
+    skipped.sort();
+    Ok(Scan {
+        hosts: assign_names(entries),
+        skipped,
+    })
 }
 
 fn read_meta(path: &Path) -> Option<ProfileMeta> {
@@ -232,7 +285,7 @@ fn assign_names(entries: BTreeMap<String, Entry>) -> Vec<SavedHost> {
             let endpoints = entry
                 .secure
                 .as_ref()
-                .map(|m| m.endpoints.iter().map(|e| e.url.clone()).collect())
+                .map(|m| m.endpoints.clone())
                 .unwrap_or_default();
             Some((
                 SavedHost {
@@ -243,26 +296,98 @@ fn assign_names(entries: BTreeMap<String, Entry>) -> Vec<SavedHost> {
                     mode,
                     origin,
                     named: false,
+                    ambiguous: false,
                 },
                 stored,
             ))
         })
         .collect();
-    let mut taken = BTreeSet::new();
+    // A name belongs to its one stored holder; a derived name sharing it,
+    // or a name two hosts hold the same way, is ambiguous.
+    let mut stored_holders: BTreeMap<String, usize> = BTreeMap::new();
+    let mut holders: BTreeMap<String, usize> = BTreeMap::new();
     for (host, stored) in hosts.iter_mut() {
-        if let Some(name) = stored {
-            if taken.insert(name.clone()) {
-                host.name = name.clone();
-                host.named = true;
-            }
+        host.name = stored
+            .clone()
+            .unwrap_or_else(|| derived_name(&host.origin, host.hostname.as_deref()));
+        *holders.entry(host.name.clone()).or_default() += 1;
+        if stored.is_some() {
+            *stored_holders.entry(host.name.clone()).or_default() += 1;
         }
     }
-    for (host, _) in hosts.iter_mut().filter(|(h, _)| h.name.is_empty()) {
-        let base = derived_name(&host.origin, host.hostname.as_deref());
-        host.name = next_free(&base, &taken);
-        taken.insert(host.name.clone());
+    for (host, stored) in hosts.iter_mut() {
+        let owners = stored_holders.get(&host.name).copied().unwrap_or(0);
+        host.named = stored.is_some() && owners == 1;
+        host.ambiguous = if stored.is_some() {
+            owners > 1
+        } else {
+            holders[&host.name] > 1
+        };
     }
     hosts.into_iter().map(|(host, _)| host).collect()
+}
+
+/// The one saved host `name` names. An ambiguous name is an error that says
+/// how to make it unique.
+fn lookup<'a>(hosts: &'a [SavedHost], name: &str) -> Result<Option<&'a SavedHost>> {
+    let name = name.trim();
+    let matches: Vec<&SavedHost> = hosts
+        .iter()
+        .filter(|h| h.name.eq_ignore_ascii_case(name))
+        .collect();
+    if let [one] = matches.as_slice() {
+        return Ok(Some(one));
+    }
+    if let Some(owner) = matches.iter().find(|h| h.named) {
+        return Ok(Some(owner));
+    }
+    if matches.is_empty() {
+        return Ok(None);
+    }
+    bail!(
+        "'{name}' names more than one saved host ({}); re-pair one of them so it gets its own name, then `mold host use` it",
+        matches
+            .iter()
+            .map(|h| h.origin.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// Write each unambiguous derived name into its host's profile(s), keeping
+/// every other field, so the name no longer depends on what else is saved.
+/// Returns the hosts that were named. Run only by explicit host commands.
+pub fn persist_derived_names() -> Result<Vec<SavedHost>> {
+    persist_derived_names_at(&crate::default_store())
+}
+
+pub fn persist_derived_names_at(root: &Path) -> Result<Vec<SavedHost>> {
+    let mut named = Vec::new();
+    for host in list_at(root)?
+        .into_iter()
+        .filter(|h| !h.named && !h.ambiguous)
+    {
+        let digest = crate::store::origin_digest(&host.origin);
+        for file in [format!("{digest}.json"), format!("regular-{digest}.json")] {
+            let path = root.join(file);
+            if !path.try_exists()? {
+                continue;
+            }
+            let bytes = crate::read_private(&path)?;
+            let mut profile: serde_json::Value = serde_json::from_slice(&bytes)?;
+            let object = profile
+                .as_object_mut()
+                .with_context(|| format!("invalid saved host profile {}", path.display()))?;
+            object.insert("name".into(), host.name.clone().into());
+            let bytes = zeroize::Zeroizing::new(serde_json::to_vec(&profile)?);
+            mold_secure::identity_file::write_private_file(&path, &bytes, true)?;
+        }
+        named.push(SavedHost {
+            named: true,
+            ..host
+        });
+    }
+    Ok(named)
 }
 
 fn next_free(base: &str, taken: &BTreeSet<String>) -> String {
@@ -317,10 +442,8 @@ pub fn find(name: &str) -> Result<Option<SavedHost>> {
 }
 
 pub fn find_at(root: &Path, name: &str) -> Result<Option<SavedHost>> {
-    let name = name.trim();
-    Ok(list_at(root)?
-        .into_iter()
-        .find(|h| h.name.eq_ignore_ascii_case(name)))
+    let hosts = list_at(root)?;
+    Ok(lookup(&hosts, name)?.cloned())
 }
 
 pub fn find_by_origin(origin: &str) -> Result<Option<SavedHost>> {
@@ -343,7 +466,7 @@ pub fn find_by_instance_id_at(root: &Path, instance_id: &str) -> Result<Option<S
 }
 
 /// A unique name for the host saved at `origin`, from a reported label: the
-/// name `origin` already has when one is stored (re-pairing keeps it), else
+/// unambiguous name `origin` already lists under (re-pairing keeps it), else
 /// the label's slug when free, else the first free `-N` suffix. Callers that
 /// took the name from the user should refuse a collision instead; see
 /// [`require_free_name`].
@@ -353,7 +476,7 @@ pub fn available_name(base: &str, origin: &str) -> Result<String> {
 
 pub fn available_name_at(root: &Path, base: &str, origin: &str) -> Result<String> {
     let hosts = list_at(root)?;
-    if let Some(saved) = hosts.iter().find(|h| h.origin == origin && h.named) {
+    if let Some(saved) = hosts.iter().find(|h| h.origin == origin && !h.ambiguous) {
         return Ok(saved.name.clone());
     }
     let base = slug(base).unwrap_or_else(|| derived_name(origin, None));
@@ -460,59 +583,95 @@ fn unknown(name: &str) -> String {
     format!("no saved host named '{name}'; run `mold host list`")
 }
 
-/// The saved origin `input` names, or `None` to use the address as typed.
+/// The saved host `input` names, or `None` to use the address as typed.
 ///
-/// In order: a saved host name (case-insensitive); a saved origin; a saved
-/// Secure host one of whose advertised endpoints is exactly this address;
-/// and, when no port was typed, the one saved host whose origin or endpoint
-/// is on this machine name or IP. So a Tailscale IP finds the host paired
-/// under its relay origin. Loopback addresses are never redirected, and an
-/// ambiguous match is no match.
-pub fn resolve(input: &str) -> Option<String> {
+/// In order: a saved host name (case-insensitive; an ambiguous one is an
+/// error); a saved origin; a Tailscale address (100.64.0.0/10 or
+/// fd7a:115c:a1e0::/48) one saved host advertised as a `tailscale`
+/// endpoint; and, when the input has neither a scheme nor a port, the one
+/// saved host with a Tailscale endpoint on that machine. LAN endpoints never
+/// redirect an address, loopback never does, and an ambiguous match is no
+/// match.
+///
+/// A bare name (one [`validate_name`] accepts) that matches nothing is an
+/// error when the store could not be read completely, since the host it
+/// meant may be in the unreadable profile; with a clean store it falls
+/// through to DNS (`hal9000` over MagicDNS is a supported use).
+pub fn resolve(input: &str) -> Result<Option<Resolved>> {
     resolve_at(&crate::default_store(), input)
 }
 
-pub fn resolve_at(root: &Path, input: &str) -> Option<String> {
+pub fn resolve_at(root: &Path, input: &str) -> Result<Option<Resolved>> {
     let input = input.trim();
     if input.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let hosts = list_at(root).ok()?;
-    if let Some(host) = hosts.iter().find(|h| h.name.eq_ignore_ascii_case(input)) {
-        return Some(host.origin.clone());
+    let bare_name = validate_name(&input.to_ascii_lowercase()).is_ok();
+    let scan = match scan_at(root) {
+        Ok(scan) => scan,
+        Err(error) if bare_name => return Err(error),
+        Err(_) => return Ok(None),
+    };
+    let found = |host: &SavedHost, via| {
+        Ok(Some(Resolved {
+            origin: host.origin.clone(),
+            name: host.name.clone(),
+            via,
+        }))
+    };
+    if let Some(host) = lookup(&scan.hosts, input)? {
+        return found(host, Match::Name);
+    }
+    if bare_name && !scan.skipped.is_empty() {
+        bail!(
+            "'{input}' is not a saved host, but some saved hosts could not be read ({}); fix or remove them before using a bare name",
+            scan.skipped
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     }
     let address = normalize_address(input);
-    if let Some(host) = hosts.iter().find(|h| h.origin == address) {
-        return Some(host.origin.clone());
+    if let Some(host) = scan.hosts.iter().find(|h| h.origin == address) {
+        return found(host, Match::Origin);
     }
-    let url = reqwest::Url::parse(&address).ok()?;
-    let machine = url
-        .host_str()?
-        .trim_matches(['[', ']'])
-        .to_ascii_lowercase();
-    if is_loopback(&machine) {
-        return None;
-    }
-    let unique = |matches: Vec<&SavedHost>| match matches.as_slice() {
-        [one] => Some(one.origin.clone()),
-        _ => None,
+    let Some(machine) = machine_of(&address) else {
+        return Ok(None);
     };
-    let exact = hosts
+    if is_loopback(&machine) || !is_tailscale_address(&machine) {
+        return Ok(None);
+    }
+    let tailscale = |h: &&SavedHost| -> Vec<String> {
+        h.endpoints
+            .iter()
+            .filter(|e| e.kind == "tailscale")
+            .map(|e| normalize_address(&e.url))
+            .filter(|url| machine_of(url).is_some_and(|m| is_tailscale_address(&m)))
+            .collect()
+    };
+    let unique = |matches: Vec<&SavedHost>| match matches.as_slice() {
+        [one] => found(one, Match::Tailscale),
+        _ => Ok(None),
+    };
+    let exact: Vec<&SavedHost> = scan
+        .hosts
         .iter()
-        .filter(|h| h.endpoints.iter().any(|e| normalize_address(e) == address))
+        .filter(|h| tailscale(h).contains(&address))
         .collect();
-    if let Some(origin) = unique(exact) {
-        return Some(origin);
+    if !exact.is_empty() {
+        return unique(exact);
     }
-    if typed_port(input) {
-        return None;
+    if has_http_scheme(input) || typed_port(input) {
+        return Ok(None);
     }
-    let same_machine = hosts
+    let same_machine = scan
+        .hosts
         .iter()
         .filter(|h| {
-            std::iter::once(&h.origin)
-                .chain(&h.endpoints)
-                .any(|e| machine_of(e).as_deref() == Some(machine.as_str()))
+            tailscale(h)
+                .iter()
+                .any(|url| machine_of(url).as_deref() == Some(machine.as_str()))
         })
         .collect();
     unique(same_machine)
@@ -527,7 +686,19 @@ fn machine_of(address: &str) -> Option<String> {
     )
 }
 
-/// Whether the user spelled a port, which then has to match exactly.
+/// Tailscale's CGNAT IPv4 range and its IPv6 ULA prefix.
+fn is_tailscale_address(machine: &str) -> bool {
+    match machine.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => {
+            let [a, b, ..] = v4.octets();
+            a == 100 && (64..128).contains(&b)
+        }
+        Ok(std::net::IpAddr::V6(v6)) => v6.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0],
+        Err(_) => false,
+    }
+}
+
+/// Whether the user spelled a port.
 fn typed_port(input: &str) -> bool {
     let trimmed = input.trim().trim_end_matches('/');
     let bare_ipv6 = !has_http_scheme(trimmed)
@@ -570,7 +741,8 @@ mod tests {
         (dir, root)
     }
 
-    fn secure(root: &Path, origin: &str, name: Option<&str>, endpoints: &[&str]) {
+    /// Endpoints as `(kind, url)`.
+    fn secure(root: &Path, origin: &str, name: Option<&str>, endpoints: &[(&str, &str)]) {
         let mut host = crate::prepare_bootstrap("hosts", "cli")
             .unwrap()
             .profile(origin)
@@ -578,45 +750,57 @@ mod tests {
         host.name = name.map(str::to_owned);
         host.endpoints = endpoints
             .iter()
-            .map(|url| Endpoint {
+            .map(|(kind, url)| Endpoint {
                 url: (*url).into(),
-                kind: "lan".into(),
+                kind: (*kind).into(),
             })
             .collect();
         crate::save_pairing_at(root, &host).unwrap();
     }
 
+    fn regular_path(root: &Path, origin: &str) -> PathBuf {
+        root.join(format!(
+            "regular-{}.json",
+            crate::store::origin_digest(origin)
+        ))
+    }
+
     /// Writes a profile the way a binary from before names did.
-    fn legacy_regular(root: &Path, origin: &str) {
-        let digest = crate::store::origin_digest(origin);
+    fn legacy_regular(root: &Path, origin: &str, hostname: Option<&str>) {
+        let mut profile = serde_json::json!({"origin": origin, "api_key": "k"});
+        if let Some(hostname) = hostname {
+            profile["hostname"] = hostname.into();
+        }
         mold_secure::identity_file::write_private_file(
-            &root.join(format!("regular-{digest}.json")),
-            &serde_json::to_vec(&serde_json::json!({"origin": origin, "api_key": "k"})).unwrap(),
+            &regular_path(root, origin),
+            &serde_json::to_vec(&profile).unwrap(),
             false,
         )
         .unwrap();
     }
 
+    fn resolved(root: &Path, input: &str) -> Option<(String, Match)> {
+        resolve_at(root, input)
+            .unwrap()
+            .map(|found| (found.origin, found.via))
+    }
+
     #[test]
     fn a_profile_from_before_names_still_loads_and_lists() {
         let (_dir, root) = store();
-        legacy_regular(&root, "http://100.64.0.9:7680");
-        let raw = crate::read_private(&root.join(format!(
-            "regular-{}.json",
-            crate::store::origin_digest("http://100.64.0.9:7680")
-        )))
-        .unwrap();
+        legacy_regular(&root, "http://100.64.0.9:7680", None);
+        let raw = crate::read_private(&regular_path(&root, "http://100.64.0.9:7680")).unwrap();
         let host: crate::RegularHost = serde_json::from_slice(&raw).unwrap();
         assert_eq!(host.name, None);
         let hosts = list_at(&root).unwrap();
         assert_eq!(hosts.len(), 1);
         assert_eq!(hosts[0].name, "host-100-64-0-9");
         assert_eq!(hosts[0].mode, ConnectionMode::Regular);
-        assert!(!hosts[0].named);
+        assert!(!hosts[0].named && !hosts[0].ambiguous);
     }
 
     #[test]
-    fn legacy_names_derive_from_the_origin_and_never_steal_a_stored_name() {
+    fn legacy_names_derive_from_the_origin() {
         assert_eq!(
             derived_name("https://abc123-7680.proxy.runpod.net", None),
             "runpod-abc123"
@@ -633,17 +817,80 @@ mod tests {
             derived_name("https://x.invalid", Some("Studio Mac")),
             "studio-mac"
         );
+    }
+
+    /// A derived name that collides is never suffixed (a suffix would move
+    /// to another host after `rm`): both rows are ambiguous, and resolving
+    /// the name is an error naming both origins.
+    #[test]
+    fn colliding_derived_names_are_ambiguous_not_suffixed() {
         let (_dir, root) = store();
-        secure(&root, "https://workstation.invalid", None, &[]);
-        secure(&root, "https://zz.invalid", Some("workstation"), &[]);
+        legacy_regular(&root, "http://10.0.0.8:7680", Some("lab"));
+        legacy_regular(&root, "http://10.0.0.9:7680", Some("lab"));
         let hosts = list_at(&root).unwrap();
-        let named = hosts.iter().find(|h| h.named).unwrap();
+        assert!(hosts
+            .iter()
+            .all(|h| h.name == "lab" && h.ambiguous && !h.named));
+        let error = resolve_at(&root, "lab").unwrap_err().to_string();
+        assert!(error.contains("http://10.0.0.8:7680"), "{error}");
+        assert!(error.contains("http://10.0.0.9:7680"), "{error}");
+        assert!(error.contains("mold host use"), "{error}");
+        assert!(set_default_at(&root, "lab").is_err());
+        assert!(remove_at(&root, "lab").is_err());
+        // Persisting skips ambiguous names; nothing is rewritten.
+        assert!(persist_derived_names_at(&root).unwrap().is_empty());
+    }
+
+    /// A stored name never moves: a derived one sharing it is the ambiguous
+    /// row, and the name resolves to the stored holder.
+    #[test]
+    fn a_stored_name_owns_its_name_over_a_derived_one() {
+        let (_dir, root) = store();
+        secure(&root, "https://zz.invalid", Some("workstation"), &[]);
+        secure(&root, "https://workstation.invalid", None, &[]);
+        let hosts = list_at(&root).unwrap();
+        let stored = hosts
+            .iter()
+            .find(|h| h.origin == "https://zz.invalid")
+            .unwrap();
+        assert!(stored.named && !stored.ambiguous);
+        let derived = hosts
+            .iter()
+            .find(|h| h.origin == "https://workstation.invalid")
+            .unwrap();
+        assert_eq!(derived.name, "workstation");
+        assert!(derived.ambiguous && !derived.named);
         assert_eq!(
-            (named.name.as_str(), named.origin.as_str()),
-            ("workstation", "https://zz.invalid")
+            resolved(&root, "workstation"),
+            Some(("https://zz.invalid".into(), Match::Name))
         );
-        let derived = hosts.iter().find(|h| !h.named).unwrap();
-        assert_eq!(derived.name, "workstation-2");
+    }
+
+    /// Explicit host commands persist unambiguous derived names, keeping
+    /// every other field, so a later removal cannot rename anything.
+    #[test]
+    fn persisting_derived_names_makes_them_stable() {
+        let (_dir, root) = store();
+        legacy_regular(&root, "http://10.0.0.8:7680", Some("lab"));
+        legacy_regular(&root, "http://10.0.0.9:7680", Some("other"));
+        let named = persist_derived_names_at(&root).unwrap();
+        assert_eq!(named.len(), 2);
+        let raw = crate::read_private(&regular_path(&root, "http://10.0.0.8:7680")).unwrap();
+        let profile: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(
+            profile,
+            serde_json::json!({"origin": "http://10.0.0.8:7680", "api_key": "k", "hostname": "lab", "name": "lab"})
+        );
+        // A newcomer reporting the same hostname cannot take the name.
+        legacy_regular(&root, "http://10.0.0.10:7680", Some("lab"));
+        assert_eq!(
+            resolved(&root, "lab"),
+            Some(("http://10.0.0.8:7680".into(), Match::Name))
+        );
+        assert!(list_at(&root)
+            .unwrap()
+            .iter()
+            .all(|h| h.named || h.origin == "http://10.0.0.10:7680"));
     }
 
     #[test]
@@ -663,7 +910,7 @@ mod tests {
     fn list_use_and_remove_round_trip() {
         let (_dir, root) = store();
         secure(&root, "https://one.invalid", Some("one"), &[]);
-        legacy_regular(&root, "http://10.0.0.8:7680");
+        legacy_regular(&root, "http://10.0.0.8:7680", None);
         assert_eq!(default_at(&root).unwrap(), None);
         assert!(set_default_at(&root, "missing").is_err());
         assert_eq!(
@@ -696,7 +943,7 @@ mod tests {
         let (_dir, root) = store();
         let origin = "https://both.invalid";
         secure(&root, origin, Some("both"), &[]);
-        legacy_regular(&root, origin);
+        legacy_regular(&root, origin, None);
         let digest = crate::store::origin_digest(origin);
         mold_secure::identity_file::write_private_file(
             &root.join(format!("regular-{digest}.mode")),
@@ -712,44 +959,104 @@ mod tests {
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
     }
 
-    #[test]
-    fn resolve_finds_names_origins_and_advertised_endpoints() {
-        let (_dir, root) = store();
-        let relay = "https://73b0aa11ffee.mold-link.urandom.io";
+    const RELAY: &str = "https://73b0aa11ffee.mold-link.urandom.io";
+
+    fn workstation(root: &Path) {
         secure(
-            &root,
-            relay,
+            root,
+            RELAY,
             Some("workstation"),
-            &["http://100.105.134.43:7680", "http://192.168.1.5:4321"],
+            &[
+                ("tailscale", "http://100.105.134.43:7680"),
+                ("tailscale", "http://[fd7a:115c:a1e0::43]:7680"),
+                ("lan", "http://192.168.1.5:7680"),
+                ("lan", "http://172.17.0.1:7680"),
+                // Mislabelled: a "tailscale" kind outside Tailscale's ranges.
+                ("tailscale", "http://10.0.0.5:7680"),
+            ],
         );
-        legacy_regular(&root, "http://10.0.0.8:7680");
+    }
+
+    #[test]
+    fn names_and_origins_resolve_and_say_how() {
+        let (_dir, root) = store();
+        workstation(&root);
+        legacy_regular(&root, "http://10.0.0.8:7680", None);
+        for input in ["workstation", "Workstation"] {
+            assert_eq!(resolved(&root, input), Some((RELAY.into(), Match::Name)));
+        }
+        assert_eq!(resolved(&root, RELAY), Some((RELAY.into(), Match::Origin)));
+        assert_eq!(
+            resolved(&root, "10.0.0.8"),
+            Some(("http://10.0.0.8:7680".into(), Match::Origin))
+        );
+    }
+
+    /// Only an advertised Tailscale address redirects to the host's paired
+    /// origin; the CLI is told so it can print the redirect.
+    #[test]
+    fn a_tailscale_address_finds_the_host_paired_under_its_relay_origin() {
+        let (_dir, root) = store();
+        workstation(&root);
         for input in [
-            "workstation",
-            "Workstation",
-            relay,
             "100.105.134.43",
             "100.105.134.43:7680",
             "http://100.105.134.43:7680",
-            "http://100.105.134.43",
-            "192.168.1.5",
-            "192.168.1.5:4321",
+            "fd7a:115c:a1e0::43",
         ] {
-            assert_eq!(resolve_at(&root, input).as_deref(), Some(relay), "{input}");
+            assert_eq!(
+                resolved(&root, input),
+                Some((RELAY.into(), Match::Tailscale)),
+                "{input}"
+            );
         }
-        assert_eq!(
-            resolve_at(&root, "10.0.0.8").as_deref(),
-            Some("http://10.0.0.8:7680")
-        );
+    }
+
+    /// A LAN or Docker address a host once advertised is somebody's machine
+    /// on this network now, never a reason to send the request elsewhere.
+    #[test]
+    fn lan_and_unlisted_addresses_are_used_as_typed() {
+        let (_dir, root) = store();
+        workstation(&root);
         for input in [
-            "192.168.1.5:9999",
+            "192.168.1.5",
+            "192.168.1.5:7680",
+            "172.17.0.1",
+            "10.0.0.5",
             "100.105.134.44",
             "localhost",
             "http://127.0.0.1:7680",
-            "unknown-name",
             "",
         ] {
-            assert_eq!(resolve_at(&root, input), None, "{input}");
+            assert_eq!(resolved(&root, input), None, "{input:?}");
         }
+    }
+
+    /// Same-machine matching needs neither a scheme nor a port: an explicit
+    /// `https://` or port means exactly that origin.
+    #[test]
+    fn a_scheme_or_port_disables_same_machine_matching() {
+        let (_dir, root) = store();
+        workstation(&root);
+        for input in [
+            "https://100.105.134.43",
+            "http://100.105.134.43",
+            "100.105.134.43:9999",
+        ] {
+            assert_eq!(resolved(&root, input), None, "{input}");
+        }
+        let (_dir, root) = store();
+        secure(
+            &root,
+            "https://a.invalid",
+            Some("a"),
+            &[("tailscale", "http://100.64.1.1:7690")],
+        );
+        // No port: the one Tailscale endpoint on that machine.
+        assert_eq!(
+            resolved(&root, "100.64.1.1"),
+            Some(("https://a.invalid".into(), Match::Tailscale))
+        );
     }
 
     #[test]
@@ -759,23 +1066,57 @@ mod tests {
             &root,
             "https://a.invalid",
             Some("a"),
-            &["http://10.1.1.1:7680"],
+            &[("tailscale", "http://100.64.1.1:7680")],
         );
         secure(
             &root,
             "https://b.invalid",
             Some("b"),
-            &["http://10.1.1.1:7690"],
+            &[("tailscale", "http://100.64.1.1:7690")],
         );
         assert_eq!(
-            resolve_at(&root, "10.1.1.1"),
-            Some("https://a.invalid".into())
+            resolved(&root, "100.64.1.1"),
+            Some(("https://a.invalid".into(), Match::Tailscale))
         );
-        assert_eq!(resolve_at(&root, "http://10.1.1.1"), None);
         assert_eq!(
-            resolve_at(&root, "10.1.1.1:7690"),
-            Some("https://b.invalid".into())
+            resolved(&root, "100.64.1.1:7690"),
+            Some(("https://b.invalid".into(), Match::Tailscale))
         );
+        secure(
+            &root,
+            "https://c.invalid",
+            Some("c"),
+            &[("tailscale", "http://100.64.1.2:7680")],
+        );
+        secure(
+            &root,
+            "https://d.invalid",
+            Some("d"),
+            &[("tailscale", "http://100.64.1.2:7680")],
+        );
+        assert_eq!(resolved(&root, "100.64.1.2"), None);
+    }
+
+    /// With an unreadable profile, a bare name that matches nothing might be
+    /// that profile's host: refuse rather than look it up in DNS. Addresses
+    /// and clean stores keep the plain fall-through.
+    #[test]
+    fn an_unreadable_profile_stops_a_bare_name_falling_through_to_dns() {
+        let (_dir, root) = store();
+        assert_eq!(resolved(&root, "hal9000"), None, "no store: plain DNS");
+        workstation(&root);
+        assert_eq!(resolved(&root, "hal9000"), None, "clean store: plain DNS");
+        let broken = root.join(format!("{}.json", "ab".repeat(32)));
+        mold_secure::identity_file::write_private_file(&broken, b"not json", false).unwrap();
+        let error = resolve_at(&root, "hal9000").unwrap_err().to_string();
+        assert!(error.contains(&broken.display().to_string()), "{error}");
+        // A readable host still resolves, and an address is used as typed.
+        assert_eq!(
+            resolved(&root, "workstation"),
+            Some((RELAY.into(), Match::Name))
+        );
+        assert_eq!(resolved(&root, "hal9000.tailnet.ts.net"), None);
+        assert_eq!(resolved(&root, "http://hal9000:7680"), None);
     }
 
     #[test]
@@ -829,5 +1170,11 @@ mod tests {
         assert!(!typed_port("10.0.0.1"));
         assert!(!typed_port("http://10.0.0.1"));
         assert!(!typed_port("fd00::1"));
+        assert!(is_tailscale_address("100.64.0.1"));
+        assert!(is_tailscale_address("100.127.255.255"));
+        assert!(!is_tailscale_address("100.128.0.1"));
+        assert!(is_tailscale_address("fd7a:115c:a1e0::1"));
+        assert!(!is_tailscale_address("fd7a:115c:a1e1::1"));
+        assert!(!is_tailscale_address("workstation"));
     }
 }

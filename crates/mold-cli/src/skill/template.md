@@ -131,8 +131,8 @@ The operator creates a one-use, two-minute invitation using MOLD_API_KEY (or
 @owner-only-key-file). Transfer the invitation privately. Each paired client
 stores its own key and revocable grant under a host name (`mold host list`).
 `--host NAME` (global, on every remote command), `MOLD_HOST=NAME`, or a default
-set with `mold host use NAME` selects it; a URL, or an address the host
-advertised, still works. Precedence: `--host`, then `MOLD_HOST`, then the
+set with `mold host use NAME` selects it; a URL still works, and a Tailscale IP
+the host advertised finds it (LAN addresses are used as typed). Precedence: `--host`, then `MOLD_HOST`, then the
 default host, then `http://localhost:7680`. `mold host rm NAME` deletes the
 saved credentials; revoke the device on the host to end its grant there.
 

@@ -79,7 +79,7 @@ pub async fn run() -> Result<()> {
 /// [`run`] against `host` (a `--host` value) instead of `MOLD_HOST`.
 pub async fn run_with_host(host: Option<&str>) -> Result<()> {
     let token = load_token()?;
-    let client = MoldClient::for_host(host);
+    let client = MoldClient::for_host(host)?;
     let allowed_roles = load_allowed_roles();
     let daily_quota = load_daily_quota();
     let config = BotConfig {

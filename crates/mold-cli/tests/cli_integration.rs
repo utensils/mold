@@ -2742,11 +2742,9 @@ async fn the_host_flag_wins_over_the_environment() {
     );
 }
 
-/// Save a Regular host profile in `env`'s credential store the way
-/// `mold pair --mode regular` files one.
+/// Write one owner-only file into `env`'s credential store.
 #[cfg(unix)]
-fn save_named_regular_host(env: &TestEnv, origin: &str, name: &str) {
-    use sha2::Digest;
+fn write_client_file(env: &TestEnv, file: &str, bytes: &[u8]) -> std::path::PathBuf {
     use std::io::Write;
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     let root = env.home.join("secure/clients");
@@ -2760,19 +2758,77 @@ fn save_named_regular_host(env: &TestEnv, origin: &str, name: &str) {
         std::os::unix::fs::PermissionsExt::from_mode(0o700),
     )
     .unwrap();
-    let digest = hex::encode(sha2::Sha256::digest(origin.as_bytes()));
+    let path = root.join(file);
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(root.join(format!("regular-{digest}.json")))
+        .open(&path)
         .unwrap()
-        .write_all(
-            serde_json::json!({"origin": origin, "api_key": null, "name": name})
-                .to_string()
-                .as_bytes(),
-        )
+        .write_all(bytes)
         .unwrap();
+    path
+}
+
+/// Save a Regular host profile the way `mold pair --mode regular` files
+/// one; `name: None` writes it the way a mold from before names did.
+#[cfg(unix)]
+fn save_regular_profile(env: &TestEnv, origin: &str, name: Option<&str>, hostname: Option<&str>) {
+    use sha2::Digest;
+    let digest = hex::encode(sha2::Sha256::digest(origin.as_bytes()));
+    let mut profile = serde_json::json!({"origin": origin, "api_key": null});
+    if let Some(name) = name {
+        profile["name"] = name.into();
+    }
+    if let Some(hostname) = hostname {
+        profile["hostname"] = hostname.into();
+    }
+    write_client_file(
+        env,
+        &format!("regular-{digest}.json"),
+        profile.to_string().as_bytes(),
+    );
+}
+
+#[cfg(unix)]
+fn save_named_regular_host(env: &TestEnv, origin: &str, name: &str) {
+    save_regular_profile(env, origin, Some(name), None);
+}
+
+/// A name two legacy hosts derive is an error naming both, never a guess;
+/// with an unreadable profile, an unknown bare name is an error naming the
+/// file rather than a DNS lookup.
+#[cfg(unix)]
+#[test]
+fn ambiguous_and_unreadable_saved_hosts_stop_the_command() {
+    let env = TestEnv::new();
+    save_regular_profile(&env, "http://10.0.0.8:7680", None, Some("lab"));
+    save_regular_profile(&env, "http://10.0.0.9:7680", None, Some("lab"));
+    env.cmd()
+        .args(["ps", "--host", "lab"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("names more than one saved host"))
+        .stderr(predicate::str::contains("http://10.0.0.8:7680"))
+        .stderr(predicate::str::contains("http://10.0.0.9:7680"));
+    env.cmd()
+        .env("MOLD_HOST", "lab")
+        .args(["ps"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("names more than one saved host"));
+    env.cmd()
+        .args(["host", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("lab (ambiguous)"));
+
+    let broken = write_client_file(&env, &format!("{}.json", "ab".repeat(32)), b"not json");
+    env.cmd()
+        .args(["ps", "--host", "hal9000"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(broken.display().to_string()));
 }
 
 /// A saved host name works wherever an address does — `--host`,

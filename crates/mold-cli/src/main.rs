@@ -2748,8 +2748,8 @@ Examples:
   mold host rm workstation           Forget it and delete its credentials
 
 Hosts are saved by pairing (`mold pair`). Any remote command then takes
-`--host NAME` or `MOLD_HOST=NAME`; a URL or address still works, and an
-address the paired host advertised finds it too. Which machine a command
+`--host NAME` or `MOLD_HOST=NAME`; a URL or address still works, and a
+Tailscale IP the paired host advertised finds it too. Which machine a command
 talks to: --host, then MOLD_HOST, then the default host, then localhost.")]
     Host {
         #[command(subcommand)]

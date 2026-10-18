@@ -27,7 +27,7 @@ const STATE_RUNNING: &str = "running";
 const STATE_QUEUED: &str = "queued";
 
 pub async fn run(action: QueueAction, host: Option<&str>) -> Result<()> {
-    let client = crate::control::client_for_host(host);
+    let client = crate::control::client_for_host(host)?;
     match action {
         QueueAction::List { held, json } => queue_list(&client, held, json).await,
         QueueAction::Show { job_id, json } => queue_show(&client, &job_id, json).await,
@@ -45,7 +45,7 @@ pub async fn run(action: QueueAction, host: Option<&str>) -> Result<()> {
         } => {
             // A saved host name works here too; its paired credentials, not
             // this shell's MOLD_API_KEY, authorize the destination.
-            let to = mold_core::client::resolve_host(Some(&to));
+            let to = crate::control::resolve_target(Some(&to))?;
             let destination = match destination_api_key {
                 Some(key) => MoldClient::with_api_key(&to, key),
                 None => MoldClient::new(&to),

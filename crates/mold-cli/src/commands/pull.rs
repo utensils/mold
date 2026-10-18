@@ -383,7 +383,7 @@ pub async fn run(
         }
     };
 
-    let ctx = CliContext::new(host);
+    let ctx = CliContext::new(host)?;
 
     // Ask the machine that will RECORD the acceptance for its terms before
     // displaying anything — only skipped entirely when nothing is being

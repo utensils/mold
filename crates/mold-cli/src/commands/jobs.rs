@@ -6,7 +6,7 @@ use mold_core::{Config, MoldClient};
 use crate::{JobsAction, RetakeModeArg};
 
 pub async fn run(action: JobsAction, host: Option<&str>, _config: &Config) -> Result<()> {
-    let client = crate::control::client_for_host(host);
+    let client = crate::control::client_for_host(host)?;
     match action {
         JobsAction::List { json } => jobs_list(&client, json).await,
         JobsAction::Show { id, json, script } => jobs_show(&client, &id, json, script).await,

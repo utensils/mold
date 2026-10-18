@@ -17,10 +17,10 @@ pub(crate) struct CliContext {
 }
 
 impl CliContext {
-    pub(crate) fn new(host: Option<&str>) -> Self {
-        let client = client_for_host(host);
+    pub(crate) fn new(host: Option<&str>) -> Result<Self> {
+        let client = client_for_host(host)?;
         let config = Config::load_or_default();
-        Self { client, config }
+        Ok(Self { client, config })
     }
 
     pub(crate) fn client(&self) -> &MoldClient {
@@ -67,9 +67,27 @@ impl CliContext {
 ///
 /// `host` is the global `--host` (which clap already fills from `MOLD_HOST`);
 /// a saved host name resolves to its paired origin, and `None` falls back to
-/// the default host, then localhost. See `mold_core::client::resolve_host`.
-pub(crate) fn client_for_host(host: Option<&str>) -> MoldClient {
-    MoldClient::for_host(host)
+/// the default host, then localhost. See [`resolve_target`].
+pub(crate) fn client_for_host(host: Option<&str>) -> Result<MoldClient> {
+    Ok(MoldClient::with_env_key(&resolve_target(host)?))
+}
+
+/// Resolve `host` like every CLI command does, saying on stderr when an
+/// address was sent to a different saved origin
+/// (`100.105.134.43 → workstation (https://…)`). See
+/// `mold_core::client::resolve_target`.
+pub(crate) fn resolve_target(host: Option<&str>) -> Result<String> {
+    let target = mold_core::client::resolve_target(host)?;
+    if let Some(note) = target.redirect_note() {
+        // A command may build several clients for one target; say it once.
+        static SAID: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+        if !said.contains(&note) {
+            eprintln!("{note}");
+            said.push(note);
+        }
+    }
+    Ok(target.origin)
 }
 
 /// Whether an unavailable HTTP target names this machine.

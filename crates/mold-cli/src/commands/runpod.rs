@@ -2104,7 +2104,9 @@ async fn ensure_run_pod(client: &RunPodClient, config: &Config, opts: &RunOption
     enforce_cost_alert(client, config).await?;
     if let Ok(origin) = std::env::var("MOLD_HOST") {
         // `MOLD_HOST=<saved name>` names the pod's paired origin.
-        let origin = mold_secure_client::hosts::resolve(&origin).unwrap_or(origin);
+        let origin = mold_secure_client::hosts::resolve(&origin)?
+            .map(|found| found.origin)
+            .unwrap_or(origin);
         let selected = paired_runpod_id(Some(&origin), None)?;
         require_paired_pod(&origin)?;
         return ensure_paired_pod(client, config, opts, &selected).await;

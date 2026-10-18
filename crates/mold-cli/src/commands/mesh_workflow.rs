@@ -62,7 +62,7 @@ pub struct CreateArgs {
 }
 
 pub async fn run(host: Option<&str>, action: MeshWorkflowAction) -> Result<()> {
-    let client = crate::control::client_for_host(host);
+    let client = crate::control::client_for_host(host)?;
     match action {
         MeshWorkflowAction::Create {
             prompt,

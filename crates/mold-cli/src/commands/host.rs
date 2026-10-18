@@ -10,6 +10,9 @@ use crate::theme;
 use crate::HostAction;
 
 pub fn run(action: HostAction) -> Result<()> {
+    // Running a host command is the one time derived names are written
+    // down, so they stop depending on what else is saved.
+    hosts::persist_derived_names()?;
     match action {
         HostAction::List { json } => list(json),
         HostAction::Use { name, clear } => {
@@ -84,6 +87,7 @@ fn row_json(host: &SavedHost, is_default: bool) -> serde_json::Value {
         "origin": host.origin,
         "default": is_default,
         "named": host.named,
+        "ambiguous": host.ambiguous,
         "instance_id": host.instance_id,
         "hostname": host.hostname,
         "endpoints": host.endpoints,
@@ -91,7 +95,19 @@ fn row_json(host: &SavedHost, is_default: bool) -> serde_json::Value {
 }
 
 fn render_table(saved: &[SavedHost], default: Option<&str>) -> String {
-    let name_width = saved.iter().map(|h| h.name.len()).max().unwrap_or(0).max(4);
+    let label = |h: &SavedHost| {
+        if h.ambiguous {
+            format!("{} (ambiguous)", h.name)
+        } else {
+            h.name.clone()
+        }
+    };
+    let name_width = saved
+        .iter()
+        .map(|h| label(h).len())
+        .max()
+        .unwrap_or(0)
+        .max(4);
     let origin_width = saved
         .iter()
         .map(|h| h.origin.len())
@@ -111,13 +127,18 @@ fn render_table(saved: &[SavedHost], default: Option<&str>) -> String {
         out.push_str(
             format!(
                 "{:<name_width$}  {:<7}  {:<origin_width$}  {marker}",
-                host.name,
+                label(host),
                 host.mode.as_str(),
                 host.origin
             )
             .trim_end(),
         );
         out.push('\n');
+    }
+    if saved.iter().any(|h| h.ambiguous) {
+        out.push_str(
+            "\nAn ambiguous name belongs to more than one host and resolves to an error; re-pair one of them so it gets its own name.\n",
+        );
     }
     out
 }
@@ -145,6 +166,7 @@ mod tests {
             hostname: None,
             endpoints: vec![],
             named: true,
+            ambiguous: false,
         }
     }
 
@@ -168,6 +190,18 @@ mod tests {
                 "lab          regular  http://10.0.0.8:7680              *",
             ]
         );
+    }
+
+    #[test]
+    fn ambiguous_rows_are_marked_and_explained() {
+        let mut first = host("lab", "http://10.0.0.8:7680", ConnectionMode::Regular);
+        first.ambiguous = true;
+        first.named = false;
+        let mut second = first.clone();
+        second.origin = "http://10.0.0.9:7680".into();
+        let table = render_table(&[first, second], None);
+        assert_eq!(table.matches("lab (ambiguous)").count(), 2, "{table}");
+        assert!(table.contains("resolves to an error"), "{table}");
     }
 
     #[test]

@@ -386,7 +386,7 @@ pub async fn run_overview(host: Option<&str>) -> Result<()> {
     }
 
     // Server section
-    let client = crate::control::client_for_host(host);
+    let client = crate::control::client_for_host(host)?;
     println!();
     println!("  {}", "Server".bold());
     println!("  {:<18} {}", "Host:".dimmed(), client.host());
