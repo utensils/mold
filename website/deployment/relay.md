@@ -180,9 +180,11 @@ grant and the operator key is exchanged, never stored. An app or device key is
 saved as a Regular credential instead, and a host with authentication off is
 saved with no key (only when the host also answers without one). The key comes
 from `--api-key-file`, `--api-key-stdin` or a hidden prompt, never from
-`MOLD_API_KEY`. Over `https://`, loopback or Tailscale (an address in
-100.64.0.0/10 or fd7a:115c:a1e0::/48, a `*.ts.net` name, or a MagicDNS name
-whose every address is one) this is a Secure pairing. Mold refuses a Secure pairing
+`MOLD_API_KEY`. Over `https://`, loopback or Tailscale this is a Secure
+pairing. Tailscale means an address in fd7a:115c:a1e0::/48, a `*.ts.net` name,
+a MagicDNS name whose every address is a Tailscale address, or an address in
+100.64.0.0/10 when this machine has a tailnet address of its own (that range is
+also carrier-grade NAT, so on its own it proves nothing). Mold refuses a Secure pairing
 over plain `http://` to any other address, because the invitation would cross
 the network readable: use the host's `https://` address, pair with the link, or
 pass `--regular` for a direct HTTP connection (allowed, with a warning, on a

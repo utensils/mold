@@ -417,13 +417,14 @@ fn key_outcome(status: u16, code: &str, regular: bool) -> Result<KeyOutcome> {
 /// on the network) and allowed, with a warning, for an explicit Regular
 /// direct connection.
 fn plain_http_policy(origin: &str, regular: bool) -> Result<bool> {
-    plain_http_policy_with(origin, regular, resolve_bounded)
+    plain_http_policy_with(origin, regular, resolve_bounded, local_addresses)
 }
 
 fn plain_http_policy_with(
     origin: &str,
     regular: bool,
     resolve: impl Fn(&str) -> Option<Vec<std::net::IpAddr>>,
+    local: impl Fn() -> Vec<std::net::IpAddr>,
 ) -> Result<bool> {
     let Ok(url) = reqwest::Url::parse(origin) else {
         return Ok(false);
@@ -431,7 +432,7 @@ fn plain_http_policy_with(
     let machine = url.host_str().unwrap_or_default();
     if url.scheme() != "http"
         || crate::control::is_loopback_host(origin)
-        || is_tailscale_machine(machine, resolve)
+        || is_tailscale_machine(machine, resolve, local)
     {
         return Ok(false);
     }
@@ -442,27 +443,47 @@ fn plain_http_policy_with(
     Ok(true)
 }
 
-/// A Tailscale path: an address in its ranges, a MagicDNS `*.ts.net` name,
-/// or a name whose every resolved address is a Tailscale address (a bare
-/// MagicDNS name such as `workstation`).
+/// A Tailscale path: a Tailscale address, a MagicDNS `*.ts.net` name, or a
+/// name whose every resolved address is a Tailscale address (a bare MagicDNS
+/// name such as `workstation`). See [`is_tailnet_ip`] for which addresses.
 fn is_tailscale_machine(
     machine: &str,
     resolve: impl Fn(&str) -> Option<Vec<std::net::IpAddr>>,
+    local: impl Fn() -> Vec<std::net::IpAddr>,
 ) -> bool {
-    use mold_secure_client::hosts::is_tailscale_address;
-    if is_tailscale_address(machine) {
-        return true;
+    let local_tailnet = std::cell::OnceCell::new();
+    let on_tailnet = || {
+        *local_tailnet.get_or_init(|| {
+            local().iter().any(|ip| {
+                ip.is_ipv4() && mold_secure_client::hosts::is_tailscale_address(&ip.to_string())
+            })
+        })
+    };
+    let bare = machine.trim_matches(['[', ']']);
+    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+        return is_tailnet_ip(ip, on_tailnet);
     }
     let name = machine.trim_end_matches('.').to_ascii_lowercase();
-    if name.parse::<std::net::IpAddr>().is_ok() || name.trim_matches(['[', ']']).contains(':') {
-        return false;
-    }
     if name.ends_with(".ts.net") {
         return true;
     }
-    resolve(&name).is_some_and(|ips| {
-        !ips.is_empty() && ips.iter().all(|ip| is_tailscale_address(&ip.to_string()))
-    })
+    resolve(&name)
+        .is_some_and(|ips| !ips.is_empty() && ips.iter().all(|ip| is_tailnet_ip(*ip, on_tailnet)))
+}
+
+/// Tailscale's own IPv6 prefix (fd7a:115c:a1e0::/48) is conclusive. Its IPv4
+/// range, 100.64.0.0/10, is also carrier-grade NAT, so it counts only when
+/// this machine has a tailnet address of its own (Tailscale is up here).
+fn is_tailnet_ip(ip: std::net::IpAddr, on_tailnet: impl Fn() -> bool) -> bool {
+    mold_secure_client::hosts::is_tailscale_address(&ip.to_string())
+        && (ip.is_ipv6() || on_tailnet())
+}
+
+/// This machine's interface addresses (empty when they cannot be read).
+fn local_addresses() -> Vec<std::net::IpAddr> {
+    if_addrs::get_if_addrs()
+        .map(|interfaces| interfaces.into_iter().map(|i| i.ip()).collect())
+        .unwrap_or_default()
 }
 
 /// The system resolver, given at most two seconds; `None` on failure or
@@ -991,47 +1012,73 @@ mod tests {
         let ips = |list: &[&str]| Some(list.iter().map(|ip| ip.parse().unwrap()).collect());
         match host {
             "workstation" => ips(&["100.101.102.103", "fd7a:115c:a1e0::5"]),
+            "v6-only" => ips(&["fd7a:115c:a1e0::5"]),
             "mixed" => ips(&["100.101.102.103", "192.168.1.5"]),
             "lan-box" => ips(&["192.168.1.5"]),
             _ => None,
         }
     }
 
-    /// https, loopback and Tailscale (an IP in its ranges, a `.ts.net`
-    /// name, or a name whose every address is one) are private paths;
-    /// plain HTTP to anything else is refused for Secure and warned about
-    /// for Regular.
+    fn on_a_tailnet() -> Vec<std::net::IpAddr> {
+        vec![
+            "192.168.1.9".parse().unwrap(),
+            "100.88.1.2".parse().unwrap(),
+        ]
+    }
+
+    fn off_a_tailnet() -> Vec<std::net::IpAddr> {
+        vec!["192.168.1.9".parse().unwrap()]
+    }
+
+    /// https, loopback and Tailscale are private paths; plain HTTP to
+    /// anything else is refused for Secure and warned about for Regular.
+    /// 100.64.0.0/10 is also carrier-grade NAT, so an IPv4 address there
+    /// counts only when this machine is on a tailnet itself; Tailscale's
+    /// fd7a:115c:a1e0::/48 and `*.ts.net` names count on their own.
     #[test]
     fn plain_http_is_refused_for_secure_and_warned_for_regular() {
-        let policy = |origin: &str, regular| plain_http_policy_with(origin, regular, fake_dns);
-        for origin in [
-            "https://192.168.1.5",
-            "http://127.0.0.1:7680",
-            "http://localhost:7680",
-            "http://100.105.134.43:7680",
-            "http://[fd7a:115c:a1e0::43]:7680",
-            "http://workstation.tail1234.ts.net:7680",
-            "http://WORKSTATION.TAIL1234.TS.NET.:7680",
-            "http://workstation:7680",
-        ] {
-            assert!(!policy(origin, false).unwrap(), "{origin}");
-            assert!(!policy(origin, true).unwrap(), "{origin}");
+        let policy = |origin: &str, regular, local: fn() -> Vec<std::net::IpAddr>| {
+            plain_http_policy_with(origin, regular, fake_dns, local)
+        };
+        for local in [on_a_tailnet as fn() -> _, off_a_tailnet] {
+            for origin in [
+                "https://192.168.1.5",
+                "http://127.0.0.1:7680",
+                "http://localhost:7680",
+                "http://[fd7a:115c:a1e0::43]:7680",
+                "http://workstation.tail1234.ts.net:7680",
+                "http://WORKSTATION.TAIL1234.TS.NET.:7680",
+                "http://v6-only:7680",
+            ] {
+                assert!(!policy(origin, false, local).unwrap(), "{origin}");
+                assert!(!policy(origin, true, local).unwrap(), "{origin}");
+            }
+            for origin in [
+                "http://192.168.1.5:7680",
+                "http://172.17.0.1:7680",
+                "http://10.0.0.8:7680",
+                "http://mixed:7680",
+                "http://lan-box:7680",
+                "http://unknown-name:7680",
+                "http://evil-ts.net:7680",
+            ] {
+                let error = policy(origin, false, local).unwrap_err().to_string();
+                assert!(
+                    error.contains("plain HTTP") && error.contains("--regular"),
+                    "{error}"
+                );
+                assert!(policy(origin, true, local).unwrap(), "{origin}");
+            }
         }
-        for origin in [
-            "http://192.168.1.5:7680",
-            "http://172.17.0.1:7680",
-            "http://10.0.0.8:7680",
-            "http://mixed:7680",
-            "http://lan-box:7680",
-            "http://unknown-name:7680",
-            "http://evil-ts.net:7680",
-        ] {
-            let error = policy(origin, false).unwrap_err().to_string();
-            assert!(
-                error.contains("plain HTTP") && error.contains("--regular"),
-                "{error}"
-            );
-            assert!(policy(origin, true).unwrap(), "{origin}");
+        // A CGNAT-range address (or a name resolving to one) is Tailscale
+        // only from a machine with a tailnet address of its own.
+        for origin in ["http://100.105.134.43:7680", "http://workstation:7680"] {
+            assert!(!policy(origin, false, on_a_tailnet).unwrap(), "{origin}");
+            let error = policy(origin, false, off_a_tailnet)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("plain HTTP"), "{origin}: {error}");
+            assert!(policy(origin, true, off_a_tailnet).unwrap(), "{origin}");
         }
     }
 
