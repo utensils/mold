@@ -1617,6 +1617,74 @@ pub enum CatalogSortArg {
 
 #[derive(clap::Subcommand)]
 pub enum HostAction {
+    /// Pair with a host from its pairing link, or from its URL and an API key
+    #[command(after_long_help = "\
+Examples:
+  mold host add 'https://utensils.io/mold/pair#version=2&...'   Paste the link `mold host invite` printed
+  mold host add -  < link.txt                                  Read the link from stdin
+  mold host add http://10.0.0.8:7680 --name workstation --api-key-file key.txt
+
+With a URL, an operator key is exchanged for this client's own revocable
+grant and never stored; an app or device key is saved as a Regular
+credential; a host with authentication off is saved with no key.")]
+    Add {
+        /// Pairing link, a file holding one, a host URL, or `-` for stdin.
+        /// Prompted for when omitted on a terminal.
+        #[arg(value_name = "LINK|URL|-")]
+        input: Option<String>,
+        /// Name to save it under (default: the host's own name)
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        /// Owner-only file holding the API key (URL form)
+        #[arg(long, value_hint = ValueHint::FilePath, conflicts_with = "api_key_stdin")]
+        api_key_file: Option<std::path::PathBuf>,
+        /// Read the API key from stdin (URL form)
+        #[arg(long)]
+        api_key_stdin: bool,
+        /// Pair over Regular direct HTTP(S) instead of Secure (URL form)
+        #[arg(long)]
+        regular: bool,
+        /// Make it the default host
+        #[arg(long)]
+        default: bool,
+        /// How this client appears in the host's paired-device list
+        #[arg(long, value_name = "NAME")]
+        device_name: Option<String>,
+    },
+    /// Print a one-use pairing link for this host (run it on the host)
+    #[command(after_long_help = "\
+Examples:
+  mold host invite                     Print the link; paste it into `mold host add` on the client
+  mold host invite --qr                Also draw a QR code for a phone
+  mold host invite --regular --direct-url http://10.0.0.8:7680
+  mold host invite --output /private/invite.json
+
+Only the link goes to stdout. It expires in two minutes and is spent the
+moment a client claims it. Uses the operator key (--api-key-file,
+MOLD_API_KEY, or this home's operator credential).")]
+    Invite {
+        /// Invite a Regular direct HTTP(S) client instead of Secure
+        #[arg(long, requires = "direct_url")]
+        regular: bool,
+        /// The explicit direct origin a Regular client should use
+        #[arg(long, value_name = "URL", requires = "regular")]
+        direct_url: Option<String>,
+        /// Also draw the link as a terminal QR code (on stderr)
+        #[arg(long)]
+        qr: bool,
+        /// Write the owner-only invitation file instead of printing a link
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        output: Option<std::path::PathBuf>,
+        /// This host's local engine address
+        #[arg(long, default_value = "127.0.0.1:7680")]
+        target: std::net::SocketAddr,
+        /// Credential-free WSS endpoint for a separately supervised connector
+        #[arg(long, value_name = "WSS_URL")]
+        relay_url: Option<String>,
+        /// Owner-only file holding this host's operator key
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        api_key_file: Option<std::path::PathBuf>,
+    },
     /// List saved hosts: NAME, MODE, ORIGIN, and which one is the default
     #[command(alias = "ls")]
     List {
@@ -2748,12 +2816,14 @@ Manage pods manually:
     /// Manage the saved hosts `--host` and `MOLD_HOST` accept by name
     #[command(after_long_help = "\
 Examples:
+  mold host invite                   On the host: print a one-use pairing link
+  mold host add '<link>'             On the client: pair from that link
   mold host list                     Saved hosts and the default
   mold host use workstation          Target it whenever nothing else names a host
   mold host use --clear              Back to http://localhost:7680
   mold host rm workstation           Forget it and delete its credentials
 
-Hosts are saved by pairing (`mold pair`). Any remote command then takes
+Hosts are saved by `mold host add`. Any remote command then takes
 `--host NAME` or `MOLD_HOST=NAME`; a URL or address still works, and a
 Tailscale IP the paired host advertised finds it too. Which machine a command
 talks to: --host, then MOLD_HOST, then the default host, then localhost.")]
@@ -2762,13 +2832,15 @@ talks to: --host, then MOLD_HOST, then the default host, then localhost.")]
         action: HostAction,
     },
 
-    /// Create an invitation on this authenticated local host.
+    /// Alias of `mold host invite --output`.
+    #[command(hide = true)]
     Pairing {
         #[command(subcommand)]
         action: PairingAction,
     },
 
-    /// Pair this client using an owner-only invitation file from the host.
+    /// Alias of `mold host add` (an invitation or link file, or a manual Regular key).
+    #[command(hide = true)]
     Pair {
         #[arg(long, value_hint = clap::ValueHint::FilePath)]
         invite_file: Option<std::path::PathBuf>,
@@ -3099,33 +3171,6 @@ fn apply_spatial_tile_override(value: Option<&str>) {
     // SAFETY: called once from the command dispatch before any inference
     // thread exists, matching how `serve` publishes `MOLD_HOST`.
     unsafe { std::env::set_var("MOLD_LTX2_SPATIAL_TILE", value) };
-}
-
-/// After re-pairing a server that was saved under another origin, delete the
-/// old entry (its name and default already moved to the new one).
-fn retire_superseded(
-    superseded: Option<mold_secure_client::hosts::SavedHost>,
-    origin: &str,
-) -> anyhow::Result<()> {
-    if let Some(old) = superseded {
-        mold_secure_client::hosts::retire(&old, origin)?;
-        eprintln!(
-            "Replaced the earlier pairing of '{}' at {}.",
-            old.name, old.origin
-        );
-    }
-    Ok(())
-}
-
-/// Report a newly saved pairing by the name `--host` now accepts.
-fn print_saved_host(what: &str, origin: &str, name: &Option<String>) {
-    match name {
-        Some(name) => println!(
-            "{what} {origin} as '{name}'. Use it with --host {name} (or MOLD_HOST={name}); \
-             make it the default with `mold host use {name}`."
-        ),
-        None => println!("{what} {origin}. Use it with --host {origin}."),
-    }
 }
 
 /// Whether `--host` was typed, as opposed to arriving from `MOLD_HOST`.
@@ -4199,17 +4244,19 @@ async fn run(
                     direct_url,
                 },
         } => {
-            commands::pairing::create(
+            commands::host::invite(commands::host::InviteOptions {
                 target,
-                &output,
-                relay_url.as_deref(),
-                if mode == "regular" {
+                mode: if mode == "regular" {
                     mold_secure_client::ConnectionMode::Regular
                 } else {
                     mold_secure_client::ConnectionMode::Secure
                 },
-                direct_url.as_deref(),
-            )
+                direct_url,
+                relay_url,
+                api_key_file: None,
+                qr: false,
+                output: Some(output),
+            })
             .await?
         }
         Commands::Pair {
@@ -4225,66 +4272,26 @@ async fn run(
                     "manual direct pairing requires --mode regular"
                 );
                 let api_key = api_key_file
-                    .map(|p| {
-                        mold_secure_client::read_private(&p)
-                            .and_then(|v| Ok(std::str::from_utf8(&v)?.trim().to_owned()))
-                    })
+                    .map(|p| commands::pairing::read_key_file(&p))
                     .transpose()?;
-                let origin = mold_secure_client::regular_origin(&url)?;
-                let host = mold_secure_client::RegularHost {
-                    name: Some(mold_secure_client::hosts::available_name("", &origin)?),
-                    origin,
-                    api_key,
-                    ..Default::default()
-                };
-                mold_secure_client::save_regular_host(&host)?;
-                print_saved_host("Saved Regular connection to", &host.origin, &host.name);
+                commands::host::add_manual_regular(&url, api_key).await?;
                 return Ok(());
             }
             let path =
                 invite_file.context("use --invite-file or explicit --mode regular --direct-url")?;
-            let value: serde_json::Value =
-                serde_json::from_slice(&mold_secure_client::read_private(&path)?)?;
-            if value["mode"] == "regular" {
-                anyhow::ensure!(
-                    mode.as_deref() != Some("secure"),
-                    "invitation mode does not match --mode"
-                );
-                let mut host = mold_secure_client::pair_regular(value, &name).await?;
-                let (saved_name, superseded) = mold_secure_client::hosts::name_for_pairing(
-                    host.name.as_deref().unwrap_or_default(),
-                    &host.origin,
-                    host.instance_id.as_deref(),
-                    mold_secure_client::ConnectionMode::Regular,
-                )?;
-                host.name = Some(saved_name);
-                mold_secure_client::save_regular_host(&host)?;
-                retire_superseded(superseded, &host.origin)?;
-                print_saved_host("Paired in Regular mode with", &host.origin, &host.name);
-                return Ok(());
-            }
+            let bytes = mold_secure_client::read_private(&path)?;
+            let invitation = mold_secure_client::parse_pairing_link(
+                std::str::from_utf8(&bytes).context("invitation file is not text")?,
+            )?;
+            let regular = invitation["mode"] == "regular";
             anyhow::ensure!(
-                mode.as_deref() != Some("regular"),
+                mode.as_deref() != Some(if regular { "secure" } else { "regular" }),
                 "invitation mode does not match --mode"
             );
-            let invite = serde_json::from_value(value)?;
-            let mut host = mold_secure_client::pair(invite, &name).await?;
-            let (saved_name, superseded) = mold_secure_client::hosts::name_for_pairing(
-                host.name.as_deref().unwrap_or_default(),
-                &host.origin,
-                host.instance_id.as_deref(),
-                mold_secure_client::ConnectionMode::Secure,
-            )?;
-            host.name = Some(saved_name);
-            mold_secure_client::save_pairing(&host)?;
-            retire_superseded(superseded, &host.origin)?;
-            mold_secure_client::select_connection_mode(
-                &host.origin,
-                mold_secure_client::ConnectionMode::Secure,
-            )?;
-            print_saved_host("Paired securely with", &host.origin, &host.name);
+            let added = commands::host::pair_invitation(invitation, None, &name).await?;
+            commands::host::finish(added, false).await?;
         }
-        Commands::Host { action } => commands::host::run(action)?,
+        Commands::Host { action } => commands::host::run(action).await?,
         Commands::Relay { action } => mold_relay::run(action).await?,
         Commands::Lambda { action } => match action {
             LambdaAction::Doctor => commands::lambda::run_doctor().await?,
@@ -4954,6 +4961,51 @@ mod tests {
             }
         ));
         assert!(try_parse(&["host", "use"]).is_err());
+        match parse(&[
+            "host",
+            "add",
+            "http://10.0.0.8:7680",
+            "--name",
+            "workstation",
+            "--api-key-file",
+            "key.txt",
+            "--regular",
+            "--default",
+        ])
+        .command
+        {
+            Commands::Host {
+                action:
+                    HostAction::Add {
+                        input,
+                        name,
+                        regular,
+                        default,
+                        ..
+                    },
+            } => {
+                assert_eq!(input.as_deref(), Some("http://10.0.0.8:7680"));
+                assert_eq!(name.as_deref(), Some("workstation"));
+                assert!(regular && default);
+            }
+            _ => panic!("expected host add"),
+        }
+        assert!(try_parse(&["host", "add", "--api-key-file", "k", "--api-key-stdin"]).is_err());
+        assert!(try_parse(&["host", "invite", "--qr"]).is_ok());
+        assert!(
+            try_parse(&["host", "invite", "--regular"]).is_err(),
+            "needs --direct-url"
+        );
+        // The old spellings keep working.
+        assert!(try_parse(&["pairing", "create", "--output", "/private/i.json"]).is_ok());
+        assert!(try_parse(&[
+            "pair",
+            "--invite-file",
+            "/private/i.json",
+            "--name",
+            "Laptop"
+        ])
+        .is_ok());
         assert!(try_parse(&["host", "use", "a", "--clear"]).is_err());
         assert!(matches!(
             parse(&["host", "rm", "workstation"]).command,

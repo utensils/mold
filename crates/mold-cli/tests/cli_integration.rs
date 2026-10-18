@@ -2921,3 +2921,290 @@ fn queue_send_refuses_a_blank_destination() {
         .failure()
         .stderr(predicate::str::contains("--to needs a destination host"));
 }
+
+/// The saved host files `mold host add` wrote, as text, for asserting what
+/// was and was not stored.
+#[cfg(unix)]
+fn saved_client_files(env: &TestEnv) -> String {
+    let root = env.home.join("secure/clients");
+    let mut out = String::new();
+    for entry in std::fs::read_dir(root).unwrap() {
+        out.push_str(&std::fs::read_to_string(entry.unwrap().path()).unwrap());
+        out.push('\n');
+    }
+    out
+}
+
+#[cfg(unix)]
+async fn mount_status(server: &wiremock::MockServer) {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+    Mock::given(method("GET"))
+        .and(path("/api/status"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "version": "0.36.0", "git_sha": null, "build_date": null,
+            "models_loaded": [], "busy": false, "uptime_secs": 1
+        })))
+        .mount(server)
+        .await;
+}
+
+#[cfg(unix)]
+async fn refuse_sessions(server: &wiremock::MockServer, status: u16, code: &str) {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+    Mock::given(method("POST"))
+        .and(path("/api/pairing/sessions"))
+        .respond_with(
+            ResponseTemplate::new(status)
+                .set_body_json(serde_json::json!({"error": "refused", "code": code})),
+        )
+        .mount(server)
+        .await;
+}
+
+/// An operator key is exchanged for this client's own Regular grant: the
+/// session is claimed at once and only the device key is stored.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn host_add_exchanges_an_operator_key_for_a_device_grant() {
+    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    let origin = server.uri();
+    Mock::given(method("POST"))
+        .and(path("/api/pairing/sessions"))
+        .and(header("x-api-key", "operator-secret"))
+        .and(body_partial_json(
+            serde_json::json!({"mode": "regular", "direct_url": origin}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "mode": "regular", "base_url": origin, "pairing_token": "a".repeat(64),
+            "expires_at": 4_000_000_000_u64, "auth_required": true,
+            "instance_id": "inst-ws", "hostname": "Workstation"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/pairing/regular/claim"))
+        .and(body_partial_json(
+            serde_json::json!({"token": "a".repeat(64), "client_kind": "cli"}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "mode": "regular", "api_key": format!("mold_regular_{}", "b".repeat(64)),
+            "base_url": origin, "instance_id": "inst-ws", "hostname": "Workstation"
+        })))
+        .mount(&server)
+        .await;
+    mount_status(&server).await;
+
+    env.cmd()
+        .args([
+            "host",
+            "add",
+            &origin,
+            "--regular",
+            "--api-key-stdin",
+            "--default",
+        ])
+        .write_stdin("operator-secret\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "Added workstation (regular) → {origin}"
+        )))
+        .stdout(predicate::str::contains("mold ps --host workstation"));
+    let saved = saved_client_files(&env);
+    assert!(!saved.contains("operator-secret"), "{saved}");
+    assert!(saved.contains("mold_regular_"), "{saved}");
+    env.cmd()
+        .args(["host", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("workstation"))
+        .stdout(predicate::str::contains("*"));
+}
+
+/// An app/device key (the host says only an operator can pair) is saved
+/// as a Regular credential after one authenticated read proves it works.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn host_add_saves_a_device_key_as_regular() {
+    let env = TestEnv::new();
+    let server = wiremock::MockServer::start().await;
+    refuse_sessions(&server, 403, "PAIRING_OPERATOR_REQUIRED").await;
+    mount_status(&server).await;
+    env.cmd()
+        .args([
+            "host",
+            "add",
+            &server.uri(),
+            "--name",
+            "lab",
+            "--api-key-stdin",
+        ])
+        .write_stdin("device-key\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Added lab (regular)"))
+        .stdout(predicate::str::contains("mold host use lab").not());
+    assert!(saved_client_files(&env).contains("device-key"));
+}
+
+/// Auth disabled: nothing to exchange, saved as Regular with no key. A
+/// rejected key and a host that cannot pair are clear errors.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn host_add_reports_what_the_host_answered() {
+    let env = TestEnv::new();
+    let open = wiremock::MockServer::start().await;
+    refuse_sessions(&open, 503, "PAIRING_UNAVAILABLE").await;
+    mount_status(&open).await;
+    env.cmd()
+        .args([
+            "host",
+            "add",
+            &open.uri(),
+            "--name",
+            "open-box",
+            "--api-key-stdin",
+        ])
+        .write_stdin("\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Added open-box (regular)"));
+
+    let rejecting = wiremock::MockServer::start().await;
+    refuse_sessions(&rejecting, 401, "UNAUTHORIZED").await;
+    env.cmd()
+        .args(["host", "add", &rejecting.uri(), "--api-key-stdin"])
+        .write_stdin("wrong\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("rejected that API key"));
+
+    let old = wiremock::MockServer::start().await;
+    env.cmd()
+        .args(["host", "add", &old.uri(), "--api-key-stdin"])
+        .write_stdin("key\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("mold host invite"));
+}
+
+/// The pairing link (or a file holding it) pairs through `host add`, and
+/// `mold pair --invite-file` still works as an alias.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn host_add_and_pair_accept_a_pairing_link() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    let origin = server.uri();
+    Mock::given(method("POST"))
+        .and(path("/api/pairing/regular/claim"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "mode": "regular", "api_key": format!("mold_regular_{}", "c".repeat(64)),
+            "base_url": origin, "instance_id": "inst-link", "hostname": "Render Box"
+        })))
+        .mount(&server)
+        .await;
+    mount_status(&server).await;
+    let link = mold_secure_client::pairing_link(&serde_json::json!({
+        "type": "mold.mobile-pairing", "version": 2, "mode": "regular",
+        "base_url": origin, "instance_id": "inst-link", "name": "Render Box",
+        "pairing_token": "d".repeat(64), "expires_at": 4_000_000_000_u64
+    }))
+    .unwrap();
+    env.cmd()
+        .args(["host", "add", &link])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Added render-box (regular)"));
+    // A second claim of the same server under the same origin keeps its name.
+    let file = write_client_file(&env, "link.txt", link.as_bytes());
+    env.cmd()
+        .args(["pair", "--invite-file"])
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("render-box"));
+}
+
+/// `mold host invite` prints only the link on stdout; `--output` keeps the
+/// owner-only file and prints nothing there.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn host_invite_prints_only_the_link() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    let address = server.address().to_string();
+    let direct = format!("http://{address}");
+    Mock::given(method("POST"))
+        .and(path("/api/pairing/sessions"))
+        .and(header("x-api-key", "operator"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "mode": "regular", "base_url": direct, "pairing_token": "e".repeat(64),
+            "expires_at": 4_000_000_000_u64, "auth_required": true,
+            "instance_id": "inst-inv", "hostname": "workstation"
+        })))
+        .mount(&server)
+        .await;
+    let output = env
+        .cmd()
+        .env("MOLD_API_KEY", "operator")
+        .args([
+            "host",
+            "invite",
+            "--regular",
+            "--direct-url",
+            &direct,
+            "--target",
+            &address,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "{stdout}");
+    let parsed = mold_secure_client::parse_pairing_link(lines[0]).unwrap();
+    assert_eq!(parsed["base_url"], direct.as_str());
+    assert_eq!(parsed["name"], "workstation");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("mold host add"), "{stderr}");
+
+    let private = env.home.join("private");
+    std::fs::create_dir(&private).unwrap();
+    std::fs::set_permissions(
+        &private,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    let file = private.join("invite.json");
+    env.cmd()
+        .env("MOLD_API_KEY", "operator")
+        .args([
+            "host",
+            "invite",
+            "--regular",
+            "--direct-url",
+            &direct,
+            "--target",
+            &address,
+            "--output",
+        ])
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+    assert!(file.exists());
+}
