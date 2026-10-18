@@ -101,6 +101,12 @@ impl TestEnv {
         cmd.env("MOLD_MODELS_DIR", &self.models);
         cmd.env("MOLD_OUTPUT_DIR", &self.output);
         cmd.env("NO_COLOR", "1");
+        // A developer shell's RUST_BACKTRACE makes anyhow capture backtraces,
+        // and macOS's unwinder can crash (exit 139) walking the very large
+        // debug `mold` binary's DWARF unwind tables once `__eh_frame` passes
+        // the 16 MiB compact-unwind offset limit. CI never sets it.
+        cmd.env_remove("RUST_BACKTRACE");
+        cmd.env_remove("RUST_LIB_BACKTRACE");
         // Prevent tests from connecting to a running server
         cmd.env("MOLD_HOST", "http://127.0.0.1:1");
         cmd
