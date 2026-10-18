@@ -170,44 +170,6 @@ pub fn write_invitation(path: &Path, value: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn namespace_forget_removes_old_aliases_without_removing_other_hosts_or_owners() {
-        let owner = uuid::Uuid::new_v4().to_string();
-        let other_owner = uuid::Uuid::new_v4().to_string();
-        let prefix = uuid::Uuid::new_v4().simple().to_string();
-        let prepared = crate::prepare_bootstrap("Native registry test", "desktop").unwrap();
-        let first = prepared
-            .profile(&format!("https://first-{prefix}.invalid"))
-            .unwrap();
-        let second = prepared
-            .profile(&format!("https://second-{prefix}.invalid"))
-            .unwrap();
-        let unrelated = crate::prepare_bootstrap("Other", "desktop")
-            .unwrap()
-            .profile(&format!("https://other-{prefix}.invalid"))
-            .unwrap();
-        register_ephemeral(&owner, first.clone()).unwrap();
-        register_ephemeral(&owner, second.clone()).unwrap();
-        register_ephemeral(&owner, unrelated.clone()).unwrap();
-        register_ephemeral(&other_owner, first.clone()).unwrap();
-        assert!(has_ephemeral_authority(&owner, &first));
-        forget_ephemeral_namespace(&owner, &first.namespace);
-        assert!(!has_ephemeral_authority(&owner, &first));
-        assert!(has_ephemeral_authority(&other_owner, &first));
-        let entries = ephemeral();
-        assert!(!entries.contains_key(&(owner.clone(), first.origin.clone())));
-        assert!(!entries.contains_key(&(owner.clone(), second.origin.clone())));
-        assert!(entries.contains_key(&(owner.clone(), unrelated.origin.clone())));
-        assert!(entries.contains_key(&(other_owner.clone(), first.origin.clone())));
-        drop(entries);
-        forget_ephemeral(&owner, None);
-        forget_ephemeral(&other_owner, None);
-    }
-}
-
 /// Retain Secure credential knowledge across mode selection and route aliases.
 pub(crate) fn is_known_secure_credential(candidate: &str) -> Result<bool> {
     let digest: [u8; 32] = Sha256::digest(candidate.as_bytes()).into();
@@ -260,4 +222,42 @@ fn remember_secure_credential(key: &str) -> Result<()> {
     );
     history.insert(digest);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn namespace_forget_removes_old_aliases_without_removing_other_hosts_or_owners() {
+        let owner = uuid::Uuid::new_v4().to_string();
+        let other_owner = uuid::Uuid::new_v4().to_string();
+        let prefix = uuid::Uuid::new_v4().simple().to_string();
+        let prepared = crate::prepare_bootstrap("Native registry test", "desktop").unwrap();
+        let first = prepared
+            .profile(&format!("https://first-{prefix}.invalid"))
+            .unwrap();
+        let second = prepared
+            .profile(&format!("https://second-{prefix}.invalid"))
+            .unwrap();
+        let unrelated = crate::prepare_bootstrap("Other", "desktop")
+            .unwrap()
+            .profile(&format!("https://other-{prefix}.invalid"))
+            .unwrap();
+        register_ephemeral(&owner, first.clone()).unwrap();
+        register_ephemeral(&owner, second.clone()).unwrap();
+        register_ephemeral(&owner, unrelated.clone()).unwrap();
+        register_ephemeral(&other_owner, first.clone()).unwrap();
+        assert!(has_ephemeral_authority(&owner, &first));
+        forget_ephemeral_namespace(&owner, &first.namespace);
+        assert!(!has_ephemeral_authority(&owner, &first));
+        assert!(has_ephemeral_authority(&other_owner, &first));
+        let entries = ephemeral();
+        assert!(!entries.contains_key(&(owner.clone(), first.origin.clone())));
+        assert!(!entries.contains_key(&(owner.clone(), second.origin.clone())));
+        assert!(entries.contains_key(&(owner.clone(), unrelated.origin.clone())));
+        assert!(entries.contains_key(&(other_owner.clone(), first.origin.clone())));
+        drop(entries);
+        forget_ephemeral(&owner, None);
+        forget_ephemeral(&other_owner, None);
+    }
 }

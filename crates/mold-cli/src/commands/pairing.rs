@@ -141,6 +141,30 @@ fn validate_relay_url(value: &str) -> Result<()> {
     }
     Ok(())
 }
+
+fn regular_invitation_payload(mut value: serde_json::Value) -> Result<serde_json::Value> {
+    anyhow::ensure!(
+        value["mode"] == "regular",
+        "invalid Regular invitation response"
+    );
+    let origin = value["base_url"]
+        .as_str()
+        .context("missing Regular origin")?;
+    anyhow::ensure!(
+        mold_secure_client::regular_origin(origin)? == origin,
+        "invalid Regular origin"
+    );
+    value["version"] = 2.into();
+    value["type"] = "mold.mobile-pairing".into();
+    value["name"] = value["hostname"].as_str().unwrap_or("Mold host").into();
+    let invitation = value
+        .as_object_mut()
+        .context("invalid Regular invitation")?;
+    invitation.remove("hostname");
+    invitation.remove("auth_required");
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,27 +214,4 @@ mod tests {
             invitation_payload(serde_json::json!({"protocol":3,"endpoints":[]}), None).is_err()
         );
     }
-}
-
-fn regular_invitation_payload(mut value: serde_json::Value) -> Result<serde_json::Value> {
-    anyhow::ensure!(
-        value["mode"] == "regular",
-        "invalid Regular invitation response"
-    );
-    let origin = value["base_url"]
-        .as_str()
-        .context("missing Regular origin")?;
-    anyhow::ensure!(
-        mold_secure_client::regular_origin(origin)? == origin,
-        "invalid Regular origin"
-    );
-    value["version"] = 2.into();
-    value["type"] = "mold.mobile-pairing".into();
-    value["name"] = value["hostname"].as_str().unwrap_or("Mold host").into();
-    let invitation = value
-        .as_object_mut()
-        .context("invalid Regular invitation")?;
-    invitation.remove("hostname");
-    invitation.remove("auth_required");
-    Ok(value)
 }
