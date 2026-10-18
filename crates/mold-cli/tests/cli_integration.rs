@@ -2741,3 +2741,183 @@ async fn the_host_flag_wins_over_the_environment() {
         "MOLD_HOST was used even though --host named another machine"
     );
 }
+
+/// Write one owner-only file into `env`'s credential store.
+#[cfg(unix)]
+fn write_client_file(env: &TestEnv, file: &str, bytes: &[u8]) -> std::path::PathBuf {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let root = env.home.join("secure/clients");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&root)
+        .unwrap();
+    std::fs::set_permissions(
+        env.home.join("secure"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    let path = root.join(file);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .unwrap()
+        .write_all(bytes)
+        .unwrap();
+    path
+}
+
+/// Save a Regular host profile the way `mold pair --mode regular` files
+/// one; `name: None` writes it the way a mold from before names did.
+#[cfg(unix)]
+fn save_regular_profile(env: &TestEnv, origin: &str, name: Option<&str>, hostname: Option<&str>) {
+    use sha2::Digest;
+    let digest = hex::encode(sha2::Sha256::digest(origin.as_bytes()));
+    let mut profile = serde_json::json!({"origin": origin, "api_key": null});
+    if let Some(name) = name {
+        profile["name"] = name.into();
+    }
+    if let Some(hostname) = hostname {
+        profile["hostname"] = hostname.into();
+    }
+    write_client_file(
+        env,
+        &format!("regular-{digest}.json"),
+        profile.to_string().as_bytes(),
+    );
+}
+
+#[cfg(unix)]
+fn save_named_regular_host(env: &TestEnv, origin: &str, name: &str) {
+    save_regular_profile(env, origin, Some(name), None);
+}
+
+/// A name two legacy hosts derive is an error naming both, never a guess;
+/// with an unreadable profile, an unknown bare name is an error naming the
+/// file rather than a DNS lookup.
+#[cfg(unix)]
+#[test]
+fn ambiguous_and_unreadable_saved_hosts_stop_the_command() {
+    let env = TestEnv::new();
+    save_regular_profile(&env, "http://10.0.0.8:7680", None, Some("lab"));
+    save_regular_profile(&env, "http://10.0.0.9:7680", None, Some("lab"));
+    env.cmd()
+        .args(["ps", "--host", "lab"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("names more than one saved host"))
+        .stderr(predicate::str::contains("http://10.0.0.8:7680"))
+        .stderr(predicate::str::contains("http://10.0.0.9:7680"));
+    env.cmd()
+        .env("MOLD_HOST", "lab")
+        .args(["ps"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("names more than one saved host"));
+    env.cmd()
+        .args(["host", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("lab (ambiguous)"));
+
+    let broken = write_client_file(&env, &format!("{}.json", "ab".repeat(32)), b"not json");
+    env.cmd()
+        .args(["ps", "--host", "hal9000"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(broken.display().to_string()));
+}
+
+/// A saved host name works wherever an address does — `--host`,
+/// `MOLD_HOST`, and the default host — and local-only commands refuse a
+/// typed `--host` instead of ignoring it.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_saved_host_name_targets_its_paired_origin() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/downloads"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "active_jobs": [], "queued": [], "history": []
+        })))
+        .mount(&server)
+        .await;
+    save_named_regular_host(&env, &server.uri(), "workstation");
+
+    env.cmd()
+        .args(["downloads", "list", "--host", "Workstation"])
+        .assert()
+        .success();
+    env.cmd()
+        .env("MOLD_HOST", "workstation")
+        .args(["downloads", "list"])
+        .assert()
+        .success();
+    env.cmd()
+        .env_remove("MOLD_HOST")
+        .args(["host", "use", "workstation"])
+        .assert()
+        .success();
+    env.cmd()
+        .env_remove("MOLD_HOST")
+        .args(["downloads", "list"])
+        .assert()
+        .success();
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
+
+    env.cmd()
+        .args(["host", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("workstation"))
+        .stdout(predicate::str::contains(server.uri()))
+        .stdout(predicate::str::contains("*"));
+    env.cmd()
+        .args(["host", "list", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"default\": true"));
+
+    env.cmd()
+        .args(["stats", "--host", "workstation"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--host does not apply to `mold stats`",
+        ));
+    // MOLD_HOST from the environment stays ignored by local-only commands.
+    env.cmd()
+        .env("MOLD_HOST", "workstation")
+        .args(["stats"])
+        .assert()
+        .success();
+
+    env.cmd()
+        .args(["host", "rm", "workstation"])
+        .assert()
+        .success();
+    env.cmd()
+        .args(["host", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No saved hosts"));
+}
+
+/// `queue send --to` with nothing in it is refused before anything is
+/// resolved or sent.
+#[test]
+fn queue_send_refuses_a_blank_destination() {
+    let env = TestEnv::new();
+    env.cmd()
+        .args(["queue", "send", "job-1", "--to", "  "])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--to needs a destination host"));
+}

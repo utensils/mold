@@ -192,8 +192,25 @@ fn candidates(select: impl FnOnce(&CompletionCache) -> &Vec<String>) -> Vec<Comp
         .collect()
 }
 
+/// Saved host names (`mold host list`) first, then the addresses earlier
+/// commands reached. Both are local reads; neither can fail a keystroke.
 pub fn complete_host() -> Vec<CompletionCandidate> {
-    candidates(|cache| &cache.hosts)
+    let saved: Vec<String> = mold_secure_client::hosts::list()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|host| host.name)
+        .collect();
+    let mut seen: std::collections::HashSet<String> = saved.iter().cloned().collect();
+    let reached = load_if_present()
+        .map(|cache| cache.hosts)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|host| seen.insert(host.clone()));
+    saved
+        .into_iter()
+        .chain(reached)
+        .map(CompletionCandidate::new)
+        .collect()
 }
 
 pub fn complete_tag() -> Vec<CompletionCandidate> {
@@ -245,6 +262,27 @@ mod tests {
             None => std::env::remove_var("MOLD_HOME"),
         }
         result
+    }
+
+    #[test]
+    fn host_completion_offers_saved_names_before_reached_addresses() {
+        with_home(|_| {
+            mold_secure_client::save_regular_host(&mold_secure_client::RegularHost {
+                origin: "http://10.0.0.8:7680".into(),
+                name: Some("workstation".into()),
+                ..Default::default()
+            })
+            .unwrap();
+            record_reached_host("http://10.0.0.8:7680", |_| {});
+            record_reached_host("workstation", |_| {});
+            assert_eq!(
+                offered(complete_host),
+                vec![
+                    "workstation".to_string(),
+                    "http://10.0.0.8:7680".to_string()
+                ]
+            );
+        });
     }
 
     #[test]

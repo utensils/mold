@@ -141,56 +141,6 @@ fn validate_relay_url(value: &str) -> Result<()> {
     }
     Ok(())
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn regular_owner_export_round_trips_through_the_real_client_parser() {
-        let response = serde_json::json!({
-            "mode": "regular",
-            "auth_required": true,
-            "base_url": "http://192.168.1.5:7680",
-            "instance_id": "host-instance",
-            "hostname": "Host",
-            "pairing_token": "a".repeat(64),
-            "expires_at": 4_000_000_000_u64
-        });
-        let output = regular_invitation_payload(response.clone()).unwrap();
-        let serialized = serde_json::to_vec(&output).unwrap();
-        let _: mold_secure_client::RegularInvite = serde_json::from_slice(&serialized).unwrap();
-        assert_eq!(output["base_url"], response["base_url"]);
-        assert_eq!(output["pairing_token"], response["pairing_token"]);
-        assert_eq!(output["mode"], response["mode"]);
-        assert!(output.get("auth_required").is_none());
-    }
-    #[test]
-    fn standalone_invitation_binds_an_explicit_credential_free_relay_endpoint() {
-        let value = serde_json::json!({"protocol":3,"hostname":"host","endpoints":[{"kind":"relay","url":"https://host.example"}]});
-        let output =
-            invitation_payload(value.clone(), Some("wss://relay.example/production")).unwrap();
-        assert_eq!(output["websocket_url"], "wss://relay.example/production");
-        for bad in [
-            "ws://relay.example",
-            "wss://secret@relay.example",
-            "wss://relay.example?token=secret",
-        ] {
-            assert!(invitation_payload(value.clone(), Some(bad)).is_err());
-        }
-    }
-    #[test]
-    fn owner_export_uses_shared_qr_contract_and_never_private_engine_origin() {
-        let value = serde_json::json!({"protocol":3,"hostname":"host","endpoints":[{"kind":"lan","url":"http://192.168.1.5:4321"},{"kind":"relay","url":"https://host.example"}],"websocket_url":"wss://relay.example"});
-        let output = invitation_payload(value, None).unwrap();
-        assert_eq!(output["version"], 2);
-        assert!(output.get("protocol").is_none());
-        assert_eq!(output["type"], "mold.mobile-pairing");
-        assert_eq!(output["base_url"], "https://host.example");
-        assert_eq!(output["name"], "host");
-        assert!(
-            invitation_payload(serde_json::json!({"protocol":3,"endpoints":[]}), None).is_err()
-        );
-    }
-}
 
 fn regular_invitation_payload(mut value: serde_json::Value) -> Result<serde_json::Value> {
     anyhow::ensure!(
@@ -213,4 +163,60 @@ fn regular_invitation_payload(mut value: serde_json::Value) -> Result<serde_json
     invitation.remove("hostname");
     invitation.remove("auth_required");
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn regular_owner_export_round_trips_through_the_real_client_parser() {
+        let response = serde_json::json!({
+            "mode": "regular",
+            "auth_required": true,
+            "base_url": "http://192.168.1.5:7680",
+            "instance_id": "host-instance",
+            "hostname": "Host",
+            "pairing_token": "a".repeat(64),
+            "expires_at": 4_000_000_000_u64
+        });
+        let output = regular_invitation_payload(response.clone()).unwrap();
+        let serialized = serde_json::to_vec(&output).unwrap();
+        let _: mold_secure_client::RegularInvite = serde_json::from_slice(&serialized).unwrap();
+        assert_eq!(output["base_url"], response["base_url"]);
+        assert_eq!(output["pairing_token"], response["pairing_token"]);
+        assert_eq!(output["mode"], response["mode"]);
+        assert_eq!(output["instance_id"], "host-instance");
+        assert_eq!(output["name"], "Host");
+        assert!(output.get("auth_required").is_none());
+    }
+    #[test]
+    fn standalone_invitation_binds_an_explicit_credential_free_relay_endpoint() {
+        let value = serde_json::json!({"protocol":3,"hostname":"host","endpoints":[{"kind":"relay","url":"https://host.example"}]});
+        let output =
+            invitation_payload(value.clone(), Some("wss://relay.example/production")).unwrap();
+        assert_eq!(output["websocket_url"], "wss://relay.example/production");
+        for bad in [
+            "ws://relay.example",
+            "wss://secret@relay.example",
+            "wss://relay.example?token=secret",
+        ] {
+            assert!(invitation_payload(value.clone(), Some(bad)).is_err());
+        }
+    }
+    #[test]
+    fn owner_export_uses_shared_qr_contract_and_never_private_engine_origin() {
+        let value = serde_json::json!({"protocol":3,"hostname":"host","instance_id":"inst-1","endpoints":[{"kind":"lan","url":"http://192.168.1.5:4321"},{"kind":"relay","url":"https://host.example"}],"websocket_url":"wss://relay.example"});
+        let output = invitation_payload(value, None).unwrap();
+        // The client names the pairing and recognises a re-pair from these.
+        assert_eq!(output["hostname"], "host");
+        assert_eq!(output["instance_id"], "inst-1");
+        assert_eq!(output["version"], 2);
+        assert!(output.get("protocol").is_none());
+        assert_eq!(output["type"], "mold.mobile-pairing");
+        assert_eq!(output["base_url"], "https://host.example");
+        assert_eq!(output["name"], "host");
+        assert!(
+            invitation_payload(serde_json::json!({"protocol":3,"endpoints":[]}), None).is_err()
+        );
+    }
 }

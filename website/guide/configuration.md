@@ -161,7 +161,8 @@ temperature = 0.7
 
 Secure is the default. `MOLD_ALLOW_DIRECT_API=1` opts the host into separate
 Regular direct HTTP(S) access; `MOLD_CONNECTION_MODE=secure|regular` explicitly
-selects the CLI mode, and `MOLD_HOST` selects its saved origin. A failed Secure
+selects the CLI mode, and `--host`/`MOLD_HOST` (a saved host name or origin)
+selects the saved profile. A failed Secure
 request never downgrades to Regular, and the Mold proxy always requires
 end-to-end encryption.
 
@@ -184,7 +185,7 @@ equivalent is `mold serve --bind <address>`.
 | --------------------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `MOLD_HOME`                       | `~/.mold`                              | Base directory for config and cache                                                                                                                                                                                                                                                                                                                                                  |
 | `MOLD_DEFAULT_MODEL`              | `flux2-klein:q8`                       | Default model name                                                                                                                                                                                                                                                                                                                                                                   |
-| `MOLD_HOST`                       | `http://localhost:7680`                | Remote server URL                                                                                                                                                                                                                                                                                                                                                                    |
+| `MOLD_HOST`                       | `http://localhost:7680`                | Server the CLI talks to: a saved host name (`mold host list`), a URL, or `host[:port]`. `--host` overrides it; without either, the default host from `mold host use` applies, then localhost. Local-only commands ignore it                                                                                                                                                          |
 | `MOLD_MODELS_DIR`                 | `$MOLD_HOME/models`                    | Model storage directory                                                                                                                                                                                                                                                                                                                                                              |
 | `MOLD_ARTIFACT_ATTESTATIONS_DIR`  | `$MOLD_HOME/.artifact-attestations-v1` | Owner-private digest receipts written at acquisition; existing models use local installation identities when receipts are unavailable. Set this to private service state when `MOLD_HOME` is shared or group-writable                                                                                                                                                                |
 | `MOLD_PORT`                       | `7680`                                 | Server port                                                                                                                                                                                                                                                                                                                                                                          |
@@ -510,11 +511,12 @@ including the pinned commit and digest.
 The acceptance has to live on the machine that does the downloading, and
 `mold pull` follows the pull:
 
-- **A server answers at `MOLD_HOST`** (including the local `mold serve`): the
-  id is sent with the request and the **server** writes it into its own
-  `$MOLD_HOME`. Nothing is recorded on the calling machine.
-- **No server, or `--local`**: the pull runs here, so the acceptance is
-  recorded here.
+- **A server answers at `--host`/`MOLD_HOST`** (including the local
+  `mold serve`): the id is sent with the request and the **server** writes it
+  into its own `$MOLD_HOME`. Nothing is recorded on the calling machine.
+- **`--local`, or no server answering on this machine**: the pull runs here,
+  so the acceptance is recorded here. A remote host that does not answer is an
+  error rather than a pull here.
 
 Either way the terms are printed before the request goes out — and they are the
 terms of the machine that will record them. When a server will do the

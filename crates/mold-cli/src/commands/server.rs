@@ -338,7 +338,9 @@ async fn report_remote_status(url: &str) -> bool {
     // `client_for_host` is the CLI's one authenticated construction path: a
     // server with an API key answers `/api/status` with 401 to an anonymous
     // client, which would read here as "nothing is running".
-    let client = crate::control::client_for_host(Some(url));
+    let Ok(client) = crate::control::client_for_host(Some(url)) else {
+        return false;
+    };
     let Ok(status) = client.server_status().await else {
         return false;
     };
@@ -372,7 +374,7 @@ fn report_unmanaged_processes() -> bool {
 async fn run_status_local(managed: Option<ManagedServer>) -> Result<()> {
     match managed {
         Some(srv) => {
-            let client = crate::control::client_for_host(Some(&srv.base_url()));
+            let client = crate::control::client_for_host(Some(&srv.base_url()))?;
             match client.server_status().await {
                 Ok(status) => {
                     eprintln!("Server running (PID {})", srv.pid);
@@ -598,7 +600,10 @@ pub async fn run_discover(timeout_secs: u64, json: bool, probe: bool) -> Result<
 
     if let Some(first) = rows.first() {
         println!();
-        println!("Connect: export MOLD_HOST={}", first.server.url);
+        println!(
+            "Connect: mold ps --host {url}  (or export MOLD_HOST={url})",
+            url = first.server.url
+        );
     }
     Ok(())
 }

@@ -33,6 +33,7 @@ impl RelayClient {
                         mold_secure_client::RegularHost {
                             origin: origin.into(),
                             api_key: key,
+                            ..Default::default()
                         },
                     )?;
                 }

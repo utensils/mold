@@ -1308,7 +1308,7 @@ pub async fn run(
     let hdr_exr_dir = require_local_hdr_exr_dir(hdr_exr_dir, local)?;
 
     // Load config and pull model-specific defaults.
-    let ctx = CliContext::new(host.as_deref());
+    let ctx = CliContext::new(host.as_deref())?;
     let mut config = ctx.config().clone();
     // Catalog bridge: when the user passed `cv:<id>` / `hf:<author>/<name>`,
     // resolve it (sidecar-first, then live) and inject the synthesized

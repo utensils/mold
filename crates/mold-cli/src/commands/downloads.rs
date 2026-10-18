@@ -20,7 +20,7 @@ use crate::ui::{col_width, format_disk_size};
 use crate::DownloadsAction;
 
 pub async fn run(host: Option<&str>, action: DownloadsAction) -> Result<()> {
-    let client = crate::control::client_for_host(host);
+    let client = crate::control::client_for_host(host)?;
     match action {
         DownloadsAction::List { json } => list(&client, json).await,
         DownloadsAction::Add {

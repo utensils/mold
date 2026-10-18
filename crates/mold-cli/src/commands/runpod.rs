@@ -1424,6 +1424,13 @@ pub async fn run_create(opts: CreateOptions) -> Result<()> {
             theme::prefix_hint(),
             format!("export MOLD_HOST={proxy}").bold()
         );
+        if let Some(name) = saved_host_name(&proxy) {
+            println!(
+                "  {} {}",
+                theme::prefix_hint(),
+                format!("or: mold ps --host {name}").bold()
+            );
+        }
         println!("  {} gallery: {}", theme::prefix_hint(), proxy.cyan());
     }
     Ok(())
@@ -1645,8 +1652,19 @@ pub async fn run_connect(pod_id: String, check: bool) -> Result<()> {
         wait_for_mold(&proxy, 15).await?;
     }
     println!("export MOLD_HOST={proxy}");
+    if let Some(name) = saved_host_name(&proxy) {
+        eprintln!("{} or: mold ps --host {name}", theme::prefix_hint());
+    }
     eprintln!("{} gallery: {}", theme::prefix_hint(), proxy.cyan());
     Ok(())
+}
+
+/// The saved host name a pod's pairing answers to, for `--host` hints.
+fn saved_host_name(origin: &str) -> Option<String> {
+    mold_secure_client::hosts::find_by_origin(origin)
+        .ok()
+        .flatten()
+        .map(|host| host.name)
 }
 
 /// `mold runpod logs <pod-id>` — hand off to RunPod's supported web console.
@@ -1695,6 +1713,9 @@ pub struct RunOptions {
     /// straight to that machine's trash. The file still lands in
     /// `--output-dir` on this machine, which is the point of the command.
     pub no_save: bool,
+    /// The global `--host` (or `MOLD_HOST`): a paired pod to reuse, by saved
+    /// name or origin. `None` recovers or creates one.
+    pub host: Option<String>,
 }
 
 /// `mold runpod run "<prompt>"` — securely provision or reuse the selected pod,
@@ -2058,13 +2079,15 @@ pub async fn reap_idle_warm_pod_if_needed() -> bool {
 fn paired_runpod_id(origin: Option<&str>, tracked: Option<&str>) -> Result<String> {
     if let Some(origin) = origin {
         let url =
-            reqwest::Url::parse(origin).context("MOLD_HOST must name the paired RunPod origin")?;
+            reqwest::Url::parse(origin).context("--host must name the paired RunPod origin")?;
         if url.scheme() != "https"
             || url.origin().ascii_serialization() != origin.trim_end_matches('/')
             || !url.username().is_empty()
             || url.password().is_some()
         {
-            bail!("MOLD_HOST must be the HTTPS origin printed by mold runpod connect");
+            bail!(
+                "--host must be the HTTPS origin printed by mold runpod connect, or its saved name"
+            );
         }
         let id = url
             .host_str()
@@ -2074,7 +2097,7 @@ fn paired_runpod_id(origin: Option<&str>, tracked: Option<&str>) -> Result<Strin
                     && id.len() <= 128
                     && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
             })
-            .context("MOLD_HOST is not a RunPod host; use mold runpod connect after pairing")?;
+            .context("--host is not a RunPod host; use mold runpod connect after pairing")?;
         return Ok(id.into());
     }
     tracked
@@ -2082,9 +2105,17 @@ fn paired_runpod_id(origin: Option<&str>, tracked: Option<&str>) -> Result<Strin
         .context("No selected RunPod host")
 }
 
+/// The paired pod `--host`/`MOLD_HOST` selects for `runpod run`, resolved
+/// like every other command's host, so a saved name works.
+fn selected_pod_origin(host: Option<&str>) -> Result<Option<String>> {
+    host.filter(|h| !h.trim().is_empty())
+        .map(|h| crate::control::resolve_target(Some(h)))
+        .transpose()
+}
+
 async fn ensure_run_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -> Result<Pod> {
     enforce_cost_alert(client, config).await?;
-    if let Ok(origin) = std::env::var("MOLD_HOST") {
+    if let Some(origin) = selected_pod_origin(opts.host.as_deref())? {
         let selected = paired_runpod_id(Some(&origin), None)?;
         require_paired_pod(&origin)?;
         return ensure_paired_pod(client, config, opts, &selected).await;
@@ -2538,6 +2569,39 @@ mod tests {
         }
     }
 
+    /// `runpod run --host` takes a saved pod name like every other command,
+    /// and no host means "recover or create".
+    #[test]
+    fn runpod_run_resolves_its_host_like_every_command() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let _home = pin_mold_home(temp.path());
+        let origin = "https://abc123-7680.proxy.runpod.net";
+        let mut profile = mold_secure_client::prepare_bootstrap("runpod run", "cli")
+            .unwrap()
+            .profile(origin)
+            .unwrap();
+        profile.name = Some("pod-a".into());
+        mold_secure_client::save_pairing(&profile).unwrap();
+        assert_eq!(
+            selected_pod_origin(Some("pod-a")).unwrap().as_deref(),
+            Some(origin)
+        );
+        assert_eq!(
+            selected_pod_origin(Some(origin)).unwrap().as_deref(),
+            Some(origin)
+        );
+        assert_eq!(selected_pod_origin(None).unwrap(), None);
+        assert_eq!(selected_pod_origin(Some("  ")).unwrap(), None);
+        assert_eq!(
+            paired_runpod_id(Some(origin), None).unwrap(),
+            "abc123",
+            "the resolved origin is what the pod id is read from"
+        );
+    }
+
     fn pin_mold_home(path: &std::path::Path) -> MoldHomeGuard {
         let previous = std::env::var("MOLD_HOME").ok();
         std::env::set_var("MOLD_HOME", path);
@@ -2575,6 +2639,7 @@ mod tests {
             create: policy_create_options(None),
             wait_ready_timeout_secs: 1,
             no_save: false,
+            host: None,
         };
         let error = run_run(run)
             .await
@@ -2610,6 +2675,7 @@ mod tests {
             create: policy_create_options(None),
             wait_ready_timeout_secs: 1,
             no_save: false,
+            host: None,
         };
         let error = require_run_model_activation(&mut config, &run)
             .await
@@ -3102,6 +3168,7 @@ mod tests {
             create,
             wait_ready_timeout_secs: 1,
             no_save: false,
+            host: None,
         };
         let error = ensure_paired_pod(&client, &config, &options, "selected")
             .await

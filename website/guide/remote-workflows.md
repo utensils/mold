@@ -26,6 +26,33 @@ export MOLD_HOST=http://gpu-host:7680
 mold run "a cinematic portrait"
 ```
 
+Every remote command also takes `--host` for one invocation, so a second
+machine needs no environment change:
+
+```bash
+mold ps --host http://gpu-host:7680
+mold library list --host gpu-host
+```
+
+## Saved Hosts
+
+Pairing saves each host under a name, so you rarely type an origin again.
+`--host`, `MOLD_HOST`, and a default host all accept it, and a Tailscale IP the
+host advertised finds the same pairing (mold says so on stderr; LAN addresses
+are always used as typed):
+
+```bash
+mold host list                     # NAME  MODE  ORIGIN  DEFAULT
+mold ps --host workstation
+MOLD_HOST=workstation mold library list
+mold host use workstation          # default for every remote command
+mold host use --clear              # back to http://localhost:7680
+```
+
+`--host` wins over `MOLD_HOST`, which wins over the default host; with none of
+them, mold talks to `http://localhost:7680`. See
+[`mold host`](/guide/cli-reference#mold-host).
+
 ## Finding Servers on Your Network
 
 If you don't know the GPU host's address, let mold find it. Builds with the
@@ -38,7 +65,7 @@ mold server discover
 # NAME          URL                       VERSION  AUTH  GPU
 # hal9000-7680  http://192.168.1.10:7680  0.26.0   -     1xNVIDIA GeForce RTX 4090
 #
-# Connect: export MOLD_HOST=http://192.168.1.10:7680
+# Connect: mold ps --host http://192.168.1.10:7680  (or export MOLD_HOST=http://192.168.1.10:7680)
 ```
 
 Add `--probe` for a `/health` latency column, `--json` for machine-readable
@@ -93,7 +120,8 @@ Remote workflows pair well with both:
   server's advertised model capabilities; scripted chain jobs and durable
   mesh workflows remain CLI/API-only.
 
-In both cases, the key variable is still `MOLD_HOST`.
+In both cases, the key variable is still `MOLD_HOST` (a URL or a saved host
+name).
 
 ## LM Studio MCP
 
@@ -153,7 +181,10 @@ outcome is still being confirmed.
 Behavior depends on where the command runs:
 
 - `mold pull` against a reachable server downloads onto that server
-- if no server is reachable, the CLI falls back to local pulling
+- a remote host (`--host`, `MOLD_HOST` or the default host) that does not
+  answer is an error; nothing is downloaded onto this machine
+- with no host named and no local server running, the CLI pulls locally
+- `mold pull --local` always downloads onto this machine
 
 That distinction matters if your laptop has little disk space or no GPU.
 

@@ -468,7 +468,7 @@ pub async fn run_chain(
         req.motion_tail_frames,
     );
 
-    let ctx = CliContext::new(host.as_deref());
+    let ctx = CliContext::new(host.as_deref())?;
     let config = ctx.config().clone();
     // The CLI's chain door for a LOCAL run, mirroring the server's
     // `validate_and_normalize_chain_family`: an unset `enable_audio` means

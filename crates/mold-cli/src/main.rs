@@ -22,7 +22,7 @@ mod test_support;
 mod theme;
 mod ui;
 
-use clap::{builder::ValueHint, CommandFactory, Parser, Subcommand};
+use clap::{builder::ValueHint, CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::engine::{ArgValueCandidates, CompletionCandidate};
 use mold_core::{OutputFormat, Scheduler};
 
@@ -178,6 +178,12 @@ Report bugs: https://github.com/utensils/mold/issues"
 )]
 #[command(version = mold_core::build_info::FULL_VERSION, propagate_version = true)]
 struct Cli {
+    /// Machine to talk to: a saved host name (`mold host list`), a URL, or
+    /// host[:port]. Without it: MOLD_HOST, then the default host
+    /// (`mold host use`), then http://localhost:7680.
+    #[arg(long, global = true, env = "MOLD_HOST", value_name = "HOST",
+          add = ArgValueCandidates::new(completion_cache::complete_host))]
+    host: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -724,14 +730,10 @@ Examples:
     /// Show status of the managed server, or of `--host` when one is named
     #[command(after_long_help = "\
 Examples:
-  mold server status                       This machine's managed daemon
-  mold server status --host plato          A remote server (PID/logs are local-only)
-  MOLD_HOST=plato mold server status       Same, from the environment")]
-    Status {
-        /// Report on this server instead of the local managed daemon
-        #[arg(long, env = "MOLD_HOST", help_heading = "Server", add = ArgValueCandidates::new(completion_cache::complete_host))]
-        host: Option<String>,
-    },
+  mold server status                          This machine's managed daemon
+  mold server status --host workstation       A remote server (PID/logs are local-only)
+  MOLD_HOST=workstation mold server status    Same, from the environment")]
+    Status,
     /// Discover mold servers advertised on the local network via mDNS
     #[cfg(feature = "mdns")]
     #[command(after_long_help = "\
@@ -977,41 +979,20 @@ enum VideoUpscaleAction {
         model: String,
         #[arg(long, env = "MOLD_UPSCALE_TILE_SIZE")]
         tile_size: Option<u32>,
-        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
-        host: Option<String>,
         /// Follow the job through terminal publication
         #[arg(long)]
         wait: bool,
     },
     /// List durable Framewise upscale jobs
-    List {
-        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
-        host: Option<String>,
-    },
+    List,
     /// Print one job as JSON
-    Status {
-        id: String,
-        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
-        host: Option<String>,
-    },
+    Status { id: String },
     /// Pause after the current frame boundary
-    Pause {
-        id: String,
-        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
-        host: Option<String>,
-    },
+    Pause { id: String },
     /// Resume from the last completed frame checkpoint
-    Resume {
-        id: String,
-        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
-        host: Option<String>,
-    },
+    Resume { id: String },
     /// Cancel without replacing or publishing source media
-    Cancel {
-        id: String,
-        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
-        host: Option<String>,
-    },
+    Cancel { id: String },
 }
 
 #[derive(clap::Subcommand)]
@@ -1635,6 +1616,34 @@ pub enum CatalogSortArg {
 }
 
 #[derive(clap::Subcommand)]
+pub enum HostAction {
+    /// List saved hosts: NAME, MODE, ORIGIN, and which one is the default
+    #[command(alias = "ls")]
+    List {
+        /// Print the rows as JSON instead of a table
+        #[arg(long)]
+        json: bool,
+    },
+    /// Make a saved host the default for every remote command
+    Use {
+        /// Saved host name (see `mold host list`)
+        #[arg(required_unless_present = "clear", conflicts_with = "clear",
+              add = ArgValueCandidates::new(commands::host::complete_saved_name))]
+        name: Option<String>,
+        /// Forget the default; commands go back to http://localhost:7680
+        #[arg(long)]
+        clear: bool,
+    },
+    /// Forget a saved host and delete its stored credentials
+    #[command(alias = "remove")]
+    Rm {
+        /// Saved host name (see `mold host list`)
+        #[arg(add = ArgValueCandidates::new(commands::host::complete_saved_name))]
+        name: String,
+    },
+}
+
+#[derive(clap::Subcommand)]
 enum PairingAction {
     /// Save a short-lived pairing invitation with owner-only permissions.
     Create {
@@ -2000,10 +2009,6 @@ Examples:
         #[arg(long, help_heading = "Video")]
         camera_control: Option<String>,
 
-        /// Server URL to connect to
-        #[arg(long, env = "MOLD_HOST", help_heading = "Server", add = ArgValueCandidates::new(completion_cache::complete_host))]
-        host: Option<String>,
-
         /// Skip server and run inference locally (requires GPU features)
         #[arg(long, help_heading = "Server")]
         local: bool,
@@ -2330,11 +2335,7 @@ Examples:
 Use with LM Studio by adding a stdio MCP entry whose command is the mold binary
 and whose args are [\"mcp\", \"--host\", \"http://localhost:7680\"]. Run
 `mold serve` separately before calling generation tools.")]
-    Mcp {
-        /// Server URL to connect to
-        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
-        host: Option<String>,
-    },
+    Mcp,
 
     /// Manage a background mold server daemon (start, stop, status, discover)
     #[command(after_long_help = "\
@@ -2428,8 +2429,10 @@ Examples:
   mold pull flux-schnell:q8
   mold pull sdxl-turbo:fp16
 
-If MOLD_HOST is reachable, the download happens on that server.
-If no server is reachable, mold pulls locally.
+The download happens on the server --host/MOLD_HOST names (default:
+localhost). If that is this machine and nothing answers, mold pulls locally;
+a remote that does not answer is an error. --local always pulls here, and
+hf:/cv: catalog recipes always download on this machine.
 
 For gated or private Hugging Face repos, export HF_TOKEN=hf_... before pulling.
 When using a remote server, HF_TOKEN must be set in the server process
@@ -2451,6 +2454,10 @@ Run 'mold list' to see all available models.")]
         /// the flag for a bundle covered by more than one agreement.
         #[arg(long, value_name = "ID", action = clap::ArgAction::Append)]
         accept_license: Vec<String>,
+
+        /// Download on this machine without asking any server
+        #[arg(long)]
+        local: bool,
     },
 
     /// Create and register a local quantized Hunyuan3D shape model
@@ -2551,11 +2558,6 @@ Install a result with `mold pull <id>`.")]
         #[arg(value_name = "QUERY")]
         query: Option<String>,
 
-        /// Talk to this machine instead of the one `MOLD_HOST` names.
-        #[arg(long, env = "MOLD_HOST", value_name = "URL",
-              add = ArgValueCandidates::new(completion_cache::complete_host))]
-        host: Option<String>,
-
         /// Restrict to one model family (see `mold list` for the names in use)
         #[arg(long, value_name = "FAMILY")]
         family: Option<String>,
@@ -2604,15 +2606,6 @@ Talks to the server at MOLD_HOST (MOLD_API_KEY when configured). A download
 queue belongs to one machine, so there is no local fallback: `mold pull`
 is the command that also works without a server.")]
     Downloads {
-        /// Talk to this machine instead of the one `MOLD_HOST` names.
-        ///
-        /// Global, so it reads the same before or after the verb —
-        /// `mold downloads --host plato list` and `mold downloads list --host
-        /// plato` are the same command. Which machine you are talking to is
-        /// not a per-verb choice.
-        #[arg(long, env = "MOLD_HOST", global = true, value_name = "URL",
-              add = ArgValueCandidates::new(completion_cache::complete_host))]
-        host: Option<String>,
         #[command(subcommand)]
         action: DownloadsAction,
     },
@@ -2630,14 +2623,6 @@ stage's output as its own retained artifact, reports stage-by-stage progress,
 and can be resumed after a restart. It is durable on ONE machine, so every
 verb here talks to MOLD_HOST.")]
     MeshWorkflow {
-        /// Talk to this machine instead of the one `MOLD_HOST` names.
-        ///
-        /// Global, so it reads the same before or after the verb. A workflow
-        /// is durable on ONE machine, so this is which machine's workflows
-        /// you are acting on.
-        #[arg(long, env = "MOLD_HOST", global = true, value_name = "URL",
-              add = ArgValueCandidates::new(completion_cache::complete_host))]
-        host: Option<String>,
         #[command(subcommand)]
         action: MeshWorkflowAction,
     },
@@ -2745,7 +2730,7 @@ Set up once:
   export RUNPOD_API_KEY=<key>                       Or use env var
   mold runpod doctor                                Verify auth
 
-Generate on a paired pod selected by MOLD_HOST:
+Generate on a paired pod selected by --host or MOLD_HOST:
   mold runpod run \"a cat on a skateboard\"           Uses paired host → generates → saves
   mold runpod run \"a sunset\" --keep                Leave pod up for reuse
 
@@ -2758,6 +2743,23 @@ Manage pods manually:
     Runpod {
         #[command(subcommand)]
         action: RunpodAction,
+    },
+
+    /// Manage the saved hosts `--host` and `MOLD_HOST` accept by name
+    #[command(after_long_help = "\
+Examples:
+  mold host list                     Saved hosts and the default
+  mold host use workstation          Target it whenever nothing else names a host
+  mold host use --clear              Back to http://localhost:7680
+  mold host rm workstation           Forget it and delete its credentials
+
+Hosts are saved by pairing (`mold pair`). Any remote command then takes
+`--host NAME` or `MOLD_HOST=NAME`; a URL or address still works, and a
+Tailscale IP the paired host advertised finds it too. Which machine a command
+talks to: --host, then MOLD_HOST, then the default host, then localhost.")]
+    Host {
+        #[command(subcommand)]
+        action: HostAction,
     },
 
     /// Create an invitation on this authenticated local host.
@@ -3002,25 +3004,6 @@ Examples:
     #[cfg(feature = "discord")]
     Discord,
 
-    /// Generate shell completions (sources dynamic model-name completion)
-    #[command(after_long_help = "\
-Setup instructions:
-
-  zsh (add to ~/.zshrc):
-    source <(mold completions zsh)
-
-  bash (add to ~/.bashrc):
-    source <(mold completions bash)
-
-  fish (persist to completions dir):
-    mold completions fish | source
-    mold completions fish > ~/.config/fish/completions/mold.fish
-
-  elvish:
-    eval (mold completions elvish | slurp)
-
-  powershell (add to $PROFILE):
-    mold completions powershell | Out-String | Invoke-Expression")]
     /// Upscale an image using a super-resolution model (Real-ESRGAN)
     ///
     /// Supports standalone upscaling of existing images and piped I/O.
@@ -3051,10 +3034,6 @@ Examples:
         #[arg(long, env = "MOLD_UPSCALE_TILE_SIZE")]
         tile_size: Option<u32>,
 
-        /// Server URL to connect to
-        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
-        host: Option<String>,
-
         /// Skip server and run inference locally
         #[arg(long)]
         local: bool,
@@ -3070,6 +3049,25 @@ Examples:
         action: VideoUpscaleAction,
     },
 
+    /// Generate shell completions (sources dynamic model-name completion)
+    #[command(after_long_help = "\
+Setup instructions:
+
+  zsh (add to ~/.zshrc):
+    source <(mold completions zsh)
+
+  bash (add to ~/.bashrc):
+    source <(mold completions bash)
+
+  fish (persist to completions dir):
+    mold completions fish | source
+    mold completions fish > ~/.config/fish/completions/mold.fish
+
+  elvish:
+    eval (mold completions elvish | slurp)
+
+  powershell (add to $PROFILE):
+    mold completions powershell | Out-String | Invoke-Expression")]
     Completions {
         /// Shell to generate completions for (bash, zsh, fish, elvish, powershell)
         #[arg(add = ArgValueCandidates::new(complete_shell))]
@@ -3101,6 +3099,123 @@ fn apply_spatial_tile_override(value: Option<&str>) {
     // SAFETY: called once from the command dispatch before any inference
     // thread exists, matching how `serve` publishes `MOLD_HOST`.
     unsafe { std::env::set_var("MOLD_LTX2_SPATIAL_TILE", value) };
+}
+
+/// After re-pairing a server that was saved under another origin, delete the
+/// old entry (its name and default already moved to the new one).
+fn retire_superseded(
+    superseded: Option<mold_secure_client::hosts::SavedHost>,
+    origin: &str,
+) -> anyhow::Result<()> {
+    if let Some(old) = superseded {
+        mold_secure_client::hosts::retire(&old, origin)?;
+        eprintln!(
+            "Replaced the earlier pairing of '{}' at {}.",
+            old.name, old.origin
+        );
+    }
+    Ok(())
+}
+
+/// Report a newly saved pairing by the name `--host` now accepts.
+fn print_saved_host(what: &str, origin: &str, name: &Option<String>) {
+    match name {
+        Some(name) => println!(
+            "{what} {origin} as '{name}'. Use it with --host {name} (or MOLD_HOST={name}); \
+             make it the default with `mold host use {name}`."
+        ),
+        None => println!("{what} {origin}. Use it with --host {origin}."),
+    }
+}
+
+/// Whether `--host` was typed, as opposed to arriving from `MOLD_HOST`.
+fn host_given_on_command_line(matches: &clap::ArgMatches) -> bool {
+    matches.value_source("host") == Some(clap::parser::ValueSource::CommandLine)
+}
+
+/// The command `--host` cannot apply to, because it only ever runs on this
+/// machine, or `None` when the command talks to the host `--host` names.
+fn local_only_command(command: &Commands) -> Option<&'static str> {
+    Some(match command {
+        // `--local` skips the server, so a host would be silently ignored.
+        Commands::Run { local: true, .. } => "run --local",
+        Commands::Pull { local: true, .. } => "pull --local",
+        Commands::Run { .. }
+        | Commands::Mcp
+        | Commands::Jobs { .. }
+        | Commands::Queue { .. }
+        | Commands::Library { .. }
+        | Commands::Trash { .. }
+        | Commands::Pull { .. }
+        | Commands::Licenses { .. }
+        | Commands::List { .. }
+        | Commands::Search { .. }
+        | Commands::Downloads { .. }
+        | Commands::MeshWorkflow { .. }
+        | Commands::Info { model: None, .. }
+        | Commands::Unload
+        | Commands::Ps
+        | Commands::Gpu { .. }
+        | Commands::Upscale { .. }
+        | Commands::VideoUpscale { .. }
+        | Commands::Server {
+            action: ServerAction::Status,
+        } => return None,
+        #[cfg(feature = "discord")]
+        Commands::Discord => return None,
+        // `runpod run` reuses the paired pod `--host` names; every other
+        // runpod verb manages pods through the provider API.
+        Commands::Runpod {
+            action: RunpodAction::Run { .. },
+        } => return None,
+        Commands::Server { action } => match action {
+            ServerAction::Start { .. } => "server start",
+            ServerAction::Stop => "server stop",
+            #[cfg(feature = "mdns")]
+            ServerAction::Discover { .. } => "server discover",
+            ServerAction::Status => unreachable!("server status takes --host"),
+        },
+        Commands::Info { model: Some(_), .. } => "info MODEL",
+        Commands::Skill(_) => "skill",
+        Commands::Serve { .. } => "serve",
+        Commands::Chain { .. } => "chain",
+        Commands::Quantize { .. } => "quantize",
+        Commands::Rm { .. } => "rm",
+        Commands::Stats { .. } => "stats",
+        Commands::Clean { .. } => "clean",
+        Commands::Default { .. } => "default",
+        Commands::Config { .. } => "config",
+        Commands::Runpod { .. } => "runpod",
+        Commands::Host { .. } => "host",
+        Commands::Pairing { .. } => "pairing",
+        Commands::Pair { .. } => "pair",
+        Commands::Relay { .. } => "relay",
+        Commands::Lambda { .. } => "lambda",
+        Commands::Expand { .. } => "expand",
+        Commands::Remix { .. } => "remix",
+        Commands::Version => "version",
+        Commands::System { .. } => "system",
+        Commands::Update { .. } => "update",
+        Commands::Completions { .. } => "completions",
+    })
+}
+
+/// Refuse a typed `--host` on a command that would silently ignore it.
+/// `MOLD_HOST` from the environment stays ignored there, as it always was.
+fn reject_misplaced_host(command: &Commands, typed: bool) -> anyhow::Result<()> {
+    match local_only_command(command) {
+        Some(name) => refuse_typed_host(name, typed),
+        None => Ok(()),
+    }
+}
+
+/// The one refusal for a typed `--host` that would be ignored.
+fn refuse_typed_host(name: &str, typed: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !typed,
+        "--host does not apply to `mold {name}`: it runs on this machine only"
+    );
+    Ok(())
 }
 
 fn main() {
@@ -3268,7 +3383,10 @@ async fn run(
 ) -> anyhow::Result<()> {
     // Parse CLI first so we can set the log level based on the subcommand.
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    let host_typed = host_given_on_command_line(&matches);
+    reject_misplaced_host(&cli.command, host_typed)?;
     anyhow::ensure!(
         bootstrap.is_none() || matches!(&cli.command, Commands::Serve { .. }),
         "secure bootstrap is accepted only by mold serve"
@@ -3325,6 +3443,7 @@ async fn run(
         }
     };
 
+    let host = cli.host;
     match cli.command {
         Commands::Run {
             model_or_prompt,
@@ -3372,7 +3491,6 @@ async fn run(
             sample_shift,
             distill_strength,
             camera_control,
-            host,
             format,
             transparent,
             no_metadata,
@@ -3750,7 +3868,7 @@ async fn run(
             )
             .await?;
         }
-        Commands::Mcp { host } => {
+        Commands::Mcp => {
             commands::mcp::run(host).await?;
         }
         Commands::Server { action } => match action {
@@ -3772,7 +3890,7 @@ async fn run(
                 )
                 .await?;
             }
-            ServerAction::Status { host } => {
+            ServerAction::Status => {
                 commands::server::run_status(host).await?;
             }
             ServerAction::Stop => {
@@ -3792,21 +3910,22 @@ async fn run(
         },
         Commands::Jobs { action } => {
             let config = mold_core::Config::load_or_default();
-            commands::jobs::run(action, &config).await?;
+            commands::jobs::run(action, host.as_deref(), &config).await?;
         }
         Commands::Queue { action } => {
-            commands::queue::run(action).await?;
+            commands::queue::run(action, host.as_deref()).await?;
         }
         Commands::Library { action } => {
-            commands::library::run(action).await?;
+            commands::library::run(action, host.as_deref()).await?;
         }
         Commands::Trash { action } => {
-            commands::trash::run(action).await?;
+            commands::trash::run(action, host.as_deref()).await?;
         }
         Commands::Pull {
             model,
             skip_verify,
             accept_license,
+            local,
         } => {
             // Passed through rather than recorded here: `pull::run` decides
             // whether the pull lands locally or on `MOLD_HOST`, and the
@@ -3817,14 +3936,17 @@ async fn run(
             if model.starts_with("hf:") || model.starts_with("cv:") {
                 match resolve_catalog_id(&model).await? {
                     CatalogIdResolution::Manifest(name) => {
-                        commands::pull::run(&name, &opts, &accept_licenses).await?
+                        commands::pull::run(&name, &opts, &accept_licenses, host.as_deref(), local)
+                            .await?
                     }
                     CatalogIdResolution::Recipe(entry) => {
+                        refuse_typed_host("pull <catalog recipe>", host_typed)?;
                         commands::pull::run_recipe(*entry, &opts).await?
                     }
                 }
             } else {
-                commands::pull::run(&model, &opts, &accept_licenses).await?;
+                commands::pull::run(&model, &opts, &accept_licenses, host.as_deref(), local)
+                    .await?;
             }
         }
         Commands::Quantize {
@@ -3845,21 +3967,20 @@ async fn run(
                 // whichever was given: silently ignoring the parent flag
                 // would record consent on MOLD_HOST after the user asked
                 // for this machine.
-                commands::licenses::accept(&ids, local || accept_local).await?;
+                commands::licenses::accept(&ids, local || accept_local, host.as_deref()).await?;
             }
             None => {
-                commands::licenses::run(local).await?;
+                commands::licenses::run(local, host.as_deref()).await?;
             }
         },
         Commands::Rm { models, force } => {
             commands::rm::run(&models, force).await?;
         }
         Commands::List { json } => {
-            commands::list::run(json).await?;
+            commands::list::run(json, host.as_deref()).await?;
         }
         Commands::Search {
             query,
-            host,
             family,
             kind,
             source,
@@ -3892,10 +4013,10 @@ async fn run(
             })
             .await?;
         }
-        Commands::Downloads { host, action } => {
+        Commands::Downloads { action } => {
             commands::downloads::run(host.as_deref(), action).await?;
         }
-        Commands::MeshWorkflow { host, action } => {
+        Commands::MeshWorkflow { action } => {
             commands::mesh_workflow::run(host.as_deref(), action).await?;
         }
         Commands::Stats { json } => {
@@ -3912,7 +4033,7 @@ async fn run(
                     eprintln!("{} --verify requires a model name", theme::prefix_error());
                     return Err(AlreadyReported.into());
                 }
-                commands::info::run_overview().await?;
+                commands::info::run_overview(host.as_deref()).await?;
             }
         }
         Commands::Default { model } => {
@@ -4063,6 +4184,7 @@ async fn run(
                     create,
                     wait_ready_timeout_secs: wait_timeout,
                     no_save,
+                    host,
                 };
                 commands::runpod::run_run(opts).await?
             }
@@ -4108,15 +4230,15 @@ async fn run(
                             .and_then(|v| Ok(std::str::from_utf8(&v)?.trim().to_owned()))
                     })
                     .transpose()?;
+                let origin = mold_secure_client::regular_origin(&url)?;
                 let host = mold_secure_client::RegularHost {
-                    origin: mold_secure_client::regular_origin(&url)?,
+                    name: Some(mold_secure_client::hosts::available_name("", &origin)?),
+                    origin,
                     api_key,
+                    ..Default::default()
                 };
                 mold_secure_client::save_regular_host(&host)?;
-                println!(
-                    "Saved Regular connection to {}. Set MOLD_HOST to this origin.",
-                    host.origin
-                );
+                print_saved_host("Saved Regular connection to", &host.origin, &host.name);
                 return Ok(());
             }
             let path =
@@ -4128,12 +4250,17 @@ async fn run(
                     mode.as_deref() != Some("secure"),
                     "invitation mode does not match --mode"
                 );
-                let host = mold_secure_client::pair_regular(value, &name).await?;
+                let mut host = mold_secure_client::pair_regular(value, &name).await?;
+                let (saved_name, superseded) = mold_secure_client::hosts::name_for_pairing(
+                    host.name.as_deref().unwrap_or_default(),
+                    &host.origin,
+                    host.instance_id.as_deref(),
+                    mold_secure_client::ConnectionMode::Regular,
+                )?;
+                host.name = Some(saved_name);
                 mold_secure_client::save_regular_host(&host)?;
-                println!(
-                    "Paired in Regular mode with {}. Set MOLD_HOST to this origin.",
-                    host.origin
-                );
+                retire_superseded(superseded, &host.origin)?;
+                print_saved_host("Paired in Regular mode with", &host.origin, &host.name);
                 return Ok(());
             }
             anyhow::ensure!(
@@ -4141,17 +4268,23 @@ async fn run(
                 "invitation mode does not match --mode"
             );
             let invite = serde_json::from_value(value)?;
-            let host = mold_secure_client::pair(invite, &name).await?;
+            let mut host = mold_secure_client::pair(invite, &name).await?;
+            let (saved_name, superseded) = mold_secure_client::hosts::name_for_pairing(
+                host.name.as_deref().unwrap_or_default(),
+                &host.origin,
+                host.instance_id.as_deref(),
+                mold_secure_client::ConnectionMode::Secure,
+            )?;
+            host.name = Some(saved_name);
             mold_secure_client::save_pairing(&host)?;
+            retire_superseded(superseded, &host.origin)?;
             mold_secure_client::select_connection_mode(
                 &host.origin,
                 mold_secure_client::ConnectionMode::Secure,
             )?;
-            println!(
-                "Paired securely with {}. Set MOLD_HOST to this origin.",
-                host.origin
-            );
+            print_saved_host("Paired securely with", &host.origin, &host.name);
         }
+        Commands::Host { action } => commands::host::run(action)?,
         Commands::Relay { action } => mold_relay::run(action).await?,
         Commands::Lambda { action } => match action {
             LambdaAction::Doctor => commands::lambda::run_doctor().await?,
@@ -4196,15 +4329,19 @@ async fn run(
             }
         },
         Commands::Unload => {
-            commands::unload::run().await?;
+            commands::unload::run(host.as_deref()).await?;
         }
         Commands::Ps => {
-            commands::ps::run().await?;
+            commands::ps::run(host.as_deref()).await?;
         }
         Commands::Gpu { action } => match action {
-            GpuAction::List { json } => commands::gpu::list(json).await?,
-            GpuAction::Disable { device } => commands::gpu::set(&device, false).await?,
-            GpuAction::Enable { device } => commands::gpu::set(&device, true).await?,
+            GpuAction::List { json } => commands::gpu::list(json, host.as_deref()).await?,
+            GpuAction::Disable { device } => {
+                commands::gpu::set(&device, false, host.as_deref()).await?
+            }
+            GpuAction::Enable { device } => {
+                commands::gpu::set(&device, true, host.as_deref()).await?
+            }
         },
         Commands::Version => {
             println!("mold {}", mold_core::build_info::version_string());
@@ -4219,7 +4356,7 @@ async fn run(
         }
         #[cfg(feature = "discord")]
         Commands::Discord => {
-            commands::discord::run().await?;
+            commands::discord::run(host.as_deref()).await?;
         }
         Commands::Upscale {
             image,
@@ -4227,7 +4364,6 @@ async fn run(
             output,
             format,
             tile_size,
-            host,
             local,
             preview,
         } => {
@@ -4241,20 +4377,17 @@ async fn run(
                 source,
                 model,
                 tile_size,
-                host,
                 wait,
             } => commands::video_upscale::create(source, model, tile_size, host, wait).await?,
-            VideoUpscaleAction::List { host } => commands::video_upscale::list(host).await?,
-            VideoUpscaleAction::Status { id, host } => {
-                commands::video_upscale::status(id, host).await?
-            }
-            VideoUpscaleAction::Pause { id, host } => {
+            VideoUpscaleAction::List => commands::video_upscale::list(host).await?,
+            VideoUpscaleAction::Status { id } => commands::video_upscale::status(id, host).await?,
+            VideoUpscaleAction::Pause { id } => {
                 commands::video_upscale::transition(id, "pause", host).await?
             }
-            VideoUpscaleAction::Resume { id, host } => {
+            VideoUpscaleAction::Resume { id } => {
                 commands::video_upscale::transition(id, "resume", host).await?
             }
-            VideoUpscaleAction::Cancel { id, host } => {
+            VideoUpscaleAction::Cancel { id } => {
                 commands::video_upscale::transition(id, "cancel", host).await?
             }
         },
@@ -4675,37 +4808,205 @@ mod tests {
         .is_err());
     }
 
-    /// The three remote families this PR adds take `--host` like every other
-    /// remote verb, so inspecting a second machine does not mean exporting an
-    /// env var. It sits on the PARENT of the two subcommand families, because
-    /// which machine you are talking to is not a per-verb choice.
+    /// Which machine you are talking to is not a per-verb choice: `--host`
+    /// is global, reads the same before or after the verb, and every remote
+    /// command takes it.
     #[test]
     fn the_new_remote_commands_take_a_host() {
-        match parse(&["search", "flux", "--host", "http://plato:7680"]).command {
-            Commands::Search { host, query, .. } => {
-                assert_eq!(host.as_deref(), Some("http://plato:7680"));
-                assert_eq!(query.as_deref(), Some("flux"));
+        for args in [
+            &["search", "flux", "--host", "workstation"][..],
+            &["downloads", "--host", "workstation", "list"],
+            &["mesh-workflow", "list", "--host", "workstation"],
+            &["--host", "workstation", "ps"],
+            &["run", "a cat", "--host", "workstation"],
+            &["mcp", "--host", "workstation"],
+            &["server", "status", "--host", "workstation"],
+            &["ps", "--host", "workstation"],
+            &["unload", "--host", "workstation"],
+            &["queue", "list", "--host", "workstation"],
+            &["library", "list", "--host", "workstation"],
+            &["trash", "list", "--host", "workstation"],
+            &["pull", "flux-schnell:q8", "--host", "workstation"],
+            &["list", "--host", "workstation"],
+            &["licenses", "--host", "workstation"],
+            &["info", "--host", "workstation"],
+            &["gpu", "list", "--host", "workstation"],
+            &["jobs", "list", "--host", "workstation"],
+            &["upscale", "a.png", "--host", "workstation"],
+            &["video-upscale", "list", "--host", "workstation"],
+            &["video-upscale", "status", "job-1", "--host", "workstation"],
+            &["runpod", "run", "a cat", "--host", "workstation"],
+            #[cfg(feature = "discord")]
+            &["discord", "--host", "workstation"],
+        ] {
+            let (cli, typed) = parse_with_source(args);
+            assert_eq!(cli.host.as_deref(), Some("workstation"), "{args:?}");
+            assert!(typed, "{args:?}");
+            assert!(
+                reject_misplaced_host(&cli.command, typed).is_ok(),
+                "{args:?} should accept --host"
+            );
+        }
+        // Absent is absent: the client then reads MOLD_HOST / the default host.
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("MOLD_HOST");
+        std::env::remove_var("MOLD_HOST");
+        let absent = parse(&["mesh-workflow", "list"]).host;
+        if let Some(value) = previous {
+            std::env::set_var("MOLD_HOST", value);
+        }
+        assert_eq!(absent, None);
+    }
+
+    #[test]
+    fn a_recipe_pull_refuses_a_typed_host() {
+        let error = refuse_typed_host("pull <catalog recipe>", true).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "--host does not apply to `mold pull <catalog recipe>`: it runs on this machine only"
+        );
+        assert!(refuse_typed_host("pull <catalog recipe>", false).is_ok());
+    }
+
+    /// A command that only ever runs here refuses a typed `--host` rather
+    /// than silently ignoring it.
+    #[test]
+    fn local_only_commands_reject_a_typed_host() {
+        for args in [
+            &["serve", "--host", "workstation"][..],
+            &[
+                "system",
+                "gallery-authority",
+                "status",
+                "--host",
+                "workstation",
+            ],
+            &["config", "list", "--host", "workstation"],
+            &["completions", "zsh", "--host", "workstation"],
+            &["skill", "--host", "workstation", "list"],
+            &["version", "--host", "workstation"],
+            &["rm", "flux-dev:q4", "--host", "workstation"],
+            &["stats", "--host", "workstation"],
+            &["clean", "--host", "workstation"],
+            &["update", "--host", "workstation"],
+            &["chain", "validate", "a.toml", "--host", "workstation"],
+            &["expand", "a cat", "--host", "workstation"],
+            &["remix", "a cat", "--host", "workstation"],
+            &["default", "--host", "workstation"],
+            &["info", "flux-dev:q4", "--host", "workstation"],
+            &["server", "start", "--host", "workstation"],
+            &["server", "stop", "--host", "workstation"],
+            &["host", "list", "--host", "workstation"],
+            &["pair", "--invite-file", "i.json", "--host", "workstation"],
+            &["runpod", "list", "--host", "workstation"],
+            &["run", "a cat", "--local", "--host", "workstation"],
+            &[
+                "pull",
+                "flux-schnell:q8",
+                "--local",
+                "--host",
+                "workstation",
+            ],
+            &["lambda", "status", "--host", "workstation"],
+        ] {
+            let Ok((cli, typed)) = try_parse_with_source(args) else {
+                // A subcommand whose own arguments this fixture got wrong is
+                // a fixture bug, not an acceptance of --host.
+                panic!("{args:?} did not parse");
+            };
+            let error = reject_misplaced_host(&cli.command, typed)
+                .expect_err(&format!("{args:?} should refuse --host"));
+            assert!(
+                error.to_string().contains("runs on this machine only"),
+                "{error}"
+            );
+            // The environment is not a typed flag: MOLD_HOST stays ignored.
+            assert!(reject_misplaced_host(&cli.command, false).is_ok());
+        }
+    }
+
+    #[test]
+    fn host_subcommands_parse() {
+        assert!(matches!(
+            parse(&["host", "list", "--json"]).command,
+            Commands::Host {
+                action: HostAction::List { json: true }
             }
-            _ => panic!("expected search"),
-        }
-        match parse(&["downloads", "--host", "http://plato:7680", "list"]).command {
-            Commands::Downloads { host, .. } => {
-                assert_eq!(host.as_deref(), Some("http://plato:7680"))
+        ));
+        match parse(&["host", "use", "workstation"]).command {
+            Commands::Host {
+                action: HostAction::Use { name, clear },
+            } => {
+                assert_eq!(name.as_deref(), Some("workstation"));
+                assert!(!clear);
             }
-            _ => panic!("expected downloads"),
+            _ => panic!("expected host use"),
         }
-        // Global, so after the verb reads the same as before it.
-        match parse(&["mesh-workflow", "list", "--host", "http://plato:7680"]).command {
-            Commands::MeshWorkflow { host, .. } => {
-                assert_eq!(host.as_deref(), Some("http://plato:7680"))
+        assert!(matches!(
+            parse(&["host", "use", "--clear"]).command,
+            Commands::Host {
+                action: HostAction::Use {
+                    name: None,
+                    clear: true
+                }
             }
-            _ => panic!("expected mesh-workflow"),
-        }
-        // Absent is absent: the client then reads MOLD_HOST as it always did.
-        match parse(&["mesh-workflow", "list"]).command {
-            Commands::MeshWorkflow { host, .. } => assert_eq!(host, None),
-            _ => panic!("expected mesh-workflow"),
-        }
+        ));
+        assert!(try_parse(&["host", "use"]).is_err());
+        assert!(try_parse(&["host", "use", "a", "--clear"]).is_err());
+        assert!(matches!(
+            parse(&["host", "rm", "workstation"]).command,
+            Commands::Host {
+                action: HostAction::Rm { .. }
+            }
+        ));
+    }
+
+    /// `upscale` and `completions` used to swap their help text.
+    #[test]
+    fn upscale_and_completions_describe_themselves() {
+        let (upscale, completions) = std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(|| {
+                let command = Cli::command();
+                let about = |name: &str| {
+                    command
+                        .find_subcommand(name)
+                        .and_then(|c| c.get_about())
+                        .map(|a| a.to_string())
+                        .unwrap_or_default()
+                };
+                (about("upscale"), about("completions"))
+            })
+            .expect("spawn help thread")
+            .join()
+            .expect("help thread panicked");
+        assert!(upscale.starts_with("Upscale an image"), "{upscale}");
+        assert!(
+            completions.starts_with("Generate shell completions"),
+            "{completions}"
+        );
+    }
+
+    fn try_parse_with_source(args: &[&str]) -> Result<(Cli, bool), clap::Error> {
+        let argv = std::iter::once("mold".to_string())
+            .chain(args.iter().map(|arg| (*arg).to_string()))
+            .collect::<Vec<_>>();
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(move || {
+                let matches = Cli::command().try_get_matches_from(argv)?;
+                let typed = host_given_on_command_line(&matches);
+                Ok((Cli::from_arg_matches(&matches)?, typed))
+            })
+            .expect("spawn parse thread")
+            .join()
+            .expect("parse thread panicked")
+    }
+
+    fn parse_with_source(args: &[&str]) -> (Cli, bool) {
+        try_parse_with_source(args).unwrap_or_else(|error| panic!("{error}"))
     }
 
     /// Try to parse CLI args, returning the clap error on failure. The full

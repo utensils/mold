@@ -13139,6 +13139,13 @@ mod tests {
         let created = response_json(created).await;
         assert_eq!(created["protocol"], 3);
         assert!(created.get("token").is_none());
+        // The CLI saves the host under its reported name and recognises a
+        // re-pair by instance id, so a Secure invitation carries both.
+        assert_eq!(
+            created["instance_id"].as_str(),
+            Some(state.instance_id.as_str())
+        );
+        assert!(created.get("hostname").is_some());
         let invite: mold_secure::Invitation =
             serde_json::from_value(created["invite"].clone()).unwrap();
         let device = mold_secure::Identity::generate().unwrap();
@@ -13180,6 +13187,11 @@ mod tests {
         .unwrap()
         .into_response();
         let response = response_json(response).await;
+        assert_eq!(
+            response["instance_id"].as_str(),
+            Some(state.instance_id.as_str())
+        );
+        assert!(response.get("hostname").is_some());
         let api_key = response["api_key"].as_str().unwrap();
         assert_ne!(api_key, "operator");
         assert!(keys.contains(api_key));

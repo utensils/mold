@@ -372,6 +372,8 @@ pub async fn run(
     model: &str,
     opts: &mold_core::download::PullOptions,
     accept_licenses: &[String],
+    host: Option<&str>,
+    local: bool,
 ) -> Result<()> {
     let canonical = resolve_model_name(model);
     let manifest = match find_manifest(&canonical) {
@@ -382,15 +384,19 @@ pub async fn run(
         }
     };
 
-    let ctx = CliContext::new(None);
+    // `--local` never consults a server: this machine pulls and records.
+    let ctx = if local {
+        None
+    } else {
+        Some(CliContext::new(host)?)
+    };
 
     // Ask the machine that will RECORD the acceptance for its terms before
     // displaying anything — only skipped entirely when nothing is being
     // accepted, so an ordinary pull pays no extra round trip.
-    let server_terms = if accept_licenses.is_empty() {
-        None
-    } else {
-        server_license_terms(&ctx).await?
+    let server_terms = match &ctx {
+        Some(ctx) if !accept_licenses.is_empty() => server_license_terms(ctx).await?,
+        _ => None,
     };
 
     // Resolve and display before anything is dispatched: an unknown id must
@@ -407,17 +413,30 @@ pub async fn run(
     // The server path carries the accepted terms on the wire so the SERVER
     // records them in its own root; the local path records them here. Which
     // machine runs the pull decides which machine's acceptance counts.
-    match pull_via_server(&ctx, manifest, &payload).await {
-        Ok(()) => {}
-        Err(e) => match classify_server_error(&e) {
-            ServerAvailability::FallbackLocal => {
-                print_server_fallback(ctx.client().host(), "pulling locally");
-                for license in &licenses {
-                    record_license_locally(license)?;
+    let pull_here = |licenses: &[AcceptedLicense]| -> Result<()> {
+        for license in licenses {
+            record_license_locally(license)?;
+        }
+        Ok(())
+    };
+    match ctx {
+        None => {
+            pull_here(&licenses)?;
+            pull_and_configure(model, opts).await?;
+        }
+        Some(ctx) => match pull_via_server(&ctx, manifest, &payload).await {
+            Ok(()) => {}
+            Err(e) => match classify_server_error(&e) {
+                ServerAvailability::FallbackLocal if falls_back_locally(ctx.client().host()) => {
+                    print_server_fallback(ctx.client().host(), "pulling locally");
+                    pull_here(&licenses)?;
+                    pull_and_configure(model, opts).await?;
                 }
-                pull_and_configure(model, opts).await?;
-            }
-            ServerAvailability::SurfaceError => return Err(e),
+                ServerAvailability::FallbackLocal => {
+                    return Err(remote_pull_unreachable(e, ctx.client().host()))
+                }
+                ServerAvailability::SurfaceError => return Err(e),
+            },
         },
     }
 
@@ -429,6 +448,39 @@ pub async fn run(
         ))
     );
     Ok(())
+}
+
+/// Whether an unreachable server may be replaced by a pull on this machine:
+/// only when the target IS this machine, like every read-only fallback. A
+/// named remote that does not answer must not quietly fill this disk.
+fn falls_back_locally(host: &str) -> bool {
+    crate::control::is_loopback_host(host)
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+
+    #[test]
+    fn only_this_machine_falls_back_to_a_local_pull() {
+        assert!(falls_back_locally("http://localhost:7680"));
+        assert!(falls_back_locally("http://127.0.0.1:7680"));
+        assert!(!falls_back_locally("http://10.0.0.8:7680"));
+        assert!(!falls_back_locally("https://abc.mold-link.urandom.io"));
+        let error = remote_pull_unreachable(anyhow::anyhow!("refused"), "http://10.0.0.8:7680");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("http://10.0.0.8:7680 did not answer"),
+            "{text}"
+        );
+        assert!(text.contains("mold pull --local"), "{text}");
+    }
+}
+
+fn remote_pull_unreachable(error: anyhow::Error, host: &str) -> anyhow::Error {
+    error.context(format!(
+        "{host} did not answer, so nothing was downloaded; run `mold pull --local` to download on this machine instead"
+    ))
 }
 
 /// Why this build's GPU backend (`None` on a CPU-only build) cannot run the

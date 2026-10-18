@@ -316,7 +316,7 @@ async fn finish_canonical_child(
 }
 
 pub async fn run(host: Option<String>) -> Result<()> {
-    let server = McpServer::new(host);
+    let server = McpServer::new(host)?;
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
     let mut stdout = BufWriter::new(tokio::io::stdout());
@@ -443,18 +443,12 @@ fn append_queue_summary_status_lines(
 }
 
 impl McpServer {
-    fn new(host: Option<String>) -> Self {
-        let client = match host {
-            Some(host) => match std::env::var("MOLD_API_KEY").ok().filter(|k| !k.is_empty()) {
-                Some(api_key) => MoldClient::with_api_key(&host, api_key),
-                None => MoldClient::new(&host),
-            },
-            None => MoldClient::from_env(),
-        };
-        Self {
+    fn new(host: Option<String>) -> Result<Self> {
+        let client = crate::control::client_for_host(host.as_deref())?;
+        Ok(Self {
             client,
             jobs: AsyncJobRegistry::default(),
-        }
+        })
     }
 
     async fn handle_message(&self, message: Value) -> Option<Value> {
@@ -6233,6 +6227,7 @@ mod tests {
             .await;
 
         let result = McpServer::new(Some(server.uri()))
+            .unwrap()
             .tool_server_status()
             .await
             .unwrap();

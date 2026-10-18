@@ -5,6 +5,32 @@ clients grow. Commands are designed for direct use, shell composition, scripts,
 CI jobs, and agent tool calls, with pipe-friendly media I/O and machine-readable
 forms where automation needs them.
 
+## Choosing a host: `--host`
+
+`--host` is a global flag: it works on every command that talks to a server,
+before or after the verb (`mold --host workstation ps`,
+`mold ps --host workstation`). It takes a saved host name (see [`mold host`](#mold-host)), a
+URL, or `host[:port]` (a bare host gets `http://` and port `7680`). A Tailscale
+IP the paired host advertised also finds the saved pairing, even when it was
+paired under a relay origin, and mold prints the redirect on stderr
+(`100.105.134.43 → workstation (https://…)`). A LAN address never redirects,
+and an address typed with a scheme or port must match an advertised endpoint
+exactly. Which machine a command talks to:
+
+1. `--host`
+2. `MOLD_HOST` (same forms, including a saved name)
+3. the default host set with `mold host use NAME`
+4. `http://localhost:7680`
+
+Commands that only ever run on this machine (`serve`, `system`, `config`,
+`stats`, `clean`, `rm`, `quantize`, `update`, `version`, `completions`,
+`skill`, `chain`, `expand`, `remix`, `default`, `host`, `pair`, `pairing`,
+`relay`, `lambda`, every `runpod` verb except `runpod run`,
+`server start|stop|discover`, `info MODEL`, `run --local`, `pull --local`, and a
+`pull` of an `hf:`/`cv:` catalog recipe) refuse a typed `--host` instead of
+ignoring it; `MOLD_HOST` in the environment stays ignored there.
+`runpod run --host NAME` reuses that paired pod.
+
 ## `mold run`
 
 Generate images or video from prompts.
@@ -98,7 +124,7 @@ prompt expansion for that run.
 | `--preview`                                                                                  | Display output inline in the terminal                                                                                                                                                                                                               |
 | `--expand`, `--no-expand`, `--expand-backend <URL>`, `--expand-model <MODEL>`                | Prompt expansion controls                                                                                                                                                                                                                           |
 | `--local`                                                                                    | Skip the server and run local inference                                                                                                                                                                                                             |
-| `--host <URL>`                                                                               | Override `MOLD_HOST`                                                                                                                                                                                                                                |
+| `--host <HOST>`                                                                              | Global; a saved host name, URL or address. See [Choosing a host](#choosing-a-host-host)                                                                                                                                                             |
 | `--gpus <SPEC>`                                                                              | Local GPUs: `all`, `none`, ordinals, or stable `cuda:`/`metal:`/`GPU-`/`MIG-` IDs                                                                                                                                                                   |
 | `--eager`, `--offload`                                                                       | VRAM/performance placement modes; `--offload` also reaches remote renders and sequences                                                                                                                                                             |
 | `--t5-variant <TAG>`, `--qwen3-variant <TAG>`, `--qwen2-variant <TAG>`                       | Text encoder variant overrides                                                                                                                                                                                                                      |
@@ -622,8 +648,8 @@ PID, port and the `mold server stop` hint.
 
 ```bash
 mold server status                       # this machine's managed daemon
-mold server status --host plato          # a named server, over HTTP
-MOLD_HOST=plato mold server status       # same, from the environment
+mold server status --host workstation    # a named server, over HTTP
+MOLD_HOST=workstation mold server status # same, from the environment
 ```
 
 When `--host`/`MOLD_HOST` names a server that is not this machine's managed
@@ -658,7 +684,8 @@ mold server discover [--timeout-secs N] [--json] [--probe]
 | `--probe`            | Also probe each server's `/health` + `/api/status` and show a `LATENCY` column |
 
 The table lists NAME, URL, VERSION, AUTH (whether an API key is required), and a
-GPU summary, followed by a `export MOLD_HOST=…` hint for the first result.
+GPU summary, followed by a `mold ps --host <url>` hint (or the equivalent
+`export MOLD_HOST=…`) for the first result.
 Advertising and server-assisted browsing are on by default when a server is
 built with the `mdns` feature; disable both per-server with
 `mold serve --no-mdns` or `MOLD_MDNS=0`.
@@ -668,7 +695,7 @@ built with the `mdns` feature; disable both per-server with
 Start a stdio Model Context Protocol server that proxies to `mold serve`.
 
 ```bash
-mold mcp [--host URL]
+mold mcp [--host HOST]
 ```
 
 MCP exposes thirteen tools: `generate_image`, `generate_mesh`, `export_mesh`,
@@ -692,14 +719,18 @@ embedding local inference.
 ```bash
 mold pull flux-schnell:q8
 mold pull pulid-flux --accept-license insightface-antelopev2
+mold pull flux-schnell:q8 --local
 mold list
 mold info
 mold info flux-dev:q4
 mold info flux-dev:q4 --verify
 ```
 
-`mold pull <MODEL> [--skip-verify] [--accept-license <ID>]` downloads manifest
-models locally or through the reachable server. `--skip-verify` skips the
+`mold pull <MODEL> [--skip-verify] [--accept-license <ID>] [--local]` downloads
+manifest models on the server `--host`/`MOLD_HOST` names. When that target is
+this machine and nothing answers, it pulls locally; a remote host that does not
+answer is an error (nothing is downloaded here), and `--local` always pulls on
+this machine. `hf:`/`cv:` catalog recipes always download here. `--skip-verify` skips the
 SHA-256 pass after the download; `--accept-license` records a third-party
 model-license acceptance before pulling (see
 [Configuration](/guide/configuration#third-party-model-licenses)).
@@ -835,7 +866,7 @@ mold run "a cat" | mold upscale -
 | `-o, --output <PATH>` | Output path                    |
 | `--format <FMT>`      | `png` or `jpeg`                |
 | `--tile-size <N>`     | Tile size; `0` disables tiling |
-| `--host <URL>`        | Override `MOLD_HOST`           |
+| `--host <HOST>`       | Global; see Choosing a host    |
 | `--local`             | Skip server and run locally    |
 | `--preview`           | Display output inline          |
 
@@ -866,6 +897,33 @@ still lands in `--output-dir` on this machine, which is the point of the
 command.
 See [mold runpod CLI](/deployment/runpod-cli).
 
+## `mold host`
+
+Manage the saved hosts that `--host` and `MOLD_HOST` accept by name. Pairing
+(`mold pair`, `mold runpod create`) saves each one under the host's own name
+(or the pod's), made unique with a `-2` suffix when needed; pairing the same
+server again under a new address replaces its entry and keeps its name and
+default. A pairing saved by
+an older mold lists under a name derived from its hostname or origin; the first
+`mold host` command writes that name into the profile so it never changes. Two
+older pairings that derive the same name are both listed as `(ambiguous)`, and
+the name is an error until one is re-paired. If a saved profile cannot be read,
+an unknown bare name is an error naming the file instead of a DNS lookup.
+Nothing here touches the network.
+
+```bash
+mold host list                   # NAME  MODE  ORIGIN  DEFAULT
+mold host list --json
+mold host use workstation        # the default whenever nothing else names a host
+mold host use --clear            # back to http://localhost:7680
+mold host rm workstation         # forget it and delete its saved credentials
+```
+
+`mold host rm` deletes this machine's credentials for the host (both Secure and
+Regular, and the mode selection) and clears the default if it pointed there.
+It does not revoke the device on the host; do that from the host's paired
+clients list.
+
 ## `mold relay`, `mold pairing`, and `mold pair`
 
 All remote connections use pinned end-to-end encryption. An authenticated
@@ -884,8 +942,9 @@ mold relay connect --relay-url wss://gateway.example --target 127.0.0.1:7680
 
 `pairing create` uses the local operator `MOLD_API_KEY`, accepts an explicit
 numeric loopback `--target`, and never prints invitation secrets. `pair` stores
-its per-device identity and grant in the owner-only client store. Set MOLD_HOST
-to its printed origin. Old transport/token flags and `relay serve` are removed;
+its per-device identity and grant in the owner-only client store, under a host
+name it prints; use it with `--host NAME`, `MOLD_HOST=NAME`, or
+`mold host use NAME`. Old transport/token flags and `relay serve` are removed;
 upgrade and pair again. See [encrypted remote connections](/deployment/relay)
 for secure headless setup, native/browser media adapters and streaming limits.
 

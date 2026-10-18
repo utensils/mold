@@ -277,8 +277,8 @@ Run the engine where the GPU lives and connect from another machine:
 ```bash
 mold serve  # authenticated GPU host; enable Remote Access or configure its relay
 mold pairing create --output "$MOLD_HOME/secure/invitation.json"  # on the host
-mold pair --invite-file /private/invitation.json  # on the client
-MOLD_HOST=https://PAIRED_HOST_ORIGIN mold run "a cat"
+mold pair --invite-file /private/invitation.json  # on the client; prints the host's saved name
+mold run "a cat" --host workstation  # or MOLD_HOST=workstation, or mold host use workstation
 ```
 
 Use [encrypted remote connections](https://utensils.io/mold/deployment/relay)

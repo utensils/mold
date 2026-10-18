@@ -4,12 +4,8 @@ use mold_core::{
     VIDEO_UPSCALE_DISCLOSURE,
 };
 
-fn client(host: Option<String>) -> MoldClient {
-    MoldClient::new(
-        host.or_else(|| std::env::var("MOLD_HOST").ok())
-            .as_deref()
-            .unwrap_or("http://localhost:7680"),
-    )
+fn client(host: Option<String>) -> Result<MoldClient> {
+    crate::control::client_for_host(host.as_deref())
 }
 
 pub async fn create(
@@ -19,7 +15,7 @@ pub async fn create(
     host: Option<String>,
     wait: bool,
 ) -> Result<()> {
-    let client = client(host);
+    let client = client(host)?;
     let mut job = client
         .create_video_upscale_job(&CreateVideoUpscaleJobRequest {
             source: VideoUpscaleSource::Library { filename },
@@ -51,7 +47,7 @@ pub async fn create(
 }
 
 pub async fn list(host: Option<String>) -> Result<()> {
-    for job in client(host).list_video_upscale_jobs().await? {
+    for job in client(host)?.list_video_upscale_jobs().await? {
         println!(
             "{}\t{:?}\t{}/{}\t{}",
             job.id,
@@ -67,7 +63,7 @@ pub async fn list(host: Option<String>) -> Result<()> {
 pub async fn status(id: String, host: Option<String>) -> Result<()> {
     println!(
         "{}",
-        serde_json::to_string_pretty(&client(host).get_video_upscale_job(&id).await?)?
+        serde_json::to_string_pretty(&client(host)?.get_video_upscale_job(&id).await?)?
     );
     Ok(())
 }
@@ -76,7 +72,7 @@ pub async fn transition(id: String, action: &'static str, host: Option<String>) 
     println!(
         "{}",
         serde_json::to_string_pretty(
-            &client(host)
+            &client(host)?
                 .transition_video_upscale_job(&id, action)
                 .await?
         )?

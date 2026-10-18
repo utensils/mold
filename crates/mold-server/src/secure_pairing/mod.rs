@@ -285,6 +285,49 @@ impl SecurePairing {
 
 #[cfg(test)]
 mod authority_tests;
+
+pub(crate) async fn check(
+    auth: Option<axum::Extension<crate::auth::AuthState>>,
+) -> Result<impl axum::response::IntoResponse, crate::routes::ApiError> {
+    let keys = auth.and_then(|axum::Extension(a)| a).ok_or_else(|| {
+        crate::routes::ApiError::with_code(
+            "secure host unavailable",
+            "SECURE_UNAVAILABLE",
+            axum::http::StatusCode::UNAUTHORIZED,
+        )
+    })?;
+    let secure = keys.secure.as_ref().ok_or_else(|| {
+        crate::routes::ApiError::with_code(
+            "secure host unavailable",
+            "SECURE_UNAVAILABLE",
+            axum::http::StatusCode::UNAUTHORIZED,
+        )
+    })?;
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        axum::Json(serde_json::json!({"epoch":secure.epoch(),"active":secure.active_ids()})),
+    ))
+}
+pub(crate) async fn renew(
+    auth: Option<axum::Extension<crate::auth::AuthState>>,
+    context: Option<axum::Extension<RequestContext>>,
+) -> Result<impl axum::response::IntoResponse, crate::routes::ApiError> {
+    let invalid = || {
+        crate::routes::ApiError::with_code(
+            "live encrypted device grant required",
+            "SECURE_GRANT_REQUIRED",
+            axum::http::StatusCode::UNAUTHORIZED,
+        )
+    };
+    let keys = auth.and_then(|axum::Extension(a)| a).ok_or_else(invalid)?;
+    let axum::Extension(context) = context.ok_or_else(invalid)?;
+    let grant = keys.renew_secure_pairing(&context).map_err(|_| invalid())?;
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        axum::Json(serde_json::json!({"grant":grant})),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,46 +371,4 @@ mod tests {
         assert!(!secure.consume_nonce("overflow", 100));
         assert!(secure.consume_nonce("first", 162));
     }
-}
-
-pub(crate) async fn check(
-    auth: Option<axum::Extension<crate::auth::AuthState>>,
-) -> Result<impl axum::response::IntoResponse, crate::routes::ApiError> {
-    let keys = auth.and_then(|axum::Extension(a)| a).ok_or_else(|| {
-        crate::routes::ApiError::with_code(
-            "secure host unavailable",
-            "SECURE_UNAVAILABLE",
-            axum::http::StatusCode::UNAUTHORIZED,
-        )
-    })?;
-    let secure = keys.secure.as_ref().ok_or_else(|| {
-        crate::routes::ApiError::with_code(
-            "secure host unavailable",
-            "SECURE_UNAVAILABLE",
-            axum::http::StatusCode::UNAUTHORIZED,
-        )
-    })?;
-    Ok((
-        [(axum::http::header::CACHE_CONTROL, "no-store")],
-        axum::Json(serde_json::json!({"epoch":secure.epoch(),"active":secure.active_ids()})),
-    ))
-}
-pub(crate) async fn renew(
-    auth: Option<axum::Extension<crate::auth::AuthState>>,
-    context: Option<axum::Extension<RequestContext>>,
-) -> Result<impl axum::response::IntoResponse, crate::routes::ApiError> {
-    let invalid = || {
-        crate::routes::ApiError::with_code(
-            "live encrypted device grant required",
-            "SECURE_GRANT_REQUIRED",
-            axum::http::StatusCode::UNAUTHORIZED,
-        )
-    };
-    let keys = auth.and_then(|axum::Extension(a)| a).ok_or_else(invalid)?;
-    let axum::Extension(context) = context.ok_or_else(invalid)?;
-    let grant = keys.renew_secure_pairing(&context).map_err(|_| invalid())?;
-    Ok((
-        [(axum::http::header::CACHE_CONTROL, "no-store")],
-        axum::Json(serde_json::json!({"grant":grant})),
-    ))
 }

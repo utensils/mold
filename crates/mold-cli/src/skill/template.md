@@ -116,6 +116,10 @@ this check with a mutable `latest` tag or retry paid creation blindly.
 mold relay connect --relay-url wss://API.execute-api.REGION.amazonaws.com/production --target 127.0.0.1:7680
 mold pairing create --output "$MOLD_HOME/secure/invitation.json"
 mold pair --invite-file /private/invitation.json --name "My client"
+mold host list
+mold host use workstation
+mold ps --host workstation
+mold host rm workstation
 ```
 
 Start an authenticated host first. Its owner-only secure identity stays on the
@@ -125,7 +129,12 @@ on headless hosts; mold serve then owns its outbound connector. The separate
 relay connect command reads the identity, never an old relay token.
 The operator creates a one-use, two-minute invitation using MOLD_API_KEY (or
 @owner-only-key-file). Transfer the invitation privately. Each paired client
-stores its own key and revocable grant. MOLD_HOST selects a paired origin.
+stores its own key and revocable grant under a host name (`mold host list`).
+`--host NAME` (global, on every remote command), `MOLD_HOST=NAME`, or a default
+set with `mold host use NAME` selects it; a URL still works, and a Tailscale IP
+the host advertised finds it (LAN addresses are used as typed). Precedence: `--host`, then `MOLD_HOST`, then the
+default host, then `http://localhost:7680`. `mold host rm NAME` deletes the
+saved credentials; revoke the device on the host to end its grant there.
 
 Secure direct and relay API traffic, uploads, progress and media use pinned Noise XX over
 LAN or the Lambda WebSocket relay. The cloud sees metadata and ciphertext, not
@@ -158,7 +167,7 @@ Authentication/protocol refusal is final. Interrupted mutations are never automa
 owner-authenticated one-time bootstrap for fresh hosts and preserve the existing
 identity for known paired volumes. A private pre-create journal reconciles an
 uncertain paid response without replaying creation. Unknown existing volumes
-require pairing before replacement. An explicit MOLD_HOST selects that exact
+require pairing before replacement. An explicit --host/MOLD_HOST (a saved name works) selects that exact
 paired pod; provider readiness alone is not trusted Mold readiness. Native Remote Access
 opens the encrypted LAN listener and outbound connector; stopping it closes
 active sessions. HTTPS browsers may require WSS because of mixed-content rules.

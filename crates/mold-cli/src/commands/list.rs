@@ -53,8 +53,8 @@ fn model_label(model: &mold_core::ModelInfoExtended) -> String {
     }
 }
 
-pub async fn run(json: bool) -> Result<()> {
-    let ctx = CliContext::new(None);
+pub async fn run(json: bool, host: Option<&str>) -> Result<()> {
+    let ctx = CliContext::new(host)?;
     let default_model =
         mold_core::manifest::resolve_model_name(&ctx.config().resolved_default_model());
 

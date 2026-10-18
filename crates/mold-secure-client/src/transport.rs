@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 type Socket = crate::object_socket::ObjectSocket;
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Endpoint {
     pub url: String,
     pub kind: String,
@@ -34,6 +34,14 @@ pub struct PairedHost {
     pub device_identity: String,
     pub api_key: String,
     pub grant: DeviceGrant,
+    /// The CLI's label for this host (`mold host list`); see `hosts`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
+    /// The hostname the host reported when it was paired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
 }
 impl PairedHost {
     pub fn validate(&self) -> Result<()> {
@@ -426,6 +434,14 @@ pub struct PairingInvite {
     pub host_binding_signature: String,
     pub invite_seed: String,
     pub invite: Invitation,
+    /// The host's display name, its reported hostname and instance id. Older
+    /// invitations carry none of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
 }
 async fn read_json(socket: &mut Socket) -> Result<serde_json::Value> {
     loop {
@@ -777,6 +793,17 @@ pub async fn pair(invite: PairingInvite, client_name: &str) -> Result<PairedHost
             epoch: 0,
             signature: String::new(),
         },
+        name: invite
+            .name
+            .as_deref()
+            .or(invite.hostname.as_deref())
+            .and_then(crate::hosts::slug),
+        instance_id: invite.instance_id.clone().filter(|v| !v.is_empty()),
+        hostname: invite
+            .hostname
+            .clone()
+            .or_else(|| invite.name.clone())
+            .filter(|v| !v.is_empty()),
     };
     let (socket, session, wire) = admit_best(&host, Some(&invite)).await?;
     let proof = invitation_key.sign(&claim_bytes(
@@ -816,8 +843,55 @@ pub async fn pair(invite: PairingInvite, client_name: &str) -> Result<PairedHost
         .context("pairing response missing device credential")?
         .to_string();
     host.grant = serde_json::from_value(value["grant"].clone())?;
+    adopt_claim_identity(&mut host, &value);
     host.validate()?;
     Ok(host)
+}
+
+/// Fill the host's name, hostname and instance id from the encrypted claim
+/// answer when the invitation carried none (an app's QR link omits them).
+fn adopt_claim_identity(host: &mut PairedHost, claim: &serde_json::Value) {
+    let text = |key: &str| {
+        claim[key]
+            .as_str()
+            .filter(|v| !v.trim().is_empty())
+            .map(str::to_owned)
+    };
+    if host.instance_id.is_none() {
+        host.instance_id = text("instance_id");
+    }
+    if host.hostname.is_none() {
+        host.hostname = text("hostname");
+    }
+    if host.name.is_none() {
+        host.name = host.hostname.as_deref().and_then(crate::hosts::slug);
+    }
+}
+
+#[cfg(test)]
+mod claim_identity_tests {
+    #[test]
+    fn the_claim_fills_what_the_invitation_left_out() {
+        let mut host = crate::prepare_bootstrap("claim", "cli")
+            .unwrap()
+            .profile("https://claim.invalid")
+            .unwrap();
+        host.instance_id = None;
+        let claim = serde_json::json!({"instance_id": "inst-9", "hostname": "Work Station"});
+        super::adopt_claim_identity(&mut host, &claim);
+        assert_eq!(host.instance_id.as_deref(), Some("inst-9"));
+        assert_eq!(host.hostname.as_deref(), Some("Work Station"));
+        assert_eq!(host.name.as_deref(), Some("work-station"));
+        // What the invitation already said wins.
+        host.instance_id = Some("from-invite".into());
+        host.name = Some("chosen".into());
+        super::adopt_claim_identity(
+            &mut host,
+            &serde_json::json!({"instance_id": "x", "hostname": "y"}),
+        );
+        assert_eq!(host.instance_id.as_deref(), Some("from-invite"));
+        assert_eq!(host.name.as_deref(), Some("chosen"));
+    }
 }
 
 impl Drop for PairedHost {

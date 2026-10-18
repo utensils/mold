@@ -81,12 +81,8 @@ pub async fn run(
     };
 
     // Try server first (unless --local)
-    let base_url = host
-        .or_else(|| std::env::var("MOLD_HOST").ok())
-        .unwrap_or_else(|| "http://localhost:7680".to_string());
-
     if !local {
-        let client = mold_core::MoldClient::new(&base_url);
+        let client = crate::control::client_for_host(host.as_deref())?;
         match client.upscale(&req).await {
             Ok(resp) => {
                 return write_output(
@@ -135,6 +131,8 @@ async fn upscale_local(
             model_name,
             &mold_core::download::PullOptions::default(),
             &[],
+            None,
+            false,
         )
         .await?;
         // Reload config after pull

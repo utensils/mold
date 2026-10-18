@@ -127,6 +127,9 @@ impl PreparedBootstrap {
             device_identity: identity.to_string(),
             api_key: p.api_key.clone(),
             grant: p.grant.clone(),
+            name: None,
+            instance_id: Some(p.instance_id.clone()),
+            hostname: None,
         };
         host.validate()?;
         Ok(host)

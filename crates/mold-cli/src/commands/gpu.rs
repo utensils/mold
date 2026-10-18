@@ -95,8 +95,8 @@ pub(crate) fn format_device_line(device: &DeviceInfo) -> String {
     )
 }
 
-pub async fn list(json: bool) -> Result<()> {
-    let client = MoldClient::from_env();
+pub async fn list(json: bool, host: Option<&str>) -> Result<()> {
+    let client = crate::control::client_for_host(host)?;
     let (state, local) = match client.devices().await {
         Ok(state) => (state, false),
         Err(error)
@@ -134,8 +134,8 @@ pub async fn list(json: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn set(selector: &str, enabled: bool) -> Result<()> {
-    let client = MoldClient::from_env();
+pub async fn set(selector: &str, enabled: bool, host: Option<&str>) -> Result<()> {
+    let client = crate::control::client_for_host(host)?;
     match set_enabled_with_client(&client, selector, enabled).await {
         Ok(()) => Ok(()),
         Err(error)

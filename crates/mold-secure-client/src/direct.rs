@@ -76,7 +76,8 @@ mod regular_authority_tests {
             &owner,
             RegularHost {
                 origin: host.origin.clone(),
-                api_key: Some(host.api_key.clone())
+                api_key: Some(host.api_key.clone()),
+                ..Default::default()
             }
         )
         .is_err());
@@ -85,6 +86,7 @@ mod regular_authority_tests {
             RegularHost {
                 origin: host.origin.clone(),
                 api_key: Some("distinct-direct-key".into()),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -93,7 +95,8 @@ mod regular_authority_tests {
             &owner,
             RegularHost {
                 origin: "https://abc.mold-link.urandom.io".into(),
-                api_key: None
+                api_key: None,
+                ..Default::default()
             }
         )
         .is_err());
@@ -111,6 +114,7 @@ mod regular_authority_tests {
             RegularHost {
                 origin: origin.clone(),
                 api_key: Some("direct-cookie-test".into()),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -161,6 +165,7 @@ mod regular_authority_tests {
             RegularHost {
                 origin: origin.clone(),
                 api_key: Some("regular".into()),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -209,10 +214,18 @@ mod regular_authority_tests {
 }
 
 /// Direct credentials are distinct from pinned Noise authority, even at one origin.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RegularHost {
     pub origin: String,
     pub api_key: Option<String>,
+    /// The CLI's label for this host (`mold host list`); see `hosts`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
+    /// The hostname the host reported when it was paired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
 }
 impl RegularHost {
     pub fn validate(&self) -> Result<()> {
@@ -366,7 +379,6 @@ pub async fn pair_regular(value: serde_json::Value, name: &str) -> Result<Regula
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
     anyhow::ensure!(now < invite.expires_at, "Regular invitation expired");
-    let _display_name = invite.name;
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(10))
@@ -387,6 +399,10 @@ pub async fn pair_regular(value: serde_json::Value, name: &str) -> Result<Regula
             && claim["instance_id"] == invite.instance_id,
         "Regular claim authority mismatch"
     );
+    let hostname = claim["hostname"]
+        .as_str()
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned);
     let host = RegularHost {
         origin,
         api_key: Some(
@@ -395,6 +411,13 @@ pub async fn pair_regular(value: serde_json::Value, name: &str) -> Result<Regula
                 .context("missing Regular credential")?
                 .to_owned(),
         ),
+        name: invite
+            .name
+            .as_deref()
+            .or(hostname.as_deref())
+            .and_then(crate::hosts::slug),
+        instance_id: Some(invite.instance_id),
+        hostname: hostname.or(invite.name),
     };
     host.validate()?;
     Ok(host)

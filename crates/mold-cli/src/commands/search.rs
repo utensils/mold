@@ -72,7 +72,7 @@ pub fn sort_wire(sort: CatalogSortArg) -> &'static str {
 }
 
 pub async fn run(args: SearchArgs) -> Result<()> {
-    let client = crate::control::client_for_host(args.host.as_deref());
+    let client = crate::control::client_for_host(args.host.as_deref())?;
     let query = args.to_query();
     let page = match client.search_catalog(&query).await {
         Ok(page) => {
