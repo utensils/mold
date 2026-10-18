@@ -3893,10 +3893,11 @@ async function onSubmitInner(
         return;
       }
     }
-    let route =
+    const preparedRoute =
       quick && !allowStaleQuick && quickRouteIsCurrent(quick)
         ? cloneRoute(quick.route)
-        : resolveSubmitRoute();
+        : null;
+    let route = preparedRoute ?? resolveSubmitRoute();
     if (route === false) return;
     if (preparingFreshVideo) {
       const eligible = routing.hosts.value
@@ -3911,6 +3912,16 @@ async function onSubmitInner(
           );
         })
         .map((host) => host.id);
+      // A current quick rewrite retains its captured generation authority.
+      // Ordinary Auto submissions can still select an eligible normalizer.
+      if (
+        preparedRoute &&
+        (!eligible.includes(preparedRoute.hostId) ||
+          !preparedRoute.referenceUploads?.video_normalization?.available)
+      )
+        throw new Error(
+          `${preparedRoute.label} is the prepared generation machine and does not advertise fresh video-reference normalization. Choose another machine and prepare the prompt again.`,
+        );
       const selection = routing.targetId.value;
       if (
         selection !== AUTO_TARGET_ID &&

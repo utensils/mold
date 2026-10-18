@@ -994,6 +994,9 @@ impl JobRegistry {
         let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
         let entry = entries.iter_mut().find(|e| e.id == id)?;
         let stall = self.current_stall(entry);
+        if entry.progress.is_none() && stall.is_none() {
+            return None;
+        }
         let progress = entry.progress.get_or_insert_with(QueueJobProgress::default);
         if progress.stall == stall {
             return None;
@@ -1228,6 +1231,51 @@ impl JobRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stall_tick_preserves_absent_progress_before_any_work_or_diagnostic() {
+        let registry = JobRegistry::new();
+        registry.register("no-progress", "fake");
+        registry.mark_running("no-progress", Some(0));
+        registry.set_stall_threshold_seconds(0);
+        assert_eq!(registry.progress_snapshot("no-progress"), Some(None));
+        assert_eq!(registry.stall_event("no-progress"), None);
+        assert_eq!(registry.progress_snapshot("no-progress"), Some(None));
+    }
+
+    #[test]
+    fn stall_tick_creates_actual_diagnostic_and_explicitly_clears_prior_stall() {
+        let registry = JobRegistry::new();
+        registry.register("diagnostic-only", "fake");
+        registry.mark_running("diagnostic-only", Some(0));
+        registry.set_stall_threshold_seconds(1);
+        registry.age_progress_for_tests("diagnostic-only", std::time::Duration::from_secs(2));
+        assert!(matches!(
+            registry.stall_event("diagnostic-only"),
+            Some(SseProgressEvent::Stall { stall: Some(_) })
+        ));
+        assert!(registry
+            .progress_snapshot("diagnostic-only")
+            .flatten()
+            .unwrap()
+            .stall
+            .is_some());
+        registry.set_stall_threshold_seconds(0);
+        assert_eq!(
+            registry.stall_event("diagnostic-only"),
+            Some(SseProgressEvent::Stall { stall: None })
+        );
+        let snapshot = registry
+            .progress_snapshot("diagnostic-only")
+            .flatten()
+            .expect("a prior diagnostic remains an explicit recovered snapshot");
+        assert!(snapshot.stall.is_none());
+        assert_eq!(registry.stall_event("diagnostic-only"), None);
+        assert_eq!(
+            registry.progress_snapshot("diagnostic-only"),
+            Some(Some(snapshot))
+        );
+    }
 
     #[tokio::test]
     async fn progress_relay_keeps_the_live_runtime_threshold_instead_of_reloading_disk() {

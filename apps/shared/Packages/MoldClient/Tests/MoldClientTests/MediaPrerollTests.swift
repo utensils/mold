@@ -68,6 +68,17 @@ private final class PrimingPlayer: AVPlayer, @unchecked Sendable {
         catch let error as URLError { #expect(error.code == .timedOut) }
         #expect(player.priming.withLock { $0.cancellations } == 1)
     }
+    @Test func unexplainedFalsePrerollIsAVisibleFailureRatherThanCancellation() async throws {
+        let (media, player) = fixture()
+        let work = Task { try await media.prepare(player, timeout: .seconds(2)) }
+        try await started(player)
+        player.priming.withLock { $0.completion }?(false)
+        do { try await work.value; Issue.record("Interrupted preroll unexpectedly succeeded") }
+        catch {
+            #expect(!(error is CancellationError), "A spontaneous failure must not disappear through the UI's cancellation handler")
+            #expect(error.localizedDescription.contains("prepared"))
+        }
+    }
     @Test func replacementAndLateCallbackCannotPrimeOrCancelTheSuccessor() async throws {
         let (media, player) = fixture()
         let work = Task { try await media.prepare(player, timeout: .seconds(2)) }

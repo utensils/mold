@@ -4,6 +4,39 @@ import XCTest
 final class ReferenceParityTests: XCTestCase {
     override func setUp() { super.setUp(); acceptCompanionPermissions() }
 
+    @MainActor func testLengthMenuUsesTheAuthoritativeFrameGridAndCurrentSelection() async throws {
+        continueAfterFailure = false
+        let machine = try FixtureMachine(referenceFixture: true)
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        cleanUpFixture(machine, port: port, app: app)
+        app.launch(); try addMachine(app, port: port)
+        try choose("minimax-h3-ref2va:comfy-pruned-int8-turbo-4step", in: app)
+        // The fixture serves the checked-in generation profile unchanged:
+        // fixed 24 fps, 107...345 frames, step 17 and offset 5.
+        let length = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Length,'")).firstMatch
+        reveal(length, app: app)
+        XCTAssertTrue(length.waitForExistence(timeout: 5), app.debugDescription)
+        length.tap()
+        XCTAssertFalse(app.buttons["0 s"].exists)
+        XCTAssertFalse(app.buttons["1 s"].exists)
+        let current = app.buttons["5.2 s"].firstMatch
+        XCTAssertTrue(current.waitForExistence(timeout: 5), app.debugDescription)
+        let selected = app.buttons["8.7 s"].firstMatch
+        XCTAssertTrue(selected.exists, "Nine seconds snaps to the accepted 209-frame option")
+        let options = XCTAttachment(screenshot: app.screenshot())
+        options.name = "Authoritative H3 length options include the current frame count"
+        options.lifetime = .keepAlways; add(options)
+        selected.tap()
+        XCTAssertTrue(app.buttons["Length, 8.7 seconds"].firstMatch.waitForExistence(timeout: 5), app.debugDescription)
+        app.buttons["Length, 8.7 seconds"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["8.7 s"].firstMatch.exists)
+        let settled = XCTAttachment(screenshot: app.screenshot())
+        settled.name = "Selected snapped length remains checked"
+        settled.lifetime = .keepAlways; add(settled)
+        XCTAssertTrue(machine.generationRequests.isEmpty)
+    }
+
     @MainActor func testLibraryContextAttachesExplicitFirstAndLastFrames() async throws {
         continueAfterFailure = false
         let machine = try FixtureMachine(referenceFixture: true, galleryPrints: 2)

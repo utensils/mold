@@ -25,7 +25,7 @@ import { remixPrompt } from "../lib/api/remix";
 import { startCatalogDownload } from "../lib/api/catalog";
 import { ApiError } from "../lib/api/client";
 import { applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
-import type { ModelEntry } from "../lib/api/types";
+import type { ModelEntry, ServerCapabilities } from "../lib/api/types";
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -949,6 +949,110 @@ describe("GenerateView prepared expansion batches", () => {
     expect(useToastStore().items.at(-1)?.message).toContain(
       "prepared print is frozen to a different machine",
     );
+  });
+
+  it("refuses fresh video on the frozen expansion host without switching machines", async () => {
+    const batch = 1;
+    const h3 = {
+      ...model,
+      name: "minimax-h3-ref2va:comfy-pruned-int8",
+      family: "minimax-h3",
+    } as ModelEntry;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) =>
+      Promise.resolve(path === "/api/models" ? [h3] : []),
+    );
+    apiJson.mockImplementation((path: string) =>
+      Promise.resolve(path === "/api/models" ? [h3] : []),
+    );
+    useModelStore().all = [h3];
+    useHostModelsStore().byHost.local!.entries = [h3];
+    const form = useGenerateFormStore().form;
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: "normalizer",
+      label: "Other GPU",
+      url: "http://other:7680",
+      apiKey: "other-key",
+      status: "ready",
+      error: null,
+      instanceId: "other-instance",
+    });
+    hosts.capabilities.normalizer = {
+      reference_uploads: {
+        video_normalization: {
+          available: true,
+          protocol_version: 1,
+          input_roles: ["reference_video"],
+        },
+      },
+    } as unknown as ServerCapabilities;
+    const localRoute = {
+      hostId: "local",
+      label: "Frozen Studio",
+      kind: "local" as const,
+      target: { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
+      instanceId: "local-instance",
+    };
+    const otherRoute = {
+      ...localRoute,
+      hostId: "normalizer",
+      label: "Other GPU",
+      instanceId: "other-instance",
+      referenceUploads: hosts.capabilities.normalizer.reference_uploads!,
+    };
+    const resolver = vi
+      .spyOn(hosts, "resolveRoute")
+      .mockImplementation((_selection, _model, eligible) => (eligible ? otherRoute : localRoute));
+    vi.mocked(expandPrompt).mockResolvedValue({
+      original: form.prompt,
+      expanded: Array.from({ length: batch }, (_, i) => `expanded shot ${i}`),
+    });
+    const submit = vi.spyOn(useGenerationStore(), "submitBatch");
+    const wrapper = mountView();
+    await flushPromises();
+    Object.assign(form, {
+      model: h3.name,
+      family: h3.family,
+      batchSize: batch,
+      frames: 124,
+      fps: 24,
+    });
+    const body = new Blob(["original MOV"], { type: "video/quicktime" });
+    form.h3Authoring = {
+      firstFrame: null,
+      lastFrame: null,
+      references: [
+        {
+          reference: {
+            kind: "fresh_video",
+            original: {
+              name: "original.mov",
+              mime_type: "video/quicktime",
+              byte_length: body.size,
+              sha256: "a".repeat(64),
+            },
+            body,
+          },
+        },
+      ],
+    };
+    await nextTick();
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+    expect(expandPrompt).toHaveBeenCalledTimes(1);
+    expect(form.prompt).toBe("expanded shot 0");
+    expect(wrapper.find("[data-test=quick-expansion-stale]").exists()).toBe(false);
+    expect(wrapper.findComponent(ComposerCard).props("disabledReason")).toBeNull();
+    resolver.mockClear();
+    await wrapper.get('[data-test="generate-button"]').trigger("click");
+    await flushPromises();
+    expect(resolver.mock.calls.some((call) => call[2] !== undefined)).toBe(false);
+    expect(useToastStore().items.at(-1)?.message).toBe(
+      "Frozen Studio is the prepared generation machine and does not advertise fresh video-reference normalization. Choose another machine and prepare the prompt again.",
+    );
+    expect(submit).not.toHaveBeenCalled();
+    expect(form.h3Authoring.references[0]?.reference).toMatchObject({ kind: "fresh_video", body });
+    expect(form.prompt).toBe("expanded shot 0");
   });
 
   it("reuses a quick transformed prompt after a host-only selection change", async () => {

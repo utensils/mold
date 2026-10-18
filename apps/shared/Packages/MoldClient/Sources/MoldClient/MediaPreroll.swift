@@ -28,7 +28,7 @@ import Foundation
             try Task.checkCancellation()
             let primed = await request.start()
             try check(player, item: item, deadline: deadline)
-            guard primed else { throw CancellationError() }
+            guard primed else { throw MediaPreparationError.prerollFailed }
         } onCancel: {
             Task { @MainActor in request.cancel() }
         }
@@ -40,6 +40,11 @@ import Foundation
         if let error = item.error ?? player.error { throw error }
         guard ContinuousClock.now < deadline else { throw URLError(.timedOut) }
     }
+}
+
+private enum MediaPreparationError: LocalizedError {
+    case prerollFailed
+    var errorDescription: String? { "Video playback could not be prepared. Try again." }
 }
 
 @MainActor private final class MediaPrerollRequest {

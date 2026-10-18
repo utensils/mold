@@ -3585,6 +3585,16 @@ async function generate(batchOverride: number | null = null) {
           );
         })
         .map((host) => host.id);
+      // A prepared/quick expansion already chose its generation authority.
+      // Auto may choose a normalizer only before that route has been frozen.
+      if (
+        route &&
+        (!eligible.includes(route.hostId) ||
+          !route.referenceUploads?.video_normalization?.available)
+      )
+        throw new Error(
+          `${route.label} is the prepared generation machine and does not advertise fresh video-reference normalization. Choose another machine and prepare the prompt again.`,
+        );
       if (selection && selection !== "capable" && !eligible.includes(selection))
         throw new Error(
           "The selected machine does not advertise fresh video-reference normalization.",

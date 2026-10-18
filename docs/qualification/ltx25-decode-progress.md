@@ -121,3 +121,67 @@ verification; subsequent arrivals were left untouched. Production generation
 then progressed on all four devices. Only the four original paused campaign
 rows were cancelled to settle their retained intent. No GPU reset, device-policy
 change, production-binary replacement or model mutation was performed.
+
+## Bounded shipping-runtime qualification
+
+A separate idle four-L40S window on 2026-10-18 completed in 309 seconds,
+including shutdown and restoration of the unchanged production service. The
+CUDA/H3 shipping build carried private snapshot commit
+`84d32c8c294cb22e4cdd75c4005134049a81238b` (binary SHA-256
+`74a18f84ff155a866576017cfbf9985a40e82adb99263294626759c23f5d4444`).
+A file manifest compared its production Rust sources with branch commit
+`bcb7d828469bf65fce9a2cc677abb007bae3295f`: all production files matched;
+the sole differing Rust source was a test-only routes file. The private
+snapshot identity is not the final published branch identity.
+
+- LTX-2.5 distilled BF16 completed 481 frames at 24 fps, 128×128, eight steps,
+  guidance 1, audio enabled and a single 481-frame clip. The downloaded export
+  and published Library file had identical SHA-256. Full media decoding counted
+  exactly 481 H.264 frames and an AAC stream; video duration was 20.041667 s.
+- Installed `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step` completed three
+  256×256, 107-frame, 24-fps audio renders, each with five terminal-inclusive
+  steps, guidance 0 and strength 1. Inputs were real HEVC MOV, VP9 WebM and VFR
+  MP4 fixtures. Standard client candidate/upload/finalize negotiation produced
+  canonical MP4 references consumed by the actual runtime. Canonical HEVC and
+  VP9 inputs had 48 frames at 24 fps; VFR had 34 frames at 17 fps, each lasting
+  2000 ms. The runtime prepared each into its own 24-Hz reference shape. Every
+  export decoded all 107 H.264 frames with AAC, and matched its Library digest.
+- With an intentionally short two-second observational threshold, all five jobs
+  (four completions and one subsequent cancellation) emitted real stall objects
+  and explicit null recovery after new completed work. This exercises reporting
+  during legitimate quiet work; it does not reproduce a hard driver stall.
+- The subsequent warm 128×128 LTX cancellation was accepted with HTTP 202 and
+  `device_still_held:true` at decoder counter 30/30. The worker returned about
+  three seconds later, and no export or Library row was published. This proves
+  cancellation after the final decode boundary before publication, rather than
+  cancellation between unfinished decoder units.
+
+First, middle and final decoded frames from all four successful exports were
+saved as twelve small PNGs and four contact sheets. RGB samples were finite,
+nonempty, nonblack and nonconstant. Visual inspection shows substantial
+artifacts at these deliberately small shapes; these are technical media and
+transport checks, not aesthetic or semantic quality qualification. Neither this
+window nor the CPU RoPE microbenchmark establishes a GPU speedup or completion
+bound for the original 576×1024 shape.
+
+Every private attempt used separate homes, credentials and output directories;
+only its explicitly recorded IDs were cancelled. Fresh live-queue, durable-row
+and GPU-owner checks preceded service interruption. All sixty-seven historical
+held/paused external rows retained their exact identity, order, owner and pause
+intent. The twenty jobs preserved during the earlier recovery were each traced
+by queue-job identity to a published result, rather than inferred complete from
+an empty queue. New unrelated arrivals always take precedence over further UAT.
+
+A separately preflighted, single-job window qualified cancellation between
+unfinished decoder work units: LTX-2.5 distilled BF16, 256×256, 481 frames at
+24 fps, eight steps, guidance 1 and audio. At 20:36:13.317810 UTC the exact-job
+observer saw `Diffusion video decode QKV chunks` at **10/16**. Its DELETE
+returned HTTP 202 at 20:36:13.319156 with `cancel_requested:true` and
+`device_still_held:true`. The cancelled client returned at 20:36:13.703538;
+the private queue emptied, and no export or Library row was published. This
+qualifies cooperative cancellation between unfinished decoder chunks, not
+interruption of an in-flight kernel. The task server exited normally on SIGTERM,
+all its GPU contexts disappeared, and unchanged production was restored within
+269.574 seconds for the whole window. All sixty-seven historical external
+rows remained unchanged. No additional H3 render or full LTX completion was
+submitted in this window.

@@ -808,9 +808,13 @@ or failed conversion get an explicit error.
 The session binds the exact original digest and frozen request, then returns
 verified canonical hashes and facts. Explicit finalization must finish before
 placement and generation; a partial upload is never a usable reference. A
-failed/disconnected attempt cancels its unused lease and retries with a fresh
-session. Conversion cannot adopt an old upload handle or reinterpret retained
-source media, replay authority, `--source-video` or `--extend-video`.
+failed/disconnected attempt cancels its unused lease when its handle is known
+and retries from the retained original bytes with a fresh session. A lost
+successful upload response requires re-uploading in that fresh session; upload
+handles are one-use. If the session-creation response is lost, the client cannot
+cancel its unknown handle, so its session slot expires after the 30-minute TTL.
+Conversion cannot adopt an old upload handle or reinterpret retained source
+media, replay authority, `--source-video` or `--extend-video`.
 
 This optional server feature currently requires Unix child resource limits
 and working ffmpeg/ffprobe tools. Nix/server packages supply codecs; raw

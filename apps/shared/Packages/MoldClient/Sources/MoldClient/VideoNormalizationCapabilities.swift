@@ -36,15 +36,35 @@ extension ReferenceUploadCapabilities {
         maxSessionBytes = try keyed.decodeIfPresent(Int.self, forKey: .maxSessionBytes)
         maxActiveSessions = try keyed.decodeIfPresent(Int.self, forKey: .maxActiveSessions)
         sessionTtlMs = try keyed.decodeIfPresent(Int.self, forKey: .sessionTtlMs)
-        // A malformed additive advertisement never disables the ordinary V2 path.
-        videoNormalization = try? keyed.decodeIfPresent(VideoNormalizationCapabilities.self, forKey: .videoNormalization)
+        if keyed.contains(.videoNormalization), try !keyed.decodeNil(forKey: .videoNormalization) {
+            let nested = try keyed.nestedContainer(keyedBy: CodingKeys.self, forKey: .videoNormalization)
+            let version = try nested.decodeIfPresent(Int.self, forKey: .protocolVersion)
+            // Future schemas are not ours to validate. Absence and an unsupported
+            // protocol remain compatible with ordinary canonical upload V2.
+            if let version, version != 1 {
+                videoNormalization = nil
+            } else {
+                videoNormalization = try keyed.decode(VideoNormalizationCapabilities.self, forKey: .videoNormalization)
+                if videoNormalization?.available == true,
+                   VideoNormalizationPolicy.validatedAdvertisement(self) == nil {
+                    throw DecodingError.dataCorruptedError(forKey: .videoNormalization, in: keyed,
+                        debugDescription: "Malformed advertised video normalization V1 capability")
+                }
+            }
+        } else {
+            videoNormalization = nil
+        }
     }
 }
 
 public enum VideoNormalizationPolicy {
     public static func capability(_ uploads: ReferenceUploadCapabilities?, apiKey: String?) -> VideoNormalizationCapabilities? {
+        guard !(apiKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) else { return nil }
+        return validatedAdvertisement(uploads)
+    }
+
+    static func validatedAdvertisement(_ uploads: ReferenceUploadCapabilities?) -> VideoNormalizationCapabilities? {
         guard let uploads, (try? ReferenceUploadPolicy.validate(uploads)) != nil,
-              !(apiKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true),
               let cap = uploads.videoNormalization, cap.available, cap.protocolVersion == 1,
               cap.inputRoles?.contains("reference_video") == true,
               let candidate = cap.candidateSessionPath, let finalize = cap.finalizePath,

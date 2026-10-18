@@ -4343,6 +4343,83 @@ describe("CreatePage layout and behavior", () => {
     });
   });
 
+  it("refuses fresh video on its frozen quick-expansion host without falling back to another normalizer", async () => {
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Other GPU",
+      apiKey: "sk-studio",
+    });
+    localStorage.setItem("mold.web.generateTarget.v1", AUTO_TARGET_ID);
+    const h3 = installedModelRow(
+      "minimax-h3-ref2va:comfy-pruned-int8",
+      "minimax-h3",
+    );
+    hostModelsMock.mockResolvedValue([h3]);
+    hostCapabilitiesMock.mockImplementation(async (host) =>
+      host.id === studio.id
+        ? {
+            reference_uploads: {
+              video_normalization: {
+                available: true,
+                protocol_version: 1,
+                input_roles: ["reference_video"],
+              },
+            },
+          }
+        : {},
+    );
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: h3.name,
+      modelFamily: "minimax-h3",
+      prompt: "a lighthouse",
+    });
+    const body = new Blob(["original MOV"], { type: "video/quicktime" });
+    form.state.value.h3Authoring = {
+      firstFrame: null,
+      lastFrame: null,
+      references: [
+        {
+          reference: {
+            kind: "fresh_video",
+            original: {
+              name: "original.mov",
+              mime_type: "video/quicktime",
+              byte_length: body.size,
+              sha256: "a".repeat(64),
+            },
+            body,
+          },
+        },
+      ],
+    };
+    await nextTick();
+    const frozen = useHostRouting().resolve(h3.name)!;
+    expect(frozen.hostId).toBe(ORIGIN_HOST_ID);
+    expandPromptMock.mockResolvedValueOnce({
+      original: "a lighthouse",
+      expanded: ["storm light over the harbor"],
+    });
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+    expect(
+      useNotifications()
+        .toasts.map((item) => item.text)
+        .join(" "),
+    ).toContain(
+      `${frozen.label} is the prepared generation machine and does not advertise fresh video-reference normalization. Choose another machine and prepare the prompt again.`,
+    );
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(form.state.value.prompt).toBe("storm light over the harbor");
+    expect(form.state.value.h3Authoring.references[0]?.reference).toMatchObject(
+      { kind: "fresh_video", body },
+    );
+  });
+
   it("reuses a quick transformed prompt on a newly selected host without stale recovery", async () => {
     const studio = addHost({
       url: "http://studio:7680",

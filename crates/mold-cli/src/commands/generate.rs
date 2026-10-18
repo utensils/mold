@@ -2613,10 +2613,6 @@ async fn bind_remote_reference_uploads(
 ) -> Result<Option<ReferenceUploadLease>> {
     let has_candidates = uploads.iter().any(|upload| upload.candidate.is_some());
     if has_candidates {
-        anyhow::ensure!(
-            batch == 1,
-            "fresh video reference normalization requires --batch 1"
-        );
         let normalization_available = match client.server_capabilities().await {
             Ok(capabilities) => mold_core::reference_upload::supports_video_normalization(
                 &capabilities.reference_uploads,
@@ -2625,6 +2621,10 @@ async fn bind_remote_reference_uploads(
             Err(error) => return Err(error),
         };
         if client.has_api_key() && normalization_available {
+            anyhow::ensure!(
+                batch == 1,
+                "fresh video reference normalization requires --batch 1"
+            );
             let candidates = uploads
                 .iter()
                 .map(|upload| {
@@ -5593,6 +5593,83 @@ mod tests {
             .await
             .expect("a single photograph predates the capability block");
         // Dropping the server asserts the `expect(0)`.
+    }
+
+    #[tokio::test]
+    async fn h3_canonical_video_batches_remain_inline_on_keyless_and_older_hosts() {
+        use sha2::{Digest as _, Sha256};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let bytes = general_purpose::STANDARD
+            .decode(
+                include_str!("../../../mold-server/tests/fixtures/reference-video.mp4.b64").trim(),
+            )
+            .unwrap();
+        let sha256 = format!("{:x}", Sha256::digest(&bytes));
+        for keyed in [false, true] {
+            for status in [200, 404] {
+                let server = MockServer::start().await;
+                let reply = if status == 200 {
+                    ResponseTemplate::new(200)
+                        .set_body_json(mold_core::ServerCapabilities::default())
+                } else {
+                    ResponseTemplate::new(status)
+                };
+                Mock::given(method("GET"))
+                    .and(path("/api/capabilities"))
+                    .respond_with(reply)
+                    .expect(if keyed { 2 } else { 1 })
+                    .mount(&server)
+                    .await;
+                let directory = tempfile::tempdir().unwrap();
+                let video = directory.path().join("reference.mp4");
+                std::fs::write(&video, &bytes).unwrap();
+                let mut request = h3_request(mold_core::minimax_h3::REF2VA_COMFY);
+                let client = if keyed {
+                    MoldClient::with_api_key(&server.uri(), "test-key".into())
+                } else {
+                    MoldClient::new(&server.uri())
+                };
+                let lease = bind_remote_reference_uploads(
+                    &client,
+                    &mut request,
+                    vec![ReferenceUpload {
+                        file: std::fs::File::open(&video).unwrap(),
+                        candidate: Some(
+                            mold_core::video_normalization::ReferenceCandidate::FreshVideo {
+                                index: 1,
+                                kind: mold_core::GenerationReferenceKind::Video,
+                                original: mold_core::video_normalization::OriginalVideo {
+                                    mime_type: "video/mp4".into(),
+                                    name: Some("reference.mp4".into()),
+                                    byte_length: bytes.len() as u64,
+                                    sha256: sha256.clone(),
+                                },
+                            },
+                        ),
+                    }],
+                    3,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("keyed={keyed}, status={status}: {error:#}"));
+                assert!(lease.is_none());
+                let reference = &request.references.as_ref().unwrap()[0];
+                assert_eq!(
+                    reference.provenance().sha256.as_deref(),
+                    Some(sha256.as_str())
+                );
+                assert!(
+                    matches!(reference.media(), GenerationReferenceAuthority::Inline { data } if data == &bytes)
+                );
+                assert!(server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .all(|request| request.method == "GET"));
+            }
+        }
     }
 
     #[tokio::test]

@@ -35,15 +35,30 @@ struct VideoNormalizationPolicyTests {
             var advertised = Self.advertisement
             var nested = advertised["video_normalization"] as! [String: Any]
             nested[key] = value; advertised["video_normalization"] = nested
-            #expect(VideoNormalizationPolicy.capability(try Self.decode(advertised), apiKey: "key") == nil, "unsafe \(key)")
+            if key == "protocol_version" {
+                #expect(VideoNormalizationPolicy.capability(try Self.decode(advertised), apiKey: "key") == nil)
+            } else {
+                #expect(throws: (any Error).self) { try Self.decode(advertised) }
+            }
         }
     }
-    @Test func malformedAdditiveBlockPreservesCanonicalUploadV2() throws {
+    @Test func malformedAdditiveBlockDoesNotMasqueradeAsAnOlderServer() throws {
         var advertised = Self.advertisement
         advertised["video_normalization"] = ["available": "invalid"]
+        #expect(throws: (any Error).self) { try Self.decode(advertised) }
+        advertised["video_normalization"] = ["available": true, "protocol_version": 1]
+        #expect(throws: (any Error).self) { try Self.decode(advertised) }
+    }
+    @Test func absentAndFutureAdditiveProtocolsPreserveCanonicalUploadV2() throws {
+        var advertised = Self.advertisement
+        advertised.removeValue(forKey: "video_normalization")
         let caps = try Self.decode(advertised)
         #expect(caps.videoNormalization == nil)
         try ReferenceUploadPolicy.validate(caps)
+        advertised["video_normalization"] = ["protocol_version": 2, "future_schema": true]
+        let future = try Self.decode(advertised)
+        #expect(future.videoNormalization == nil)
+        try ReferenceUploadPolicy.validate(future)
     }
 }
 
