@@ -1198,14 +1198,22 @@ fn connector_host(host: &str) -> Result<String> {
         return Ok(format!("host {}", saved.name));
     }
     let looks_like_address = host.contains("://") || host.contains(':') || host.contains('.');
-    if !looks_like_address {
+    // A bare name that is not saved can still be a DNS or MagicDNS name, as
+    // `mold mcp --host` accepts; only one that resolves nowhere is a typo.
+    let resolves = || {
+        use std::net::ToSocketAddrs;
+        (host, 7680)
+            .to_socket_addrs()
+            .is_ok_and(|mut addrs| addrs.next().is_some())
+    };
+    if !looks_like_address && !resolves() {
         let saved = mold_secure_client::hosts::list()
             .unwrap_or_default()
             .into_iter()
             .map(|host| host.name)
             .collect::<Vec<_>>();
         anyhow::bail!(
-            "'{host}' is not a saved host{}; pair it with `mold host add` or pass a URL",
+            "'{host}' is not a saved host and does not resolve{}; pair it with `mold host add` or pass a URL",
             if saved.is_empty() {
                 String::new()
             } else {
