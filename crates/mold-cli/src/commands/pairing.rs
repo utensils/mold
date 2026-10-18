@@ -112,45 +112,12 @@ pub(crate) fn operator_key(api_key_file: Option<&Path>) -> Result<Zeroizing<Stri
 /// refused file or its folder breaks and how to fix it. The check itself
 /// is unchanged.
 pub(crate) fn read_private_explained(path: &Path, what: &str) -> Result<Zeroizing<Vec<u8>>> {
-    mold_secure_client::read_private(path).map_err(|error| match private_file_problem(path) {
-        Some(problem) => anyhow::anyhow!("{what} {problem}"),
-        None => error.context(format!("cannot read {what} {}", path.display())),
+    mold_secure_client::read_private(path).map_err(|error| {
+        match mold_secure_client::explain_private_file(path) {
+            Some(problem) => anyhow::anyhow!("{what} {problem}"),
+            None => error.context(format!("cannot read {what} {}", path.display())),
+        }
     })
-}
-
-/// The first owner-only rule `path` or its folder breaks, in words.
-#[cfg(unix)]
-fn private_file_problem(path: &Path) -> Option<String> {
-    use std::os::unix::fs::MetadataExt;
-    // SAFETY: getuid has no preconditions.
-    let me = unsafe { libc::getuid() };
-    let file = std::fs::symlink_metadata(path).ok()?;
-    let folder_path = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let folder = std::fs::metadata(folder_path).ok()?;
-    let (file_shown, folder_shown) = (path.display(), folder_path.display());
-    Some(if file.file_type().is_symlink() {
-        format!("{file_shown} is a symlink; pass the file itself")
-    } else if file.uid() != me {
-        format!("{file_shown} must be owned by you")
-    } else if file.mode() & 0o077 != 0 {
-        format!("{file_shown} must be private (chmod 600 {file_shown})")
-    } else if file.nlink() > 1 {
-        format!("{file_shown} has other hard links; copy it to a new file")
-    } else if folder.uid() != me {
-        format!("{file_shown} is in a folder you do not own ({folder_shown})")
-    } else if folder.mode() & 0o077 != 0 {
-        format!("{file_shown}'s folder {folder_shown} must be private (chmod 700 {folder_shown})")
-    } else {
-        return None;
-    })
-}
-
-#[cfg(not(unix))]
-fn private_file_problem(_path: &Path) -> Option<String> {
-    None
 }
 
 /// A canonical invitation from this authenticated local host, as the value

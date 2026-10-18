@@ -25,6 +25,7 @@
 use crate::{ConnectionMode, Endpoint};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
+use serde_json::{Map, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -42,7 +43,10 @@ pub struct SavedHost {
     pub name: String,
     /// The exact origin its credentials are filed under.
     pub origin: String,
+    /// The selected mode (the `.mode` file, else the only profile's).
     pub mode: ConnectionMode,
+    /// Which profiles are on disk for this origin.
+    pub profiles: Vec<ConnectionMode>,
     pub instance_id: Option<String>,
     pub hostname: Option<String>,
     /// Endpoints the host advertised when it was paired (Secure only).
@@ -287,6 +291,13 @@ fn assign_names(entries: BTreeMap<String, Entry>) -> Vec<SavedHost> {
                 .as_ref()
                 .map(|m| m.endpoints.clone())
                 .unwrap_or_default();
+            let profiles = [
+                entry.secure.as_ref().map(|_| ConnectionMode::Secure),
+                entry.regular.as_ref().map(|_| ConnectionMode::Regular),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
             Some((
                 SavedHost {
                     name: String::new(),
@@ -294,6 +305,7 @@ fn assign_names(entries: BTreeMap<String, Entry>) -> Vec<SavedHost> {
                     hostname,
                     endpoints,
                     mode,
+                    profiles,
                     origin,
                     named: false,
                     ambiguous: false,
@@ -373,19 +385,10 @@ pub fn persist_derived_names_at(root: &Path) -> Result<Vec<SavedHost>> {
             if !path.try_exists()? {
                 continue;
             }
-            // Both byte buffers are zeroized on drop; the parsed copy's secret
-            // strings are wiped as soon as the new bytes exist.
-            let bytes = crate::read_private(&path)?;
-            let mut profile: serde_json::Value = serde_json::from_slice(&bytes)?;
-            let object = profile
-                .as_object_mut()
-                .with_context(|| format!("invalid saved host profile {}", path.display()))?;
-            object.insert("name".into(), host.name.clone().into());
-            let serialized = serde_json::to_vec(&profile);
-            wipe_secrets(&mut profile);
-            drop(profile);
-            let bytes = zeroize::Zeroizing::new(serialized?);
-            mold_secure::identity_file::write_private_file(&path, &bytes, true)?;
+            let name = host.name.clone();
+            rewrite_profile(&path, |profile| {
+                profile.insert("name".into(), name.into());
+            })?;
         }
         named.push(SavedHost {
             named: true,
@@ -531,6 +534,31 @@ pub fn remove_at(root: &Path, name: &str) -> Result<SavedHost> {
     Ok(host)
 }
 
+fn remove_if_present(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
+    }
+}
+
+/// Rewrite one owner-only profile in place through `edit`, keeping every
+/// other field and wiping the parsed copy's secrets afterwards.
+fn rewrite_profile(path: &Path, edit: impl FnOnce(&mut Map<String, Value>)) -> Result<()> {
+    let bytes = crate::read_private(path)?;
+    let mut profile: Value = serde_json::from_slice(&bytes)?;
+    edit(
+        profile
+            .as_object_mut()
+            .with_context(|| format!("invalid saved host profile {}", path.display()))?,
+    );
+    let serialized = serde_json::to_vec(&profile);
+    wipe_secrets(&mut profile);
+    drop(profile);
+    let bytes = zeroize::Zeroizing::new(serialized?);
+    mold_secure::identity_file::write_private_file(path, &bytes, true)?;
+    Ok(())
+}
+
 fn delete_profiles(root: &Path, origin: &str) -> Result<()> {
     let digest = crate::store::origin_digest(origin);
     for file in [
@@ -581,9 +609,32 @@ pub fn default() -> Result<Option<SavedHost>> {
     default_at(&crate::default_store())
 }
 
+/// `Ok(None)` when no default is set, or its host has since been removed. A
+/// default whose profile is still there but cannot be read is an error, so
+/// a broken file never quietly sends commands to localhost instead.
 pub fn default_at(root: &Path) -> Result<Option<SavedHost>> {
-    match read_default_origin(root)? {
-        Some(origin) => find_by_origin_at(root, &origin),
+    let Some(origin) = read_default_origin(root)? else {
+        return Ok(None);
+    };
+    let scan = scan_at(root)?;
+    if let Some(host) = scan.hosts.into_iter().find(|h| h.origin == origin) {
+        return Ok(Some(host));
+    }
+    let digest = crate::store::origin_digest(&origin);
+    let broken = scan.skipped.iter().find(|path| {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|name| {
+                name == format!("{digest}.json") || name == format!("regular-{digest}.json")
+            })
+    });
+    match broken {
+        Some(path) => bail!(
+            "the default host {origin} is saved in {}, which cannot be read: {}; fix it, re-pair the host, or run `mold host use --clear`",
+            path.display(),
+            crate::explain_private_file(path)
+                .unwrap_or_else(|| "it is not a valid saved host profile".into())
+        ),
         None => Ok(None),
     }
 }
@@ -780,30 +831,66 @@ pub fn name_for_pairing_at(
     instance_id: Option<&str>,
     mode: ConnectionMode,
 ) -> Result<(String, Option<SavedHost>)> {
-    if let Some(previous) = instance_id
-        .map(|id| find_by_instance_id_at(root, id))
-        .transpose()?
-        .flatten()
-        .filter(|h| h.origin != origin && h.mode == mode && !h.ambiguous)
-    {
+    // Every entry of this server, not just the first: the one to replace is
+    // the one holding a profile in this mode at another origin.
+    if let Some(previous) = instance_id.filter(|id| !id.is_empty()).and_then(|id| {
+        list_at(root).ok()?.into_iter().find(|h| {
+            h.instance_id.as_deref() == Some(id)
+                && h.origin != origin
+                && h.profiles.contains(&mode)
+                && !h.ambiguous
+        })
+    }) {
         return Ok((previous.name.clone(), Some(previous)));
     }
     Ok((available_name_at(root, reported, origin)?, None))
 }
 
-/// Delete a superseded pairing's credentials after its server was saved
-/// again at `origin`, moving the default along with it.
-pub fn retire(superseded: &SavedHost, origin: &str) -> Result<()> {
-    retire_at(&crate::default_store(), superseded, origin)
+/// Delete the `mode` profile a pairing superseded after its server was saved
+/// again at `origin`, moving the default along with it. A profile in the
+/// other mode stays: it becomes that origin's selected mode and gives up
+/// its name, which the new pairing now holds.
+pub fn retire(superseded: &SavedHost, origin: &str, mode: ConnectionMode) -> Result<()> {
+    retire_at(&crate::default_store(), superseded, origin, mode)
 }
 
-pub fn retire_at(root: &Path, superseded: &SavedHost, origin: &str) -> Result<()> {
+pub fn retire_at(
+    root: &Path,
+    superseded: &SavedHost,
+    origin: &str,
+    mode: ConnectionMode,
+) -> Result<()> {
     anyhow::ensure!(
         superseded.origin != origin,
         "a pairing cannot supersede itself"
     );
     let was_default = read_default_origin(root)?.as_deref() == Some(superseded.origin.as_str());
-    delete_profiles(root, &superseded.origin)?;
+    let digest = crate::store::origin_digest(&superseded.origin);
+    let (gone, kept, kept_mode) = match mode {
+        ConnectionMode::Secure => (
+            format!("{digest}.json"),
+            format!("regular-{digest}.json"),
+            ConnectionMode::Regular,
+        ),
+        ConnectionMode::Regular => (
+            format!("regular-{digest}.json"),
+            format!("{digest}.json"),
+            ConnectionMode::Secure,
+        ),
+    };
+    if root.join(&kept).try_exists()? {
+        remove_if_present(&root.join(&gone))?;
+        mold_secure::identity_file::write_private_file(
+            &root.join(format!("regular-{digest}.mode")),
+            &serde_json::to_vec(&kept_mode)?,
+            true,
+        )?;
+        rewrite_profile(&root.join(&kept), |profile| {
+            profile.remove("name");
+        })?;
+    } else {
+        delete_profiles(root, &superseded.origin)?;
+    }
     if was_default {
         mold_secure::identity_file::write_private_file(
             &root.join(DEFAULT_FILE),
@@ -1234,7 +1321,13 @@ mod tests {
         new.name = Some(name);
         new.instance_id = Some("instance-1".into());
         crate::save_pairing_at(&root, &new).unwrap();
-        retire_at(&root, &superseded, "https://new.invalid").unwrap();
+        retire_at(
+            &root,
+            &superseded,
+            "https://new.invalid",
+            ConnectionMode::Secure,
+        )
+        .unwrap();
         let hosts = list_at(&root).unwrap();
         assert_eq!(hosts.len(), 1);
         assert_eq!(hosts[0].origin, "https://new.invalid");
@@ -1273,6 +1366,156 @@ mod tests {
         .unwrap();
         assert!(none_regular.is_none());
         assert_eq!((name.as_str(), none), ("lab", None));
+    }
+
+    /// A default whose profile cannot be read is an error naming the file,
+    /// never a silent fall back to localhost; a default whose host is gone
+    /// is simply unset.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_default_is_an_error_not_localhost() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, root) = store();
+        secure(&root, "https://one.invalid", Some("one"), &[]);
+        set_default_at(&root, "one").unwrap();
+        let profile = root.join(format!(
+            "{}.json",
+            crate::store::origin_digest("https://one.invalid")
+        ));
+        std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let error = format!("{:#}", default_at(&root).unwrap_err());
+        assert!(error.contains(&profile.display().to_string()), "{error}");
+        assert!(error.contains("chmod 600"), "{error}");
+        assert!(error.contains("mold host use --clear"), "{error}");
+        std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(default_at(&root).unwrap().unwrap().name, "one");
+        std::fs::remove_file(&profile).unwrap();
+        assert_eq!(default_at(&root).unwrap(), None);
+    }
+
+    /// Re-pairing one mode at a new origin retires only that mode: the
+    /// other mode's profile stays, becomes the selected mode, and gives up
+    /// the name the new pairing took.
+    #[test]
+    fn retiring_one_mode_keeps_the_other() {
+        let (_dir, root) = store();
+        let old = "https://both.invalid";
+        let mut secure_host = crate::prepare_bootstrap("hosts", "cli")
+            .unwrap()
+            .profile(old)
+            .unwrap();
+        secure_host.name = Some("workstation".into());
+        secure_host.instance_id = Some("inst-1".into());
+        crate::save_pairing_at(&root, &secure_host).unwrap();
+        let digest = crate::store::origin_digest(old);
+        mold_secure::identity_file::write_private_file(
+            &root.join(format!("regular-{digest}.json")),
+            &serde_json::to_vec(&serde_json::json!({
+                "origin": old, "api_key": "k", "name": "workstation", "instance_id": "inst-1"
+            }))
+            .unwrap(),
+            false,
+        )
+        .unwrap();
+        mold_secure::identity_file::write_private_file(
+            &root.join(format!("regular-{digest}.mode")),
+            &serde_json::to_vec(&ConnectionMode::Secure).unwrap(),
+            false,
+        )
+        .unwrap();
+        set_default_at(&root, "workstation").unwrap();
+        let (name, superseded) = name_for_pairing_at(
+            &root,
+            "x",
+            "https://new.invalid",
+            Some("inst-1"),
+            ConnectionMode::Secure,
+        )
+        .unwrap();
+        let superseded = superseded.unwrap();
+        assert_eq!(
+            (name.as_str(), superseded.origin.as_str()),
+            ("workstation", old)
+        );
+        let mut new = crate::prepare_bootstrap("hosts", "cli")
+            .unwrap()
+            .profile("https://new.invalid")
+            .unwrap();
+        new.name = Some(name);
+        new.instance_id = Some("inst-1".into());
+        crate::save_pairing_at(&root, &new).unwrap();
+        retire_at(
+            &root,
+            &superseded,
+            "https://new.invalid",
+            ConnectionMode::Secure,
+        )
+        .unwrap();
+
+        assert!(
+            !root.join(format!("{digest}.json")).exists(),
+            "the Secure profile went"
+        );
+        let remaining = list_at(&root).unwrap();
+        let old_entry = remaining.iter().find(|h| h.origin == old).unwrap();
+        assert_eq!(
+            old_entry.mode,
+            ConnectionMode::Regular,
+            "selector follows what is left"
+        );
+        assert_eq!(old_entry.profiles, vec![ConnectionMode::Regular]);
+        assert_ne!(
+            old_entry.name, "workstation",
+            "the new pairing owns the name"
+        );
+        let raw = crate::read_private(&root.join(format!("regular-{digest}.json"))).unwrap();
+        let profile: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(profile["api_key"], "k", "the Regular credential is kept");
+        assert_eq!(
+            resolved(&root, "workstation"),
+            Some(("https://new.invalid".into(), Match::Name))
+        );
+        assert_eq!(
+            default_at(&root).unwrap().unwrap().origin,
+            "https://new.invalid"
+        );
+    }
+
+    /// The replacement is found by (instance, mode) across every entry, not
+    /// by whichever entry with that instance happens to list first.
+    #[test]
+    fn the_superseded_entry_matches_instance_and_mode_together() {
+        let (_dir, root) = store();
+        let mut first = crate::prepare_bootstrap("hosts", "cli")
+            .unwrap()
+            .profile("https://a-secure.invalid")
+            .unwrap();
+        first.name = Some("secure-route".into());
+        first.instance_id = Some("inst-1".into());
+        crate::save_pairing_at(&root, &first).unwrap();
+        let regular = "http://10.0.0.8:7680";
+        mold_secure::identity_file::write_private_file(
+            &root.join(format!(
+                "regular-{}.json",
+                crate::store::origin_digest(regular)
+            )),
+            &serde_json::to_vec(&serde_json::json!({
+                "origin": regular, "api_key": "k", "name": "direct-route", "instance_id": "inst-1"
+            }))
+            .unwrap(),
+            false,
+        )
+        .unwrap();
+        let (name, superseded) = name_for_pairing_at(
+            &root,
+            "x",
+            "http://10.0.0.9:7680",
+            Some("inst-1"),
+            ConnectionMode::Regular,
+        )
+        .unwrap();
+        assert_eq!(name, "direct-route");
+        assert_eq!(superseded.unwrap().origin, regular);
     }
 
     #[test]

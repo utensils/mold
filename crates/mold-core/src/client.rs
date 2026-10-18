@@ -4157,6 +4157,7 @@ mod tests {
     /// A saved Regular credential always wins over `MOLD_API_KEY`: the env
     /// key belongs to whatever this shell last talked to, and must never be
     /// sent to a host that has its own saved key (or is saved keyless).
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_saved_regular_credential_wins_over_mold_api_key() {
         use wiremock::matchers::{header, method, path};

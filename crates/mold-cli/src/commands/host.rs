@@ -311,7 +311,7 @@ pub(crate) async fn pair_invitation(
         let mut host = mold_secure_client::pair_regular(invitation, device).await?;
         host.name = Some(name.clone());
         mold_secure_client::save_regular_host(&host)?;
-        retire_superseded(superseded, &host.origin)?;
+        retire_superseded(superseded, &host.origin, ConnectionMode::Regular)?;
         return Ok(Added {
             name,
             origin: host.origin.clone(),
@@ -329,7 +329,7 @@ pub(crate) async fn pair_invitation(
     let mut host = mold_secure_client::pair(invite, device).await?;
     host.name = Some(name.clone());
     mold_secure_client::save_pairing(&host)?;
-    retire_superseded(superseded, &host.origin)?;
+    retire_superseded(superseded, &host.origin, ConnectionMode::Secure)?;
     mold_secure_client::select_connection_mode(&host.origin, ConnectionMode::Secure)?;
     Ok(Added {
         name,
@@ -360,9 +360,13 @@ fn choose_name(
 
 /// After re-pairing a server that was saved under another origin, delete the
 /// old entry (its name and default already moved to the new one).
-fn retire_superseded(superseded: Option<SavedHost>, origin: &str) -> Result<()> {
+fn retire_superseded(
+    superseded: Option<SavedHost>,
+    origin: &str,
+    mode: ConnectionMode,
+) -> Result<()> {
     if let Some(old) = superseded {
-        hosts::retire(&old, origin)?;
+        hosts::retire(&old, origin, mode)?;
         eprintln!(
             "Replaced the earlier pairing of '{}' at {}.",
             old.name, old.origin
@@ -602,7 +606,7 @@ async fn save_key(
         ..Default::default()
     };
     mold_secure_client::save_regular_host(&host)?;
-    retire_superseded(superseded, origin)?;
+    retire_superseded(superseded, origin, ConnectionMode::Regular)?;
     Ok(Added {
         name,
         origin: origin.to_string(),
@@ -624,7 +628,7 @@ pub(crate) async fn add_manual_regular(
         name: Some(name.clone()),
         ..Default::default()
     })?;
-    retire_superseded(superseded, &origin)?;
+    retire_superseded(superseded, &origin, ConnectionMode::Regular)?;
     finish(
         Added {
             name,
@@ -847,6 +851,7 @@ mod tests {
             name: name.into(),
             origin: origin.into(),
             mode,
+            profiles: vec![mode],
             instance_id: None,
             hostname: None,
             endpoints: vec![],

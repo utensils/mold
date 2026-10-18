@@ -50,6 +50,42 @@ pub fn save_pairing_at(root: &Path, host: &PairedHost) -> Result<PathBuf> {
     mold_secure::identity_file::write_private_file(&dest, &bytes, true)?;
     Ok(dest)
 }
+/// Which owner-only rule a refused private file (or its folder) breaks, in
+/// words with the fix, or `None` when none of them is the reason. The check
+/// [`read_private`] makes is unchanged; this only explains a refusal.
+#[cfg(unix)]
+pub fn explain_private_file(path: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let me = rustix::process::getuid().as_raw();
+    let file = std::fs::symlink_metadata(path).ok()?;
+    let folder_path = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let folder = std::fs::metadata(folder_path).ok()?;
+    let (file_shown, folder_shown) = (path.display(), folder_path.display());
+    Some(if file.file_type().is_symlink() {
+        format!("{file_shown} is a symlink; pass the file itself")
+    } else if file.uid() != me {
+        format!("{file_shown} must be owned by you")
+    } else if file.mode() & 0o077 != 0 {
+        format!("{file_shown} must be private (chmod 600 {file_shown})")
+    } else if file.nlink() > 1 {
+        format!("{file_shown} has other hard links; copy it to a new file")
+    } else if folder.uid() != me {
+        format!("{file_shown} is in a folder you do not own ({folder_shown})")
+    } else if folder.mode() & 0o077 != 0 {
+        format!("{file_shown}'s folder {folder_shown} must be private (chmod 700 {folder_shown})")
+    } else {
+        return None;
+    })
+}
+
+#[cfg(not(unix))]
+pub fn explain_private_file(_path: &Path) -> Option<String> {
+    None
+}
+
 pub fn read_private(path: &Path) -> Result<zeroize::Zeroizing<Vec<u8>>> {
     Ok(mold_secure::identity_file::read_private_file(path, 16384)?)
 }
