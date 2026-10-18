@@ -601,7 +601,7 @@ pub async fn run_discover(timeout_secs: u64, json: bool, probe: bool) -> Result<
     if let Some(first) = rows.first() {
         println!();
         println!(
-            "Connect: mold ps --host {url}  (or export MOLD_HOST={url})",
+            "Connect: mold host add {url}  (pairs and saves it; or mold ps --host {url})",
             url = first.server.url
         );
     }

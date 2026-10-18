@@ -114,8 +114,10 @@ this check with a mutable `latest` tag or retry paid creation blindly.
 
 ```bash
 mold relay connect --relay-url wss://API.execute-api.REGION.amazonaws.com/production --target 127.0.0.1:7680
-mold pairing create --output "$MOLD_HOME/secure/invitation.json"
-mold pair --invite-file /private/invitation.json --name "My client"
+mold host invite
+mold host add
+mold host add - < /private/link.txt
+mold host add https://workstation.example --api-key-file /private/operator.key
 mold host list
 mold host use workstation
 mold ps --host workstation
@@ -127,8 +129,12 @@ host; authorize its public signing key through the relay operator's IAM
 provisioning command. Configure MOLD_PUBLIC_URL and MOLD_SECURE_WEBSOCKET_URL
 on headless hosts; mold serve then owns its outbound connector. The separate
 relay connect command reads the identity, never an old relay token.
-The operator creates a one-use, two-minute invitation using MOLD_API_KEY (or
-@owner-only-key-file). Transfer the invitation privately. Each paired client
+On the host, `mold host invite` prints a one-use, two-minute pairing link (only
+the link on stdout) using the operator key; the user pastes it into
+`mold host add` on the client. With the host URL and an operator key instead,
+`mold host add` exchanges the key for this client's own grant and never stores
+it; an app/device key is saved as Regular. Never ask the user to paste a key or
+link into chat: have them run `! mold host add …` themselves. Each paired client
 stores its own key and revocable grant under a host name (`mold host list`).
 `--host NAME` (global, on every remote command), `MOLD_HOST=NAME`, or a default
 set with `mold host use NAME` selects it; a URL still works, and a Tailscale IP
@@ -147,14 +153,14 @@ credential; the managed Mold proxy always requires Secure. Never fall back to a
 cloud-provided host key. Uploads are bounded to 64 MiB; responses stream with backpressure.
 Enable Regular with `mold serve --allow-direct-api`, `MOLD_ALLOW_DIRECT_API=1`, or
 Nix `services.mold.allowDirectApi = true`. For a one-use direct invitation:
-`mold pairing create --mode regular --direct-url https://direct.example:7680 --output /private/regular.json`.
-Pair with the same `mold pair --invite-file` command. Manual direct setup is
-`mold pair --mode regular --direct-url https://direct.example:7680 --api-key-file /private/key`.
+`mold host invite --regular --direct-url https://direct.example:7680`, then
+`mold host add` with that link. With a device key you already hold:
+`mold host add https://direct.example:7680 --api-key-file /private/key`.
 The private per-origin profile captures its selected mode; `MOLD_CONNECTION_MODE=secure|regular`
 is an explicit CLI override. Secure credentials cannot authorize Regular HTTP.
 The canonical per-home operator file also authorizes invitation export when
 MOLD_API_KEY is absent. Keep invitations and credentials in owner-private files.
-For a REST app, claim a Regular invitation with `--name "Custom app"` in a
+For a REST app, claim a Regular invitation with `--device-name "Custom app"` in a
 separate private `MOLD_HOME`. Read its persistent key from
 `secure/clients/regular-<SHA256(origin)>.json` and send `X-API-Key`; Bearer alone
 is not accepted. Revoke only that app's grant when retiring it. Nix `apiKeyFile`

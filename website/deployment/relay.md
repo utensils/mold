@@ -59,7 +59,7 @@ Tailscale address; do not use a Mold proxy URL.
 On the authenticated host, export a new private invitation:
 
 ```bash
-mold pairing create --mode regular --direct-url http://HOST:7680 \
+mold host invite --regular --direct-url http://HOST:7680 \
   --output "$MOLD_HOME/secure/custom-app-invitation.json"
 ```
 
@@ -68,7 +68,7 @@ select the service home and the operator key file configured by `apiKeyFile`:
 
 ```bash
 sudo -u 'mold' env MOLD_HOME=/var/lib/mold \
-  MOLD_API_KEY=@/run/agenix/mold-api-key mold pairing create --mode regular \
+  MOLD_API_KEY=@/run/agenix/mold-api-key mold host invite --regular \
   --direct-url http://HOST:7680 \
   --output /var/lib/mold/secure/custom-app-invitation.json
 ```
@@ -81,8 +81,8 @@ Use a separate private client home for each app:
 
 ```bash
 mkdir -m 700 "$HOME/.mold-custom-app"
-MOLD_HOME="$HOME/.mold-custom-app" mold pair \
-  --invite-file /private/custom-app-invitation.json --name "Custom app"
+MOLD_HOME="$HOME/.mold-custom-app" mold host add \
+  /private/custom-app-invitation.json --device-name "Custom app"
 ```
 
 The invitation is single use. The resulting device key persists across server
@@ -146,27 +146,52 @@ mold relay connect --relay-url wss://API.execute-api.REGION.amazonaws.com/produc
 The standalone equivalent is `mold-relay connect`; build it with
 `cargo build --release -p mold-ai-relay --features cli`. Use `--identity-file`
 when the connector runs with a different `MOLD_HOME`. Pass the same WSS endpoint
-to `mold pairing create --relay-url WSS_ENDPOINT` when exporting an invitation
+to `mold host invite --relay-url WSS_ENDPOINT` when exporting an invitation
 for a separately supervised connector. Only numeric loopback
 HTTP targets are accepted. Before forwarding any request, the connector probes
 and reuses the exact socket to verify that anonymous requests are rejected.
 
-Create a client invitation on the host:
+## Pairing the CLI
+
+On the host, print a one-use pairing link:
 
 ```bash
-mold pairing create --output "$MOLD_HOME/secure/invitation.json"
+mold host invite
 ```
 
-This uses the operator `MOLD_API_KEY` (also supports `@/private/key-file`), writes
-a new owner-only file, and prints only its filename and the host public key.
-The invitation expires after two minutes and may be claimed once. Transfer it
-privately to the client, then run:
+This uses the operator key (`--api-key-file`, `MOLD_API_KEY` — also
+`@/private/key-file` — or the home's operator credential). Only the link goes to
+stdout; the expiry and the host public key go to stderr. It is the same link the
+apps show, so it pairs a phone or Studio too. It expires after two minutes and
+may be claimed once. On the client, run this and paste the link at the prompt
+(passing the link as an argument also works, but leaves it in shell history):
 
 ```bash
-mold pair --invite-file /private/invitation.json --name "My laptop"
+mold host add
 ```
 
-Set `MOLD_HOST` to the paired origin printed by the command. Existing commands
+`mold host invite --output FILE` writes an owner-only invitation file instead,
+for `mold host add FILE` on the client.
+
+From a client that holds the host's operator key, skip the link:
+`mold host add https://HOST --api-key-file /private/operator.key` asks the host
+for an invitation and claims it at once, so the client gets its own revocable
+grant and the operator key is exchanged, never stored. An app or device key is
+saved as a Regular credential instead, and a host with authentication off is
+saved with no key (only when the host also answers without one). The key comes
+from `--api-key-file`, `--api-key-stdin` or a hidden prompt, never from
+`MOLD_API_KEY`. Over `https://` or loopback this is a Secure pairing. Over
+plain `http://` it works across Tailscale only when the `tailscale` CLI on this
+machine confirms the address (or every address the name resolves to) is a peer
+on your tailnet: `tailscale status` must list it. An address in Tailscale's
+ranges alone proves nothing, since 100.64.0.0/10 is also carrier-grade NAT.
+Otherwise Mold refuses a Secure pairing over plain `http://`, because the
+invitation would cross the network readable: use the host's `https://` address,
+pair with the link, or pass `--regular` for a direct HTTP connection (allowed,
+with a warning, on a network you trust).
+
+The client saves the host under its name (`mold host list`); use it with
+`--host NAME`, `MOLD_HOST=NAME`, or `mold host use NAME`. Existing commands
 such as `mold server status`, `mold library`, `mold queue` and `mold run` use the
 pinned encrypted transport automatically. Pairing state lives in
 `$MOLD_HOME/secure/clients`; do not copy it between unrelated users or devices.

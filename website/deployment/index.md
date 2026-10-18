@@ -10,11 +10,11 @@ The simplest setup: run the server on a GPU host, generate from anywhere.
 ```bash
 # On your GPU server
 mold serve
-mold pairing create --output "$MOLD_HOME/secure/invitation.json"
+mold host invite                 # prints a one-use pairing link
 
-# Privately transfer the invitation, then pair on your laptop
-mold pair --invite-file /private/invitation.json
-MOLD_HOST=PAIRED_HOST_ORIGIN mold run "a cat"
+# Paste the link on your laptop, then generate there
+mold host add                    # then paste the link
+mold run "a cat" --host workstation
 ```
 
 Secure is the default for both direct connections and the optional proxy.

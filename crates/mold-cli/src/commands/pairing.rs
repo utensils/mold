@@ -1,15 +1,144 @@
-//! Owner-only headless invitation export. Private invitation material never
-//! enters arguments, stdout, logs, or a remote plaintext HTTP request.
+//! Pairing invitations: create one on this host (`mold host invite`), or ask
+//! a host for one with its operator key (`mold host add URL`). Private
+//! invitation material never enters arguments or logs; on this host it goes
+//! only to stdout as the one pairing link, or to an owner-only file.
 use anyhow::{bail, Context, Result};
 use std::{net::SocketAddr, path::Path};
+use zeroize::Zeroizing;
 
-pub async fn create(
+/// What `POST /api/pairing/sessions` answered.
+pub(crate) enum SessionReply {
+    /// A one-use invitation (the raw session response).
+    Created(serde_json::Value),
+    /// A refusal, with the API error `code` and message when the body
+    /// carried them.
+    Refused {
+        status: u16,
+        code: String,
+        message: String,
+    },
+}
+
+/// Ask `base_url` for a pairing session with `key` (sent as `X-API-Key`
+/// when non-empty). `regular_direct` asks for a Regular invitation bound to
+/// that explicit direct origin. A transport failure is an error.
+pub(crate) async fn request_session(
+    base_url: &str,
+    key: &str,
+    regular_direct: Option<&str>,
+) -> Result<SessionReply> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    request_session_with(&client, base_url, key, regular_direct).await
+}
+
+/// [`request_session`] through the caller's no-proxy, no-redirect client.
+pub(crate) async fn request_session_with(
+    client: &reqwest::Client,
+    base_url: &str,
+    key: &str,
+    regular_direct: Option<&str>,
+) -> Result<SessionReply> {
+    let mut request = client.post(format!(
+        "{}/api/pairing/sessions",
+        base_url.trim_end_matches('/')
+    ));
+    if !key.is_empty() {
+        request = request.header("x-api-key", key);
+    }
+    let request = match regular_direct {
+        Some(origin) => request.json(&serde_json::json!({"mode":"regular","direct_url":origin})),
+        None => request.body(""),
+    };
+    let mut response = request
+        .send()
+        .await
+        .with_context(|| format!("cannot contact the Mold host at {base_url}"))?;
+    let status = response.status();
+    let mut bytes = Zeroizing::new(Vec::new());
+    while let Some(chunk) = response.chunk().await? {
+        if bytes.len() + chunk.len() > 32768 {
+            bail!("invalid pairing response size")
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if status.is_success() {
+        return Ok(SessionReply::Created(serde_json::from_slice(&bytes)?));
+    }
+    let body = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default();
+    let field = |key: &str| body[key].as_str().unwrap_or_default().to_owned();
+    Ok(SessionReply::Refused {
+        status: status.as_u16(),
+        code: field("code"),
+        message: field("error"),
+    })
+}
+
+/// The first usable key in an owner-only key file: the first line that is
+/// neither blank nor a `#` comment.
+pub(crate) fn read_key_file(path: &Path) -> Result<Zeroizing<String>> {
+    let bytes = read_private_explained(path, "key file")?;
+    Ok(Zeroizing::new(
+        std::str::from_utf8(&bytes)?
+            .lines()
+            .map(str::trim)
+            .find(|v| !v.is_empty() && !v.starts_with('#'))
+            .context("key file is empty")?
+            .to_string(),
+    ))
+}
+
+/// This host's operator key: `--api-key-file`, else `MOLD_API_KEY` (a key,
+/// a comma list whose first entry is used, or `@owner-only-key-file`), else
+/// the per-home operator credential.
+pub(crate) fn operator_key(api_key_file: Option<&Path>) -> Result<Zeroizing<String>> {
+    if let Some(path) = api_key_file {
+        return read_key_file(path);
+    }
+    let raw = Zeroizing::new(match std::env::var("MOLD_API_KEY") {
+        Ok(value) => value,
+        Err(_) => mold_secure_client::operator_key::read(
+            &mold_core::Config::mold_dir().context("Mold home is unavailable")?,
+        )?
+        .context("Set MOLD_API_KEY to the host operator key or @owner-only-key-file, or pass --api-key-file")?
+        .to_string(),
+    });
+    if let Some(path) = raw.strip_prefix('@') {
+        return read_key_file(Path::new(path));
+    }
+    Ok(Zeroizing::new(
+        raw.split(',')
+            .map(str::trim)
+            .find(|v| !v.is_empty())
+            .context("operator key is empty")?
+            .to_string(),
+    ))
+}
+
+/// [`mold_secure_client::read_private`], saying which owner-only rule a
+/// refused file or its folder breaks and how to fix it. The check itself
+/// is unchanged.
+pub(crate) fn read_private_explained(path: &Path, what: &str) -> Result<Zeroizing<Vec<u8>>> {
+    mold_secure_client::read_private(path).map_err(|error| {
+        match mold_secure_client::explain_private_file(path) {
+            Some(problem) => anyhow::anyhow!("{what} {problem}"),
+            None => error.context(format!("cannot read {what} {}", path.display())),
+        }
+    })
+}
+
+/// A canonical invitation from this authenticated local host, as the value
+/// `mold host add` / [`mold_secure_client::pairing_link`] take.
+pub(crate) async fn create_invitation(
     target: SocketAddr,
-    output: &Path,
     relay_url: Option<&str>,
     mode: mold_secure_client::ConnectionMode,
     direct_url: Option<&str>,
-) -> Result<()> {
+    api_key_file: Option<&Path>,
+) -> Result<serde_json::Value> {
     anyhow::ensure!(
         mode != mold_secure_client::ConnectionMode::Regular || relay_url.is_none(),
         "Regular pairing cannot use a proxy endpoint"
@@ -19,7 +148,7 @@ pub async fn create(
             direct_url.context("Regular pairing requires --direct-url")?,
         )?),
         mold_secure_client::ConnectionMode::Secure => {
-            anyhow::ensure!(direct_url.is_none(), "--direct-url requires --mode regular");
+            anyhow::ensure!(direct_url.is_none(), "--direct-url requires --regular");
             None
         }
     };
@@ -27,74 +156,34 @@ pub async fn create(
     if let Some(url) = relay_url {
         validate_relay_url(url)?;
     }
-    // Check the output destination before consuming a short-lived invitation.
-    if output.try_exists()? {
-        bail!("invitation output already exists; choose a new private filename")
-    }
-    let raw = match std::env::var("MOLD_API_KEY") {
-        Ok(value) => value,
-        Err(_) => mold_secure_client::operator_key::read(
-            &mold_core::Config::mold_dir().context("Mold home is unavailable")?,
-        )?
-        .context("Set MOLD_API_KEY to the host operator key or @owner-only-key-file")?
-        .to_string(),
-    };
-    let key = if let Some(path) = raw.strip_prefix('@') {
-        let bytes = mold_secure_client::read_private(Path::new(path))?;
-        std::str::from_utf8(&bytes)?
-            .lines()
-            .map(str::trim)
-            .find(|v| !v.is_empty() && !v.starts_with('#'))
-            .context("operator key file is empty")?
-            .to_string()
-    } else {
-        raw.split(',')
-            .map(str::trim)
-            .find(|v| !v.is_empty())
-            .context("operator key is empty")?
-            .to_string()
-    };
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(10))
-        .build()?;
-    let request = client
-        .post(format!("http://{target}/api/pairing/sessions"))
-        .header("x-api-key", key);
-    let request = if let Some(origin) = direct_url {
-        request.json(&serde_json::json!({"mode":"regular","direct_url":origin}))
-    } else {
-        request.body("")
-    };
-    let mut response = request
-        .send()
+    let key = operator_key(api_key_file)?;
+    let value = match request_session(&format!("http://{target}"), &key, direct_url.as_deref())
         .await
         .context("cannot contact the local Mold host")?
-        .error_for_status()
-        .context("host refused pairing; use its operator credential")?;
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        if bytes.len() + chunk.len() > 32768 {
-            bail!("invalid pairing response size")
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-    let value = if mode == mold_secure_client::ConnectionMode::Regular {
-        regular_invitation_payload(value)?
-    } else {
-        invitation_payload(value, relay_url)?
+    {
+        SessionReply::Created(value) => value,
+        SessionReply::Refused { status, code, .. } => bail!(
+            "host refused pairing ({status}{}); use its operator credential",
+            if code.is_empty() {
+                String::new()
+            } else {
+                format!(" {code}")
+            }
+        ),
     };
-    mold_secure_client::write_invitation(output, &value)?;
-    println!("Pairing invitation saved to {}. It expires in two minutes; transfer it privately and run mold pair --invite-file <file> on the client.",output.display());
-    println!(
-        "Host public signing key: {}",
-        value["host_key"].as_str().unwrap_or_default()
-    );
-    Ok(())
+    if mode == mold_secure_client::ConnectionMode::Regular {
+        regular_invitation_payload(value)
+    } else {
+        invitation_payload(value, relay_url)
+    }
 }
-fn invitation_payload(
+
+/// Write an invitation to a new owner-only file (the `--output` form).
+pub(crate) fn write_invitation_file(output: &Path, value: &serde_json::Value) -> Result<()> {
+    mold_secure_client::write_invitation(output, value)
+}
+
+pub(crate) fn invitation_payload(
     mut value: serde_json::Value,
     relay_url: Option<&str>,
 ) -> Result<serde_json::Value> {
@@ -142,7 +231,9 @@ fn validate_relay_url(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn regular_invitation_payload(mut value: serde_json::Value) -> Result<serde_json::Value> {
+pub(crate) fn regular_invitation_payload(
+    mut value: serde_json::Value,
+) -> Result<serde_json::Value> {
     anyhow::ensure!(
         value["mode"] == "regular",
         "invalid Regular invitation response"
@@ -189,6 +280,26 @@ mod tests {
         assert_eq!(output["name"], "Host");
         assert!(output.get("auth_required").is_none());
     }
+    /// The exported Secure invitation is the shared pairing link's payload:
+    /// it encodes and parses back unchanged.
+    #[test]
+    fn a_secure_export_becomes_the_shared_pairing_link() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../studio/api/pairing.fixtures.json"))
+                .unwrap();
+        let mut session = fixture["links"][3]["payload"].clone();
+        session["protocol"] = 3.into();
+        session["hostname"] = "Roaming Studio".into();
+        session["auth_required"] = true.into();
+        let invitation = invitation_payload(session, None).unwrap();
+        let link = mold_secure_client::pairing_link(&invitation).unwrap();
+        assert!(link.starts_with("https://utensils.io/mold/pair#version=2&"));
+        let parsed = mold_secure_client::parse_pairing_link(&link).unwrap();
+        assert_eq!(parsed["base_url"], "https://relay.example");
+        assert_eq!(parsed["name"], "Roaming Studio");
+        let _: mold_secure_client::PairingInvite = serde_json::from_value(parsed).unwrap();
+    }
+
     #[test]
     fn standalone_invitation_binds_an_explicit_credential_free_relay_endpoint() {
         let value = serde_json::json!({"protocol":3,"hostname":"host","endpoints":[{"kind":"relay","url":"https://host.example"}]});

@@ -6,6 +6,8 @@ mod bootstrap;
 pub use bootstrap::*;
 pub use mold_secure::{identity_file, operator_key, Binding};
 pub mod hosts;
+pub mod link;
+pub use link::{pairing_link, parse_pairing_link, PAIRING_LINK};
 mod http;
 pub use http::*;
 
