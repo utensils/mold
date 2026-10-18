@@ -932,8 +932,9 @@ reads a file holding the link or JSON invitation. A link passed as an argument
 works too, but stays in your shell history until it is claimed. With a host URL instead it
 asks the host for an invitation with the key from `--api-key-file`,
 `--api-key-stdin`, or a hidden prompt (never `MOLD_API_KEY`). Over plain
-`http://` this needs a loopback or Tailscale address or MagicDNS name (a
-100.64.0.0/10 address counts only while this machine is on a tailnet too), or `--regular` (with a
+`http://` this needs a loopback address, a tailnet peer the `tailscale` CLI
+confirms (`tailscale status` lists the address, or every address its name
+resolves to), or `--regular` (with a
 warning); otherwise use `https://` or the link:
 
 | The host answers                                   | `mold host add`                                                                                       |

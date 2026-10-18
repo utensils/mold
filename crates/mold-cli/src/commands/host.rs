@@ -417,14 +417,16 @@ fn key_outcome(status: u16, code: &str, regular: bool) -> Result<KeyOutcome> {
 /// on the network) and allowed, with a warning, for an explicit Regular
 /// direct connection.
 fn plain_http_policy(origin: &str, regular: bool) -> Result<bool> {
-    plain_http_policy_with(origin, regular, resolve_bounded, local_addresses)
+    plain_http_policy_with(origin, regular, resolve_bounded, tailnet_peer_ips)
 }
+
+type IpSet = std::collections::HashSet<std::net::IpAddr>;
 
 fn plain_http_policy_with(
     origin: &str,
     regular: bool,
     resolve: impl Fn(&str) -> Option<Vec<std::net::IpAddr>>,
-    local: impl Fn() -> Vec<std::net::IpAddr>,
+    peers: impl Fn() -> Option<IpSet>,
 ) -> Result<bool> {
     let Ok(url) = reqwest::Url::parse(origin) else {
         return Ok(false);
@@ -432,7 +434,7 @@ fn plain_http_policy_with(
     let machine = url.host_str().unwrap_or_default();
     if url.scheme() != "http"
         || crate::control::is_loopback_host(origin)
-        || is_tailscale_machine(machine, resolve, local)
+        || is_verified_tailnet_peer(machine, resolve, peers)
     {
         return Ok(false);
     }
@@ -443,47 +445,116 @@ fn plain_http_policy_with(
     Ok(true)
 }
 
-/// A Tailscale path: a Tailscale address, a MagicDNS `*.ts.net` name, or a
-/// name whose every resolved address is a Tailscale address (a bare MagicDNS
-/// name such as `workstation`). See [`is_tailnet_ip`] for which addresses.
-fn is_tailscale_machine(
+/// Whether Tailscale itself confirms `machine` is a tailnet peer: the
+/// literal address, or EVERY address the name resolves to, must be in the
+/// IP lists `tailscale status` reports. The address ranges are only a cheap
+/// pre-filter (100.64.0.0/10 is also carrier-grade NAT); a missing or
+/// failing CLI verifies nothing.
+fn is_verified_tailnet_peer(
     machine: &str,
     resolve: impl Fn(&str) -> Option<Vec<std::net::IpAddr>>,
-    local: impl Fn() -> Vec<std::net::IpAddr>,
+    peers: impl Fn() -> Option<IpSet>,
 ) -> bool {
-    let local_tailnet = std::cell::OnceCell::new();
-    let on_tailnet = || {
-        *local_tailnet.get_or_init(|| {
-            local().iter().any(|ip| {
-                ip.is_ipv4() && mold_secure_client::hosts::is_tailscale_address(&ip.to_string())
-            })
-        })
-    };
+    use mold_secure_client::hosts::is_tailscale_address;
     let bare = machine.trim_matches(['[', ']']);
-    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
-        return is_tailnet_ip(ip, on_tailnet);
+    let candidates = match bare.parse::<std::net::IpAddr>() {
+        Ok(ip) => vec![ip],
+        Err(_) => match resolve(&machine.trim_end_matches('.').to_ascii_lowercase()) {
+            Some(ips) if !ips.is_empty() => ips,
+            _ => return false,
+        },
+    };
+    if !candidates
+        .iter()
+        .all(|ip| is_tailscale_address(&ip.to_string()))
+    {
+        return false;
     }
-    let name = machine.trim_end_matches('.').to_ascii_lowercase();
-    if name.ends_with(".ts.net") {
-        return true;
-    }
-    resolve(&name)
-        .is_some_and(|ips| !ips.is_empty() && ips.iter().all(|ip| is_tailnet_ip(*ip, on_tailnet)))
+    peers().is_some_and(|known| candidates.iter().all(|ip| known.contains(ip)))
 }
 
-/// Tailscale's own IPv6 prefix (fd7a:115c:a1e0::/48) is conclusive. Its IPv4
-/// range, 100.64.0.0/10, is also carrier-grade NAT, so it counts only when
-/// this machine has a tailnet address of its own (Tailscale is up here).
-fn is_tailnet_ip(ip: std::net::IpAddr, on_tailnet: impl Fn() -> bool) -> bool {
-    mold_secure_client::hosts::is_tailscale_address(&ip.to_string())
-        && (ip.is_ipv6() || on_tailnet())
+/// Every Tailscale IP of this machine and its peers, from
+/// `tailscale status --json` (bounded to three seconds). `None` when the
+/// CLI is missing, slow, fails, or prints something unreadable.
+fn tailnet_peer_ips() -> Option<IpSet> {
+    let cli = tailscale_cli()?;
+    let output = run_bounded(
+        &cli,
+        &["status", "--json"],
+        std::time::Duration::from_secs(3),
+    )?;
+    parse_tailnet_ips(&output)
 }
 
-/// This machine's interface addresses (empty when they cannot be read).
-fn local_addresses() -> Vec<std::net::IpAddr> {
-    if_addrs::get_if_addrs()
-        .map(|interfaces| interfaces.into_iter().map(|i| i.ip()).collect())
-        .unwrap_or_default()
+/// The first `tailscale` on PATH, else the macOS app's bundled CLI.
+fn tailscale_cli() -> Option<PathBuf> {
+    let on_path = std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|dir| dir.join("tailscale"))
+            .find(|candidate| candidate.is_file())
+    });
+    on_path.or_else(|| {
+        let app = PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale");
+        (cfg!(target_os = "macos") && app.is_file()).then_some(app)
+    })
+}
+
+/// Only `Self.TailscaleIPs` and each `Peer.*.TailscaleIPs` are read; the
+/// rest of the status (names, keys, routes) is ignored and never logged.
+fn parse_tailnet_ips(json: &[u8]) -> Option<IpSet> {
+    let status: serde_json::Value = serde_json::from_slice(json).ok()?;
+    let ips_of = |node: &serde_json::Value| -> Vec<std::net::IpAddr> {
+        node["TailscaleIPs"]
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .filter_map(|ip| ip.as_str()?.parse().ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut ips: IpSet = ips_of(&status["Self"]).into_iter().collect();
+    if let Some(peers) = status["Peer"].as_object() {
+        for peer in peers.values() {
+            ips.extend(ips_of(peer));
+        }
+    }
+    Some(ips)
+}
+
+/// Run `program args` and return its stdout, or `None` when it cannot
+/// start, exits non-zero, or outlives `timeout` (then it is killed).
+fn run_bounded(program: &Path, args: &[&str], timeout: std::time::Duration) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    // Drain concurrently so a large status cannot fill the pipe and stall.
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    let bytes = reader.join().ok()?.ok()?;
+    status.success().then_some(bytes)
 }
 
 /// The system resolver, given at most two seconds; `None` on failure or
@@ -1012,74 +1083,122 @@ mod tests {
         let ips = |list: &[&str]| Some(list.iter().map(|ip| ip.parse().unwrap()).collect());
         match host {
             "workstation" => ips(&["100.101.102.103", "fd7a:115c:a1e0::5"]),
-            "v6-only" => ips(&["fd7a:115c:a1e0::5"]),
+            "workstation.tail1234.ts.net" => ips(&["100.101.102.103"]),
+            "elsewhere.ts.net" => ips(&["100.64.9.9"]),
             "mixed" => ips(&["100.101.102.103", "192.168.1.5"]),
             "lan-box" => ips(&["192.168.1.5"]),
             _ => None,
         }
     }
 
-    fn on_a_tailnet() -> Vec<std::net::IpAddr> {
-        vec![
-            "192.168.1.9".parse().unwrap(),
-            "100.88.1.2".parse().unwrap(),
-        ]
+    /// What `tailscale status --json` would report: this machine and two
+    /// peers (the shape matches the real output; only the IP lists matter).
+    const STATUS: &str = r#"{
+        "Self": {"HostName": "laptop", "TailscaleIPs": ["100.88.1.2", "fd7a:115c:a1e0::2"]},
+        "Peer": {
+            "nodekey:aa": {"HostName": "workstation", "TailscaleIPs": ["100.101.102.103", "fd7a:115c:a1e0::5"]},
+            "nodekey:bb": {"HostName": "render", "TailscaleIPs": ["100.105.134.43"]}
+        }
+    }"#;
+
+    fn peers() -> Option<std::collections::HashSet<std::net::IpAddr>> {
+        parse_tailnet_ips(STATUS.as_bytes())
     }
 
-    fn off_a_tailnet() -> Vec<std::net::IpAddr> {
-        vec!["192.168.1.9".parse().unwrap()]
+    fn no_tailscale() -> Option<std::collections::HashSet<std::net::IpAddr>> {
+        None
     }
 
-    /// https, loopback and Tailscale are private paths; plain HTTP to
-    /// anything else is refused for Secure and warned about for Regular.
-    /// 100.64.0.0/10 is also carrier-grade NAT, so an IPv4 address there
-    /// counts only when this machine is on a tailnet itself; Tailscale's
-    /// fd7a:115c:a1e0::/48 and `*.ts.net` names count on their own.
+    /// Plain-HTTP Secure pairing is allowed over Tailscale only when the
+    /// `tailscale` CLI confirms the destination is a tailnet peer: a literal
+    /// address, or EVERY address a name resolves to (`.ts.net` included).
+    /// 100.64.0.0/10 is also carrier-grade NAT, so the range alone proves
+    /// nothing; a missing CLI or an address it does not list is refused.
     #[test]
     fn plain_http_is_refused_for_secure_and_warned_for_regular() {
-        let policy = |origin: &str, regular, local: fn() -> Vec<std::net::IpAddr>| {
-            plain_http_policy_with(origin, regular, fake_dns, local)
+        type Peers = fn() -> Option<std::collections::HashSet<std::net::IpAddr>>;
+        let policy = |origin: &str, regular, peers: Peers| {
+            plain_http_policy_with(origin, regular, fake_dns, peers)
         };
-        for local in [on_a_tailnet as fn() -> _, off_a_tailnet] {
+        for peers in [peers as Peers, no_tailscale] {
             for origin in [
                 "https://192.168.1.5",
                 "http://127.0.0.1:7680",
                 "http://localhost:7680",
-                "http://[fd7a:115c:a1e0::43]:7680",
-                "http://workstation.tail1234.ts.net:7680",
-                "http://WORKSTATION.TAIL1234.TS.NET.:7680",
-                "http://v6-only:7680",
             ] {
-                assert!(!policy(origin, false, local).unwrap(), "{origin}");
-                assert!(!policy(origin, true, local).unwrap(), "{origin}");
-            }
-            for origin in [
-                "http://192.168.1.5:7680",
-                "http://172.17.0.1:7680",
-                "http://10.0.0.8:7680",
-                "http://mixed:7680",
-                "http://lan-box:7680",
-                "http://unknown-name:7680",
-                "http://evil-ts.net:7680",
-            ] {
-                let error = policy(origin, false, local).unwrap_err().to_string();
-                assert!(
-                    error.contains("plain HTTP") && error.contains("--regular"),
-                    "{error}"
-                );
-                assert!(policy(origin, true, local).unwrap(), "{origin}");
+                assert!(!policy(origin, false, peers).unwrap(), "{origin}");
             }
         }
-        // A CGNAT-range address (or a name resolving to one) is Tailscale
-        // only from a machine with a tailnet address of its own.
-        for origin in ["http://100.105.134.43:7680", "http://workstation:7680"] {
-            assert!(!policy(origin, false, on_a_tailnet).unwrap(), "{origin}");
-            let error = policy(origin, false, off_a_tailnet)
-                .unwrap_err()
-                .to_string();
+        for origin in [
+            "http://100.105.134.43:7680",
+            "http://[fd7a:115c:a1e0::5]:7680",
+            "http://workstation:7680",
+            "http://workstation.tail1234.ts.net:7680",
+        ] {
+            assert!(!policy(origin, false, peers).unwrap(), "{origin}");
+            assert!(!policy(origin, true, peers).unwrap(), "{origin}");
+            let error = policy(origin, false, no_tailscale).unwrap_err().to_string();
             assert!(error.contains("plain HTTP"), "{origin}: {error}");
-            assert!(policy(origin, true, off_a_tailnet).unwrap(), "{origin}");
+            assert!(policy(origin, true, no_tailscale).unwrap(), "{origin}");
         }
+        for origin in [
+            "http://100.64.9.9:7680",
+            "http://[fd7a:115c:a1e0::99]:7680",
+            "http://192.168.1.5:7680",
+            "http://172.17.0.1:7680",
+            "http://mixed:7680",
+            "http://lan-box:7680",
+            "http://unknown-name:7680",
+            "http://elsewhere.ts.net:7680",
+        ] {
+            let error = policy(origin, false, peers).unwrap_err().to_string();
+            assert!(
+                error.contains("plain HTTP") && error.contains("--regular"),
+                "{error}"
+            );
+            assert!(policy(origin, true, peers).unwrap(), "{origin}");
+        }
+    }
+
+    #[test]
+    fn tailscale_status_is_read_for_ip_lists_only() {
+        let ips = peers().unwrap();
+        for ip in [
+            "100.88.1.2",
+            "100.101.102.103",
+            "fd7a:115c:a1e0::5",
+            "100.105.134.43",
+        ] {
+            assert!(ips.contains(&ip.parse().unwrap()), "{ip}");
+        }
+        assert_eq!(ips.len(), 5);
+        assert_eq!(parse_tailnet_ips(b"not json"), None);
+        assert_eq!(parse_tailnet_ips(b"{}").map(|s| s.len()), Some(0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_tailscale_cli_is_bounded_and_may_be_missing() {
+        let short = std::time::Duration::from_millis(200);
+        assert_eq!(
+            run_bounded(Path::new("/nonexistent/tailscale"), &["status"], short),
+            None
+        );
+        let started = std::time::Instant::now();
+        assert_eq!(run_bounded(Path::new("/bin/sleep"), &["5"], short), None);
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        assert_eq!(
+            run_bounded(Path::new("/bin/sh"), &["-c", "exit 3"], short),
+            None
+        );
+        assert_eq!(
+            run_bounded(
+                Path::new("/bin/sh"),
+                &["-c", "printf ok"],
+                std::time::Duration::from_secs(3)
+            ),
+            Some(b"ok".to_vec())
+        );
     }
 
     #[test]
