@@ -894,9 +894,14 @@ export function serializeMinimaxH3Authoring<T extends H3Request>(
   family: string | null | undefined,
   model: string,
   state: MinimaxH3AuthoringState,
+  capabilityTask?: "fl2va" | "ref2va" | null,
 ): T {
-  if (!isMinimaxH3Identity(family, model)) return { ...request };
-  const task = minimaxH3TaskForModel(model);
+  if (
+    capabilityTask === null ||
+    (!capabilityTask && !isMinimaxH3Identity(family, model))
+  )
+    return { ...request };
+  const task = capabilityTask ?? minimaxH3TaskForModel(model);
 
   // Snap onto the family grid and clamp to the family bounds. The floor is
   // `MIN_FRAMES`, not the default clip length: a compact tag renders the whole

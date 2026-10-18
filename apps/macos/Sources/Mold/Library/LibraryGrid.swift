@@ -129,21 +129,25 @@ struct LibraryGrid: View {
         // (`onCommand` read back disabled, M7 S6), and a second item would
         // be a duplicate -- so the grid answers the key. Proven by PID.
         .onKeyPress(keys: ["a"]) { press in
-            guard press.modifiers.contains(.command) else { return .ignored }
+            guard focused, !TextEditingFocus.shared.isEditing, press.modifiers.contains(.command) else { return .ignored }
             let ids = entries.map(\.id)
             selection = LibraryCursor.Selection(items: Set(ids), anchor: ids.first, lead: selection.lead ?? ids.first)
             return .handled
         }
         // Claimed after a yield rather than in `onAppear`: a `@FocusState`
         // written in the pass that inserts the view is dropped.
-        .task { await Task.yield(); focused = true }
+        .task {
+            await Task.yield()
+            if Self.claimsFocus(afterSelection: false, editingText: TextEditingFocus.shared.isEditing) { focused = true }
+        }
         // One handler, because what these keys mean depends on what is HELD
         // with them -- and `onKeyPress(_ key:)` matches its key whatever that
         // is. Space is Quick Look everywhere else on the Mac; Return opens in
         // place, which is the app's own viewer and the only one that plays a
         // clip with the machine's media ticket. See `LibraryGridKeys`.
         .onKeyPress(keys: LibraryGridKeys.keys) { press in
-            perform(LibraryGridKeys.action(for: press.key, modifiers: press.modifiers))
+            guard focused, !TextEditingFocus.shared.isEditing else { return .ignored }
+            return perform(LibraryGridKeys.action(for: press.key, modifiers: press.modifiers))
         }
     }
 
@@ -154,6 +158,10 @@ struct LibraryGrid: View {
     private func laidOut() -> [JustifiedLibraryLayout.Section] {
         guard let sectionsRevision else { return layout.resolve(sections, width: width, targetHeight: edge) }
         return layout.resolve(sections, revision: sectionsRevision, width: width, targetHeight: edge)
+    }
+
+    static func claimsFocus(afterSelection: Bool, editingText: Bool) -> Bool {
+        afterSelection || !editingText
     }
 
     static func visibleAnchor(in entries: [LibraryEntry], visibleRowIDs: Set<PrintID>) -> PrintID? {
@@ -190,7 +198,10 @@ struct LibraryGrid: View {
                 fresh: !scope.isTrash && library.unreadMedia.isUnread(entry)
             )
             .onTapGesture(count: 2) { onOpen(entry.id) }
-            .onTapGesture { click(entry) }
+            .onTapGesture {
+                focused = Self.claimsFocus(afterSelection: true, editingText: TextEditingFocus.shared.isEditing)
+                click(entry)
+            }
             .draggable(actions.draggable(entry))
             .libraryMenu(
                 LibraryMenu(targets: selection.items.contains(entry.id) ? selectedTargets : [entry],

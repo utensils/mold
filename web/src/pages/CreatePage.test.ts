@@ -1385,6 +1385,12 @@ describe("CreatePage layout and behavior", () => {
       new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
     );
     expect((document.activeElement as HTMLElement).textContent?.trim()).toBe(
+      "Copy File Name",
+    );
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+    );
+    expect((document.activeElement as HTMLElement).textContent?.trim()).toBe(
       "Use as source",
     );
 

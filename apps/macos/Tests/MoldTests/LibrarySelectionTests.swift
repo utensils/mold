@@ -1,3 +1,5 @@
+import AppKit
+import SwiftUI
 import Foundation
 import MoldClient
 import Testing
@@ -51,7 +53,7 @@ struct LibrarySelectionTests {
         let selection = selection(count: 1, editing: false, performed: performed)
 
         #expect(selection.plan.items.compactMap(\.kind)
-            == [.open, .quickLook, .reuse, .favorite(true), .copy, .save, .trash])
+            == [.open, .quickLook, .reuse, .favorite(true), .copy, .copyFileName, .save, .trash])
 
         selection.perform(.quickLook)
         #expect(performed.actions == [.quickLook])
@@ -62,6 +64,22 @@ struct LibrarySelectionTests {
     /// them is enabled.
     @Test func aCaretChangeIsAChangeTheMenuHasToSee() {
         #expect(selection(count: 2, editing: false) != selection(count: 2, editing: true))
+    }
+
+    @Test func copyMenuUsesCapturedDestinationsWithoutAWindowEnvironment() {
+        let host = MoldHost(name: "Fixture", baseURL: URL(string: "http://fixture.invalid")!)
+        var called: MoldHost?
+        var offered = selection(count: 1, editing: false)
+        let original = offered
+        offered.copyDestinations = [host]
+        offered.copyTo = { called = $0 }
+        #expect(offered != original)
+        let menu = LibraryCopyToMenu(destinations: offered.copyDestinations, copy: offered.copyTo)
+        let view = NSHostingView(rootView: menu)
+        view.layoutSubtreeIfNeeded()
+        #expect(view.fittingSize.height > 0)
+        menu.copy(host)
+        #expect(called == host)
     }
 
     @Test func sameShapedPrintSelectionsStillReplaceTheirActionClosures() {

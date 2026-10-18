@@ -22,8 +22,9 @@ struct LibraryCommands: Commands {
 
         CommandMenu("Library") {
             if let library {
-                RowActionMenu(actions: library.plan.items, perform: library.perform)
+                RowActionMenu(actions: library.plan.items + library.plan.collectionItems, perform: library.perform)
                     .modifier(LibraryShortcuts(selection: library))
+                LibraryCopyToMenu(destinations: library.copyDestinations, copy: library.copyTo)
             }
         }
     }
@@ -53,9 +54,14 @@ private struct LibraryShortcuts: ViewModifier {
         }
         .keyboardShortcut("f", modifiers: [.command, .option])
         .disabled(selection.isEmpty)
-        Button("Move to Trash") { selection.perform(.trash) }
+        Button("Empty Trash…") { selection.perform(.emptyTrash) }
+            .keyboardShortcut(.delete, modifiers: [.command, .shift])
+            .disabled(selection.trashCount == 0 || selection.lifecycleBusy || selection.isEditingText)
+        Button(selection.scope.isTrash ? "Delete Immediately…" : "Move to Trash") {
+            selection.perform(selection.scope.isTrash ? .deleteForever : .trash)
+        }
             .keyboardShortcut(.delete, modifiers: .command)
-            .disabled(selection.isEmpty || selection.scope.isTrash || selection.lifecycleBusy)
+            .disabled(selection.isEmpty || selection.lifecycleBusy || selection.isEditingText)
     }
 }
 

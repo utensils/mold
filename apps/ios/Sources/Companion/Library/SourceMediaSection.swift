@@ -30,13 +30,15 @@ struct SourceMediaSection: View {
                         Divider()
                     }
                     if groups.count > limit { Button("Show more sources") { limit += 48 } }
-                    if groups.isEmpty { Text("No retained source media.").foregroundStyle(.secondaryText) }
-                } else if inventory.availability != .unavailableLegacy || RetainedSourceMedia.disclosable(entry.print.metadata) {
+                    if groups.isEmpty { Text("No source media.").foregroundStyle(.secondaryText) }
+                } else if SourceMediaState(inventory: inventory, failed: false, metadata: entry.print.metadata) == .none {
+                    Text("No source media.").foregroundStyle(.secondaryText)
+                } else {
                     Text(RetainedSourceMedia.disclosure(inventory.availability) ?? "Source media unavailable.").foregroundStyle(.secondaryText)
-                } else { Text("No retained source media.").foregroundStyle(.secondaryText) }
+                }
             } else if failure == nil { ProgressView("Loading sources…") }
             if let failure { Text(failure).foregroundStyle(.secondaryText) }
-            if failure != nil || inventory?.availability != .available {
+            if SourceMediaState(inventory: inventory, failed: failure != nil, metadata: entry.print.metadata).canRetry {
                 Button("Retry sources") { retry += 1 }
             }
         }

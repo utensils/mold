@@ -9,6 +9,7 @@ struct MirrorTarget: Sendable {
     let originContext: String
     let isCurrent: @MainActor @Sendable () -> Bool
     let collections: [(slug: String, name: String)]
+    var privacyOnly = false
 
     var key: String { LocalSyncRecord.key(hostID: hostID, filename: print.filename) }
 }
@@ -65,6 +66,7 @@ struct MirrorDestination {
     let host: MoldHost
     let backend: any MoldBackend
     let instance: String?
+    let recordScope: String?
     let view: ReplicaMirrorView
     /// Names changed on This Mac since the persisted destination cursor;
     /// nil when the log cannot say.
@@ -83,19 +85,34 @@ struct MirrorDestination {
 struct MirrorReceipts: Sendable {
     let records: LibrarySyncRecords
     let instance: String?
+    var destinationInstance: String? = nil
+    var destinationHost: UUID? = nil
+    var destinationRoute: String? = nil
 
     func markPending(_ key: String, _ filename: String) async throws {
         try await records.markPending(key, filename: filename, instance: instance)
     }
 
-    func receipt(_ record: LocalSyncRecord, key: String) async throws {
-        try await records.checkpoint(record, key: key, instance: instance)
+    func receipt(_ record: LocalSyncRecord, key: String, sourceRoute: String? = nil) async throws {
+        var bound = record
+        bound.destinationHost = destinationHost
+        bound.sourceRoute = sourceRoute ?? bound.sourceRoute
+        bound.destinationRoute = destinationRoute ?? bound.destinationRoute
+        if let previous = await records.records(instance)[key], previous.destinationFilename == bound.destinationFilename {
+            bound.privacyPending = bound.privacyPending ?? previous.privacyPending
+            bound.initialOrganizationPending = bound.initialOrganizationPending ?? previous.initialOrganizationPending
+            bound.organization = bound.organization ?? previous.organization
+            bound.organizationIntent = bound.organizationIntent ?? previous.organizationIntent
+            bound.originKey = bound.originKey ?? previous.originKey
+        }
+        try await records.checkpoint(bound, key: key, instance: instance)
     }
 }
 
 struct MirrorCopy {
     let target: MirrorTarget
     let filename: String
+    var newCopy = false
 }
 
 struct MirrorWorkPlan {
@@ -155,8 +172,10 @@ struct MirrorCopies {
 }
 
 struct MirrorOrganization {
-    let failedFiles: Set<String>
-    let failures: [String]
+    var failedFiles: Set<String>
+    var failures: [String]
+    var states: [String: LibraryOrganizationState] = [:]
+    var expected: [String: LibraryOrganizationSnapshot] = [:]
 }
 
 func targetVersioned(_ print: GalleryPrint) -> Bool {
@@ -227,7 +246,7 @@ func repairCachedSources(_ target: MirrorTarget, to destination: any MoldBackend
     do {
         guard await target.isCurrent() else { throw MoldClientError.unreachable(routeChanged) }
         let sourceMedia = try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
-            from: target.source, to: destination, as: filename)
+            from: target.source, to: destination, as: filename, isCurrent: { await target.isCurrent() })
         return MirrorResult(filename: filename, alreadyLocal: true, error: nil, sourceMedia: sourceMedia)
     } catch {
         return MirrorResult(filename: nil, alreadyLocal: false, error: error.sentence, repeatAcknowledgable: canAcknowledgeSyncError(error))
@@ -257,9 +276,14 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
             }
             if equal {
                 guard await target.isCurrent() else { throw MoldClientError.unreachable(routeChanged) }
+                if let receipts, let receipt = LocalSyncRecord(receipt: target.print, from: target.hostID,
+                    as: requestedName, destinationInstance: receipts.destinationInstance) {
+                    try await receipts.receipt(receipt, key: target.key, sourceRoute: target.originContext)
+                    receipted = true
+                }
                 let sourceMedia = try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
-                    from: target.source, to: destination, as: requestedName, expectedSourceArchiveIdentity: sourceIdentity, downloadedOutput: file)
-                return MirrorResult(filename: requestedName, alreadyLocal: true, error: nil, sourceMedia: sourceMedia)
+                    from: target.source, to: destination, as: requestedName, expectedSourceArchiveIdentity: sourceIdentity, downloadedOutput: file, isCurrent: { await target.isCurrent() })
+                return MirrorResult(filename: requestedName, alreadyLocal: true, error: nil, sourceMedia: sourceMedia, receipted: receipted)
             }
         }
         let filename = occupied ? try await collisionName(for: target, file: file) : requestedName
@@ -270,9 +294,14 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
                 ? try await LibraryMirrorFiles.equal(file, existing) : false
             if equal {
                 guard await target.isCurrent() else { throw MoldClientError.unreachable(routeChanged) }
+                if let receipts, let receipt = LocalSyncRecord(receipt: target.print, from: target.hostID,
+                    as: filename, destinationInstance: receipts.destinationInstance) {
+                    try await receipts.receipt(receipt, key: target.key, sourceRoute: target.originContext)
+                    receipted = true
+                }
                 let sourceMedia = try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
-                    from: target.source, to: destination, as: filename, expectedSourceArchiveIdentity: sourceIdentity, downloadedOutput: file)
-                return MirrorResult(filename: filename, alreadyLocal: true, error: nil, sourceMedia: sourceMedia)
+                    from: target.source, to: destination, as: filename, expectedSourceArchiveIdentity: sourceIdentity, downloadedOutput: file, isCurrent: { await target.isCurrent() })
+                return MirrorResult(filename: filename, alreadyLocal: true, error: nil, sourceMedia: sourceMedia, receipted: receipted)
             }
         }
         guard await target.isCurrent() else { throw MoldClientError.unreachable(routeChanged) }
@@ -288,13 +317,14 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
         // checkpoint tokens means a resume MUST repair retained inputs
         // before declaring the copy complete. A receipt that cannot be made
         // durable fails the item here, before any retained input moves.
-        if let receipts, let receipt = LocalSyncRecord(receipt: target.print, from: target.hostID, as: imported,
-                                                       destinationInstance: receipts.instance) {
-            try await receipts.receipt(receipt, key: target.key)
+        if let receipts, var receipt = LocalSyncRecord(receipt: target.print, from: target.hostID, as: imported,
+                                                       destinationInstance: receipts.destinationInstance) {
+            receipt.initialOrganizationPending = true
+            try await receipts.receipt(receipt, key: target.key, sourceRoute: target.originContext)
             receipted = true
         }
         let sourceMedia = try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
-            from: target.source, to: destination, as: imported, expectedSourceArchiveIdentity: sourceIdentity, downloadedOutput: file)
+            from: target.source, to: destination, as: imported, expectedSourceArchiveIdentity: sourceIdentity, downloadedOutput: file, isCurrent: { await target.isCurrent() })
         return MirrorResult(filename: imported, alreadyLocal: false, error: nil, sourceMedia: sourceMedia, receipted: true)
     } catch {
         return MirrorResult(filename: nil, alreadyLocal: false,
@@ -331,6 +361,16 @@ extension LibraryStore {
     /// `fullPlan`: an explicit press plans every print, skipping only on
     /// matching source and destination checkpoint evidence; Keep in Sync's
     /// automatic runs pass false and plan from each machine's cursor.
+    func copy(_ selection: [LibraryEntry], to destination: MoldHost) async {
+        await mirrorLocally(selection, syncAll: false, destination: destination)
+        syncSession.runFinished(in: self)
+    }
+
+    func syncAll(to destination: MoldHost, fullPlan: Bool = true, automatic: Bool = false) async {
+        await mirrorLocally([], syncAll: true, fullPlan: fullPlan, destination: destination, automatic: automatic)
+        syncSession.runFinished(in: self)
+    }
+
     func syncAllLocally(fullPlan: Bool = true) async {
         await mirrorLocally([], syncAll: true, fullPlan: fullPlan)
         syncSession.runFinished(in: self)
@@ -347,23 +387,32 @@ extension LibraryStore {
 
     var syncStopped: Bool { Task.isCancelled || localSaveStopRequested }
 
-    private func mirrorLocally(_ selection: [LibraryEntry], syncAll: Bool, fullPlan: Bool = true) async {
+    private func mirrorLocally(_ selection: [LibraryEntry], syncAll: Bool, fullPlan: Bool = true, destination: MoldHost? = nil, automatic: Bool = false) async {
         guard !localSaveRunning else { return }
         localSaveRunning = true
         defer { localSaveRunning = false }
         localSaveIssueKeys = [:]
         localSaveNotices = []
         localSaveAlertPresented = false
+        defer { if automatic { localSaveAlertPresented = false } }
         let visibilityGeneration = collectionVisibility.generation
         defer { localSaveTask = nil }
-        let candidates = selection.filter(Self.canSaveLocally)
-        guard syncAll || !candidates.isEmpty else { return }
-        guard let local = hosts.host(MoldEngine.localHostID), hosts.isUp(local) else {
-            localSaveReport = "Start This Mac’s engine to save remote prints in its Library."
+        guard let local = destination ?? hosts.host(MoldEngine.localHostID), hosts.isUp(local),
+              hosts.host(local.id) == local else {
+            localSaveReport = destination == nil
+                ? "Start This Mac’s engine to save remote prints in its Library."
+                : "Connect to the destination machine before copying prints."
             localSaveFailures = []
             localSaveAlertPresented = true
             return
         }
+        syncDestinationHost = local.id
+        defer { syncDestinationHost = nil }
+        let eligibleSelection = destination == nil && !syncAll ? selection.filter(Self.canSaveLocally) : selection
+        let candidates = eligibleSelection.compactMap { entry in
+            entry.everyCopy.first { $0.hostID != local.id && Self.syncableName($0.print.filename) }
+        }
+        guard syncAll || !candidates.isEmpty else { return }
         // Never on an empty stand-in for records this build cannot read.
         if syncAll, let blocked = syncRecords.blockedReason {
             localSaveReport = "Sync All is paused."
@@ -402,7 +451,7 @@ extension LibraryStore {
         }
         let plan = await planMirrorWork(sources, destination: prepared, syncAll: syncAll, fullPlan: fullPlan)
         let copies = await copyMirrorWork(plan, sources: sources, prepared: prepared, syncAll: syncAll)
-        let organization = await organizeMirrorCopies(copies.assignments, destination: prepared.backend)
+        let organization = await reconcileMirrorOrganization(copies, sources: sources, prepared: prepared, explicitCopy: !syncAll)
         var failures = copies.failures + organization.failures
         if copies.transferred > 0 || !copies.assignments.collectionFiles.isEmpty || prepared.createdCollections > 0 {
             if let collections = try? await prepared.backend.collections() {
@@ -413,10 +462,10 @@ extension LibraryStore {
         // import while collections load; the read then catches it, and later
         // events apply normally.
         localSaveSuppressImports = false
-        publishSyncProgress("Refreshing This Mac’s Library…", force: true)
+        publishSyncProgress("Refreshing \(prepared.host.name)’s Library…", force: true)
         await refresh(on: prepared.host.id)
         await reconcileCollectionVisibility()
-        if syncAll {
+        do {
             failures += await verifyMirrorCopies(sources: sources, prepared: prepared,
                 plan: plan, copies: copies, organization: organization)
         }
@@ -446,13 +495,13 @@ extension LibraryStore {
         var transferred = 0
         var completed = 0
         func record(_ target: MirrorTarget, as filename: String, organize: Bool) {
-            if syncAll { successfulCopies.append(MirrorCopy(target: target, filename: filename)) }
+            successfulCopies.append(MirrorCopy(target: target, filename: filename, newCopy: (organize && syncedCopies[target.key] == nil) || syncedCopies[target.key]?.initialOrganizationPending == true))
             let existing = syncedCopies[target.key]
             // A receipt is not a finished copy: its organization may never
             // have landed, so file its memberships again.
             let fileMembership = !syncAll || existing == nil || existing?.provisional == true
                 || existing?.destinationInstance != prepared.instance
-                || syncRecords.pending(target.key, instance: prepared.instance) != nil
+                || syncRecords.pending(target.key, instance: prepared.recordScope) != nil
             for collection in target.collections where fileMembership {
                 let name = localNames[collection.slug] ?? collection.name
                 if let previous = collectionNames[collection.slug], previous != name {
@@ -511,16 +560,16 @@ extension LibraryStore {
                     }
                     if result.alreadyLocal { alreadyLocal += 1 }
                     else { transferred += 1 }
-                    let pendingMatch = syncRecords.pending(target.key, instance: prepared.instance) == name
+                    let pendingMatch = syncRecords.pending(target.key, instance: prepared.recordScope) == name
                     record(target, as: name, organize: !result.alreadyLocal || pendingMatch)
                     // A response-proven copy gets its own durable receipt
                     // before organization, from what is already known: no
                     // per-print listing read, and never ahead of a refill.
-                    if syncAll, let receipts, syncedCopies[target.key]?.destinationFilename != name,
+                    if let receipts, syncedCopies[target.key]?.destinationFilename != name,
                        let receipt = LocalSyncRecord(receipt: target.print, from: target.hostID, as: name,
                                                      destinationInstance: prepared.instance) {
                         do {
-                            try await receipts.receipt(receipt, key: target.key)
+                            try await receipts.receipt(receipt, key: target.key, sourceRoute: target.originContext)
                             receipted.insert(target.key)
                         } catch {
                             failures.append("\(target.print.filename): its sync receipt could not be saved: \(error.sentence)")
@@ -554,60 +603,6 @@ extension LibraryStore {
         localSaveIssueKeys[message] = Array(Set((localSaveIssueKeys[message]?.split(separator: ":").map(String.init) ?? []) + [key])).sorted().joined(separator: ":")
     }
 
-    private func organizeMirrorCopies(_ assignments: MirrorAssignments,
-                                       destination: any MoldBackend) async -> MirrorOrganization {
-        let collectionNames = assignments.collectionNames
-        let collectionFiles = assignments.collectionFiles
-        let titleAssignments = assignments.titles
-        let favoriteFiles = assignments.favorites
-        let tagFiles = assignments.tags
-        var failures: [String] = []
-        var organizationFailedFiles: Set<String> = []
-        publishSyncProgress("Organizing copied prints and collections…", force: true)
-        // A host resolves a collection name to its own slug and creates the
-        // local copy once. Never send the source machine's collection ID.
-        for slug in collectionFiles.keys.sorted() {
-            guard let name = collectionNames[slug],
-                  let filenames = collectionFiles[slug], !filenames.isEmpty else { continue }
-            do {
-                try await destination.mutate(GalleryBulkMutation(
-                    filenames: Array(Set(filenames)).sorted(), addToCollection: .named(name)))
-            } catch {
-                failures.append("Collection “\(name)”: \(error.sentence)")
-                organizationFailedFiles.formUnion(filenames)
-            }
-        }
-        if !titleAssignments.isEmpty {
-            do {
-                try await destination.mutate(GalleryBulkMutation(
-                    filenames: [], titles: titleAssignments))
-            } catch {
-                failures.append("Print titles: \(error.sentence)")
-                organizationFailedFiles.formUnion(titleAssignments.map(\.filename))
-            }
-        }
-        if !favoriteFiles.isEmpty {
-            do {
-                try await destination.mutate(GalleryBulkMutation(
-                    filenames: Array(Set(favoriteFiles)).sorted(), favorite: true))
-            } catch {
-                failures.append("Favourites: \(error.sentence)")
-                organizationFailedFiles.formUnion(favoriteFiles)
-            }
-        }
-        for tag in tagFiles.keys.sorted() {
-            do {
-                try await destination.mutate(GalleryBulkMutation(
-                    filenames: Array(Set(tagFiles[tag] ?? [])).sorted(), addTags: [tag]))
-            } catch {
-                failures.append("Tag “\(tag)”: \(error.sentence)")
-                organizationFailedFiles.formUnion(tagFiles[tag] ?? [])
-            }
-        }
-
-        return MirrorOrganization(failedFiles: organizationFailedFiles, failures: failures)
-    }
-
     private func publishMirrorReport(selectedCount: Int, syncAll: Bool, sources: MirrorSources,
                                      prepared: MirrorDestination, plan: MirrorWorkPlan,
                                      copies: MirrorCopies, failures: [String]) {
@@ -617,7 +612,7 @@ extension LibraryStore {
         let createdCollections = prepared.createdCollections
         let candidateCount = sources.candidateCount
         let skipped = syncAll ? 0 : selectedCount - candidateCount
-        var summary = "Copied \(transferred) \(transferred == 1 ? "print" : "prints") to This Mac’s Library."
+        var summary = "Copied \(transferred) \(transferred == 1 ? "print" : "prints") to \(prepared.host.name)’s Library."
         if alreadyLocal > 0 {
             summary += alreadyLocal == 1 ? " 1 was already here." : " \(alreadyLocal) were already here."
         }
@@ -626,7 +621,7 @@ extension LibraryStore {
             summary += " Created \(createdCollections) \(createdCollections == 1 ? "collection" : "collections")."
         }
         let unsaved = candidateCount - transferred - alreadyLocal - keptRemoved
-        if keptRemoved > 0 { summary += " \(keptRemoved) copies were kept removed from This Mac; use Save to copy them again deliberately." }
+        if keptRemoved > 0 { summary += " \(keptRemoved) copies were kept removed from \(prepared.host.name); use Copy to copy them again deliberately." }
         if unsaved > 0 { summary += " \(unsaved) were not copied." }
         if skipped > 0 { summary += " Skipped \(skipped) local or unsupported prints." }
         if !failures.isEmpty { summary += " \(failures.count) issues need attention." }
@@ -641,7 +636,15 @@ extension LibraryStore {
     /// See `LibrarySyncRecords.links`.
     func syncLinks() -> [PrintID: PrintID] {
         syncRecords.links(localHost: MoldEngine.localHostID,
-                          instance: hosts.instanceID(of: MoldEngine.localHostID))
+                          instance: hosts.instanceID(of: MoldEngine.localHostID), authority: syncAuthority)
+    }
+
+    /// Conservative hide-only receipt links never enter the ordinary merge graph.
+    func syncPrivacyLinks() -> [PrintID: PrintID] {
+        guard !hiddenCollectionIDs.isEmpty else { return [:] }
+        _ = syncRecords.privacyRevision
+        return syncRecords.privacyLinks(localHost: MoldEngine.localHostID,
+            instance: hosts.instanceID(of: MoldEngine.localHostID), authority: syncAuthority)
     }
 
     /// The records' document, now. For quitting.

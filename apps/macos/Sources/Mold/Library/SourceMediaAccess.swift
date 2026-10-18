@@ -2,6 +2,15 @@ import MoldClient
 import SwiftUI
 
 extension LibraryStore {
+    /// Includes hide-only receipt links, which may change without row edits.
+    struct SourcePrivacyRevision: Equatable {
+        let rows: Int
+        let receipts: Int?
+    }
+    var sourcePrivacyRevision: SourcePrivacyRevision {
+        .init(rows: sourceAccessRevision, receipts: hiddenCollectionIDs.isEmpty ? nil : syncRecords.privacyRevision)
+    }
+
     func sourceMediaChanged(_ event: MoldEvent, host: UUID) {
         let filename: String?
         switch event {
@@ -18,11 +27,12 @@ extension LibraryStore {
         Task { await SourceMediaPreview.invalidate(host: host, filename: filename) }
     }
     var sourceAccess: SourceMediaAccessIndex.Snapshot {
-        sourceAccessIndex.snapshot(key: .init(revision: sourceAccessRevision,
-            visibility: collectionVisibility.generation, hosts: hosts.hosts, instances: hosts.instanceIDs)) {
+        sourceAccessIndex.snapshot(key: .init(revision: sourcePrivacyRevision.rows,
+            visibility: collectionVisibility.generation, hosts: hosts.hosts, instances: hosts.instanceIDs,
+            privacyRevision: sourcePrivacyRevision.receipts)) {
             let currentShelves = shelves
             let visible = LibraryScope.all.resolve(LibraryQuery(), shelves: currentShelves,
-                hiddenCollectionIDs: CollectionShelf.hiddenIDs(in: currentShelves)).apply(to: items)
+                hiddenCollectionIDs: CollectionShelf.hiddenIDs(in: currentShelves), privacyEvidence: trashed, privacyLinks: syncPrivacyLinks()).apply(to: items)
             return .init(visible: visible.flatMap(\.everyCopy), details: (items + trashed).flatMap(\.everyCopy),
                          hosts: hosts.hosts, instances: hosts.instanceIDs)
         }

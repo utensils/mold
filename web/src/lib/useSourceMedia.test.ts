@@ -98,3 +98,53 @@ describe("independent source attachment", () => {
     ).rejects.toThrow("cannot");
   });
 });
+
+it("uses retained image bytes as the LTX last keyframe while preserving intermediate frames", async () => {
+  const state = ref({
+    ...__testing__.defaultForm(),
+    model: "ltx-2",
+    modelFamily: "ltx-2",
+    frames: 25,
+    imageAttachments: [
+      {
+        kind: "upload" as const,
+        filename: "existing-first.png",
+        base64: "first",
+      },
+    ],
+    keyframes: [
+      {
+        frame: 12,
+        image: {
+          kind: "upload" as const,
+          filename: "middle.png",
+          base64: "middle",
+        },
+      },
+    ],
+  });
+  const size = [state.value.width, state.value.height];
+  await attachSourceMedia(
+    {
+      ...selection,
+      attachment: "last",
+      member: {
+        ...selection.member,
+        media_kind: "image",
+        role: "source_image",
+        display_name: "last.png",
+      },
+    },
+    state,
+    undefined,
+    () => true,
+    async () => new Blob(["abc"]),
+  );
+  expect(state.value.keyframes.map((frame) => frame.frame)).toEqual([
+    0, 12, 24,
+  ]);
+  expect(state.value.keyframes[0]?.image.filename).toBe("existing-first.png");
+  expect(state.value.keyframes[1]?.image.filename).toBe("middle.png");
+  expect(state.value.keyframes[2]?.image.base64).toBe("YWJj");
+  expect([state.value.width, state.value.height]).toEqual(size);
+});

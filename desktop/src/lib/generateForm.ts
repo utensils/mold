@@ -1364,6 +1364,7 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
       form.family,
       form.model,
       form.h3Authoring ?? emptyMinimaxH3AuthoringState(),
+      form.recipeCapabilities?.authoringTask,
     ),
   );
   // Crop provenance rides only when the wire actually carries fitted source

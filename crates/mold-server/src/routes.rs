@@ -6876,6 +6876,11 @@ impl DurableAdmissionReadiness {
         self.media.is_some()
     }
 
+    /// Receiving a backup needs durable storage, but never a generation worker.
+    pub(crate) fn retained_transfer_ready(&self) -> bool {
+        cfg!(unix) && self.output_enabled && self.journal_enabled && self.media_ready()
+    }
+
     pub(crate) fn admission(
         &self,
     ) -> Option<Arc<crate::queue_media_admission::DurableMediaAdmission>> {
@@ -8585,7 +8590,7 @@ async fn server_capabilities(
         },
         video_upscale: framewise_capabilities,
         durable_media: readiness.advertised_media(),
-        retained_media_transfer: (cfg!(unix) && readiness.advertised_media().is_some()).then_some(
+        retained_media_transfer: readiness.retained_transfer_ready().then_some(
             mold_core::RetainedMediaTransferCapabilities {
                 protocol_version: 1,
             },

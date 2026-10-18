@@ -1381,6 +1381,70 @@ describe("organization union + filters", () => {
     expect(gallery.collectionAvailability("river-studies")).toBe("unavailable");
   });
 
+  it("keeps hidden trash membership protecting live copies until confirmed removal", () => {
+    const gallery = seed();
+    gallery.buckets.local!.items[0]!.collections = [];
+    const hidden = gallery.buckets["hal9000-7680"]!.items.shift()!;
+    gallery.trashBuckets["hal9000-7680"] = loadedBucket([{ ...hidden, trashed_at: 400 }]);
+    gallery.collectionsByHost["hal9000-7680"]!.items[0]!.hidden = true;
+    expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["solo.png"]);
+    expect(gallery.basePrintCount).toBe(1);
+    gallery.trashBuckets["hal9000-7680"] = loadedBucket([]);
+    expect(gallery.filtered.map((e) => e.item.filename)).toContain("shared.png");
+  });
+
+  it("uses trash only for privacy without lending its ordinary organization to a live print", () => {
+    const gallery = seed();
+    const local = gallery.buckets.local!.items[0]!;
+    local.collections = [];
+    local.tags = [];
+    local.favorite = false;
+    local.title = null;
+    const old = gallery.buckets["hal9000-7680"]!.items.shift()!;
+    gallery.trashBuckets["hal9000-7680"] = loadedBucket([
+      { ...old, trashed_at: 400, tags: ["trash-tag"], favorite: true, title: "Trashed title" },
+    ]);
+    const entry = gallery.merged.find((print) => print.item.filename === local.filename)!;
+    const organization = gallery.organizationOf(entry);
+    expect(organization.tags).toEqual([]);
+    expect(organization.favorite).toBe(false);
+    expect(organization.title).toBeNull();
+    expect(organization.collections).toEqual([]);
+    expect(organization.trashedAt).toBeNull();
+    expect(gallery.filtered.map((print) => print.item.filename)).toContain(local.filename);
+    gallery.collectionsByHost["hal9000-7680"]!.items[0]!.hidden = true;
+    expect(gallery.filtered.map((print) => print.item.filename)).not.toContain(local.filename);
+  });
+
+  it("hides only the captured destination of a partial renamed private copy without identity metadata", () => {
+    const gallery = seed();
+    const destination = useHostsStore().extras[0]!;
+    destination.instanceId = "destination-instance";
+    gallery.buckets["hal9000-7680"]!.items.push(img("renamed-partial.png", 500));
+    gallery.provisionalCopyPrivacy = [
+      {
+        source: JSON.stringify(["local", "http://127.0.0.1:49152", "secure", "source-instance"]),
+        destination: JSON.stringify([
+          destination.id,
+          destination.url,
+          "secure",
+          destination.instanceId,
+        ]),
+        sourceFilename: "private.png",
+        destinationFilename: "renamed-partial.png",
+      },
+    ];
+    expect(gallery.filtered.map((entry) => entry.item.filename)).not.toContain(
+      "renamed-partial.png",
+    );
+    gallery.filter = destination.id;
+    expect(gallery.filtered.map((entry) => entry.item.filename)).not.toContain(
+      "renamed-partial.png",
+    );
+    destination.instanceId = "replacement-instance";
+    expect(gallery.filtered.map((entry) => entry.item.filename)).toContain("renamed-partial.png");
+  });
+
   it("discards retained collection authority when a configured route is replaced", () => {
     const gallery = seed();
     gallery.collectionsByHost["hal9000-7680"]!.authorityTarget = {

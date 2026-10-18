@@ -728,3 +728,34 @@ it("withholds unresolved collection membership from default-print filtering", ()
     filterByOrganization([print], { excludeCollectionSlugs: new Set() }),
   ).toEqual([]);
 });
+it("retains hidden trash evidence across failed reads and clears it only after successful removal", async () => {
+  const trashed = entry("plato", "hidden.png", {
+    collections: ["private"],
+    trashed_at: 500,
+  });
+  const fetchers = {
+    capabilities: vi.fn(
+      async () =>
+        ({
+          gallery: {
+            organize: true,
+            trash: { enabled: true, retention_days: 30 },
+          },
+        }) as never,
+    ),
+    collections: vi.fn(async () => [
+      collection("private", "Private", { hidden: true }),
+    ]),
+    tags: vi.fn(async () => []),
+    trash: vi.fn(async () => [trashed]),
+  };
+  const first = await fetchOrganization([PLATO], fetchers);
+  fetchers.trash.mockRejectedValueOnce(new Error("offline"));
+  const failed = await fetchOrganization([PLATO], fetchers, undefined, first);
+  expect(failed[0]?.trashListingOk).toBe(false);
+  expect(failed[0]?.trashed).toEqual([trashed]);
+  fetchers.trash.mockResolvedValueOnce([]);
+  expect(
+    (await fetchOrganization([PLATO], fetchers, undefined, failed))[0]?.trashed,
+  ).toEqual([]);
+});

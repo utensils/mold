@@ -11,7 +11,7 @@ public extension LibraryMenuPlan {
     /// they are on purpose and `RowAction.rendered` leaves the order alone;
     /// it is still what drops an empty submenu and trims a stray divider.
     var items: [Item] {
-        RowAction.rendered((scope == .trash ? trashItems : printItems) + collectionItems).map { item in
+        RowAction.rendered(scope == .trash ? trashItems : printItems).map { item in
             var item = item
             switch item.kind {
             case .trash?, .putBack?, .deleteForever?, .emptyTrash?: item.isDisabled = lifecycleBusy
@@ -38,6 +38,10 @@ public extension LibraryMenuPlan {
         if canUseAsSource, count == 1 {
             items.append(Item(kind: .useAsSourceImage, title: "Use as Source Image"))
         }
+        if canUseEndpoints, count == 1 {
+            items.append(Item(kind: .useAsFirstFrame, title: "Use as First Frame"))
+            items.append(Item(kind: .useAsLastFrame, title: "Use as Last Frame"))
+        }
         if canAddReference, count == 1 {
             items.append(Item(kind: .addAsReference, title: "Add as Reference"))
         }
@@ -63,6 +67,7 @@ public extension LibraryMenuPlan {
         items += [
             .separator,
             Item(kind: .copy, title: "Copy"),
+            Item(kind: .copyFileName, title: count == 1 ? "Copy File Name" : "Copy File Names"),
             Item(kind: .save, title: saveTitle),
         ]
         if localSaveCount > 0 {
@@ -112,7 +117,7 @@ public extension LibraryMenuPlan {
     /// The shelf itself, when one is being shown. These three lived only in
     /// the sidebar's right-click menu: unreachable from the keyboard and
     /// invisible to Help ▸ Search.
-    private var collectionItems: [Item] {
+    var collectionItems: [Item] {
         guard let shelf = enclosingShelf, scope == .collection else { return [] }
         return [
             .separator,

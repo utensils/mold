@@ -17,7 +17,7 @@ extension LibraryStore {
         let destination = prepared.backend
         let local = prepared.host
         let instance = prepared.instance
-        let checkedKeys = Set(plan.items.map(\.target.key))
+        let checkedKeys = Set(plan.items.map(\.target.key)).union(organization.states.keys)
         let touched = copies.successful.filter { checkedKeys.contains($0.target.key) }
         var failures: [String] = []
         var outcome = LibrarySyncRecords.RunOutcome()
@@ -43,7 +43,11 @@ extension LibraryStore {
                                 checkpointFailures.insert(copy.filename)
                                 continue
                             }
-                            group.addTask { (copy, await repairCachedSources(copy.target, to: destination, as: copy.filename)) }
+                            if copy.target.privacyOnly {
+                                group.addTask { (copy, MirrorResult(filename: copy.filename, alreadyLocal: true, error: nil)) }
+                            } else {
+                                group.addTask { (copy, await repairCachedSources(copy.target, to: destination, as: copy.filename)) }
+                            }
                             return
                         }
                     }
@@ -101,6 +105,20 @@ extension LibraryStore {
                    verified.revisions[filename] == token {
                     record.destinationCheckpoint = checkpoint.instanceId + ":" + token
                 }
+                if let expected = organization.expected[sourceKey] {
+                    let slugs = Dictionary((collectionsPerHost[local.id] ?? []).map { ($0.id, $0.slug) }, uniquingKeysWith: { first, _ in first })
+                    let actual = LibraryOrganizationSnapshot(collections: Set(localPrint.collectionList.compactMap { slugs[$0] }),
+                        tags: Set(localPrint.tagList), title: localPrint.title ?? "", favorite: localPrint.isFavorite)
+                    guard actual == expected else {
+                        failures.append("\(filename): its organization changed before verification; it will be retried.")
+                        continue
+                    }
+                }
+                record.privacyPending = organization.states[sourceKey] == nil ? syncRecords.records(prepared.recordScope)[sourceKey]?.privacyPending : nil
+                record.initialOrganizationPending = organization.states[sourceKey] == nil ? syncRecords.records(prepared.recordScope)[sourceKey]?.initialOrganizationPending : nil
+                record.destinationHost = local.id
+                record.organization = organization.states[sourceKey] ?? prepared.records[sourceKey]?.organization
+                record.originKey = prepared.records[sourceKey]?.originKey ?? syncRecords.verifiedOrigin(of: PrintID(host: target.hostID, filename: target.print.filename), authority: syncAuthority)
                 record.sourceRoute = target.originContext
                 record.destinationRoute = local.baseURL.absoluteString
                 outcome.records[sourceKey] = record
@@ -120,15 +138,27 @@ extension LibraryStore {
         let targetsByKey = Dictionary(plan.targets.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
         for key in copies.receipted where outcome.records[key] == nil {
             guard let target = targetsByKey[key],
-                  let receipt = syncRecords.records(instance)[key], receipt.provisional == true,
+                  let receipt = syncRecords.records(prepared.recordScope)[key], receipt.provisional == true,
                   let row = refreshed.live(receipt.destinationFilename),
-                  let listed = LocalSyncRecord(source: target.print, from: target.hostID, local: row,
+                  var listed = LocalSyncRecord(source: target.print, from: target.hostID, local: row,
                                                on: local.id, destinationInstance: instance)
             else { continue }
+            // Upgrading output facts must not discard an organization intent
+            // whose response failed or whose readback is not yet confirmed.
+            listed.privacyPending = receipt.privacyPending
+            listed.sourceRoute = receipt.sourceRoute
+            listed.destinationRoute = receipt.destinationRoute
+            listed.initialOrganizationPending = receipt.initialOrganizationPending
+            listed.destinationHost = receipt.destinationHost
+            listed.organization = receipt.organization
+            listed.organizationIntent = receipt.organizationIntent
+            listed.originKey = receipt.originKey
             outcome.records[key] = listed
         }
 
-        outcome.settled.formUnion(plan.settled)
+        let organizationTouched = Set(organization.states.keys).union(
+            copies.successful.filter { organization.failedFiles.contains($0.filename) }.map(\.target.key))
+        outcome.settled.formUnion(plan.settled.subtracting(organizationTouched))
         outcome.retried = plan.considered.subtracting(outcome.settled)
         outcome.removed = plan.tombstones
         outcome.keptRemoved = plan.keptRemovedKeys
@@ -150,7 +180,7 @@ extension LibraryStore {
             // the destination cursor where it was when the names are unknown.
             let unread = Set(hosts.hosts.map(\.id)).subtracting(sources.hosts.keys).subtracting([local.id])
                 .union(sources.hostErrors.keys)
-            let reverse = syncRecords.sourceKeys(copiedAs: instance)
+            let reverse = syncRecords.sourceKeys(copiedAs: prepared.recordScope)
             func oweUnread(_ names: Set<String>) {
                 for name in names {
                     for key in reverse[name] ?? [] {
@@ -177,7 +207,7 @@ extension LibraryStore {
                 outcome.destinationCursor = .init(cursor: prepared.view.cursor, route: route)
             }
         }
-        await syncRecords.finishRun(outcome, instance: instance)
+        await syncRecords.finishRun(outcome, instance: prepared.recordScope)
         return failures
     }
 }

@@ -815,3 +815,38 @@ describe("Qwen Image 2.1 capabilities", () => {
     expect(baseGenerationCapabilities("qwen-image21").transparency).toBeNull();
   });
 });
+
+it("routes additive endpoint and typed-reference capabilities before model spelling", () => {
+  const recipe = sdxlRecipe();
+  recipe.capabilities.boundary_frames = {
+    mode: "adjustable",
+    first_required: false,
+    last_required: false,
+    min_frames: 2,
+    wire: "h3-endpoints",
+  };
+  expect(
+    baseGenerationCapabilities(
+      "unknown-video",
+      "future-video",
+      null,
+      null,
+      null,
+      recipe,
+    ).sourceImageMode,
+  ).toBe("h3-boundaries");
+  recipe.capabilities.boundary_frames = {
+    ...recipe.capabilities.boundary_frames,
+    mode: "hidden",
+  };
+  expect(
+    baseGenerationCapabilities(
+      "minimax-h3",
+      "minimax-h3-fl2va:comfy-pruned-int8",
+      null,
+      null,
+      null,
+      recipe,
+    ).sourceImageMode,
+  ).not.toBe("h3-boundaries");
+});

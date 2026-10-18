@@ -48,6 +48,7 @@ extension LibraryPane {
         @Bindable var navigation = navigation
 
         return content(showing)
+            .safeAreaInset(edge: .bottom, spacing: 0) { LibraryActivityStatus() }
             .toolbar { ToolbarItem { LibraryConnectionStatus() } }
             // The OPEN print while the viewer shows one, the grid's selection
             // otherwise (`LibraryInspector+Pane`). Ahead of `.toolbar` so the

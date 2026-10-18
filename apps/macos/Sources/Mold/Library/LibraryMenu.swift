@@ -49,6 +49,7 @@ struct LibraryMenu {
             canReuse: actions.reuse != nil && !scope.isTrash,
             canUseAsSource: canAttach(using: actions.useAsSource),
             canAddReference: canAttach(using: actions.addAsReference),
+            canUseEndpoints: canAttach(using: actions.useAsFirstFrame) && canAttach(using: actions.useAsLastFrame),
             canUpscale: actions.canUpscale(targets),
             upscalers: actions.upscalerOptions(for: targets),
             trashCount: trashCount,
@@ -69,7 +70,11 @@ extension View {
         // Resolve observable host/operation flags here. The native builder
         // later renders only this pure plan, without subscribing to stores.
         let plan = snapshot ?? menu.plan
+        let copyDestinations = menu.actions.copyDestinations(for: menu.targets, scope: menu.scope)
         return rowActionMenu(lazy: { plan.items }, perform: menu.perform) {
+            LibraryCopyToMenu(destinations: copyDestinations) { host in
+                menu.actions.copy(menu.targets, to: host)
+            }
             let shares = menu.share
             if !shares.isEmpty {
                 ShareLink(items: shares) { print in SharePreview(print.filename) }

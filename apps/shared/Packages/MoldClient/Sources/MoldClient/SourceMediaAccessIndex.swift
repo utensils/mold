@@ -5,10 +5,12 @@ import Foundation
 public final class SourceMediaAccessIndex {
     public struct Key: Equatable {
         let revision: Int
+        let privacyRevision: Int?
         let visibility: UUID
         let hosts: [MoldHost]
         let instances: [UUID: String]
-        public init(revision: Int, visibility: UUID, hosts: [MoldHost], instances: [UUID: String]) {
+        public init(revision: Int, visibility: UUID, hosts: [MoldHost], instances: [UUID: String], privacyRevision: Int? = nil) {
+            self.privacyRevision = privacyRevision
             self.revision = revision; self.visibility = visibility
             self.hosts = hosts; self.instances = instances
         }

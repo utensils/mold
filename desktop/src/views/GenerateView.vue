@@ -7,7 +7,7 @@ import { restoreRetainedDraftMedia } from "@studio/lib/retainedDraftMedia";
 import { relayFetch as fetch } from "@studio/api/relayTransport";
 import VideoSoundToggle from "../components/gallery/VideoSoundToggle.vue";
 import { useVideoPlaybackStore } from "../stores/videoPlayback";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, provide, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   dropTargetAtPosition,
   isSupportedDroppedImage,
@@ -242,6 +242,13 @@ import {
   nativeBytes,
   thumbnailPath,
 } from "../lib/gallery/media";
+import { attachRetainedSource } from "../lib/retainedSourceAttachment";
+import {
+  SOURCE_ATTACHMENT_CHOICES,
+  imageAttachmentChoices,
+  type SourceAttachmentIntent,
+} from "@studio/lib/sourceAttachmentChoices";
+import { copyTextToClipboard } from "@studio/lib/notificationClipboard";
 import { applyGalleryEntryAsSource, canUseGalleryEntryAsSource } from "../lib/gallery/useAsSource";
 import { readGalleryMediaBase64 } from "../lib/gallery/sourceMedia";
 import { useReuseStillPrint } from "../composables/useReuseStillPrint";
@@ -920,6 +927,10 @@ const caps = computed(() =>
     form.sourceImageCapability,
     effectiveGenerationRecipe(contractEntry.value, form.pipeline),
   ),
+);
+provide(
+  SOURCE_ATTACHMENT_CHOICES,
+  computed(() => imageAttachmentChoices(caps.value)),
 );
 const formValidationError = computed(
   () =>
@@ -1820,9 +1831,13 @@ function canvasPrintEntry(j: Job): MergedPrint | null {
  * inline completion already holds them, a durable one reads the file back
  * from the machine that rendered it.
  */
-async function useCanvasResultAsSource(j: Job, entry: MergedPrint | null): Promise<void> {
+async function useCanvasResultAsSource(
+  j: Job,
+  entry: MergedPrint | null,
+  intent?: SourceAttachmentIntent,
+): Promise<void> {
   if (!entry) return;
-  const outcome = await applyGalleryEntryAsSource(entry, form, async (print) => {
+  const read = async (print: MergedPrint) => {
     const inline = j.result?.image;
     if (inline) return base64Blob(inline, mediaMimeType(print.item.filename));
     const target = resultHostTarget(j.clientId);
@@ -1832,7 +1847,19 @@ async function useCanvasResultAsSource(j: Job, entry: MergedPrint | null): Promi
       target,
     );
     return new Blob([nativeBytes(bytes)], { type: mediaMimeType(print.item.filename) });
-  });
+  };
+  const route = JSON.stringify(resultHostTarget(j.clientId));
+  const outcome = intent
+    ? await attachRetainedSource(
+        form,
+        entry.item.filename,
+        "image",
+        () => read(entry),
+        () => route === JSON.stringify(resultHostTarget(j.clientId)),
+        intent,
+        caps.value,
+      )
+    : await applyGalleryEntryAsSource(entry, form, read);
   if (!outcome.ok) {
     toasts.push(outcome.error, "error");
     return;
@@ -2267,6 +2294,21 @@ function canvasMenu(): MenuEntry[] {
           ),
     },
     { separator: true },
+    {
+      label: "Copy File Name",
+      disabled: !sourceEntry,
+      action: () => {
+        if (sourceEntry) void copyTextToClipboard(sourceEntry.item.filename);
+      },
+    },
+    ...(sourceEntry &&
+    mediaMimeType(sourceEntry.item.filename).startsWith("image/") &&
+    canUseGalleryEntryAsSource(sourceEntry.item)
+      ? imageAttachmentChoices(caps.value).map((intent) => ({
+          label: `Use as ${intent} frame`,
+          action: () => void useCanvasResultAsSource(j, sourceEntry, intent),
+        }))
+      : []),
     {
       label: "Copy prompt",
       action: () => void navigator.clipboard.writeText(j.prompt),

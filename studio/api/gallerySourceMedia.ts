@@ -46,6 +46,42 @@ function reuseSessionPath(filename: string): string {
 
 export const __testing__ = { inventoryPath, memberPath, reuseSessionPath };
 
+/** Refuse malformed reads as failures; they must never establish input absence. */
+export function parseRetainedSourceMediaInventory(
+  value: unknown,
+): RetainedSourceMediaInventory {
+  const inventory = value as Partial<RetainedSourceMediaInventory> | null;
+  if (
+    !inventory ||
+    ![
+      "available",
+      "unavailable_legacy",
+      "unavailable_missing_or_corrupt",
+      "unavailable_auth",
+    ].includes(inventory.availability ?? "") ||
+    (inventory.members != null && !Array.isArray(inventory.members)) ||
+    (inventory.availability === "available" &&
+      !Array.isArray(inventory.members)) ||
+    inventory.members?.some(
+      (member) =>
+        !member ||
+        typeof member.member_id !== "string" ||
+        !member.member_id ||
+        typeof member.role !== "string" ||
+        typeof member.display_name !== "string" ||
+        !Number.isSafeInteger(member.size_bytes) ||
+        member.size_bytes < 0,
+    )
+  )
+    throw new Error(
+      "This machine returned an invalid source-media inventory. Refresh or update it.",
+    );
+  return {
+    availability: inventory.availability!,
+    members: inventory.members ?? [],
+  };
+}
+
 export async function retainedSourceMediaInventory(
   filename: string,
   target: ApiTarget,
@@ -74,7 +110,7 @@ export async function retainedSourceMediaInventory(
       `Could not inspect retained source media (HTTP ${response.status})`,
     );
   }
-  return response.json();
+  return parseRetainedSourceMediaInventory(await response.json());
 }
 
 export async function retainedSourceMediaBlob(

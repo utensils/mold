@@ -5,7 +5,7 @@ import MoldClient
     func refreshUnreadMedia() {
         let previous = unreadMedia
         unreadMedia.retainHosts(Set(hosts.hosts.map(\.id)))
-        let query = LibraryScope.all.resolve(LibraryQuery(), shelves: shelves, hiddenCollectionIDs: hiddenCollectionIDs)
+        let query = LibraryScope.all.resolve(LibraryQuery(), shelves: shelves, hiddenCollectionIDs: hiddenCollectionIDs, privacyEvidence: trashed, privacyLinks: syncPrivacyLinks())
         unreadMedia.observe(entries: items, visible: query.apply(to: items),
                             loadedHosts: Set(perHost.keys), presentHosts: Set(hosts.hosts.map(\.id)))
         if unreadMedia != previous { unreadMedia.save(to: readDefaults) }

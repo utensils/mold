@@ -103,20 +103,33 @@ partial/offline writes, fences superseded edits and routes, and repairs mixed
 hidden replicas; protect logical hidden media before pruning copies for display.
 A fresh read must confirm a visibility write before retiring its pending intent.
 
-Library Sync runs once per press. Repeating is the persisted, off-by-default
-"Keep This Mac in Sync" toggle (toolbar menu + Settings ▸ Library): a remote
-machine's first connect (`.authority`, forwarded once by HostStore), reconnect
-(`.resyncRequired`) and non-echo `.gallery` frames debounce into one
-non-overlapping run; a change or press mid-run (Sync or Save) queues exactly one
-follow-up, read by `runFinished`. Automatic runs never raise the engine-down
-alert -- they wait for This Mac's engine to connect. No timer. Stop drops the
-queued follow-up; quit cancels the run and blocks new ones before the drain. Successful
-runs never require a completion sheet. Repeat issue acknowledgment is bound to
-origin route/instance, output version/recipe and exact error, never authentication
-or connectivity failures; preserve retries and inspectable details. Sync must not
-recreate destination trash or a recorded copy intentionally removed from the
-local listing. Explicit Save remains deliberate recovery. Copy hidden collection
-attributes for existing and empty replicas as well as newly filed outputs.
+Library Sync runs once per press. The toolbar offers Sync All to every connected
+machine and selection/viewer Copy to; Settings Library and the toolbar expose one
+Keep in Sync toggle per captured destination route/installation. Legacy v1 true
+migrates only to historical This Mac. One global run serializes transfers, coalesces
+one sync follow-up per destination and preserves manual selections. Automatic runs
+never raise connectivity alerts; Stop drops follow-ups and quit cancels/drains.
+Verified copy components span destination buckets and collision-renamed copies;
+filename/seed grouping is privacy evidence, never transfer or echo authority.
+Destination Trash and intentionally removed verified copies prevent automatic
+recreation; explicit Copy restores deliberately. Source removal never deletes backups.
+
+Organization tracks versioned observed source, actually applied contributions and
+local removal suppression per verified source. Remove only sync-owned unclaimed
+memberships; preserve destination-only organization and differing scalar edits.
+Ordinary local removals suppress unchanged re-additions until source remove/re-add or
+explicit Copy, while hidden membership always reasserts. Legacy observation never
+retroactively owns existing values or authorizes removals. Persist immutable mutation
+intent with durable UUIDs before writes; verify resulting organization and include
+cached organization-only copies in final checkpoint verification. Journal a newly imported output’s initial-organization obligation until verification; a bare interrupted receipt must not become a destination override. Explicit Copy discovers verified component hosts and current readable root organization; forwarded privacy changes must schedule root reconciliation even when its own cursor did not change. Union every verified raw lineage edge before canonicalization; never overwrite a shared endpoint in a neighbor dictionary. Keep provisional/unfinished receipt links separate as conservative hide-only privacy evidence, scoped to captured routes and installations. They must not grant output skip tokens, ordinary merge authority or organization ownership; preserve them through listed-facts upgrades until organization verification. Source-access caches and previews observe a separate privacy identity revision so receipt-only links revoke existing visible originals without waiting for row changes. Organization-only journal writes must not invalidate that identity clock. Partial/ambiguous
+writes remain retryable. Keep scalar authority attached to the verified origin across
+forwarding, never traversal order. A surviving forwarded copy must still back up to a new destination when its root is offline or trashed, using the verified origin organization snapshot; privacy-only handling applies when its destination copy already exists or the readable root is separately considered. Keep source-access row and privacy revisions as independent equatable fields, never an arithmetic sum. Hidden privacy checks merge live and Trash evidence
+before host projection on grids, counts, unread and source/picker access.
+
+Successful runs need no completion sheet. Repeat issue acknowledgment binds to origin
+route/instance, output recipe/version and exact error, never authentication/connectivity
+failures. Preserve retries and inspectable details. Sync hidden attributes for existing
+and empty collections as well as newly filed outputs.
 
 Sidebar destination tags wrap badges so native List selection receives SidebarRow,
 not the ForEach destination ID. Verify rendered top-level navigation from Library.
@@ -307,3 +320,18 @@ not differ (unchanged merge identity/order key, no shared filename/identity/link
 no key tie); otherwise it rebuilds. The legacy trash LISTING, not `trashedAt`, decides a row's partition (`ReplicaDelta.inTrash`). A direct `perHost` write outside those paths
 marks the timeline for a full rebuild. Tests construct `LibraryStore` without a
 `replicaStore`; only `AppStores` persists to Application Support.
+
+Library grid/viewer Delete (both SwiftUI U+0008 and physical AppKit U+007F) and forward Delete trash; in Trash they confirm deletion using
+only the trash endpoint. Bare F is scoped to Library interaction focus. Editable fields keep
+all typing keys. Shift-Command-Delete confirms machine-scoped Empty Trash. Print menus never
+contain collection Rename/Hide/Delete; the collection row and menu bar own those actions.
+Operation status uses the content-column inset and operation/issue identity for dismissal.
+Dismissing never stops work or acknowledges issues; toolbar status restores it and retains Stop.
+Source file actions use SourceMediaLoading.original with exact authority/revision fences and
+release private files on dismissal/revocation. Copy commands include the sanitized owning-host
+selector, full member ID and shell-quoted filenames. Interpolation endpoint replacement keeps
+interior keyframes and migrates an existing first-frame source into frame 0 when adding a
+last endpoint; explicit refused boundary capabilities cannot use the legacy fallback.
+
+Library menu supplements and Commands capture destination snapshots and callbacks before
+native hosting; they cannot require window-only environment stores.

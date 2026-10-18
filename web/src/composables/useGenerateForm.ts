@@ -1654,6 +1654,11 @@ export function useGenerateForm(): UseGenerateForm {
           family,
           s.model,
           s.h3Authoring ?? emptyMinimaxH3AuthoringState(),
+          capabilities.sourceImageMode === "h3-boundaries"
+            ? "fl2va"
+            : capabilities.sourceImageMode === "ordered-references"
+              ? "ref2va"
+              : null,
         ),
       );
       // Crop provenance rides only when the wire actually carries fitted

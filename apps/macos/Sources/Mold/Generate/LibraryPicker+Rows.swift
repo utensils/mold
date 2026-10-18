@@ -12,12 +12,19 @@ extension LibraryPicker {
         machineID: MoldHost.ID? = nil,
         availableHosts: Set<MoldHost.ID>? = nil,
         reachableHosts: Set<MoldHost.ID> = [],
-        hiddenCollectionIDs: [MoldHost.ID: Set<String>] = [:]
+        hiddenCollectionIDs: [MoldHost.ID: Set<String>] = [:],
+        privacyEvidence: [LibraryEntry] = [],
+        privacyLinks: [PrintID: PrintID] = [:]
     ) -> [LibraryEntry] {
         // Hide a logical print before projecting physical copies: a hidden
         // replica must never leak through a visible copy on another machine.
         let tokens = LibraryEntry.fold(query).split(separator: " ")
-        return entries.compactMap { entry in
+        var privacy = LibraryQuery()
+        privacy.hiddenCollectionIDs = hiddenCollectionIDs
+        privacy.privacyEvidence = privacyEvidence
+        privacy.privacyLinks = privacyLinks
+        let allowedIDs = Set(privacy.apply(to: entries).map(\.id))
+        return entries.filter { allowedIDs.contains($0.id) }.compactMap { entry in
             guard !entry.everyCopy.contains(where: { copy in
                 copy.print.collectionList.contains {
                     hiddenCollectionIDs[copy.hostID]?.contains($0) == true

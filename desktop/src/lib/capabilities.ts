@@ -134,6 +134,19 @@ export function generationCapabilitiesForFamily(
  * advertises no recipe, where the legacy rules answer.
  */
 export interface RecipeCapabilitiesSnapshot {
+  /** Resolved advertised attachment contract; absent only on older persisted snapshots. */
+  attachmentCapabilities?: Pick<
+    BaseGenerationCapabilities,
+    | "supportsSourceImage"
+    | "requiresSourceImage"
+    | "supportsKeyframes"
+    | "supportsEndFrame"
+    | "supportsSourceVideo"
+    | "supportsAudioInput"
+    | "sourceImageMode"
+    | "boundaryFrames"
+  >;
+  authoringTask?: "fl2va" | "ref2va" | null;
   outputFormats: OutputFormat[];
   defaultOutputFormat: OutputFormat;
   promptMode: PromptRequirement;
@@ -179,6 +192,22 @@ export function recipeCapabilitiesSnapshot(
     recipe,
   );
   return {
+    attachmentCapabilities: {
+      supportsSourceImage: caps.supportsSourceImage,
+      requiresSourceImage: caps.requiresSourceImage,
+      supportsKeyframes: caps.supportsKeyframes,
+      supportsEndFrame: caps.supportsEndFrame,
+      supportsSourceVideo: caps.supportsSourceVideo,
+      supportsAudioInput: caps.supportsAudioInput,
+      sourceImageMode: caps.sourceImageMode,
+      boundaryFrames: caps.boundaryFrames ?? null,
+    },
+    authoringTask:
+      caps.sourceImageMode === "h3-boundaries"
+        ? "fl2va"
+        : caps.sourceImageMode === "ordered-references"
+          ? "ref2va"
+          : null,
     outputFormats: caps.outputFormats as OutputFormat[],
     defaultOutputFormat: caps.defaultOutputFormat as OutputFormat,
     promptMode: caps.promptMode,
@@ -220,15 +249,20 @@ export function generationCapabilitiesForForm(
     advertisedGuidance,
     advertisedSourceImage,
   );
-  if (!snapshot || isMinimaxH3Family(family)) return caps;
+  if (!snapshot) return caps;
   return {
     ...caps,
+    ...(snapshot.attachmentCapabilities ?? {}),
     // Absent on a snapshot persisted before the field existed: no toggle,
     // exactly what an older host's recipe says.
     transparency: snapshot.transparency ?? null,
     referenceImages: snapshot.referenceImages,
     referenceImagesReason: snapshot.referenceImages ? null : caps.referenceImagesReason,
-    sourceImageMode: sourceImageModeForReferences(snapshot.referenceImages),
+    sourceImageMode:
+      snapshot.attachmentCapabilities?.sourceImageMode ??
+      (isMinimaxH3Family(family)
+        ? caps.sourceImageMode
+        : sourceImageModeForReferences(snapshot.referenceImages)),
   };
 }
 

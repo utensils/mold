@@ -353,3 +353,12 @@ Held Queue recovery actions use separate full-width rows with wrapping labels, i
 Native Queue rows keep a fixed preview slot with MoldStyle’s neutral image
 placeholder when no source image exists. Distinguish loading, empty, nonimage and
 unavailable states accessibly; do not present an ordinary source-free job as an error.
+
+Library source actions share MoldClient.SourceMediaActions/SourceMediaState and the exact-owner
+bounded original loader. Metadata copies include owning-host commands and full member IDs;
+file publication/sharing is fenced by route, instance, current owner revision and visibility.
+Release private files on dismissal/revocation. Print actions use recipe-advertised endpoints
+and keyframes; explicit first/last handoffs preserve interior LTX anchors and authored scalars.
+Adding a last LTX endpoint migrates a current source image into frame 0 unless an explicit
+first anchor already exists. Print menus retain their source handoff while recipe is absent.
+Copy File Name is available for print selections and all Info file values are selectable.

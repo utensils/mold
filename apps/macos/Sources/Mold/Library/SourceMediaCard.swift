@@ -34,6 +34,7 @@ struct SourceMediaCard<Content: View>: View {
     }
 
     var body: some View {
+        SourceMediaActionsView(owner: owner, member: member, gallery: gallery) {
         VStack(alignment: .leading, spacing: 8) {
             content()
             let layout = gallery ? AnyLayout(VStackLayout(alignment: .leading, spacing: 10)) : AnyLayout(HStackLayout(alignment: .top, spacing: 12))
@@ -81,8 +82,10 @@ struct SourceMediaCard<Content: View>: View {
         .padding(gallery ? 12 : 0)
         .background(.quaternary.opacity(gallery ? 0.25 : 0), in: RoundedRectangle(cornerRadius: 16))
         .contentShape(Rectangle())
-        .rowActionMenu(SourceMediaReuseAction.menu(choices: choices, canOpen: openSource != nil,
-                                                   knownKind: member.contentKind != "unknown", busy: choice != nil), perform: perform)
+        } extra: {
+            RowActionMenu(actions: SourceMediaReuseAction.menu(choices: choices, canOpen: openSource != nil,
+                knownKind: member.contentKind != "unknown", busy: choice != nil), perform: perform)
+        }
         .sheet(isPresented: $choosingModel) {
             SourceMediaModelChooser(member: member) { host, model, recipe, role in
                 guard choice == nil, library.allowsSource(previewKey.authority, detail: !gallery), hosts.host(host.id) == host, hosts.isUp(host),
@@ -145,7 +148,7 @@ struct SourceMediaCard<Content: View>: View {
         let instance = hosts.instanceIDs[owner.hostID]
         let fence = ReferenceImportFence(model: generate.modelName, host: target, recipe: recipe, media: generate.draft.media)
         let destinationRoute = target.flatMap(hosts.host)
-        let destinationInstance = target.flatMap { hosts.instanceIDs[$0] }
+        let destinationInstance = target.flatMap({ hosts.instanceIDs[$0] })
         let revisions = generate.mediaRevisions
         let snapshot = generate.draft
         let sourceAuthority = previewKey.authority
@@ -156,7 +159,7 @@ struct SourceMediaCard<Content: View>: View {
             guard !Task.isCancelled, library.allowsSource(previewKey.authority, detail: !gallery), hosts.host(owner.hostID) == host, hosts.instanceIDs[owner.hostID] == instance,
                   library.allowsSource(sourceAuthority, detail: !gallery), library.sourceMediaCatalog.revision == sourceRevision,
                   destinationRoute == target.flatMap(hosts.host),
-                  destinationInstance == target.flatMap { hosts.instanceIDs[$0] },
+                  destinationInstance == target.flatMap({ hosts.instanceIDs[$0] }),
                   revisions == generate.mediaRevisions,
                   fence.isCurrent(model: generate.modelName, host: target, recipe: self.recipe, media: generate.draft.media) else {
                 if !Task.isCancelled { failure = "The draft or machine changed. Choose the source again to retry." }
@@ -166,10 +169,18 @@ struct SourceMediaCard<Content: View>: View {
             current.media = staged.media
             if current.width == snapshot.width { current.width = staged.width }
             if current.height == snapshot.height { current.height = staged.height }
+            if current.frames == snapshot.frames { current.frames = staged.frames }
             generate.draft = current
             onStaged()
         } catch {
-            if !Task.isCancelled { failure = error.localizedDescription }
+            guard !Task.isCancelled, library.allowsSource(sourceAuthority, detail: !gallery),
+                  library.sourceMediaCatalog.revision == sourceRevision,
+                  hosts.host(owner.hostID) == host, hosts.instanceIDs[owner.hostID] == instance,
+                  destinationRoute == target.flatMap(hosts.host),
+                  destinationInstance == target.flatMap({ hosts.instanceIDs[$0] }), revisions == generate.mediaRevisions,
+                  fence.isCurrent(model: generate.modelName, host: target, recipe: self.recipe, media: generate.draft.media)
+            else { return }
+            failure = error.localizedDescription
         }
     }
 }

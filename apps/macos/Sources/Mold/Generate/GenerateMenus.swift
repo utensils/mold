@@ -21,10 +21,11 @@ enum GenerateMenus {
     /// reuse items are a composition of the source well's and the strip's own
     /// "attach these bytes", and each is offered only where that well exists
     /// and has room.
-    static func result(canUseAsSource: Bool, canAddReference: Bool) -> [Row] {
-        var actions: [GenerateAction] = [.saveACopy, .copyResult, .showInLibrary]
+    static func result(canUseAsSource: Bool, canAddReference: Bool, canUseEndpoints: Bool = false) -> [Row] {
+        var actions: [GenerateAction] = [.saveACopy, .copyResult, .copyFileName, .showInLibrary]
         if canUseAsSource { actions.append(.useAsSourceImage) }
         if canAddReference { actions.append(.addAsReference) }
+        if canUseEndpoints { actions += [.useAsFirstFrame, .useAsLastFrame] }
         return Row.ordered(actions.map(\.row))
     }
 

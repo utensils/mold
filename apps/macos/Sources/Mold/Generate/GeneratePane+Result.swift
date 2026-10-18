@@ -16,8 +16,12 @@ extension GeneratePane {
             } : nil,
             addAsReference: referenceRoom ? { result in
                 Task { await attachResult(result, as: .reference) }
-            } : nil)
+            } : nil,
+            useAsFirstFrame: endpointRoom ? { result in Task { await attachResult(result, as: .firstFrame) } } : nil,
+            useAsLastFrame: endpointRoom ? { result in Task { await attachResult(result, as: .lastFrame) } } : nil)
     }
+
+    private var endpointRoom: Bool { recipe.map { SourceMediaAttachment.acceptsEndpoints(capabilities: $0.capabilities) } ?? false }
 
     /// The source well exists for this recipe AND this layout draws it.
     private var canReuseAsSource: Bool {
@@ -108,6 +112,9 @@ extension GeneratePane {
         case .source:
             guard canReuseAsSource else { return }
             DraftPictureAttachment.useAsSource(picked, in: &draft, recipe: recipe)
+        case .firstFrame, .lastFrame:
+            guard endpointRoom else { return }
+            SourceMediaAttachment.setEndpoint(first: kind == .firstFrame, picture: picked, draft: &draft, recipe: recipe)
         case .reference:
             guard referenceRoom else { return }
             if let typedReference {

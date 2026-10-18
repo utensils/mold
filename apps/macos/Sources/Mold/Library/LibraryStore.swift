@@ -108,14 +108,19 @@ final class LibraryStore {
     var bulkActivities: [UUID: String] = [:]
     var bulkProgress: String?
     var bulkResult: String?
-    var bulkRunning = false
+    var bulkResultHasIssues = false
+    var activityDisclosure = ActivityDisclosure()
+    var syncActivityID = UUID()
+    var bulkActivityID = UUID()
+    var bulkRunning = false { didSet { if bulkRunning && !oldValue { bulkActivityID = UUID() } } }
     var bulkEmptying = false
     var isBulkBusy: Bool { bulkRunning }
     var bulkStopRequested = false
     var bulkTargets: Set<PrintID> = []
 
-    var localSaveRunning = false
+    var localSaveRunning = false { didSet { if localSaveRunning && !oldValue { syncActivityID = UUID() } } }
     var localSaveSuppressImports = false
+    var syncDestinationHost: MoldHost.ID?
     var localSaveProgress: String?
     /// When `localSaveProgress` last changed, for its ~10 Hz throttle.
     @ObservationIgnored var localSaveProgressPublished: ContinuousClock.Instant?

@@ -1,3 +1,4 @@
+pub mod destination;
 use super::*;
 use mold_secure_client::RequestBuilderExt;
 use sha2::{Digest, Sha256};

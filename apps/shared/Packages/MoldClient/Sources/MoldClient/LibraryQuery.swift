@@ -16,6 +16,10 @@ public struct LibraryQuery: Hashable, Sendable {
     /// is what was asked for.
     public var hiddenCollectionIDs: [MoldHost.ID: Set<String>] = [:]
 
+    /// Live and Trash rows used only as privacy evidence, never actionable media.
+    public var privacyEvidence: [LibraryEntry] = []
+    public var privacyLinks: [PrintID: PrintID] = [:]
+
     public init() {}
 
     public var machineIDs: Set<MoldHost.ID> {
@@ -34,7 +38,19 @@ public struct LibraryQuery: Hashable, Sendable {
             if case let .machine(id, _) = token { return id }
             return nil
         })
-        let protected = showHidden ? entries : entries.filter { !isHidden($0) }
+        // Merge the complete identity before projecting live rows or machines.
+        // A hidden original in Trash still protects its unfiled backup.
+        var protected = entries
+        if !showHidden && !hiddenCollectionIDs.isEmpty {
+            let evidence = entries.flatMap(\.everyCopy) + privacyEvidence.flatMap(\.everyCopy)
+            var unique: [PrintID: LibraryEntry] = [:]
+            for copy in evidence { unique[copy.id] = copy }
+            let protectedIDs = Set(LibraryMerge.merge(Array(unique.values), localHost: nil, links: privacyLinks)
+                .filter { isHidden($0) }.flatMap(\.everyCopy).map(\.id))
+            protected = entries.filter {
+                !$0.everyCopy.contains { protectedIDs.contains($0.id) }
+            }
+        }
         let candidates = machineIDs.isEmpty
             ? protected : protected.compactMap { $0.presented(onAnyOf: machineIDs) }
         var shown = candidates.filter { entry in

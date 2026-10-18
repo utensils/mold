@@ -9,6 +9,7 @@ import {
 } from "../lib/sourceMediaResources";
 import SourceMediaCard from "./SourceMediaCard.vue";
 import {
+  retainedSourceMediaDisclosable,
   retainedSourceMediaInventory,
   retainedSourceMediaDisclosure,
   type RetainedSourceMediaInventory,
@@ -120,7 +121,12 @@ onBeforeUnmount(() => {
         (inventory?.availability === 'available' && !inventory.members?.length)
       "
     >
-      No retained source media is available for this print.
+      {{
+        inventory?.availability === "available" ||
+        (owner.metadata && !retainedSourceMediaDisclosable(owner.metadata))
+          ? "No source media."
+          : "Original source media was not retained for this older print."
+      }}
     </p>
     <p v-else role="status">
       {{

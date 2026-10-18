@@ -35,8 +35,12 @@ final class AppRouter {
     /// A print whose recipe Generate should load next ("Use These Settings").
     var pendingReuse: LibraryEntry?
     var pendingSource: LibraryEntry?
+    var pendingSourceAttachment: SourceMediaAttachment?
+    var pendingSourceRequest = UUID()
 
-    func useAsSource(_ entry: LibraryEntry) {
+    func useAsSource(_ entry: LibraryEntry, attachment: SourceMediaAttachment? = nil) {
+        pendingSourceAttachment = attachment
+        pendingSourceRequest = UUID()
         pendingSource = entry
         selection = .go(.generate)
     }

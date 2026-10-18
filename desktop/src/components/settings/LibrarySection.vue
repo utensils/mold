@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useLibrarySyncStore } from "../../stores/librarySync";
+import { copyMachineIdentity } from "@studio/api/galleryCopy";
 import SettingRow from "@studio/components/settings/SettingRow.vue";
 import ToggleControl from "@studio/components/settings/ToggleControl.vue";
 import EngineRow from "./EngineRow.vue";
@@ -20,10 +22,24 @@ import { useLibraryPrefsStore } from "../../stores/libraryPrefs";
  * and the sentence lies.
  */
 const libraryPrefs = useLibraryPrefsStore();
+const sync = useLibrarySyncStore();
+void sync.initialize();
 </script>
 
 <template>
   <div data-test="library-section">
+    <SettingRow
+      v-for="machine in sync.destinations"
+      :key="copyMachineIdentity(machine)"
+      :label="`Keep in Sync to ${machine.label}`"
+      help="Copy new prints and reconcile organization while this app is open. Deleting a print never deletes backups."
+    >
+      <ToggleControl
+        :model-value="sync.keep[copyMachineIdentity(machine)] === true"
+        :aria-label="`Keep in Sync to ${machine.label}`"
+        @commit="sync.setKeep(machine, $event)"
+      />
+    </SettingRow>
     <EngineRow schema-key="gallery.trash_retention_days" />
     <SettingRow
       label="Tag new prints with their title"

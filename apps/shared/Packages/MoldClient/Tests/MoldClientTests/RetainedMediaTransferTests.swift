@@ -461,6 +461,23 @@ struct RetainedMediaTransferTests {
         #expect(target.calls.isEmpty)
     }
 
+    @Test func revokedCopyAuthorityAfterMemberDownloadCannotPublishRetainedPins() async throws {
+        let source = FakeBackend(), target = FakeBackend()
+        source.stub("retainedMediaTransferOffer(for:)", returning:
+            offer(archiveIdentitySha256: "a".repeated(64), members: [member()]))
+        target.stub("retainedMediaTransferOffer(for:)", returning:
+            offer(archiveIdentitySha256: "b".repeated(64), members: []))
+        source.stub("retainedSourceMediaBytes(for:member:)", returning: Data([1, 2, 3]))
+        await #expect(throws: CancellationError.self) {
+            try await RetainedSourceMedia.mirrorSources(for: "old.png", metadata: nil,
+                from: source, to: target, as: "copy.png", isCurrent: {
+                    source.count("retainedSourceMediaBytes(for:member:)") == 0
+                })
+        }
+        #expect(source.count("retainedSourceMediaBytes(for:member:)") == 1)
+        #expect(target.count("importRetainedMedia(_:for:)") == 0)
+    }
+
     @Test func transferFrameKeepsReferenceOrderAndStreamsExactlyDeclaredBytes() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)

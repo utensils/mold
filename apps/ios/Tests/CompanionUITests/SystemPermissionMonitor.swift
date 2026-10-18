@@ -18,37 +18,44 @@ extension XCTestCase {
     /// Always remove this test's exact loopback pairing, including on failure.
     /// Relaunch dismisses whichever viewer, sheet, or menu was left open.
     @MainActor func cleanUpFixture(_ machine: FixtureMachine, port: UInt16, app: XCUIApplication) {
+        // An async teardown awaiting MainActor deadlocks when XCTest
+        // interrupts a failing assertion already executing on that actor.
+        let cleanup: @MainActor @Sendable () -> Void = {
+            defer { app.terminate(); machine.stop() }
+            app.terminate()
+            app.launchArguments = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
+            app.launch()
+            XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
+            if !app.navigationBars["All Prints"].exists { app.chooseLibraryShelf("All Prints") }
+            XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
+            let card = app.descendants(matching: .any).matching(NSPredicate(format:
+                "identifier BEGINSWITH 'machine-card-' AND label MATCHES %@",
+                ".*127\\.0\\.0\\.1:\(port)([^0-9].*|$)")).firstMatch
+            if app.staticTexts["No machines yet"].exists { return }
+            let fleet = app.scrollViews["machines-fleet"]
+            XCTAssertTrue(fleet.waitForExistence(timeout: 5), "Fixture cleanup must own the Machines viewport")
+            if XCTestCase.revealFixtureControl(card, in: fleet, app: app) {
+                card.tap()
+                let detail = app.collectionViews["machine-details"]
+                XCTAssertTrue(detail.waitForExistence(timeout: 5))
+                let remove = detail.buttons["Remove…"].firstMatch
+                XCTAssertTrue(XCTestCase.revealFixtureControl(remove, in: detail, app: app), "The exact fixture's Remove action must be reachable")
+                remove.tap()
+                let confirm = app.buttons["Remove"].firstMatch
+                XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+                confirm.tap()
+                XCTAssertTrue(card.waitForNonExistence(timeout: 5), "Fixture pairing must not survive teardown")
+            } else {
+                // The test can fail before Add succeeds. Absence is only
+                // accepted after searching the actual fleet in both directions.
+                XCTAssertFalse(card.exists)
+            }
+        }
         addTeardownBlock {
-            await MainActor.run {
-                defer { app.terminate(); machine.stop() }
-                app.terminate()
-                app.launchArguments = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
-                app.launch()
-                XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
-                if !app.navigationBars["All Prints"].exists { app.chooseLibraryShelf("All Prints") }
-                XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
-                let card = app.descendants(matching: .any).matching(NSPredicate(format:
-                    "identifier BEGINSWITH 'machine-card-' AND label MATCHES %@",
-                    ".*127\\.0\\.0\\.1:\(port)([^0-9].*|$)")).firstMatch
-                if app.staticTexts["No machines yet"].exists { return }
-                let fleet = app.scrollViews["machines-fleet"]
-                XCTAssertTrue(fleet.waitForExistence(timeout: 5), "Fixture cleanup must own the Machines viewport")
-                if XCTestCase.revealFixtureControl(card, in: fleet, app: app) {
-                    card.tap()
-                    let detail = app.collectionViews["machine-details"]
-                    XCTAssertTrue(detail.waitForExistence(timeout: 5))
-                    let remove = detail.buttons["Remove…"].firstMatch
-                    XCTAssertTrue(XCTestCase.revealFixtureControl(remove, in: detail, app: app), "The exact fixture's Remove action must be reachable")
-                    remove.tap()
-                    let confirm = app.buttons["Remove"].firstMatch
-                    XCTAssertTrue(confirm.waitForExistence(timeout: 5))
-                    confirm.tap()
-                    XCTAssertTrue(card.waitForNonExistence(timeout: 5), "Fixture pairing must not survive teardown")
-                } else {
-                    // The test can fail before Add succeeds. Absence is only
-                    // accepted after searching the actual fleet in both directions.
-                    XCTAssertFalse(card.exists)
-                }
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { cleanup() }
+            } else {
+                DispatchQueue.main.sync { cleanup() }
             }
         }
     }

@@ -22,6 +22,7 @@ public enum LibraryAction: Hashable, Sendable {
     case reuse
     case useAsSourceImage
     case addAsReference
+    case useAsFirstFrame, useAsLastFrame
     case quickLook
     case favorite(Bool)
     case newCollection
@@ -32,6 +33,7 @@ public enum LibraryAction: Hashable, Sendable {
     /// not read that machine's upscalers.
     case upscale(model: String?)
     case copy
+    case copyFileName
     case save
     case saveLocally
     case export(format: String)
@@ -65,6 +67,7 @@ public struct LibraryMenuPlan: Sendable {
     public let canOpen: Bool
     public let canReuse: Bool
     public let canUseAsSource: Bool
+    public let canUseEndpoints: Bool
     public let canAddReference: Bool
     /// Whether the machine holding this print advertises upscaling it -- a
     /// clip needs `video_upscale`, a still `gallery_image` as well. Absence
@@ -86,7 +89,7 @@ public struct LibraryMenuPlan: Sendable {
                 meshExports: MeshExport.Split? = nil,
                 canOpen: Bool = true, canReuse: Bool = false,
                 canUseAsSource: Bool = false,
-                canAddReference: Bool = false, canUpscale: Bool = false,
+                canAddReference: Bool = false, canUseEndpoints: Bool = false, canUpscale: Bool = false,
                 upscalers: [UpscalerOption] = [], trashCount: Int = 0,
                 localSaveCount: Int = 0, trashLocationName: String? = nil, lifecycleBusy: Bool = false) {
         self.lifecycleBusy = lifecycleBusy
@@ -101,6 +104,7 @@ public struct LibraryMenuPlan: Sendable {
         self.canOpen = canOpen
         self.canReuse = canReuse
         self.canUseAsSource = canUseAsSource
+        self.canUseEndpoints = canUseEndpoints
         self.canAddReference = canAddReference
         self.canUpscale = canUpscale
         self.upscalers = upscalers

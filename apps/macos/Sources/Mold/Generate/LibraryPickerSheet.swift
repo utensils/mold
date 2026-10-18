@@ -122,7 +122,7 @@ struct LibraryPickerSheet: View {
         LibraryPicker.rows(library.items, query: query, machineID: machineID,
                            availableHosts: Set(hosts.hosts.map(\.id)),
                            reachableHosts: Set(hosts.hosts.filter { hosts.isUp($0) }.map(\.id)),
-                           hiddenCollectionIDs: library.hiddenCollectionIDs)
+                           hiddenCollectionIDs: library.hiddenCollectionIDs, privacyEvidence: library.trashed, privacyLinks: library.syncPrivacyLinks())
     }
 
     func showPreview(_ entry: LibraryEntry) {

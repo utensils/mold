@@ -28,6 +28,15 @@ nonisolated struct LocalSyncRecord: Codable, Sendable, Equatable {
     var sourceRoute: String?
     var destinationRoute: String?
     var provisional: Bool?
+    var destinationHost: UUID?
+    var organization: LibraryOrganizationState?
+    var organizationIntent: SyncOrganizationIntent?
+    /// This run imported a new output but has not verified its initial organization.
+    var initialOrganizationPending: Bool?
+    /// The output association may hide a copy before organization verification.
+    var privacyPending: Bool?
+    /// Verified root authority stays attached through forwarded copies.
+    var originKey: String?
 
     static func key(hostID: MoldHost.ID, filename: String) -> String {
         "\(hostID.uuidString):\(filename)"
@@ -119,8 +128,11 @@ nonisolated struct LocalSyncRecord: Codable, Sendable, Equatable {
     /// The output receipt for an import the destination answered with `filename`.
     init?(receipt source: GalleryPrint, from sourceHost: MoldHost.ID, as filename: String,
           destinationInstance: String?) {
-        guard let sourceVersion = source.mediaVersion, let sourceSize = source.sizeBytes,
-              let sourceRecipe = Self.recipe(source, host: sourceHost) else { return nil }
+        guard let sourceRecipe = Self.recipe(source, host: sourceHost) else { return nil }
+        // Older gallery listings omit version/size. Their receipt may journal
+        // organization intent, but can never match or seal a skipped output.
+        let sourceVersion = source.mediaVersion ?? ""
+        let sourceSize = source.sizeBytes ?? 0
         self.sourceVersion = sourceVersion
         sourceTimestamp = source.timestamp
         self.sourceSize = sourceSize
@@ -132,5 +144,13 @@ nonisolated struct LocalSyncRecord: Codable, Sendable, Equatable {
         destinationRecipe = sourceRecipe
         self.destinationInstance = destinationInstance
         provisional = true
+        privacyPending = true
     }
+}
+
+nonisolated struct SyncOrganizationIntent: Codable, Equatable, Sendable {
+    let operation: String
+    let before: LibraryOrganizationSnapshot
+    let after: LibraryOrganizationSnapshot
+    let state: LibraryOrganizationState
 }

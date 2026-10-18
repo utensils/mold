@@ -2,6 +2,7 @@ import { studioPrimary, standaloneStudio } from "./secureStudio";
 import { CONNECTION_MODE_HEADER } from "@studio/api/connectionMode";
 import type { InjectionKey } from "vue";
 import { relayFetch } from "@studio/api/relayTransport";
+export const ORIGIN_AUTH_CHANGED_EVENT = "mold:origin-auth-changed";
 export const ORIGIN_ACCESS_CHANGE_KEY: InjectionKey<() => void> = Symbol(
   "mold.origin.change-key",
 );
@@ -18,8 +19,11 @@ export function originApiKey(): string | null {
 }
 export function setOriginApiKey(key: string): void {
   const value = key.trim();
+  const previous = originApiKey();
   if (value) sessionStorage.setItem(storageKey(), value);
   else sessionStorage.removeItem(storageKey());
+  if (previous !== (value || null))
+    window.dispatchEvent(new CustomEvent(ORIGIN_AUTH_CHANGED_EVENT));
 }
 export function originApiTarget() {
   return {

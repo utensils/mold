@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import SourceMediaActions from "./SourceMediaActions.vue";
 import { computed, ref, watch, onBeforeUnmount } from "vue";
 import { imageDimensionsFromBytes } from "../lib/imageDimensions";
 import ModalPanel from "@ui/components/ModalPanel.vue";
@@ -13,6 +14,7 @@ import {
   sourceOwnerIdentity,
   type SourceMediaSelection,
 } from "../lib/sourceMediaBrowser";
+const actions = ref<InstanceType<typeof SourceMediaActions>>();
 const props = defineProps<{
   selection: SourceMediaSelection;
   usages: SourceMediaSelection[];
@@ -144,7 +146,7 @@ watch(
         label="Source media viewer"
         @close="emit('close')"
       >
-        <div class="source-viewer">
+        <div class="source-viewer" @contextmenu="actions?.open($event)">
           <div class="source-viewer__media">
             <p v-if="loading" role="status">Loading original…</p>
             <div v-else-if="error" role="alert">
@@ -219,6 +221,13 @@ watch(
             >
               Use as source
             </button>
+            <SourceMediaActions
+              ref="actions"
+              :selection="selection"
+              :allow-open-owner="allowOpenOwner"
+              @use="emit('use', $event)"
+              @open-owner="emit('openOwner', $event)"
+            />
             <h3>Where used · {{ usages.length }}</h3>
             <ul>
               <li

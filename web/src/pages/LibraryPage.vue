@@ -31,13 +31,39 @@ import { workspaceLabel } from "../lib/workspaces";
  */
 import {
   computed,
+  provide,
   nextTick,
   onBeforeUnmount,
   onMounted,
   ref,
   watch,
 } from "vue";
+import {
+  SOURCE_ATTACHMENT_CHOICES,
+  imageAttachmentChoices,
+  type SourceAttachmentIntent,
+} from "@studio/lib/sourceAttachmentChoices";
+import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
+import { generationCapabilitiesForFamily } from "../lib/generateCapabilities";
 import { useRoute, useRouter } from "vue-router";
+import { observeLibraryCopyAuthority } from "../lib/libraryCopyAuthority";
+import { copyGalleryPrint, type CopyMachine } from "@studio/api/galleryCopy";
+import {
+  confirmedPhysicalCopyPrivacyKeys,
+  provisionalCopyPrivacy,
+  type ProvisionalCopyPrivacy,
+} from "@studio/lib/copyPrivacy";
+import {
+  provisionalCopyHiddenKeys,
+  retainCopyPrivacyUntilConfirmed,
+} from "../lib/copyPrivacy";
+import { apiJsonTo } from "@studio/api/client";
+import {
+  browserSyncStorage,
+  copyJournal,
+} from "@studio/lib/galleryCopyJournal";
+import { primaryModifierPressed } from "../lib/platform";
+import { copyTextToClipboard } from "@studio/lib/notificationClipboard";
 import Icon from "@ui/components/Icon.vue";
 import SegmentedControl, {
   type SegmentOption,
@@ -179,7 +205,11 @@ import {
 } from "@studio/lib/minimaxH3Authoring";
 
 import SourceMediaBrowser from "@studio/components/SourceMediaBrowser.vue";
-import { useSourceMedia, webSourceOwner } from "../lib/useSourceMedia";
+import {
+  attachOutputEndpoint,
+  useSourceMedia,
+  webSourceOwner,
+} from "../lib/useSourceMedia";
 import type {
   SourceMediaOwner,
   SourceMediaSelection,
@@ -208,6 +238,31 @@ const entries = ref<HostGalleryImage[]>([]);
 /** Concrete device copies retained behind the deduplicated All view. */
 const rawEntries = ref<HostGalleryImage[]>([]);
 const privacyEvidence = ref<HostGalleryImage[]>([]);
+const provisionalPrivacy = ref<ProvisionalCopyPrivacy[]>([]);
+const copyPrivacyReadFailed = ref(false);
+async function loadCopyPrivacy(confirmedHidden = new Set<string>()) {
+  try {
+    const document = await browserSyncStorage.read();
+    const receipts = document?.receipts ?? {};
+    provisionalPrivacy.value = retainCopyPrivacyUntilConfirmed(
+      provisionalCopyPrivacy(receipts),
+      provisionalPrivacy.value,
+      receipts,
+      confirmedHidden,
+    );
+    copyPrivacyReadFailed.value = false;
+  } catch (failure) {
+    copyPrivacyReadFailed.value = true;
+    throw failure;
+  }
+}
+function onCopyPrivacyStorage(event: StorageEvent) {
+  if (event.key !== "mold.library-sync.v1") return;
+  void loadCopyPrivacy().catch((failure) => {
+    errorMessage.value = String(failure);
+  });
+}
+
 /** Per-host organization: capabilities, collections, tags, trash listing. */
 const snapshots = ref<HostOrganizationSnapshot[]>([]);
 const galleryImageUpscaleByHost = ref<Record<string, boolean>>({});
@@ -250,6 +305,22 @@ const favoritesOnly = ref(false);
 const tagFilter = ref<string[]>([]);
 
 const form = useGenerateForm();
+const attachmentCapabilities = computed(() => {
+  const state = form.state.value;
+  const model = models.value.find((model) => model.name === state.model);
+  return generationCapabilitiesForFamily(
+    model?.family ?? state.modelFamily,
+    state.model,
+    state.pipeline,
+    model?.guidance_capabilities,
+    model?.source_image ?? state.sourceImageCapability,
+    effectiveGenerationRecipe(model, state.pipeline),
+  );
+});
+const attachmentChoices = computed(() =>
+  imageAttachmentChoices(attachmentCapabilities.value),
+);
+provide(SOURCE_ATTACHMENT_CHOICES, attachmentChoices);
 const route = useRoute();
 const router = useRouter();
 const sourceView = computed(() => route.query.section === "sources");
@@ -1631,10 +1702,11 @@ const missingLinkedHost = computed(
     !getHost(hostFilter.value),
 );
 
-const globallyHiddenKeys = computed(() => {
+const physicalHiddenKeys = computed(() => {
   const keys = new Set<string>();
   for (const group of groupLogicalGalleryPrints([
     ...rawEntries.value,
+    ...trashRaw.value,
     ...privacyEvidence.value,
   ])) {
     const org = unionOrganization(
@@ -1647,6 +1719,25 @@ const globallyHiddenKeys = computed(() => {
     )
       for (const copy of group.copies) keys.add(keyOf(copy));
   }
+  return keys;
+});
+const globallyHiddenKeys = computed(() => {
+  const keys = new Set(physicalHiddenKeys.value);
+  const pending = provisionalCopyHiddenKeys(
+    provisionalPrivacy.value,
+    listHosts(),
+  );
+  if (copyPrivacyReadFailed.value)
+    for (const row of rawEntries.value) keys.add(keyOf(row));
+  if (pending.size)
+    for (const group of groupLogicalGalleryPrints([
+      ...rawEntries.value,
+      ...trashRaw.value,
+      ...privacyEvidence.value,
+    ])) {
+      if (group.copies.some((copy) => pending.has(keyOf(copy))))
+        for (const copy of group.copies) keys.add(keyOf(copy));
+    }
   return keys;
 });
 const organizationFiltered = computed(() => {
@@ -1766,6 +1857,7 @@ async function performRefresh() {
   loading.value = true;
   errorMessage.value = null;
   try {
+    await loadCopyPrivacy();
     const hosts = listHosts();
     const listings = new Map<string, readonly HostListingRow[]>();
     const [merged, organization, upscaleCapabilities] = await Promise.all([
@@ -1860,6 +1952,9 @@ async function performRefresh() {
     }
     unreachableHostIds.value = merged.unreachableHostIds;
     remoteHostCount.value = merged.remoteHostCount;
+    await loadCopyPrivacy(
+      confirmedPhysicalCopyPrivacyKeys(rawEntries.value, organization ?? []),
+    );
     // Only a total wipe-out (no host answered) is an error; one box down just
     // shows an "unreachable" note while the rest render.
     if (
@@ -2387,6 +2482,31 @@ function galleryImageMimeType(item: GalleryImage, declared: string): string {
   return format ? `image/${format}` : "application/octet-stream";
 }
 
+async function onUseAsEndpoint(
+  item: GalleryImage,
+  intent: SourceAttachmentIntent,
+) {
+  const host = hostForEntry(item);
+  if (!host) return;
+  const captured = copyRouteSnapshot();
+  try {
+    await attachOutputEndpoint(
+      item,
+      form.state,
+      models.value.find((model) => model.name === form.state.value.model),
+      intent,
+      () => copyRouteSnapshot() === captured,
+      () => fetchGalleryBlob(host, item.filename),
+    );
+    closeLightbox();
+    void router.push({ name: "create" });
+  } catch (failure) {
+    toast(
+      "error",
+      failure instanceof Error ? failure.message : String(failure),
+    );
+  }
+}
 async function onUseAsSource(item: GalleryImage) {
   if (!(await setAsSource(item))) return;
   closeLightbox();
@@ -2644,6 +2764,114 @@ function setThumbnailSize(next: number) {
   saveGalleryThumbnailSize(next);
 }
 
+const copyBusy = ref(false),
+  copyStatus = ref(""),
+  copyError = ref("");
+const copyDestinationId = ref("");
+const copyDestinations = computed(() => {
+  void snapshots.value;
+  return listHosts();
+});
+let copyController: AbortController | undefined;
+const copyRouteSnapshot = () =>
+  JSON.stringify(
+    listHosts().map(({ id, url, apiKey, instanceId, connectionMode }) => [
+      id,
+      url,
+      apiKey,
+      instanceId,
+      connectionMode,
+    ]),
+  );
+async function copyPrintsTo(items: GalleryImage[], destinationId: string) {
+  if (copyBusy.value || !destinationId) return;
+  const target = hostById(destinationId);
+  if (!target) return;
+  copyBusy.value = true;
+  copyError.value = "";
+  copyController = new AbortController();
+  const controller = copyController;
+  const routes = copyRouteSnapshot();
+  let changed = false;
+  const invalidate = () => {
+    changed = true;
+    controller.abort();
+  };
+  const stopObservingAuthority = observeLibraryCopyAuthority(invalidate);
+  const current = () =>
+    !changed && !controller.signal.aborted && routes === copyRouteSnapshot();
+  async function machine(
+    host: NonNullable<ReturnType<typeof hostById>>,
+  ): Promise<CopyMachine> {
+    const target = hostApiTarget(host);
+    const status = await apiJsonTo<{ instance_id?: string }>(
+      target,
+      "/api/status",
+      { signal: controller.signal },
+    );
+    if (
+      !current() ||
+      !status.instance_id ||
+      (host.instanceId && status.instance_id !== host.instanceId)
+    )
+      throw new Error(
+        "The machine or its connection changed. Reconnect before copying.",
+      );
+    return {
+      id: host.id,
+      label: host.name,
+      target: { ...target },
+      instanceId: status.instance_id,
+    };
+  }
+  try {
+    const destination = await machine(target);
+    let legacyUnavailable = 0;
+    for (let index = 0; index < items.length; index++) {
+      const item = items[index]!;
+      const host = hostForEntry(item);
+      if (!host || host.id === destinationId) continue;
+      copyStatus.value = `Copying ${index + 1}/${items.length} to ${destination.label}…`;
+      const receipt = await copyGalleryPrint({
+        source: await machine(host),
+        destination,
+        filename: item.filename,
+        current,
+        journal: (() => {
+          const journal = copyJournal(browserSyncStorage);
+          return {
+            ...journal,
+            write: async (...args: Parameters<typeof journal.write>) => {
+              await journal.write(...args);
+              await loadCopyPrivacy();
+            },
+          };
+        })(),
+        signal: controller.signal,
+      });
+      if (receipt.outcome === "legacy_inputs_unavailable") legacyUnavailable++;
+      if (receipt.organization?.conflicts?.length)
+        copyError.value = receipt.organization.conflicts.join(" · ");
+    }
+    copyStatus.value = `Copied to ${destination.label}.${legacyUnavailable ? ` Original inputs were not retained for ${legacyUnavailable} older print(s).` : ""}`;
+    await refresh();
+  } catch (failure) {
+    copyError.value = controller.signal.aborted
+      ? "Copy stopped. Copy again to repair any incomplete prints."
+      : `${failure instanceof Error ? failure.message : String(failure)} If the browser blocks this connection, open Studio over HTTPS or use the native app.`;
+  } finally {
+    copyBusy.value = false;
+    stopObservingAuthority();
+  }
+}
+onBeforeUnmount(() => copyController?.abort());
+async function copyFileNames(items: GalleryImage[]) {
+  if (
+    !(await copyTextToClipboard(items.map((item) => item.filename).join("\n")))
+  )
+    toast("error", "Could not copy file names.");
+}
+
 // ── Tile context menu ───────────────────────────────────────────────────────
 const contextMenu = ref<{
   item: GalleryImage;
@@ -2739,12 +2967,22 @@ function onDocumentKeydown(event: KeyboardEvent) {
     return;
   }
   if (typingTarget(event) || event.altKey) return;
-  const meta = event.metaKey || event.ctrlKey;
+  const meta = primaryModifierPressed(event);
   const key = event.key.toLowerCase();
   if (meta && event.shiftKey && key === "n") {
     if (!canOrganize.value) return;
     event.preventDefault();
     void onNewCollection(selected.value ?? undefined);
+    return;
+  }
+  if (
+    meta &&
+    event.shiftKey &&
+    event.key === "Backspace" &&
+    scope.value === "trash"
+  ) {
+    event.preventDefault();
+    void emptyTrash();
     return;
   }
   if (
@@ -2763,9 +3001,18 @@ function onDocumentKeydown(event: KeyboardEvent) {
       );
     return;
   }
-  if (meta || event.shiftKey) return;
+  if (event.metaKey || event.ctrlKey || event.shiftKey) return;
   if (event.key === "Backspace" || event.key === "Delete") {
-    if (scope.value === "trash") return;
+    if (scope.value === "trash") {
+      if (selected.value) {
+        event.preventDefault();
+        void deleteForeverOne(selected.value);
+      } else if (selectMode.value && selection.value.size > 0) {
+        event.preventDefault();
+        void deleteForeverSelected();
+      }
+      return;
+    }
     if (selected.value) {
       event.preventDefault();
       void onLightboxDelete(selected.value);
@@ -2888,6 +3135,7 @@ function pollTick() {
   void refresh();
 }
 onMounted(async () => {
+  window.addEventListener("storage", onCopyPrivacyStorage);
   document.addEventListener("visibilitychange", refreshWhenVisible);
   window.addEventListener("online", refreshWhenVisible);
   const [, listing] = await Promise.all([
@@ -2904,6 +3152,7 @@ onMounted(async () => {
 });
 onBeforeUnmount(() => {
   disposed = true;
+  window.removeEventListener("storage", onCopyPrivacyStorage);
   document.removeEventListener("visibilitychange", refreshWhenVisible);
   window.removeEventListener("online", refreshWhenVisible);
   stopUpscalePoll();
@@ -3185,6 +3434,25 @@ onBeforeUnmount(() => {
       @set-host="setHostFilter"
     />
 
+    <div
+      v-if="copyBusy || copyStatus || copyError"
+      role="status"
+      class="gal__banner"
+    >
+      <span>{{ copyError || copyStatus }}</span
+      ><button v-if="copyBusy" type="button" @click="copyController?.abort()">
+        Stop</button
+      ><button
+        v-else
+        type="button"
+        @click="
+          copyStatus = '';
+          copyError = '';
+        "
+      >
+        Dismiss
+      </button>
+    </div>
     <!-- Trash retention banner. -->
     <div
       v-if="scope === 'trash' && retentionSummary.segments.length > 0"
@@ -3487,6 +3755,16 @@ onBeforeUnmount(() => {
       >
         Open
       </button>
+      <button
+        type="button"
+        role="menuitem"
+        @click="
+          copyFileNames([contextMenu.item]);
+          closeContextMenu();
+        "
+      >
+        Copy File Name
+      </button>
       <template v-if="scope === 'trash'">
         <button
           type="button"
@@ -3507,8 +3785,43 @@ onBeforeUnmount(() => {
         </button>
       </template>
       <template v-else>
+        <details v-if="copyDestinations.length > 1">
+          <summary>Copy to</summary>
+          <button
+            v-for="host in copyDestinations.filter(
+              (h) => h.id !== (contextMenu!.item as HostGalleryImage).hostId,
+            )"
+            :key="host.id"
+            type="button"
+            role="menuitem"
+            :disabled="copyBusy"
+            @click="
+              copyPrintsTo([contextMenu!.item], host.id);
+              closeContextMenu();
+            "
+          >
+            {{ host.name }}
+          </button>
+        </details>
         <button type="button" role="menuitem" @click="contextReuse">
           Reuse settings
+        </button>
+        <button
+          v-for="intent in mediaKind(
+            contextMenu.item.format,
+            contextMenu.item.filename,
+          ) === 'image'
+            ? attachmentChoices
+            : []"
+          :key="intent"
+          type="button"
+          role="menuitem"
+          @click="
+            onUseAsEndpoint(contextMenu!.item, intent);
+            closeContextMenu();
+          "
+        >
+          Use as {{ intent }} frame
         </button>
         <button type="button" role="menuitem" @click="contextSource">
           Use as source
@@ -3590,6 +3903,14 @@ onBeforeUnmount(() => {
             Clear
           </button>
 
+          <button
+            type="button"
+            class="gal__bar-btn"
+            :disabled="selection.size === 0"
+            @click="copyFileNames(selectedEntries)"
+          >
+            Copy File Names
+          </button>
           <template v-if="scope === 'trash'">
             <button
               type="button"
@@ -3612,6 +3933,29 @@ onBeforeUnmount(() => {
           </template>
 
           <template v-else>
+            <select
+              v-if="copyDestinations.length > 1"
+              v-model="copyDestinationId"
+              aria-label="Copy selected to"
+            >
+              <option value="">Copy to…</option>
+              <option
+                v-for="host in copyDestinations"
+                :key="host.id"
+                :value="host.id"
+              >
+                {{ host.name }}
+              </option>
+            </select>
+            <button
+              v-if="copyDestinationId"
+              type="button"
+              class="gal__bar-btn"
+              :disabled="copyBusy || selection.size === 0"
+              @click="copyPrintsTo(selectedEntries, copyDestinationId)"
+            >
+              Copy
+            </button>
             <button
               type="button"
               class="gal__bar-btn"
@@ -3803,6 +4147,7 @@ onBeforeUnmount(() => {
       @copy-link="copyLibraryLink"
       @reuse="onReuse"
       @use-source="onUseAsSource"
+      @use-endpoint="onUseAsEndpoint"
       @upscale="onUpscale"
       @delete="onLightboxDelete"
       @rename="onRename"

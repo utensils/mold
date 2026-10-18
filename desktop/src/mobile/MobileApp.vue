@@ -1,4 +1,9 @@
 <script setup lang="ts">
+import { provide } from "vue";
+import {
+  SOURCE_ATTACHMENT_CHOICES,
+  imageAttachmentChoices,
+} from "@studio/lib/sourceAttachmentChoices";
 import OriginalMediaHost from "@studio/components/OriginalMediaHost.vue";
 import { useMobileKeyboardViewport } from "./useMobileKeyboardViewport";
 import { SourceCanvasController } from "@studio/lib/sourceCanvasController";
@@ -1730,6 +1735,10 @@ const caps = computed(() =>
     selectedGenerationModel.value?.source_image ?? form.sourceImageCapability,
     effectiveGenerationRecipe(selectedGenerationModel.value, form.pipeline),
   ),
+);
+provide(
+  SOURCE_ATTACHMENT_CHOICES,
+  computed(() => imageAttachmentChoices(caps.value)),
 );
 const generatedAudioSupported = computed(
   () => caps.value.supportsAudio && selectedGenerationModel.value?.supports_audio !== false,
@@ -9882,6 +9891,7 @@ const mobileSourceOwners = computed<SourceMediaOwner[]>(() => {
         print.filename,
       ]),
       filename: print.filename,
+      metadata: print.metadata,
       title: printCaption(print),
       hostLabel: print.hostName,
       target: { ...print.target },
@@ -9967,6 +9977,8 @@ async function useMobileRetainedSource(
           h.instanceId === instance &&
           JSON.stringify(mobileHostTarget(h)) === JSON.stringify(owner.target),
       ),
+    selection.attachment,
+    caps.value,
   );
   usingPrintAsSource.value = false;
   if (!outcome.ok) {

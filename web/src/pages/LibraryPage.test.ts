@@ -579,6 +579,9 @@ describe("LibraryPage", () => {
     hidden.mockReturnValue(false);
     document.dispatchEvent(new Event("visibilitychange"));
     window.dispatchEvent(new Event("online"));
+    // Refresh resolves durable copy privacy before publishing/fetching rows.
+    // Let that asynchronous preflight settle; the gallery read stays pending.
+    await flushPromises();
     expect(listGalleryMock).toHaveBeenCalledTimes(2);
     resolveRefresh([cat, dog]);
     await flushPromises();

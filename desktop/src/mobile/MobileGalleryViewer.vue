@@ -510,6 +510,7 @@ function guardSheetClick(event: MouseEvent): void {
 const retainedOwner = computed<SourceMediaOwner>(() => ({
   key: JSON.stringify([props.cacheKey, props.target.baseUrl, props.item.filename]),
   filename: props.item.filename,
+  metadata: props.item.metadata,
   title: props.item.filename,
   hostLabel: props.hostName,
   instanceId: props.instanceId ?? "",

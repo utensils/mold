@@ -73,6 +73,8 @@ struct LibraryPane: View {
                            ? { attach($0, as: .source) } : nil,
                        addAsReference: attachmentOffer.canAddReference
                            ? { attach($0, as: .reference) } : nil,
+                       useAsFirstFrame: attachmentOffer.canUseEndpoints ? { attach($0, as: .firstFrame) } : nil,
+                       useAsLastFrame: attachmentOffer.canUseEndpoints ? { attach($0, as: .lastFrame) } : nil,
                        confirmDestruction: { pendingDestruction = $0 },
                        materializer: materializer, upscales: upscales,
                        collectionAction: { performCollection($0) },
@@ -95,7 +97,6 @@ struct LibraryPane: View {
             .onChange(of: navigation.scope) { visit.capture(showing.visible, scope: navigation.scope) }
             .onChange(of: resolved) { visit.capture(showing.visible, scope: navigation.scope) }
             .onDisappear { library.finishVisit(visit.finish()) }
-            .safeAreaInset(edge: .bottom) { LibraryActivityStatus() }
             .focusedSceneValue(\.refreshAction) { Task { await actions.reload() } }
             .focusedSceneValue(\.inspectorToggle, InspectorToggle(isShowing: showsInspector) {
                 showsInspector.toggle()

@@ -81,7 +81,7 @@ can clear both pictures and saved listings after explaining the offline effect.
 
 Use **View** (native apps) or **View original** (web, desktop and mobile) beside an attached input to inspect it without replacing or removing it. References, source/target pictures, boundary frames, masks, control and identity pictures, and attached video/audio have separate viewing actions. Image previews fit the whole picture. Use **Actual size** on desktop and web, or pinch to zoom in the native iOS app, for close inspection. **Done** or Escape returns to the attachment or picker. Picker previews do not select or attach the picture. Queue viewing actions show the full submitted media, which may already have been fitted to the generation canvas; older machines without the original-input endpoint report it unavailable.
 
-Library tiles and the picture viewer’s More menu offer **Use as Source** without replacing the prompt or model. Reference-only recipes receive a reference; named camera views ask which role to fill. Choose from Library searches the merged gallery, with an All Machines or individual-machine filter. Its full-width filter row stays below native navigation chrome and above the pictures at every text size. Switching models preserves explicit attachments; incompatible source/reference pictures are disclosed as parked until a compatible recipe is selected.
+Library tiles and the picture viewer’s More menu offer capability-based image attachments without replacing the prompt or model. **Use as first frame** and **Use as last frame** use H3/Wan endpoints or LTX interpolation anchors; replacing an LTX endpoint preserves interior anchors. Reference-only recipes receive a reference; named camera views ask which role to fill. Choose from Library searches the merged gallery, with an All Machines or individual-machine filter. Its full-width filter row stays below native navigation chrome and above the pictures at every text size. Switching models preserves explicit attachments; incompatible source/reference pictures are disclosed as parked until a compatible recipe is selected.
 
 Oversized new still inputs are proportionally reduced to at most 4096 pixels per axis and 2 MiB, applying orientation and preserving transparency. Smaller compatible inputs keep their bytes. Replacing a source clears its old mask; retained source/mask pairs and exported originals remain unchanged. Fresh drafts use Random; a deliberately locked seed of zero remains valid.
 
@@ -455,3 +455,19 @@ Provider errors remain errors; this bounded fallback is not an exhaustive search
 of either provider's index. Older servers retain their provider search behavior.
 
 **Batch** in More Options applies to pictures and clips. Switching kind preserves the count; choose **1** to disable batching. A grouped Queue row exposes **Cancel Batch** even while collapsed. It cancels each eligible live child on its owning machine, preserves completed outputs, and respects older machines that cannot stop a running job.
+
+
+Library print/selection/viewer menus offer **Copy File Name** (one filename per line for
+selections), and Info file values are selectable. Source cards/details show the owning machine,
+selectable `source:<print>#<member>` and optional SHA-256. **Source actions** offers Copy Source ID,
+Copy CLI Command (shell-quoted with the owning host), original image/file clipboard, Save a Copy
+and native Share. Downloads use the exact owner’s bounded authenticated original and are
+revoked when the view or authority changes. The ID belongs to that host’s copy.
+An authenticated empty source inventory, or a legacy no-retained-media answer for a print
+without input provenance, displays **No source media.** without Retry. Missing/damaged,
+unauthorized and failed reads remain distinct and retryable. No background sync is added on iOS.
+
+Print menus offer explicit first/last frame reuse for supported recipes. LTX interpolation
+keeps interior anchors and carries an existing first-frame source into keyframe 0 when a last
+frame is added. Before an older machine supplies a recipe, **Use as source image** remains
+available; an explicit unsupported recipe still controls which actions are offered.

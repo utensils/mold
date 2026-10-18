@@ -45,6 +45,7 @@ struct LibraryViewer: View {
     /// churned. The window notification stays as a backstop for the responder
     /// changes no mesh view announces (clicking into the grid, or a sheet).
     @State private var responderClaimsArrows = false
+    @FocusState private var interactionFocused: Bool
 
     var body: some View {
         ZStack {
@@ -63,6 +64,26 @@ struct LibraryViewer: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.background)
+        .focusable()
+        .focusEffectDisabled()
+        .focused($interactionFocused)
+        .task(id: entry.id) {
+            await Task.yield()
+            if !isEditing && !TextEditingFocus.shared.isEditing { interactionFocused = true }
+        }
+        .onKeyPress(keys: [.delete, .deleteForward, "f"]) { press in
+            guard interactionFocused, !isEditing, !TextEditingFocus.shared.isEditing else { return .ignored }
+            switch LibraryGridKeys.action(for: press.key, modifiers: press.modifiers) {
+            case .trash:
+                if scope.isTrash { actions.deleteForever([entry]) } else { actions.moveToTrash([entry]) }
+            case .favorite:
+                guard !scope.isTrash else { return .ignored }
+                actions.toggleFavorite([entry])
+            case .emptyTrash: actions.emptyTrash()
+            default: return .ignored
+            }
+            return .handled
+        }
         // Handoff: the same print, continued on the iPhone or iPad companion.
         .userActivity(PrintHandoff.activityType, element: entry.id) { id, activity in
             guard let host else { return }

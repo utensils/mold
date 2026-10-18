@@ -1241,6 +1241,7 @@ pub async fn run(
     filing: FilingOptions,
     preview: bool,
     local: bool,
+    require_remote: bool,
     gpus: Option<String>,
     t5_variant: Option<String>,
     qwen3_variant: Option<String>,
@@ -2231,6 +2232,7 @@ pub async fn run(
                 height,
                 steps,
                 guidance,
+                require_remote,
             )
             .await;
             let response = match response {
@@ -3079,6 +3081,7 @@ async fn generate_remote(
     cli_height: Option<u32>,
     cli_steps: Option<u32>,
     cli_guidance: Option<f64>,
+    require_remote: bool,
 ) -> Result<GenerateResponse> {
     // One reporting point for every remote path — the stream and the
     // pull-and-retry — so a new branch inside cannot silently skip the
@@ -3099,6 +3102,7 @@ async fn generate_remote(
         cli_height,
         cli_steps,
         cli_guidance,
+        require_remote,
     )
     .await?;
     report_request_warnings(&response.request_warnings);
@@ -3122,6 +3126,7 @@ async fn generate_remote_inner(
     cli_height: Option<u32>,
     cli_steps: Option<u32>,
     cli_guidance: Option<f64>,
+    require_remote: bool,
 ) -> Result<GenerateResponse> {
     // Try SSE streaming first
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -3161,6 +3166,9 @@ async fn generate_remote_inner(
                     response.map_err(|e| tag_remote(client, e))
                 }
                 GenerateServerAction::FallbackLocal => {
+                    if require_remote {
+                        return Err(tag_remote(client, e.context("Library-addressed inputs require the selected host; local fallback is disabled")));
+                    }
                     if has_remote_reference_handles(req) {
                         return Err(tag_remote(
                             client,
@@ -5318,6 +5326,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .await
     }
@@ -6160,6 +6169,7 @@ mod tests {
             false,
             None,
             FilingOptions::default(),
+            false,
             false,
             false,
             None,
@@ -8651,5 +8661,39 @@ mod audio_batch_passthrough_tests {
             capabilities.canonical_generation_batch_limit(&[request]),
             Ok(64)
         );
+    }
+}
+
+#[cfg(test)]
+mod library_address_fallback_tests {
+    use super::*;
+    #[tokio::test]
+    async fn library_addressed_input_cannot_fall_back_to_local_inference() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt":"a chair", "model":"flux-dev:q4", "width":64, "height":64,
+            "steps":1, "guidance":1.0, "batch_size":1
+        }))
+        .unwrap();
+        let error = generate_remote_inner(
+            &MoldClient::new("http://127.0.0.1:1"),
+            &request,
+            &Config::default(),
+            &request.model,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("Library-addressed"), "{error:#}");
     }
 }

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import SourceMediaActions from "./SourceMediaActions.vue";
 import SourceMediaViewer from "./SourceMediaViewer.vue";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
@@ -12,6 +13,7 @@ import {
   sourceOwnerIdentity,
   type SourceMediaSelection,
 } from "../lib/sourceMediaBrowser";
+const actions = ref<InstanceType<typeof SourceMediaActions>>();
 const props = defineProps<{
   selection: SourceMediaSelection;
   usages?: SourceMediaSelection[];
@@ -151,7 +153,12 @@ watch(
 onBeforeUnmount(() => observer?.disconnect());
 </script>
 <template>
-  <article ref="root" class="source-card" data-test="source-media-card">
+  <article
+    ref="root"
+    class="source-card"
+    data-test="source-media-card"
+    @contextmenu="actions?.open($event)"
+  >
     <button
       type="button"
       class="source-card__preview"
@@ -229,6 +236,15 @@ onBeforeUnmount(() => observer?.disconnect());
     <span v-else class="source-card__notice"
       >This file type cannot be attached to a new creation.</span
     >
+    <SourceMediaActions
+      ref="actions"
+      :selection="selection"
+      :allow-open-owner="showOwner"
+      allow-open-source
+      @use="emit('use', $event)"
+      @open-owner="emit('openOwner', $event)"
+      @open="viewer = selection"
+    />
     <SourceMediaViewer
       v-if="viewer"
       :selection="viewer"

@@ -1,7 +1,7 @@
 import Foundation
 import MoldClient
 
-enum LibraryAttachmentKind { case source, reference }
+enum LibraryAttachmentKind { case source, reference, firstFrame, lastFrame }
 
 enum AttachmentModelAdoption {
     /// Mirrors Generate's first-ready rule: only the model restored with the
@@ -14,6 +14,7 @@ enum AttachmentModelAdoption {
 struct LibraryAttachmentOffer: Equatable {
     let canUseAsSource: Bool
     let canAddReference: Bool
+    var canUseEndpoints = false
 }
 
 struct AttachmentModelKey: Hashable {
@@ -92,6 +93,7 @@ extension LibraryAttachmentOffer {
     static func resolve(recipe: GenerationRecipe, model: Model?, media: DraftMedia) -> Self {
         let layout = ImageConditioningWells.layout(recipe: recipe, model: model, media: media)
         let canAddReference: Bool
+    var canUseEndpoints = false
         if let typed = recipe.capabilities.generationReferences, typed.mode.isVisible {
             canAddReference = typed.kinds.contains("image")
                 && media.generationReferences.count < typed.maxCount
@@ -99,7 +101,8 @@ extension LibraryAttachmentOffer {
         } else {
             canAddReference = layout.references?.hasRoom(for: media.editImages.count) == true
         }
-        return Self(canUseAsSource: layout.showsSourceWell, canAddReference: canAddReference)
+        return Self(canUseAsSource: layout.showsSourceWell, canAddReference: canAddReference,
+                    canUseEndpoints: SourceMediaAttachment.acceptsEndpoints(capabilities: recipe.capabilities))
     }
 }
 

@@ -2662,6 +2662,11 @@ Pre-render moves require `queue.pre_render_transfer` on both machines. Reservati
 
 ### Source Media identities and preview performance
 
+Receivers advertise `retained_media_transfer: { "protocol_version": 1 }` only when
+Unix gallery output, the durable journal, and the reconciled encrypted media store
+are available. Receiving backups does not require generation workers; this
+capability is independent of generation's `durable_media` admission contract.
+
 Retained source inventory members may include `content_sha256`, a lowercase
 SHA-256 digest of the exact bytes returned for independent reuse. Keyframe
 identities describe the extracted image, not its serialized frame envelope.

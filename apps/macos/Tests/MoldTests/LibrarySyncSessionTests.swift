@@ -11,7 +11,7 @@ struct LibrarySyncSessionTests {
     private func bench(debounce: Duration = .milliseconds(20), keepInSync: Bool = false)
         -> (LibrarySyncSession, LibraryStore, FakeBackend) {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
-        let backend = FakeBackend(host: local)
+        let backend = FakeBackend(host: local, syncOrganization: true)
         let hosts = HostStore(hosts: [local]) { _ in backend }
         hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
@@ -28,7 +28,7 @@ struct LibrarySyncSessionTests {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let session = LibrarySyncSession(defaults: defaults)
         #expect(!session.keepInSync)
-        let library = LibraryStore(hosts: HostStore(hosts: []) { FakeBackend(host: $0) }, syncSession: session)
+        let library = LibraryStore(hosts: HostStore(hosts: []) { FakeBackend(host: $0, syncOrganization: true) }, syncSession: session)
         session.setKeepInSync(true, in: library)
         #expect(LibrarySyncSession(defaults: defaults).keepInSync)
         session.setKeepInSync(false, in: library)
@@ -89,11 +89,11 @@ struct LibrarySyncSessionTests {
         #expect(backend.callCount("gallery") - before == oneRun)
     }
 
-    @Test func aPressDuringARunQueuesAFollowUpOnlyWithKeepInSync() {
+    @Test func aPressDuringARunPreservesManualFollowUpRegardlessOfKeepInSync() {
         let (off, offLibrary, _) = bench()
         offLibrary.localSaveRunning = true
         off.syncNow(in: offLibrary)
-        #expect(!off.rerunPending)
+        #expect(off.rerunPending)
         let (on, onLibrary, _) = bench(keepInSync: true)
         onLibrary.localSaveRunning = true
         on.syncNow(in: onLibrary)
@@ -145,7 +145,7 @@ struct LibrarySyncSessionTests {
 
     @Test func anAutomaticRunWaitsForThisMacsEngineInsteadOfAlerting() async throws {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
-        let backend = FakeBackend(host: local)
+        let backend = FakeBackend(host: local, syncOrganization: true)
         let hosts = HostStore(hosts: [local]) { _ in backend }
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         defaults.set(true, forKey: LibrarySyncSession.keepInSyncKey)
@@ -188,7 +188,7 @@ struct LibrarySyncSessionTests {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         LibrarySyncSession(defaults: defaults).acknowledge(["old"])
         let session = LibrarySyncSession(defaults: defaults)
-        let library = LibraryStore(hosts: HostStore(hosts: []) { FakeBackend(host: $0) }, syncSession: session)
+        let library = LibraryStore(hosts: HostStore(hosts: []) { FakeBackend(host: $0, syncOrganization: true) }, syncSession: session)
         library.localSaveIssueKeys = ["media": "old"]
         #expect(library.syncIssueAcknowledgment)
         library.syncIssueAcknowledgment = false
@@ -223,7 +223,7 @@ struct LibrarySyncSessionTests {
 
     @Test func acknowledgmentsFollowIndividualSourcesAcrossChangingGroups() {
         let session = LibrarySyncSession(defaults: UserDefaults(suiteName: UUID().uuidString)!)
-        let library = LibraryStore(hosts: HostStore(hosts: []) { FakeBackend(host: $0) }, syncSession: session)
+        let library = LibraryStore(hosts: HostStore(hosts: []) { FakeBackend(host: $0, syncOrganization: true) }, syncSession: session)
         library.localSaveIssueKeys = ["legacy": "sourceA:v1sourceB"]
         library.syncIssueAcknowledgment = true
         library.localSaveIssueKeys = ["legacy": "sourceA"]
@@ -234,7 +234,7 @@ struct LibrarySyncSessionTests {
 
     @Test func legacyNoticesRemainInDetailsButAcknowledgedSourcesLeaveBanner() {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
-        let library = LibraryStore(hosts: HostStore(hosts: []) { FakeBackend(host: $0) },
+        let library = LibraryStore(hosts: HostStore(hosts: []) { FakeBackend(host: $0, syncOrganization: true) },
                                    syncSession: LibrarySyncSession(defaults: defaults))
         library.localSaveNotices = ["source A legacy inputs", "source B legacy inputs"]
         library.localSaveIssueKeys = ["source A legacy inputs": "routeA-version1", "source B legacy inputs": "routeB-version1"]
@@ -259,13 +259,89 @@ struct LibrarySyncSessionTests {
 
     @Test func successfulSyncDoesNotPresentCompletionSheet() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
-        let backend = FakeBackend(host: local)
+        let backend = FakeBackend(host: local, syncOrganization: true)
         let hosts = HostStore(hosts: [local]) { _ in backend }
         hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
         let library = LibraryStore(hosts: hosts)
         await library.syncAllLocally()
         #expect(!library.localSaveReport.isEmpty)
         #expect(!library.localSaveAlertPresented)
+    }
+
+    @Test func destinationKeepChoiceDoesNotFollowAReplacementRoute() {
+        let destination = MoldHost(name: "Backup", baseURL: URL(string: "https://backup.example")!)
+        let backend = FakeBackend(host: destination, syncOrganization: true)
+        let hosts = HostStore(hosts: [destination]) { _ in backend }
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let session = LibrarySyncSession(defaults: defaults)
+        let library = LibraryStore(hosts: hosts, syncSession: session)
+        library.localSaveRunning = true
+        session.setKeepInSync(true, to: destination, in: library)
+        #expect(session.keepInSync(to: destination, in: library))
+        var replaced = destination; replaced.baseURL = URL(string: "https://replacement.example")!
+        hosts.hosts = [replaced]
+        #expect(!session.keepInSync(to: replaced, in: library))
+        session.stop(in: library)
+        #expect(!session.rerunPending)
+        #expect(LibrarySyncSession(defaults: defaults).keepInSync(to: destination, in: library))
+    }
+
+    @Test func queuedDestinationRunsAreSerializedAndStopClearsEveryDestination() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let first = MoldHost(name: "First", baseURL: URL(string: "https://first.example")!)
+        let second = MoldHost(name: "Second", baseURL: URL(string: "https://second.example")!)
+        let backends = Dictionary(uniqueKeysWithValues: [local, first, second].map { ($0.id, FakeBackend(host: $0, syncOrganization: true)) })
+        let hosts = HostStore(hosts: [local, first, second]) { backends[$0.id]! }
+        for host in hosts.hosts { hosts.reachability[host.id] = .up(FakeFixtures.serverStatus()) }
+        let session = LibrarySyncSession(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        let library = LibraryStore(hosts: hosts, syncSession: session)
+        library.localSaveRunning = true
+        session.syncNow(to: first, in: library)
+        session.syncNow(to: second, in: library)
+        session.syncNow(to: first, in: library)
+        #expect(session.rerunPending)
+        #expect(library.localSaveTask == nil)
+        session.stop(in: library)
+        library.localSaveRunning = false
+        session.runFinished(in: library)
+        #expect(library.localSaveTask == nil)
+        #expect(!session.rerunPending)
+    }
+
+    @Test func automaticDestinationFailureRemainsInspectableWithoutPresentingAlert() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = MoldHost(name: "Unavailable source", baseURL: URL(string: "https://source.example")!)
+        let target = FakeBackend(host: local, syncOrganization: true)
+        let source = FakeBackend(host: remote, syncOrganization: true)
+        source.plantedErrors["gallery"] = MoldClientError.unauthorized
+        let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? target : source }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+        await library.syncAll(to: local, automatic: true)
+        #expect(!library.localSaveFailures.isEmpty)
+        #expect(!library.localSaveAlertPresented)
+    }
+
+    @Test func remoteKeepDestinationFollowsNewThisMacGalleryEvents() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = MoldHost(name: "Backup", baseURL: URL(string: "https://destination.example")!)
+        let source = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
+        let destination = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        source.mediaAnswer = Data([1, 2, 3])
+        let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? source : destination }
+        for machine in hosts.hosts { hosts.reachability[machine.id] = .up(FakeFixtures.serverStatus()) }
+        let session = LibrarySyncSession(defaults: UserDefaults(suiteName: UUID().uuidString)!, debounce: .milliseconds(5))
+        let library = LibraryStore(hosts: hosts, syncSession: session)
+        session.setKeepInSync(true, to: remote, in: library)
+        await idle(library)
+        let print = FakeFixtures.print("local-arrival.png")
+        source.prints = [print]
+        library.live.apply(.gallery(.added(filename: print.filename, row: print)), from: local.id, in: library)
+        await settle { destination.importedNames == [print.filename] }
+        await idle(library)
+        #expect(destination.importedNames == [print.filename])
+        #expect(!library.localSaveAlertPresented)
+        session.stop(in: library)
     }
 
 }

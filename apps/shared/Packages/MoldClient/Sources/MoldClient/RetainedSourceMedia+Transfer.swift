@@ -95,8 +95,10 @@ public extension RetainedSourceMedia {
     @discardableResult
     static func mirrorSources(for sourceFilename: String, metadata: OutputMetadata?,
                               from origin: any MoldBackend, to target: any MoldBackend,
-                              as targetFilename: String, expectedSourceArchiveIdentity: String? = nil, downloadedOutput: URL? = nil) async throws -> MirrorResult {
+                              as targetFilename: String, expectedSourceArchiveIdentity: String? = nil, downloadedOutput: URL? = nil,
+                              isCurrent: @Sendable () async -> Bool = { true }) async throws -> MirrorResult {
         try Task.checkCancellation()
+        guard await isCurrent() else { throw CancellationError() }
         let offer: TransferOffer
         do { offer = try await origin.retainedMediaTransferOffer(for: sourceFilename) }
         catch let error as MoldClientError {
@@ -105,8 +107,10 @@ public extension RetainedSourceMedia {
             guard inventory.availability == .unavailableLegacy, metadata != nil, !disclosable(metadata) else {
                 throw transferIncomplete("Update the source machine to copy this print’s retained media.")
             }
+            guard await isCurrent() else { throw CancellationError() }
             return .complete
         }
+        guard await isCurrent() else { throw CancellationError() }
         guard validTransferDigest(offer.archiveIdentitySha256) else { throw MoldClientError.malformedResponse }
         if let expectedSourceArchiveIdentity, expectedSourceArchiveIdentity != offer.archiveIdentitySha256 {
             throw transferIncomplete("The original print changed while copying. Try again.")
@@ -123,12 +127,14 @@ public extension RetainedSourceMedia {
               let sourceMetadata = offer.metadata, metadata == nil || mirrorMetadataMatches(sourceMetadata, metadata) else {
             throw transferIncomplete("The original print changed while copying. Try again.")
         }
+        guard await isCurrent() else { throw CancellationError() }
         let destination: TransferOffer
         do { destination = try await target.retainedMediaTransferOffer(for: targetFilename) }
         catch let error as MoldClientError {
             guard case let .http(status, _, _) = error, status == 404 || status == 405 else { throw error }
             throw transferIncomplete("Update the destination machine to retain this print’s source media.")
         }
+        guard await isCurrent() else { throw CancellationError() }
         guard validTransferDigest(destination.archiveIdentitySha256) else { throw MoldClientError.malformedResponse }
         guard destination.outputSha256 == offer.outputSha256, destination.outputSizeBytes == offer.outputSizeBytes else {
             throw transferIncomplete("The local copy has different output bytes or generation settings.")
@@ -151,8 +157,10 @@ public extension RetainedSourceMedia {
         var files: [URL] = []
         for (index, member) in offer.members.enumerated() {
             try Task.checkCancellation()
+            guard await isCurrent() else { throw CancellationError() }
             guard let id = member.memberId, !id.isEmpty else { throw MoldClientError.malformedResponse }
             let bytes = try await origin.retainedSourceMediaBytes(for: sourceFilename, member: id)
+            guard await isCurrent() else { throw CancellationError() }
             let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
             guard bytes.count == member.sizeBytes, digest == member.sha256 else {
                 throw transferIncomplete("The source media changed while copying. Try again.")
@@ -163,9 +171,11 @@ public extension RetainedSourceMedia {
             files.append(path)
         }
         try Task.checkCancellation()
+        guard await isCurrent() else { throw CancellationError() }
         try await target.importRetainedMedia(
             Transfer(archiveIdentitySha256: destination.archiveIdentitySha256,
                      members: offer.members.map(\.contentIdentity), files: files), for: targetFilename)
+        guard await isCurrent() else { throw CancellationError() }
         return .complete
     }
 

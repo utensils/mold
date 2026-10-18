@@ -3,7 +3,8 @@ import OriginalMediaHost from "@studio/components/OriginalMediaHost.vue";
 import HeldQueueTransferDialog from "@studio/components/HeldQueueTransferDialog.vue";
 import { provideHeldQueueTransfer } from "@studio/composables/useHeldQueueTransfer";
 
-import { computed, onMounted, onUnmounted, watch } from "vue";
+import { computed, provide, onMounted, onUnmounted, watch } from "vue";
+import { useLibrarySyncStore } from "./stores/librarySync";
 import { useRouter } from "vue-router";
 import TitleBar from "./components/shell/TitleBar.vue";
 import Sidebar from "./components/shell/Sidebar.vue";
@@ -16,7 +17,30 @@ import UpdateBanner from "./components/shell/UpdateBanner.vue";
 import LicenseAcceptanceDialog from "@studio/components/LicenseAcceptanceDialog.vue";
 import { openExternal } from "./lib/openExternal";
 import { dockBadgeValue } from "./lib/dockBadge";
-import { ipc } from "./lib/ipc";
+import { ipc, inTauri } from "./lib/ipc";
+import { NATIVE_SOURCE_FILE_ACTIONS } from "@studio/lib/sourceMediaActions";
+import { blobToBase64 } from "@studio/lib/base64";
+import { imageDimensionsFromBytes } from "@studio/lib/imageDimensions";
+if (inTauri())
+  provide(NATIVE_SOURCE_FILE_ACTIONS, {
+    async copyImage(blob, current) {
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      const dimensions = imageDimensionsFromBytes(bytes, ["png", "jpeg", "webp"]);
+      if (
+        !dimensions ||
+        dimensions.width * dimensions.height > 32_000_000 ||
+        Math.max(dimensions.width, dimensions.height) > 8192
+      )
+        throw new Error("This original is too large for the image clipboard. Use Save a Copy.");
+      if (!current()) throw new Error("The source changed before copying.");
+      await ipc.clipboardWriteImage(bytes);
+    },
+    async saveFile(blob, filename, current) {
+      const encoded = await blobToBase64(blob);
+      if (!current()) throw new Error("The source changed before saving.");
+      await ipc.saveMediaBytes(filename, encoded);
+    },
+  });
 import { notificationRoute, type NotificationAction } from "./lib/notificationAction";
 import { appIsBackground } from "./lib/notify";
 import {
@@ -405,6 +429,7 @@ function reconcileDurableOnWake() {
 }
 
 onMounted(async () => {
+  void useLibrarySyncStore().initialize();
   // Synchronous and first: the Create form's auto-tag mirror has to be right
   // before any request can be built from it, whichever workspace opens.
   libraryPrefs.init();
@@ -452,6 +477,7 @@ onMounted(async () => {
   if (!gallery.loaded) void gallery.fetchAll();
 });
 onUnmounted(() => {
+  useLibrarySyncStore().stop();
   window.removeEventListener("keydown", onKeydown);
   window.removeEventListener("contextmenu", suppressNativeContextMenu);
   window.removeEventListener("selectstart", suppressChromeSelection);

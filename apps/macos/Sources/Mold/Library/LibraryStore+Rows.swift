@@ -58,6 +58,7 @@ extension LibraryStore {
                               links: syncLinks())
         pendingTrash = PendingRows()
         trashed = trashTimeline.tiles
+        refreshUnreadMedia()
         rows.bump()
     }
 
@@ -107,6 +108,7 @@ extension LibraryStore {
             pendingTrash = PendingRows()
             if trashTimeline.patch(upserted: changed, removed: gone, links: links) {
                 trashed = trashTimeline.tiles
+                refreshUnreadMedia()
                 rows.bump()
             } else {
                 rebuildTrash()

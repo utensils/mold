@@ -1,4 +1,5 @@
 import Foundation
+import MoldClient
 
 /// Library Sync runs when asked. "Sync All to This Mac" is one run; the
 /// opt-in "Keep This Mac in Sync" mode mirrors again whenever a remote
@@ -13,6 +14,18 @@ final class LibrarySyncSession {
     private(set) var rerunPending = false
     /// The queued follow-up was a press: it plans every print.
     private var rerunFull = false
+    private struct PendingRun {
+        let destination: MoldHost
+        let instance: String?
+        var fullPlan: Bool
+        var selection: [LibraryEntry]?
+        var automatic: Bool
+    }
+    private var queued: [PendingRun] = []
+    private var destinations: Set<String>
+    private var localIdentity: String?
+    private static let localIdentityKey = "library.keepInSync.localIdentity.v2"
+    private static let destinationsKey = "library.keepInSync.destinations.v2"
     private var debounceTask: Task<Void, Never>?
     /// An automatic run is waiting for This Mac's engine to connect.
     private(set) var waitingForLocalEngine = false
@@ -28,6 +41,8 @@ final class LibrarySyncSession {
         self.defaults = defaults
         self.debounce = debounce
         keepInSync = defaults.bool(forKey: Self.keepInSyncKey)
+        destinations = Set(defaults.stringArray(forKey: Self.destinationsKey) ?? [])
+        localIdentity = defaults.string(forKey: Self.localIdentityKey)
         // Retired with the timer; nothing reads it any more.
         defaults.removeObject(forKey: Self.retiredIntervalKey)
         // Older releases persisted multiple source hashes as one colon-joined
@@ -40,28 +55,80 @@ final class LibrarySyncSession {
     /// Sync on, the press queues one follow-up instead of being dropped.
     /// A press plans every print; Keep in Sync's own runs plan from cursors.
     func syncNow(in library: LibraryStore) {
-        start(in: library, fullPlan: true)
+        guard let local = library.hosts.host(MoldEngine.localHostID) else { return }
+        start(in: library, destination: local, fullPlan: true)
     }
 
-    private func start(in library: LibraryStore, fullPlan: Bool) {
-        guard !terminating else { return }
-        guard library.localSaveTask == nil, !library.localSaveRunning else {
-            if keepInSync {
-                rerunPending = true
-                rerunFull = rerunFull || fullPlan
+    func syncNow(to destination: MoldHost, in library: LibraryStore) {
+        start(in: library, destination: destination, fullPlan: true)
+    }
+
+    func copy(_ selection: [LibraryEntry], to destination: MoldHost, in library: LibraryStore) {
+        start(in: library, destination: destination, fullPlan: true, selection: selection)
+    }
+
+    func keepInSync(to destination: MoldHost, in library: LibraryStore) -> Bool {
+        if destination.id == MoldEngine.localHostID {
+            if keepInSync && localIdentity == nil, library.hosts.instanceID(of: destination.id) != nil {
+                localIdentity = identity(destination, in: library)
+                defaults.set(localIdentity, forKey: Self.localIdentityKey)
             }
+            return keepInSync && (localIdentity == nil || localIdentity == identity(destination, in: library))
+        }
+        return destinations.contains(identity(destination, in: library))
+    }
+
+    private func identity(_ destination: MoldHost, in library: LibraryStore) -> String {
+        [destination.id.uuidString, destination.baseURL.absoluteString,
+         library.hosts.instanceID(of: destination.id) ?? ""].joined(separator: "\n")
+    }
+
+    func setKeepInSync(_ enabled: Bool, to destination: MoldHost, in library: LibraryStore) {
+        if destination.id == MoldEngine.localHostID { setKeepInSync(enabled, in: library); return }
+        let key = identity(destination, in: library)
+        if enabled { destinations.insert(key) } else { destinations.remove(key) }
+        defaults.set(Array(destinations).sorted(), forKey: Self.destinationsKey)
+        if enabled { start(in: library, destination: destination, fullPlan: false, automatic: true) }
+        else { queued.removeAll { $0.destination.id == destination.id && $0.automatic } }
+    }
+
+    private func start(in library: LibraryStore, destination: MoldHost, fullPlan: Bool,
+                       selection: [LibraryEntry]? = nil, automatic: Bool = false) {
+        guard !terminating, library.hosts.host(destination.id) == destination else { return }
+        let run = PendingRun(destination: destination, instance: library.hosts.instanceID(of: destination.id),
+            fullPlan: fullPlan, selection: selection, automatic: automatic)
+        guard library.localSaveTask == nil, !library.localSaveRunning else {
+            if let index = queued.firstIndex(where: { $0.destination == destination && $0.instance == run.instance
+                && ($0.selection == nil) == (selection == nil) }) {
+                queued[index].fullPlan = queued[index].fullPlan || fullPlan
+                queued[index].automatic = queued[index].automatic && automatic
+                if let selection {
+                    var ids = Set(queued[index].selection?.map(\.id) ?? [])
+                    queued[index].selection?.append(contentsOf: selection.filter { ids.insert($0.id).inserted })
+                }
+            } else { queued.append(run) }
+            rerunPending = true
+            rerunFull = rerunFull || fullPlan
             return
         }
-        // A Stop that landed after an earlier run's last check would
-        // otherwise end this one before it starts.
+        guard !automatic || library.hosts.isUp(destination) else {
+            if destination.id == MoldEngine.localHostID { waitingForLocalEngine = true }
+            return
+        }
         library.localSaveStopRequested = false
         library.localSaveTask = Task { [weak library] in
-            await library?.syncAllLocally(fullPlan: fullPlan)
+            guard let library else { return }
+            if let selection { await library.copy(selection, to: destination) }
+            else { await library.syncAll(to: destination, fullPlan: fullPlan, automatic: automatic) }
         }
     }
 
     func setKeepInSync(_ enabled: Bool, in library: LibraryStore) {
         keepInSync = enabled
+        if enabled, let local = library.hosts.host(MoldEngine.localHostID) {
+            localIdentity = identity(local, in: library)
+            defaults.set(localIdentity, forKey: Self.localIdentityKey)
+        }
         defaults.set(enabled, forKey: Self.keepInSyncKey)
         if enabled { noteRemoteChange(in: library, after: .zero) } else {
             debounceTask?.cancel()
@@ -80,17 +147,20 @@ final class LibrarySyncSession {
     }
 
     private func noteRemoteChange(in library: LibraryStore, after delay: Duration) {
-        guard keepInSync, !terminating else { return }
+        guard (keepInSync || !destinations.isEmpty), !terminating else { return }
         debounceTask?.cancel()
         debounceTask = Task { [weak self, weak library] in
             if delay > .zero { do { try await Task.sleep(for: delay) } catch { return } }
-            guard let self, let library, self.keepInSync, !self.terminating else { return }
+            guard let self, let library, (self.keepInSync || !self.destinations.isEmpty), !self.terminating else { return }
             self.debounceTask = nil
-            guard let local = library.hosts.host(MoldEngine.localHostID), library.hosts.isUp(local) else {
-                self.waitingForLocalEngine = true
-                return
+            if self.keepInSync {
+                if let local = library.hosts.host(MoldEngine.localHostID), library.hosts.isUp(local), self.keepInSync(to: local, in: library) {
+                    self.start(in: library, destination: local, fullPlan: false, automatic: true)
+                } else { self.waitingForLocalEngine = true }
             }
-            self.start(in: library, fullPlan: false)
+            for host in library.hosts.hosts where host.id != MoldEngine.localHostID && self.keepInSync(to: host, in: library) {
+                self.start(in: library, destination: host, fullPlan: false, automatic: true)
+            }
         }
     }
 
@@ -104,12 +174,19 @@ final class LibrarySyncSession {
     /// Every finished copy run -- Sync or an explicit Save -- ends here, so a
     /// change that arrived while it ran is never stranded.
     func runFinished(in library: LibraryStore) {
-        guard rerunPending else { return }
         rerunPending = false
-        let full = rerunFull
         rerunFull = false
-        guard keepInSync, !terminating else { return }
-        start(in: library, fullPlan: full)
+        guard !terminating else { queued.removeAll(); return }
+        while !queued.isEmpty {
+            let run = queued.removeFirst()
+            guard library.hosts.host(run.destination.id) == run.destination,
+                  library.hosts.instanceID(of: run.destination.id) == run.instance else { continue }
+            if run.automatic && !keepInSync(to: run.destination, in: library) { continue }
+            rerunPending = !queued.isEmpty
+            start(in: library, destination: run.destination, fullPlan: run.fullPlan,
+                selection: run.selection, automatic: run.automatic)
+            return
+        }
     }
 
     /// Stops the current run and anything queued behind it. "Keep This Mac in
@@ -119,6 +196,7 @@ final class LibrarySyncSession {
         debounceTask = nil
         rerunPending = false
         rerunFull = false
+        queued.removeAll()
         if library.localSaveRunning || library.localSaveTask != nil {
             library.localSaveStopRequested = true
         }

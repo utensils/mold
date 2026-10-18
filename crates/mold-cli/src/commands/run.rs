@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap_complete::engine::CompletionCandidate;
 use mold_core::manifest::{
     all_generation_model_names, is_known_model, looks_like_model_name, resolve_model_name,
@@ -1265,6 +1265,77 @@ pub async fn run(
         );
     }
 
+    // All Library-addressed inputs use one authenticated origin. Keep the
+    // private materializations alive until authoring and submission finish.
+    use super::media_input::{InputKind, InputResolver};
+    // Reject malformed keyframe syntax before downloading any addressed input.
+    for value in &keyframe {
+        let (frame, path) = value
+            .split_once(':')
+            .ok_or_else(|| anyhow::anyhow!("--keyframe must be in <frame:path> format"))?;
+        frame
+            .parse::<u32>()
+            .context("--keyframe frame index must be an unsigned integer")?;
+        super::media_address::parse(path).map_err(anyhow::Error::msg)?;
+    }
+    let mut inputs = InputResolver::new(host.as_deref(), local);
+    let audio_file = inputs.optional(audio_file, InputKind::Audio).await?;
+    let video = inputs.optional(video, InputKind::Video).await?;
+    let extend = inputs.optional(extend, InputKind::Video).await?;
+    let mut resolved_images = Vec::with_capacity(image.len());
+    for path in image {
+        resolved_images.push(inputs.resolve(&path, InputKind::Image).await?);
+    }
+    let image = resolved_images;
+    let last_image = inputs.optional(last_image, InputKind::Image).await?;
+    let first_frame = inputs.optional_path(first_frame, InputKind::Image).await?;
+    let last_frame = inputs.optional_path(last_frame, InputKind::Image).await?;
+    let mask = inputs.optional(mask, InputKind::Image).await?;
+    let control = inputs.optional(control, InputKind::Image).await?;
+    let mut resolved_keyframes = Vec::with_capacity(keyframe.len());
+    for value in keyframe {
+        let (frame, path) = value
+            .split_once(':')
+            .ok_or_else(|| anyhow::anyhow!("--keyframe must be in <frame:path> format"))?;
+        resolved_keyframes.push(format!(
+            "{frame}:{}",
+            inputs.resolve(path, InputKind::Image).await?
+        ));
+    }
+    let keyframe = resolved_keyframes;
+    let mut references = references;
+    for reference in &mut references {
+        let kind = match reference.kind {
+            h3::ReferenceKind::Image => InputKind::Image,
+            h3::ReferenceKind::Video => InputKind::Video,
+            h3::ReferenceKind::Audio => InputKind::Audio,
+        };
+        reference.path = PathBuf::from(
+            inputs
+                .resolve(
+                    reference
+                        .path
+                        .to_str()
+                        .ok_or_else(|| anyhow::anyhow!("reference path is not UTF-8"))?,
+                    kind,
+                )
+                .await?,
+        );
+    }
+    let mut identity = identity;
+    for path in &mut identity.id_images {
+        *path = PathBuf::from(
+            inputs
+                .resolve(
+                    path.to_str()
+                        .ok_or_else(|| anyhow::anyhow!("identity path is not UTF-8"))?,
+                    InputKind::Image,
+                )
+                .await?,
+        );
+    }
+    let require_remote = inputs.remote_only;
+
     // One flag, two destinations. On H3 `--reference` is Ref2VA authoring and
     // stays with `prepare_authoring`, which probes the original files; on every
     // other model it is the ordered reference group and is resolved here,
@@ -1984,6 +2055,7 @@ pub async fn run(
         filing,
         preview,
         local,
+        require_remote,
         gpus,
         t5_variant,
         qwen3_variant,

@@ -256,7 +256,7 @@ final class LibraryStore {
     func refreshUnreadMedia() {
         let previous = unreadMedia
         unreadMedia.retainHosts(Set(hosts.hosts.map(\.id)))
-        let query = LibraryScope.all.resolve(LibraryQuery(), shelves: shelves, hiddenCollectionIDs: hiddenCollectionIDs)
+        let query = LibraryScope.all.resolve(LibraryQuery(), shelves: shelves, hiddenCollectionIDs: hiddenCollectionIDs, privacyEvidence: trashPool)
         unreadMedia.observe(entries: pool, visible: query.apply(to: pool),
                             loadedHosts: Set(live.keys), presentHosts: Set(hosts.hosts.map(\.id)))
         if unreadMedia != previous { unreadMedia.save(to: readDefaults) }

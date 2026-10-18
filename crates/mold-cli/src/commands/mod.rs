@@ -23,6 +23,8 @@ pub mod licenses;
 pub mod list;
 pub(crate) mod local_engine;
 pub mod mcp;
+pub(crate) mod media_address;
+pub(crate) mod media_input;
 pub mod mesh_workflow;
 #[cfg(any(target_os = "macos", test))]
 mod metal_memory_admin;

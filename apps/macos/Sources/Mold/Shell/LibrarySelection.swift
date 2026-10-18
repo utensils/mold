@@ -55,6 +55,9 @@ struct LibrarySelection: Equatable {
     let perform: (LibraryAction) -> Void
 
     var lifecycleBusy = false
+    var canUseEndpoints = false
+    var copyDestinations: [MoldHost] = []
+    var copyTo: (MoldHost) -> Void = { _ in }
 
     var isEmpty: Bool { count == 0 }
 
@@ -68,14 +71,14 @@ struct LibrarySelection: Equatable {
                         name: name, shelves: shelves, enclosingShelf: enclosingShelf,
                         exportFormats: exportFormats, meshExports: meshExports,
                         canReuse: canReuse, canUseAsSource: canUseAsSource,
-                        canAddReference: canAddReference,
+                        canAddReference: canAddReference, canUseEndpoints: canUseEndpoints,
                         canUpscale: canUpscale, upscalers: upscalers,
                         trashCount: trashCount, localSaveCount: localSaveCount,
                         trashLocationName: trashLocationName, lifecycleBusy: lifecycleBusy)
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.lifecycleBusy == rhs.lifecycleBusy && lhs.targets == rhs.targets
+        lhs.copyDestinations == rhs.copyDestinations && lhs.canUseEndpoints == rhs.canUseEndpoints && lhs.lifecycleBusy == rhs.lifecycleBusy && lhs.targets == rhs.targets
             && lhs.count == rhs.count && lhs.allFavorite == rhs.allFavorite
             && lhs.scope == rhs.scope && lhs.shelves == rhs.shelves
             && lhs.enclosingShelf == rhs.enclosingShelf

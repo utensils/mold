@@ -1,4 +1,6 @@
 import Foundation
+import Observation
+import Synchronization
 import MoldClient
 import Testing
 @testable import Mold
@@ -74,5 +76,49 @@ extension LibraryVisibilityTests {
         library.collectionsPerHost = [host.id: [Collection(id: "private", name: "Private", slug: "private", hidden: true)]]
         _ = library.sourceAccess
         #expect(library.sourceAccessIndex.derivations == 3)
+    }
+}
+
+
+extension LibraryVisibilityTests {
+    @Test func receiptOnlyPrivacyRevokesCachedSourceAccessAndNotifiesObservers() async throws {
+        let source = MoldHost(name: "Hidden source", baseURL: URL(string: "http://hidden-source")!)
+        let destination = MoldHost(name: "Existing backup", baseURL: URL(string: "http://existing-backup")!)
+        let hosts = HostStore(hosts: [source, destination]) { FakeBackend(host: $0) }
+        hosts.reachability[source.id] = .up(FakeFixtures.serverStatus())
+        hosts.reachability[destination.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+        var original = GalleryPrint.Mutable(FakeFixtures.print("hidden-source.png", prompt: "private"))
+        original.collections = ["private"]
+        let copied = LibraryEntry(host: destination, print: FakeFixtures.print("collision-copy.png", prompt: "private"))
+        library.collectionsPerHost = [source.id: [Collection(id: "private", name: "Private", slug: "private", hidden: true)]]
+        library.items = [LibraryEntry(host: source, print: original.build()), copied]
+        let authority = SourceMediaAuthority(owner: copied, route: destination, instance: hosts.instanceID(of: destination.id))
+        #expect(library.allowsSource(authority))
+        let derivations = library.sourceAccessIndex.derivations
+        let changed = Mutex(false)
+        withObservationTracking { _ = library.sourcePrivacyRevision } onChange: { changed.withLock { $0 = true } }
+        var receipt = try #require(LocalSyncRecord(receipt: original.build(), from: source.id,
+            as: copied.print.filename, destinationInstance: hosts.instanceID(of: destination.id)))
+        receipt.destinationHost = destination.id; receipt.sourceRoute = library.originContext(source.id)
+        receipt.destinationRoute = destination.baseURL.absoluteString
+        try await library.syncRecords.checkpoint(receipt,
+            key: LocalSyncRecord.key(hostID: source.id, filename: original.build().filename), instance: library.recordScope(destination))
+        #expect(changed.withLock { $0 })
+        #expect(!library.allowsSource(authority))
+        #expect(library.sourceAccessIndex.derivations == derivations + 1)
+        #expect(library.syncLinks().isEmpty)
+        let privacyRevision = library.sourcePrivacyRevision
+        receipt.organization = LibraryOrganizationState(observed: .init())
+        try await library.syncRecords.checkpoint(receipt,
+            key: LocalSyncRecord.key(hostID: source.id, filename: original.build().filename), instance: library.recordScope(destination))
+        #expect(library.sourcePrivacyRevision == privacyRevision)
+        #expect(!library.allowsSource(authority))
+        #expect(library.sourceAccessIndex.derivations == derivations + 1,
+            "organization-only journal writes must not re-project all source owners")
+        let protectedRevision = library.sourcePrivacyRevision
+        library.collectionsPerHost = [:]
+        #expect(library.sourcePrivacyRevision != protectedRevision,
+            "removing the final hidden shelf must not alias a receipt privacy revision")
     }
 }

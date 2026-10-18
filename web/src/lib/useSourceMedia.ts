@@ -1,3 +1,7 @@
+import {
+  imageAttachmentChoices,
+  replaceEndpointKeyframe,
+} from "@studio/lib/sourceAttachmentChoices";
 import { onBeforeUnmount, ref, watch, type Ref } from "vue";
 import { useRouter } from "vue-router";
 import { retainedSourceMediaContent } from "@studio/api/sourceMediaBrowser";
@@ -29,6 +33,7 @@ import type {
   GalleryImage,
   GenerateFormState,
   ModelInfoExtended,
+  SourceImageState,
 } from "../types";
 
 export function webSourceOwner(item: GalleryImage): SourceMediaOwner | null {
@@ -41,6 +46,7 @@ export function webSourceOwner(item: GalleryImage): SourceMediaOwner | null {
   return {
     key: `${host.id}:${item.filename}`,
     filename: item.filename,
+    metadata: item.metadata,
     title: item.title || item.metadata.title || item.filename,
     hostLabel: hosted.hostLabel || host.name,
     target: {
@@ -85,8 +91,30 @@ export async function attachSourceMedia(
     refusalReason: null,
     identityVisible: false,
   };
+  if (
+    selection.attachment &&
+    (kind !== "image" ||
+      !imageAttachmentChoices(caps).includes(selection.attachment))
+  )
+    throw new Error("The selected style does not accept that video endpoint.");
+  const endpoint = selection.attachment;
+  const keyframe =
+    endpoint &&
+    caps.supportsKeyframes &&
+    !caps.supportsEndFrame &&
+    context.plan.kind !== "h3-boundaries";
   const destination =
-    kind === "image" ? routeCreateDrop(staged, context) : null;
+    kind === "image"
+      ? endpoint
+        ? context.plan.kind === "h3-boundaries"
+          ? endpoint === "first"
+            ? "h3-first"
+            : "h3-last"
+          : endpoint === "first"
+            ? "source"
+            : "end"
+        : routeCreateDrop(staged, context)
+      : null;
   if (destination && typeof destination !== "string")
     throw new Error(destination.refused);
   if (
@@ -124,19 +152,44 @@ export async function attachSourceMedia(
           : selection.member.display_name,
       );
       const dimensions = imageDimensionsFromBase64(prepared.base64);
-      const failure = await applyCreateDrop(
-        staged,
-        destination as Exclude<typeof destination, null | object>,
-        {
+      if (keyframe) {
+        if (
+          endpoint === "last" &&
+          staged.imageAttachments[0] &&
+          !staged.keyframes.some((frame) => frame.frame === 0)
+        ) {
+          staged.keyframes.unshift({
+            frame: 0,
+            image: { ...staged.imageAttachments[0] },
+          });
+        }
+        staged.keyframes = replaceEndpointKeyframe<
+          SourceImageState,
+          GenerateFormState["keyframes"][number]
+        >(staged.keyframes, staged.frames ?? Number.NaN, endpoint!, {
           kind: "upload",
           filename: prepared.filename,
           base64: prepared.base64,
           mime: prepared.mimeType,
           ...(dimensions ?? {}),
-        },
-        context,
-      );
-      if (failure) throw new Error(failure);
+        });
+        staged.imageAttachments = [];
+        staged.maskImage = null;
+      } else {
+        const failure = await applyCreateDrop(
+          staged,
+          destination as Exclude<typeof destination, null | object>,
+          {
+            kind: "upload",
+            filename: prepared.filename,
+            base64: prepared.base64,
+            mime: prepared.mimeType,
+            ...(dimensions ?? {}),
+          },
+          context,
+        );
+        if (failure) throw new Error(failure);
+      }
     } else if (context.plan.kind === "h3-references") {
       staged.h3Authoring = await appendMinimaxH3PickedMediaReference(
         staged.h3Authoring,
@@ -256,4 +309,47 @@ export function useSourceMedia(models: () => ModelInfoExtended[] = () => []) {
     }
   }
   return { use, busy, error };
+}
+
+/** Output reuse uses the same staged authoring mutation and capability checks as retained inputs. */
+export async function attachOutputEndpoint(
+  item: GalleryImage,
+  state: Ref<GenerateFormState>,
+  model: ModelInfoExtended | undefined,
+  attachment: import("@studio/lib/sourceAttachmentChoices").SourceAttachmentIntent,
+  current: () => boolean,
+  read: () => Promise<Blob>,
+) {
+  const owner = webSourceOwner(item);
+  if (!owner)
+    throw new Error("The print's owning machine is no longer available.");
+  let changed = false;
+  const snapshot = JSON.stringify(listHosts());
+  const invalidate = () => {
+    changed = true;
+  };
+  window.addEventListener(HOSTS_CHANGED_EVENT, invalidate);
+  window.addEventListener(GENERATE_TARGET_CHANGED_EVENT, invalidate);
+  try {
+    await attachSourceMedia(
+      {
+        owner,
+        attachment,
+        member: {
+          member_id: "output",
+          role: "source_image",
+          media_kind: "image",
+          display_name: item.filename,
+          size_bytes: 0,
+        },
+      },
+      state,
+      model,
+      () => !changed && snapshot === JSON.stringify(listHosts()) && current(),
+      read,
+    );
+  } finally {
+    window.removeEventListener(HOSTS_CHANGED_EVENT, invalidate);
+    window.removeEventListener(GENERATE_TARGET_CHANGED_EVENT, invalidate);
+  }
 }

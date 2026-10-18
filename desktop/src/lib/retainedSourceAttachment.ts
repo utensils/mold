@@ -1,3 +1,9 @@
+import {
+  imageAttachmentChoices,
+  replaceEndpointKeyframe,
+  type SourceAttachmentIntent,
+} from "@studio/lib/sourceAttachmentChoices";
+import type { GenerationCapabilities } from "./capabilities";
 import { appendMinimaxH3PickedMediaReference } from "@studio/lib/minimaxH3PickedMedia";
 import { emptyMinimaxH3AuthoringState } from "@studio/lib/minimaxH3Authoring";
 import { watch, isReactive } from "vue";
@@ -19,18 +25,24 @@ export async function attachRetainedSource(
   kind: string,
   read: () => Promise<Blob>,
   stillCurrent: () => boolean,
+  attachment?: SourceAttachmentIntent,
+  resolvedCapabilities?: GenerationCapabilities,
 ): Promise<UseAsSourceOutcome> {
   const before = JSON.stringify(form);
   const staged = cloneGenerateForm(form);
-  const caps = generationCapabilitiesForForm(
-    form.family,
-    form.model,
-    form.pipeline,
-    form.guidanceCapabilities,
-    form.sourceImageCapability,
-    form.recipeCapabilities,
-  );
+  const caps =
+    resolvedCapabilities ??
+    generationCapabilitiesForForm(
+      form.family,
+      form.model,
+      form.pipeline,
+      form.guidanceCapabilities,
+      form.sourceImageCapability,
+      form.recipeCapabilities,
+    );
   const plan = sourceMediaPlan(caps);
+  if (attachment && (kind !== "image" || !imageAttachmentChoices(caps).includes(attachment)))
+    return { ok: false, error: "The selected style does not accept that video endpoint." };
   if (
     (kind === "image" && plan.kind === "none") ||
     (kind === "video" && plan.kind !== "h3-references" && !caps.supportsSourceVideo) ||
@@ -82,7 +94,21 @@ export async function attachRetainedSource(
         width: form.width,
         height: form.height,
       };
-      const routed = resolveDropTarget(plan, null, {
+      const keyframe =
+        attachment &&
+        caps.supportsKeyframes &&
+        !caps.supportsEndFrame &&
+        plan.kind !== "h3-boundaries";
+      const endpointTarget = attachment
+        ? plan.kind === "h3-boundaries"
+          ? attachment === "first"
+            ? "h3-first"
+            : "h3-last"
+          : attachment === "first"
+            ? "source"
+            : "end"
+        : null;
+      const routed = resolveDropTarget(plan, endpointTarget, {
         hasSource: Boolean(staged.sourceImage),
         referenceCount: staged.imageAttachments.length,
         identityVisible: false,
@@ -93,15 +119,38 @@ export async function attachRetainedSource(
         lastWrite: staged.exclusiveWell ?? null,
         refusalReason: caps.referenceImagesReason,
       });
-      if (typeof routed !== "string") return { ok: false, error: routed.refused };
-      const outcome = await applyDropToForm(staged, routed, {
-        filename: prepared.filename,
-        base64: prepared.base64,
-        ...dimensions,
-        metadata: null,
-      });
-      if (!outcome.ok) return outcome;
-      if (routed === "source") staged.maskImage = null;
+      if (keyframe) {
+        if (
+          attachment === "last" &&
+          staged.sourceImage &&
+          !staged.keyframes.some((frame) => frame.frame === 0)
+        ) {
+          staged.keyframes.unshift({
+            frame: 0,
+            image: {
+              filename: staged.sourceImageName ?? "first-frame.png",
+              base64: staged.sourceImage,
+            },
+          });
+        }
+        staged.keyframes = replaceEndpointKeyframe(staged.keyframes, staged.frames, attachment!, {
+          filename: prepared.filename,
+          base64: prepared.base64,
+        });
+        staged.sourceImage = null;
+        staged.sourceImageName = null;
+        staged.maskImage = null;
+      } else {
+        if (typeof routed !== "string") return { ok: false, error: routed.refused };
+        const outcome = await applyDropToForm(staged, routed, {
+          filename: prepared.filename,
+          base64: prepared.base64,
+          ...dimensions,
+          metadata: null,
+        });
+        if (!outcome.ok) return outcome;
+        if (routed === "source") staged.maskImage = null;
+      }
     }
     if (!current())
       return {
@@ -117,6 +166,7 @@ export async function attachRetainedSource(
     form.maskImage = staged.maskImage;
     form.exclusiveWell = staged.exclusiveWell;
     form.endFrame = staged.endFrame;
+    form.keyframes = staged.keyframes;
     form.sourceFit = staged.sourceFit;
     form.sourceVideo = staged.sourceVideo;
     form.audioFile = staged.audioFile;

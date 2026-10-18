@@ -1,6 +1,7 @@
 import { ApiError, apiFetchTo, type ApiTarget } from "./client";
 import {
   retainedSourceMediaInventory,
+  parseRetainedSourceMediaInventory,
   type RetainedSourceMediaInventory,
   type RetainedSourceMediaMember,
 } from "./gallerySourceMedia";
@@ -147,13 +148,16 @@ export async function sourceMediaInventories(
     );
   for (const filename of filenames) {
     const inventory = result.inventories[filename];
-    if (
-      !inventory ||
-      typeof inventory.availability !== "string" ||
-      (inventory.members != null && !Array.isArray(inventory.members))
-    )
-      throw new Error("Incomplete source inventory response");
-    inventory.members ??= [];
+    try {
+      if (!inventory) throw new Error("Incomplete source inventory response");
+      result.inventories[filename] =
+        parseRetainedSourceMediaInventory(inventory);
+    } catch (failure) {
+      delete result.inventories[filename];
+      result.errors ??= {};
+      result.errors[filename] =
+        failure instanceof Error ? failure.message : String(failure);
+    }
   }
   return result;
 }

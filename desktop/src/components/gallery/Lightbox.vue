@@ -1,8 +1,12 @@
 <script setup lang="ts">
+import {
+  SOURCE_ATTACHMENT_CHOICES,
+  type SourceAttachmentIntent,
+} from "@studio/lib/sourceAttachmentChoices";
 import SourceMediaPanel from "@studio/components/SourceMediaPanel.vue";
 import type { SourceMediaOwner, SourceMediaSelection } from "@studio/lib/sourceMediaBrowser";
 
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useOverlayStack } from "@ui/lib/overlayStack";
 import Icon from "@ui/components/Icon.vue";
 import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
@@ -153,6 +157,7 @@ const emit = defineEmits<{
   next: [];
   delete: [];
   useSource: [];
+  useEndpoint: [intent: SourceAttachmentIntent];
   useRetainedSource: [selection: SourceMediaSelection];
   /** One-shot reuse. The OWNER runs it: retained private source media is
    *  attached there, and doing it here would drop it. */
@@ -297,11 +302,16 @@ onBeforeUnmount(() => restoreFocusEl?.focus?.());
 
 /** How long the render took, when the print knows (additive metadata). */
 const took = computed(() => formatGenerationTime(meta.value.generation_time_ms));
+const endpointChoices = inject(
+  SOURCE_ATTACHMENT_CHOICES,
+  computed(() => []),
+);
 const retainedOwner = computed<SourceMediaOwner | null>(() =>
   props.target
     ? {
         key: JSON.stringify([props.cacheKey, props.target.baseUrl, props.item.filename]),
         filename: props.item.filename,
+        metadata: props.item.metadata,
         title: props.item.filename,
         hostLabel: props.hostLabel ?? "",
         target: { ...props.target },
@@ -409,6 +419,12 @@ function imageMenu(): MenuEntry[] {
             disabled: props.audio || props.mesh,
             action: () => emit("useSource"),
           },
+          ...(!props.video && !props.audio && !props.mesh
+            ? endpointChoices.value.map((intent) => ({
+                label: `Use as ${intent} frame`,
+                action: () => emit("useEndpoint", intent),
+              }))
+            : []),
         ]),
     {
       label: "Copy file path",
@@ -419,6 +435,7 @@ function imageMenu(): MenuEntry[] {
             toasts.push(error instanceof Error ? error.message : String(error), "error"),
           ),
     },
+    { label: "Copy File Name", action: () => void copy(props.item.filename) },
     { label: "Copy prompt", action: () => void copy(meta.value.prompt) },
     { label: "Copy seed", action: () => void copy(String(meta.value.seed)) },
     { separator: true },
@@ -659,6 +676,8 @@ async function performVideoExport(options: VideoExportOptions) {
       <span
         class="min-w-0 truncate font-mono text-xs text-fg-2"
         data-test="lightbox-filename"
+        data-selectable
+        style="user-select: text"
         :title="item.filename"
       >
         {{ item.filename }}

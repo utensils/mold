@@ -177,7 +177,7 @@ async function load(owners: SourceMediaOwner[]) {
               delete values[key];
               invalidateSourceOwner(key);
               errors[key] =
-                `${owner.title}: ${value?.availability.replaceAll("_", " ") ?? result.errors?.[owner.filename] ?? "Source inventory unavailable"}`;
+                `${owner.title}: ${value?.availability?.replaceAll("_", " ") ?? result.errors?.[owner.filename] ?? "Source inventory unavailable"}`;
             }
           }
           inventories.value = values;
