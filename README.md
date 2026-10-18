@@ -279,6 +279,7 @@ mold serve  # authenticated GPU host; enable Remote Access or configure its rela
 mold host invite                     # on the host: prints a one-use pairing link
 mold host add                        # on the client: paste the link; saves the host by name
 mold run "a cat" --host workstation  # or MOLD_HOST=workstation, or mold host use workstation
+mold library download --latest --host workstation  # save that print's original file here
 ```
 
 Use [encrypted remote connections](https://utensils.io/mold/deployment/relay)
@@ -341,7 +342,8 @@ mold downloads watch
 See the [remote workflow](https://utensils.io/mold/guide/remote-workflows) and
 [RunPod](https://utensils.io/mold/deployment/runpod-cli) guides. Use
 `mold queue` to manage remote work and `mold library` to browse and organize
-the host's prints, including `mold library source-media` to recover the
+the host's prints, including `mold library download` to save a print's original
+file, `mold library source-media` to recover the
 conditioning image a print was made from and `mold trash delete` to remove one
 permanently. Retained sources survive queue cleanup and remain available while
 any referencing library output exists, including in the trash. Matching retained

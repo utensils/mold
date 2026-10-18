@@ -418,6 +418,8 @@ direct filesystem access.
 ```bash
 mold library list [--query TEXT] [--tag TAG] [--tag TAG]... [--collection NAME-OR-SLUG] [--favorite] [--format FORMAT] [--limit N] [--offset N] [--json]
 mold library show <FILENAME> [--json | --preview]
+mold library download <FILENAME>... [-o PATH | -o DIR/ | -o -] [--trash] [--force]
+mold library download --latest [N] [-o DIR/] [--trash] [--force]
 mold library title <FILENAME> <TEXT>
 mold library title <FILENAME> --clear
 mold library favorite <FILENAME>...
@@ -442,6 +444,27 @@ mold library collection update <NAME-OR-SLUG> [--name TEXT] [--description TEXT 
 mold library collection delete <NAME-OR-SLUG> [--yes]
 mold library collection add <NAME-OR-SLUG> <FILENAME>...
 mold library collection remove <NAME-OR-SLUG> <FILENAME>...
+```
+
+`download` saves prints' original files, byte for byte, from the host's
+Library (or its trash with `--trash`). A name may be a unique prefix of the
+filename; an exact name always wins, and an ambiguous prefix lists its matches.
+By default each file lands in the current directory under its own name; `-o`
+names the file for one print, a directory (ending in `/`, or one that exists)
+for any number, or `-` for stdout (one print). `--latest N` takes the newest N
+prints instead of names. Existing files are refused before anything is
+downloaded unless `--force` is given. Each file streams to `<name>.part` and is
+renamed when complete, with a progress bar when stderr is a terminal; a failed
+or interrupted download leaves no `.part` behind, the rest of the batch still
+runs, and the command exits non-zero if any print failed. It works against any
+host `--host` names, with no local fallback. `mold library list` ends with a
+`Download: mold library download <name>` hint on a terminal.
+
+```bash
+mold library download mold-flux-dev-q4-1700000000000.png
+mold library download mold-flux-dev-q4-17 -o renders/
+mold library download --latest 3 -o renders/ --host workstation
+mold library download clip.mp4 -o - > clip-copy.mp4
 ```
 
 `export` converts one stored 3-D print into a container other tools read: OBJ
