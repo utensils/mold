@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use mold_core::manifest::{find_manifest, resolve_model_name, ModelComponent};
 use mold_core::{
-    build_model_catalog, classify_server_error, Config, ModelPaths, MoldClient, ServerAvailability,
+    build_model_catalog, classify_server_error, Config, ModelPaths, ServerAvailability,
 };
 
 use crate::fs_util::dir_stats;
@@ -154,7 +154,7 @@ fn component_label(component: &ModelComponent) -> &'static str {
     }
 }
 
-pub async fn run_overview() -> Result<()> {
+pub async fn run_overview(host: Option<&str>) -> Result<()> {
     let config = Config::load_or_default();
 
     // Header
@@ -386,7 +386,7 @@ pub async fn run_overview() -> Result<()> {
     }
 
     // Server section
-    let client = MoldClient::from_env();
+    let client = crate::control::client_for_host(host);
     println!();
     println!("  {}", "Server".bold());
     println!("  {:<18} {}", "Host:".dimmed(), client.host());
@@ -822,7 +822,7 @@ mod tests {
     #[tokio::test]
     async fn overview_returns_ok() {
         // No server running is fine — overview should print "Not running" and succeed
-        let result = run_overview().await;
+        let result = run_overview(None).await;
         assert!(result.is_ok());
     }
 }

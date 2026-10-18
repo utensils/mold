@@ -64,17 +64,12 @@ impl CliContext {
 ///
 /// H3 authoring uses this before opening reference media so a missing or
 /// invalid API-key header fails before local bytes are read.
+///
+/// `host` is the global `--host` (which clap already fills from `MOLD_HOST`);
+/// a saved host name resolves to its paired origin, and `None` falls back to
+/// the default host, then localhost. See `mold_core::client::resolve_host`.
 pub(crate) fn client_for_host(host: Option<&str>) -> MoldClient {
-    match host {
-        Some(host) => std::env::var("MOLD_API_KEY")
-            .ok()
-            .filter(|key| !key.is_empty())
-            .map_or_else(
-                || MoldClient::new(host),
-                |key| MoldClient::with_api_key(host, key),
-            ),
-        None => MoldClient::from_env(),
-    }
+    MoldClient::for_host(host)
 }
 
 /// Whether an unavailable HTTP target names this machine.

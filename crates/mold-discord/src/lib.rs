@@ -66,14 +66,20 @@ pub fn slash_commands() -> Vec<poise::Command<state::BotState, anyhow::Error>> {
 ///
 /// Reads configuration from environment variables:
 /// - `MOLD_DISCORD_TOKEN` or `DISCORD_TOKEN` — bot token (required)
-/// - `MOLD_HOST` — mold server URL (default: `http://localhost:7680`)
+/// - `MOLD_HOST` — mold server: a URL, an address, or a saved host name
+///   (default: the CLI's default host, then `http://localhost:7680`)
 /// - `MOLD_DISCORD_COOLDOWN` — per-user cooldown in seconds (default: 10)
 /// - `MOLD_DISCORD_ALLOWED_ROLES` — comma-separated role names/IDs (default: unrestricted)
 /// - `MOLD_DISCORD_DAILY_QUOTA` — max generations per user per day (default: unlimited)
 /// - `MOLD_LOG` — log level (default: `info`)
 pub async fn run() -> Result<()> {
+    run_with_host(None).await
+}
+
+/// [`run`] against `host` (a `--host` value) instead of `MOLD_HOST`.
+pub async fn run_with_host(host: Option<&str>) -> Result<()> {
     let token = load_token()?;
-    let client = MoldClient::from_env();
+    let client = MoldClient::for_host(host);
     let allowed_roles = load_allowed_roles();
     let daily_quota = load_daily_quota();
     let config = BotConfig {

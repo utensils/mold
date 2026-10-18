@@ -1424,6 +1424,13 @@ pub async fn run_create(opts: CreateOptions) -> Result<()> {
             theme::prefix_hint(),
             format!("export MOLD_HOST={proxy}").bold()
         );
+        if let Some(name) = saved_host_name(&proxy) {
+            println!(
+                "  {} {}",
+                theme::prefix_hint(),
+                format!("or: mold ps --host {name}").bold()
+            );
+        }
         println!("  {} gallery: {}", theme::prefix_hint(), proxy.cyan());
     }
     Ok(())
@@ -1645,8 +1652,19 @@ pub async fn run_connect(pod_id: String, check: bool) -> Result<()> {
         wait_for_mold(&proxy, 15).await?;
     }
     println!("export MOLD_HOST={proxy}");
+    if let Some(name) = saved_host_name(&proxy) {
+        eprintln!("{} or: mold ps --host {name}", theme::prefix_hint());
+    }
     eprintln!("{} gallery: {}", theme::prefix_hint(), proxy.cyan());
     Ok(())
+}
+
+/// The saved host name a pod's pairing answers to, for `--host` hints.
+fn saved_host_name(origin: &str) -> Option<String> {
+    mold_secure_client::hosts::find_by_origin(origin)
+        .ok()
+        .flatten()
+        .map(|host| host.name)
 }
 
 /// `mold runpod logs <pod-id>` — hand off to RunPod's supported web console.
@@ -2085,6 +2103,8 @@ fn paired_runpod_id(origin: Option<&str>, tracked: Option<&str>) -> Result<Strin
 async fn ensure_run_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -> Result<Pod> {
     enforce_cost_alert(client, config).await?;
     if let Ok(origin) = std::env::var("MOLD_HOST") {
+        // `MOLD_HOST=<saved name>` names the pod's paired origin.
+        let origin = mold_secure_client::hosts::resolve(&origin).unwrap_or(origin);
         let selected = paired_runpod_id(Some(&origin), None)?;
         require_paired_pod(&origin)?;
         return ensure_paired_pod(client, config, opts, &selected).await;

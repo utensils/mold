@@ -2741,3 +2741,115 @@ async fn the_host_flag_wins_over_the_environment() {
         "MOLD_HOST was used even though --host named another machine"
     );
 }
+
+/// Save a Regular host profile in `env`'s credential store the way
+/// `mold pair --mode regular` files one.
+#[cfg(unix)]
+fn save_named_regular_host(env: &TestEnv, origin: &str, name: &str) {
+    use sha2::Digest;
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let root = env.home.join("secure/clients");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&root)
+        .unwrap();
+    std::fs::set_permissions(
+        env.home.join("secure"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    let digest = hex::encode(sha2::Sha256::digest(origin.as_bytes()));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(root.join(format!("regular-{digest}.json")))
+        .unwrap()
+        .write_all(
+            serde_json::json!({"origin": origin, "api_key": null, "name": name})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+}
+
+/// A saved host name works wherever an address does — `--host`,
+/// `MOLD_HOST`, and the default host — and local-only commands refuse a
+/// typed `--host` instead of ignoring it.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_saved_host_name_targets_its_paired_origin() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/downloads"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "active_jobs": [], "queued": [], "history": []
+        })))
+        .mount(&server)
+        .await;
+    save_named_regular_host(&env, &server.uri(), "workstation");
+
+    env.cmd()
+        .args(["downloads", "list", "--host", "Workstation"])
+        .assert()
+        .success();
+    env.cmd()
+        .env("MOLD_HOST", "workstation")
+        .args(["downloads", "list"])
+        .assert()
+        .success();
+    env.cmd()
+        .env_remove("MOLD_HOST")
+        .args(["host", "use", "workstation"])
+        .assert()
+        .success();
+    env.cmd()
+        .env_remove("MOLD_HOST")
+        .args(["downloads", "list"])
+        .assert()
+        .success();
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
+
+    env.cmd()
+        .args(["host", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("workstation"))
+        .stdout(predicate::str::contains(server.uri()))
+        .stdout(predicate::str::contains("*"));
+    env.cmd()
+        .args(["host", "list", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"default\": true"));
+
+    env.cmd()
+        .args(["stats", "--host", "workstation"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--host does not apply to `mold stats`",
+        ));
+    // MOLD_HOST from the environment stays ignored by local-only commands.
+    env.cmd()
+        .env("MOLD_HOST", "workstation")
+        .args(["stats"])
+        .assert()
+        .success();
+
+    env.cmd()
+        .args(["host", "rm", "workstation"])
+        .assert()
+        .success();
+    env.cmd()
+        .args(["host", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No saved hosts"));
+}

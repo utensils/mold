@@ -5,8 +5,8 @@ use crate::control::CliContext;
 use crate::theme;
 use crate::ui::print_server_unavailable;
 
-pub async fn run() -> Result<()> {
-    let ctx = CliContext::new(None);
+pub async fn run(host: Option<&str>) -> Result<()> {
+    let ctx = CliContext::new(host);
 
     match ctx.client().unload_model().await {
         Ok(body) => {

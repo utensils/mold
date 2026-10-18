@@ -372,6 +372,7 @@ pub async fn run(
     model: &str,
     opts: &mold_core::download::PullOptions,
     accept_licenses: &[String],
+    host: Option<&str>,
 ) -> Result<()> {
     let canonical = resolve_model_name(model);
     let manifest = match find_manifest(&canonical) {
@@ -382,7 +383,7 @@ pub async fn run(
         }
     };
 
-    let ctx = CliContext::new(None);
+    let ctx = CliContext::new(host);
 
     // Ask the machine that will RECORD the acceptance for its terms before
     // displaying anything — only skipped entirely when nothing is being

@@ -129,6 +129,11 @@ fn finalize(root: &Path, pending: &Pending, pod: &Pod) -> Result<()> {
     let mut profile = pending.profile.clone();
     profile.origin = format!("https://{}-7680.proxy.runpod.net", pod.id);
     profile.websocket = format!("wss://{}-7680.proxy.runpod.net/_mold/secure", pod.id);
+    // Label the pairing with the pod's name, so `--host <name>` finds it.
+    profile.name = Some(mold_secure_client::hosts::available_name(
+        &pending.name,
+        &profile.origin,
+    )?);
     mold_secure_client::save_pairing(&profile)?;
     if let Some(volume) = &pending.volume {
         write(

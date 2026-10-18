@@ -16,8 +16,8 @@ use mold_core::{
 
 use crate::{LibraryAction, LibraryCollectionAction, LibraryTagAction};
 
-pub async fn run(action: LibraryAction) -> Result<()> {
-    run_remote(action, &MoldClient::from_env()).await
+pub async fn run(action: LibraryAction, host: Option<&str>) -> Result<()> {
+    run_remote(action, &crate::control::client_for_host(host)).await
 }
 
 async fn run_remote(action: LibraryAction, client: &MoldClient) -> Result<()> {

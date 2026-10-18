@@ -26,8 +26,8 @@ const STATE_RUNNING: &str = "running";
 /// Wire value of the plain queued lifecycle.
 const STATE_QUEUED: &str = "queued";
 
-pub async fn run(action: QueueAction) -> Result<()> {
-    let client = MoldClient::from_env();
+pub async fn run(action: QueueAction, host: Option<&str>) -> Result<()> {
+    let client = crate::control::client_for_host(host);
     match action {
         QueueAction::List { held, json } => queue_list(&client, held, json).await,
         QueueAction::Show { job_id, json } => queue_show(&client, &job_id, json).await,
@@ -43,6 +43,9 @@ pub async fn run(action: QueueAction) -> Result<()> {
             to,
             destination_api_key,
         } => {
+            // A saved host name works here too; its paired credentials, not
+            // this shell's MOLD_API_KEY, authorize the destination.
+            let to = mold_core::client::resolve_host(Some(&to));
             let destination = match destination_api_key {
                 Some(key) => MoldClient::with_api_key(&to, key),
                 None => MoldClient::new(&to),

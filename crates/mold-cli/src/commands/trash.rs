@@ -16,8 +16,8 @@ use crate::TrashAction;
 /// Gallery view name the server uses for trashed prints.
 const TRASH_VIEW: &str = "trash";
 
-pub async fn run(action: TrashAction) -> Result<()> {
-    let client = MoldClient::from_env();
+pub async fn run(action: TrashAction, host: Option<&str>) -> Result<()> {
+    let client = crate::control::client_for_host(host);
     match action {
         TrashAction::List { json } => trash_list(&client, json).await,
         TrashAction::Restore { filenames } => trash_restore(&client, &filenames).await,

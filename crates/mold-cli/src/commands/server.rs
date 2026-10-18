@@ -598,7 +598,10 @@ pub async fn run_discover(timeout_secs: u64, json: bool, probe: bool) -> Result<
 
     if let Some(first) = rows.first() {
         println!();
-        println!("Connect: export MOLD_HOST={}", first.server.url);
+        println!(
+            "Connect: mold ps --host {url}  (or export MOLD_HOST={url})",
+            url = first.server.url
+        );
     }
     Ok(())
 }

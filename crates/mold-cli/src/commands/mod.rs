@@ -12,6 +12,7 @@ pub mod expand;
 pub(crate) mod generate;
 pub mod gpu;
 pub(crate) mod h3;
+pub mod host;
 pub(crate) mod identity;
 pub mod info;
 pub mod jobs;

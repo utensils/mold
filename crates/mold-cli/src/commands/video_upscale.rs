@@ -5,11 +5,7 @@ use mold_core::{
 };
 
 fn client(host: Option<String>) -> MoldClient {
-    MoldClient::new(
-        host.or_else(|| std::env::var("MOLD_HOST").ok())
-            .as_deref()
-            .unwrap_or("http://localhost:7680"),
-    )
+    crate::control::client_for_host(host.as_deref())
 }
 
 pub async fn create(
