@@ -62,10 +62,13 @@ mold skill show claude-desktop                             # the SKILL.md that g
 mold skill uninstall claude-desktop
 ```
 
-Mold never overwrites a file it did not write: an `--output` path holding some
-other file, or an `mcpServers.mold` entry that is not `mold mcp`, needs
-`--force`. `uninstall` removes only mold's connector entry and its ZIP in
-Downloads; remove the uploaded skill yourself under Customize > Skills.
+Mold never overwrites a file it did not write. Overwriting an `--output` path
+that holds some other file needs `--force`. So does replacing an
+`mcpServers.mold` entry that mold did not write, or one edited since mold wrote
+it. Mold records the entry it wrote in
+`claude_desktop_config.json.mold-connector`. `uninstall` removes only that
+recorded entry and the ZIP mold put in Downloads. Remove the uploaded skill
+yourself under Customize > Skills.
 
 ## Connector without the skill
 

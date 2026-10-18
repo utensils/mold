@@ -21,6 +21,7 @@ pub(super) const ZIP_NAME: &str = "mold-skill.zip";
 const CONNECTOR: &str = "mold";
 const CONFIG_FILE: &str = "claude_desktop_config.json";
 const BACKUP_SUFFIX: &str = ".mold-backup";
+const OWNED_SUFFIX: &str = ".mold-connector";
 
 /// Claude Desktop's config directory: `~/Library/Application Support/Claude`
 /// on macOS, `%APPDATA%\Claude` on Windows. Desktop has no Linux build.
@@ -162,26 +163,11 @@ impl Connector {
     }
 }
 
-/// True when an `mcpServers` entry is one mold wrote: the mold binary run as
-/// `mold mcp`. Anything else under the `mold` key belongs to the user.
-fn is_ours(entry: &Value) -> bool {
-    let binary = entry
-        .get("command")
-        .and_then(Value::as_str)
-        .map(|command| {
-            // Split by hand: a config copied from Windows keeps `\` separators,
-            // which `Path` treats as ordinary characters elsewhere.
-            let file = command.rsplit(['/', '\\']).next().unwrap_or(command);
-            file.eq_ignore_ascii_case("mold") || file.eq_ignore_ascii_case("mold.exe")
-        })
-        .unwrap_or(false);
-    let runs_mcp = entry
-        .get("args")
-        .and_then(Value::as_array)
-        .and_then(|args| args.first())
-        .and_then(Value::as_str)
-        == Some("mcp");
-    binary && runs_mcp
+/// Mold owns `mcpServers.mold` only while it still equals the entry mold last
+/// wrote, recorded beside the config in `<config>.mold-connector`. A
+/// hand-written `mold mcp` entry, or one edited since, belongs to the user.
+fn is_ours(entry: &Value, owned: Option<&Value>) -> bool {
+    owned == Some(entry)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -203,10 +189,14 @@ fn servers(config: &mut Value) -> Result<&mut Map<String, Value>> {
         .with_context(|| format!("mcpServers in {CONFIG_FILE} is not a JSON object"))
 }
 
-/// Add or update `mcpServers.mold`, leaving every other key alone.
+/// Add or update `mcpServers.mold`, leaving every other key alone. `owned`
+/// is the entry mold last wrote ([`read_owned`]). An existing entry equal to
+/// the new one is `Unchanged`, and the caller records it as mold's: it holds
+/// nothing a person customized.
 pub(super) fn merge_connector(
     config: &mut Value,
     connector: &Connector,
+    owned: Option<&Value>,
     force: bool,
 ) -> Result<Merge> {
     let servers = servers(config)?;
@@ -214,9 +204,9 @@ pub(super) fn merge_connector(
     let merge = match servers.get(CONNECTOR) {
         None => Merge::Added,
         Some(existing) if *existing == entry => return Ok(Merge::Unchanged),
-        Some(existing) if is_ours(existing) || force => Merge::Updated,
+        Some(existing) if is_ours(existing, owned) || force => Merge::Updated,
         Some(_) => bail!(
-            "{CONFIG_FILE} already has an mcpServers.{CONNECTOR} entry that mold did not write; pass --force to replace it, or --no-connector to leave it"
+            "{CONFIG_FILE} already has an mcpServers.{CONNECTOR} entry that mold did not write (or that was edited since); pass --force to replace it, or --no-connector to leave it"
         ),
     };
     servers.insert(CONNECTOR.to_string(), entry);
@@ -231,8 +221,8 @@ pub(super) enum Removal {
     NotOurs,
 }
 
-/// Remove `mcpServers.mold` when mold wrote it.
-pub(super) fn remove_connector(config: &mut Value) -> Result<Removal> {
+/// Remove `mcpServers.mold` when it is still the entry mold wrote.
+pub(super) fn remove_connector(config: &mut Value, owned: Option<&Value>) -> Result<Removal> {
     let Some(servers) = config
         .as_object_mut()
         .and_then(|object| object.get_mut("mcpServers"))
@@ -242,7 +232,7 @@ pub(super) fn remove_connector(config: &mut Value) -> Result<Removal> {
     };
     match servers.get(CONNECTOR) {
         None => Ok(Removal::Absent),
-        Some(entry) if !is_ours(entry) => Ok(Removal::NotOurs),
+        Some(entry) if !is_ours(entry, owned) => Ok(Removal::NotOurs),
         Some(_) => {
             servers.remove(CONNECTOR);
             Ok(Removal::Removed)
@@ -251,15 +241,46 @@ pub(super) fn remove_connector(config: &mut Value) -> Result<Removal> {
 }
 
 /// What `mcpServers.mold` holds right now, for `mold skill list`.
-pub(super) fn connector_state(config: &Value) -> &'static str {
+pub(super) fn connector_state(config: &Value, owned: Option<&Value>) -> &'static str {
     match config
         .get("mcpServers")
         .and_then(|servers| servers.get(CONNECTOR))
     {
         None => "no connector",
-        Some(entry) if is_ours(entry) => "connector",
+        Some(entry) if is_ours(entry, owned) => "connector",
         Some(_) => "connector (not mold's)",
     }
+}
+
+fn owned_path(config: &Path) -> PathBuf {
+    let mut name = config.as_os_str().to_os_string();
+    name.push(OWNED_SUFFIX);
+    PathBuf::from(name)
+}
+
+/// The entry mold last wrote under `mcpServers.mold`, if any.
+pub(super) fn read_owned(config: &Path) -> Option<Value> {
+    serde_json::from_slice(&std::fs::read(owned_path(config)).ok()?).ok()
+}
+
+/// Record (or, with `None`, forget) the entry mold wrote.
+pub(super) fn write_owned(config: &Path, entry: Option<&Value>) -> Result<()> {
+    let path = owned_path(config);
+    match entry {
+        Some(entry) => std::fs::write(&path, format!("{}\n", serde_json::to_string_pretty(entry)?))
+            .with_context(|| format!("failed to write {}", path.display())),
+        None => match std::fs::remove_file(&path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                Err(error).with_context(|| format!("failed to remove {}", path.display()))
+            }
+            _ => Ok(()),
+        },
+    }
+}
+
+/// The entry under `mcpServers.mold`, to record after a merge.
+pub(super) fn connector_entry(config: &Value) -> Option<&Value> {
+    config.get("mcpServers")?.get(CONNECTOR)
 }
 
 /// Read the config; a missing or blank file is an empty object. A file that
@@ -460,7 +481,7 @@ mod tests {
             "preferences": { "sidebarMode": "chat" }
         });
         assert_eq!(
-            merge_connector(&mut config, &connector(), false).unwrap(),
+            merge_connector(&mut config, &connector(), None, false).unwrap(),
             Merge::Added
         );
         assert_eq!(config["mcpServers"]["time"]["command"], "uvx");
@@ -470,7 +491,7 @@ mod tests {
             json!({ "command": "/opt/bin/mold", "args": ["mcp"] })
         );
         assert_eq!(
-            merge_connector(&mut config, &connector(), false).unwrap(),
+            merge_connector(&mut config, &connector(), None, false).unwrap(),
             Merge::Unchanged
         );
     }
@@ -478,21 +499,22 @@ mod tests {
     #[test]
     fn an_empty_config_gets_an_mcp_servers_object() {
         let mut config = json!({});
-        merge_connector(&mut config, &connector(), false).unwrap();
+        merge_connector(&mut config, &connector(), None, false).unwrap();
         assert!(config["mcpServers"]["mold"].is_object());
     }
 
     #[test]
-    fn a_pinned_host_and_mold_home_are_passed_to_mold_mcp() {
+    fn a_pinned_host_and_mold_home_replace_the_entry_mold_wrote() {
         let pinned = Connector::new(
             "/opt/bin/mold".to_string(),
             Some("workstation"),
             Some("/Volumes/Data/mold".to_string()),
         );
         let mut config = json!({});
-        merge_connector(&mut config, &connector(), false).unwrap();
+        merge_connector(&mut config, &connector(), None, false).unwrap();
+        let owned = connector_entry(&config).cloned();
         assert_eq!(
-            merge_connector(&mut config, &pinned, false).unwrap(),
+            merge_connector(&mut config, &pinned, owned.as_ref(), false).unwrap(),
             Merge::Updated
         );
         assert_eq!(
@@ -506,49 +528,70 @@ mod tests {
     }
 
     #[test]
-    fn a_mold_entry_mold_did_not_write_needs_force() {
-        let mut config = json!({
-            "mcpServers": { "mold": { "command": "npx", "args": ["some-other-mold"] } }
-        });
-        let error = merge_connector(&mut config, &connector(), false)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("--force"), "{error}");
-        assert_eq!(config["mcpServers"]["mold"]["command"], "npx");
-        assert_eq!(remove_connector(&mut config).unwrap(), Removal::NotOurs);
-        assert_eq!(connector_state(&config), "connector (not mold's)");
-        assert_eq!(
-            merge_connector(&mut config, &connector(), true).unwrap(),
-            Merge::Updated
-        );
-        assert_eq!(connector_state(&config), "connector");
+    fn a_mold_mcp_entry_mold_did_not_write_needs_force() {
+        // Hand-written, or mold's entry edited since: either way it is the user's.
+        let hand_written =
+            json!({ "command": "/usr/local/bin/mold", "args": ["mcp", "--host", "gpu"] });
+        let recorded = json!({ "command": "/usr/local/bin/mold", "args": ["mcp"] });
+        for owned in [None, Some(&recorded)] {
+            let mut config = json!({ "mcpServers": { "mold": hand_written.clone() } });
+            let error = merge_connector(&mut config, &connector(), owned, false)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("--force"), "{error}");
+            assert_eq!(config["mcpServers"]["mold"], hand_written);
+            assert_eq!(
+                remove_connector(&mut config, owned).unwrap(),
+                Removal::NotOurs
+            );
+            assert_eq!(connector_state(&config, owned), "connector (not mold's)");
+            assert_eq!(
+                merge_connector(&mut config, &connector(), owned, true).unwrap(),
+                Merge::Updated
+            );
+        }
     }
 
     #[test]
-    fn a_windows_mold_exe_counts_as_ours() {
-        let mut config = json!({
-            "mcpServers": { "mold": { "command": "C:\\Tools\\mold.exe", "args": ["mcp"] } }
-        });
-        assert_eq!(
-            merge_connector(&mut config, &connector(), false).unwrap(),
-            Merge::Updated
-        );
-    }
-
-    #[test]
-    fn remove_deletes_only_the_mold_connector() {
+    fn remove_deletes_only_the_entry_mold_wrote() {
         let mut config = json!({ "mcpServers": { "time": {} } });
-        assert_eq!(remove_connector(&mut config).unwrap(), Removal::Absent);
-        merge_connector(&mut config, &connector(), false).unwrap();
-        assert_eq!(remove_connector(&mut config).unwrap(), Removal::Removed);
+        assert_eq!(
+            remove_connector(&mut config, None).unwrap(),
+            Removal::Absent
+        );
+        merge_connector(&mut config, &connector(), None, false).unwrap();
+        let owned = connector_entry(&config).cloned();
+        assert_eq!(connector_state(&config, owned.as_ref()), "connector");
+        assert_eq!(
+            remove_connector(&mut config, owned.as_ref()).unwrap(),
+            Removal::Removed
+        );
         assert_eq!(config, json!({ "mcpServers": { "time": {} } }));
-        assert_eq!(remove_connector(&mut json!({})).unwrap(), Removal::Absent);
+        assert_eq!(
+            remove_connector(&mut json!({}), None).unwrap(),
+            Removal::Absent
+        );
+    }
+
+    #[test]
+    fn the_ownership_record_round_trips_and_is_forgotten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_path(dir.path());
+        assert_eq!(read_owned(&path), None);
+        let entry = json!({ "command": "/opt/bin/mold", "args": ["mcp"] });
+        write_owned(&path, Some(&entry)).unwrap();
+        assert_eq!(read_owned(&path), Some(entry));
+        write_owned(&path, None).unwrap();
+        write_owned(&path, None).unwrap();
+        assert_eq!(read_owned(&path), None);
     }
 
     #[test]
     fn a_config_that_is_not_an_object_is_refused() {
-        assert!(merge_connector(&mut json!([]), &connector(), false).is_err());
-        assert!(merge_connector(&mut json!({ "mcpServers": [] }), &connector(), false).is_err());
+        assert!(merge_connector(&mut json!([]), &connector(), None, false).is_err());
+        assert!(
+            merge_connector(&mut json!({ "mcpServers": [] }), &connector(), None, false).is_err()
+        );
     }
 
     #[test]
@@ -561,7 +604,7 @@ mod tests {
 
         std::fs::write(&path, r#"{"preferences":{"a":1}}"#).unwrap();
         let mut config = read_config(&path).unwrap();
-        merge_connector(&mut config, &connector(), false).unwrap();
+        merge_connector(&mut config, &connector(), None, false).unwrap();
         let backup = write_config(&path, &config).unwrap().unwrap();
         assert_eq!(
             std::fs::read_to_string(backup).unwrap(),

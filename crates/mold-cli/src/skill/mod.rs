@@ -1142,7 +1142,9 @@ fn add_desktop_connector(args: &SkillInstallArgs, host: Option<&str>, dir: &Path
     let connector = claude_desktop::Connector::new(exe.display().to_string(), host, mold_home);
     let path = claude_desktop::config_path(dir);
     let mut config = claude_desktop::read_config(&path)?;
-    let merge = claude_desktop::merge_connector(&mut config, &connector, args.force)?;
+    let owned = claude_desktop::read_owned(&path);
+    let merge =
+        claude_desktop::merge_connector(&mut config, &connector, owned.as_ref(), args.force)?;
     match merge {
         claude_desktop::Merge::Unchanged => eprintln!(
             "✓ The mold connector in {} is already current.",
@@ -1164,6 +1166,9 @@ fn add_desktop_connector(args: &SkillInstallArgs, host: Option<&str>, dir: &Path
             }
         }
     }
+    // Record what is now under mcpServers.mold, so later runs (and
+    // uninstall) can tell mold's entry from one a person wrote or edited.
+    claude_desktop::write_owned(&path, claude_desktop::connector_entry(&config))?;
     eprintln!("  It talks to {host_label}.");
     if exe.components().any(|part| part.as_os_str() == "target") {
         eprintln!(
@@ -1230,9 +1235,11 @@ fn uninstall_claude_desktop(named: bool) -> Result<usize> {
     if let Some(dir) = desktop_config_dir(&home).filter(|dir| dir.is_dir()) {
         let path = claude_desktop::config_path(&dir);
         let mut config = claude_desktop::read_config(&path)?;
-        match claude_desktop::remove_connector(&mut config)? {
+        let owned = claude_desktop::read_owned(&path);
+        match claude_desktop::remove_connector(&mut config, owned.as_ref())? {
             claude_desktop::Removal::Removed => {
                 let backup = claude_desktop::write_config(&path, &config)?;
+                claude_desktop::write_owned(&path, None)?;
                 eprintln!("Removed the mold connector from {}", display_path(&path));
                 if let Some(backup) = backup {
                     eprintln!("  Previous config saved as {}", display_path(&backup));
@@ -1269,7 +1276,11 @@ fn desktop_status(home: &Path) -> String {
     let connector = match desktop_config_dir(home).filter(|dir| dir.is_dir()) {
         None => "-".to_string(),
         Some(dir) => match claude_desktop::read_config(&claude_desktop::config_path(&dir)) {
-            Ok(config) => claude_desktop::connector_state(&config).to_string(),
+            Ok(config) => claude_desktop::connector_state(
+                &config,
+                claude_desktop::read_owned(&claude_desktop::config_path(&dir)).as_ref(),
+            )
+            .to_string(),
             Err(_) => "config unreadable".to_string(),
         },
     };
