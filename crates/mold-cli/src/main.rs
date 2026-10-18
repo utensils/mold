@@ -166,7 +166,7 @@ impl std::error::Error for AlreadyReported {}
 #[derive(Parser)]
 #[command(
     name = "mold",
-    about = "Local AI image generation — FLUX, SD1.5, SDXL & Z-Image diffusion models on your GPU",
+    about = "Local AI image, video and 3-D generation on your GPU — FLUX, SDXL, Qwen-Image, Wan, LTX-Video, Hunyuan3D and more",
     after_long_help = "\
 Quick start:
   mold pull flux-schnell:q8        Download a model
@@ -180,7 +180,8 @@ Report bugs: https://github.com/utensils/mold/issues"
 struct Cli {
     /// Machine to talk to: a saved host name (`mold host list`), a URL, or
     /// host[:port]. Without it: MOLD_HOST, then the default host
-    /// (`mold host use`), then http://localhost:7680.
+    /// (`mold host use`), then http://localhost:7680. Refused by commands
+    /// that only run on this machine.
     #[arg(long, global = true, env = "MOLD_HOST", value_name = "HOST",
           add = ArgValueCandidates::new(completion_cache::complete_host))]
     host: Option<String>,
@@ -295,7 +296,8 @@ enum LicensesAction {
     /// Consent and acquisition are different acts: this agrees to the terms so
     /// a later pull is unblocked, rather than transferring gigabytes now.
     /// Acceptance is recorded on the machine that would run the pull — the
-    /// server at MOLD_HOST when one answers, otherwise this machine.
+    /// selected host (--host, MOLD_HOST, or the default host) when one
+    /// answers, otherwise this machine.
     Accept {
         /// License id(s), as printed by `mold licenses`
         #[arg(required = true, num_args = 1..)]
@@ -496,7 +498,8 @@ Examples:
         #[arg(long)]
         json: bool,
     },
-    /// Print `export MOLD_HOST=…` for the given pod (shell-evalable)
+    /// Print `export MOLD_HOST=…` for the given pod (shell-evalable); the
+    /// paired pod is also saved under its name for `--host <pod-name>`
     #[command(after_long_help = "\
 Example:
   eval \"$(mold runpod connect <pod-id>)\"")]
@@ -939,7 +942,8 @@ pub enum QueueAction {
     Send {
         #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         job_id: String,
-        /// Destination URL (source remains MOLD_HOST)
+        /// Destination host: a saved host name or URL (the source is the
+        /// selected host)
         #[arg(long, value_name = "HOST")]
         to: String,
         /// Destination credential, independent of the source API key
@@ -2383,8 +2387,10 @@ Examples:
   mold serve --bind 127.0.0.1 --port 9000
   MOLD_PORT=8080 mold serve
 
-Remote clients pair with an invitation from the host, then set MOLD_HOST to
-the paired origin. Plain HTTP is available only on the private loopback engine.
+Remote clients pair with `mold host invite` here and `mold host add` on the
+client, then use `--host NAME`. Plain HTTP is available only on the private
+loopback engine, or with --allow-direct-api for clients saved with
+`mold host add URL --regular`.
 
 For gated or private Hugging Face repos, export HF_TOKEN in the server
 environment before starting mold serve.")]
@@ -2443,7 +2449,7 @@ and whose args are [\"mcp\", \"--host\", \"http://localhost:7680\"]. Run
 `mold serve` separately before calling generation tools.")]
     Mcp,
 
-    /// Manage a background mold server daemon (start, stop, status, discover)
+    /// Manage a background mold server daemon (start, stop, status; discover in mDNS builds)
     #[command(after_long_help = "\
 Examples:
   mold server start              Start background server on port 7680
@@ -2486,8 +2492,9 @@ Examples:
   mold queue pause / mold queue resume Host-wide dispatch gate
   mold queue sweep                     Run the retention sweeps now
 
-Talks to the server at MOLD_HOST (MOLD_API_KEY when configured). There is
-no local fallback: a queue belongs to one serving host. `list`, `show`, and
+Talks to the selected host (--host, MOLD_HOST, or the default host) with its
+saved credential. There is no local fallback: a queue belongs to one serving
+host. `list`, `show`, and
 the waiting vocabulary (`Next up`, `#N in line`) are the same policy the web,
 desktop, and iPhone surfaces render.")]
     Queue {
@@ -2505,8 +2512,10 @@ Examples:
   mold library collection remove Portfolio b.png
   mold library trash a.png
 
-Every command targets MOLD_HOST (with MOLD_API_KEY when configured) and never
-falls back to direct filesystem access. An unreachable host is an error.")]
+Every command targets the selected host (--host, MOLD_HOST, or the default
+host) with its saved credential and never falls back to direct filesystem
+access. An unreachable host is an error. `mold library download` saves a
+print's original file.")]
     Library {
         #[command(subcommand)]
         action: LibraryAction,
@@ -2520,8 +2529,9 @@ Examples:
   mold trash empty --yes               Purge everything without confirming
   mold trash sweep                     Run the retention sweep now
 
-Talks to the server at MOLD_HOST (MOLD_API_KEY when configured). There is
-no local fallback: the trash belongs to that host's gallery. Retention is
+Talks to the selected host (--host, MOLD_HOST, or the default host) with its
+saved credential. There is no local fallback: the trash belongs to that
+host's gallery. Retention is
 the host's `gallery.trash_retention_days` config key (default 30; 0 keeps
 trashed prints forever).")]
     Trash {
@@ -2595,8 +2605,8 @@ under the configured models directory and registered on every local surface.")]
     /// Show third-party model licenses and whether they have been accepted
     #[command(after_long_help = "\
 Acceptance is recorded per Mold data root, so this reports the machine that
-runs the pull: the server at MOLD_HOST when one answers, otherwise this
-machine. Accept terms without downloading anything:
+runs the pull: the selected host (--host, MOLD_HOST, or the default host)
+when one answers, otherwise this machine. Accept terms without downloading anything:
 
   mold licenses accept tencent-hunyuan3d-2.0
 
@@ -2654,7 +2664,7 @@ Examples:
   mold search \"anime style\" --kind lora --sort recent
   mold search sdxl --source civitai --page 2 --json
 
-The search runs on MOLD_HOST when one answers, so it sees any Hugging Face or
+The search runs on the selected host when one answers, so it sees any Hugging Face or
 Civitai credentials that machine has stored. With no server reachable it runs
 here instead, using HF_TOKEN and CIVITAI_TOKEN from the environment.
 
@@ -2708,8 +2718,8 @@ Examples:
   mold downloads add flux-dev:q4
   mold downloads watch
 
-Talks to the server at MOLD_HOST (MOLD_API_KEY when configured). A download
-queue belongs to one machine, so there is no local fallback: `mold pull`
+Talks to the selected host (--host, MOLD_HOST, or the default host) with its
+saved credential. A download queue belongs to one machine, so there is no local fallback: `mold pull`
 is the command that also works without a server.")]
     Downloads {
         #[command(subcommand)]
@@ -2727,7 +2737,7 @@ Examples:
 Unlike a one-shot `mold run` against a 3-D model, a workflow keeps every
 stage's output as its own retained artifact, reports stage-by-stage progress,
 and can be resumed after a restart. It is durable on ONE machine, so every
-verb here talks to MOLD_HOST.")]
+verb here talks to the selected host.")]
     MeshWorkflow {
         #[command(subcommand)]
         action: MeshWorkflowAction,
@@ -2844,7 +2854,7 @@ Manage pods manually:
   mold runpod gpus                                  List GPU stock
   mold runpod create --gpu 5090                     Create a pod
   mold runpod list                                  List active pods
-  mold runpod connect <pod-id>                      Print export MOLD_HOST=…
+  mold runpod connect <pod-id>                      Print export MOLD_HOST=… (or use --host <pod-name>)
   mold runpod delete <pod-id>                       Tear down")]
     Runpod {
         #[command(subcommand)]
@@ -3458,6 +3468,9 @@ async fn async_main(
         };
         for cause in chain {
             eprintln!("  {} {cause}", theme::prefix_cause());
+        }
+        if let Some(hint) = errors::pairing_hint(&e) {
+            eprintln!("  {} {hint}", theme::prefix_hint());
         }
         std::process::exit(1);
     }

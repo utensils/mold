@@ -3668,3 +3668,26 @@ async fn library_download_cleans_up_a_failed_print_and_reports_it() {
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
 }
+
+/// A host that refuses plain HTTP until paired gets one actionable hint.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unpaired_host_error_says_how_to_pair() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(426).set_body_json(serde_json::json!({
+            "error": "A secure Mold connection is required",
+            "code": "SECURE_CONNECTION_REQUIRED"
+        })))
+        .mount(&server)
+        .await;
+    env.cmd()
+        .args(["library", "list", "--host", &server.uri()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "pair it first: run `mold host invite` on that machine, then `mold host add` here",
+        ));
+}

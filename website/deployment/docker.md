@@ -172,19 +172,25 @@ When 4090 stock is thin, the RTX 5090 (`NVIDIA GeForce RTX 5090`, image
 
 ### Connecting Once the Pod is Up
 
+Pair the pod before sending it work: `mold runpod create` pairs automatically
+and saves the pod under its own name, and a pod started another way pairs with
+`mold host invite` in its console and `mold host add` on your machine. Then
+name it with `--host`:
+
+```bash
+mold host list                                     # the pod's saved name
+mold ps --host <pod-name>
+mold run "a cinematic portrait" --host <pod-name>
+```
+
+The proxy URL itself is not an API transport for an unpaired client; plain
+`curl` health checks apply only on the pod's loopback or to a Regular host
+started with `--allow-direct-api`:
+
 ```bash
 POD=<pod-id>
-export MOLD_HOST="https://${POD}-7680.proxy.runpod.net"
-
-# Health checks
-curl "$MOLD_HOST/health"
-curl "$MOLD_HOST/api/status" | jq
-
-# Generate
-mold run "a cinematic portrait"
-
-# Open the bundled Mold Studio (gallery lives at /library)
-open "$MOLD_HOST/library"   # macOS; use `xdg-open` on Linux
+curl "https://${POD}-7680.proxy.runpod.net/health"
+open "https://${POD}-7680.proxy.runpod.net/library"   # macOS; use `xdg-open` on Linux
 ```
 
 ::: tip Mold Studio is bundled

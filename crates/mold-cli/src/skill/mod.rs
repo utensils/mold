@@ -481,7 +481,7 @@ fn render_adapter(profile: RenderProfile) -> (String, &'static str, &'static str
         RenderProfile::Portable => ("references", "This portable bundle follows the Agent Skills directory and frontmatter standard."),
         RenderProfile::Claude => {
             fields.push("argument-hint: \"[prompt or mold subcommand]\"".to_string());
-            ("references", "Claude Code: resolve all linked resources relative to this skill directory. No shell tools are pre-approved; retain normal permission checks.")
+            ("references", "Claude Code: resolve all linked resources relative to this skill directory. No shell tools are pre-approved; retain normal permission checks. When the user must run a command in their own terminal (pairing with `mold host add`), suggest typing `! mold host add` at the Claude Code prompt so it runs in this session and the link never enters chat.")
         }
         RenderProfile::Codex => ("references", "Codex: UI metadata lives in `agents/openai.yaml`; instructions and references remain portable and relative to this skill directory."),
         RenderProfile::Pi => {

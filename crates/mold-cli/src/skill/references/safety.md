@@ -9,6 +9,9 @@
   manager approved by the user. Confirm only that a value is present; do not
   print it.
 - Redact credentials from diagnostics and URLs before reporting them.
+- Never ask the user to paste a pairing link into chat: it is a one-use
+  credential. Ask them to run `mold host add` in their own terminal and paste it
+  at its prompt.
 
 ## Destructive and paid operations
 
@@ -18,7 +21,11 @@ for each material scope before any of these actions:
 - deleting models, gallery media, trash, cloud pods, or network volumes;
 - `mold clean --force`, bulk cancellation, or permanent purge;
 - creating or resizing paid cloud resources;
-- starting, stopping, restarting, or changing a shared/production server.
+- starting, stopping, restarting, or changing a shared/production server;
+- `mold host use` (changes the default host for every later command),
+  `mold host rm` (deletes this client's saved credentials), `mold host invite`
+  (mints a pairing credential on the host) and `mold host add` (pairs this
+  machine).
 
 Resolve exact targets first with list/info/status commands. Prefer a dry run
 when the CLI offers one. Before a broad action, state the target set and likely

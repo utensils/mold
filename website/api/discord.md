@@ -9,8 +9,8 @@ users to generate images and videos via slash commands.
 # Server + bot in one process
 MOLD_DISCORD_TOKEN="your-token" mold serve --discord
 
-# Or run the bot separately (connects to a remote server)
-MOLD_HOST=http://gpu-host:7680 MOLD_DISCORD_TOKEN="your-token" mold discord
+# Or run the bot separately (connects to a paired remote server; see mold host add)
+MOLD_HOST=workstation MOLD_DISCORD_TOKEN="your-token" mold discord
 ```
 
 ## Setup
@@ -233,7 +233,7 @@ poster and GLB using the existing Discord mesh delivery policy.
 | Variable                     | Default                 | Description                                                             |
 | ---------------------------- | ----------------------- | ----------------------------------------------------------------------- |
 | `MOLD_DISCORD_TOKEN`         | --                      | Bot token (required; falls back to `DISCORD_TOKEN`)                     |
-| `MOLD_HOST`                  | `http://localhost:7680` | mold server URL                                                         |
+| `MOLD_HOST`                  | `http://localhost:7680` | mold server: a saved host name or URL                                   |
 | `MOLD_DISCORD_COOLDOWN`      | `10`                    | Per-user cooldown (s)                                                   |
 | `MOLD_DISCORD_ALLOWED_ROLES` | --                      | Comma-separated role names/IDs for access control (unset = all)         |
 | `MOLD_DISCORD_DAILY_QUOTA`   | --                      | Max generations per user per UTC day (unset = unlimited; 0 = block all) |

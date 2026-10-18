@@ -13,7 +13,7 @@ before or after the verb (`mold --host workstation ps`,
 URL, or `host[:port]` (a bare host gets `http://` and port `7680`). A Tailscale
 IP the paired host advertised also finds the saved pairing, even when it was
 paired under a relay origin, and mold prints the redirect on stderr
-(`100.105.134.43 → workstation (https://…)`). A LAN address never redirects,
+(`100.101.102.103 → workstation (https://…)`). A LAN address never redirects,
 and an address typed with a scheme or port must match an advertised endpoint
 exactly. Which machine a command talks to:
 
@@ -287,7 +287,7 @@ mold run --script shot.toml --dry-run
 ## `mold jobs`
 
 Inspect and control durable chain jobs on a running `mold serve` instance. The
-commands use `MOLD_HOST` and send `MOLD_API_KEY` when configured.
+commands talk to the selected host ([`--host`, then `MOLD_HOST`, then the default host, then localhost](#choosing-a-host-host)) with its saved credential; `MOLD_API_KEY` is used only for a host with no saved credential.
 
 ```bash
 mold jobs list [--json]
@@ -337,7 +337,7 @@ mold mesh-workflow delete WORKFLOW-ID
 A one-shot `mold run` against a 3-D model is a single render. A workflow keeps
 every stage as its own retained artifact, reports each stage as it changes
 state, and resumes after a restart from the first unfinished stage. It is durable on one
-machine, so every verb talks to `MOLD_HOST` and there is no local form.
+machine, so every verb talks to the [selected host](#choosing-a-host-host) and there is no local form.
 
 The mode is inferred from what you supply:
 
@@ -373,8 +373,7 @@ instead and refuses a mesh larger than the limits it advertises.
 ## `mold queue`
 
 Inspect and control the generation queue on a running `mold serve` instance.
-The commands use `MOLD_HOST` and send `MOLD_API_KEY` when configured; there is
-no local fallback, because a queue belongs to one serving host.
+The commands talk to the selected host ([`--host`, then `MOLD_HOST`, then the default host, then localhost](#choosing-a-host-host)) with its saved credential; `MOLD_API_KEY` is used only for a host with no saved credential. There is no local fallback, because a queue belongs to one serving host.
 
 ```bash
 mold queue list [--held] [--json]        # job, state, model, batch, prompt, admitted
@@ -411,9 +410,7 @@ Queue listing, job detail and batch-child JSON may include `error_detail`, the o
 
 ## `mold library`
 
-Browse and organize existing prints on the server selected by `MOLD_HOST`
-(`MOLD_API_KEY` is sent when configured). These commands never fall back to
-direct filesystem access.
+Browse and organize existing prints on the selected host. The commands talk to the selected host ([`--host`, then `MOLD_HOST`, then the default host, then localhost](#choosing-a-host-host)) with its saved credential; `MOLD_API_KEY` is used only for a host with no saved credential. They never fall back to direct filesystem access.
 
 ```bash
 mold library list [--query TEXT] [--tag TAG] [--tag TAG]... [--collection NAME-OR-SLUG] [--favorite] [--format FORMAT] [--limit N] [--offset N] [--json]
@@ -531,8 +528,7 @@ instance. Deleting a print from any surface moves it to the host's trash
 (`<output_dir>/.trash/`) instead of removing it; the server purges trashed
 prints after `gallery.trash_retention_days` (default 30, `0` keeps them
 forever; see [Configuration](/guide/configuration#library-trash)). The
-commands use `MOLD_HOST` and send `MOLD_API_KEY` when configured; there is no
-local fallback, because the trash belongs to that host's gallery.
+commands talk to the selected host ([`--host`, then `MOLD_HOST`, then the default host, then localhost](#choosing-a-host-host)) with its saved credential; `MOLD_API_KEY` is used only for a host with no saved credential. There is no local fallback, because the trash belongs to that host's gallery.
 
 ```bash
 mold trash list [--json]          # filename, title, trashed, purges, size
@@ -609,7 +605,7 @@ prompting guide; custom `expand.system_prompt` templates never apply to Remix.
 Start the HTTP inference server.
 
 ```bash
-mold serve [--port N] [--bind ADDR] [--models-dir PATH] [--gpus SPEC] [--queue-size N] [--log-format json|text] [--log-file] [--discord] [--no-mdns]
+mold serve [--port N] [--bind ADDR] [--models-dir PATH] [--gpus SPEC] [--queue-size N] [--log-format json|text] [--log-file] [--discord] [--no-mdns] [--allow-direct-api]
 ```
 
 | Flag                  | Description                                                                                                                                                                                      |
@@ -623,6 +619,10 @@ mold serve [--port N] [--bind ADDR] [--models-dir PATH] [--gpus SPEC] [--queue-s
 | `--log-file`          | Enable rotated logs under `~/.mold/logs/`                                                                                                                                                        |
 | `--discord`           | Start the built-in Discord bot in the same process                                                                                                                                               |
 | `--no-mdns`           | Disable LAN advertising and server-assisted peer browsing (`mdns` builds; also `MOLD_MDNS=0`)                                                                                                    |
+| `--allow-direct-api`  | Also accept Regular direct HTTP(S) clients beside Secure pairing (also `MOLD_ALLOW_DIRECT_API=1`); clients save it with `mold host add URL --regular`                                            |
+
+Without `--allow-direct-api`, a non-loopback client over plain HTTP that has not
+paired gets `426 SECURE_CONNECTION_REQUIRED`; loopback clients always work.
 
 `GET /api/status` returns `gpus[]` with per-worker state and
 `queue_depth`/`queue_capacity` for queue health.
@@ -642,8 +642,7 @@ are also accepted. CUDA/MIG UUID prefixes may be abbreviated only when they
 match exactly one runtime-visible device; ambiguous or missing selectors fail
 startup rather than choosing another GPU.
 
-Runtime controls target the serving host (`MOLD_HOST` and `MOLD_API_KEY`
-apply):
+Runtime controls talk to the selected host ([`--host`, then `MOLD_HOST`, then the default host, then localhost](#choosing-a-host-host)) with its saved credential; `MOLD_API_KEY` is used only for a host with no saved credential:
 
 ```bash
 mold gpu list [--json]
@@ -657,7 +656,7 @@ same; operational telemetry that only the server samples remains `null` rather
 than being fabricated. `gpu enable` and `gpu disable` persist the stable
 device's startup preference in the local metadata database and report that it
 takes effect on the next `mold serve`. They never fall back to local hardware
-when `MOLD_HOST` names another machine.
+when the selected host is another machine.
 
 Disable removes the device from future scheduling immediately. Active work
 finishes before Mold drops its device-backed caches on the owner thread and
@@ -693,8 +692,9 @@ on any other port is a server you named explicitly, so it is probed over HTTP
 too — if nothing answers there, Mold also lists any unmanaged `mold serve`
 processes on this machine, since that is the usual explanation.
 
-An API key from `MOLD_API_KEY` is sent with the status read, so a server with
-authentication enabled reports normally instead of looking unreachable.
+The status read uses the host's saved credential (`MOLD_API_KEY` only for a host
+with no saved credential), so a server with authentication enabled reports
+normally instead of looking unreachable.
 
 ## `mold server discover`
 
@@ -713,8 +713,8 @@ mold server discover [--timeout-secs N] [--json] [--probe]
 | `--probe`            | Also probe each server's `/health` + `/api/status` and show a `LATENCY` column |
 
 The table lists NAME, URL, VERSION, AUTH (whether an API key is required), and a
-GPU summary, followed by a `mold ps --host <url>` hint (or the equivalent
-`export MOLD_HOST=…`) for the first result.
+GPU summary, followed by a `Connect: mold host add <url> …` hint for the first
+result.
 Advertising and server-assisted browsing are on by default when a server is
 built with the `mdns` feature; disable both per-server with
 `mold serve --no-mdns` or `MOLD_MDNS=0`.
@@ -778,7 +778,7 @@ mold search sdxl --source civitai --page 2 --page-size 50
 mold search flux --no-nsfw --json
 ```
 
-The search runs on the server at `MOLD_HOST` when one answers, so it sees the
+The search runs on the selected host when one answers, so it sees the
 Hugging Face and Civitai credentials that machine has stored, and the
 installed column answers about the machine that would do the downloading. With
 no server reachable it runs here instead, using `HF_TOKEN` and `CIVITAI_TOKEN`

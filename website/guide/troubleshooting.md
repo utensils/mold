@@ -81,15 +81,35 @@ If `mold run` cannot reach the server:
 
 - Run `mold ps` to check server status or detect local mold processes.
 - Start the server with `mold serve`.
-- Verify `MOLD_HOST` points at the right machine and port.
+- Run `mold host list` to confirm the host is saved (and which one is the
+  default), then name it with `--host`.
 
 ```bash
 mold ps
-MOLD_HOST=http://gpu-host:7680 mold run "a cat"
+mold host list
+mold ps --host workstation
+mold run "a cat" --host workstation
 ```
 
 If no server is reachable, `mold run` may fall back to local inference when the
 binary includes GPU support.
+
+## No Secure Pairing (426)
+
+`426 SECURE_CONNECTION_REQUIRED` from the server, or "No secure pairing for this
+host" from the CLI, means the client reached a non-loopback host over plain HTTP
+without pairing. Pair once: run `mold host invite` on the host and `mold host add`
+on the client, then paste the link.
+
+```bash
+mold host invite                 # on the host
+mold host add                    # on the client; paste the link
+```
+
+For a Regular direct HTTP connection instead, start the host with
+`mold serve --allow-direct-api` (or `MOLD_ALLOW_DIRECT_API=1`) and save it with
+`mold host add URL --regular --api-key-file KEY` (omit the key when
+authentication is off). Loopback (`localhost`) never needs pairing.
 
 ## Slow Generation
 

@@ -12,10 +12,14 @@ mold upscale input.png --model real-esrgan-x4plus:fp16 --output output-4x.png
 mold queue list
 mold queue cancel job-abc123
 mold server status
+mold host list
+mold ps --host workstation
+mold run flux2-klein:q8 "A red fox in falling snow" --host workstation
+mold library download --latest --host workstation
 mold skill show codex
 mold skill show codex references/prompting/families/flux2.md
 ```
 
-For a remote host, set `MOLD_HOST` in the execution environment rather than
-splicing credentials into the command. Run `mold <command> --help` for anything
-not covered here.
+For a remote host, pick a saved one from `mold host list` and pass
+`--host NAME`; its saved credential is used, so nothing secret goes on the
+command line. Run `mold <command> --help` for anything not covered here.

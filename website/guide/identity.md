@@ -150,9 +150,8 @@ mold run sdxl-base:fp16 "a hiker on a ridge" --id-image face.jpg \
 # Let the composition settle first, then apply the face
 mold run flux-dev:q4 "a hiker on a ridge" --id-image face.jpg --id-start-step 4
 
-# Remote: the server holds the bundle, you send the photograph
-MOLD_HOST=http://gpu-box:7680 mold run flux-dev:q4 "a chef in a kitchen" \
-  --id-image face.jpg
+# Remote: the paired server holds the bundle, you send the photograph
+mold run flux-dev:q4 "a chef in a kitchen" --id-image face.jpg --host workstation
 ```
 
 ### Flags

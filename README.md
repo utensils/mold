@@ -47,7 +47,8 @@ GPU hosts, including from a machine with NVIDIA hardware:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | MOLD_BACKEND=cpu sh
-MOLD_HOST=http://gpu-server:7680 mold run "a cat"
+mold host add                    # paste the link `mold host invite` printed on the GPU host
+mold run "a cat" --host workstation
 ```
 
 The CPU archive needs no NVIDIA driver or CUDA libraries. Local GPU generation

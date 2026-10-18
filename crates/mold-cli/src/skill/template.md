@@ -88,8 +88,9 @@ auto` to preserve useful alpha and remove opaque backgrounds, `on` to
 
 1. Run read-only discovery first. Do not assume the local binary and a remote
    host expose the same models or features.
-   Typed H3 references use authenticated upload sessions when a configured key
-   and advertised upload support are present; otherwise they use bounded inline
+   Typed H3 references use authenticated upload sessions when the host has a
+   credential for this client (its saved pairing, or `MOLD_API_KEY` for a host
+   with none) and advertises upload support; otherwise they use bounded inline
    data, with the server still enforcing authentication. Never reinterpret a 401
    or license refusal as a reason to retry without authentication. Remote license acceptance belongs to that host.
 2. Preserve the user's exact prompt and requested model unless they ask for
@@ -100,7 +101,8 @@ auto` to preserve useful alpha and remove opaque backgrounds, `on` to
    queued, running, or already-settled work; never report cancellation from the
    request alone.
 5. Verify the output exists and is the requested media type before reporting
-   success. For remote work, report which host owns the artifact.
+   success. For remote work, report which host owns the artifact, and fetch the
+   file with `mold library download NAME --host HOST` when the user wants it.
 
 {{agent_notes}}
 
@@ -108,83 +110,31 @@ auto` to preserve useful alpha and remove opaque backgrounds, `on` to
 
 {{prompt_routes}}
 
-Automatic cloud creation resolves a verified `@sha256` container for this
-client build before paying for a host. Nightly/source clients require the
-readiness manifest for their exact source SHA; if it is unavailable, use a
-published matching build or an explicitly reviewed image digest. Do not replace
-this check with a mutable `latest` tag or retry paid creation blindly.
+## Connect to a remote host
 
-## Secure and explicit Regular connections
+The user pairs machines; you select among the ones already saved.
+
+1. Run `mold host list` (read-only) to see the saved hosts and the default.
+2. Pass `--host NAME` on each remote command instead of changing the default.
+3. Confirm the target with `mold ps --host NAME` (or
+   `mold server status --host NAME`) before work that must run there.
+4. If the host is not saved, or a command reports "No secure pairing" or a 426,
+   ask the user to run `mold host invite` on that host and `mold host add` in
+   their own terminal on this machine, pasting the link at its prompt. Never
+   run `mold host add`, `mold host invite`, `mold host use` or `mold host rm`
+   unless the user asks, and never ask for a pairing link or key in chat.
 
 ```bash
-mold relay connect --relay-url wss://API.execute-api.REGION.amazonaws.com/production --target 127.0.0.1:7680
-mold host invite
-mold host add
-mold host add - < /private/link.txt
-mold host add https://workstation.example --api-key-file /private/operator.key
 mold host list
-mold host use workstation
 mold ps --host workstation
-mold host rm workstation
+mold run flux2-klein:q8 "A lighthouse at dusk" --host workstation
+mold library download --latest --host workstation
 ```
 
-Start an authenticated host first. Its owner-only secure identity stays on the
-host; authorize its public signing key through the relay operator's IAM
-provisioning command. Configure MOLD_PUBLIC_URL and MOLD_SECURE_WEBSOCKET_URL
-on headless hosts; mold serve then owns its outbound connector. The separate
-relay connect command reads the identity, never an old relay token.
-On the host, `mold host invite` prints a one-use, two-minute pairing link (only
-the link on stdout) using the operator key; the user pastes it into
-`mold host add` on the client. With the host URL and an operator key instead,
-`mold host add` exchanges the key for this client's own grant and never stores
-it; an app/device key is saved as Regular. Never ask the user to paste a key or
-link into chat: have them run `! mold host add …` themselves. Each paired client
-stores its own key and revocable grant under a host name (`mold host list`).
-`--host NAME` (global, on every remote command), `MOLD_HOST=NAME`, or a default
-set with `mold host use NAME` selects it; a URL still works, and a Tailscale IP
-the host advertised finds it (LAN addresses are used as typed). Precedence: `--host`, then `MOLD_HOST`, then the
-default host, then `http://localhost:7680`. `mold host rm NAME` deletes the
-saved credentials; revoke the device on the host to end its grant there.
-
-Secure direct and relay API traffic, uploads, progress and media use pinned Noise XX over
-LAN or the Lambda WebSocket relay. The cloud sees metadata and ciphertext, not
-API credentials or media. Bounded S3 objects may carry only the same encrypted
-wire bytes; object keys and cloud URLs never replace host identity verification.
-Old proxy credentials cannot be upgraded implicitly;
-upgrade and pair every Secure client again. A failed Secure request never falls
-back to HTTP. Regular direct HTTP(S) requires explicit opt-in and a distinct
-credential; the managed Mold proxy always requires Secure. Never fall back to a
-cloud-provided host key. Uploads are bounded to 64 MiB; responses stream with backpressure.
-Enable Regular with `mold serve --allow-direct-api`, `MOLD_ALLOW_DIRECT_API=1`, or
-Nix `services.mold.allowDirectApi = true`. For a one-use direct invitation:
-`mold host invite --regular --direct-url https://direct.example:7680`, then
-`mold host add` with that link. With a device key you already hold:
-`mold host add https://direct.example:7680 --api-key-file /private/key`.
-The private per-origin profile captures its selected mode; `MOLD_CONNECTION_MODE=secure|regular`
-is an explicit CLI override. Secure credentials cannot authorize Regular HTTP.
-The canonical per-home operator file also authorizes invitation export when
-MOLD_API_KEY is absent. Keep invitations and credentials in owner-private files.
-For a REST app, claim a Regular invitation with `--device-name "Custom app"` in a
-separate private `MOLD_HOME`. Read its persistent key from
-`secure/clients/regular-<SHA256(origin)>.json` and send `X-API-Key`; Bearer alone
-is not accepted. Revoke only that app's grant when retiring it. Nix `apiKeyFile`
-is operator bootstrap authority, not an app-key list; adding a device grant
-needs no Nix rebuild and must not disable authentication.
-
-Temporary gateway pressure may retry admission at most three times with short
-backoff inside the existing connection deadline, before any HTTP request frame.
-Authentication/protocol refusal is final. Interrupted mutations are never automatically replayed. RunPod create/run use
-owner-authenticated one-time bootstrap for fresh hosts and preserve the existing
-identity for known paired volumes. A private pre-create journal reconciles an
-uncertain paid response without replaying creation. Unknown existing volumes
-require pairing before replacement. An explicit --host/MOLD_HOST (a saved name works) selects that exact
-paired pod; provider readiness alone is not trusted Mold readiness. Native Remote Access
-opens the encrypted LAN listener and outbound connector; stopping it closes
-active sessions. HTTPS browsers may require WSS because of mixed-content rules.
-Lambda Labs deployment uses its existing verified SSH tunnel for end-to-end
-encryption. Its Docker container uses host networking and MOLD_BIND=127.0.0.1,
-so the tunneled engine interface remains actual loopback. Docker startup never
-copies API keys, bootstrap identities or provider tokens into SSH environment files.
+Pairing details, Secure and Regular modes, relays, REST app keys and RunPod or
+Lambda hosts are in
+[`{{reference_prefix}}/cli.md`]({{reference_prefix}}/cli.md) under "Encrypted
+remote connections" and "Connection modes".
 
 Gallery GUI exports on native iOS, Tauri and web support an optional GIF extra
 boundary pause through `pause_ms`; inspect the holding host's

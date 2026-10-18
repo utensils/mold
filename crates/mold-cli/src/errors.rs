@@ -118,8 +118,51 @@ pub fn format_oom_message(
     (label, hints)
 }
 
+/// The one next step for a host that will not talk to this client until it
+/// is paired: the server's 426 `SECURE_CONNECTION_REQUIRED` (plain HTTP to a
+/// non-loopback host without direct access), or no saved pairing here.
+pub const PAIRING_HINT: &str = "pair it first: run `mold host invite` on that machine, then `mold host add` here (or `mold host add URL --regular --api-key-file KEY` for a host with --allow-direct-api)";
+
+/// [`PAIRING_HINT`] when anything in `error`'s chain says the host needs
+/// pairing.
+pub fn pairing_hint(error: &anyhow::Error) -> Option<&'static str> {
+    error
+        .chain()
+        .map(|cause| cause.to_string())
+        .any(|text| {
+            text.contains("SECURE_CONNECTION_REQUIRED")
+                || text.contains("426 Upgrade Required")
+                || text.contains("No secure pairing for this host")
+        })
+        .then_some(PAIRING_HINT)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_unpaired_host_gets_one_pairing_hint() {
+        let no_pairing = anyhow::anyhow!("No such file or directory (os error 2)").context(
+            "No secure pairing for this host. Run `mold host invite` on the host and `mold host add` here",
+        );
+        let refused = anyhow::Error::msg(
+            r#"server error 426 Upgrade Required: {"error":"A secure Mold connection is required","code":"SECURE_CONNECTION_REQUIRED"}"#,
+        )
+        .context("could not list the Library on http://10.0.0.8:7680");
+        let plain_426 = anyhow::anyhow!(
+            "HTTP status client error (426 Upgrade Required) for url (http://10.0.0.8:7680/api/status)"
+        );
+        for error in [&no_pairing, &refused, &plain_426] {
+            let hint = pairing_hint(error).expect("hint");
+            assert!(hint.starts_with("pair it first: run `mold host invite` on that machine"));
+            assert!(hint.contains("mold host add URL --regular --api-key-file KEY"));
+        }
+        assert_eq!(pairing_hint(&anyhow::anyhow!("connection refused")), None);
+        assert_eq!(
+            pairing_hint(&anyhow::anyhow!("model not found: 426b")),
+            None
+        );
+    }
+
     use super::*;
 
     #[test]
