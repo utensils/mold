@@ -33,8 +33,7 @@ pub fn parse_pairing_link(input: &str) -> Result<Value> {
         Ok(value) => value,
         Err(_) => link_payload(&link_fields(input).context(NOT_A_CODE)?).context(NOT_A_CODE)?,
     };
-    validate(&value).context(UNSUPPORTED)?;
-    Ok(value)
+    normalized(value).context(UNSUPPORTED)
 }
 
 /// The form-encoded fragment of a pairing link, or `None` for anything else.
@@ -113,40 +112,80 @@ fn link_payload(fields: &[(String, String)]) -> Result<Value> {
     Ok(Value::Object(payload))
 }
 
-/// `Number(text)` for the decimal integers producers write; anything else
-/// becomes a value the validator refuses.
+/// What JavaScript's `Number(text)` reads from a link field, as a JSON
+/// number (an integer when it is one); `null` for `NaN` or an infinity.
 fn js_number(text: &str) -> Value {
-    text.parse::<u64>()
-        .map(Value::from)
-        .unwrap_or_else(|_| Value::String(text.into()))
+    let number = js_number_value(text.trim());
+    if number.fract() == 0.0 && (0.0..=u64::MAX as f64).contains(&number) {
+        return Value::from(number as u64);
+    }
+    serde_json::Number::from_f64(number).map_or(Value::Null, Value::Number)
 }
 
-fn validate(value: &Value) -> Result<()> {
-    let object = value.as_object().context("not an object")?;
-    let text = |key: &str| object.get(key).and_then(Value::as_str);
-    let hex = |key: &str, len: usize| {
-        text(key).is_some_and(|v| {
-            v.len() == len
-                && v.bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        })
+fn js_number_value(text: &str) -> f64 {
+    if text.is_empty() {
+        return 0.0;
+    }
+    for (prefix, radix) in [
+        ("0x", 16),
+        ("0X", 16),
+        ("0o", 8),
+        ("0O", 8),
+        ("0b", 2),
+        ("0B", 2),
+    ] {
+        if let Some(digits) = text.strip_prefix(prefix) {
+            return u64::from_str_radix(digits, radix).map_or(f64::NAN, |v| v as f64);
+        }
+    }
+    match text {
+        "Infinity" | "+Infinity" => return f64::INFINITY,
+        "-Infinity" => return f64::NEG_INFINITY,
+        _ => {}
+    }
+    // Rust also reads "inf" and "NaN"; JavaScript's decimal grammar does not.
+    if text
+        .bytes()
+        .any(|b| !(b.is_ascii_digit() || matches!(b, b'.' | b'e' | b'E' | b'+' | b'-')))
+    {
+        return f64::NAN;
+    }
+    text.parse::<f64>().unwrap_or(f64::NAN)
+}
+
+/// A JSON number that is exactly the whole number `n` the way `===` sees it.
+fn whole(value: Option<&Value>) -> Option<u64> {
+    let number = value?.as_f64()?;
+    (number.fract() == 0.0 && (0.0..=9_007_199_254_740_991.0).contains(&number))
+        .then_some(number as u64)
+}
+
+/// `parseMobilePairingPayload`'s checks, returning the payload with
+/// `version`/`expires_at` as integers and endpoints as `parseConnectionEndpoints`
+/// leaves them (normalized origins, duplicates removed).
+fn normalized(mut value: Value) -> Result<Value> {
+    let object = value.as_object_mut().context("not an object")?;
+    let text = |object: &Map<String, Value>, key: &str| {
+        object.get(key).and_then(Value::as_str).map(str::to_owned)
+    };
+    let hex = |object: &Map<String, Value>, key: &str, len: usize| {
+        text(object, key).is_some_and(|v| is_hex(&v, len))
     };
     ensure!(
-        text("type") == Some("mold.mobile-pairing")
-            && object.get("version").and_then(Value::as_u64) == Some(2)
-            && text("instance_id").is_some()
-            && text("name").is_some(),
+        text(object, "type").as_deref() == Some("mold.mobile-pairing")
+            && whole(object.get("version")) == Some(2)
+            && text(object, "instance_id").is_some()
+            && text(object, "name").is_some(),
         "invalid pairing header"
     );
-    let base = text("base_url").context("missing base_url")?;
-    if text("mode") == Some("regular") {
+    object.insert("version".into(), 2.into());
+    let base = text(object, "base_url").context("missing base_url")?;
+    if text(object, "mode").as_deref() == Some("regular") {
+        let expires_at = whole(object.get("expires_at")).filter(|v| *v > 0);
         ensure!(
-            !text("instance_id").unwrap_or_default().is_empty()
-                && hex("pairing_token", 64)
-                && object
-                    .get("expires_at")
-                    .and_then(Value::as_u64)
-                    .is_some_and(|v| v > 0)
+            !text(object, "instance_id").unwrap_or_default().is_empty()
+                && hex(object, "pairing_token", 64)
+                && expires_at.is_some()
                 && [
                     "namespace",
                     "host_key",
@@ -161,60 +200,118 @@ fn validate(value: &Value) -> Result<()> {
                 .all(|key| !object.contains_key(*key)),
             "invalid Regular pairing"
         );
-        crate::regular_origin(base)?;
-        return Ok(());
+        object.insert("expires_at".into(), expires_at.into());
+        crate::regular_origin(&base)?;
+        return Ok(value);
     }
     if let Some(mode) = object.get("mode") {
         ensure!(mode == "secure", "unknown pairing mode");
     }
-    ensure!(valid_address(base, false), "invalid base_url");
+    ensure!(valid_address(&base, false), "invalid base_url");
     ensure!(
-        hex("namespace", 32)
-            && hex("host_key", 64)
-            && hex("host_noise_key", 64)
-            && hex("host_binding_signature", 128)
-            && hex("invite_seed", 64),
+        hex(object, "namespace", 32)
+            && hex(object, "host_key", 64)
+            && hex(object, "host_noise_key", 64)
+            && hex(object, "host_binding_signature", 128)
+            && hex(object, "invite_seed", 64),
         "invalid Secure pairing"
     );
+    // Present, and null or a credential-free wss:// URL.
     match object.get("websocket_url") {
-        None | Some(Value::Null) => {}
+        Some(Value::Null) => {}
         Some(Value::String(url)) => ensure!(valid_address(url, true), "invalid websocket_url"),
-        Some(_) => bail!("invalid websocket_url"),
+        _ => bail!("invalid websocket_url"),
     }
-    let invite: mold_secure::Invitation = serde_json::from_value(
-        object
-            .get("invite")
-            .cloned()
-            .context("missing invitation")?,
-    )?;
-    let invite_hex = |v: &str, len: usize| {
-        v.len() == len
-            && v.bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    };
+    let invite = object.get("invite").context("missing invitation")?;
     ensure!(
-        invite_hex(&invite.id, 32)
-            && invite_hex(&invite.signing_key, 64)
-            && invite_hex(&invite.signature, 128)
-            && invite.expires_at > 0,
+        invite["id"].as_str().is_some_and(|v| is_hex(v, 32))
+            && invite["signingKey"].as_str().is_some_and(|v| is_hex(v, 64))
+            && invite["signature"].as_str().is_some_and(|v| is_hex(v, 128))
+            && whole(invite.get("expiresAt")).is_some_and(|v| v > 0)
+            && whole(invite.get("epoch")).is_some(),
         "invalid invitation"
     );
+    let _: mold_secure::Invitation = serde_json::from_value(invite.clone())?;
     if let Some(endpoints) = object.get("endpoints") {
-        let endpoints: Vec<crate::Endpoint> = serde_json::from_value(endpoints.clone())?;
-        ensure!(endpoints.len() <= 8, "too many endpoints");
+        let endpoints = connection_endpoints(endpoints)?;
+        object.insert("endpoints".into(), serde_json::to_value(endpoints)?);
     }
-    Ok(())
+    Ok(value)
 }
 
-/// A credential-free http(s) (or ws(s)) URL with no query or fragment.
+fn is_hex(value: &str, len: usize) -> bool {
+    value.len() == len
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// `parseConnectionEndpoints` (`studio/api/connectionRoutes.ts`): at most
+/// eight `lan`/`tailscale`/`relay` endpoints, each a plain http(s) origin
+/// (relay: https only) that is not loopback, link-local or unspecified;
+/// returned as origins, duplicates dropped.
+fn connection_endpoints(value: &Value) -> Result<Vec<crate::Endpoint>> {
+    let list = value.as_array().context("invalid connection addresses")?;
+    ensure!(list.len() <= 8, "too many connection addresses");
+    let mut out: Vec<crate::Endpoint> = Vec::new();
+    for item in list {
+        let raw = item["url"].as_str().context("invalid connection address")?;
+        let kind = item["kind"].as_str().unwrap_or_default();
+        ensure!(
+            raw.len() <= 2048
+                && !raw.contains(['?', '#'])
+                && ["lan", "tailscale", "relay"].contains(&kind),
+            "invalid connection address"
+        );
+        let url = reqwest::Url::parse(raw).context("invalid connection address")?;
+        let host = url
+            .host_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .trim_end_matches('.')
+            .to_string();
+        let link_local_v6 = host.len() > 4
+            && host.starts_with("fe")
+            && matches!(host.as_bytes()[2], b'8' | b'9' | b'a' | b'b')
+            && host.as_bytes()[3].is_ascii_hexdigit()
+            && host.as_bytes()[4] == b':';
+        let forbidden = host.is_empty()
+            || host == "localhost"
+            || host.ends_with(".localhost")
+            || host == "::"
+            || host == "::1"
+            || host == "0.0.0.0"
+            || host.starts_with("127.")
+            || host.starts_with("169.254.")
+            || link_local_v6
+            || host.contains('%');
+        ensure!(
+            !forbidden
+                && matches!(url.scheme(), "http" | "https")
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.path() == "/"
+                && (kind != "relay" || url.scheme() == "https"),
+            "connection addresses must be plain HTTP(S) origins"
+        );
+        let origin = url.origin().ascii_serialization();
+        if !out.iter().any(|e| e.url == origin) {
+            out.push(crate::Endpoint {
+                url: origin,
+                kind: kind.into(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// `validPairingAddress`: a credential-free URL with no query or fragment;
+/// an API origin is http(s) with path `/`, a WebSocket is wss.
 fn valid_address(value: &str, websocket: bool) -> bool {
     let Ok(url) = reqwest::Url::parse(value) else {
         return false;
-    };
-    let schemes: &[&str] = if websocket {
-        &["ws", "wss"]
-    } else {
-        &["http", "https"]
     };
     value == value.trim()
         && !value.contains(['\r', '\n', '\t'])
@@ -222,8 +319,12 @@ fn valid_address(value: &str, websocket: bool) -> bool {
         && url.password().is_none()
         && url.query().is_none()
         && url.fragment().is_none()
-        && schemes.contains(&url.scheme())
         && url.host_str().is_some()
+        && if websocket {
+            url.scheme() == "wss"
+        } else {
+            matches!(url.scheme(), "http" | "https") && url.path() == "/"
+        }
 }
 
 /// The pairing link for an invitation value, byte-identical to
@@ -279,8 +380,8 @@ pub fn pairing_link(payload: &Value) -> Result<String> {
         .and_then(Value::as_array)
         .filter(|list| !list.is_empty())
     {
-        let endpoints: Vec<crate::Endpoint> =
-            serde_json::from_value(Value::Array(endpoints.clone()))?;
+        // mobilePairingUrl writes what parseConnectionEndpoints leaves.
+        let endpoints = connection_endpoints(&Value::Array(endpoints.clone()))?;
         // JSON.stringify of `{kind, url}`, in that order.
         #[derive(serde::Serialize)]
         struct Ordered<'a> {
@@ -365,6 +466,7 @@ fn percent_decode(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn fixture() -> Value {
         serde_json::from_str(include_str!("../../../studio/api/pairing.fixtures.json")).unwrap()
@@ -443,6 +545,119 @@ mod tests {
         ] {
             assert!(parse_pairing_link(&bad).is_err(), "{bad}");
         }
+    }
+
+    fn secure_json() -> Value {
+        with_header(&fixture()["links"][0]["payload"])
+    }
+
+    fn parses(value: &Value) -> Result<Value> {
+        parse_pairing_link(&serde_json::to_string(value).unwrap())
+    }
+
+    /// `validPairingAddress`: a Secure API origin has path `/`; the relay
+    /// WebSocket is wss only; a JSON payload names `websocket_url` (null is
+    /// fine) like the link always does.
+    #[test]
+    fn secure_addresses_follow_valid_pairing_address() {
+        let mut value = secure_json();
+        value["websocket_url"] = Value::Null;
+        assert!(parses(&value).is_ok());
+        value.as_object_mut().unwrap().remove("websocket_url");
+        assert!(parses(&value).is_err(), "websocket_url must be present");
+        for websocket in ["ws://relay.example/ws", "https://relay.example/ws"] {
+            let mut value = secure_json();
+            value["websocket_url"] = websocket.into();
+            assert!(parses(&value).is_err(), "{websocket}");
+        }
+        let mut value = secure_json();
+        value["base_url"] = "http://studio.local:7680/api".into();
+        assert!(parses(&value).is_err());
+    }
+
+    /// Link numbers are read the way `Number()` reads them.
+    #[test]
+    fn link_numbers_follow_javascript_number() {
+        let link = fixture()["links"][4]["link"].as_str().unwrap().to_string();
+        for version in ["2", "2.0", "+2", "0x2", "2e0", "%202%20"] {
+            let input = link.replace("version=2", &format!("version={version}"));
+            let parsed = parse_pairing_link(&input).unwrap_or_else(|e| panic!("{version}: {e}"));
+            assert_eq!(parsed["version"], 2, "{version}");
+            let _: crate::RegularInvite = serde_json::from_value(parsed).unwrap();
+        }
+        for version in ["two", "inf", "NaN", "2.5", "Infinity", ""] {
+            let input = link.replace("version=2", &format!("version={version}"));
+            assert!(parse_pairing_link(&input).is_err(), "{version}");
+        }
+        let expiry = link.replace("expires_at=4000000000", "expires_at=4e9");
+        assert_eq!(
+            parse_pairing_link(&expiry).unwrap()["expires_at"],
+            4_000_000_000_u64
+        );
+        let fractional = link.replace("expires_at=4000000000", "expires_at=4000000000.5");
+        assert!(parse_pairing_link(&fractional).is_err());
+        assert_eq!(js_number(""), Value::from(0_u64));
+        assert_eq!(js_number(" 0b10 "), Value::from(2_u64));
+    }
+
+    /// `parseConnectionEndpoints`. These refusals are Rust- and TS-only: the
+    /// TypeScript throws them with its own message (not the shared
+    /// fixture's), and Swift drops a bad endpoint and then refuses the count
+    /// mismatch, so they cannot live in pairing.fixtures.json.
+    #[test]
+    fn endpoints_follow_parse_connection_endpoints() {
+        let with = |endpoints: Value| {
+            let mut value = secure_json();
+            value["endpoints"] = endpoints;
+            parses(&value)
+        };
+        for bad in [
+            json!([{"kind": "wifi", "url": "http://192.168.1.20:7680"}]),
+            json!([{"kind": "lan", "url": "http://localhost:7680"}]),
+            json!([{"kind": "lan", "url": "http://box.localhost:7680"}]),
+            json!([{"kind": "lan", "url": "http://127.0.0.1:7680"}]),
+            json!([{"kind": "lan", "url": "http://169.254.1.1:7680"}]),
+            json!([{"kind": "lan", "url": "http://[fe80::1]:7680"}]),
+            json!([{"kind": "lan", "url": "http://[::1]:7680"}]),
+            json!([{"kind": "lan", "url": "http://0.0.0.0:7680"}]),
+            json!([{"kind": "lan", "url": "http://192.168.1.20:7680/api"}]),
+            json!([{"kind": "lan", "url": "http://192.168.1.20:7680?x=1"}]),
+            json!([{"kind": "lan", "url": "http://192.168.1.20:7680#x"}]),
+            json!([{"kind": "lan", "url": "http://u:p@192.168.1.20:7680"}]),
+            json!([{"kind": "lan", "url": "ftp://192.168.1.20"}]),
+            json!([{"kind": "relay", "url": "http://relay.example"}]),
+            json!([{"kind": "lan", "url": format!("http://{}.example", "a".repeat(2048))}]),
+            json!((0..9)
+                .map(|i| json!({"kind": "lan", "url": format!("http://10.0.0.{i}:7680")}))
+                .collect::<Vec<_>>()),
+        ] {
+            assert!(with(bad.clone()).is_err(), "{bad}");
+        }
+        // Normalized to origins and deduplicated, as TypeScript returns them
+        // (Swift refuses the duplicate outright).
+        let parsed = with(json!([
+            {"kind": "lan", "url": "HTTP://192.168.1.20:7680/"},
+            {"kind": "lan", "url": "http://192.168.1.20:7680"},
+            {"kind": "relay", "url": "https://relay.example:443"},
+        ]))
+        .unwrap();
+        assert_eq!(
+            parsed["endpoints"],
+            json!([
+                {"kind": "lan", "url": "http://192.168.1.20:7680"},
+                {"kind": "relay", "url": "https://relay.example"},
+            ])
+        );
+        let mut value = secure_json();
+        value["endpoints"] = parsed["endpoints"].clone();
+        value["endpoints"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"kind": "lan", "url": "http://192.168.1.20:7680/"}));
+        let link = pairing_link(&value).unwrap();
+        assert!(link.ends_with(
+            "endpoints=%5B%7B%22kind%22%3A%22lan%22%2C%22url%22%3A%22http%3A%2F%2F192.168.1.20%3A7680%22%7D%2C%7B%22kind%22%3A%22relay%22%2C%22url%22%3A%22https%3A%2F%2Frelay.example%22%7D%5D"
+        ), "{link}");
     }
 
     #[test]
