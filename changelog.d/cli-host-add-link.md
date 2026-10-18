@@ -13,3 +13,7 @@
   stdout empty, and `mold pair` prints the `Added <name>` line and checks the
   host once after pairing. Pairing hints in errors now name `mold host invite`
   and `mold host add`.
+- **A saved host's own credential always wins over `MOLD_API_KEY`.** A
+  client now sends `MOLD_API_KEY` only to a host with no saved credential; a
+  saved Regular key (or a host saved keyless) and a Secure pairing always take
+  precedence, so a key exported for one machine is never sent to another.

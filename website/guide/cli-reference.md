@@ -22,6 +22,10 @@ exactly. Which machine a command talks to:
 3. the default host set with `mold host use NAME`
 4. `http://localhost:7680`
 
+`MOLD_API_KEY` is sent only to a host with no saved credential: a saved
+Regular key (or a host saved with no key) and a Secure pairing always win, so a
+key exported for one machine never reaches another.
+
 Commands that only ever run on this machine (`serve`, `system`, `config`,
 `stats`, `clean`, `rm`, `quantize`, `update`, `version`, `completions`,
 `skill`, `chain`, `expand`, `remix`, `default`, `host`, `pair`, `pairing`,

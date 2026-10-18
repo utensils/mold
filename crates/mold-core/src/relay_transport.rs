@@ -17,17 +17,19 @@ impl RelayClient {
             api_key: None,
         }
     }
+    /// `api_key` is `MOLD_API_KEY`, used only for an origin with no saved
+    /// credential: a saved Regular profile always supplies its own key (or
+    /// none, when saved keyless), and Secure dispatch inserts the paired one.
     pub(crate) fn for_origin(client: Client, origin: &str, mut api_key: Option<String>) -> Self {
         let mode = mold_secure_client::configured_connection_mode(origin)
             .and_then(|mode| {
                 if mode == mold_secure_client::ConnectionMode::Regular
                     && std::env::var("MOLD_CONNECTION_MODE").as_deref() == Ok("regular")
                 {
-                    let key = api_key.clone().or_else(|| {
-                        mold_secure_client::load_regular_host(origin)
-                            .ok()
-                            .and_then(|host| host.api_key)
-                    });
+                    let key = match mold_secure_client::load_regular_host(origin) {
+                        Ok(host) => host.api_key,
+                        Err(_) => api_key.clone(),
+                    };
                     mold_secure_client::register_regular_ephemeral(
                         "cli-env",
                         mold_secure_client::RegularHost {
@@ -40,9 +42,8 @@ impl RelayClient {
                 if mode == mold_secure_client::ConnectionMode::Regular {
                     let host = mold_secure_client::load_regular_host(origin)?;
                     host.validate()?;
-                    if api_key.is_none() {
-                        api_key = host.api_key;
-                    }
+                    // The saved credential wins over MOLD_API_KEY.
+                    api_key = host.api_key;
                 }
                 Ok(mode)
             })

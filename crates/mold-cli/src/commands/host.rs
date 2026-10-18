@@ -663,11 +663,17 @@ fn read_line(input: &mut impl BufRead) -> Result<Zeroizing<String>> {
     Ok(Zeroizing::new(line.trim().to_string()))
 }
 
-/// Ask on stderr; `hidden` turns terminal echo off while the answer is typed.
+/// Ask on stderr; `hidden` turns terminal echo off while the answer is
+/// typed, and refuses to ask at all where echo cannot be turned off.
 fn prompt(question: &str, hidden: bool) -> Result<Zeroizing<String>> {
+    let echo = if hidden {
+        Some(EchoOff::new().ok_or_else(echo_unavailable)?)
+    } else {
+        None
+    };
     eprint!("{question}");
     std::io::stderr().flush()?;
-    let _echo = hidden.then(EchoOff::new).flatten();
+    let _echo = echo;
     let answer = read_line(&mut std::io::stdin().lock());
     if hidden {
         eprintln!();
@@ -710,6 +716,12 @@ impl Drop for EchoOff {
             libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.saved);
         }
     }
+}
+
+fn echo_unavailable() -> anyhow::Error {
+    anyhow::anyhow!(
+        "this terminal cannot hide a typed key; pass it with --api-key-file FILE or --api-key-stdin"
+    )
 }
 
 fn default_device_name() -> String {
@@ -1035,6 +1047,12 @@ mod tests {
             .map(PathBuf::from)
             .unwrap_or_default();
         assert_eq!(file_argument("~/invite.txt"), Some(home.join("invite.txt")));
+    }
+
+    #[test]
+    fn a_key_prompt_that_would_echo_names_the_alternatives() {
+        let message = echo_unavailable().to_string();
+        assert!(message.contains("--api-key-file") && message.contains("--api-key-stdin"));
     }
 
     #[test]

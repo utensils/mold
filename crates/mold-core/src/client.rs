@@ -192,9 +192,17 @@ impl MoldClient {
     }
 
     /// A client for an already-resolved origin, with `MOLD_API_KEY` when set.
+    ///
+    /// A saved Regular profile for the origin outranks `MOLD_API_KEY`, which
+    /// is then neither sent nor counted; see `RelayClient::for_origin`.
     pub fn with_env_key(origin: &str) -> Self {
         let origin = normalize_host(origin);
-        let api_key = std::env::var("MOLD_API_KEY").ok().filter(|k| !k.is_empty());
+        let saved_regular = mold_secure_client::configured_connection_mode(&origin)
+            .is_ok_and(|mode| mode == mold_secure_client::ConnectionMode::Regular)
+            && mold_secure_client::load_regular_host(&origin).is_ok();
+        let api_key = std::env::var("MOLD_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty() && !saved_regular);
         let (client, api_key_configured) = build_client(api_key.as_deref());
         Self {
             client: crate::relay_transport::RelayClient::for_origin(client, &origin, api_key),
@@ -4144,6 +4152,72 @@ mod tests {
         unsafe { std::env::set_var("MOLD_HOST", unique_url) };
         let client = MoldClient::from_env();
         assert_eq!(client.host(), unique_url);
+    }
+
+    /// A saved Regular credential always wins over `MOLD_API_KEY`: the env
+    /// key belongs to whatever this shell last talked to, and must never be
+    /// sent to a host that has its own saved key (or is saved keyless).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_saved_regular_credential_wins_over_mold_api_key() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = HostEnv::new();
+        let previous_key = std::env::var_os("MOLD_API_KEY");
+        let status = serde_json::json!({
+            "version": "0.36.0", "git_sha": null, "build_date": null,
+            "models_loaded": [], "busy": false, "uptime_secs": 1
+        });
+        let keyed = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/status"))
+            .and(header("x-api-key", "saved-device-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(status.clone()))
+            .mount(&keyed)
+            .await;
+        let keyless = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/status"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(status))
+            .mount(&keyless)
+            .await;
+        mold_secure_client::save_regular_host(&mold_secure_client::RegularHost {
+            origin: keyed.uri(),
+            api_key: Some("saved-device-key".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        mold_secure_client::save_regular_host(&mold_secure_client::RegularHost {
+            origin: keyless.uri(),
+            ..Default::default()
+        })
+        .unwrap();
+        unsafe { std::env::set_var("MOLD_API_KEY", "unrelated-env-key") };
+        let keyed_status = MoldClient::for_host(Some(&keyed.uri()))
+            .unwrap()
+            .server_status()
+            .await;
+        let keyless_status = MoldClient::for_host(Some(&keyless.uri()))
+            .unwrap()
+            .server_status()
+            .await;
+        unsafe {
+            match previous_key {
+                Some(v) => std::env::set_var("MOLD_API_KEY", v),
+                None => std::env::remove_var("MOLD_API_KEY"),
+            }
+        }
+        keyed_status.unwrap();
+        keyless_status.unwrap();
+        for server in [&keyed, &keyless] {
+            for request in server.received_requests().await.unwrap() {
+                let sent: Vec<_> = request.headers.get_all("x-api-key").iter().collect();
+                assert!(
+                    sent.iter().all(|v| *v != "unrelated-env-key"),
+                    "env key leaked: {sent:?}"
+                );
+            }
+        }
     }
 
     /// `--host` > `MOLD_HOST` > the default saved host > localhost, and a

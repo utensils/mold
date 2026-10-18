@@ -3283,6 +3283,59 @@ async fn host_add_ignores_mold_api_key() {
         .success()
         .stdout(predicate::str::contains("Added open-box (regular)"));
     assert!(!saved_client_files(&env).contains("local-operator-key"));
+    // Nor does the reachability check after saving send it.
+    for request in server.received_requests().await.unwrap() {
+        assert!(
+            request
+                .headers
+                .get_all("x-api-key")
+                .iter()
+                .all(|v| v != "local-operator-key"),
+            "{} sent MOLD_API_KEY",
+            request.url
+        );
+    }
+}
+
+/// The post-add check uses only the credential just saved, even with an
+/// unrelated MOLD_API_KEY in the environment.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn host_add_checks_the_host_with_only_its_saved_key() {
+    let env = TestEnv::new();
+    let server = wiremock::MockServer::start().await;
+    refuse_sessions(&server, 403, "PAIRING_OPERATOR_REQUIRED").await;
+    mount_status(&server).await;
+    env.cmd()
+        .env("MOLD_API_KEY", "unrelated-env-key")
+        .args([
+            "host",
+            "add",
+            &server.uri(),
+            "--name",
+            "lab",
+            "--api-key-stdin",
+        ])
+        .write_stdin("device-key\n")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("reachable"));
+    let requests = server.received_requests().await.unwrap();
+    assert!(requests.iter().any(|r| r.url.path() == "/api/status"
+        && r.headers
+            .get("x-api-key")
+            .is_some_and(|v| v == "device-key")));
+    for request in requests {
+        assert!(
+            request
+                .headers
+                .get_all("x-api-key")
+                .iter()
+                .all(|v| v != "unrelated-env-key"),
+            "{} sent MOLD_API_KEY",
+            request.url
+        );
+    }
 }
 
 /// A bad `--name` is refused before the host is contacted.
