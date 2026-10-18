@@ -342,17 +342,22 @@ pub fn find_by_instance_id_at(root: &Path, instance_id: &str) -> Result<Option<S
         .find(|h| !instance_id.is_empty() && h.instance_id.as_deref() == Some(instance_id)))
 }
 
-/// A unique name for the host saved at `origin`, from a requested or reported
-/// label: its slug when free (or already held by `origin`), else the first
-/// free `-N` suffix. Callers that took the name from the user should refuse
-/// a collision instead; see [`name_is_free`].
+/// A unique name for the host saved at `origin`, from a reported label: the
+/// name `origin` already has when one is stored (re-pairing keeps it), else
+/// the label's slug when free, else the first free `-N` suffix. Callers that
+/// took the name from the user should refuse a collision instead; see
+/// [`require_free_name`].
 pub fn available_name(base: &str, origin: &str) -> Result<String> {
     available_name_at(&crate::default_store(), base, origin)
 }
 
 pub fn available_name_at(root: &Path, base: &str, origin: &str) -> Result<String> {
+    let hosts = list_at(root)?;
+    if let Some(saved) = hosts.iter().find(|h| h.origin == origin && h.named) {
+        return Ok(saved.name.clone());
+    }
     let base = slug(base).unwrap_or_else(|| derived_name(origin, None));
-    let taken: BTreeSet<String> = list_at(root)?
+    let taken: BTreeSet<String> = hosts
         .into_iter()
         .filter(|h| h.origin != origin)
         .map(|h| h.name)
@@ -796,8 +801,13 @@ mod tests {
             "workstation-2"
         );
         assert_eq!(
-            available_name_at(&root, "Workstation", "https://inst.invalid").unwrap(),
-            "workstation"
+            available_name_at(&root, "Renamed Box", "https://inst.invalid").unwrap(),
+            "workstation",
+            "re-pairing keeps the saved name"
+        );
+        assert_eq!(
+            available_name_at(&root, "", "https://10.9.8.7").unwrap(),
+            "host-10-9-8-7"
         );
         assert!(!name_is_free_at(&root, "workstation", "https://other.invalid").unwrap());
         assert!(name_is_free_at(&root, "workstation", "https://inst.invalid").unwrap());
