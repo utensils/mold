@@ -26,6 +26,7 @@ struct VideoNormalizationCapture {
 
     static func capture(_ request: GenerateRequest, capabilities uploads: ReferenceUploadCapabilities, apiKey: String?) throws -> Self {
         let refusal = ReferenceUploadPolicy.refusal("REFERENCE_NORMALIZATION_INVALID", "Prepare fresh video references from the original files on a compatible keyed host.")
+        try VideoNormalizationPolicy.requireValidAdvertisement(uploads)
         guard let caps = VideoNormalizationPolicy.capability(uploads, apiKey: apiKey), request.batchSize == 1,
               request.references == nil, let inputs = request.pendingReferenceInputs, !inputs.isEmpty,
               inputs.contains(where: { $0.freshVideo != nil }) else { throw refusal }

@@ -36,12 +36,29 @@ extension ReferenceUploadCapabilities {
         maxSessionBytes = try keyed.decodeIfPresent(Int.self, forKey: .maxSessionBytes)
         maxActiveSessions = try keyed.decodeIfPresent(Int.self, forKey: .maxActiveSessions)
         sessionTtlMs = try keyed.decodeIfPresent(Int.self, forKey: .sessionTtlMs)
+        do {
+            try decodeVideoNormalization(from: keyed)
+        } catch {
+            videoNormalization = nil
+            videoNormalizationFailure = "The host advertised a malformed video normalization V1 contract. Refresh the host or choose another machine."
+        }
+    }
+
+    private mutating func decodeVideoNormalization(from keyed: KeyedDecodingContainer<CodingKeys>) throws {
         if keyed.contains(.videoNormalization), try !keyed.decodeNil(forKey: .videoNormalization) {
             let nested = try keyed.nestedContainer(keyedBy: CodingKeys.self, forKey: .videoNormalization)
             let version = try nested.decodeIfPresent(Int.self, forKey: .protocolVersion)
+            guard let version else {
+                // An unversioned advertisement never negotiates V1. Still retain
+                // malformed base field types as a diagnostic rather than silently
+                // pretending they form a usable additive capability.
+                _ = try nested.decode(Bool.self, forKey: .available)
+                videoNormalization = nil
+                return
+            }
             // Future schemas are not ours to validate. Absence and an unsupported
             // protocol remain compatible with ordinary canonical upload V2.
-            if let version, version != 1 {
+            if version != 1 {
                 videoNormalization = nil
             } else {
                 videoNormalization = try keyed.decode(VideoNormalizationCapabilities.self, forKey: .videoNormalization)
@@ -58,13 +75,20 @@ extension ReferenceUploadCapabilities {
 }
 
 public enum VideoNormalizationPolicy {
+    static func requireValidAdvertisement(_ uploads: ReferenceUploadCapabilities?) throws {
+        if let failure = uploads?.videoNormalizationFailure {
+            throw ReferenceUploadPolicy.refusal("REFERENCE_NORMALIZATION_INVALID", failure)
+        }
+    }
+
     public static func capability(_ uploads: ReferenceUploadCapabilities?, apiKey: String?) -> VideoNormalizationCapabilities? {
         guard !(apiKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) else { return nil }
         return validatedAdvertisement(uploads)
     }
 
     static func validatedAdvertisement(_ uploads: ReferenceUploadCapabilities?) -> VideoNormalizationCapabilities? {
-        guard let uploads, (try? ReferenceUploadPolicy.validate(uploads)) != nil,
+        guard let uploads, uploads.videoNormalizationFailure == nil,
+              (try? ReferenceUploadPolicy.validate(uploads)) != nil,
               let cap = uploads.videoNormalization, cap.available, cap.protocolVersion == 1,
               cap.inputRoles?.contains("reference_video") == true,
               let candidate = cap.candidateSessionPath, let finalize = cap.finalizePath,

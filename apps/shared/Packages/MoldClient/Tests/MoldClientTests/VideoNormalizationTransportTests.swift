@@ -39,10 +39,12 @@ private actor NormalizationTransport: MoldHTTPTransport {
     var priced: GenerateRequest?
     var expireOnPricing: NormalizationClock?
     var requireLicense = false
+    var malformedNormalization = false
     func state() -> ([String], String) { (paths, boundary) }
     func submittedRequests() -> [GenerateRequest] { admitted }
     func pricedRequest() -> GenerateRequest? { priced }
     func requireConsent() { requireLicense = true }
+    func advertiseMalformedNormalization() { malformedNormalization = true }
     func expireWhilePricing(_ clock: NormalizationClock?) { expireOnPricing = clock }
     func setMismatch() { mismatch = true }
     func response(for request: URLRequest, body: MoldRequestBody) async throws -> (MoldResponseBytes, HTTPURLResponse) {
@@ -56,6 +58,11 @@ private actor NormalizationTransport: MoldHTTPTransport {
             let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("Fixtures/capabilities.json")
             value = try JSONSerialization.jsonObject(with: Data(contentsOf: fixture)) as! [String: Any]
             value["reference_uploads"] = VideoNormalizationPolicyTests.advertisement
+            if malformedNormalization {
+                var uploads = VideoNormalizationPolicyTests.advertisement
+                uploads["video_normalization"] = ["available": true, "protocol_version": 1]
+                value["reference_uploads"] = uploads
+            }
         } else if path == "/api/status" {
             value = ["version": "test", "busy": false, "instance_id": "instance", "uptime_secs": 1]
         } else if path == "/api/generate/placement-preview" {
@@ -99,6 +106,17 @@ private actor NormalizationTransport: MoldHTTPTransport {
 }
 
 struct VideoNormalizationTransportTests {
+    @Test func malformedKnownV1RefusesPendingAdmissionWithoutLosingCapabilitiesOrPosting() async throws {
+        let transport = NormalizationTransport(); let (backend, request, _) = try fixture(transport)
+        await transport.advertiseMalformedNormalization()
+        do {
+            _ = try await backend.submit(BatchAdmission(requests: [request]))
+            Issue.record("Malformed normalization was admitted")
+        } catch MoldClientError.http(_, let code, _) {
+            #expect(code == "REFERENCE_NORMALIZATION_INVALID")
+        } catch { Issue.record("Expected the specific normalization contract error, received \(error)") }
+        #expect(await transport.state().0 == ["GET /api/capabilities"])
+    }
     private func fixture(_ transport: NormalizationTransport) throws -> (HTTPBackend, GenerateRequest, ReferenceUploadCapabilities) {
         let host = MoldHost(name: "machine", baseURL: URL(string: "http://normalizer")!, apiKey: "key")
         var request = GenerateRequest(prompt: "scene", model: "minimax-h3-ref2va:official-bf16", width: 1280, height: 720, steps: 30, guidance: 1)

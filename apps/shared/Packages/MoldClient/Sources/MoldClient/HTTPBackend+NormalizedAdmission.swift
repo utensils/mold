@@ -7,6 +7,7 @@ extension HTTPBackend {
         try await requireReferenceAuthority()
         let advertised = try await capabilities().referenceUploads
         try await requireReferenceAuthority()
+        try VideoNormalizationPolicy.requireValidAdvertisement(advertised)
         guard let caps = advertised, VideoNormalizationPolicy.capability(caps, apiKey: host.apiKey) != nil,
               admission.requests.count <= (caps.maxActiveSessions ?? 0) else {
             throw ReferenceUploadPolicy.refusal("REFERENCE_NORMALIZATION_UNAVAILABLE", "Fresh video references need a compatible keyed host and a batch within its reference-session limit.")

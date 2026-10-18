@@ -88,6 +88,9 @@ public struct DurableMediaCapabilities: Codable, Hashable, Sendable {
 
 public struct ReferenceUploadCapabilities: Codable, Hashable, Sendable {
     public var videoNormalization: VideoNormalizationCapabilities? = nil
+    /// Client-only diagnostic: malformed additive V1 must not erase unrelated
+    /// host capabilities or masquerade as an older canonical-only server.
+    public internal(set) var videoNormalizationFailure: String? = nil
     /// Advertised-but-off is real: the protocol needs API-key auth, so a
     /// keyless host reports the block with `available: false`.
     public let available: Bool

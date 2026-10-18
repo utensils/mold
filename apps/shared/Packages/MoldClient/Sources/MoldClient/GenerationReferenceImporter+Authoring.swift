@@ -6,6 +6,9 @@ public extension GenerationReferenceImporter {
     /// remain immutable until the selected authority supplies exact facts and finalizes them.
     static func loadAuthoring(url: URL, capabilities: ReferenceUploadCapabilities?, apiKey: String?,
                               role: GenerationImageReferenceRole? = nil) async throws -> AuthoringReference {
+        if role == nil, videoMime(for: url.pathExtension.lowercased()) != nil {
+            try VideoNormalizationPolicy.requireValidAdvertisement(capabilities)
+        }
         guard role == nil, let cap = VideoNormalizationPolicy.capability(capabilities, apiKey: apiKey),
               cap.acceptedExtensions?.contains(url.pathExtension.lowercased()) == true,
               let mime = videoMime(for: url.pathExtension.lowercased()),

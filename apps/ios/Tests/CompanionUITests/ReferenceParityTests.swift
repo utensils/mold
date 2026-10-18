@@ -10,14 +10,25 @@ final class ReferenceParityTests: XCTestCase {
         let port = try await machine.start()
         let app = XCUIApplication()
         cleanUpFixture(machine, port: port, app: app)
+        app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
         app.launch(); try addMachine(app, port: port)
         try choose("minimax-h3-ref2va:comfy-pruned-int8-turbo-4step", in: app)
         // The fixture serves the checked-in generation profile unchanged:
         // fixed 24 fps, 107...345 frames, step 17 and offset 5.
-        let length = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Length,'")).firstMatch
-        reveal(length, app: app)
+        let optionsButton = app.buttons["Options"].firstMatch
+        let moreOptions = app.buttons["More Options"].firstMatch
+        let composer = form(in: app)
+        for _ in 0..<8 where !optionsButton.exists && !moreOptions.exists { composer.swipeUp() }
+        let opener = optionsButton.exists ? optionsButton : moreOptions
+        XCTAssertTrue(opener.waitForExistence(timeout: 5), app.debugDescription)
+        reveal(opener, app: app); tapMenu(opener)
+        XCTAssertTrue(app.navigationBars["More Options"].waitForExistence(timeout: 5))
+        let length = app.buttons["options-length"].firstMatch
+        let optionsForm = app.collectionViews["generation-options-form"].firstMatch
+        XCTAssertTrue(optionsForm.waitForExistence(timeout: 5))
+        for _ in 0..<6 where !length.exists || !length.isHittable { optionsForm.swipeUp() }
         XCTAssertTrue(length.waitForExistence(timeout: 5), app.debugDescription)
-        length.tap()
+        tapMenu(length)
         XCTAssertFalse(app.buttons["0 s"].exists)
         XCTAssertFalse(app.buttons["1 s"].exists)
         let current = app.buttons["5.2 s"].firstMatch
@@ -28,8 +39,8 @@ final class ReferenceParityTests: XCTestCase {
         options.name = "Authoritative H3 length options include the current frame count"
         options.lifetime = .keepAlways; add(options)
         selected.tap()
-        XCTAssertTrue(app.buttons["Length, 8.7 seconds"].firstMatch.waitForExistence(timeout: 5), app.debugDescription)
-        app.buttons["Length, 8.7 seconds"].firstMatch.tap()
+        XCTAssertEqual(length.label, "Length, 8.7 seconds")
+        tapMenu(length)
         XCTAssertTrue(app.buttons["8.7 s"].firstMatch.exists)
         let settled = XCTAttachment(screenshot: app.screenshot())
         settled.name = "Selected snapped length remains checked"

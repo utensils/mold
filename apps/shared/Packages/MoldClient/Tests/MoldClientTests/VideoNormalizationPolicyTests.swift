@@ -38,16 +38,29 @@ struct VideoNormalizationPolicyTests {
             if key == "protocol_version" {
                 #expect(VideoNormalizationPolicy.capability(try Self.decode(advertised), apiKey: "key") == nil)
             } else {
-                #expect(throws: (any Error).self) { try Self.decode(advertised) }
+                let caps = try Self.decode(advertised)
+                #expect(VideoNormalizationPolicy.capability(caps, apiKey: "key") == nil)
+                try ReferenceUploadPolicy.validate(caps)
             }
         }
     }
-    @Test func malformedAdditiveBlockDoesNotMasqueradeAsAnOlderServer() throws {
+    @Test func malformedAdditiveBlockPreservesUnrelatedCapabilitiesAndCanonicalV2() throws {
         var advertised = Self.advertisement
         advertised["video_normalization"] = ["available": "invalid"]
-        #expect(throws: (any Error).self) { try Self.decode(advertised) }
+        let document: [String: Any] = ["reference_uploads": advertised,
+            "gallery": ["organize": true, "trash": ["enabled": true]],
+            "queue": ["durable_queue": true], "events": ["available": true]]
+        let full = try MoldJSON.decoder.decode(Capabilities.self, from: JSONSerialization.data(withJSONObject: document))
+        #expect(full.gallery?.organize == true)
+        #expect(full.gallery?.trash?.enabled == true)
+        #expect(full.queue?.durableQueue == true)
+        #expect(full.events?.available == true)
+        try ReferenceUploadPolicy.validate(try #require(full.referenceUploads))
+        let encoded = try JSONSerialization.jsonObject(with: MoldJSON.encoder.encode(full)) as! [String: Any]
+        let uploads = encoded["reference_uploads"] as! [String: Any]
+        #expect(uploads.keys.allSatisfy { !$0.contains("failure") })
         advertised["video_normalization"] = ["available": true, "protocol_version": 1]
-        #expect(throws: (any Error).self) { try Self.decode(advertised) }
+        #expect(VideoNormalizationPolicy.capability(try Self.decode(advertised), apiKey: "key") == nil)
     }
     @Test func absentAndFutureAdditiveProtocolsPreserveCanonicalUploadV2() throws {
         var advertised = Self.advertisement
@@ -59,10 +72,27 @@ struct VideoNormalizationPolicyTests {
         let future = try Self.decode(advertised)
         #expect(future.videoNormalization == nil)
         try ReferenceUploadPolicy.validate(future)
+        advertised["video_normalization"] = ["available": true]
+        let unversioned = try Self.decode(advertised)
+        #expect(unversioned.videoNormalization == nil)
+        try VideoNormalizationPolicy.requireValidAdvertisement(unversioned)
+        try ReferenceUploadPolicy.validate(unversioned)
     }
 }
 
 struct FreshVideoImportTests {
+    @Test func malformedAdvertisedV1RefusesBeforeCanonicalVideoFallback() async throws {
+        var advertised = VideoNormalizationPolicyTests.advertisement
+        advertised["video_normalization"] = ["available": true, "protocol_version": 1]
+        let caps = try VideoNormalizationPolicyTests.decode(advertised)
+        let file = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "Fixtures/endpoint-bframes.mp4")
+        do {
+            _ = try await GenerationReferenceImporter.loadAuthoring(url: file, capabilities: caps, apiKey: "key")
+            Issue.record("Malformed known V1 fell through to canonical probing")
+        } catch MoldClientError.http(_, let code, _) {
+            #expect(code == "REFERENCE_NORMALIZATION_INVALID")
+        } catch { Issue.record("Expected a specific normalization contract error, received \(error)") }
+    }
     @Test func negotiatedImportKeepsOriginalWithoutTryingToDecodeCanonicalFacts() async throws {
         let caps = try VideoNormalizationPolicyTests.decode(VideoNormalizationPolicyTests.advertisement)
         let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("webm")
