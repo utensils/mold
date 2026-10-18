@@ -80,9 +80,11 @@ final class LibrarySyncRecords {
     /// Bumped when links may have changed: on load and once per finished run,
     /// never per copied print.
     private(set) var linksRevision = 0
-    private var linkCache: (revision: Int, bucket: String, links: [PrintID: PrintID])?
+    private var linkCache: (revision: Int, bucket: String, authority: [UUID: String]?, links: [PrintID: PrintID])?
     private var reverseCache: (revision: Int, bucket: String, index: [String: [String]])?
     private var recordsRevision = 0
+    private var lineageCache: (revision: Int, authority: [UUID: String]?, incoming: [PrintID: [(key: String, record: LocalSyncRecord)]])?
+    private var componentCache: (revision: Int, authority: [UUID: String]?, members: [PrintID: [PrintID]])?
 
     init(directory: URL? = nil, migrating defaults: UserDefaults? = nil) {
         journal = directory.map(LibrarySyncJournal.init)
@@ -125,7 +127,7 @@ final class LibrarySyncRecords {
     private func adopt(_ instance: String?) {
         load()
         let key = Self.bucketKey(instance)
-        guard !key.isEmpty, let legacy = doc.buckets.removeValue(forKey: "") else { return }
+        guard !key.isEmpty, !key.contains("\n"), let legacy = doc.buckets.removeValue(forKey: "") else { return }
         doc.buckets[key, default: Bucket()].records.merge(legacy.records) { mine, _ in mine }
         doc.buckets[key, default: Bucket()].pending.merge(legacy.pending) { mine, _ in mine }
         doc.buckets[key, default: Bucket()].retry.formUnion(legacy.retry)
@@ -147,23 +149,105 @@ final class LibrarySyncRecords {
         return index
     }
 
-    /// Every record as a two-way link between a source print and the This Mac
-    /// copy made of it -- what `LibraryMerge` joins exactly. Rebuilt once per
-    /// `linksRevision`, not per listing or per copied print.
-    func links(localHost: MoldHost.ID, instance: String?) -> [PrintID: PrintID] {
+    /// Verified copy components across all destinations, represented by one
+    /// stable member each. Rebuilt once per links revision or authority change,
+    /// never once per copied print. Unknown/replaced routes cannot join.
+    func links(localHost: MoldHost.ID, instance: String?, authority: [UUID: String]? = nil) -> [PrintID: PrintID] {
         load()
         let key = instance.map(Self.bucketKey) ?? doc.lastBucket ?? ""
-        if let cached = linkCache, cached.revision == linksRevision, cached.bucket == key { return cached.links }
-        var links: [PrintID: PrintID] = [:]
-        for (sourceKey, record) in doc.buckets[key]?.records ?? [:] {
-            guard let source = LocalSyncRecord.source(of: sourceKey) else { continue }
-            let origin = PrintID(host: source.host, filename: source.filename)
-            let copy = PrintID(host: localHost, filename: record.destinationFilename)
-            links[origin] = copy
-            links[copy] = origin
+        if let cached = linkCache, cached.revision == linksRevision, cached.bucket == key, cached.authority == authority { return cached.links }
+        var edges: [PrintID: PrintID] = [:]
+        // Every destination bucket participates; compressing to components
+        // avoids one-neighbor dictionaries losing A->B/A->C fan-out.
+        for bucket in doc.buckets.values {
+            for (sourceKey, record) in bucket.records {
+                guard record.provisional != true, let source = LocalSyncRecord.source(of: sourceKey) else { continue }
+                let origin = PrintID(host: source.host, filename: source.filename)
+                let copy = PrintID(host: record.destinationHost ?? localHost, filename: record.destinationFilename)
+                if let authority {
+                    guard let currentOrigin = authority[origin.host], record.sourceRoute == currentOrigin,
+                          let route = record.destinationRoute,
+                          authority[copy.host] == [copy.host.uuidString, route, record.destinationInstance ?? ""].joined(separator: "\n")
+                    else { continue }
+                }
+                if let prior = edges[copy], prior != origin {
+                    // Preserve the prior verified edge while joining a second
+                    // independently verified source to the same output.
+                    edges[origin] = prior
+                } else { edges[copy] = origin }
+            }
         }
-        linkCache = (linksRevision, key, links)
+        let links = LibraryMerge.copyComponents(edges)
+        linkCache = (linksRevision, key, authority, links)
         return links
+    }
+
+    /// Incoming verified edges are immutable for a run. Rebuilding this per
+    /// receipt or scanning all records per print would make a large sync quadratic.
+    private func incomingRecords(authority: [UUID: String]? = nil) -> [PrintID: [(key: String, record: LocalSyncRecord)]] {
+        load()
+        if let cached = lineageCache, cached.revision == linksRevision, cached.authority == authority { return cached.incoming }
+        var index: [PrintID: [(key: String, record: LocalSyncRecord)]] = [:]
+        for bucket in doc.buckets.values {
+            for (key, record) in bucket.records where record.provisional != true {
+                let copy = PrintID(host: record.destinationHost ?? MoldEngine.localHostID, filename: record.destinationFilename)
+                if let authority {
+                    guard let source = LocalSyncRecord.source(of: key),
+                          let currentOrigin = authority[source.host], record.sourceRoute == currentOrigin,
+                          let route = record.destinationRoute,
+                          authority[copy.host] == [copy.host.uuidString, route, record.destinationInstance ?? ""].joined(separator: "\n")
+                    else { continue }
+                }
+                index[copy, default: []].append((key, record))
+            }
+        }
+        for id in Array(index.keys) { index[id]?.sort { $0.key < $1.key } }
+        lineageCache = (linksRevision, authority, index)
+        return index
+    }
+
+    /// Follow durable verified lineage, never filename/seed display grouping.
+    func verifiedOrigin(of copy: PrintID, authority: [UUID: String]? = nil) -> String? {
+        let incoming = incomingRecords(authority: authority)
+        var current = copy
+        var visited = Set<PrintID>()
+        while visited.insert(current).inserted {
+            let candidates = incoming[current] ?? []
+            let roots = Set(candidates.map { $0.record.originKey ?? $0.key })
+            guard roots.count <= 1 else { return nil }
+            guard let edge = candidates.first,
+                  let source = LocalSyncRecord.source(of: edge.key) else { break }
+            if let root = edge.record.originKey { return root }
+            current = PrintID(host: source.host, filename: source.filename)
+        }
+        return current == copy ? nil : LocalSyncRecord.key(hostID: current.host, filename: current.filename)
+    }
+
+    func hasVerifiedIncoming(_ copy: PrintID, authority: [UUID: String]? = nil) -> Bool { !(incomingRecords(authority: authority)[copy] ?? []).isEmpty }
+
+    func organizationAtOrigin(of copy: PrintID, authority: [UUID: String]? = nil) -> LibraryOrganizationSnapshot? {
+        let contributors = incomingRecords(authority: authority)[copy] ?? []
+        let roots = Set(contributors.map { $0.record.originKey ?? $0.key })
+        guard roots.count == 1 else { return nil }
+        return contributors.first?.record.organization?.observed
+    }
+
+    func verifiedCopies(of source: PrintID, authority: [UUID: String]? = nil) -> [PrintID] {
+        let graph = links(localHost: MoldEngine.localHostID, instance: nil, authority: authority)
+        guard let component = graph[source] else { return [] }
+        if componentCache?.revision != linksRevision || componentCache?.authority != authority {
+            var members: [PrintID: [PrintID]] = [:]
+            for (id, representative) in graph { members[representative, default: []].append(id) }
+            for key in Array(members.keys) {
+                members[key]?.sort { $0.host.uuidString + $0.filename < $1.host.uuidString + $1.filename }
+            }
+            componentCache = (linksRevision, authority, members)
+        }
+        return componentCache?.members[component] ?? []
+    }
+
+    func verifiedCopy(of source: PrintID, on host: UUID, authority: [UUID: String]? = nil) -> PrintID? {
+        verifiedCopies(of: source, authority: authority).first { $0.host == host }
     }
 
     // MARK: - Durable per-copy writes

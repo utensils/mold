@@ -19,6 +19,7 @@ struct LibraryPicker: View {
         var query = LibraryQuery()
         query.text = search
         query.hiddenCollectionIDs = library.hiddenCollectionIDs
+        query.privacyEvidence = library.trashPool
         if let machine, let host = hosts.host(machine) { query.tokens = [.machine(id: machine, name: host.name)] }
         return query.apply(to: library.pool).filter { $0.print.kind == .picture }
     }

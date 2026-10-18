@@ -30,7 +30,7 @@ final class GalleryLive {
         switch event {
         case .authority, .resyncRequired:
             if host == MoldEngine.localHostID { store.syncSession.localEngineAvailable(in: store) }
-            else { store.syncSession.noteRemoteChange(in: store) }
+            store.syncSession.noteRemoteChange(in: store)
         case .gallery, .deviceStateChanged, .job, .queue: break
         }
         switch event {
@@ -75,7 +75,9 @@ final class GalleryLive {
         // the one case that remains.
         guard !echo.isEcho(change, on: host,
                            pending: store.mutations.outbox.chain(for: host)) else { return }
-        if host != MoldEngine.localHostID { store.syncSession.noteRemoteChange(in: store) }
+        if case let .added(_, _, imported) = change, imported,
+           host == (store.syncDestinationHost ?? MoldEngine.localHostID), store.localSaveSuppressImports { return }
+        store.syncSession.noteRemoteChange(in: store)
         if store.followsFeed(host) {
             follow(change, from: host, in: store)
             return
@@ -102,7 +104,7 @@ final class GalleryLive {
             // The bulk-save task performs one final local refresh. Redrawing
             // the full grid for every imported picture makes a large save
             // quadratic, even though the event still reaches other clients.
-            if imported && host == MoldEngine.localHostID && store.localSaveSuppressImports { return }
+            if imported && host == (store.syncDestinationHost ?? MoldEngine.localHostID) && store.localSaveSuppressImports { return }
             if let row { insert(row, on: host, in: store) } else {
                 Task { await relists.run(host) { await relist(host, in: store) } }
             }
@@ -132,7 +134,7 @@ final class GalleryLive {
             // 1,000-print trash would be 1,000 catch-ups racing that read.
             if store.bulkTargets.contains(PrintID(host: host, filename: filename)) { return }
         case let .added(_, _, imported):
-            if imported && host == MoldEngine.localHostID && store.localSaveSuppressImports { return }
+            if imported && host == (store.syncDestinationHost ?? MoldEngine.localHostID) && store.localSaveSuppressImports { return }
         case .collectionsChanged:
             Task { await store.reloadCollections() }
         }

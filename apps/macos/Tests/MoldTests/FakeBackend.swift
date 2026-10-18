@@ -103,6 +103,8 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     /// Nil keeps the old behaviour: imports are recorded, never listed.
     nonisolated(unsafe) var listsImports: (@Sendable (String) -> GalleryPrint?)?
     let noRetainedMedia: Bool
+    let syncOrganization: Bool
+    nonisolated(unsafe) var appliedOrganizationOperations: Set<String> = []
     /// Every filename an inventory was asked for, in call order -- which is
     /// how a test pins that EVERY known copy of a print was probed.
     nonisolated(unsafe) var retainedInventoryRequests: [String] = []
@@ -225,9 +227,10 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
 
     func callCount(_ route: String) -> Int { callsLock.withLock { recorded.filter { $0 == route }.count } }
 
-    init(host: MoldHost, noRetainedMedia: Bool = false) {
+    init(host: MoldHost, noRetainedMedia: Bool = false, syncOrganization: Bool = false) {
         self.host = host
         self.noRetainedMedia = noRetainedMedia
+        self.syncOrganization = syncOrganization
     }
 
     /// Not `private`: `FakeBackend+Models.swift` (M5 S1b's routes, split out
@@ -976,6 +979,23 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         try record("mutate")
         mutationRequests.append(mutation)
         await pause("mutate")
+        guard syncOrganization, appliedOrganizationOperations.insert(mutation.operationId).inserted else { return }
+        let names = Set(mutation.filenames)
+        for index in prints.indices {
+            var row = GalleryPrint.Mutable(prints[index])
+            if let title = mutation.titles.first(where: { $0.filename == prints[index].filename }) { row.title = title.title.isEmpty ? nil : title.title }
+            if names.contains(prints[index].filename) {
+                if let favorite = mutation.favorite { row.favorite = favorite }
+                row.tags = Array(Set(prints[index].tagList).union(mutation.addTags).subtracting(mutation.removeTags)).sorted()
+                if let name = mutation.addToCollection?.name, let collection = collectionRows.first(where: { $0.name == name }) {
+                    row.collections = Array(Set(prints[index].collectionList).union([collection.id])).sorted()
+                }
+                if let slug = mutation.removeFromCollectionSlug, let collection = collectionRows.first(where: { $0.slug == slug }) {
+                    row.collections = prints[index].collectionList.filter { $0 != collection.id }
+                }
+            }
+            prints[index] = row.build()
+        }
     }
     nonisolated(unsafe) var mutationRequests: [GalleryBulkMutation] = []
     nonisolated(unsafe) var trashRequests: [[String]] = []
@@ -1018,6 +1038,15 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     nonisolated(unsafe) var importFailures: Set<String> = []
 
     @discardableResult
+    private static func importedSyncPrint(_ item: GalleryImport, as filename: String, bytes: Int) -> GalleryPrint {
+        let metadata = item.originalMetadata.map { try! JSONSerialization.jsonObject(with: MoldJSON.encoder.encode($0)) } ?? ["prompt": item.prompt]
+        let object: [String: Any] = ["filename": filename, "metadata": metadata,
+            "timestamp": UInt64(item.timestamp?.timeIntervalSince1970 ?? 1000),
+            "format": URL(fileURLWithPath: filename).pathExtension, "size_bytes": bytes,
+            "media_version": "1000:\(bytes)"]
+        return try! MoldJSON.decoder.decode(GalleryPrint.self, from: JSONSerialization.data(withJSONObject: object))
+    }
+
     func importPrint(_ item: GalleryImport, as filename: String) async throws -> String {
         try record("importPrint")
         await pause("importPrint")
@@ -1030,7 +1059,12 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
             importedNames.append(filename)
             importedItems.append(item)
             importedMedia.append(bytes)
-            if let row = listsImports?(filename) {
+            if var row = listsImports?(filename) ?? (syncOrganization ? Self.importedSyncPrint(item, as: filename, bytes: bytes.count) : nil) {
+                if syncOrganization {
+                    var mutable = GalleryPrint.Mutable(row)
+                    mutable.title = nil; mutable.favorite = false; mutable.tags = []; mutable.collections = []
+                    row = mutable.build()
+                }
                 prints.removeAll { $0.filename == filename }
                 prints.append(row)
             }

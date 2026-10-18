@@ -255,8 +255,9 @@ struct LibraryReplicaTests {
     @Test func clearingTheCacheKeepsAnsweringMachinesCollections() async throws {
         let snapshots = LibrarySnapshots(directory: temp("lib"))
         let (_, fake) = feedMachine([try row("a.png")])
-        fake.stub("collections()", returning: [Collection(id: "c", name: "C", slug: "c")])
         let (library, hosts) = try await machines([("alpha", fake, true)], snapshots: snapshots)
+        // machines installs default routes; the scenario overrides that default.
+        fake.stub("collections()", returning: [Collection(id: "c", name: "C", slug: "c")])
         await library.reload()
         await library.clearOfflineCache()
         await library.waitForSnapshotWrites()

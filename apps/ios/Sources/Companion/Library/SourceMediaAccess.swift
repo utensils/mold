@@ -24,7 +24,7 @@ extension LibraryStore {
         return sourceAccessIndex.snapshot(key: .init(revision: sourceAccessRevision,
             visibility: collectionVisibility.generation, hosts: hosts.hosts, instances: instances)) {
             let visible = LibraryScope.all.resolve(LibraryQuery(), shelves: shelves,
-                hiddenCollectionIDs: hiddenCollectionIDs).apply(to: pool)
+                hiddenCollectionIDs: hiddenCollectionIDs, privacyEvidence: trashPool).apply(to: pool)
             return .init(visible: visible.flatMap(\.everyCopy), details: (pool + trashPool).flatMap(\.everyCopy),
                          hosts: hosts.hosts, instances: instances)
         }

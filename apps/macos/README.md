@@ -832,10 +832,13 @@ Collection visibility is shared by slug across machines, including existing
 replicas; pending hide/show edits retry when their original machines return.
 Media actions on a machine-filtered view affect only its displayed copies.
 
-**Sync All to This Mac** copies once, when you press it. Its menu's **Keep This Mac in Sync**
-(also in Settings ▸ Library, off by default, remembered between launches) copies new and
-changed prints as soon as each machine announces them, with one catch-up when a machine
-connects; there is no timer. The Library status shows completion and issues. During a
+**Sync All to** offers each connected machine as a destination. **Copy to** on a
+selection or viewer deliberately copies just those prints. Each machine's **Keep
+in Sync** toggle (also in Settings ▸ Library, off by default) copies new and changed
+prints when machines announce them. Choices bind to the machine's captured route
+and installation; a replacement machine never inherits them. There is no timer.
+Only one transfer runs at a time, with coalesced follow-ups per destination and
+preserved manual selections. The Library status shows completion and issues. During a
 transfer, one progress banner offers a single **Stop Sync** control, which ends the run and
 any follow-up queued behind it and lets active transfers settle. Quitting stops a running sync. Successful runs
 need no confirmation. **Details** keeps the full report available. **Done**, Return, and Escape dismiss
@@ -846,9 +849,20 @@ issues show only Copy Details and Done. Changed issues and connection or
 authentication failures still appear. **Reset Acknowledgments** restores those
 notifications. The checkbox reflects saved choices when Details reopens, and new issues leave it unchecked. Sync continues retrying acknowledged media.
 
+Sync reconciles organization through durable per-source contributions. Source additions
+arrive on verified copies; source removals remove only memberships sync added.
+Destination-only memberships and edited titles/favourites survive. Removing an ordinary
+synced membership suppresses its unchanged re-addition until the source removes/re-adds
+it or you explicitly Copy again. Hidden memberships always reassert. Legacy copies gain
+no retrospective removal authority. Organization intent is journaled before writes and
+fresh destination/source checkpoints must confirm the result before completion. Verified
+copy lineage connects fan-out and forwarded copies without sending echoed edits back to
+the origin. Hidden evidence includes originals in Trash before machine filtering; only
+authoritative permanent removal clears that evidence.
+
 Sync preserves hidden collection flags, including empty shelves. Copies already
-in This Mac’s Trash, or previously synced copies removed from its Library, stay
-removed; use an explicit Save to copy them again deliberately. This is a copy
+in the destination’s Trash, or previously synced copies removed from its Library,
+stay removed; use an explicit Copy to copy them again deliberately. This is a copy
 workflow: removing a source does not delete a destination copy. Permanent trash
 deletion reports the actual machine refusal; an older machine without the
 trash-only selected-delete endpoint must be updated before retrying.
@@ -976,3 +990,31 @@ prefix, filters at most 100 returned candidates with fuzzy matching, and paginat
 that matching set. Source, family, kind and mature-content filters still apply.
 Provider errors remain errors; this bounded fallback is not an exhaustive search
 of either provider's index. Older servers retain their provider search behavior.
+
+
+Library print and viewer menus offer **Copy File Name** (one filename per line for a selection).
+The Info file rows remain selectable. Collection Rename/Hide/Delete belong to the collection
+row and Library menu bar; print menus retain **Remove from Collection**.
+With focus in the Library grid or viewer, Delete, forward Delete and Command-Delete move
+prints to Trash; in Trash they confirm permanent deletion. **F** toggles favourites.
+Shift-Command-Delete confirms Empty Trash for the displayed machine scope. Text fields
+keep their editing keys.
+
+Library and finished-result menus offer **Use as First Frame** and **Use as Last Frame**
+when the selected recipe advertises boundary frames or keyframes. H3/Wan use their endpoint
+protocol; interpolation inserts frame 0 or frames-1 without discarding interior anchors.
+Manual canvas sizes and unrelated inputs remain authored.
+
+Source cards and details show the owning machine, selectable `source:<print>#<member>` ID,
+and available content SHA-256. **Source actions** copies the ID or a shell-quoted CLI command
+including its non-secret owning host, copies the original image/file, saves a copy or opens
+native sharing. File actions use the exact owner’s bounded authenticated original, never its
+thumbnail. Dismissal, visibility revocation and changed authority release private temporary files.
+An authenticated empty source inventory, or a legacy no-retained-media answer for a print
+without input provenance, says **No source media.** without Retry. Failed and damaged reads
+remain distinguishable and retryable.
+
+Operation status reserves space below the Library content column, leaving the inspector
+and viewer transport visible. Dismiss hides the current operation without stopping it or
+acknowledging issues. A new operation or issue reopens status; the Library Status toolbar
+control restores dismissed status and keeps Stop Sync reachable through the finishing phase.

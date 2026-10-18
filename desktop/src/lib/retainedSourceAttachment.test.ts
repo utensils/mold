@@ -128,3 +128,59 @@ it("routes extensionless octet-stream H3 images through the normal image path", 
   });
   expect(form.h3Authoring?.references[0]?.reference.kind).toBe("image");
 });
+
+it("inserts LTX endpoints without replacing middle keyframes or resizing the canvas", async () => {
+  const form = newGenerateForm();
+  form.family = "ltx-2";
+  form.model = "ltx-2";
+  form.frames = 25;
+  form.keyframes = [{ frame: 12, image: { filename: "middle.png", base64: "bWlk" } }];
+  form.sourceImage = "old";
+  form.maskImage = "mask";
+  const originalSize = [form.width, form.height];
+  const outcome = await attachRetainedSource(
+    form,
+    "last.png",
+    "image",
+    async () => new Blob(["abc"]),
+    () => true,
+    "last",
+  );
+  expect(outcome.ok).toBe(true);
+  expect(form.keyframes.map((frame) => frame.frame)).toEqual([12, 24]);
+  expect(form.keyframes[0]?.image.filename).toBe("middle.png");
+  expect(form.keyframes[1]?.image.base64).toBe("YWJj");
+  expect(form.sourceImage).toBeNull();
+  expect(form.maskImage).toBeNull();
+  expect([form.width, form.height]).toEqual(originalSize);
+});
+it("replaces an existing LTX endpoint in place and refuses an unsupported endpoint before reading", async () => {
+  const form = newGenerateForm();
+  form.family = "ltx-2";
+  form.model = "ltx-2";
+  form.frames = 25;
+  form.keyframes = [
+    { frame: 0, image: { filename: "old.png", base64: "old" } },
+    { frame: 12, image: { filename: "middle.png", base64: "middle" } },
+  ];
+  expect(
+    (
+      await attachRetainedSource(
+        form,
+        "first.png",
+        "image",
+        async () => new Blob(["abc"]),
+        () => true,
+        "first",
+      )
+    ).ok,
+  ).toBe(true);
+  expect(form.keyframes).toHaveLength(2);
+  expect(form.keyframes[0]?.image.filename).toBe("first.png");
+  form.family = "flux";
+  const read = vi.fn(async () => new Blob(["abc"]));
+  expect((await attachRetainedSource(form, "no.png", "image", read, () => true, "last")).ok).toBe(
+    false,
+  );
+  expect(read).not.toHaveBeenCalled();
+});

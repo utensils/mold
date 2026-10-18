@@ -521,6 +521,32 @@ reports an incomplete copy rather than claiming the sources were saved.
 thumbnail. An unreachable host or rejected gallery credential is an error;
 `mold library` never switches to local files.
 
+
+### Reusing Library inputs from the CLI
+
+Image input flags accept an existing local path, `print:FILENAME`, or
+`source:FILENAME#MEMBER`. A source member ID accepts a unique hexadecimal
+prefix of at least eight characters. Resolve the address on the selected
+`--host`; IDs belong to that machine's exact print copy. Use `./` before a
+literal local filename beginning with `print:` or `source:`.
+
+```bash
+mold --host workstation library source-media clip.mp4
+mold --host workstation library source-media clip.mp4 --member 6f1c1d2e -o first.png
+mold --host workstation run flux-dev:q4 'A chair in sunlight' --image 'print:chair.png'
+mold --host workstation run ltx-2.5-22b-distilled:bf16 'A slow pan' --keyframe '0:source:clip.mp4#6f1c1d2e'
+```
+
+The same address forms work for `--last-image`, `--first-frame`, `--last-frame`,
+`--reference KIND=...`, `--mask`, `--id-image`, `--control`, `--audio-file`,
+`--video`, and `--extend`. The input's media
+kind must match its role. Addressed inputs require a serving host; `--local`
+is refused and a disconnected submission never falls back to local generation.
+Downloads use reusable original content, including unwrapped keyframe images.
+A host without the content route can serve legacy non-keyframe bytes; upgrade
+it before downloading a keyframe image. The source-media table shows a short
+content SHA-256 when the server supplies one.
+
 ## `mold trash`
 
 Inspect, restore, or empty the gallery trash on a running `mold serve`

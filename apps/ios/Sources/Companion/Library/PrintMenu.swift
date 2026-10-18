@@ -9,6 +9,7 @@ struct PrintMenu: View {
     @Environment(LibraryStore.self) private var library
     @Environment(PrintActions.self) private var actions
     @Environment(AppRouter.self) private var router
+    @Environment(GenerateController.self) private var generate
     let entries: [LibraryEntry]
     let trashed: Bool
     var compact = false
@@ -23,6 +24,11 @@ struct PrintMenu: View {
     }
 
     @ViewBuilder private var items: some View {
+        Button {
+            UIPasteboard.general.string = entries.map { $0.print.filename }.joined(separator: "\n")
+        } label: { Label(entries.count == 1 ? "Copy File Name" : "Copy File Names", systemImage: "doc.on.doc") }
+        .disabled(entries.isEmpty)
+
         if trashed {
             Button { Task { await library.putBack(entries) } } label: {
                 Label("Put Back", systemImage: "arrow.uturn.backward")
@@ -34,8 +40,8 @@ struct PrintMenu: View {
             .disabled(requestPermanentDelete == nil)
         } else {
             if single, let entry = entries.first, entry.print.kind == .picture {
-                Button { router.useAsSource(entry) } label: {
-                    Label("Use as Source", systemImage: "photo.badge.plus")
+                ForEach(attachmentChoices) { choice in
+                    Button(choice.title) { router.useAsSource(entry, attachment: choice) }
                 }
             }
             if single, let entry = entries.first, entry.print.kind != .mesh {
@@ -83,6 +89,11 @@ struct PrintMenu: View {
                 Label("Delete", systemImage: "trash")
             }
         }
+    }
+
+    private var attachmentChoices: [SourceMediaAttachment] {
+        let member = RetainedSourceMedia.Member(memberId: "", role: "source_image", displayName: "print.png", sizeBytes: 0, mediaKind: "image")
+        return SourceMediaAttachment.choices(member: member, recipe: generate.recipe, media: generate.draft.media)
     }
 
     private var single: Bool { entries.count == 1 }

@@ -1,4 +1,5 @@
 import type { ApiTarget } from "../api/client";
+import type { RetainedSourceMediaMetadataLike } from "../api/gallerySourceMedia";
 import type { RetainedSourceMediaMember } from "../api/gallerySourceMedia";
 
 export interface SourceMediaOwner {
@@ -9,10 +10,12 @@ export interface SourceMediaOwner {
   target: ApiTarget;
   instanceId?: string;
   revision?: string | number;
+  metadata?: RetainedSourceMediaMetadataLike;
 }
 export interface SourceMediaSelection {
   owner: SourceMediaOwner;
   member: RetainedSourceMediaMember;
+  attachment?: import("./sourceAttachmentChoices").SourceAttachmentIntent;
 }
 export function sourceOwnerIdentity(owner: SourceMediaOwner): string {
   return JSON.stringify([

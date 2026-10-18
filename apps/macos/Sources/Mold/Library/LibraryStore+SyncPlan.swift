@@ -30,7 +30,7 @@ extension LibraryStore {
         var fullHosts: Set<MoldHost.ID> = []
         var unchanged = 0
         var unchangedKeptRemoved = 0
-        let reverse = syncAll ? syncRecords.sourceKeys(copiedAs: destination.instance) : [:]
+        let reverse = syncAll ? syncRecords.sourceKeys(copiedAs: destination.recordScope) : [:]
         let staleFullPlan = bucket.lastFullPlan.map { Date().timeIntervalSince($0) > Self.fullPlanInterval } ?? true
         let planEverything = requestedFull || staleFullPlan
 
@@ -44,7 +44,8 @@ extension LibraryStore {
             }
         } else {
             var owed: [MoldHost.ID: Set<String>] = [:]
-            for key in bucket.retry.union(bucket.pending.keys) {
+            let organizationPending = Set(bucket.records.filter { $0.value.organizationIntent != nil }.keys)
+            for key in bucket.retry.union(bucket.pending.keys).union(organizationPending) {
                 if let source = LocalSyncRecord.source(of: key) { owed[source.host, default: []].insert(source.filename) }
             }
             var kept: [MoldHost.ID: Set<String>] = [:]
@@ -55,10 +56,18 @@ extension LibraryStore {
                 guard let source = sources.hosts[hostID] else { continue }
                 guard !planEverything, let changed = source.changed, let localChanged = destination.changed else {
                     fullHosts.insert(hostID)
-                    consideredPairs += source.candidates.map { (hostID, $0) }
+                    let privacy = source.view.rows.keys.filter { name in
+                        source.view.isTrash(name) && syncRecords.verifiedCopy(of: PrintID(host: hostID, filename: name),
+                            on: local.id, authority: syncAuthority) != nil
+                    }
+                    consideredPairs += Set(source.candidates + privacy).sorted().map { (hostID, $0) }
                     continue
                 }
-                func candidate(_ name: String) -> Bool { source.view.live(name) != nil && Self.syncableName(name) }
+                func candidate(_ name: String) -> Bool {
+                    Self.syncableName(name) && (source.view.live(name) != nil
+                        || (source.view.isTrash(name) && syncRecords.verifiedCopy(of: PrintID(host: hostID, filename: name),
+                            on: local.id, authority: syncAuthority) != nil))
+                }
                 var names = Set<String>()
                 for name in changed where candidate(name) { names.insert(name) }
                 for name in owed[hostID] ?? [] where candidate(name) { names.insert(name) }
@@ -75,7 +84,7 @@ extension LibraryStore {
                 consideredPairs += names.sorted().map { (hostID, $0) }
                 let keptHere = (kept[hostID] ?? []).filter { !names.contains($0) && candidate($0) }.count
                 unchangedKeptRemoved += keptHere
-                unchanged += source.candidates.count - names.count - keptHere
+                unchanged += max(0, source.candidates.count - names.count - keptHere)
             }
         }
 
@@ -84,7 +93,7 @@ extension LibraryStore {
         var unresolvedCollections: Set<String> = []
         for (hostID, name) in consideredPairs {
             guard let source = sources.hosts[hostID], hosts.host(hostID) == source.host,
-                  let print = source.view.live(name) else {
+                  let print = source.view.rows[name] else {
                 failures.append("\(name): its recipe is no longer available")
                 continue
             }
@@ -97,19 +106,37 @@ extension LibraryStore {
                 failures.append("\(print.filename): a source collection is no longer available")
                 unresolvedCollections.insert(LocalSyncRecord.key(hostID: hostID, filename: print.filename))
             }
+            let sourceID = PrintID(host: hostID, filename: print.filename)
+            if syncRecords.hasVerifiedIncoming(sourceID, authority: syncAuthority), syncRecords.verifiedOrigin(of: sourceID, authority: syncAuthority) == nil {
+                failures.append("\(print.filename): independent original copies disagree on its lineage; copy from an original machine so its organization remains authoritative.")
+                unresolvedCollections.insert(LocalSyncRecord.key(hostID: hostID, filename: print.filename))
+                continue
+            }
+            if syncAll, let origin = syncRecords.verifiedOrigin(of: sourceID, authority: syncAuthority),
+               let root = LocalSyncRecord.source(of: origin),
+               sources.hosts[root.host]?.view.live(root.filename) != nil {
+                // The original is already in this run. Forwarded organization
+                // must never become a new source contribution or scalar edit.
+                unchanged += 1
+                continue
+            }
             let sourceHost = source.host
+            let sourceInstance = hosts.instanceID(of: sourceHost.id)
+            let destinationInstance = hosts.instanceID(of: local.id)
             targets.append(MirrorTarget(hostID: hostID, print: print, source: source.backend,
                                         originContext: source.originContext,
                                         isCurrent: { [weak self] in
                                             self?.hosts.host(sourceHost.id) == sourceHost && self?.hosts.host(local.id) == local
-                                        }, collections: names))
+                                                && self?.hosts.instanceID(of: sourceHost.id) == sourceInstance
+                                                && self?.hosts.instanceID(of: local.id) == destinationInstance
+                                        }, collections: names, privacyOnly: source.view.isTrash(name)))
         }
 
         // Checkpoints for exactly what is considered: the whole GET only where
         // a plan is full anyway.
         var sourceCheckpoints: [MoldHost.ID: GallerySyncCheckpoint] = [:]
         var destinationCheckpoint: GallerySyncCheckpoint?
-        if syncAll && !targets.isEmpty {
+        if !targets.isEmpty {
             publishSyncProgress("Preparing \(targets.count.formatted()) prints…", force: true)
             var namesByHost: [MoldHost.ID: [String]] = [:]
             for target in targets { namesByHost[target.hostID, default: []].append(target.print.filename) }
@@ -144,6 +171,30 @@ extension LibraryStore {
             if syncStopped { break }
             let original = target.print.filename
             let sourceKey = target.key
+            let sourceID = PrintID(host: target.hostID, filename: original)
+            if target.privacyOnly {
+                if let verified = syncRecords.verifiedCopy(of: sourceID, on: local.id, authority: syncAuthority),
+                   destination.view.live(verified.filename) != nil {
+                    cachedCopies.append(MirrorCopy(target: target, filename: verified.filename))
+                } else { settled.insert(sourceKey) }
+                continue
+            }
+            if syncAll, let verified = syncRecords.verifiedCopy(of: sourceID, on: local.id, authority: syncAuthority) {
+                if destination.view.live(verified.filename) == nil {
+                    keptRemoved += 1; keptRemovedKeys.insert(sourceKey); settled.insert(sourceKey)
+                    continue
+                }
+                if syncRecords.verifiedOrigin(of: sourceID, authority: syncAuthority) != nil {
+                    // Already on the verified root/component: no echo writes.
+                    unchanged += 1; settled.insert(sourceKey)
+                    continue
+                }
+                if records[sourceKey] == nil {
+                    work.append(MirrorWorkItem(index: index, target: target, filename: verified.filename,
+                        occupied: true, cachedFilename: verified.filename))
+                    continue
+                }
+            }
             let removedLocally = destination.view.rows[original] != nil && destination.view.isTrash(original)
             if syncAll, removedLocally
                 || (records[sourceKey].map { $0.destinationInstance == localInstance && destination.view.live($0.destinationFilename) == nil } ?? false) {
@@ -182,7 +233,7 @@ extension LibraryStore {
                 let destinationToken = destinationCheckpoint.flatMap { checkpoint in
                     checkpoint.revisions[existing.filename].map { checkpoint.instanceId + ":" + $0 }
                 }
-                if bucket.pending[sourceKey] == nil, cached.provisional != true,
+                if bucket.pending[sourceKey] == nil, cached.organizationIntent == nil, cached.provisional != true,
                    target.isCurrent(),
                    let sourceToken, let destinationToken,
                    cached.sourceCheckpoint == sourceToken, cached.destinationCheckpoint == destinationToken,
@@ -204,7 +255,7 @@ extension LibraryStore {
             targets: targets, items: work, cachedCopies: cachedCopies, keptRemoved: keptRemoved,
             unchanged: unchanged,
             plannedEverything: syncAll && fullHosts.count == sources.hosts.count && sources.hostErrors.isEmpty,
-            considered: Set(targets.map(\.key)), settled: settled,
+            considered: Set(targets.map(\.key)).union(unresolvedCollections), settled: settled,
             keptRemovedKeys: keptRemovedKeys, unresolvedCollections: unresolvedCollections,
             sourceCheckpoints: sourceCheckpoints,
             tombstones: syncAll ? tombstones(sources, destination: destination, fullHosts: fullHosts) : [],

@@ -4,6 +4,7 @@ import SwiftUI
 /// A stable toolbar slot: connection changes never insert rows above the grid.
 struct LibraryConnectionStatus: View {
     @Environment(HostStore.self) private var hosts
+    @Environment(LibraryStore.self) private var library
     @Environment(PrintMaterializer.self) private var materializer
     @State private var showsDetails = false
     private var offline: [MoldHost] { hosts.hosts.filter { !hosts.isUp($0) } }
@@ -20,6 +21,19 @@ struct LibraryConnectionStatus: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Library Status").font(.headline)
+                    if library.activityDisclosure.hasDismissed {
+                        Button("Show operation status") { library.activityDisclosure.restore(); showsDetails = false }
+                    }
+                    if library.localSaveRunning {
+                        Text(library.localSaveProgress ?? "Finishing sync…")
+                        Button("Stop Sync") { library.syncSession.stop(in: library) }
+                            .disabled(library.localSaveStopRequested)
+                    }
+                    if library.bulkRunning {
+                        Text(library.bulkProgress ?? "Finishing operation…")
+                        Button("Stop After Current Batch") { library.bulkStopRequested = true }
+                            .disabled(library.bulkStopRequested)
+                    }
                     if offline.isEmpty { Text("All machines connected") }
                     else {
                         Text("Saved prints remain available while these machines are offline.")

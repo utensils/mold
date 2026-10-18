@@ -1255,14 +1255,14 @@ place. Each file is written to a new hidden .<name>.XXXXXX.part beside it.")]
 Examples:
   mold library source-media mold-flux-dev-q4-1700000000000.png
   mold library source-media cat.png --json
-  mold library source-media cat.png --member 6f1c... -o recovered.png
-  mold library source-media cat.png --member 6f1c... --output - | viu -")]
+  mold library source-media cat.png --member 6f1c0123 -o recovered.png
+  mold library source-media cat.png --member 6f1c0123 --output - | viu -")]
     SourceMedia {
         /// Gallery filename as shown by `mold library list`
         #[arg(value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filename: String,
         /// Download this member instead of listing. The id comes from the
-        /// listing and is opaque — never a path on the host.
+        /// listing; a unique hexadecimal prefix of at least 8 characters is accepted.
         #[arg(long, value_name = "ID")]
         member: Option<String>,
         /// Where to write the downloaded member. Defaults to its display
@@ -2263,6 +2263,8 @@ Examples:
         lora_scale: f64,
 
         /// Source image(s). Repeat for multi-image edit models; use `-` for stdin on single-image families only.
+        /// Inputs also accept print:FILENAME or source:FILENAME#MEMBER on --host.
+        /// Prefix ./ to use a literal local filename starting with print: or source:.
         #[arg(short = 'i', long, help_heading = "img2img", value_hint = ValueHint::FilePath)]
         image: Vec<String>,
 

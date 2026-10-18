@@ -6,6 +6,7 @@ import { originAuthenticatedFetch as fetch } from "../lib/originAuth";
 
 import {
   computed,
+  provide,
   nextTick,
   onBeforeUnmount,
   onMounted,
@@ -14,6 +15,12 @@ import {
   watch,
 } from "vue";
 import { useRouter } from "vue-router";
+import {
+  SOURCE_ATTACHMENT_CHOICES,
+  imageAttachmentChoices,
+  type SourceAttachmentIntent,
+} from "@studio/lib/sourceAttachmentChoices";
+import { attachOutputEndpoint } from "../lib/useSourceMedia";
 import { requestChoice, toast, undoableAction } from "../lib/toasts";
 import ComposerCard from "../components/create/ComposerCard.vue";
 import ResultCanvas from "../components/create/ResultCanvas.vue";
@@ -1310,6 +1317,10 @@ const capabilities = computed(() =>
     currentModel.value?.source_image ?? form.state.value.sourceImageCapability,
     activeRecipe.value,
   ),
+);
+provide(
+  SOURCE_ATTACHMENT_CHOICES,
+  computed(() => imageAttachmentChoices(capabilities.value)),
 );
 /** Which conditioning the request will carry — the shared decision. */
 const requestConditioning = computed(() =>
@@ -4945,6 +4956,50 @@ function closeRecentContextMenu(restoreFocus = false) {
   if (restoreFocus) void nextTick(() => trigger?.focus());
 }
 
+async function useRecentAsEndpoint(
+  item: GalleryImage,
+  intent: SourceAttachmentIntent,
+) {
+  const inline = recentContextMenu.value?.inlineBase64;
+  const routes = JSON.stringify(listHosts());
+  const hostId =
+    (item as GalleryImage & { hostId?: string }).hostId ?? ORIGIN_HOST_ID;
+  const host = listHosts().find((machine) => machine.id === hostId);
+  closeRecentContextMenu();
+  if (!host) {
+    toast("error", "The print's machine is no longer available.");
+    return;
+  }
+  try {
+    await attachOutputEndpoint(
+      item,
+      form.state,
+      currentModel.value ?? undefined,
+      intent,
+      () => JSON.stringify(listHosts()) === routes,
+      () =>
+        inline
+          ? Promise.resolve(
+              new Blob(
+                [
+                  Uint8Array.from(atob(inline), (character) =>
+                    character.charCodeAt(0),
+                  ),
+                ],
+                { type: galleryItemMimeType(item) },
+              ),
+            )
+          : fetchGalleryBlob(host, item.filename),
+    );
+    closeDrawer();
+  } catch (failure) {
+    toast(
+      "error",
+      failure instanceof Error ? failure.message : String(failure),
+    );
+  }
+}
+
 async function useRecentAsSource(item: GalleryImage) {
   if (recentSourceDisabled.value) return;
   // Read the bytes off the menu BEFORE closing it — closing drops the entry
@@ -6264,6 +6319,7 @@ onBeforeUnmount(() => {
       @next="stepDrawer(1)"
       @reuse="onLightboxReuse"
       @use-source="onLightboxUseSource"
+      @use-endpoint="useRecentAsEndpoint"
       @upscale="onLightboxUpscale"
       @delete="handleDelete"
     />
@@ -6295,6 +6351,27 @@ onBeforeUnmount(() => {
         @click="onRecentContextReuse()"
       >
         Reuse settings
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        @click="copyTextToClipboard(recentContextMenu!.item.filename)"
+      >
+        Copy File Name
+      </button>
+      <button
+        v-for="intent in mediaKind(
+          recentContextMenu.item.format,
+          recentContextMenu.item.filename,
+        ) === 'image'
+          ? imageAttachmentChoices(capabilities)
+          : []"
+        :key="intent"
+        type="button"
+        role="menuitem"
+        @click="useRecentAsEndpoint(recentContextMenu!.item, intent)"
+      >
+        Use as {{ intent }} frame
       </button>
       <button
         type="button"

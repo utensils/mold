@@ -19,7 +19,7 @@ extension FixtureMachine {
                 ["member_id": "opening", "role": "source_image", "display_name": "opening.png", "size_bytes": image.count],
                 ["member_id": "closing", "role": "keyframes", "display_name": "closing.png", "size_bytes": frame.count]]])
         }
-        if path == prefix + "/opening" { return image }
+        if path == prefix + "/opening" || path == prefix + "/opening/content" || path == prefix + "/closing/content" { return image }
         if path == prefix + "/closing" { return frame }
         return nil
     }

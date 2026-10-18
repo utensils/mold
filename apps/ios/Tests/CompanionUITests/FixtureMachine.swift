@@ -326,7 +326,7 @@ final class FixtureMachine: @unchecked Sendable {
             let licenseBody = Data(#"{"error":"Accept the model license","code":"LICENSE_NOT_ACCEPTED","license":{"id":"fixture-terms","name":"Fixture Model Terms","url":"https://example.com/terms","canonical":"https://example.com/terms","sha256":"abc","summary":"Fixture terms for a simulated download."}}"#.utf8)
             let body = refuseLicense ? licenseBody : acceptLicense ? Data("[]".utf8) : refusedExport ? Data(#"{"error":"Fixture refused this export"}"#.utf8) : export ? exportResponse(exportRequest) : libraryMutation ? Data("{}".utf8) : isTrashListing ? trashGallery : install ? Data(#"{"id":"fixture-download"}"#.utf8) : unload ? Data("{}".utf8) : patchCollection ? collection() : allowed ? response(path, historyQuery: historyQuery) : Data(#"{"error":"Fixture is read-only"}"#.utf8)
             let status = refuseLicense ? "403 Forbidden" : refusedExport ? "500 Internal Server Error" : allowed ? "200 OK" : "405 Method Not Allowed"
-            let contentType = export ? "application/octet-stream" : path.hasSuffix(".mp4") ? "video/mp4" : path.hasPrefix("/api/gallery/image/") || path.hasPrefix("/api/gallery/thumbnail/") || path.hasSuffix("/input-thumbnail") || (retainedMediaFixture && path.hasSuffix("/fixture-source"))
+            let contentType = export ? "application/octet-stream" : path.hasSuffix(".mp4") ? "video/mp4" : path.hasPrefix("/api/gallery/image/") || path.hasPrefix("/api/gallery/thumbnail/") || path.hasSuffix("/input-thumbnail") || (retainedMediaFixture && path.hasPrefix("/api/gallery/source-media/fixture-0.png/fixture-source"))
                 ? "image/png" : "application/json"
             var reply = Data("HTTP/1.1 \(status)\r\nContent-Type: \(contentType)\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
             reply.append(body)
@@ -373,7 +373,7 @@ final class FixtureMachine: @unchecked Sendable {
         // A valid tiny PNG lets previews decode and source selection exercise
         // real image import; no generation or external machine is involved.
         if (path.hasPrefix("/api/gallery/image/fixture-") && path.hasSuffix(".png"))
-            || path.hasPrefix("/api/gallery/thumbnail/fixture-") || path.hasSuffix("/input-thumbnail") || (retainedMediaFixture && path.hasSuffix("/fixture-source")) {
+            || path.hasPrefix("/api/gallery/thumbnail/fixture-") || path.hasSuffix("/input-thumbnail") || (retainedMediaFixture && path.hasPrefix("/api/gallery/source-media/fixture-0.png/fixture-source")) {
             if aspectFixture {
                 let portrait = path.contains("fixture-1")
                 let width = portrait ? 90 : 160, height = portrait ? 160 : 90

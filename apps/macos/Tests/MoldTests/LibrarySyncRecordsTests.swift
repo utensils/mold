@@ -143,4 +143,64 @@ struct LibrarySyncRecordsTests {
         _ = LocalSyncRecord.recipe(print("typed.png"), host: host)
         #expect(!LocalSyncRecord.recipeCached(print("typed.png"), host: host))
     }
+    @Test func remoteDestinationCannotAdoptUnboundHistoricalLocalRecords() async throws {
+        let store = LibrarySyncRecords()
+        let key = LocalSyncRecord.key(hostID: UUID(), filename: "legacy.png")
+        try await store.checkpoint(record("legacy.png", instance: nil), key: key, instance: nil)
+        let remoteScope = "\(UUID().uuidString)\nhttps://destination.example\nremote-instance"
+        #expect(store.records(remoteScope).isEmpty)
+        #expect(store.records("historical-local")[key] != nil)
+    }
+
+    @Test func verifiedDestinationComponentsPreserveFanoutAcrossBuckets() async throws {
+        let store = LibrarySyncRecords()
+        let sourceHost = UUID(), firstHost = UUID(), secondHost = UUID()
+        let source = PrintID(host: sourceHost, filename: "source.png")
+        let key = LocalSyncRecord.key(hostID: sourceHost, filename: source.filename)
+        var first = record("renamed-first.png", instance: "first")
+        first.destinationHost = firstHost
+        var second = record("renamed-second.png", instance: "second")
+        second.destinationHost = secondHost
+        try await store.checkpoint(first, key: key, instance: "first")
+        await store.finishRun(.init(), instance: "first")
+        try await store.checkpoint(second, key: key, instance: "second")
+        await store.finishRun(.init(), instance: "second")
+        #expect(store.verifiedCopy(of: source, on: firstHost)?.filename == first.destinationFilename)
+        #expect(store.verifiedCopy(of: source, on: secondHost)?.filename == second.destinationFilename)
+        #expect(store.verifiedCopies(of: source).count == 3)
+    }
+
+    @Test func conflictingIndependentLineageNeverChoosesAnOriginByDictionaryOrder() async throws {
+        let store = LibrarySyncRecords()
+        let copyHost = UUID(), firstSource = UUID(), secondSource = UUID()
+        var copy = record("shared.png", instance: "backup")
+        copy.destinationHost = copyHost
+        try await store.checkpoint(copy, key: LocalSyncRecord.key(hostID: firstSource, filename: "first.png"), instance: "backup")
+        try await store.checkpoint(copy, key: LocalSyncRecord.key(hostID: secondSource, filename: "second.png"), instance: "backup")
+        await store.finishRun(.init(), instance: "backup")
+        let id = PrintID(host: copyHost, filename: "shared.png")
+        #expect(store.hasVerifiedIncoming(id))
+        #expect(store.verifiedOrigin(of: id) == nil)
+        #expect(store.organizationAtOrigin(of: id) == nil)
+    }
+
+    @Test func replacedDestinationInstanceCannotInheritVerifiedLineage() async throws {
+        let store = LibrarySyncRecords()
+        let source = UUID(), destination = UUID()
+        let key = LocalSyncRecord.key(hostID: source, filename: "source.png")
+        var copy = record("copy.png", instance: "old-instance")
+        copy.destinationHost = destination
+        copy.sourceRoute = "\(source.uuidString)\nhttps://source.example\nsource-instance"
+        copy.destinationRoute = "https://destination.example"
+        try await store.checkpoint(copy, key: key, instance: "old-instance")
+        await store.finishRun(.init(), instance: "old-instance")
+        let id = PrintID(host: destination, filename: "copy.png")
+        var authority = [source: copy.sourceRoute!, destination: "\(destination.uuidString)\nhttps://destination.example\nold-instance"]
+        #expect(store.verifiedOrigin(of: id, authority: authority) == key)
+        authority[destination] = "\(destination.uuidString)\nhttps://destination.example\nreplacement-instance"
+        #expect(!store.hasVerifiedIncoming(id, authority: authority))
+        #expect(store.verifiedOrigin(of: id, authority: authority) == nil)
+        #expect(store.verifiedCopy(of: PrintID(host: source, filename: "source.png"), on: destination, authority: authority) == nil)
+    }
+
 }

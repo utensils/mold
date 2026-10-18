@@ -2588,6 +2588,9 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default();
         assert!(methods.split(',').any(|method| method.trim() == "PATCH"));
+        // Browser-relayed gallery imports and retained-source handoffs use PUT
+        // with the same authenticated cross-origin preflight policy.
+        assert!(methods.split(',').any(|method| method.trim() == "PUT"));
         let headers = response
             .headers()
             .get(header::ACCESS_CONTROL_ALLOW_HEADERS)

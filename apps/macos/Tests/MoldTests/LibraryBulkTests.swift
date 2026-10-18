@@ -186,4 +186,14 @@ struct LibraryBulkTests {
         #expect(store.bulkResult?.contains("Update this machine") == true)
     }
 
+    @Test func unstampedLegacyTrashSelectionStillUsesTrashOnlyDeletion() async {
+        let (store, fake, _) = await bench(0)
+        fake.trashedRows = [FakeFixtures.print("legacy-trash.png")]
+        await store.refreshTrash()
+        await store.deleteForever(store.trashed)
+        #expect(fake.callCount("deleteTrashed") == 1)
+        #expect(fake.callCount("deleteForever") == 0)
+        #expect(fake.trashedRows.isEmpty)
+    }
+
 }

@@ -956,3 +956,30 @@ describe("reference crop", () => {
     ).not.toHaveProperty("crop");
   });
 });
+it("serializes a positively advertised endpoint task without routing on the model name", () => {
+  const state = emptyMinimaxH3AuthoringState();
+  state.firstFrame = {
+    filename: "first.png",
+    mimeType: "image/png",
+    width: 64,
+    height: 64,
+    data: "FIRST",
+  };
+  const request = serializeMinimaxH3Authoring(
+    { model: "future-model", frames: 124 },
+    "future-family",
+    "future-model",
+    state,
+    "fl2va",
+  );
+  expect(request).toMatchObject({ source_image: "FIRST" });
+  expect(
+    serializeMinimaxH3Authoring(
+      { model: "future-model", frames: 124 },
+      "minimax-h3",
+      "future-model",
+      state,
+      null,
+    ),
+  ).not.toHaveProperty("source_image");
+});

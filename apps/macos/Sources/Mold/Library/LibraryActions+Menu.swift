@@ -1,3 +1,4 @@
+import AppKit
 import MoldClient
 import SwiftUI
 
@@ -22,6 +23,10 @@ extension LibraryActions {
             if let entry = targets.first, targets.count == 1, entry.isAttachableRaster {
                 addAsReference?(entry)
             }
+        case .useAsFirstFrame:
+            if let entry = targets.first, targets.count == 1, entry.isAttachableRaster { useAsFirstFrame?(entry) }
+        case .useAsLastFrame:
+            if let entry = targets.first, targets.count == 1, entry.isAttachableRaster { useAsLastFrame?(entry) }
         case .quickLook:
             quickLook(targets)
         case let .favorite(on):
@@ -34,6 +39,9 @@ extension LibraryActions {
             if let shelf = library.shelf(slug: slug) { library.unfile(targets, from: shelf) }
         case let .upscale(model):
             upscale(targets, using: model)
+        case .copyFileName:
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(targets.map { $0.print.filename }.joined(separator: "\n"), forType: .string)
         case .copy:
             copy(targets)
         case .save:

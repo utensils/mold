@@ -67,7 +67,7 @@ extension LibraryPane {
     /// narrowing the chosen shelf adds.
     var resolved: LibraryQuery {
         navigation.scope.resolve(navigation.query, shelves: library.shelves,
-                                 hiddenCollectionIDs: library.hiddenCollectionIDs)
+                                 hiddenCollectionIDs: library.hiddenCollectionIDs, privacyEvidence: library.trashed, privacyLinks: library.syncLinks())
     }
 
     // MARK: - The viewer, the cursor, and what a print seeds

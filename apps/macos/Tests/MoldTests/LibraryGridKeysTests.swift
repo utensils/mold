@@ -34,14 +34,17 @@ struct LibraryGridKeysTests {
         #expect(LibraryGridKeys.action(for: .leftArrow, modifiers: .option) == nil)
     }
 
-    @Test func aBareBackspaceDoesNothing() {
-        #expect(LibraryGridKeys.action(for: .delete, modifiers: []) == nil)
+    @Test func bareDeleteKeysTrashTheFocusedSelection() {
+        #expect(LibraryGridKeys.action(for: .delete, modifiers: []) == .trash)
+        #expect(LibraryGridKeys.action(for: .deleteForward, modifiers: []) == .trash)
+        #expect(LibraryGridKeys.action(for: "f", modifiers: []) == .favorite)
+        #expect(LibraryGridKeys.action(for: "f", modifiers: .shift) == nil)
     }
 
     /// What the menu item and the README both promise.
     @Test func commandBackspaceTrashesTheSelection() {
         #expect(LibraryGridKeys.action(for: .delete, modifiers: .command) == .trash)
-        #expect(LibraryGridKeys.action(for: .delete, modifiers: [.command, .shift]) == nil)
+        #expect(LibraryGridKeys.action(for: .delete, modifiers: [.command, .shift]) == .emptyTrash)
     }
 
     @Test func spaceIsQuickLookAndReturnOpens() {

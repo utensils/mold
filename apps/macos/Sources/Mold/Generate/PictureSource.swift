@@ -94,7 +94,7 @@ enum PictureSource {
               let current = library.entry(entry.id), current.print == entry.print else { return false }
         return LibraryPicker.rows(library.items, query: "", machineID: origin.id,
             availableHosts: Set(hosts.hosts.map(\.id)),
-            hiddenCollectionIDs: library.hiddenCollectionIDs).contains { $0.id == entry.id }
+            hiddenCollectionIDs: library.hiddenCollectionIDs, privacyEvidence: library.trashed, privacyLinks: library.syncLinks()).contains { $0.id == entry.id }
     }
 
 }

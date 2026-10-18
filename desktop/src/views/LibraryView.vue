@@ -16,6 +16,7 @@ import { viewerAfterRemoval } from "@studio/lib/viewerRemoval";
 import { scopedCollectionInventory } from "@studio/lib/collectionVisibility";
 import {
   computed,
+  provide,
   nextTick,
   onBeforeUnmount,
   onMounted,
@@ -46,6 +47,14 @@ import CollectionsShelf, { type ShelfCard } from "../components/library/Collecti
 import type { CoverTile } from "../components/library/CollectionCard.vue";
 import HistoryDrawer from "../components/library/HistoryDrawer.vue";
 import LibraryChipRow from "../components/library/LibraryChipRow.vue";
+import { useLibrarySyncStore } from "../stores/librarySync";
+import { copyTextToClipboard } from "@studio/lib/notificationClipboard";
+import { capabilitiesForCreateForm } from "../lib/capabilities";
+import {
+  SOURCE_ATTACHMENT_CHOICES,
+  imageAttachmentChoices,
+  type SourceAttachmentIntent,
+} from "@studio/lib/sourceAttachmentChoices";
 import LibraryHeader from "../components/library/LibraryHeader.vue";
 import TrashBanner from "../components/library/TrashBanner.vue";
 import TrashTileActions from "../components/library/TrashTileActions.vue";
@@ -138,7 +147,17 @@ const hosts = useHostsStore();
 const appPrefs = useAppPrefsStore();
 const models = useModelStore();
 const generateForm = useGenerateFormStore();
+const attachmentCapabilities = computed(() =>
+  capabilitiesForCreateForm(
+    generateForm.form,
+    models.installed.find((model) => model.name === generateForm.form.model),
+  ),
+);
+const attachmentChoices = computed(() => imageAttachmentChoices(attachmentCapabilities.value));
+provide(SOURCE_ATTACHMENT_CHOICES, attachmentChoices);
 const contextMenu = useContextMenuStore();
+const librarySync = useLibrarySyncStore();
+void librarySync.initialize();
 const toasts = useToastStore();
 const reuseStillPrint = useReuseStillPrint();
 /** `modelDisplayNameForId` scans the installed list; a grid of 2 000 tiles
@@ -252,6 +271,7 @@ const sourceOwners = computed<SourceMediaOwner[]>(() =>
           {
             key: JSON.stringify([copy.sourceKey, target.baseUrl, instanceId, copy.item.filename]),
             filename: copy.item.filename,
+            metadata: copy.item.metadata,
             title: copy.item.title ?? copy.item.filename,
             hostLabel:
               gallery.sources.find((source) => source.key === copy.sourceKey)?.label ??
@@ -320,6 +340,8 @@ async function useRetainedSource(selection: SourceMediaSelection, details = fals
       origin()?.baseUrl === owner.target.baseUrl &&
       origin()?.apiKey === owner.target.apiKey &&
       (!sourceKey || gallery.hostFor(sourceKey)?.instanceId === originalInstance),
+    selection.attachment,
+    attachmentCapabilities.value,
   );
   if (!outcome.ok) {
     toasts.push(outcome.error, "error");
@@ -1350,6 +1372,28 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
     selectMode.value && bulkSelection.value.has(item.filename) && bulkCount > 1;
   const copyItems: MenuEntry[] = [
     {
+      label: "Copy File Name",
+      action: () =>
+        void copyTextToClipboard(
+          actionTargets(entry)
+            .map((row) => row.item.filename)
+            .join("\n"),
+        ),
+    },
+    ...(inTrash.value
+      ? []
+      : [
+          {
+            label: "Copy to",
+            children: librarySync.machines
+              .filter((machine) => machine.id !== entry.sourceKey)
+              .map((machine) => ({
+                label: machine.label,
+                action: () => librarySync.copyTo(actionTargets(entry), machine),
+              })),
+          },
+        ]),
+    {
       label: "Copy prompt",
       action: () => {
         void navigator.clipboard.writeText(m.prompt).then(() => toasts.push("Copied"));
@@ -1387,6 +1431,7 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
     const allOrganizable = targets.every(canOrganizeEntry);
     const allTrashable = targets.every(entryTrashCapable);
     return [
+      ...copyItems.slice(0, 2),
       ...(allOrganizable
         ? [
             {
@@ -1430,6 +1475,12 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
   }
   return [
     { label: "Use these settings", action: () => reuseSettings(entry) },
+    ...(!isVideo(item) && !isAudio(item) && !isMesh(item)
+      ? attachmentChoices.value.map((intent) => ({
+          label: `Use as ${intent} frame`,
+          action: () => void useAsEndpoint(entry, intent),
+        }))
+      : []),
     ...(organize
       ? [
           { separator: true } as MenuEntry,
@@ -2553,6 +2604,29 @@ function removeSelected() {
  * Create. Deliberately does NOT touch `composer.prefill`, so GenerateView's
  * prefill watcher can't clobber the source we just attached.
  */
+async function useAsEndpoint(entry: MergedPrint, intent: SourceAttachmentIntent) {
+  const authority = JSON.stringify([
+    targetFor(entry),
+    gallery.hostFor(entry.sourceKey)?.instanceId,
+  ]);
+  const outcome = await attachRetainedSource(
+    generateForm.form,
+    entry.item.filename,
+    "image",
+    () => fetchItemBlob(entry),
+    () =>
+      authority ===
+      JSON.stringify([targetFor(entry), gallery.hostFor(entry.sourceKey)?.instanceId]),
+    intent,
+    attachmentCapabilities.value,
+  );
+  if (!outcome.ok) {
+    toasts.push(outcome.error, "error");
+    return;
+  }
+  lightboxOpen.value = false;
+  void router.push("/create");
+}
 async function useAsSource(entry: MergedPrint) {
   const outcome = await applyGalleryEntryAsSource(entry, generateForm.form, fetchItemBlob);
   if (!outcome.ok) {
@@ -2847,6 +2921,42 @@ onUnmounted(() => {
       @refresh="gallery.fetchAll()"
     />
 
+    <div
+      v-if="librarySync.machines.length > 1"
+      class="flex shrink-0 flex-wrap items-center gap-2 px-3 py-2"
+      aria-label="Library synchronization"
+    >
+      <details>
+        <summary>Sync All to</summary>
+        <button
+          v-for="machine in librarySync.machines"
+          :key="machine.id"
+          type="button"
+          class="px-2 py-1"
+          @click="librarySync.syncAll(machine)"
+        >
+          {{ machine.label }}
+        </button>
+      </details>
+      <button
+        v-if="
+          librarySync.dismissed && (librarySync.busy || librarySync.status || librarySync.error)
+        "
+        type="button"
+        @click="librarySync.dismissed = false"
+      >
+        Show transfer status
+      </button>
+      <button v-if="librarySync.busy" type="button" @click="librarySync.stop">Stop</button>
+    </div>
+    <div
+      v-if="!librarySync.dismissed && (librarySync.status || librarySync.error)"
+      role="status"
+      class="flex shrink-0 items-center gap-2 px-3 py-2"
+    >
+      <span>{{ librarySync.error || librarySync.status }}</span
+      ><button type="button" @click="librarySync.dismissed = true">Dismiss</button>
+    </div>
     <LibraryChipRow
       v-if="showChipRow"
       ref="chipRow"
@@ -3201,6 +3311,7 @@ onUnmounted(() => {
       @next="moveSelection(1)"
       @delete="removeSelected"
       @use-source="useSelectedAsSource"
+      @use-endpoint="useAsEndpoint(selectedEntry!, $event)"
       @use-retained-source="useRetainedSource($event, true)"
       @reuse="reuseSettings(selectedEntry!)"
       @rename="(title) => renamePrint(selectedEntry!, title)"

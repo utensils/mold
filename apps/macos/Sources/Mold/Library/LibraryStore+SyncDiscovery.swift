@@ -19,7 +19,7 @@ extension LibraryStore {
         let sourceHostIDs = syncAll
             ? Set(hosts.hosts.filter { $0.id != local.id }.map(\.id))
             : Set(selected.map(\.hostID))
-        let bucket = syncAll ? syncRecords.bucket(hosts.instanceID(of: local.id)) : nil
+        let bucket = syncAll ? syncRecords.bucket(recordScope(local)) : nil
         var reads: [MoldHost.ID: MirrorSourceRead] = [:]
         // Every source at once: a slow machine never holds the others.
         await withTaskGroup(of: MirrorSourceRead.self) { group in
@@ -85,14 +85,14 @@ extension LibraryStore {
             try await replica.pull(pullRequest(local, syncAll ? .all : .live), using: destination)
         } catch {
             settleTimelines()
-            return .unavailable("Couldn’t read This Mac’s Library: \(error.sentence)")
+            return .unavailable("Couldn’t read \(local.name)’s Library: \(error.sentence)")
         }
         settleTimelines()
         guard hosts.host(local.id) == local, hosts.instanceID(of: local.id) == instance else {
-            return .unavailable("Couldn’t read This Mac’s Library: The machine changed while reading its Library.")
+            return .unavailable("Couldn’t read \(local.name)’s Library: The machine changed while reading its Library.")
         }
         let view = await replica.mirrorView()
-        let bucket = syncAll ? syncRecords.bucket(instance) : LibrarySyncRecords.Bucket()
+        let bucket = syncRecords.bucket(recordScope(local))
         let route = local.baseURL.absoluteString + "\n" + (instance ?? "")
         let changed: Set<String>? = if syncAll, let cursor = bucket.destinationCursor, cursor.route == route {
             await replica.changedNames(since: cursor.cursor)
@@ -102,7 +102,7 @@ extension LibraryStore {
         do {
             localCollections = try await destination.collections()
         } catch {
-            failures.append("This Mac’s collections: \(error.sentence)")
+            failures.append("\(local.name)’s collections: \(error.sentence)")
             localCollections = collectionsPerHost[local.id] ?? []
         }
         var localCollectionBySlug = Dictionary(localCollections.map { ($0.slug, $0) }, uniquingKeysWith: { first, _ in first })
@@ -148,8 +148,8 @@ extension LibraryStore {
             failedCollectionSlugs.insert(slug)
         }
         return .ready(MirrorDestination(
-            host: local, backend: destination, instance: instance, view: view, changed: changed, bucket: bucket,
-            receipts: syncAll ? MirrorReceipts(records: syncRecords, instance: instance) : nil,
+            host: local, backend: destination, instance: instance, recordScope: recordScope(local), view: view, changed: changed, bucket: bucket,
+            receipts: MirrorReceipts(records: syncRecords, instance: recordScope(local), destinationInstance: instance, destinationHost: local.id),
             collectionNames: localNames, createdCollections: createdCollections,
             failedCollectionSlugs: failedCollectionSlugs, failures: failures))
     }

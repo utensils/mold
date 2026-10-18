@@ -150,3 +150,27 @@ func searchIsForgivingAboutHowItIsTyped(typed: String) {
     let trash = LibraryScope.trash.resolve(LibraryQuery(), shelves: [], hiddenCollectionIDs: hidden)
     #expect(trash.apply(to: prints).map(\.print.filename) == ["hidden.png"])
 }
+
+@Test func hiddenTrashEvidenceProtectsLiveCopyBeforeMachineProjection() {
+    let hidden = entry("private.png", host: workstation, collections: ["secret"])
+    let backup = entry("private.png", host: hal)
+    var query = LibraryQuery()
+    query.hiddenCollectionIDs = [workstation: ["secret"]]
+    query.privacyEvidence = [hidden]
+    query.tokens = [.machine(id: hal, name: "Backup")]
+    #expect(query.apply(to: [backup]).isEmpty)
+    query.privacyEvidence = [] // authoritative permanent removal ends this evidence
+    #expect(query.apply(to: [backup]).count == 1)
+}
+
+@Test func hiddenTrashEvidenceFollowsVerifiedCollisionRename() {
+    let hidden = entry("original.png", host: workstation, collections: ["secret"])
+    let backup = entry("collision-renamed.png", host: hal)
+    var query = LibraryQuery()
+    query.hiddenCollectionIDs = [workstation: ["secret"]]
+    query.privacyEvidence = [hidden]
+    query.privacyLinks = [backup.id: hidden.id]
+    #expect(query.apply(to: [backup]).isEmpty)
+    query.tokens = [.collection(slug: "secret", name: "Secret", ids: [workstation: "secret"])]
+    #expect(query.apply(to: [backup]).isEmpty, "Trash evidence is never a live collection member")
+}

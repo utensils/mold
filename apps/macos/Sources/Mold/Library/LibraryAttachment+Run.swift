@@ -86,6 +86,9 @@ extension LibraryPane {
         case .source:
             guard attachmentOffer.canUseAsSource else { return }
             DraftPictureAttachment.useAsSource(picked, in: &draft, recipe: context.recipe)
+        case .firstFrame, .lastFrame:
+            guard attachmentOffer.canUseEndpoints else { return }
+            SourceMediaAttachment.setEndpoint(first: kind == .firstFrame, picture: picked, draft: &draft, recipe: context.recipe)
         case .reference:
             guard attachmentOffer.canAddReference else { return }
             if let typedReference {

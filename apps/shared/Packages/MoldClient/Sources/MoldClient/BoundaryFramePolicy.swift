@@ -10,8 +10,9 @@ public enum BoundaryFramePolicy {
     }
 
     public static func resolve(capabilities: RecipeCapabilities) -> String? {
-        if let boundary = capabilities.boundaryFrames, boundary.mode.isVisible,
-           ["wan-pair", "h3-endpoints"].contains(boundary.wire) { return boundary.wire }
+        if let boundary = capabilities.boundaryFrames {
+            return boundary.mode.isVisible && ["wan-pair", "h3-endpoints"].contains(boundary.wire) ? boundary.wire : nil
+        }
         if capabilities.wanRecipe?.supportsFirstLastFrame == true { return "wan-pair" }
         return nil
     }
@@ -58,6 +59,7 @@ public enum BoundaryFramePolicy {
         capabilities: RecipeCapabilities, recipe: GenerationRecipe? = nil
     ) {
         guard let wire = resolve(capabilities: capabilities) else { return }
+        draft.media.reconcileMask(supported: false)
         let attachedEndpoint = image(first: first, draft: draft, capabilities: capabilities)
         let previousEndpoint = first && wire == "h3-endpoints" && attachedEndpoint != nil
             ? draft.media.sourceImageOriginal ?? attachedEndpoint : attachedEndpoint

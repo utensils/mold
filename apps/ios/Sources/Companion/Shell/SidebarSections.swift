@@ -62,7 +62,7 @@ extension RootView {
         }
         var query = LibraryQuery()
         if let id = library.machineID, let host = library.hosts.host(id) { query.tokens = [.machine(id: id, name: host.name)] }
-        let resolved = scope.resolve(query, shelves: library.shelves, hiddenCollectionIDs: library.hiddenCollectionIDs)
+        let resolved = scope.resolve(query, shelves: library.shelves, hiddenCollectionIDs: library.hiddenCollectionIDs, privacyEvidence: library.trashPool)
         return Text(resolved.apply(to: scope.isTrash ? library.trashPool : library.pool).count.formatted())
     }
 

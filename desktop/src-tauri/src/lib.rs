@@ -2,6 +2,7 @@ pub mod clipboard;
 pub mod commands;
 pub mod connection;
 pub mod gallery;
+pub mod library_sync;
 #[cfg(target_os = "macos")]
 mod macos_window;
 pub mod menu;
@@ -228,6 +229,14 @@ pub fn run() {
             gallery::import_source_image,
             gallery::save_output_bytes,
             gallery::mirror::mirror_gallery_print,
+            gallery::mirror::destination::library_copy_cancel,
+            gallery::mirror::destination::library_copy_release,
+            gallery::mirror::destination::library_copy_legacy_offer,
+            gallery::mirror::destination::library_copy_output,
+            gallery::mirror::destination::library_copy_sources,
+            gallery::mirror::destination::library_copy_matches,
+            library_sync::library_sync_read,
+            library_sync::library_sync_write,
             gallery::save_media_bytes,
             gallery::save_gallery_media,
             gallery::media_save_directory,

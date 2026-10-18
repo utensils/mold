@@ -198,7 +198,7 @@ are fitted automatically while library originals remain unchanged.
 The Generate controls stay at the bottom; the Library can create a collection
 from selected prints and hide collection members from general browsing across
 all their machine copies. The native iOS companion shares collection hiding and offers **Add to Collection** directly in the selection bar, including **New Collection…** to create and file selected prints together.
-Library machine filters scope collection counts and membership as well as trash, restore and permanent deletion to the selected machines, preserving copies elsewhere. Unavailable inventories and collections absent from a machine are distinguished. Native Mac Sync runs once per press; the opt-in Keep This Mac in Sync mode follows machines' gallery announcements instead of a timer, with completion status and Stop; unchanged media issues can be acknowledged while retries continue. Sync Details closes with Done, Return or Escape and successful reports omit issue controls. Intentionally removed local copies stay removed. Choose All Machines to act on every copy. Native Trash remains browsable for hidden collection members and offers Put Back, Delete Immediately and Empty Trash for the selected machines.
+Library machine filters scope collection counts and membership as well as trash, restore and permanent deletion to the selected machines, preserving copies elsewhere. Unavailable inventories and collections absent from a machine are distinguished. Native Mac and desktop Library sync let you choose a destination machine for Copy to or Sync All to, with an opt-in Keep in Sync choice per destination. Automatic runs follow gallery changes rather than a timer; Stop remains available and dismissed activity can be reopened. Copies are backups: deleting an original does not delete its copies. Sync owns only the organization changes it applied, preserves destination edits, and always propagates hidden source membership. Sync Details closes with Done, Return or Escape and successful reports omit issue controls. Intentionally removed local copies stay removed. Choose All Machines to act on every copy. Native Trash remains browsable for hidden collection members and offers Put Back, Delete Immediately and Empty Trash for the selected machines.
 [Mold Studio for Mac guide](https://utensils.io/mold/guide/macos)
 
 **[Download Mold Studio for Mac (Apple Silicon, macOS 26+)](https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg)**
@@ -370,6 +370,14 @@ return visits faster without changing source retention. Older machines that do
 not provide verified content digests keep separate entries.
 Native source viewers identify legacy originals from their contents when opened
 and keep large-library access checks indexed so inspecting a source stays responsive.
+
+Library source details expose the owning print/member address and optional content
+SHA-256, with original-media copy, save and share actions where supported. Use
+`mold --host <machine> library source-media <filename> --member <unique-prefix>`
+to download reusable original bytes. Generation input flags accept
+`print:<filename>` and `source:<filename>#<member>` on the selected host, alongside
+ordinary local paths. Prefix a literal local filename with `./` to escape these
+prefixes. Library-addressed inputs do not fall back to local inference.
 
 Native Mac mirrors accept missing archive-only job IDs and generation durations, a short version matching the same version with a build suffix, and an alpha-channel fact derived from identical output bytes when absent on the source. The same compatibility check compares the gallery listing with its stable source archive, so completion bookkeeping does not falsely report a changed print. When an older archive omits scheduler or transparency settings, the source output is downloaded and its digest verified before its embedded recipe can corroborate those fields. Output bytes and all generation settings must still match; conflicting recorded provenance is refused. Retrying Sync All repairs retained inputs on compatible existing copies without duplicating their outputs.
 

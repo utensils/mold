@@ -10,8 +10,8 @@ struct LibraryLocalSaveTests {
     @Test func syncStagesKeepReceiptsBeforeOrganizationAndRequireStableFinalEvidence() async throws {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("sync-stage-order-\(UUID().uuidString)")
-        let source = FakeBackend(host: remote, noRetainedMedia: true)
-        let target = FakeBackend(host: local, noRetainedMedia: true)
+        let source = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
         var mutable = GalleryPrint.Mutable(versionedPrint("stage-order.png", prompt: "fox"))
         mutable.favorite = true
         let print = mutable.build()
@@ -62,8 +62,8 @@ struct LibraryLocalSaveTests {
     @Test func cachedCheckpointCannotSkipAfterRouteChangesDuringDestinationProbe() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("checkpoint-route-race")
-        let source = FakeBackend(host: remote, noRetainedMedia: true)
-        let target = FakeBackend(host: local, noRetainedMedia: true)
+        let source = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
         let print = versionedPrint("checkpoint-route-race.png", prompt: "fox")
         source.prints = [print]
         source.mediaAnswer = Data([1, 2, 3])
@@ -92,8 +92,8 @@ struct LibraryLocalSaveTests {
     @Test func unchangedCheckpointSkipsPerPrintProbesAndChangedInputsRepair() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("checkpoint-remote")
-        let source = FakeBackend(host: remote, noRetainedMedia: true)
-        let target = FakeBackend(host: local, noRetainedMedia: true)
+        let source = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
         let print = versionedPrint("checkpoint.png", prompt: "fox")
         source.prints = [print]
         source.mediaAnswer = Data([1, 2, 3])
@@ -124,15 +124,15 @@ struct LibraryLocalSaveTests {
     @Test func relaunchAfterOrganizationFailureUsesDurableCopyWithoutOutputDownload() async throws {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("resume-checkpoint-remote")
-        let source = FakeBackend(host: remote, noRetainedMedia: true)
-        let target = FakeBackend(host: local, noRetainedMedia: true)
+        let source = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
         var json = try JSONSerialization.jsonObject(with: MoldJSON.encoder.encode(versionedPrint("resume-checkpoint.png", prompt: "fox"))) as! [String: Any]
         json["favorite"] = true
         let print = try MoldJSON.decoder.decode(GalleryPrint.self, from: JSONSerialization.data(withJSONObject: json))
         source.prints = [print]
         source.mediaAnswer = Data([1, 2, 3])
         source.retainedTransferOfferResponder = { _ in
-            if !target.importedNames.isEmpty { target.prints = [print] }
+            // The destination fake lists the imported output without organization.
             return .init(archiveIdentitySha256: String(repeating: "a", count: 64), members: [],
                          outputSha256: "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
                          outputSizeBytes: 3, metadata: print.metadata)
@@ -154,8 +154,8 @@ struct LibraryLocalSaveTests {
     @Test func failedRetainedCopyResumesFromDurableOutputReceiptAfterRelaunch() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("output-receipt-remote")
-        let source = FakeBackend(host: remote, noRetainedMedia: true)
-        let target = FakeBackend(host: local, noRetainedMedia: true)
+        let source = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
         let print = versionedPrint("output-receipt.png", prompt: "fox")
         source.prints = [print]
         source.mediaAnswer = Data([1, 2, 3])
@@ -196,8 +196,8 @@ struct LibraryLocalSaveTests {
     @Test func existingEmbeddedCopyRepairsArchiveSourcesWithoutDuplicatingOutput() async throws {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("archive-enriched-remote")
-        let source = FakeBackend(host: remote, noRetainedMedia: true)
-        let target = FakeBackend(host: local, noRetainedMedia: true)
+        let source = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
         let embedded = try MoldJSON.decoder.decode(GalleryPrint.self, from: Data(
             #"{"filename":"archive-enriched.png","timestamp":1000,"size_bytes":3,"media_version":"1000:3","metadata":{"prompt":"fox","version":"0.32.0"}}"#.utf8))
         let archived = try MoldJSON.decoder.decode(GalleryPrint.self, from: Data(
@@ -228,8 +228,8 @@ struct LibraryLocalSaveTests {
     @Test func unsupportedRetainedDestinationDoesNotImportOutput() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("unsupported-retained-remote")
-        let source = FakeBackend(host: remote, noRetainedMedia: true)
-        let target = FakeBackend(host: local, noRetainedMedia: true)
+        let source = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
         target.capabilityBlock = try! MoldJSON.decoder.decode(Capabilities.self, from: Data("{}".utf8))
         let print = versionedPrint("unsupported.png", prompt: "fox")
         source.prints = [print]
@@ -262,8 +262,8 @@ struct LibraryLocalSaveTests {
     func legacyInputsDoNotPreventSavingFinishedOutput(upscaled: Bool) async throws {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("legacy-new-source")
-        let source = FakeBackend(host: remote, noRetainedMedia: true)
-        let target = FakeBackend(host: local, noRetainedMedia: true)
+        let source = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
         let print = try legacyPrint("legacy-new.png", upscaled: upscaled)
         source.prints = [print]
         source.mediaAnswer = Data([1, 2, 3])
@@ -291,8 +291,8 @@ struct LibraryLocalSaveTests {
     func existingLegacyOutputsStaySyncedAcrossRepeatedCachedSync(upscaled: Bool) async throws {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("legacy-existing-source")
-        let source = FakeBackend(host: remote, noRetainedMedia: true)
-        let target = FakeBackend(host: local, noRetainedMedia: true)
+        let source = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
         let print = try legacyPrint("legacy-existing.png", upscaled: upscaled)
         source.prints = [print]
         target.prints = [print]
@@ -323,8 +323,8 @@ struct LibraryLocalSaveTests {
     @Test func unsupportedSourceTransferEndpointStillRefusesDisclosedInputs() async throws {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("unsupported-source-transfer")
-        let source = FakeBackend(host: remote, noRetainedMedia: true)
-        let target = FakeBackend(host: local, noRetainedMedia: true)
+        let source = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
         let print = try legacyPrint("unsupported-source.png", upscaled: false)
         source.prints = [print]
         source.mediaAnswer = Data([1, 2, 3])
@@ -344,8 +344,8 @@ struct LibraryLocalSaveTests {
     func unverifiedMissingInputsRemainFailures(availability: RetainedSourceMedia.Availability) async throws {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("unverified-source")
-        let source = FakeBackend(host: remote, noRetainedMedia: true)
-        let target = FakeBackend(host: local, noRetainedMedia: true)
+        let source = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
         let print = try legacyPrint("unverified.png", upscaled: false)
         source.prints = [print]
         source.mediaAnswer = Data([1, 2, 3])
@@ -364,8 +364,8 @@ struct LibraryLocalSaveTests {
     @Test func saveLocallyRetainsSourceMediaBeforeReportingSuccess() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("retained-remote")
-        let source = FakeBackend(host: remote, noRetainedMedia: true)
-        let target = FakeBackend(host: local, noRetainedMedia: true)
+        let source = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
         target.capabilityBlock = try! MoldJSON.decoder.decode(Capabilities.self, from: Data(#"{"retained_media_transfer":{"protocol_version":1}}"#.utf8))
         let print = versionedPrint("retained.png", prompt: "fox")
         source.prints = [print]
@@ -386,8 +386,8 @@ struct LibraryLocalSaveTests {
     @Test func copiedH3ReferencesRemainReusableWithoutTheOriginalHost() async throws {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("h3-source")
-        let source = FakeBackend(host: remote, noRetainedMedia: true)
-        let target = FakeBackend(host: local, noRetainedMedia: true)
+        let source = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
         target.capabilityBlock = try MoldJSON.decoder.decode(Capabilities.self, from: Data(#"{"retained_media_transfer":{"protocol_version":1}}"#.utf8))
         let members = (0..<4).map { index in
             let bytes = Data([UInt8(index)])
@@ -436,8 +436,8 @@ struct LibraryLocalSaveTests {
     @Test func cachedSyncRepairsMissingSourcesWithoutDownloadingOutputAgain() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("cached-retained-remote")
-        let source = FakeBackend(host: remote, noRetainedMedia: true)
-        let target = FakeBackend(host: local, noRetainedMedia: true)
+        let source = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
         target.capabilityBlock = try! MoldJSON.decoder.decode(Capabilities.self, from: Data(#"{"retained_media_transfer":{"protocol_version":1}}"#.utf8))
         let print = versionedPrint("cached-retained.png", prompt: "fox")
         source.prints = [print]
@@ -461,8 +461,8 @@ struct LibraryLocalSaveTests {
     @Test func failedSourceTransferLeavesCopyIncompleteAndRepairable() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("failed-retained-remote")
-        let source = FakeBackend(host: remote, noRetainedMedia: true)
-        let target = FakeBackend(host: local, noRetainedMedia: true)
+        let source = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
         target.capabilityBlock = try! MoldJSON.decoder.decode(Capabilities.self, from: Data(#"{"retained_media_transfer":{"protocol_version":1}}"#.utf8))
         let print = versionedPrint("failed-retained.png", prompt: "fox")
         source.prints = [print]
@@ -505,8 +505,8 @@ struct LibraryLocalSaveTests {
     @Test func savingAFilteredRemoteSelectionImportsOnlyPicturesIntoThisMac() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("remote")
-        let localBackend = FakeBackend(host: local, noRetainedMedia: true)
-        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true)
+        let localBackend = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
+        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
         remoteBackend.mediaAnswer = Data([1, 2, 3])
         let hosts = HostStore(hosts: [local, remote]) { host in
             host.id == local.id ? localBackend : remoteBackend
@@ -525,13 +525,13 @@ struct LibraryLocalSaveTests {
         #expect(localBackend.importedNames == ["remote.png"])
         #expect(localBackend.importedMedia.first == Data([1, 2, 3]))
         #expect(localBackend.importedItems.first?.originalMetadata?.prompt == "a fox")
-        #expect(localBackend.callCount("gallery") == 2)
+        #expect(localBackend.callCount("gallery") == 3)
         #expect(library.localSaveReport.contains("Skipped 2"))
     }
 
     @Test func anUnavailableLocalEngineExplainsWhyNothingWasSaved() async {
         let remote = host("remote")
-        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true)
+        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
         let hosts = HostStore(hosts: [remote]) { _ in remoteBackend }
         let library = LibraryStore(hosts: hosts)
         library.localSaveTask = Task {}
@@ -548,8 +548,8 @@ struct LibraryLocalSaveTests {
     @Test func remoteCollectionIsCreatedAndFiledOnlyOnThisMac() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("remote")
-        let localBackend = FakeBackend(host: local, noRetainedMedia: true)
-        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true)
+        let localBackend = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
+        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
         remoteBackend.mediaAnswer = Data([1, 2, 3])
         remoteBackend.collectionRows = [Collection(id: "remote-id", name: "Night Sky",
                                                     slug: "night-sky")]
@@ -577,8 +577,8 @@ struct LibraryLocalSaveTests {
     @Test func unavailableSourceCollectionsDoNotBlockPictureCopies() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("remote")
-        let localBackend = FakeBackend(host: local, noRetainedMedia: true)
-        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true)
+        let localBackend = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
+        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
         remoteBackend.mediaAnswer = Data([1, 2, 3])
         remoteBackend.plantedErrors["collections"] = MoldClientError.malformedResponse
         let hosts = HostStore(hosts: [local, remote]) { machine in
@@ -603,8 +603,8 @@ struct LibraryLocalSaveTests {
     @Test func stoppedSaveDoesNotStartAnotherTransfer() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("remote")
-        let localBackend = FakeBackend(host: local, noRetainedMedia: true)
-        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true)
+        let localBackend = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
+        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
         let print = FakeFixtures.print("star.png")
         remoteBackend.prints = [print]
         remoteBackend.mediaAnswer = Data([1, 2, 3])
@@ -622,8 +622,8 @@ struct LibraryLocalSaveTests {
     @Test func aFailedImportReportsOneFailureAndContinuesTheBatch() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("remote")
-        let localBackend = FakeBackend(host: local, noRetainedMedia: true)
-        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true)
+        let localBackend = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
+        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
         remoteBackend.mediaAnswer = Data([1, 2, 3])
         let hosts = HostStore(hosts: [local, remote]) { host in
             host.id == local.id ? localBackend : remoteBackend
@@ -642,14 +642,14 @@ struct LibraryLocalSaveTests {
         #expect(library.localSaveReport.contains("1 were not copied"))
         #expect(library.localSaveFailures.contains { $0.contains("taken.png") })
         #expect(library.localSaveAlertPresented)
-        #expect(localBackend.callCount("gallery") == 2)
+        #expect(localBackend.callCount("gallery") == 3)
     }
 
     @Test func syncAllIgnoresSelectionAndCopiesEveryMediaKindAndEmptyCollections() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("remote")
-        let localBackend = FakeBackend(host: local, noRetainedMedia: true)
-        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true)
+        let localBackend = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
+        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
         remoteBackend.mediaAnswer = Data([1, 2, 3])
         let print = try! MoldJSON.decoder.decode(GalleryPrint.self, from: Data(#"""
             {
@@ -695,9 +695,9 @@ struct LibraryLocalSaveTests {
                              name: "first", baseURL: URL(string: "http://first")!)
         let second = MoldHost(id: UUID(),
                               name: "second", baseURL: URL(string: "http://second")!)
-        let localBackend = FakeBackend(host: local, noRetainedMedia: true)
-        let firstBackend = FakeBackend(host: first, noRetainedMedia: true)
-        let secondBackend = FakeBackend(host: second, noRetainedMedia: true)
+        let localBackend = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
+        let firstBackend = FakeBackend(host: first, noRetainedMedia: true, syncOrganization: true)
+        let secondBackend = FakeBackend(host: second, noRetainedMedia: true, syncOrganization: true)
         firstBackend.prints = [versionedPrint("same.png")]
         secondBackend.prints = [versionedPrint("same.png")]
         firstBackend.mediaAnswer = Data([1, 2, 3])
@@ -731,8 +731,8 @@ struct LibraryLocalSaveTests {
     @Test func syncAllKeepsDifferentRecipesEvenWhenMediaBytesMatch() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("different-recipe")
-        let localBackend = FakeBackend(host: local, noRetainedMedia: true)
-        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true)
+        let localBackend = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
+        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
         let name = "same.png"
         localBackend.prints = [versionedPrint(name, prompt: "local recipe")]
         localBackend.mediaAnswers[name] = Data([1, 2, 3])
@@ -752,8 +752,8 @@ struct LibraryLocalSaveTests {
     @Test func syncAllBoundsCollisionNamesToFileSystemLimit() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("long-names")
-        let localBackend = FakeBackend(host: local, noRetainedMedia: true)
-        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true)
+        let localBackend = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
+        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
         let name = String(repeating: "🌟", count: 59) + ".png"
         localBackend.prints = [versionedPrint(name, prompt: "local")]
         localBackend.mediaAnswers[name] = Data([1, 2, 3])
@@ -774,8 +774,8 @@ struct LibraryLocalSaveTests {
     @Test func syncAllReportsAnUnavailableRemoteHost() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("unavailable")
-        let localBackend = FakeBackend(host: local, noRetainedMedia: true)
-        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true)
+        let localBackend = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
+        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
         remoteBackend.plantedErrors["gallery"] = MoldClientError.malformedResponse
         let hosts = HostStore(hosts: [local, remote]) { machine in
             machine.id == local.id ? localBackend : remoteBackend
@@ -792,8 +792,8 @@ struct LibraryLocalSaveTests {
     @Test func failedOrganizationIsRetriedAfterMediaWasAlreadyPresent() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("retry-organization")
-        let localBackend = FakeBackend(host: local, noRetainedMedia: true)
-        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true)
+        let localBackend = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
+        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
         var mutable = GalleryPrint.Mutable(versionedPrint("same.png", prompt: "recipe"))
         mutable.title = "Remote title"
         remoteBackend.prints = [mutable.build()]
@@ -807,7 +807,10 @@ struct LibraryLocalSaveTests {
 
         await library.syncAllLocally()
         #expect(localBackend.importedNames == ["same.png"])
-        #expect(library.localSaveFailures.contains { $0.contains("Print titles") })
+        #expect(library.localSaveFailures.contains { $0.contains("organization could not be verified") })
+        let organizationKey = LocalSyncRecord.key(hostID: remote.id, filename: "same.png")
+        #expect(library.syncRecords.records(hosts.instanceID(of: local.id))[organizationKey]?.organizationIntent != nil,
+            "upgrading the output receipt must preserve pending organization")
 
         localBackend.prints = [versionedPrint("same.png", prompt: "recipe")]
         localBackend.mediaAnswers["same.png"] = Data([1, 2, 3])
@@ -820,8 +823,8 @@ struct LibraryLocalSaveTests {
     @Test func anAlreadyLocalPrintKeepsItsOwnTitleOnSyncAll() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("existing-local-title")
-        let localBackend = FakeBackend(host: local, noRetainedMedia: true)
-        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true)
+        let localBackend = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
+        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
         var localMutable = GalleryPrint.Mutable(versionedPrint("same.png", prompt: "recipe"))
         localMutable.title = "My title"
         localBackend.prints = [localMutable.build()]
@@ -844,8 +847,8 @@ struct LibraryLocalSaveTests {
     @Test func uncertainImportResponseKeepsPendingOrganizationForRetry() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("uncertain-import")
-        let localBackend = FakeBackend(host: local, noRetainedMedia: true)
-        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true)
+        let localBackend = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
+        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
         var mutable = GalleryPrint.Mutable(versionedPrint("clip.mp4", prompt: "recipe"))
         mutable.title = "Remote clip"
         remoteBackend.prints = [mutable.build()]
@@ -873,8 +876,8 @@ struct LibraryLocalSaveTests {
     @Test func impossibleStagingSizeReportsFailureWithoutDownloading() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("huge-gallery-row")
-        let localBackend = FakeBackend(host: local, noRetainedMedia: true)
-        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true)
+        let localBackend = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
+        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
         let row = try! JSONSerialization.data(withJSONObject: [
             "filename": "huge.mp4", "timestamp": 1000,
             "size_bytes": Int.max, "metadata": ["prompt": "clip"],
@@ -895,8 +898,8 @@ struct LibraryLocalSaveTests {
     @Test func remoteTrashDoesNotSendALocalCopyToTrash() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("remote")
-        let localBackend = FakeBackend(host: local, noRetainedMedia: true)
-        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true)
+        let localBackend = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
+        let remoteBackend = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
         let hosts = HostStore(hosts: [local, remote]) { host in
             host.id == local.id ? localBackend : remoteBackend
         }
@@ -916,8 +919,8 @@ struct LibraryLocalSaveTests {
     @Test func syncDoesNotRecreateDestinationTrash() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("trashed-sync-source")
-        let source = FakeBackend(host: remote, noRetainedMedia: true)
-        let destination = FakeBackend(host: local, noRetainedMedia: true)
+        let source = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        let destination = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
         let print = versionedPrint("intentionally-trashed.png", prompt: "fox")
         source.prints = [print]
         source.mediaAnswer = Data([1, 2, 3])
@@ -934,8 +937,8 @@ struct LibraryLocalSaveTests {
     @Test func syncDoesNotRecreateRecordedCopyRemovedFromDestination() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("removed-sync-source")
-        let source = FakeBackend(host: remote, noRetainedMedia: true)
-        let destination = FakeBackend(host: local, noRetainedMedia: true)
+        let source = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        let destination = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
         let print = versionedPrint("intentionally-deleted.png", prompt: "fox")
         source.prints = [print]
         destination.prints = [print]
@@ -954,8 +957,8 @@ struct LibraryLocalSaveTests {
     @Test func replacedSourceRouteCannotPairOldListingWithNewBackend() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("original-source-route")
-        let source = FakeBackend(host: remote, noRetainedMedia: true)
-        let destination = FakeBackend(host: local, noRetainedMedia: true)
+        let source = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        let destination = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
         source.prints = [versionedPrint("old-route.png", prompt: "fox")]
         source.delays["gallery"] = .milliseconds(100)
         source.mediaAnswer = Data([1, 2, 3])
@@ -975,8 +978,8 @@ struct LibraryLocalSaveTests {
     @Test func newerShowWinsDuringSyncCollectionCreation() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("visibility-race-source")
-        let source = FakeBackend(host: remote, noRetainedMedia: true)
-        let destination = FakeBackend(host: local, noRetainedMedia: true)
+        let source = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        let destination = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
         let slug = "sync-race-\(UUID().uuidString)"
         source.collectionRows = [Collection(id: "remote-hidden", name: slug, slug: slug, hidden: true)]
         destination.collectionCreateResponses[slug] = Collection(id: "local-hidden", name: slug, slug: slug, hidden: false)
@@ -996,8 +999,8 @@ struct LibraryLocalSaveTests {
     @Test func recurringSyncKeepsLocalCollectionRemovalButExplicitSaveCanRestoreIt() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("membership-removal-source")
-        let source = FakeBackend(host: remote, noRetainedMedia: true)
-        let destination = FakeBackend(host: local, noRetainedMedia: true)
+        let source = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        let destination = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
         let slug = "membership-\(UUID().uuidString)"
         source.collectionRows = [Collection(id: "source-shelf", name: slug, slug: slug)]
         destination.collectionRows = [Collection(id: "destination-shelf", name: slug, slug: slug)]
@@ -1020,6 +1023,106 @@ struct LibraryLocalSaveTests {
         #expect(destination.mutationRequests.allSatisfy { $0.addToCollection == nil })
         await library.saveLocally([LibraryEntry(host: remote, print: source.prints[0])])
         #expect(destination.mutationRequests.contains { $0.addToCollection?.name == slug })
+    }
+
+    @Test func cachedCopyReconcilesNewOrganizationAndPreservesLocalRemoval() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("organization-origin")
+        let source = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        let destination = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
+        let original = versionedPrint("organization.png", prompt: "fox")
+        source.prints = [original]; destination.prints = [original]
+        source.mediaAnswer = Data([1, 2, 3]); destination.mediaAnswer = Data([1, 2, 3])
+        let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? destination : source }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+        await library.syncAllLocally()
+        var changed = GalleryPrint.Mutable(original)
+        changed.tags = ["added"]; changed.title = "Origin title"; changed.favorite = true
+        source.prints = [changed.build()]
+        await library.syncAllLocally()
+        #expect(destination.prints[0].tagList == ["added"])
+        #expect(destination.prints[0].title == "Origin title")
+        #expect(destination.prints[0].isFavorite)
+        let key = LocalSyncRecord.key(hostID: remote.id, filename: original.filename)
+        #expect(library.syncRecords.records(hosts.instanceID(of: local.id))[key]?.organization?.ownedTags == ["added"])
+        var edited = GalleryPrint.Mutable(destination.prints[0])
+        edited.tags = ["mine"]; edited.title = "Destination title"; edited.favorite = false
+        destination.prints = [edited.build()]
+        await library.syncAllLocally()
+        #expect(destination.prints[0].tagList == ["mine"])
+        #expect(destination.prints[0].title == "Destination title")
+        #expect(!destination.prints[0].isFavorite)
+        #expect(destination.importedNames.isEmpty)
+        #expect(library.localSaveFailures.isEmpty)
+    }
+
+    @Test func syncCopiesToChosenRemoteDestinationWithoutRecreatingVerifiedOrigin() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("chosen-destination")
+        let source = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
+        let destination = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        source.prints = [versionedPrint("fanout.png", prompt: "fox")]
+        source.mediaAnswer = Data([1, 2, 3])
+        let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? source : destination }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        hosts.reachability[remote.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+        await library.syncAll(to: remote)
+        #expect(destination.importedNames == ["fanout.png"])
+        #expect(source.importedNames.isEmpty)
+        await library.syncAllLocally()
+        #expect(source.importedNames.isEmpty)
+        #expect(library.localSaveFailures.isEmpty)
+    }
+
+    @Test func hiddenTrashOriginReassertsPrivacyOnVerifiedBackupWithoutRecopyingOutput() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("privacy-trash-origin")
+        let source = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        let destination = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
+        source.collectionRows = [Collection(id: "source-private", name: "Private", slug: "private", hidden: true)]
+        destination.collectionRows = [Collection(id: "backup-private", name: "Private", slug: "private", hidden: true)]
+        var original = GalleryPrint.Mutable(versionedPrint("private-backup.png", prompt: "fox"))
+        original.collections = ["source-private"]
+        source.prints = [original.build()]; source.mediaAnswer = Data([1, 2, 3])
+        let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? destination : source }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+        await library.syncAllLocally()
+        #expect(destination.prints[0].collectionList == ["backup-private"])
+        source.trashedRows = [FakeFixtures.trashState(original.build(), at: 2)]
+        source.prints = []
+        var unfiled = GalleryPrint.Mutable(destination.prints[0]); unfiled.collections = []
+        destination.prints = [unfiled.build()]
+        let downloads = source.callCount("mediaFile")
+        await library.syncAllLocally()
+        #expect(destination.prints[0].collectionList == ["backup-private"])
+        #expect(source.callCount("mediaFile") == downloads)
+        #expect(destination.importedNames.count == 1)
+        #expect(library.localSaveFailures.isEmpty)
+    }
+
+    @Test func threeDestinationRingNeverCopiesForwardedOutputsBackToOrigin() async {
+        let origin = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let second = host("ring-second"), third = host("ring-third")
+        let machines = [origin, second, third]
+        let backends = Dictionary(uniqueKeysWithValues: machines.map {
+            ($0.id, FakeBackend(host: $0, noRetainedMedia: true, syncOrganization: true))
+        })
+        let source = backends[origin.id]!
+        source.prints = [versionedPrint("ring.png", prompt: "fox")]
+        source.mediaAnswer = Data([1, 2, 3])
+        let hosts = HostStore(hosts: machines) { backends[$0.id]! }
+        for machine in machines { hosts.reachability[machine.id] = .up(FakeFixtures.serverStatus()) }
+        let library = LibraryStore(hosts: hosts)
+        await library.syncAll(to: second)
+        await library.syncAll(to: third)
+        await library.syncAll(to: origin)
+        #expect(source.importedNames.isEmpty)
+        #expect(backends[second.id]?.importedNames == ["ring.png"])
+        #expect(backends[third.id]?.importedNames == ["ring.png"])
+        #expect(library.localSaveFailures.isEmpty)
     }
 
 }

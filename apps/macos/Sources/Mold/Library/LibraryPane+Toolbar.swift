@@ -32,10 +32,16 @@ extension LibraryPane {
         }
         ToolbarItem {
             Menu {
-                Toggle("Keep This Mac in Sync", isOn: Binding(
-                    get: { library.syncSession.keepInSync },
-                    set: { library.syncSession.setKeepInSync($0, in: library) }))
-                    .help("Copy new and changed remote prints to this Mac as machines announce them.")
+                ForEach(hosts.hosts) { destination in
+                    Button("Sync All to \(destination.name)") {
+                        library.syncSession.syncNow(to: destination, in: library)
+                    }
+                    .disabled(!hosts.isUp(destination))
+                    Toggle("Keep \(destination.name) in Sync", isOn: Binding(
+                        get: { library.syncSession.keepInSync(to: destination, in: library) },
+                        set: { library.syncSession.setKeepInSync($0, to: destination, in: library) }))
+                        .disabled(hosts.instanceID(of: destination.id) == nil)
+                }
             } label: {
                 Label(library.syncSession.keepInSync ? "Keeping This Mac in Sync" : "Sync All to This Mac",
                       systemImage: library.syncSession.keepInSync
@@ -43,7 +49,7 @@ extension LibraryPane {
             } primaryAction: {
                 library.syncSession.syncNow(in: library)
             }
-            .help("Copy remote media and collections to this Mac now. Removed local copies stay removed. Use the menu to keep this Mac in sync automatically.")
+            .help("Choose a destination to copy all prints or keep that machine in sync. Removed copies stay removed until deliberately copied again.")
             // Not disabled while a run is in flight: the toggle must stay
             // reachable, and a press mid-run is guarded (queued with Keep in
             // Sync on, otherwise ignored) by `syncNow` itself.

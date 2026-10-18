@@ -71,13 +71,13 @@ struct GenerateView: View {
             }
             Button("Cancel", role: .cancel) { router.pendingSource = nil }
         }
-        .task(id: router.pendingSource?.id) {
+        .task(id: router.pendingSourceRequest) {
             guard let entry = router.pendingSource else { return }
-            if generate.recipe?.capabilities.mesh?.namedViews?.mode.isVisible == true {
+            if router.pendingSourceAttachment == nil, generate.recipe?.capabilities.mesh?.namedViews?.mode.isVisible == true {
                 choosingSourceRole = true
                 return
             }
-            await generate.useAsSource(entry)
+            await generate.useAsSource(entry, attachment: router.pendingSourceAttachment)
             if router.pendingSource?.id == entry.id { router.pendingSource = nil }
         }
         .onChange(of: hosts.models, initial: true) { _, _ in generate.settleChoice() }

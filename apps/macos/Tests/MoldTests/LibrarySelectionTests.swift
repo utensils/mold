@@ -51,7 +51,7 @@ struct LibrarySelectionTests {
         let selection = selection(count: 1, editing: false, performed: performed)
 
         #expect(selection.plan.items.compactMap(\.kind)
-            == [.open, .quickLook, .reuse, .favorite(true), .copy, .save, .trash])
+            == [.open, .quickLook, .reuse, .favorite(true), .copy, .copyFileName, .save, .trash])
 
         selection.perform(.quickLook)
         #expect(performed.actions == [.quickLook])

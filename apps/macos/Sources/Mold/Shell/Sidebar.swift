@@ -134,7 +134,7 @@ struct Sidebar: View {
         return switch scope {
         case .favorites:
             LibraryScope.favorites.resolve(navigation.query, shelves: library.shelves,
-                hiddenCollectionIDs: library.hiddenCollectionIDs).apply(to: library.items).count
+                hiddenCollectionIDs: library.hiddenCollectionIDs, privacyEvidence: library.trashed, privacyLinks: library.syncLinks()).apply(to: library.items).count
         case .trash: navigation.query.apply(to: library.trashed).count
         case .all, .collection: nil
         }

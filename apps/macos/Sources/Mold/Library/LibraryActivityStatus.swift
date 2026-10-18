@@ -6,7 +6,20 @@ struct LibraryActivityStatus: View {
     @Environment(LibraryStore.self) private var library
     @State private var presentation = ContextMenuPresentation<LibraryActivitySnapshot>()
     @State private var completionRevision = 0
+    @State private var mutationID = UUID()
     private let tracking = ContextMenuTracking.shared
+
+    private var syncID: String {
+        "sync:\(library.syncActivityID):" + library.localSaveIssueKeys.values.sorted().joined(separator: "|")
+            + (library.localSaveFailures.isEmpty ? "" : ":failure:" + library.localSaveFailures.sorted().joined(separator: "|"))
+    }
+    private var bulkResultID: String { bulkID + (library.bulkResultHasIssues ? ":issue:\(library.bulkResult ?? "")" : "") }
+    private var bulkID: String { "bulk:\(library.bulkActivityID)" }
+    private func dismiss(_ identity: String) -> some View {
+        Button { library.activityDisclosure.dismiss(identity) } label: {
+            Image(systemName: "xmark").accessibilityLabel("Dismiss status")
+        }.buttonStyle(.borderless).help("Hide this status without stopping the operation")
+    }
 
     var body: some View {
         let _ = completionRevision
@@ -14,42 +27,48 @@ struct LibraryActivityStatus: View {
         let status = presentation.resolve(current, isTracking: tracking.isTracking,
                                           isEmpty: current.isEmpty)
         return VStack(spacing: 0) {
-            if let progress = status.localSaveProgress {
+            if let progress = status.localSaveProgress, library.activityDisclosure.shows(syncID) {
                 bulkStatusRow(progress) {
                     Button("Stop Sync") { library.syncSession.stop(in: library) }
                         .disabled(status.localSaveStopRequested)
+                    dismiss(syncID)
                 }
             }
-            if status.localSaveProgress == nil, !status.syncReport.isEmpty {
+            if status.localSaveProgress == nil, !status.syncReport.isEmpty, library.activityDisclosure.shows(syncID) {
                 HStack {
                     Image(systemName: status.syncHasIssues ? "exclamationmark.triangle" : "checkmark.circle")
                         .accessibilityLabel(status.syncHasIssues ? "Sync has issues" : "Sync complete")
                     Text(status.syncReport).lineLimit(3)
                     Spacer()
                     Button("Details") { library.localSaveAlertPresented = true }
+                    dismiss(syncID)
                 }.padding(12).background(.bar)
             }
-            if let progress = status.bulkProgress {
+            if let progress = status.bulkProgress, library.activityDisclosure.shows(bulkID) {
                 bulkStatusRow(progress) {
                     Button(status.bulkEmptying ? "Stop After Current Machine" : "Stop After Current Batch") { library.bulkStopRequested = true }
                         .disabled(status.bulkStopRequested)
+                    dismiss(bulkID)
                 }
             }
-            if let progress = status.mutationProgress {
-                bulkStatusRow(progress) { EmptyView() }
+            if let progress = status.mutationProgress, library.activityDisclosure.shows("mutation:\(mutationID)") {
+                bulkStatusRow(progress) { dismiss("mutation:\(mutationID)") }
             }
             ForEach(status.activities.keys.sorted(by: { $0.uuidString < $1.uuidString }), id: \.self) { id in
-                bulkStatusRow(status.activities[id] ?? "Working…") { EmptyView() }
+                if library.activityDisclosure.shows("activity:\(id)") {
+                    bulkStatusRow(status.activities[id] ?? "Working…") { dismiss("activity:\(id)") }
+                }
             }
-            if let result = status.bulkResult, !status.bulkRunning {
+            if let result = status.bulkResult, !status.bulkRunning, library.activityDisclosure.shows(bulkResultID) {
                 HStack {
                     Text(result)
                     Spacer()
-                    Button("Dismiss") { library.bulkResult = nil }
+                    Button("Dismiss") { library.activityDisclosure.dismiss(bulkResultID) }
                 }.padding(12).background(.bar)
             }
         }
         .onReceive(tracking.didFinishTracking) { completionRevision = $0 }
+        .onChange(of: status.mutationProgress == nil) { _, empty in if !empty { mutationID = UUID() } }
     }
 }
 

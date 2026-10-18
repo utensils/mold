@@ -43,10 +43,10 @@ import Testing
     @Test func oneSelectedPrintIsOfferedEverythingInOneOrder() {
         let offered = plan(shelves: [shelf("Smurfs")], formats: ["mp4"])
         #expect(titles(offered) == ["Open", "Quick Look “robot.png”", "Use These Settings",
-                                    "Add to Favourites", "Move to Collection", "Copy",
+                                    "Add to Favourites", "Move to Collection", "Copy", "Copy File Name",
                                     "Save a Copy…", "Export…", "Move to Trash"])
         #expect(kinds(offered) == [.open, .quickLook, .reuse, .favorite(true),
-                                   .copy, .save, .trash])
+                                   .copy, .copyFileName, .save, .trash])
     }
 
     /// Destructive last, after a divider, and marked.
@@ -98,13 +98,15 @@ import Testing
         let smurfs = shelf("Smurfs")
         let offered = plan(scope: .collection, shelves: [smurfs], enclosing: smurfs)
         #expect(kinds(offered).contains(.unfile(slug: "smurfs")))
-        #expect(titles(offered).suffix(3)
+        #expect(!kinds(offered).contains(.renameCollection))
+        #expect(!kinds(offered).contains(.deleteCollection))
+        #expect(offered.collectionItems.filter { !$0.isSeparator }.map(\.title)
             == ["Rename “Smurfs”…", "Hide from All Prints", "Delete Collection…"])
     }
 
     @Test func aHiddenCollectionIsOfferedTheOtherHalfOfTheToggle() {
         let hidden = shelf("Smurfs", hidden: true)
-        let items = plan(scope: .collection, enclosing: hidden).items
+        let items = plan(scope: .collection, enclosing: hidden).collectionItems
         let toggle = items.first { $0.kind == .setCollectionHidden(false) }
         #expect(toggle?.title == "Show in All Prints")
     }

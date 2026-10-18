@@ -27,6 +27,7 @@ struct SourceMediaCard: View {
     }
 
     var body: some View {
+        SourceMediaActionsView(owner: owner, member: member, gallery: gallery) {
         VStack(alignment: .leading, spacing: 8) {
             let layout = gallery ? AnyLayout(VStackLayout(alignment: .leading, spacing: 10)) : AnyLayout(HStackLayout(alignment: .top, spacing: 12))
             if showsPreview { layout {
@@ -75,6 +76,10 @@ struct SourceMediaCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(gallery ? 12 : 0)
         .background(.quaternary.opacity(gallery ? 0.25 : 0), in: RoundedRectangle(cornerRadius: 16))
+        } extra: {
+            if let openSource { Button("Open source", action: openSource) }
+            ForEach(choices) { destination in Button(destination.title) { failure = nil; choice = destination } }
+        }
         .accessibilityElement(children: .contain)
         .onDisappear { preview = nil; displayedKey = nil }
         .task(id: previewKey) {
@@ -106,7 +111,7 @@ struct SourceMediaCard: View {
         let instance = hosts.instanceID(of: owner.hostID)
         let fence = ReferenceImportFence(model: generate.modelName, host: target, recipe: recipe, media: generate.draft.media)
         let destinationRoute = target.flatMap(hosts.host)
-        let destinationInstance = target.flatMap { hosts.instanceID(of: $0) }
+        let destinationInstance = target.flatMap({ hosts.instanceID(of: $0) })
         let revisions = generate.mediaRevisions
         let snapshot = generate.draft
         let sourceAuthority = previewKey.authority
@@ -117,7 +122,7 @@ struct SourceMediaCard: View {
             guard !Task.isCancelled, library.allowsSource(previewKey.authority, detail: !gallery), hosts.host(owner.hostID) == host, hosts.instanceID(of: owner.hostID) == instance,
                   library.allowsSource(sourceAuthority, detail: !gallery), library.sourceMediaCatalog.revision == sourceRevision,
                   destinationRoute == target.flatMap(hosts.host),
-                  destinationInstance == target.flatMap { hosts.instanceID(of: $0) },
+                  destinationInstance == target.flatMap({ hosts.instanceID(of: $0) }),
                   revisions == generate.mediaRevisions,
                   fence.isCurrent(model: generate.modelName, host: target, recipe: self.recipe, media: generate.draft.media) else {
                 if !Task.isCancelled { failure = "The draft or machine changed. Choose the source again to retry." }
@@ -127,10 +132,18 @@ struct SourceMediaCard: View {
             current.media = staged.media
             if current.width == snapshot.width { current.width = staged.width }
             if current.height == snapshot.height { current.height = staged.height }
+            if current.frames == snapshot.frames { current.frames = staged.frames }
             generate.draft = current
             dismiss(); router.openedPrint = nil; router.selection = .go(.generate)
         } catch {
-            if !Task.isCancelled { failure = error.localizedDescription }
+            guard !Task.isCancelled, library.allowsSource(sourceAuthority, detail: !gallery),
+                  library.sourceMediaCatalog.revision == sourceRevision,
+                  hosts.host(owner.hostID) == host, hosts.instanceID(of: owner.hostID) == instance,
+                  destinationRoute == target.flatMap(hosts.host),
+                  destinationInstance == target.flatMap({ hosts.instanceID(of: $0) }), revisions == generate.mediaRevisions,
+                  fence.isCurrent(model: generate.modelName, host: target, recipe: self.recipe, media: generate.draft.media)
+            else { return }
+            failure = error.localizedDescription
         }
     }
 }

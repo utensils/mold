@@ -25,6 +25,7 @@ extension LibraryStore {
         bulkRunning = true
         bulkStopRequested = false
         bulkResult = nil
+        bulkResultHasIssues = false
         defer {
             bulkRunning = false
             bulkProgress = nil
@@ -61,12 +62,10 @@ extension LibraryStore {
                     case .trash: try await client.trash(names)
                     case .restore: try await client.restoreFromTrash(names)
                     case .delete:
-                        let trashed = batch.filter { $0.print.trashedAt != nil }.map(\.print.filename)
-                        let live = batch.filter { $0.print.trashedAt == nil }.map(\.print.filename)
-                        // Trash deletion must not destroy a concurrently restored
-                        // live print on the same host.
-                        if !trashed.isEmpty { try await client.deleteTrashed(trashed) }
-                        if !live.isEmpty { try await client.deleteForever(live) }
+                        // Permanent deletion is a Trash action. Its listing
+                        // is authoritative even when an older row has no stamp;
+                        // a concurrent restore must remain protected server-side.
+                        try await client.deleteTrashed(names)
                     }
                     guard hosts.host(host.id) == host else {
                         failed += rows.count - start
@@ -104,8 +103,10 @@ extension LibraryStore {
         // Routine trash succeeds silently; interrupted or uncertain work remains visible.
         if action == .trash, !reconciliationFailed, failed == 0, completed == total {
             bulkResult = nil
+        bulkResultHasIssues = false
             return
         }
+        bulkResultHasIssues = reconciliationFailed || failed > 0
         bulkResult = "\(action.rawValue): \(completed.formatted()) of \(total.formatted()) copies confirmed. \(ending)"
             + (failureDetails.isEmpty ? "" : " " + failureDetails.joined(separator: " · "))
     }
@@ -119,6 +120,7 @@ extension LibraryStore {
         bulkEmptying = true
         bulkStopRequested = false
         bulkResult = nil
+        bulkResultHasIssues = false
         defer {
             bulkRunning = false
             bulkEmptying = false
@@ -152,6 +154,7 @@ extension LibraryStore {
         }
         let ending = failed ? "Some results could not be confirmed; check the machine."
             : completed < destinations.count ? "Stopped after the current machine." : "Finished."
+        bulkResultHasIssues = failed
         bulkResult = "Emptying Trash: \(completed) of \(destinations.count) machines confirmed. \(ending)"
             + (failureDetails.isEmpty ? "" : " " + failureDetails.joined(separator: " · "))
     }

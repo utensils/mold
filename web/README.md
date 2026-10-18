@@ -18,6 +18,12 @@ Switch and Forget leave remembered alternatives at the connection screen until
 you choose one. Thumbnails are cached by the concrete machine URL and instance,
 including across reloads; forgetting that machine evicts its cached tiles.
 
+## Library copies and original inputs
+
+Print menus offer **Copy to** another connected machine. Selection mode can copy several prints. Browser Copy is manual, serial, cancellable, and limited to 64 MiB per print including retained inputs; it uses each machine's captured authenticated Secure or Regular connection. The destination must support retained-media transfer before a source-bearing print is imported. Interrupted copies keep a repair receipt, so repeating Copy repairs retained inputs and organization without intentionally duplicating the output. An older print whose originals were never retained is reported separately; damaged or unauthorized originals refuse the copy.
+
+Source Media cards and their original viewer offer a host-scoped `source:<print filename>#<member-id>`, a shell-quoted CLI download command, Copy File Name, Save a Copy, and file clipboard/share actions where the browser supports them. Source IDs refer to the displayed owning machine. Image sources and image print menus offer **Use as first frame** / **Use as last frame** when the selected recipe accepts them, including LTX endpoint keyframes. Established input absence says **No source media.**; read failures remain retryable. Hidden membership on a trashed copy continues protecting live copies until its removal is confirmed.
+
 ## Inspecting inputs
 
 Use **View** (native apps) or **View original** (web, desktop and mobile) beside an attached input to inspect it without replacing or removing it. References, source/target pictures, boundary frames, masks, control and identity pictures, and attached video/audio have separate viewing actions. Image previews fit the whole picture. Use **Actual size** on desktop and web, or pinch to zoom in the native iOS app, for close inspection. **Done** or Escape returns to the attachment or picker. Picker previews do not select or attach the picture. Queue viewing actions show the full submitted media, which may already have been fitted to the generation canvas; older machines without the original-input endpoint report it unavailable.

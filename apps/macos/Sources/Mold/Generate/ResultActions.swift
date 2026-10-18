@@ -17,15 +17,21 @@ struct ResultActions {
     /// `nil` where the recipe takes no references, or the strip is full.
     let addAsReference: ((BatchResult) -> Void)?
 
+    var useAsFirstFrame: ((BatchResult) -> Void)?
+    var useAsLastFrame: ((BatchResult) -> Void)?
+
     var menu: [GenerateMenus.Row] {
         GenerateMenus.result(canUseAsSource: useAsSource != nil,
-                             canAddReference: addAsReference != nil)
+                             canAddReference: addAsReference != nil, canUseEndpoints: useAsFirstFrame != nil && useAsLastFrame != nil)
     }
 
     func perform(_ action: GenerateAction, on result: BatchResult) {
         switch action {
         case .saveACopy: save(result)
         case .copyResult: copy(result)
+        case .copyFileName: if let filename = result.filename { Clipboard.put(filename) }
+        case .useAsFirstFrame: useAsFirstFrame?(result)
+        case .useAsLastFrame: useAsLastFrame?(result)
         case .showInLibrary: showInLibrary()
         case .useAsSourceImage: useAsSource?(result)
         case .addAsReference: addAsReference?(result)

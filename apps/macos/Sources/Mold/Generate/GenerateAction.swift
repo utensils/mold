@@ -15,6 +15,8 @@ enum GenerateAction: Hashable, CaseIterable {
     case copyResult
     case showInLibrary
     case useAsSourceImage
+    case useAsFirstFrame, useAsLastFrame
+    case copyFileName
     case addAsReference
 
     // The source well.
@@ -64,6 +66,9 @@ enum GenerateAction: Hashable, CaseIterable {
         case .saveACopy: "Save a Copy…"
         case .copyResult, .copyPrompt: "Copy"
         case .showInLibrary: "Show in Library"
+        case .copyFileName: "Copy File Name"
+        case .useAsFirstFrame: "Use as First Frame"
+        case .useAsLastFrame: "Use as Last Frame"
         case .useAsSourceImage: "Use as Source Image"
         case .addAsReference: "Add as Reference"
         case .viewInput: "View Original"

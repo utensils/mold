@@ -92,6 +92,9 @@ export interface HostOrganizationSnapshot {
   trashListingOk: boolean;
   collectionsListingOk?: boolean;
   routeUrl?: string;
+  /** Volatile authority only; never persisted or displayed. */
+  routeCredential?: string | null;
+  routeMode?: string;
   instanceId?: string | null;
   visibilityReadRevision?: number;
   visibilityError?: string;
@@ -123,6 +126,8 @@ function emptySnapshot(host: HostEntry): HostOrganizationSnapshot {
   return {
     hostId: host.id,
     routeUrl: host.url,
+    routeCredential: host.apiKey ?? null,
+    routeMode: host.connectionMode ?? "secure",
     instanceId: host.instanceId ?? null,
     hostLabel: host.name,
     organize: null,
@@ -209,12 +214,15 @@ export function fetchOrganization(
   ).then(async (snapshots) => {
     for (const next of snapshots) {
       const old = previous.find((s) => s.hostId === next.hostId);
-      if (
-        !next.collectionsListingOk &&
+      const sameAuthority =
         old &&
         old.routeUrl === next.routeUrl &&
-        old.instanceId === next.instanceId
-      ) {
+        old.instanceId === next.instanceId &&
+        (old.routeCredential === undefined ||
+          old.routeCredential === next.routeCredential) &&
+        (old.routeMode === undefined || old.routeMode === next.routeMode);
+      if (sameAuthority && !next.trashListingOk) next.trashed = old.trashed;
+      if (!next.collectionsListingOk && sameAuthority) {
         next.collections = protectCollectionVisibilityListing(
           old.collections,
           next.visibilityReadRevision!,

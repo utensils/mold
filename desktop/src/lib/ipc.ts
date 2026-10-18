@@ -1,3 +1,5 @@
+import type { CopyMachine, CopyOffer, CopyOptions } from "@studio/api/galleryCopy";
+import { LIBRARY_SYNC_FORGET } from "./librarySyncEvents";
 import {
   CONNECTION_MODE_HEADER,
   forgetConnectionMode,
@@ -182,6 +184,84 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
   return invoke<T>(cmd, args);
 }
 
+async function nativeCopyOperation<T>(
+  command:
+    | "library_copy_output"
+    | "library_copy_sources"
+    | "library_copy_matches"
+    | "library_copy_legacy_offer",
+  args: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (!inTauri()) throw new Error("Native Library transfers require the desktop app.");
+  signal?.throwIfAborted();
+  const operationId = crypto.randomUUID();
+  let cancellation: Promise<unknown> | undefined;
+  const cancel = () => {
+    cancellation = invoke("library_copy_cancel", { operationId }).catch(() => undefined);
+  };
+  signal?.addEventListener("abort", cancel, { once: true });
+  try {
+    const result = await invoke<T>(command, { ...args, operationId });
+    signal?.throwIfAborted();
+    return result;
+  } finally {
+    signal?.removeEventListener("abort", cancel);
+    // A cancel can beat native registration or arrive just after native work
+    // finished. Await it, then retire that operation's pending tombstone.
+    await cancellation;
+    await invoke("library_copy_release", { operationId }).catch(() => undefined);
+  }
+}
+export function nativeLibraryCopyHooks(): Pick<
+  CopyOptions,
+  "nativeImportOutput" | "nativeTransferSources" | "nativeMatchesOutput" | "nativeLegacyOffer"
+> {
+  if (!inTauri()) return {};
+  return {
+    nativeImportOutput: (source, destination, filename, expected, signal) =>
+      ipc.copyGalleryOutput(source, destination, filename, expected, signal),
+    nativeTransferSources: (
+      source,
+      destination,
+      sourceFilename,
+      destinationFilename,
+      sourceOffer,
+      destinationOffer,
+      signal,
+    ) =>
+      ipc.copyGallerySources(
+        source,
+        destination,
+        sourceFilename,
+        destinationFilename,
+        sourceOffer,
+        destinationOffer,
+        signal,
+      ),
+    nativeMatchesOutput: (
+      source,
+      destination,
+      sourceFilename,
+      destinationFilename,
+      sourceOffer,
+      destinationOffer,
+      signal,
+    ) =>
+      ipc.copyGalleryMatches(
+        source,
+        destination,
+        sourceFilename,
+        destinationFilename,
+        sourceOffer,
+        destinationOffer,
+        signal,
+      ),
+    nativeLegacyOffer: (source, filename, signal) =>
+      ipc.copyGalleryLegacyOffer(source, filename, signal),
+  };
+}
+
 /** Engine the browser build talks to when there is no Tauri backend. */
 const browserFallbackConnection = (): ConnectionInfo => ({
   mode: "external",
@@ -264,7 +344,9 @@ export const ipc = {
       }
     }
     if (!inTauri()) return [];
-    return invoke<SavedHost[]>("forget_remote_host", { id });
+    const hosts = await invoke<SavedHost[]>("forget_remote_host", { id });
+    window.dispatchEvent(new CustomEvent(LIBRARY_SYNC_FORGET, { detail: { id } }));
+    return hosts;
   },
   async testRemoteHost(
     url: string,
@@ -498,6 +580,93 @@ export const ipc = {
     if (!picked) return null;
     const paths = Array.isArray(picked) ? picked : [picked];
     return Promise.all(paths.map((path) => ipc.importSourceImage(path)));
+  },
+  librarySyncRead(): Promise<import("@studio/lib/galleryCopyJournal").LibrarySyncDocument | null> {
+    return invoke("library_sync_read");
+  },
+  librarySyncWrite(
+    document: import("@studio/lib/galleryCopyJournal").LibrarySyncDocument,
+  ): Promise<void> {
+    return invoke("library_sync_write", { document });
+  },
+  copyGalleryLegacyOffer(
+    source: CopyMachine,
+    filename: string,
+    signal?: AbortSignal,
+  ): Promise<CopyOffer> {
+    return nativeCopyOperation(
+      "library_copy_legacy_offer",
+      { source: source.target, sourceInstance: source.instanceId, filename },
+      signal,
+    );
+  },
+  copyGalleryOutput(
+    source: CopyMachine,
+    destination: CopyMachine,
+    filename: string,
+    expected: CopyOffer,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    return nativeCopyOperation(
+      "library_copy_output",
+      {
+        source: source.target,
+        destination: destination.target,
+        sourceInstance: source.instanceId,
+        destinationInstance: destination.instanceId,
+        filename,
+        expected,
+      },
+      signal,
+    );
+  },
+  copyGallerySources(
+    source: CopyMachine,
+    destination: CopyMachine,
+    sourceFilename: string,
+    destinationFilename: string,
+    expectedSource: CopyOffer,
+    expectedDestination: CopyOffer,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    return nativeCopyOperation(
+      "library_copy_sources",
+      {
+        source: source.target,
+        destination: destination.target,
+        sourceInstance: source.instanceId,
+        destinationInstance: destination.instanceId,
+        sourceFilename,
+        destinationFilename,
+        expectedSource,
+        expectedDestination,
+      },
+      signal,
+    );
+  },
+  copyGalleryMatches(
+    source: CopyMachine,
+    destination: CopyMachine,
+    sourceFilename: string,
+    destinationFilename: string,
+    origin: CopyOffer,
+    candidate: CopyOffer,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    return nativeCopyOperation(
+      "library_copy_matches",
+      {
+        source: source.target,
+        destination: destination.target,
+        sourceInstance: source.instanceId,
+        destinationInstance: destination.instanceId,
+        sourceFilename,
+        destinationFilename,
+        origin,
+        candidate,
+      },
+      signal,
+    );
   },
   /** Mirror a library print together with its authoritative retained sources. */
   async mirrorGalleryPrint(

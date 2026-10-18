@@ -540,6 +540,27 @@ mold library source-media mold-flux-dev-q4-1700000000000.png --json
 mold library source-media mold-flux-dev-q4-1700000000000.png --member 6f1c1d2e --output recovered.png
 ```
 
+Member IDs accept a unique hexadecimal prefix of at least eight characters;
+ambiguous prefixes fail. The table includes the reusable content SHA-256 when
+available. Downloads return original attachable content, including unwrapped
+keyframe pictures. Older hosts can serve raw non-keyframe members; keyframes
+require a host with the `/content` route.
+
+Generation image inputs (`--image`, `--keyframe FRAME:...`, `--last-image`,
+`--first-frame`, `--last-frame`, `--mask`, `--id-image`, `--control`, and
+`--reference KIND=...`, `--audio-file`, `--video`, and `--extend`) accept `print:FILENAME` and
+`source:FILENAME#MEMBER` alongside local paths. These addresses resolve on the
+selected `--host`; the member ID belongs to that machine's print copy. An
+addressed input refuses `--local`, and submission cannot fall back to local
+inference if the selected host disconnects. Prefix a literal local filename
+starting with `source:` or `print:` with `./`. Source image inputs require
+actual image bytes, not thumbnails or structured retained envelopes.
+
+```bash
+mold --host workstation run flux-dev:q4 'A chair in sunlight' --image 'print:chair.png'
+mold --host workstation run ltx-2.5-22b-distilled:bf16 'A slow pan' --keyframe '0:source:clip.mp4#6f1c1d2e'
+```
+
 A Library video can be upscaled durably, frame by frame, without holding the
 connection open.
 

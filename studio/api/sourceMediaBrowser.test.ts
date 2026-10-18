@@ -103,3 +103,22 @@ it("bounds older-server inventory fallback concurrency", async () => {
   expect(Object.keys(answer.inventories)).toHaveLength(10);
   expect(peak).toBe(4);
 });
+it("keeps valid older-host sources when another owner returns malformed inventory", async () => {
+  fetchMock.mockRejectedValueOnce(new ApiError("old", 405));
+  fetchMock.mockImplementation(
+    async (_target, path) =>
+      new Response(
+        JSON.stringify(
+          path.includes("good.png")
+            ? { availability: "available", members: [member] }
+            : {},
+        ),
+      ),
+  );
+  const result = await sourceMediaInventories(["good.png", "bad.png"], target);
+  expect(result.inventories["good.png"]?.members).toEqual([member]);
+  expect(result.inventories["bad.png"]).toBeUndefined();
+  expect(result.errors?.["bad.png"]).toContain(
+    "invalid source-media inventory",
+  );
+});

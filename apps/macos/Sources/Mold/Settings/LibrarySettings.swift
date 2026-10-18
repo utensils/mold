@@ -27,9 +27,14 @@ struct LibrarySettings: View {
                 Toggle("Show date separators", isOn: $showDateSeparators)
                     .help("Group chronological views by day. Turn off for one continuous grid.")
             }
-            Section("Library Sync on This Mac") {
-                Toggle("Keep this Mac in sync", isOn: keepInSyncBinding)
-                Text("Off: Library ▸ Sync All to This Mac copies remote prints once, when you press it. On: new and changed prints are copied as soon as each machine announces them.")
+            Section("Library Sync Destinations") {
+                ForEach(hosts.hosts) { destination in
+                    Toggle("Keep \(destination.name) in Sync", isOn: Binding(
+                        get: { library.syncSession.keepInSync(to: destination, in: library) },
+                        set: { library.syncSession.setKeepInSync($0, to: destination, in: library) }))
+                        .disabled(hosts.instanceID(of: destination.id) == nil)
+                }
+                Text("Each enabled machine receives new and changed prints as machines announce them. Copy to restores a deliberately removed copy; automatic sync preserves removals.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             SettingsPaneBody(hosts: hosts, store: store, machine: machine) { machine in

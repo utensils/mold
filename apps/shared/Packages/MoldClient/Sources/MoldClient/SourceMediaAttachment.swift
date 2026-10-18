@@ -29,7 +29,7 @@ public enum SourceMediaAttachment: String, Identifiable, CaseIterable, Sendable 
         }
         switch member.contentKind {
         case "image":
-            if BoundaryFramePolicy.resolve(capabilities: caps) != nil { return [.firstFrame, .lastFrame] }
+            if acceptsEndpoints(capabilities: caps) { return [.firstFrame, .lastFrame] }
             if let named = caps.mesh?.namedViews, named.mode.isVisible {
                 return named.roles.compactMap { Self(rawValue: $0.rawValue) }
             }
@@ -73,7 +73,7 @@ public enum SourceMediaAttachment: String, Identifiable, CaseIterable, Sendable 
             switch self {
             case .source: DraftPictureAttachment.useAsSource(picture, in: &result, recipe: recipe)
             case .firstFrame, .lastFrame:
-                BoundaryFramePolicy.set(first: self == .firstFrame, picture: picture, draft: &result, capabilities: recipe.capabilities, recipe: recipe)
+                Self.setEndpoint(first: self == .firstFrame, picture: picture, draft: &result, recipe: recipe)
             case .front, .left, .back, .right:
                 let role = GenerationImageReferenceRole(rawValue: rawValue)!
                 result.media.generationReferences.removeAll { $0.role == role }
@@ -91,4 +91,32 @@ public enum SourceMediaAttachment: String, Identifiable, CaseIterable, Sendable 
         }
         return result
     }
+    public static func acceptsEndpoints(capabilities: RecipeCapabilities) -> Bool {
+        BoundaryFramePolicy.resolve(capabilities: capabilities) != nil || capabilities.acceptsKeyframes
+    }
+
+    /// LTX interpolation replaces only the selected endpoint. Unlike a paired
+    /// boundary recipe, its interior authored anchors remain meaningful.
+    public static func setEndpoint(first: Bool, picture: ImportedPicture?, draft: inout RenderDraft, recipe: GenerationRecipe) {
+        let caps = recipe.capabilities
+        if BoundaryFramePolicy.resolve(capabilities: caps) != nil {
+            BoundaryFramePolicy.set(first: first, picture: picture, draft: &draft, capabilities: caps, recipe: recipe)
+            return
+        }
+        guard caps.acceptsKeyframes else { return }
+        let frames = max(draft.frames ?? recipe.defaults.frames ?? 2, 2)
+        let index = first ? 0 : frames - 1
+        draft.media.keyframes.removeAll { $0.frame == index }
+        draft.media.parked.keyframes.removeAll { $0.frame == index }
+        if let picture {
+            draft.media.addingKeyframe(.init(frame: index, image: picture.encoded, name: picture.name))
+            draft.frames = frames
+            draft.media.reconcileSourceImage(supported: false)
+            draft.media.reconcileMask(supported: false)
+            if let pixels = PictureImport.pixelSize(of: picture.data) {
+                draft.attachSourceShape(pixels, recipe: recipe, replaced: false)
+            }
+        }
+    }
+
 }

@@ -13,7 +13,7 @@ struct SourceMediaBrowser: View {
         query.tokens = navigation.query.machineIDs.map { .machine(id: $0, name: hosts.host($0)?.name ?? "") }
             return query
         }()
-        let projected = LibraryScope.all.resolve(query, shelves: library.shelves, hiddenCollectionIDs: library.hiddenCollectionIDs).apply(to: library.items)
+        let projected = LibraryScope.all.resolve(query, shelves: library.shelves, hiddenCollectionIDs: library.hiddenCollectionIDs, privacyEvidence: library.trashed, privacyLinks: library.syncLinks()).apply(to: library.items)
         var seen = Set<PrintID>()
         let owners = projected.flatMap(\.everyCopy).filter { seen.insert($0.id).inserted }
         let routes = Dictionary(uniqueKeysWithValues: hosts.hosts.map { ($0.id, $0) })

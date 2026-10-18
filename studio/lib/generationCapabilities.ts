@@ -126,6 +126,8 @@ export interface WanRecipeCapabilities {
 }
 
 export interface BaseGenerationCapabilities {
+  boundaryFrames?:
+    import("./generated/generationProfileV1").BoundaryFramesProfile | null;
   supportsNegativePrompt: boolean;
   guidanceAdjustable: boolean;
   fixedGuidance: number | null;
@@ -563,11 +565,22 @@ export function baseGenerationCapabilities(
     // H3's two tasks own their own layouts; every other family's layout is a
     // projection of the reference contract — one call, so no surface has to
     // read `source_relation` itself.
-    sourceImageMode: h3Ref2va
-      ? "ordered-references"
-      : h3
-        ? "h3-boundaries"
-        : sourceImageModeForReferences(referenceImages),
+    boundaryFrames: profileCaps?.boundary_frames ?? null,
+    sourceImageMode:
+      profileCaps?.generation_references &&
+      profileControlVisible(profileCaps.generation_references.mode)
+        ? "ordered-references"
+        : profileCaps?.boundary_frames &&
+            profileControlVisible(profileCaps.boundary_frames.mode) &&
+            profileCaps.boundary_frames.wire === "h3-endpoints"
+          ? "h3-boundaries"
+          : profileCaps?.boundary_frames || profileCaps?.generation_references
+            ? sourceImageModeForReferences(referenceImages)
+            : h3Ref2va
+              ? "ordered-references"
+              : h3
+                ? "h3-boundaries"
+                : sourceImageModeForReferences(referenceImages),
     referenceImages,
     referenceImagesReason: referenceImages
       ? null

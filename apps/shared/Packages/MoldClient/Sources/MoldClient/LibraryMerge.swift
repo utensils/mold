@@ -35,6 +35,8 @@ public enum LibraryMerge {
     public static func merge(
         _ entries: [LibraryEntry], localHost: MoldHost.ID?, links: [PrintID: PrintID] = [:]
     ) -> [LibraryEntry] {
+        let components = copyComponents(links)
+        var byComponent: [PrintID: Int] = [:]
         var groups: [[LibraryEntry]] = []
         var byID: [PrintID: Int] = [:]
         var byFilename: [String: Int] = [:]
@@ -45,7 +47,8 @@ public enum LibraryMerge {
 
         for entry in entries {
             let identity = Self.identity(of: entry.print)
-            var index = links[entry.id].flatMap { byID[$0] }
+            var index = components[entry.id].flatMap { byComponent[$0] }
+            if index == nil { index = links[entry.id].flatMap { byID[$0] } }
             if index == nil, let candidate = byFilename[entry.print.filename],
                sizesAgree(groups[candidate][0].print, entry.print) {
                 index = candidate
@@ -70,6 +73,7 @@ public enum LibraryMerge {
                 groups.append([entry])
             }
             byID[entry.id] = group
+            if let component = components[entry.id] { byComponent[component] = group }
             // Every name a copy goes by points at the print, so a later copy
             // under either name still joins it.
             byFilename[entry.print.filename] = group
@@ -86,6 +90,26 @@ public enum LibraryMerge {
             lead.copies = others
             return lead
         }
+    }
+
+    /// Canonical representatives preserve chains and fan-out even when the
+    /// representative is absent or arrives after its copies.
+    public static func copyComponents(_ links: [PrintID: PrintID]) -> [PrintID: PrintID] {
+        var parents: [PrintID: PrintID] = [:]
+        func root(_ id: PrintID) -> PrintID {
+            var cursor = id
+            while let parent = parents[cursor], parent != cursor { cursor = parent }
+            return cursor
+        }
+        func order(_ id: PrintID) -> String { id.host.uuidString + ":" + id.filename }
+        for (from, to) in links {
+            let a = root(from), b = root(to)
+            parents[from] = a; parents[to] = b
+            if a != b {
+                if order(a) < order(b) { parents[b] = a } else { parents[a] = b }
+            }
+        }
+        return Dictionary(uniqueKeysWithValues: parents.keys.map { ($0, root($0)) })
     }
 
     /// `seed:size:model`, or `nil` when the row cannot be matched this way.

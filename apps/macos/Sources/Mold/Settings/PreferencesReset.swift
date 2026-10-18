@@ -74,6 +74,8 @@ enum PreferencesReset {
         // Library Settings owns this control; a General reset must not turn
         // automatic sync on or off behind the user's back.
         "library.keepInSync.v1",
+        "library.keepInSync.destinations.v2",
+        "library.keepInSync.localIdentity.v2",
         // The retired sync interval, deleted by LibrarySyncSession at launch.
         "library.syncIntervalMinutes.v1",
         // Sync Details owns an explicit Reset Acknowledgments control.

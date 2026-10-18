@@ -90,7 +90,7 @@ private struct DetailRow: View {
                 }
             } else {
                 AdaptiveRow { Text(row.label) } value: {
-                    Text(row.value).multilineTextAlignment(.trailing)
+                    Text(row.value).multilineTextAlignment(.trailing).textSelection(.enabled)
                 }
             }
         }

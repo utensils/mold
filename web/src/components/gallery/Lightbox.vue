@@ -17,12 +17,17 @@ import { originAuthenticatedFetch as fetch } from "../../lib/originAuth";
  */
 import {
   computed,
+  inject,
   nextTick,
   onBeforeUnmount,
   onMounted,
   ref,
   watch,
 } from "vue";
+import {
+  SOURCE_ATTACHMENT_CHOICES,
+  type SourceAttachmentIntent,
+} from "@studio/lib/sourceAttachmentChoices";
 import { showsAlphaBed } from "@studio/lib/alphaMedia";
 import { useOverlayStack } from "@ui/lib/overlayStack";
 import { useRootFocusOnOpen } from "@ui/lib/useRootFocusOnOpen";
@@ -108,6 +113,10 @@ const props = withDefaults(
   },
 );
 
+const endpointChoices = inject(
+  SOURCE_ATTACHMENT_CHOICES,
+  computed(() => []),
+);
 const emit = defineEmits<{
   (e: "viewed", item: GalleryImage): void;
   (e: "close"): void;
@@ -116,6 +125,7 @@ const emit = defineEmits<{
   (e: "next"): void;
   (e: "reuse", item: GalleryImage): void;
   (e: "use-source", item: GalleryImage): void;
+  (e: "use-endpoint", item: GalleryImage, intent: SourceAttachmentIntent): void;
   (e: "upscale", item: GalleryImage): void;
   (e: "delete", item: GalleryImage): void;
   (e: "rename", item: GalleryImage, title: string | null): void;
@@ -1036,6 +1046,15 @@ async function performVideoExport(options: VideoExportOptions) {
 
           <div class="lb__rows">
             <div class="lb__row">
+              <span class="lb__rowk">File name</span
+              ><span data-selectable style="user-select: text">{{
+                item?.filename
+              }}</span
+              ><button type="button" @click="item && copyText(item.filename)">
+                Copy File Name
+              </button>
+            </div>
+            <div class="lb__row">
               <span class="lb__rowk">Style</span><span>{{ modelLabel }}</span>
             </div>
             <div class="lb__row">
@@ -1164,7 +1183,17 @@ async function performVideoExport(options: VideoExportOptions) {
               "
               @click="onUseSource"
             >
-              Use as source
+              Use as source</button
+            ><button
+              v-for="intent in !isVideoFile && !isAudioFile && !isMeshFile
+                ? endpointChoices
+                : []"
+              :key="intent"
+              type="button"
+              class="lb__quiet"
+              @click="item && emit('use-endpoint', item, intent)"
+            >
+              Use as {{ intent }} frame
             </button>
             <a
               v-if="mediaSrc"
@@ -1182,7 +1211,13 @@ async function performVideoExport(options: VideoExportOptions) {
               data-test="copy-print-link"
               @click="item && emit('copy-link', item)"
             >
-              Copy link
+              Copy link</button
+            ><button
+              type="button"
+              class="lb__quiet"
+              @click="item && copyText(item.filename)"
+            >
+              Copy File Name
             </button>
           </div>
           <!-- Mesh transcodes, straight from the host's own
@@ -1559,7 +1594,17 @@ async function performVideoExport(options: VideoExportOptions) {
               "
               @click="onUseSource"
             >
-              Use as source
+              Use as source</button
+            ><button
+              v-for="intent in !isVideoFile && !isAudioFile && !isMeshFile
+                ? endpointChoices
+                : []"
+              :key="intent"
+              type="button"
+              class="lb__quiet"
+              @click="item && emit('use-endpoint', item, intent)"
+            >
+              Use as {{ intent }} frame
             </button>
             <a
               v-if="mediaSrc"
@@ -1577,7 +1622,13 @@ async function performVideoExport(options: VideoExportOptions) {
               data-test="copy-print-link"
               @click="item && emit('copy-link', item)"
             >
-              Copy link
+              Copy link</button
+            ><button
+              type="button"
+              class="lb__quiet"
+              @click="item && copyText(item.filename)"
+            >
+              Copy File Name
             </button>
           </div>
           <!-- Mesh transcodes, straight from the host's own

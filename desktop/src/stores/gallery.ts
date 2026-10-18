@@ -539,8 +539,20 @@ export const useGalleryStore = defineStore("gallery", {
           }
         }
       };
-      add(mergeBuckets(this.privacySources, this.buckets, this.pendingDeletions));
-      add(mergeBuckets(this.privacySources, this.trashBuckets, this.pendingDeletions));
+      // Privacy is a logical-print property across live AND trashed copies.
+      // Merge their evidence before indexing; indexing separate lists lets the
+      // unfiled live copy shadow the hidden trashed copy.
+      const privacyBuckets: Record<string, GalleryBucket> = {};
+      for (const source of this.privacySources) {
+        const live = this.buckets[source.key];
+        const trash = this.trashBuckets[source.key];
+        if (live || trash)
+          privacyBuckets[source.key] = {
+            ...(live ?? trash!),
+            items: [...(live?.items ?? []), ...(trash?.items ?? [])],
+          };
+      }
+      add(mergeBuckets(this.privacySources, privacyBuckets, new Set()));
       return index;
     },
     /** Logical prints in the trash across every host. */

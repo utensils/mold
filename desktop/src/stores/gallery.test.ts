@@ -1381,6 +1381,18 @@ describe("organization union + filters", () => {
     expect(gallery.collectionAvailability("river-studies")).toBe("unavailable");
   });
 
+  it("keeps hidden trash membership protecting live copies until confirmed removal", () => {
+    const gallery = seed();
+    gallery.buckets.local!.items[0]!.collections = [];
+    const hidden = gallery.buckets["hal9000-7680"]!.items.shift()!;
+    gallery.trashBuckets["hal9000-7680"] = loadedBucket([{ ...hidden, trashed_at: 400 }]);
+    gallery.collectionsByHost["hal9000-7680"]!.items[0]!.hidden = true;
+    expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["solo.png"]);
+    expect(gallery.basePrintCount).toBe(1);
+    gallery.trashBuckets["hal9000-7680"] = loadedBucket([]);
+    expect(gallery.filtered.map((e) => e.item.filename)).toContain("shared.png");
+  });
+
   it("discards retained collection authority when a configured route is replaced", () => {
     const gallery = seed();
     gallery.collectionsByHost["hal9000-7680"]!.authorityTarget = {

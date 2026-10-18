@@ -50,12 +50,14 @@ struct GenerateMenusTests {
 
     @Test func aResultOffersReuseOnlyWhereTheWellExists() {
         let bare = GenerateMenus.result(canUseAsSource: false, canAddReference: false)
-        #expect(bare.map(\.kind) == [.saveACopy, .copyResult, .showInLibrary])
+        #expect(bare.map(\.kind) == [.saveACopy, .copyResult, .copyFileName, .showInLibrary])
 
         let both = GenerateMenus.result(canUseAsSource: true, canAddReference: true)
-        #expect(both.map(\.kind) == [.saveACopy, .copyResult, .showInLibrary,
+        #expect(both.map(\.kind) == [.saveACopy, .copyResult, .copyFileName, .showInLibrary,
                              .useAsSourceImage, .addAsReference])
 
+        let endpoints = GenerateMenus.result(canUseAsSource: false, canAddReference: false, canUseEndpoints: true)
+        #expect(endpoints.map(\.kind).suffix(2) == [.useAsFirstFrame, .useAsLastFrame])
         let sourceOnly = GenerateMenus.result(canUseAsSource: true, canAddReference: false)
         #expect(!sourceOnly.map(\.kind).contains(.addAsReference))
     }

@@ -26,6 +26,14 @@ extension LibraryGrid {
             guard !selection.items.isEmpty else { return .ignored }
             selection = .empty
             return .handled
+        case .favorite:
+            let targets = entries.filter { selection.items.contains($0.id) }
+            guard !scope.isTrash, !targets.isEmpty else { return .ignored }
+            actions.toggleFavorite(targets)
+            return .handled
+        case .emptyTrash:
+            actions.emptyTrash()
+            return .handled
         case .trash: return trashSelection()
         case nil: return .ignored
         }

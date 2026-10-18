@@ -2546,6 +2546,48 @@ impl MoldClient {
         Ok(resp.bytes().await?.to_vec())
     }
 
+    /// Reusable original bytes, never a structured keyframe envelope. Legacy
+    /// fallback is allowed only for non-keyframes on a missing content route.
+    pub async fn download_gallery_source_media_content(
+        &self,
+        filename: &str,
+        member: &crate::RetainedSourceMediaMember,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>> {
+        let url = format!(
+            "{}/api/gallery/source-media/{}/{}",
+            self.base_url,
+            encode_path_segment(filename),
+            encode_path_segment(&member.member_id)
+        );
+        let mut response = self.client.get(format!("{url}/content")).send().await?;
+        if matches!(
+            response.status(),
+            StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+        ) {
+            anyhow::ensure!(
+                !member.role.starts_with("keyframe"),
+                "this host cannot return reusable keyframe content; upgrade the host (raw keyframe envelopes are not images)"
+            );
+            response = self.client.get(url).send().await?;
+        }
+        bounded_media_body(response, max_bytes).await
+    }
+
+    /// A bounded saved-print read for use as a generation input.
+    pub async fn get_gallery_input(&self, filename: &str, max_bytes: usize) -> Result<Vec<u8>> {
+        let response = self
+            .client
+            .get(format!(
+                "{}/api/gallery/image/{}",
+                self.base_url,
+                encode_path_segment(filename)
+            ))
+            .send()
+            .await?;
+        bounded_media_body(response, max_bytes).await
+    }
+
     /// Download a gallery image by filename.
     ///
     /// The error names the print and the host: this is the fetch a
@@ -8267,4 +8309,121 @@ mod tests {
             "a stale memo must ask the host again"
         );
     }
+}
+
+#[cfg(test)]
+mod reusable_source_content_tests {
+    use super::*;
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
+    fn member(role: &str) -> crate::RetainedSourceMediaMember {
+        serde_json::from_value(serde_json::json!({
+            "member_id": "abcdef0123456789", "role": role,
+            "display_name": "frame.png", "size_bytes": 7
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn reusable_content_downloads_unwrapped_content_not_envelope() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/gallery/source-media/clip.mp4/abcdef0123456789/content",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"picture".to_vec()))
+            .mount(&server)
+            .await;
+        let result = MoldClient::new(&server.uri())
+            .download_gallery_source_media_content("clip.mp4", &member("keyframe:0"), 32)
+            .await
+            .unwrap();
+        assert_eq!(result, b"picture");
+    }
+
+    #[tokio::test]
+    async fn reusable_content_never_falls_back_to_a_keyframe_envelope() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/gallery/source-media/clip.mp4/abcdef0123456789/content",
+            ))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let error = MoldClient::new(&server.uri())
+            .download_gallery_source_media_content("clip.mp4", &member("keyframe:0"), 32)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("keyframe"));
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reusable_content_legacy_fallback_is_only_for_route_absence() {
+        for status in [404, 405, 401, 500] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path(
+                    "/api/gallery/source-media/clip.mp4/abcdef0123456789/content",
+                ))
+                .respond_with(ResponseTemplate::new(status))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/api/gallery/source-media/clip.mp4/abcdef0123456789"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(b"picture".to_vec()))
+                .mount(&server)
+                .await;
+            let result = MoldClient::new(&server.uri())
+                .download_gallery_source_media_content("clip.mp4", &member("source_image"), 32)
+                .await;
+            assert_eq!(result.is_ok(), matches!(status, 404 | 405));
+            assert_eq!(
+                server.received_requests().await.unwrap().len(),
+                if matches!(status, 404 | 405) { 2 } else { 1 }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reusable_content_checks_declared_and_streamed_size() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/gallery/source-media/clip.mp4/abcdef0123456789/content",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0; 33]))
+            .mount(&server)
+            .await;
+        assert!(MoldClient::new(&server.uri())
+            .download_gallery_source_media_content("clip.mp4", &member("source_image"), 32)
+            .await
+            .is_err());
+    }
+}
+
+async fn bounded_media_body(response: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>> {
+    let mut response = error_for_status_with_body(response).await?;
+    let length = response.content_length();
+    anyhow::ensure!(
+        length.is_none_or(|n| n <= max_bytes as u64),
+        "media exceeds the {max_bytes} byte input limit"
+    );
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        anyhow::ensure!(
+            chunk.len() <= max_bytes.saturating_sub(bytes.len()),
+            "media exceeds the {max_bytes} byte input limit"
+        );
+        bytes.extend_from_slice(&chunk);
+    }
+    anyhow::ensure!(
+        length.is_none_or(|n| n == bytes.len() as u64),
+        "media response was truncated"
+    );
+    Ok(bytes)
 }

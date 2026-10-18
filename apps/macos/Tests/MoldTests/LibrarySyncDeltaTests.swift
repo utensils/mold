@@ -43,8 +43,8 @@ struct LibrarySyncDeltaTests {
     private func bench(_ names: [String], label: String, records: LibrarySyncRecords = LibrarySyncRecords()) -> Bench {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("\(label)-\(UUID().uuidString.prefix(8))")
-        let source = FakeBackend(host: remote, noRetainedMedia: true)
-        let target = FakeBackend(host: local, noRetainedMedia: true)
+        let source = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
         let prints = names.map { versionedPrint($0) }
         source.prints = prints
         source.mediaAnswer = Data([1, 2, 3])
@@ -105,7 +105,7 @@ struct LibrarySyncDeltaTests {
         let probes = bench.source.boundedCheckpointRequests.count
         bench.source.prints = [versionedPrint("a.png"), versionedPrint("b.png", favorite: true), versionedPrint("c.png")]
         await library.syncAllLocally(fullPlan: false)
-        #expect(bench.source.boundedCheckpointRequests.count == probes + 1)
+        #expect(bench.source.boundedCheckpointRequests.count == probes + 2)
         #expect(bench.source.boundedCheckpointRequests.last == ["b.png"])
         #expect(bench.source.callCount("mediaFile") == downloads, "a sealed, unchanged output is not downloaded again")
         #expect(bench.target.importedNames.count == 3)
@@ -223,7 +223,7 @@ struct LibrarySyncDeltaTests {
     @Test func discoveryReadsEverySourceAtOnce() async {
         let bench = bench(["a.png"], label: "slow")
         let other = host("fast-\(UUID().uuidString.prefix(8))")
-        let fast = FakeBackend(host: other, noRetainedMedia: true)
+        let fast = FakeBackend(host: other, noRetainedMedia: true, syncOrganization: true)
         let hosts = HostStore(hosts: [bench.local, bench.remote, other]) { machine in
             machine.id == bench.local.id ? bench.target : machine.id == other.id ? fast : bench.source
         }

@@ -64,9 +64,13 @@ public extension LibraryScope {
     /// Collection hiding affects browsing; trash always keeps every member
     /// available for recovery. Both native apps resolve their query here.
     func resolve(_ query: LibraryQuery, shelves: [CollectionShelf],
-                 hiddenCollectionIDs: [MoldHost.ID: Set<String>]) -> LibraryQuery {
+                 hiddenCollectionIDs: [MoldHost.ID: Set<String>],
+                 privacyEvidence: [LibraryEntry] = [],
+                 privacyLinks: [PrintID: PrintID] = [:]) -> LibraryQuery {
         var resolved = query
         resolved.hiddenCollectionIDs = isTrash ? [:] : hiddenCollectionIDs
+        resolved.privacyEvidence = isTrash ? [] : privacyEvidence
+        resolved.privacyLinks = isTrash ? [:] : privacyLinks
         if let token = token(in: shelves), !resolved.tokens.contains(token) { resolved.tokens.append(token) }
         return resolved
     }
@@ -76,9 +80,11 @@ public extension LibraryScope {
     /// The denominator for a narrowed view is this shelf on these machines,
     /// before text/kind/tag filters, with the same hidden protection as its grid.
     func baselineCount(in entries: [LibraryEntry], machines: Set<MoldHost.ID>,
-                       shelves: [CollectionShelf], hiddenIDs: [MoldHost.ID: Set<String>]) -> Int {
+                       shelves: [CollectionShelf], hiddenIDs: [MoldHost.ID: Set<String>],
+                       privacyEvidence: [LibraryEntry] = [],
+                       privacyLinks: [PrintID: PrintID] = [:]) -> Int {
         var query = LibraryQuery()
         query.tokens = machines.map { .machine(id: $0, name: "") }
-        return resolve(query, shelves: shelves, hiddenCollectionIDs: hiddenIDs).apply(to: entries).count
+        return resolve(query, shelves: shelves, hiddenCollectionIDs: hiddenIDs, privacyEvidence: privacyEvidence, privacyLinks: privacyLinks).apply(to: entries).count
     }
 }

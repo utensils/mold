@@ -43,6 +43,26 @@ struct SourceMediaAttachmentTests {
         let member = RetainedSourceMedia.Member(memberId: "one", role: "source_image", displayName: "input.png", sizeBytes: 1)
         #expect(SourceMediaAttachment.choices(member: member, recipe: recipe, media: .init()) == [.firstFrame, .lastFrame])
     }
+    @Test func keyframeRecipesOfferBothEndpoints() throws {
+        let recipe = try recipe(capabilities: ["keyframes": ["mode": "adjustable", "required": false]])
+        let member = RetainedSourceMedia.Member(memberId: "one", role: "source_image", displayName: "input.png", sizeBytes: 1)
+        #expect(SourceMediaAttachment.choices(member: member, recipe: recipe, media: .init()) == [.firstFrame, .lastFrame])
+    }
+    @Test func explicitBoundaryRefusalDoesNotFallBackToLegacyWan() throws {
+        let recipe = try recipe(capabilities: ["boundary_frames": ["mode": "unsupported", "wire": "wan-pair", "min_frames": 9, "first_required": false, "last_required": false], "wan_recipe": ["mode": "adjustable", "supports_distill_strength": false, "supports_first_last_frame": true]])
+        #expect(BoundaryFramePolicy.resolve(capabilities: recipe.capabilities) == nil)
+    }
+    @Test func interpolationEndpointReplacementPreservesInteriorFramesAndCanvas() throws {
+        let recipe = try recipe(capabilities: ["keyframes": ["mode": "adjustable", "required": false]])
+        var draft = RenderDraft(); draft.frames = 49; draft.width = 768; draft.height = 512
+        draft.media.keyframes = [.init(frame: 0, image: "first"), .init(frame: 16, image: "middle"), .init(frame: 48, image: "last")]
+        let picture = ImportedPicture(encoded: "replacement", name: "replacement.png", data: Data([1]))
+        SourceMediaAttachment.setEndpoint(first: false, picture: picture, draft: &draft, recipe: recipe)
+        #expect(draft.media.keyframes.map(\.frame) == [0,16,48])
+        #expect(draft.media.keyframes[1].image == "middle")
+        #expect(draft.media.keyframes[2].name == "replacement.png")
+        #expect(draft.width == 768 && draft.height == 512)
+    }
     @Test func continuationPreservesPromptAndParksConflictingImage() async throws {
         let recipe = try recipe(capabilities: ["supports_extend": true])
         let member = RetainedSourceMedia.Member(memberId: "one", role: "source_video", displayName: "input.mp4", sizeBytes: 3)

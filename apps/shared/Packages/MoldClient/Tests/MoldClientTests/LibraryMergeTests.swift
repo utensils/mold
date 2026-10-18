@@ -206,3 +206,16 @@ struct LibraryMergeTests {
         #expect(followed.lead == lead)
     }
 }
+
+@Test func verifiedCopyGraphJoinsRenamedFanoutInAnyTraversalOrder() {
+    let a = UUID(), b = UUID(), c = UUID()
+    let source = PrintFixtures.entry("original.png", host: a, bytes: 10)
+    let backup = PrintFixtures.entry("renamed.png", host: b, bytes: 10)
+    let third = PrintFixtures.entry("third.png", host: c, bytes: 10)
+    let links = [backup.id: source.id, third.id: source.id]
+    for rows in [[third, backup, source], [backup, source, third], [source, third, backup]] {
+        let merged = LibraryMerge.merge(rows, localHost: nil, links: links)
+        #expect(merged.count == 1)
+        #expect(merged.first?.everyCopy.count == 3)
+    }
+}

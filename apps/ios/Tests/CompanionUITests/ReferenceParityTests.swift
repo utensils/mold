@@ -4,6 +4,71 @@ import XCTest
 final class ReferenceParityTests: XCTestCase {
     override func setUp() { super.setUp(); acceptCompanionPermissions() }
 
+    @MainActor func testLibraryContextAttachesExplicitFirstAndLastFrames() async throws {
+        continueAfterFailure = false
+        let machine = try FixtureMachine(referenceFixture: true, galleryPrints: 2)
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        defer { app.terminate(); machine.stop() }
+        cleanUpFixture(machine, port: port, app: app)
+        app.launch(); try addMachine(app, port: port)
+        try choose("minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p", in: app)
+        for role in ["last", "first"] {
+            XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
+            let picture = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Fixture 0,'")).firstMatch
+            XCTAssertTrue(picture.waitForExistence(timeout: 10), app.debugDescription)
+            picture.press(forDuration: 1)
+            XCTAssertTrue(app.buttons["Copy File Name"].waitForExistence(timeout: 5), app.debugDescription)
+            let action = app.buttons["Use as \(role) frame"]
+            XCTAssertTrue(action.waitForExistence(timeout: 5), app.debugDescription)
+            action.tap()
+            let attached = app.buttons[role == "first" ? "First frame" : "Last frame"]
+            XCTAssertTrue(attached.waitForExistence(timeout: 10), app.debugDescription)
+        }
+        XCTAssertTrue(app.buttons["First frame"].exists)
+        XCTAssertTrue(app.buttons["Last frame"].exists)
+        XCTAssertTrue(machine.generationRequests.isEmpty)
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "Library explicit first and last endpoints"; shot.lifetime = .keepAlways; add(shot)
+    }
+
+    @MainActor func testSourceDetailsExposeOwningIdentifierAndOriginalActions() async throws {
+        continueAfterFailure = false
+        let machine = try FixtureMachine(galleryPrints: 1, retainedMediaFixture: true)
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        defer { app.terminate(); machine.stop() }
+        cleanUpFixture(machine, port: port, app: app)
+        app.launch(); try addMachine(app, port: port)
+        XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
+        let picture = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Fixture 0,'")).firstMatch
+        XCTAssertTrue(picture.waitForExistence(timeout: 10), app.debugDescription)
+        picture.tap()
+        let info = app.buttons["Info"].firstMatch
+        XCTAssertTrue(info.waitForExistence(timeout: 5)); info.tap()
+        let identifier = app.staticTexts["source:fixture-0.png#fixture-source"].firstMatch
+        reveal(identifier, app: app)
+        XCTAssertTrue(identifier.waitForExistence(timeout: 10), app.debugDescription)
+        // The stable card owns async actions after the native context menu closes.
+        let ownerLabel = app.staticTexts["source-media-owning-machine"].firstMatch
+        reveal(ownerLabel, app: app); ownerLabel.press(forDuration: 1)
+        for title in ["Copy Source ID", "Copy CLI Command", "Copy Image", "Save a Copy…", "Share…"] {
+            XCTAssertTrue(app.buttons[title].waitForExistence(timeout: 5), app.debugDescription)
+        }
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "Exact-owner source actions"; shot.lifetime = .keepAlways; add(shot)
+        app.buttons["Copy Image"].tap()
+        for _ in 0..<100 where !machine.requestLog().contains("GET /api/gallery/source-media/fixture-0.png/fixture-source/content") {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        XCTAssertTrue(machine.requestLog().contains("GET /api/gallery/source-media/fixture-0.png/fixture-source/content"), "Clipboard must load the exact original content endpoint")
+        let actions = app.buttons["Source actions"].firstMatch
+        let finished = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: actions)
+        await fulfillment(of: [finished], timeout: 10)
+        XCTAssertFalse(app.staticTexts["source-media-original-error"].exists, app.debugDescription)
+        XCTAssertTrue(machine.generationRequests.isEmpty)
+    }
+
     @MainActor func testLibraryPickerHeaderDoesNotCoverPictures() async throws {
         try await libraryPickerHeader(size: "UICTContentSizeCategoryL")
     }
@@ -285,6 +350,12 @@ final class ReferenceParityTests: XCTestCase {
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
         app.buttons["Add a Machine"].firstMatch.tap()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        let connection = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Connection,'")).firstMatch
+        XCTAssertTrue(connection.waitForExistence(timeout: 5), app.debugDescription)
+        connection.tap()
+        let regular = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Regular'")).firstMatch
+        XCTAssertTrue(regular.waitForExistence(timeout: 5), app.debugDescription)
+        regular.tap()
         let name = app.textFields["machine-name"]; XCTAssertTrue(name.waitForExistence(timeout: 5)); name.tap(); name.typeText("Reference UAT")
         let address = app.textFields["machine-address"]; address.tap(); address.typeText("127.0.0.1:\(port)")
         app.buttons["Add"].firstMatch.tap()

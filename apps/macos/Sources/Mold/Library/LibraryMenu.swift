@@ -49,6 +49,7 @@ struct LibraryMenu {
             canReuse: actions.reuse != nil && !scope.isTrash,
             canUseAsSource: canAttach(using: actions.useAsSource),
             canAddReference: canAttach(using: actions.addAsReference),
+            canUseEndpoints: canAttach(using: actions.useAsFirstFrame) && canAttach(using: actions.useAsLastFrame),
             canUpscale: actions.canUpscale(targets),
             upscalers: actions.upscalerOptions(for: targets),
             trashCount: trashCount,
@@ -70,6 +71,7 @@ extension View {
         // later renders only this pure plan, without subscribing to stores.
         let plan = snapshot ?? menu.plan
         return rowActionMenu(lazy: { plan.items }, perform: menu.perform) {
+            if !menu.scope.isTrash { LibraryCopyToMenu(entries: menu.targets) }
             let shares = menu.share
             if !shares.isEmpty {
                 ShareLink(items: shares) { print in SharePreview(print.filename) }

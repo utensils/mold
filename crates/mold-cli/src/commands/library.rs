@@ -548,18 +548,10 @@ async fn library_source_media(
             source_media_state_sentence(client.host(), filename, inventory.availability)
         );
     }
-    let selected = inventory
-        .members
-        .iter()
-        .find(|entry| entry.member_id == member_id)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "{} retained no member '{member_id}' for {filename}; run `mold library source-media {filename}` for the ids it kept",
-                client.host()
-            )
-        })?;
+    let selected = super::media_input::select_member(&inventory.members, member_id)
+        .with_context(|| format!("{} retained no unique member '{member_id}' for {filename}; run `mold library source-media {filename}` for the ids it kept", client.host()))?;
     let bytes = client
-        .download_gallery_source_media_member(filename, member_id)
+        .download_gallery_source_media_content(filename, selected, 256 * 1024 * 1024)
         .await
         .with_context(|| {
             format!(
@@ -567,7 +559,12 @@ async fn library_source_media(
                 selected.display_name
             )
         })?;
-    let destination = output.unwrap_or(selected.display_name.as_str());
+    let safe_name = std::path::Path::new(&selected.display_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
+        .unwrap_or("source-media");
+    let destination = output.unwrap_or(safe_name);
     if destination == "-" {
         io::stdout()
             .write_all(&bytes)
@@ -643,21 +640,27 @@ fn render_source_media(
         .clamp(8, 64);
     let _ = writeln!(
         out,
-        "{:<id_width$} {:<28} {:<28} {:>9}",
+        "{:<id_width$} {:<28} {:<28} {:>9} {:<12}",
         "MEMBER".bold(),
         "ROLE".bold(),
         "NAME".bold(),
-        "SIZE".bold()
+        "SIZE".bold(),
+        "SHA-256".bold()
     );
     let _ = writeln!(out, "{}", "─".repeat(id_width + 68).dimmed());
     for entry in &inventory.members {
         let _ = writeln!(
             out,
-            "{:<id_width$} {:<28} {:<28} {:>9}",
+            "{:<id_width$} {:<28} {:<28} {:>9} {:<12}",
             entry.member_id,
             truncate(&entry.role, 28),
             truncate(&entry.display_name, 28),
-            mold_core::format::human_bytes_compact(entry.size_bytes)
+            mold_core::format::human_bytes_compact(entry.size_bytes),
+            entry
+                .content_sha256
+                .as_deref()
+                .map(|hash| truncate(hash, 12))
+                .unwrap_or_else(|| "—".to_string())
         );
     }
     let _ = writeln!(

@@ -165,7 +165,7 @@ struct LibraryView: View {
             hostQuery.tokens.append(.machine(id: id, name: host.name))
         }
         return scope.resolve(hostQuery, shelves: library.shelves,
-                                     hiddenCollectionIDs: library.hiddenCollectionIDs)
+                                     hiddenCollectionIDs: library.hiddenCollectionIDs, privacyEvidence: library.trashPool)
     }
 
     private func showing() -> LibraryShowing {
