@@ -12,23 +12,63 @@ final class ReferenceParityTests: XCTestCase {
         cleanUpFixture(machine, port: port, app: app)
         app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
         app.launch(); try addMachine(app, port: port)
-        try choose("minimax-h3-ref2va:comfy-pruned-int8-turbo-4step", in: app)
+        // Use the actual Generate Kind control and a model row, as the populated
+        // generation UAT does. Model search is unrelated to duration acceptance.
+        let kind = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Still picture'")).firstMatch
+        XCTAssertTrue(kind.waitForExistence(timeout: 5))
+        reveal(kind, app: app); tapMenu(kind)
+        let clip = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Short clip'")).firstMatch
+        XCTAssertTrue(clip.waitForExistence(timeout: 5)); clip.tap()
+        let chooser = app.buttons["choose-model"]
+        reveal(chooser, app: app); tapMenu(chooser)
+        let sheet = app.otherElements["model-chooser"].firstMatch
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5))
+        let model = sheet.buttons["model-minimax-h3-ref2va:comfy-pruned-int8-turbo-4step"]
+        for _ in 0..<6 where !model.exists || !model.isHittable { sheet.collectionViews.firstMatch.swipeUp() }
+        XCTAssertTrue(model.waitForExistence(timeout: 5)); model.tap()
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 5))
         // The fixture serves the checked-in generation profile unchanged:
         // fixed 24 fps, 107...345 frames, step 17 and offset 5.
-        let optionsButton = app.buttons["Options"].firstMatch
-        let moreOptions = app.buttons["More Options"].firstMatch
         let composer = form(in: app)
-        for _ in 0..<8 where !optionsButton.exists && !moreOptions.exists { composer.swipeUp() }
-        let opener = optionsButton.exists ? optionsButton : moreOptions
-        XCTAssertTrue(opener.waitForExistence(timeout: 5), app.debugDescription)
-        reveal(opener, app: app); tapMenu(opener)
-        XCTAssertTrue(app.navigationBars["More Options"].waitForExistence(timeout: 5))
-        let length = app.buttons["options-length"].firstMatch
-        let optionsForm = app.collectionViews["generation-options-form"].firstMatch
-        XCTAssertTrue(optionsForm.waitForExistence(timeout: 5))
-        for _ in 0..<6 where !length.exists || !length.isHittable { optionsForm.swipeUp() }
-        XCTAssertTrue(length.waitForExistence(timeout: 5), app.debugDescription)
-        tapMenu(length)
+        func touchViewport() -> CGRect {
+            let bounds = ShellAccessibilityTests.composerViewport(composer, in: app)
+            let queue = app.buttons["generate-queue-status"]
+            // safeAreaInset's fixed Queue panel covers scrolled content even
+            // when SwiftUI reports that content as hittable in the AX tree.
+            let bottom = queue.exists ? min(bounds.maxY, queue.frame.minY - 8) : bounds.maxY
+            return CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width,
+                          height: max(0, bottom - bounds.minY))
+        }
+        func visible(_ predicate: String) -> XCUIElement? {
+            let viewport = touchViewport()
+            return app.buttons.matching(NSPredicate(format: predicate)).allElementsBoundByIndex.first {
+                !$0.frame.isEmpty && viewport.contains($0.frame) && $0.isHittable
+            }
+        }
+        for _ in 0..<8 where visible("label BEGINSWITH 'Length,'") == nil && visible("label IN {'Options', 'More Options'}") == nil {
+            let viewport = touchViewport()
+            let start = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: viewport.minX + viewport.width * 0.03, dy: viewport.midY + viewport.height * 0.2))
+            start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -viewport.height * 0.4)))
+        }
+        let before = XCTAttachment(string: app.debugDescription)
+        before.name = "Actual duration control hierarchy before native tap"; before.lifetime = .keepAlways; add(before)
+        let beforePixels = XCTAttachment(screenshot: app.screenshot())
+        beforePixels.name = "Actual duration control before native tap"; beforePixels.lifetime = .keepAlways; add(beforePixels)
+        let length: XCUIElement
+        let inOptions: Bool
+        if let inline = visible("label BEGINSWITH 'Length,'") {
+            length = inline; inOptions = false; length.tap()
+        } else {
+            let opener = try XCTUnwrap(visible("label IN {'Options', 'More Options'}"), "A rendered Options control must fit the composer viewport")
+            opener.tap()
+            XCTAssertTrue(app.navigationBars["More Options"].waitForExistence(timeout: 5))
+            length = app.buttons["options-length"].firstMatch; inOptions = true
+            let optionsForm = app.collectionViews["generation-options-form"].firstMatch
+            XCTAssertTrue(optionsForm.waitForExistence(timeout: 5))
+            for _ in 0..<6 where !length.exists || !length.isHittable { optionsForm.swipeUp() }
+            XCTAssertTrue(length.waitForExistence(timeout: 5), app.debugDescription)
+            tapMenu(length)
+        }
         XCTAssertFalse(app.buttons["0 s"].exists)
         XCTAssertFalse(app.buttons["1 s"].exists)
         let current = app.buttons["5.2 s"].firstMatch
@@ -40,7 +80,7 @@ final class ReferenceParityTests: XCTestCase {
         options.lifetime = .keepAlways; add(options)
         selected.tap()
         XCTAssertEqual(length.label, "Length, 8.7 seconds")
-        tapMenu(length)
+        if inOptions { tapMenu(length) } else { length.tap() }
         XCTAssertTrue(app.buttons["8.7 s"].firstMatch.exists)
         let settled = XCTAttachment(screenshot: app.screenshot())
         settled.name = "Selected snapped length remains checked"
