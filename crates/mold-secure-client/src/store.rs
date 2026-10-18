@@ -14,8 +14,11 @@ pub fn default_store() -> PathBuf {
         })
         .join("secure/clients")
 }
+pub(crate) fn origin_digest(origin: &str) -> String {
+    hex::encode(Sha256::digest(origin.as_bytes()))
+}
 fn filename(origin: &str) -> String {
-    format!("{}.json", hex::encode(Sha256::digest(origin.as_bytes())))
+    format!("{}.json", origin_digest(origin))
 }
 pub fn load_pairing(origin: &str) -> Result<PairedHost> {
     if let Some(host) = ephemeral_pairing(origin) {

@@ -34,6 +34,14 @@ pub struct PairedHost {
     pub device_identity: String,
     pub api_key: String,
     pub grant: DeviceGrant,
+    /// The CLI's label for this host (`mold host list`); see `hosts`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
+    /// The hostname the host reported when it was paired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
 }
 impl PairedHost {
     pub fn validate(&self) -> Result<()> {
@@ -426,6 +434,14 @@ pub struct PairingInvite {
     pub host_binding_signature: String,
     pub invite_seed: String,
     pub invite: Invitation,
+    /// The host's display name, its reported hostname and instance id. Older
+    /// invitations carry none of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
 }
 async fn read_json(socket: &mut Socket) -> Result<serde_json::Value> {
     loop {
@@ -777,6 +793,17 @@ pub async fn pair(invite: PairingInvite, client_name: &str) -> Result<PairedHost
             epoch: 0,
             signature: String::new(),
         },
+        name: invite
+            .name
+            .as_deref()
+            .or(invite.hostname.as_deref())
+            .and_then(crate::hosts::slug),
+        instance_id: invite.instance_id.clone().filter(|v| !v.is_empty()),
+        hostname: invite
+            .hostname
+            .clone()
+            .or_else(|| invite.name.clone())
+            .filter(|v| !v.is_empty()),
     };
     let (socket, session, wire) = admit_best(&host, Some(&invite)).await?;
     let proof = invitation_key.sign(&claim_bytes(

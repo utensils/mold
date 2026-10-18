@@ -204,6 +204,9 @@ async fn fixture_with_capacity(
         device_identity: hex::encode(device.to_bytes()),
         api_key: "private-fixture-key".into(),
         grant: grant.clone(),
+        name: None,
+        instance_id: None,
+        hostname: None,
     };
     let admission = PeerAdmission {
         sid: "test-host".into(),

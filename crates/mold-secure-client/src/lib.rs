@@ -5,6 +5,7 @@ pub use direct::*;
 mod bootstrap;
 pub use bootstrap::*;
 pub use mold_secure::{identity_file, operator_key, Binding};
+pub mod hosts;
 mod http;
 pub use http::*;
 

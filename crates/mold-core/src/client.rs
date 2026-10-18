@@ -163,15 +163,22 @@ impl MoldClient {
         }
     }
 
+    /// The client for `MOLD_HOST`, else the default saved host, else
+    /// localhost. See [`resolve_host`].
     pub fn from_env() -> Self {
-        let base_url =
-            std::env::var("MOLD_HOST").unwrap_or_else(|_| "http://localhost:7680".to_string());
+        Self::for_host(None)
+    }
+
+    /// The client for `host` (a `--host` value: a saved name or an address),
+    /// falling back like [`MoldClient::from_env`] when it is `None`, with
+    /// `MOLD_API_KEY` when set.
+    pub fn for_host(host: Option<&str>) -> Self {
+        let origin = resolve_host(host);
         let api_key = std::env::var("MOLD_API_KEY").ok().filter(|k| !k.is_empty());
-        let origin = normalize_host(&base_url);
         let (client, api_key_configured) = build_client(api_key.as_deref());
         Self {
-            base_url: normalize_host(&base_url),
             client: crate::relay_transport::RelayClient::for_origin(client, &origin, api_key),
+            base_url: origin,
             api_key_configured,
             gallery_persists_outputs: Default::default(),
         }
@@ -3729,35 +3736,32 @@ fn build_client(api_key: Option<&str>) -> (Client, bool) {
 /// - Host with port: `hal9000:8080` → `http://hal9000:8080`
 /// - Full URL: `http://hal9000:7680` → unchanged
 /// - URL without port: `http://hal9000` → unchanged (uses scheme default 80/443)
-fn has_http_scheme(input: &str) -> bool {
-    input
-        .get(..7)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
-        || input
-            .get(..8)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
+pub fn normalize_host(input: &str) -> String {
+    mold_secure_client::hosts::normalize_address(input)
 }
 
-pub fn normalize_host(input: &str) -> String {
-    let trimmed = input.trim().trim_end_matches('/');
-    let has_scheme = has_http_scheme(trimmed);
-    let bare_ipv6 = !has_scheme
-        && !trimmed.starts_with('[')
-        && trimmed.bytes().filter(|byte| *byte == b':').count() > 1;
-    let candidate = if has_scheme {
-        trimmed.to_string()
-    } else if bare_ipv6 {
-        format!("http://[{trimmed}]")
-    } else {
-        format!("http://{trimmed}")
-    };
-    if let Ok(mut url) = reqwest::Url::parse(&candidate) {
-        if !has_scheme && url.port().is_none() {
-            let _ = url.set_port(Some(7680));
+/// The base URL a CLI-style caller targets.
+///
+/// Precedence: `explicit` (a `--host` flag) > `MOLD_HOST` > the default saved
+/// host (`mold host use`) > `http://localhost:7680`. A saved host name, a
+/// saved origin, or an address one of its advertised endpoints carries
+/// resolves to that host's paired origin (`mold_secure_client::hosts::resolve`);
+/// anything else is normalized as typed.
+pub fn resolve_host(explicit: Option<&str>) -> String {
+    let given = |value: &String| !value.trim().is_empty();
+    let named = explicit
+        .map(str::to_owned)
+        .filter(given)
+        .or_else(|| std::env::var("MOLD_HOST").ok().filter(given));
+    match named {
+        Some(input) => {
+            mold_secure_client::hosts::resolve(&input).unwrap_or_else(|| normalize_host(&input))
         }
-        url.to_string().trim_end_matches('/').to_string()
-    } else {
-        candidate
+        None => mold_secure_client::hosts::default()
+            .ok()
+            .flatten()
+            .map(|host| host.origin)
+            .unwrap_or_else(|| mold_secure_client::hosts::LOCAL_HOST.to_string()),
     }
 }
 
@@ -3996,6 +4000,9 @@ mod tests {
             device_identity: hex::encode([2; 64]),
             api_key: "paired-upload-test".into(),
             grant,
+            name: None,
+            instance_id: None,
+            hostname: None,
         };
         let origin = profile.origin.clone();
         mold_secure_client::register_ephemeral("core-upload-test", profile).unwrap();
@@ -4017,11 +4024,47 @@ mod tests {
         assert_eq!(client.host(), "http://localhost:7680");
     }
 
+    /// Restores `MOLD_HOME`/`MOLD_HOST` and points the credential store at
+    /// a throwaway directory, so these tests never read a developer's hosts.
+    struct HostEnv {
+        _dir: tempfile::TempDir,
+        home: Option<std::ffi::OsString>,
+        host: Option<std::ffi::OsString>,
+    }
+    impl HostEnv {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let env = Self {
+                home: std::env::var_os("MOLD_HOME"),
+                host: std::env::var_os("MOLD_HOST"),
+                _dir: dir,
+            };
+            unsafe {
+                std::env::set_var("MOLD_HOME", env._dir.path());
+                std::env::remove_var("MOLD_HOST");
+            }
+            env
+        }
+    }
+    impl Drop for HostEnv {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.home {
+                    Some(v) => std::env::set_var("MOLD_HOME", v),
+                    None => std::env::remove_var("MOLD_HOME"),
+                }
+                match &self.host {
+                    Some(v) => std::env::set_var("MOLD_HOST", v),
+                    None => std::env::remove_var("MOLD_HOST"),
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_from_env_mold_host() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // Single test to avoid env var races between parallel tests
-        unsafe { std::env::remove_var("MOLD_HOST") };
+        let _env = HostEnv::new();
         let client = MoldClient::from_env();
         assert_eq!(client.host(), "http://localhost:7680");
 
@@ -4029,7 +4072,47 @@ mod tests {
         unsafe { std::env::set_var("MOLD_HOST", unique_url) };
         let client = MoldClient::from_env();
         assert_eq!(client.host(), unique_url);
-        unsafe { std::env::remove_var("MOLD_HOST") };
+    }
+
+    /// `--host` > `MOLD_HOST` > the default saved host > localhost, and a
+    /// saved name resolves wherever an address is accepted.
+    #[test]
+    fn host_resolution_precedence() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = HostEnv::new();
+        let saved = "http://10.20.30.40:7680";
+        mold_secure_client::save_regular_host(&mold_secure_client::RegularHost {
+            origin: saved.into(),
+            name: Some("workstation".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        let set_env = |value: Option<&str>| unsafe {
+            match value {
+                Some(v) => std::env::set_var("MOLD_HOST", v),
+                None => std::env::remove_var("MOLD_HOST"),
+            }
+        };
+
+        // Nothing configured: localhost.
+        assert_eq!(resolve_host(None), "http://localhost:7680");
+        mold_secure_client::hosts::set_default("workstation").unwrap();
+        // The default host fills in when nothing names one ...
+        assert_eq!(resolve_host(None), saved);
+        assert_eq!(resolve_host(Some("  ")), saved);
+        // ... MOLD_HOST beats it, and a name works there too ...
+        set_env(Some("other-box"));
+        assert_eq!(resolve_host(None), "http://other-box:7680");
+        set_env(Some("Workstation"));
+        assert_eq!(resolve_host(None), saved);
+        // ... and an explicit --host beats MOLD_HOST.
+        assert_eq!(resolve_host(Some("third:8080")), "http://third:8080");
+        assert_eq!(resolve_host(Some("10.20.30.40")), saved);
+        set_env(None);
+        assert_eq!(MoldClient::for_host(Some("workstation")).host(), saved);
+        assert_eq!(MoldClient::from_env().host(), saved);
+        mold_secure_client::hosts::clear_default().unwrap();
+        assert_eq!(MoldClient::from_env().host(), "http://localhost:7680");
     }
 
     #[test]
