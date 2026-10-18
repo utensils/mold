@@ -373,13 +373,18 @@ pub fn persist_derived_names_at(root: &Path) -> Result<Vec<SavedHost>> {
             if !path.try_exists()? {
                 continue;
             }
+            // Both byte buffers are zeroized on drop; the parsed copy's secret
+            // strings are wiped as soon as the new bytes exist.
             let bytes = crate::read_private(&path)?;
             let mut profile: serde_json::Value = serde_json::from_slice(&bytes)?;
             let object = profile
                 .as_object_mut()
                 .with_context(|| format!("invalid saved host profile {}", path.display()))?;
             object.insert("name".into(), host.name.clone().into());
-            let bytes = zeroize::Zeroizing::new(serde_json::to_vec(&profile)?);
+            let serialized = serde_json::to_vec(&profile);
+            wipe_secrets(&mut profile);
+            drop(profile);
+            let bytes = zeroize::Zeroizing::new(serialized?);
             mold_secure::identity_file::write_private_file(&path, &bytes, true)?;
         }
         named.push(SavedHost {
@@ -434,6 +439,18 @@ fn derived_name(origin: &str, hostname: Option<&str>) -> String {
         host.split('.').next().unwrap_or_default()
     };
     slug(label).unwrap_or_else(|| "host".into())
+}
+
+/// Zeroize every string in a parsed profile (credentials and identity keys
+/// among them) before the value is dropped.
+fn wipe_secrets(value: &mut serde_json::Value) {
+    use zeroize::Zeroize;
+    match value {
+        serde_json::Value::String(text) => text.zeroize(),
+        serde_json::Value::Array(items) => items.iter_mut().for_each(wipe_secrets),
+        serde_json::Value::Object(map) => map.values_mut().for_each(wipe_secrets),
+        _ => {}
+    }
 }
 
 /// The saved host with this name, case-insensitively.
