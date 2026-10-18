@@ -90,6 +90,9 @@ viuer = { version = "0.11", optional = true }
 mold-discord = { path = "../mold-discord", package = "mold-ai-discord", version = "0.36.0", optional = true }
 walkdir = "2.5.0"
 uuid = { version = "1", features = ["v4"] }
+# Claude Desktop skill ZIP (`mold skill install claude-desktop`); stored
+# entries only, so no compression backends.
+zip = { version = "8.6", default-features = false }
 
 tempfile = "3"
 

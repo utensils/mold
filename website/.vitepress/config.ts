@@ -127,6 +127,7 @@ export default defineConfig({
             { text: 'Model Discovery Catalog', link: '/docs/catalog' },
             { text: 'Troubleshooting', link: '/guide/troubleshooting' },
             { text: 'OpenClaw', link: '/guide/openclaw' },
+            { text: 'Claude Desktop', link: '/guide/claude-desktop' },
             { text: 'CLI Reference', link: '/guide/cli-reference' },
           ],
         },

@@ -3293,7 +3293,7 @@ fn handle_protocol_message(message: Value) -> Option<Value> {
     }
 }
 
-fn tool_definitions() -> Value {
+pub(crate) fn tool_definitions() -> Value {
     let mut tools = builtin_tool_definitions();
     let list = tools.as_array_mut().expect("tool definitions are an array");
     list.push(expand_prompt_tool());

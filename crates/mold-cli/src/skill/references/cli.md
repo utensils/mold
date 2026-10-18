@@ -595,7 +595,14 @@ and pod termination are destructive; follow the safety reference.
 mold serve --help
 mold mcp --host http://localhost:7680
 mold skill list
+mold skill install claude-desktop
 ```
+
+`mold skill install claude-desktop` serves Claude Desktop and claude.ai. It
+writes the skill as a ZIP for the user to upload under Customize > Skills and
+adds a `mold mcp` connector to `claude_desktop_config.json`. In that app Claude
+reaches mold only through the connector's tools, so offer this command when a
+Desktop user has no mold tools.
 
 Shell completion is installed with `mold completions <shell>`. Model names
 complete from the manifest, and tags, collections, sequence and queue job ids,
