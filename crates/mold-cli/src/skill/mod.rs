@@ -1133,14 +1133,12 @@ fn add_desktop_connector(args: &SkillInstallArgs, host: Option<&str>, dir: &Path
     };
     let exe = std::env::current_exe().context("could not locate the mold binary")?;
     let exe = exe.canonicalize().unwrap_or(exe);
+    let cwd = std::env::current_dir().context("could not determine current directory")?;
     let mold_home = std::env::var("MOLD_HOME")
         .ok()
         .filter(|home| !home.trim().is_empty())
-        .map(|home| {
-            expand_tilde(Path::new(&home))
-                .map(|path| path.display().to_string())
-                .unwrap_or(home)
-        });
+        .map(|home| absolute_mold_home(&home, &cwd))
+        .transpose()?;
     let connector = claude_desktop::Connector::new(exe.display().to_string(), host, mold_home);
     let path = claude_desktop::config_path(dir);
     let mut config = claude_desktop::read_config(&path)?;
@@ -1179,6 +1177,18 @@ fn add_desktop_connector(args: &SkillInstallArgs, host: Option<&str>, dir: &Path
         );
     }
     Ok(())
+}
+
+/// MOLD_HOME as Desktop must see it: Desktop starts the connector from its
+/// own working directory, so `~` and relative paths are resolved here.
+fn absolute_mold_home(raw: &str, cwd: &Path) -> Result<String> {
+    let path = expand_tilde(Path::new(raw))?;
+    let path = if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    };
+    Ok(path.display().to_string())
 }
 
 /// Check a `--host` value before it is written into Desktop's config, where a
@@ -2460,6 +2470,22 @@ mod claude_desktop_tests {
         assert_eq!(
             auto_includes_desktop(&user, home.path()),
             desktop_config_dir(home.path()).is_some()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_connector_gets_an_absolute_mold_home() {
+        let cwd = Path::new("/work");
+        assert_eq!(
+            absolute_mold_home("./mold-data", cwd).unwrap(),
+            "/work/./mold-data"
+        );
+        assert_eq!(absolute_mold_home("/srv/mold", cwd).unwrap(), "/srv/mold");
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(
+            absolute_mold_home("~/mold", cwd).unwrap(),
+            home.join("mold").display().to_string()
         );
     }
 
