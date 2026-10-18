@@ -56,7 +56,10 @@ it("offers exact source IDs, endpoint actions and the same actions on right-clic
   expect(view.emitted("use")?.[0]).toEqual([
     { ...selection, attachment: "last" },
   ]);
-  view.vm.open(new MouseEvent("contextmenu", { clientX: 200, clientY: 200 }));
+  // Vue Test Utils merges the exposed `open` method with the `open` emit in
+  // its wrapper inference. Keep the actual public method/menu contract here.
+  const actions = view.vm as unknown as { open(event: MouseEvent): void };
+  actions.open(new MouseEvent("contextmenu", { clientX: 200, clientY: 200 }));
   await flushPromises();
   expect(view.get('[role="menu"]').text()).toContain("Save a Copy");
   view.unmount();
