@@ -13,7 +13,7 @@ mold serve
 mold host invite                 # prints a one-use pairing link
 
 # Paste the link on your laptop, then generate there
-mold host add '<link>'
+mold host add                    # then paste the link
 mold run "a cat" --host workstation
 ```
 

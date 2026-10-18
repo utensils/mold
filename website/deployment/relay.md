@@ -163,10 +163,11 @@ This uses the operator key (`--api-key-file`, `MOLD_API_KEY` — also
 `@/private/key-file` — or the home's operator credential). Only the link goes to
 stdout; the expiry and the host public key go to stderr. It is the same link the
 apps show, so it pairs a phone or Studio too. It expires after two minutes and
-may be claimed once. Paste it on the client:
+may be claimed once. On the client, run this and paste the link at the prompt
+(passing the link as an argument also works, but leaves it in shell history):
 
 ```bash
-mold host add 'https://utensils.io/mold/pair#version=2&...'
+mold host add
 ```
 
 `mold host invite --output FILE` writes an owner-only invitation file instead,
@@ -177,8 +178,14 @@ From a client that holds the host's operator key, skip the link:
 for an invitation and claims it at once, so the client gets its own revocable
 grant and the operator key is exchanged, never stored. An app or device key is
 saved as a Regular credential instead, and a host with authentication off is
-saved with no key. A remote plain-HTTP host needs Regular direct access for
-this; otherwise use the link.
+saved with no key (only when the host also answers without one). The key comes
+from `--api-key-file`, `--api-key-stdin` or a hidden prompt, never from
+`MOLD_API_KEY`. Over `https://`, loopback or a Tailscale address (100.64.0.0/10,
+fd7a:115c:a1e0::/48) this is a Secure pairing. Mold refuses a Secure pairing
+over plain `http://` to any other address, because the invitation would cross
+the network readable: use the host's `https://` address, pair with the link, or
+pass `--regular` for a direct HTTP connection (allowed, with a warning, on a
+network you trust).
 
 The client saves the host under its name (`mold host list`); use it with
 `--host NAME`, `MOLD_HOST=NAME`, or `mold host use NAME`. Existing commands

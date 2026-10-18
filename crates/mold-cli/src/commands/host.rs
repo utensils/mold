@@ -123,7 +123,7 @@ fn list(json: bool) -> Result<()> {
     }
     if saved.is_empty() {
         println!(
-            "No saved hosts. On the host run `mold host invite`, then here `mold host add '<link>'` (or `mold host add URL` with an API key)."
+            "No saved hosts. On the host run `mold host invite`, then here `mold host add` and paste its link (or `mold host add URL` with an API key)."
         );
         return Ok(());
     }
@@ -389,7 +389,7 @@ fn key_outcome(status: u16, code: &str, regular: bool) -> Result<KeyOutcome> {
         (503, "PAIRING_UNAVAILABLE") => KeyOutcome::SaveKeyless,
         (401, _) => bail!("the host rejected that API key"),
         (403, "REGULAR_ACCESS_DISABLED") => bail!(
-            "the host has Regular direct access turned off; enable it there (`mold serve --allow-direct-api`) or pair with a link: run `mold host invite` on the host and `mold host add '<link>'` here"
+            "the host has Regular direct access turned off; enable it there (`mold serve --allow-direct-api`) or pair with a link: run `mold host invite` on the host and `mold host add` here"
         ),
         _ => bail!(
             "the host could not start pairing (HTTP {status}{}){}; run `mold host invite` on the host and paste its link into `mold host add`",

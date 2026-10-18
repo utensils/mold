@@ -277,7 +277,7 @@ Run the engine where the GPU lives and connect from another machine:
 ```bash
 mold serve  # authenticated GPU host; enable Remote Access or configure its relay
 mold host invite                     # on the host: prints a one-use pairing link
-mold host add '<link>'               # on the client; saves the host under its name
+mold host add                        # on the client: paste the link; saves the host by name
 mold run "a cat" --host workstation  # or MOLD_HOST=workstation, or mold host use workstation
 ```
 

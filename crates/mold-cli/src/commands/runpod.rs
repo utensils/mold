@@ -2259,7 +2259,7 @@ async fn ensure_paired_pod(
 }
 
 fn require_paired_pod(origin: &str) -> Result<()> {
-    mold_secure_client::load_pairing(origin).with_context(||format!("Pair this RunPod host before using it: on the host's trusted console configure Remote Access, run mold pairing create --output <private-file>, transfer the invitation privately, then run mold pair --invite-file <private-file>. Set the host MOLD_PUBLIC_URL to {origin}; provider status alone does not establish a secure Mold connection"))?;
+    mold_secure_client::load_pairing(origin).with_context(||format!("Pair this RunPod host before using it: on the host's trusted console configure Remote Access, run `mold host invite` there, then `mold host add` here and paste the link. Set the host MOLD_PUBLIC_URL to {origin}; provider status alone does not establish a secure Mold connection"))?;
     Ok(())
 }
 async fn wait_for_mold(mold_host: &str, timeout_secs: u64) -> Result<()> {

@@ -28,7 +28,7 @@ pub fn load_pairing(origin: &str) -> Result<PairedHost> {
     load_pairing_at(&default_store(), origin)
 }
 pub fn load_pairing_at(root: &Path, origin: &str) -> Result<PairedHost> {
-    let bytes=read_private(&root.join(filename(origin))) .context("No secure pairing for this host. Use mold pair with an invitation from the host; legacy proxy credentials cannot be upgraded automatically")?;
+    let bytes=read_private(&root.join(filename(origin))) .context("No secure pairing for this host. Run `mold host invite` on the host and `mold host add` here (`mold host list` shows saved hosts); legacy proxy credentials cannot be upgraded automatically")?;
     let host: PairedHost = serde_json::from_slice(&bytes)?;
     if host.origin != origin {
         bail!("stored pairing origin mismatch")

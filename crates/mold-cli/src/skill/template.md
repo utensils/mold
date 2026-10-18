@@ -115,7 +115,8 @@ this check with a mutable `latest` tag or retry paid creation blindly.
 ```bash
 mold relay connect --relay-url wss://API.execute-api.REGION.amazonaws.com/production --target 127.0.0.1:7680
 mold host invite
-mold host add 'https://utensils.io/mold/pair#version=2&...'
+mold host add
+mold host add - < /private/link.txt
 mold host add https://workstation.example --api-key-file /private/operator.key
 mold host list
 mold host use workstation

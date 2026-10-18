@@ -302,7 +302,7 @@ pub fn load_regular_host(origin: &str) -> Result<RegularHost> {
         return Ok(host);
     }
     let bytes = crate::read_private(&regular_path(origin))
-        .context("No Regular credential for this host; explicitly pair or enter a direct key")?;
+        .context("No Regular credential for this host; add it with `mold host add URL --regular` (`mold host list` shows saved hosts)")?;
     let host: RegularHost = serde_json::from_slice(&bytes)?;
     anyhow::ensure!(host.origin == origin, "Regular credential origin mismatch");
     host.validate()?;

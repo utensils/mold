@@ -906,8 +906,8 @@ by name.
 # On the host (any shell with its operator key): print a one-use pairing link.
 mold host invite
 mold host invite --qr            # also draw it as a QR code for a phone
-# On the client: paste it.
-mold host add 'https://utensils.io/mold/pair#version=2&...'
+# On the client: run this, then paste the link at the prompt.
+mold host add
 mold host add - < link.txt       # or read it from stdin
 # Or pair from the host's URL and an API key.
 mold host add http://10.0.0.8:7680 --name workstation --api-key-file /private/key
@@ -922,18 +922,22 @@ invitation file instead of printing a link, and `--relay-url WSS_URL` binds a
 separately supervised connector. It uses the operator key from `--api-key-file`,
 `MOLD_API_KEY` (or `@owner-only-key-file`), or this home's operator credential.
 
-`mold host add` takes the link, a file holding it, the JSON invitation, or `-`
-for stdin; with no argument on a terminal it asks. With a host URL instead it
+`mold host add` with no argument asks for the link on a terminal; `-` reads it
+from stdin, and a path (`./invite.txt`, `~/invite.txt`, `/private/invite.json`)
+reads a file holding the link or JSON invitation. A link passed as an argument
+works too, but stays in your shell history until it is claimed. With a host URL instead it
 asks the host for an invitation with the key from `--api-key-file`,
-`--api-key-stdin`, `MOLD_API_KEY`, or a hidden prompt:
+`--api-key-stdin`, or a hidden prompt (never `MOLD_API_KEY`). Over plain
+`http://` this needs a loopback or Tailscale address, or `--regular` (with a
+warning); otherwise use `https://` or the link:
 
-| The host answers                                   | `mold host add`                                                                                   |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| an invitation (the key is the operator key)        | claims it at once: this client gets its own revocable grant, and the operator key is never stored |
-| `PAIRING_OPERATOR_REQUIRED` (an app or device key) | checks the key with one authenticated read, then saves it as Regular                              |
-| `PAIRING_UNAVAILABLE` (authentication off)         | saves a Regular connection with no key                                                            |
-| `401`                                              | stops: the key was rejected                                                                       |
-| anything else                                      | stops and suggests `mold host invite` on the host                                                 |
+| The host answers                                   | `mold host add`                                                                                       |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| an invitation (the key is the operator key)        | claims it at once: this client gets its own revocable grant, and the operator key is never stored     |
+| `PAIRING_OPERATOR_REQUIRED` (an app or device key) | checks the key with one authenticated read, then saves it as Regular                                  |
+| `PAIRING_UNAVAILABLE` and it answers without a key | saves a Regular connection with no key (authentication is off); any other `PAIRING_UNAVAILABLE` stops |
+| `401`                                              | stops: the key was rejected                                                                           |
+| anything else                                      | stops and suggests `mold host invite` on the host                                                     |
 
 `--regular` asks for a Regular invitation for that exact URL (the host must
 allow direct access). `--name` saves it under that name (it must be free, or

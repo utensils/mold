@@ -1620,9 +1620,13 @@ pub enum HostAction {
     /// Pair with a host from its pairing link, or from its URL and an API key
     #[command(after_long_help = "\
 Examples:
-  mold host add 'https://utensils.io/mold/pair#version=2&...'   Paste the link `mold host invite` printed
-  mold host add -  < link.txt                                  Read the link from stdin
+  mold host add                       Then paste the link `mold host invite` printed
+  mold host add -  < link.txt         Read the link from stdin
+  mold host add /private/invite.json  Pair from a file holding the link or invitation
   mold host add http://10.0.0.8:7680 --name workstation --api-key-file key.txt
+
+A link given as an argument also works, but lands in your shell history
+until it is claimed; pasting it at the prompt does not.
 
 With a URL, an operator key is exchanged for this client's own revocable
 grant and never stored; an app or device key is saved as a Regular
@@ -2817,7 +2821,7 @@ Manage pods manually:
     #[command(after_long_help = "\
 Examples:
   mold host invite                   On the host: print a one-use pairing link
-  mold host add '<link>'             On the client: pair from that link
+  mold host add                      On the client: paste that link
   mold host list                     Saved hosts and the default
   mold host use workstation          Target it whenever nothing else names a host
   mold host use --clear              Back to http://localhost:7680
