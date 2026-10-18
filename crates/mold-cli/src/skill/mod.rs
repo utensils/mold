@@ -8,6 +8,8 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
+mod claude_desktop;
+
 const SKILL_DIR_NAME: &str = "mold";
 const MANIFEST_FILE: &str = ".mold-skill.json";
 const MANIFEST_SCHEMA: u32 = 1;
@@ -65,6 +67,44 @@ pub struct SkillInstallArgs {
     /// Install for every supported agent regardless of detection
     #[arg(long)]
     all: bool,
+    /// claude-desktop: where to write the skill ZIP (default:
+    /// ~/Downloads/mold-skill.zip)
+    #[arg(long, short = 'o', value_name = "FILE")]
+    output: Option<PathBuf>,
+    /// claude-desktop: only write the ZIP; leave claude_desktop_config.json alone
+    #[arg(long)]
+    no_connector: bool,
+    /// claude-desktop: do not open the Skills page or reveal the ZIP
+    #[arg(long)]
+    no_open: bool,
+    /// claude-desktop: replace an --output file or an mcpServers.mold entry
+    /// that mold did not write
+    #[arg(long)]
+    force: bool,
+}
+
+impl SkillArgs {
+    /// True for `mold skill install claude-desktop`, the one skill command
+    /// the global `--host` applies to: it pins the Desktop connector.
+    pub fn takes_host(&self) -> bool {
+        matches!(&self.command, SkillCommand::Install(args) if args.agents.contains(&Agent::ClaudeDesktop))
+    }
+}
+
+impl SkillInstallArgs {
+    /// The Claude Desktop flags someone passed, to refuse them when
+    /// `claude-desktop` is not being installed.
+    fn desktop_flags(&self) -> Vec<&'static str> {
+        [
+            (self.output.is_some(), "--output"),
+            (self.no_connector, "--no-connector"),
+            (self.no_open, "--no-open"),
+            (self.force, "--force"),
+        ]
+        .into_iter()
+        .filter_map(|(set, flag)| set.then_some(flag))
+        .collect()
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -119,6 +159,9 @@ enum Agent {
     Amp,
     Goose,
     Agents,
+    /// Claude Desktop and claude.ai: a skill ZIP to upload plus the local
+    /// `mold mcp` connector. Not a skill directory, so it has no `AgentSpec`.
+    ClaudeDesktop,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -133,9 +176,25 @@ enum RenderProfile {
     Cursor,
     Gemini,
     Goose,
+    #[serde(rename = "claude-desktop")]
+    ClaudeDesktop,
 }
 
 impl RenderProfile {
+    #[cfg(test)]
+    const ALL: [Self; 10] = [
+        Self::Portable,
+        Self::Claude,
+        Self::Codex,
+        Self::Pi,
+        Self::Openclaw,
+        Self::Copilot,
+        Self::Cursor,
+        Self::Gemini,
+        Self::Goose,
+        Self::ClaudeDesktop,
+    ];
+
     fn name(self) -> &'static str {
         match self {
             Self::Portable => "portable",
@@ -147,6 +206,7 @@ impl RenderProfile {
             Self::Cursor => "cursor",
             Self::Gemini => "gemini",
             Self::Goose => "goose",
+            Self::ClaudeDesktop => "claude-desktop",
         }
     }
 }
@@ -267,6 +327,21 @@ const AGENTS: &[AgentSpec] = &[
 ];
 
 impl Agent {
+    /// The profile `mold skill show` renders for this agent.
+    fn show_profile(self) -> RenderProfile {
+        match self {
+            Self::ClaudeDesktop => RenderProfile::ClaudeDesktop,
+            agent => agent.spec().user_profile,
+        }
+    }
+
+    fn cli_name(self) -> &'static str {
+        match self {
+            Self::ClaudeDesktop => "claude-desktop",
+            agent => agent.spec().name,
+        }
+    }
+
     fn spec(self) -> &'static AgentSpec {
         AGENTS
             .iter()
@@ -447,6 +522,7 @@ fn render_bundle(profile: RenderProfile) -> Result<Bundle> {
     let mut files = BTreeMap::new();
     let (frontmatter, reference_prefix, agent_notes) = render_adapter(profile);
     let body = TEMPLATE_MD
+        .replace("{{surface_preamble}}", surface_preamble(profile))
         .replace("{{reference_prefix}}", reference_prefix)
         .replace("{{agent_notes}}", agent_notes)
         .replace(
@@ -471,6 +547,54 @@ fn render_bundle(profile: RenderProfile) -> Result<Bundle> {
     }
     Ok(Bundle { profile, files })
 }
+
+/// Text that must come before everything else in `SKILL.md`. Only Claude
+/// Desktop has any: its chat runs in a cloud sandbox with no `mold` binary,
+/// so every CLI example below it describes what the connector does instead.
+fn surface_preamble(profile: RenderProfile) -> &'static str {
+    match profile {
+        RenderProfile::ClaudeDesktop => CLAUDE_DESKTOP_PREAMBLE,
+        _ => "",
+    }
+}
+
+/// Tools this preamble names; a test pins each to `mold mcp`'s tool list.
+#[cfg(test)]
+const CLAUDE_DESKTOP_TOOLS: &[&str] = &[
+    "server_status",
+    "list_models",
+    "generate_image",
+    "generate_image_async",
+    "generation_status",
+    "list_gallery",
+    "get_gallery_image",
+    "expand_prompt",
+];
+
+const CLAUDE_DESKTOP_PREAMBLE: &str = "\
+## In Claude Desktop and claude.ai
+
+You cannot run the `mold` command here: this conversation's code sandbox has
+no `mold` binary and cannot reach the user's machines. Work through the
+**mold connector** instead, which runs `mold mcp` on the user's computer and
+talks to their default mold host:
+
+- `server_status` and `list_models` first, to see the host and what it can run.
+- `generate_image` for a quick still; `generate_image_async` then
+  `generation_status` for video, large batches or anything slow.
+- `list_gallery` and `get_gallery_image` to find and show existing prints.
+- `expand_prompt` to apply the prompting guides below to a short idea.
+
+If no mold tools are available, ask the user to run
+`mold skill install claude-desktop` in a terminal on their computer and restart
+Claude Desktop. Pairing a host (`mold host add`) and anything else marked
+`mold …` below also happens in their terminal, never in this sandbox. Never
+ask the user to paste an API key or pairing link into the chat.
+
+The command examples in this skill describe the CLI the connector wraps; use
+them to choose models, sizes and prompts, then call the matching tool.
+
+";
 
 fn render_adapter(profile: RenderProfile) -> (String, &'static str, &'static str) {
     let mut fields = vec![
@@ -505,6 +629,7 @@ fn render_adapter(profile: RenderProfile) -> (String, &'static str, &'static str
             fields.extend(["author: utensils".to_string(), "version: \"1\"".to_string(), "tags:\n  - image-generation\n  - video-generation\n  - local-ai".to_string()]);
             ("references", "Goose: use the Skills extension to load linked resources relative to this skill directory.")
         }
+        RenderProfile::ClaudeDesktop => ("references", "Claude Desktop: this skill was uploaded under Customize > Skills; generation goes through the mold connector tools described at the top, never a sandbox shell."),
     };
     (
         format!("---\n{}\n---", fields.join("\n")),
@@ -846,11 +971,14 @@ fn selected_agents(args: &SkillInstallArgs) -> Result<Vec<Agent>> {
     }
     if args.detected {
         let home = dirs::home_dir().context("could not determine home directory for --detected")?;
-        let detected = AGENTS
+        let mut detected = AGENTS
             .iter()
             .map(|spec| spec.agent)
             .filter(|agent| *agent != Agent::Agents && agent.is_detected(&home))
             .collect::<Vec<_>>();
+        if auto_includes_desktop(args, &home) {
+            detected.push(Agent::ClaudeDesktop);
+        }
         if detected.is_empty() {
             anyhow::bail!(
                 "no supported agents detected; name agents explicitly, use `agents`, or use --all"
@@ -859,23 +987,330 @@ fn selected_agents(args: &SkillInstallArgs) -> Result<Vec<Agent>> {
         return Ok(detected);
     }
     if args.all {
-        return Ok(AGENTS.iter().map(|spec| spec.agent).collect());
+        let mut all = AGENTS.iter().map(|spec| spec.agent).collect::<Vec<_>>();
+        if dirs::home_dir().is_some_and(|home| auto_includes_desktop(args, &home)) {
+            all.push(Agent::ClaudeDesktop);
+        }
+        return Ok(all);
     }
     anyhow::bail!("name at least one agent, or pass --detected or --all")
 }
 
-pub fn run(args: &SkillArgs) -> Result<()> {
+/// `host` is a typed global `--host`, which only `install claude-desktop`
+/// accepts (see [`SkillArgs::takes_host`]).
+pub fn run(args: &SkillArgs, host: Option<&str>) -> Result<()> {
     match &args.command {
         SkillCommand::List(args) => list(args),
-        SkillCommand::Install(args) => install(args),
+        SkillCommand::Install(args) => install(args, host),
         SkillCommand::Uninstall(args) => uninstall(args),
         SkillCommand::Show(args) => show(args),
     }
 }
 
-fn install(args: &SkillInstallArgs) -> Result<()> {
+fn install(args: &SkillInstallArgs, host: Option<&str>) -> Result<()> {
+    let (desktop, agents) = split_desktop(selected_agents(args)?);
+    if desktop && (args.project || args.dir.is_some()) {
+        anyhow::bail!(
+            "claude-desktop installs to your Claude account, not a project; drop --project/--dir"
+        );
+    }
+    let stray = args.desktop_flags();
+    if !desktop && !stray.is_empty() {
+        anyhow::bail!("{} only apply to claude-desktop", stray.join(", "));
+    }
+    if !agents.is_empty() {
+        install_directories(args, &agents)?;
+    }
+    if desktop {
+        // Only a named `claude-desktop` opens the browser; `--detected` and
+        // `--all` print the same steps without taking over the screen.
+        let named = args.agents.contains(&Agent::ClaudeDesktop);
+        install_claude_desktop(args, host, named && !args.no_open)?;
+    }
+    Ok(())
+}
+
+/// Pull `claude-desktop` out of an agent list: it is not a skill directory.
+fn split_desktop(agents: Vec<Agent>) -> (bool, Vec<Agent>) {
+    let desktop = agents.contains(&Agent::ClaudeDesktop);
+    let rest = agents
+        .into_iter()
+        .filter(|agent| *agent != Agent::ClaudeDesktop)
+        .collect();
+    (desktop, rest)
+}
+
+fn desktop_config_dir(home: &Path) -> Option<PathBuf> {
+    claude_desktop::config_dir(
+        home,
+        std::env::var_os("APPDATA").map(PathBuf::from).as_deref(),
+    )
+}
+
+/// `--detected` and `--all` add Claude Desktop only in user scope: it lives
+/// on the Claude account, so a project install never includes it.
+fn auto_includes_desktop(args: &SkillInstallArgs, home: &Path) -> bool {
+    !args.project && args.dir.is_none() && desktop_detected(home)
+}
+
+fn desktop_detected(home: &Path) -> bool {
+    desktop_config_dir(home).is_some_and(|dir| dir.is_dir())
+}
+
+fn install_claude_desktop(args: &SkillInstallArgs, host: Option<&str>, open: bool) -> Result<()> {
+    let home = dirs::home_dir().context("could not determine the home directory")?;
+    let zip = match &args.output {
+        Some(path) => expand_tilde(path)?,
+        None => claude_desktop::default_zip_path(
+            dirs::download_dir(),
+            &std::env::current_dir().context("could not determine current directory")?,
+        ),
+    };
+    let bundle = render_bundle(RenderProfile::ClaudeDesktop)?;
+    claude_desktop::write_zip(&bundle.files_with_manifest()?, &zip, args.force)?;
+    eprintln!("✓ Wrote the Claude Desktop skill: {}", display_path(&zip));
+
+    if args.no_connector {
+        eprintln!("  Skipped the connector (--no-connector).");
+    } else {
+        match desktop_config_dir(&home) {
+            None => eprintln!(
+                "  Claude Desktop has no build for this platform, so no connector was added. The ZIP still uploads at {}.",
+                claude_desktop::UPLOAD_URL
+            ),
+            Some(dir) if !dir.is_dir() => eprintln!(
+                "  Claude Desktop is not installed here ({} is missing), so no connector was added. Install it and run this again.",
+                display_path(&dir)
+            ),
+            Some(dir) => add_desktop_connector(args, host, &dir)?,
+        }
+    }
+
+    eprintln!();
+    eprintln!("Next, in Claude Desktop:");
+    if !args.no_connector {
+        eprintln!("  1. Quit and reopen Claude Desktop so it starts the mold connector.");
+    } else {
+        eprintln!("  1. (No connector changes; skip the restart.)");
+    }
+    eprintln!(
+        "  2. Customize > Skills > Add > Upload a skill, choose {}, and turn it on.",
+        display_path(&zip)
+    );
+    eprintln!("     Remove or replace any older \"mold\" skill there first.");
+    eprintln!(
+        "  3. Settings > Capabilities: \"Code execution and file creation\" must be on for skills."
+    );
+    eprintln!("  Skills page: {}", claude_desktop::UPLOAD_URL);
+    if open && std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        claude_desktop::open_upload_page(&zip);
+    }
+    Ok(())
+}
+
+fn add_desktop_connector(args: &SkillInstallArgs, host: Option<&str>, dir: &Path) -> Result<()> {
+    let host_label = match host {
+        Some(host) => connector_host(host)?,
+        None => match mold_secure_client::hosts::default() {
+            Ok(Some(saved)) => format!("your default host, {}", saved.name),
+            _ => {
+                let saved = mold_secure_client::hosts::list()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|host| host.name)
+                    .collect::<Vec<_>>();
+                if saved.is_empty() {
+                    "http://localhost:7680, since no default host is set (`mold host use NAME`)"
+                        .to_string()
+                } else {
+                    format!(
+                        "http://localhost:7680, since no default host is set; pin a saved host with `mold skill install claude-desktop --host NAME` ({})",
+                        saved.join(", ")
+                    )
+                }
+            }
+        },
+    };
+    let exe = std::env::current_exe().context("could not locate the mold binary")?;
+    let exe = exe.canonicalize().unwrap_or(exe);
+    let cwd = std::env::current_dir().context("could not determine current directory")?;
+    let mold_home = std::env::var("MOLD_HOME")
+        .ok()
+        .filter(|home| !home.trim().is_empty())
+        .map(|home| absolute_mold_home(&home, &cwd))
+        .transpose()?;
+    let connector = claude_desktop::Connector::new(exe.display().to_string(), host, mold_home);
+    let path = claude_desktop::config_path(dir);
+    let mut config = claude_desktop::read_config(&path)?;
+    let owned = claude_desktop::read_owned(&path);
+    let merge =
+        claude_desktop::merge_connector(&mut config, &connector, owned.as_ref(), args.force)?;
+    match merge {
+        claude_desktop::Merge::Unchanged => eprintln!(
+            "✓ The mold connector in {} is already current.",
+            display_path(&path)
+        ),
+        claude_desktop::Merge::Added | claude_desktop::Merge::Updated => {
+            let backup = claude_desktop::write_config(&path, &config)?;
+            eprintln!(
+                "✓ {} the mold connector in {}.",
+                if merge == claude_desktop::Merge::Added {
+                    "Added"
+                } else {
+                    "Updated"
+                },
+                display_path(&path)
+            );
+            if let Some(backup) = backup {
+                eprintln!("  Previous config saved as {}", display_path(&backup));
+            }
+        }
+    }
+    // Record what is now under mcpServers.mold, so later runs (and
+    // uninstall) can tell mold's entry from one a person wrote or edited.
+    claude_desktop::write_owned(&path, claude_desktop::connector_entry(&config))?;
+    eprintln!("  It talks to {host_label}.");
+    if exe.components().any(|part| part.as_os_str() == "target") {
+        eprintln!(
+            "  Note: the connector runs {}, a build output; install mold and run this again for a stable path.",
+            display_path(&exe)
+        );
+    }
+    if std::env::var_os("MOLD_HOST").is_some() && host.is_none() {
+        eprintln!(
+            "  Note: Claude Desktop does not see MOLD_HOST; pass --host to pin the connector."
+        );
+    }
+    Ok(())
+}
+
+/// MOLD_HOME as Desktop must see it: Desktop starts the connector from its
+/// own working directory, so `~` and relative paths are resolved here.
+fn absolute_mold_home(raw: &str, cwd: &Path) -> Result<String> {
+    let path = expand_tilde(Path::new(raw))?;
+    let path = if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    };
+    Ok(path.display().to_string())
+}
+
+/// Check a `--host` value before it is written into Desktop's config, where a
+/// typo would only show up as a broken connector.
+fn connector_host(host: &str) -> Result<String> {
+    if let Some(saved) = mold_secure_client::hosts::resolve(host)? {
+        return Ok(format!("host {}", saved.name));
+    }
+    let looks_like_address = host.contains("://") || host.contains(':') || host.contains('.');
+    // A bare name that is not saved can still be a DNS or MagicDNS name, as
+    // `mold mcp --host` accepts; only one that resolves nowhere is a typo.
+    let resolves = || {
+        use std::net::ToSocketAddrs;
+        (host, 7680)
+            .to_socket_addrs()
+            .is_ok_and(|mut addrs| addrs.next().is_some())
+    };
+    if !looks_like_address && !resolves() {
+        let saved = mold_secure_client::hosts::list()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|host| host.name)
+            .collect::<Vec<_>>();
+        anyhow::bail!(
+            "'{host}' is not a saved host and does not resolve{}; pair it with `mold host add` or pass a URL",
+            if saved.is_empty() {
+                String::new()
+            } else {
+                format!(" (saved: {})", saved.join(", "))
+            }
+        );
+    }
+    Ok(mold_secure_client::hosts::normalize_address(host))
+}
+
+fn uninstall_claude_desktop(named: bool) -> Result<usize> {
+    let mut removed = 0;
+    let home = dirs::home_dir().context("could not determine the home directory")?;
+    if let Some(dir) = desktop_config_dir(&home).filter(|dir| dir.is_dir()) {
+        let path = claude_desktop::config_path(&dir);
+        let mut config = claude_desktop::read_config(&path)?;
+        let owned = claude_desktop::read_owned(&path);
+        match claude_desktop::remove_connector(&mut config, owned.as_ref())? {
+            claude_desktop::Removal::Removed => {
+                let backup = claude_desktop::write_config(&path, &config)?;
+                claude_desktop::write_owned(&path, None)?;
+                eprintln!("Removed the mold connector from {}", display_path(&path));
+                if let Some(backup) = backup {
+                    eprintln!("  Previous config saved as {}", display_path(&backup));
+                }
+                removed += 1;
+            }
+            claude_desktop::Removal::NotOurs => eprintln!(
+                "Left mcpServers.mold in {} alone: mold did not write it.",
+                display_path(&path)
+            ),
+            claude_desktop::Removal::Absent => {}
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let zip = claude_desktop::default_zip_path(dirs::download_dir(), &cwd);
+        if claude_desktop::is_mold_skill_zip(&zip) {
+            std::fs::remove_file(&zip)
+                .with_context(|| format!("failed to remove {}", zip.display()))?;
+            eprintln!("Removed {}", display_path(&zip));
+            removed += 1;
+        }
+    }
+    if named || removed > 0 {
+        eprintln!(
+            "The uploaded skill stays on your Claude account; remove it at {}.",
+            claude_desktop::UPLOAD_URL
+        );
+    }
+    Ok(removed)
+}
+
+/// The `mold skill list` cell for Claude Desktop.
+fn desktop_status(home: &Path) -> String {
+    let connector = match desktop_config_dir(home).filter(|dir| dir.is_dir()) {
+        None => "-".to_string(),
+        Some(dir) => match claude_desktop::read_config(&claude_desktop::config_path(&dir)) {
+            Ok(config) => claude_desktop::connector_state(
+                &config,
+                claude_desktop::read_owned(&claude_desktop::config_path(&dir)).as_ref(),
+            )
+            .to_string(),
+            Err(_) => "config unreadable".to_string(),
+        },
+    };
+    let zip = std::env::current_dir()
+        .map(|cwd| claude_desktop::default_zip_path(dirs::download_dir(), &cwd))
+        .ok()
+        .filter(|zip| zip.is_file());
+    let zip = match zip {
+        None => "no ZIP".to_string(),
+        Some(zip) => {
+            let current = render_bundle(RenderProfile::ClaudeDesktop)
+                .ok()
+                .and_then(|bundle| bundle.files_with_manifest().ok())
+                .and_then(|files| files.get(MANIFEST_FILE).cloned());
+            let state = if !claude_desktop::is_mold_skill_zip(&zip) {
+                "not a mold skill"
+            } else if claude_desktop::zipped_manifest(&zip) == current {
+                "current"
+            } else {
+                "outdated"
+            };
+            format!("{} [{state}]", display_path(&zip))
+        }
+    };
+    format!("{connector}; {zip}")
+}
+
+fn install_directories(args: &SkillInstallArgs, agents: &[Agent]) -> Result<()> {
     let scope = resolve_scope(args.project, &args.dir)?;
-    for (dir, target) in dedupe_targets(&scope, &selected_agents(args)?) {
+    for (dir, target) in dedupe_targets(&scope, agents) {
         let installed = replace_bundle(&dir, &render_bundle(target.profile)?)?;
         eprintln!(
             "Installed mold skill: {} ({}, {} profile)",
@@ -888,13 +1323,27 @@ fn install(args: &SkillInstallArgs) -> Result<()> {
 }
 
 fn uninstall(args: &SkillUninstallArgs) -> Result<()> {
+    let project = args.project || args.dir.is_some();
+    let (named_desktop, named) = split_desktop(args.agents.clone());
+    if named_desktop && project {
+        anyhow::bail!(
+            "claude-desktop installs to your Claude account, not a project; drop --project/--dir"
+        );
+    }
+    let mut removed = 0;
+    // With no agents named, user scope covers Claude Desktop too.
+    if named_desktop || (args.agents.is_empty() && !project) {
+        removed += uninstall_claude_desktop(named_desktop)?;
+        if named.is_empty() && !args.agents.is_empty() {
+            return Ok(());
+        }
+    }
     let scope = resolve_scope(args.project, &args.dir)?;
     let agents = if args.agents.is_empty() {
         AGENTS.iter().map(|spec| spec.agent).collect::<Vec<_>>()
     } else {
-        args.agents.clone()
+        named
     };
-    let mut removed = 0;
     for (dir, _) in dedupe_targets(&scope, &agents) {
         let count = uninstall_bundle(&dir)?;
         if count > 0 {
@@ -918,13 +1367,13 @@ fn show(args: &SkillShowArgs) -> Result<()> {
     if !safe_relative(&args.file) {
         anyhow::bail!("bundle file must be a safe relative path");
     }
-    let bundle = render_bundle(args.agent.spec().user_profile)?;
+    let bundle = render_bundle(args.agent.show_profile())?;
     let files = bundle.files_with_manifest()?;
     let key = args.file.to_string_lossy();
     let contents = files.get(key.as_ref()).with_context(|| {
         format!(
             "no rendered {} bundle file {}; available: {}",
-            args.agent.spec().name,
+            args.agent.cli_name(),
             args.file.display(),
             files.keys().cloned().collect::<Vec<_>>().join(", ")
         )
@@ -962,6 +1411,16 @@ fn list(args: &SkillListArgs) -> Result<()> {
             .map(|root| bundle_status(&spec.agent.project_skill_dir(root), spec.project_profile))
             .unwrap_or_else(|| "-".to_string());
         table.add_row([spec.label, spec.name, detected, &user, &project]);
+    }
+    if let Some(home) = &home {
+        let detected = if desktop_detected(home) { "yes" } else { "no" };
+        table.add_row([
+            "Claude Desktop",
+            "claude-desktop",
+            detected,
+            &desktop_status(home),
+            "-",
+        ]);
     }
     println!("{table}");
     Ok(())
@@ -1010,7 +1469,9 @@ mod tests {
         let profiles = AGENTS
             .iter()
             .flat_map(|spec| [spec.user_profile, spec.project_profile])
+            .chain([RenderProfile::ClaudeDesktop])
             .collect::<BTreeSet<_>>();
+        assert_eq!(profiles.len(), RenderProfile::ALL.len());
         for profile in profiles {
             let bundle = render_bundle(profile).unwrap();
             let skill = &bundle.files["SKILL.md"];
@@ -1052,17 +1513,7 @@ mod tests {
 
     #[test]
     fn every_skill_profile_explains_h3_reference_transport_and_license_separately() {
-        for profile in [
-            RenderProfile::Portable,
-            RenderProfile::Claude,
-            RenderProfile::Codex,
-            RenderProfile::Pi,
-            RenderProfile::Openclaw,
-            RenderProfile::Copilot,
-            RenderProfile::Cursor,
-            RenderProfile::Gemini,
-            RenderProfile::Goose,
-        ] {
+        for profile in RenderProfile::ALL {
             let bundle = render_bundle(profile).unwrap();
             let reference = &bundle
                 .files
@@ -1088,16 +1539,7 @@ mod tests {
             .filter(|(path, _)| path.starts_with("references/prompting/"))
             .map(|(path, contents)| (path.clone(), sha256(contents.as_bytes())))
             .collect::<BTreeMap<_, _>>();
-        for profile in [
-            RenderProfile::Claude,
-            RenderProfile::Codex,
-            RenderProfile::Pi,
-            RenderProfile::Openclaw,
-            RenderProfile::Copilot,
-            RenderProfile::Cursor,
-            RenderProfile::Gemini,
-            RenderProfile::Goose,
-        ] {
+        for profile in RenderProfile::ALL {
             let bundle = render_bundle(profile).unwrap();
             let hashes = bundle
                 .files
@@ -1136,17 +1578,7 @@ mod tests {
 
     #[test]
     fn every_direct_relative_skill_link_resolves_in_each_bundle() {
-        for profile in [
-            RenderProfile::Portable,
-            RenderProfile::Claude,
-            RenderProfile::Codex,
-            RenderProfile::Pi,
-            RenderProfile::Openclaw,
-            RenderProfile::Copilot,
-            RenderProfile::Cursor,
-            RenderProfile::Gemini,
-            RenderProfile::Goose,
-        ] {
+        for profile in RenderProfile::ALL {
             let bundle = render_bundle(profile).unwrap();
             let skill = &bundle.files["SKILL.md"];
             for tail in skill.split("](").skip(1) {
@@ -1894,5 +2326,195 @@ mod tests {
                 "mold run \"x\"  --image -".to_string()
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod claude_desktop_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> SkillArgs {
+        SkillArgs::try_parse_from(std::iter::once("skill").chain(args.iter().copied())).unwrap()
+    }
+
+    fn install_error(args: &[&str]) -> String {
+        let SkillCommand::Install(install_args) = parse(args).command else {
+            panic!("not an install");
+        };
+        install(&install_args, None).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn only_the_desktop_skill_opens_with_the_connector_preamble() {
+        let desktop = render_bundle(RenderProfile::ClaudeDesktop).unwrap();
+        let skill = &desktop.files["SKILL.md"];
+        let body = skill.split("\n---\n\n").nth(1).unwrap();
+        assert!(
+            body.starts_with("# Mold media generation\n\n## In Claude Desktop and claude.ai\n"),
+            "{}",
+            &body[..200]
+        );
+        for profile in RenderProfile::ALL {
+            if profile != RenderProfile::ClaudeDesktop {
+                let other = render_bundle(profile).unwrap();
+                assert!(!other.files["SKILL.md"].contains("## In Claude Desktop"));
+                assert!(other.files["SKILL.md"]
+                    .contains("# Mold media generation\n\nUse `mold` to generate"));
+            }
+        }
+    }
+
+    #[test]
+    fn the_desktop_skill_frontmatter_is_name_and_description_only() {
+        let desktop = render_bundle(RenderProfile::ClaudeDesktop).unwrap();
+        let frontmatter = desktop.files["SKILL.md"].split("\n---\n").next().unwrap();
+        assert_eq!(
+            frontmatter,
+            format!("---\nname: mold\ndescription: {DESCRIPTION}")
+        );
+        // claude.ai's upload limit (and the Agent Skills specification's).
+        assert!(DESCRIPTION.chars().count() <= 1024);
+    }
+
+    #[test]
+    fn every_tool_the_desktop_preamble_names_is_a_mold_mcp_tool() {
+        let tools = crate::commands::mcp::tool_definitions();
+        let names = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect::<BTreeSet<_>>();
+        for tool in CLAUDE_DESKTOP_TOOLS {
+            assert!(names.contains(tool), "mold mcp has no {tool} tool");
+            assert!(
+                CLAUDE_DESKTOP_PREAMBLE.contains(&format!("`{tool}`")),
+                "{tool} is listed but not named in the preamble"
+            );
+        }
+        for named in CLAUDE_DESKTOP_PREAMBLE
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|word| word.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
+            .filter(|word| word.contains('_'))
+        {
+            assert!(
+                CLAUDE_DESKTOP_TOOLS.contains(&named),
+                "the preamble names `{named}`; add it to CLAUDE_DESKTOP_TOOLS"
+            );
+        }
+    }
+
+    #[test]
+    fn the_desktop_zip_is_the_rendered_bundle_under_mold() {
+        let bundle = render_bundle(RenderProfile::ClaudeDesktop).unwrap();
+        let files = bundle.files_with_manifest().unwrap();
+        let bytes = claude_desktop::zip_bytes(&files).unwrap();
+        let archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let names = archive.file_names().collect::<BTreeSet<_>>();
+        assert!(names.contains("mold/SKILL.md"));
+        assert!(names.contains("mold/.mold-skill.json"));
+        assert!(names.contains("mold/references/cli.md"));
+        assert!(names.iter().all(|name| name.starts_with("mold/")));
+        assert_eq!(names.len(), files.len() + 1, "files plus the mold/ folder");
+    }
+
+    #[test]
+    fn claude_desktop_parses_with_its_flags() {
+        let SkillCommand::Install(args) = parse(&[
+            "install",
+            "claude-desktop",
+            "-o",
+            "out.zip",
+            "--no-connector",
+            "--no-open",
+            "--force",
+        ])
+        .command
+        else {
+            panic!("not an install");
+        };
+        assert_eq!(args.agents, [Agent::ClaudeDesktop]);
+        assert_eq!(args.output.as_deref(), Some(Path::new("out.zip")));
+        assert!(args.no_connector && args.no_open && args.force);
+        assert!(matches!(
+            parse(&["show", "claude-desktop"]).command,
+            SkillCommand::Show(SkillShowArgs {
+                agent: Agent::ClaudeDesktop,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse(&["uninstall", "claude-desktop"]).command,
+            SkillCommand::Uninstall(_)
+        ));
+    }
+
+    #[test]
+    fn claude_desktop_refuses_project_scope_and_desktop_flags_need_it() {
+        let error = install_error(&["install", "claude-desktop", "--project"]);
+        assert!(error.contains("not a project"), "{error}");
+        let error = install_error(&["install", "claude", "--force", "--no-open"]);
+        assert!(
+            error.contains("--no-open, --force only apply to claude-desktop"),
+            "{error}"
+        );
+        assert!(parse(&["install", "claude-desktop"]).takes_host());
+        assert!(!parse(&["install", "claude"]).takes_host());
+        assert!(!parse(&["show", "claude-desktop"]).takes_host());
+    }
+
+    #[test]
+    fn bulk_project_installs_never_pick_up_claude_desktop() {
+        let home = tempfile::tempdir().unwrap();
+        if let Some(dir) = desktop_config_dir(home.path()) {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        for args in [
+            &["install", "--all", "--project"][..],
+            &["install", "--detected", "--dir", "/project"],
+        ] {
+            let SkillCommand::Install(install_args) = parse(args).command else {
+                panic!("not an install");
+            };
+            assert!(
+                !auto_includes_desktop(&install_args, home.path()),
+                "{args:?}"
+            );
+        }
+        let SkillCommand::Install(user) = parse(&["install", "--all"]).command else {
+            panic!("not an install");
+        };
+        assert_eq!(
+            auto_includes_desktop(&user, home.path()),
+            desktop_config_dir(home.path()).is_some()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_connector_gets_an_absolute_mold_home() {
+        let cwd = Path::new("/work");
+        assert_eq!(
+            absolute_mold_home("./mold-data", cwd).unwrap(),
+            "/work/./mold-data"
+        );
+        assert_eq!(absolute_mold_home("/srv/mold", cwd).unwrap(), "/srv/mold");
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(
+            absolute_mold_home("~/mold", cwd).unwrap(),
+            home.join("mold").display().to_string()
+        );
+    }
+
+    #[test]
+    fn claude_desktop_has_its_own_show_profile() {
+        assert_eq!(
+            Agent::ClaudeDesktop.show_profile(),
+            RenderProfile::ClaudeDesktop
+        );
+        assert_eq!(Agent::ClaudeDesktop.cli_name(), "claude-desktop");
+        assert_eq!(Agent::Codex.show_profile(), RenderProfile::Codex);
     }
 }

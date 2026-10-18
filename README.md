@@ -396,6 +396,11 @@ run:
 mold skill install --detected
 ```
 
+For Claude Desktop and claude.ai, `mold skill install claude-desktop` writes
+the skill as a ZIP to upload under **Customize > Skills** and adds the local
+`mold mcp` connector to Desktop
+([guide](https://utensils.io/mold/guide/claude-desktop)).
+
 The installed bundle uses each agent's native metadata and discovery contract,
 with a concise router, safety guidance, tested examples, and the prompting
 corpus: a shared guide, one complete base guide per manifest family (prompt
