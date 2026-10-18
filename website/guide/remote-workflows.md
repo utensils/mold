@@ -26,6 +26,32 @@ export MOLD_HOST=http://gpu-host:7680
 mold run "a cinematic portrait"
 ```
 
+Every remote command also takes `--host` for one invocation, so a second
+machine needs no environment change:
+
+```bash
+mold ps --host http://gpu-host:7680
+mold library list --host gpu-host
+```
+
+## Saved Hosts
+
+Pairing saves each host under a name, so you rarely type an origin again.
+`--host`, `MOLD_HOST`, and a default host all accept it, and an address the
+host advertised (its LAN or Tailscale IP) finds the same pairing:
+
+```bash
+mold host list                     # NAME  MODE  ORIGIN  DEFAULT
+mold ps --host workstation
+MOLD_HOST=workstation mold library list
+mold host use workstation          # default for every remote command
+mold host use --clear              # back to http://localhost:7680
+```
+
+`--host` wins over `MOLD_HOST`, which wins over the default host; with none of
+them, mold talks to `http://localhost:7680`. See
+[`mold host`](/guide/cli-reference#mold-host).
+
 ## Finding Servers on Your Network
 
 If you don't know the GPU host's address, let mold find it. Builds with the
@@ -38,7 +64,7 @@ mold server discover
 # NAME          URL                       VERSION  AUTH  GPU
 # hal9000-7680  http://192.168.1.10:7680  0.26.0   -     1xNVIDIA GeForce RTX 4090
 #
-# Connect: export MOLD_HOST=http://192.168.1.10:7680
+# Connect: mold ps --host http://192.168.1.10:7680  (or export MOLD_HOST=http://192.168.1.10:7680)
 ```
 
 Add `--probe` for a `/health` latency column, `--json` for machine-readable
@@ -93,7 +119,8 @@ Remote workflows pair well with both:
   server's advertised model capabilities; scripted chain jobs and durable
   mesh workflows remain CLI/API-only.
 
-In both cases, the key variable is still `MOLD_HOST`.
+In both cases, the key variable is still `MOLD_HOST` (a URL or a saved host
+name).
 
 ## LM Studio MCP
 

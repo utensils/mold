@@ -204,7 +204,8 @@ records no crop to restore.
 
 ## Local and remote execution
 
-`mold run` first targets `MOLD_HOST` (default `http://localhost:7680`) and can
+`mold run` first targets `--host`, else `MOLD_HOST`, else the default saved host
+(`mold host use`), else `http://localhost:7680`, and can
 fall back to local inference when the server is unavailable. `--local` skips
 the server. When a task must stay on a particular machine, set the host for
 that invocation and confirm it with a read-only status call first.
@@ -230,7 +231,7 @@ do not replace its answer with a blanket system-RAM threshold.
 ```bash
 mold server status
 mold server status --host gpu-host
-MOLD_HOST=https://PAIRED_HOST_ORIGIN mold server status
+MOLD_HOST=gpu-host mold server status
 mold run --local flux2-klein:q8 "A graphite sketch of a lighthouse"
 ```
 
@@ -552,7 +553,9 @@ what earlier commands saw: `mold library list`, `mold library tag list`,
 `mold library collection list`, `mold jobs list`, `mold queue list`,
 `mold downloads list` (or `watch`) and `mold mesh-workflow list` each record
 their answers, and `mold search` records the machine. Run one of those against
-a machine before expecting `--tag`, `--host` or an id to offer anything.
+a machine before expecting `--tag`, `--host` or an id to offer anything; saved
+host names (`mold host list`) always complete for `--host`. Local-only commands
+(`serve`, `system`, `config`, `stats`, `host`, …) refuse a typed `--host`.
 Completion never contacts a server.
 
 The MCP server exposes thirteen tools: `generate_image`, `generate_mesh`,
@@ -744,6 +747,10 @@ this check with a mutable `latest` tag or retry paid creation blindly.
 mold relay connect --relay-url wss://API.execute-api.REGION.amazonaws.com/production --target 127.0.0.1:7680
 mold pairing create --output "$MOLD_HOME/secure/invitation.json"
 mold pair --invite-file /private/invitation.json --name "My client"
+mold host list
+mold host use workstation
+mold ps --host workstation
+mold host rm workstation
 ```
 
 Start an authenticated host first. Its owner-only secure identity stays on the
@@ -753,7 +760,12 @@ on headless hosts; mold serve then owns its outbound connector. The separate
 relay connect command reads the identity, never an old relay token.
 The operator creates a one-use, two-minute invitation using MOLD_API_KEY (or
 @owner-only-key-file). Transfer the invitation privately. Each paired client
-stores its own key and revocable grant. MOLD_HOST selects a paired origin.
+stores its own key and revocable grant under a host name (`mold host list`).
+`--host NAME` (global, on every remote command), `MOLD_HOST=NAME`, or a default
+set with `mold host use NAME` selects it; a URL, or an address the host
+advertised, still works. Precedence: `--host`, then `MOLD_HOST`, then the
+default host, then `http://localhost:7680`. `mold host rm NAME` deletes the
+saved credentials; revoke the device on the host to end its grant there.
 
 Secure direct and relay API traffic, uploads, progress and media use pinned Noise XX over
 LAN or the Lambda WebSocket relay. The cloud sees metadata and ciphertext, not
@@ -832,7 +844,7 @@ Manual Regular setup uses `mold pair --mode regular --direct-url URL
 --api-key-file /private/key` with a distinct Regular device key.
 Omit the key file only for an explicitly auth-disabled direct host; keep
 authentication enabled when issuing per-app grants.
-`MOLD_HOST` picks the saved origin;
+`--host`/`MOLD_HOST` (a saved name or the origin) picks the saved profile;
 `MOLD_CONNECTION_MODE=secure|regular` explicitly overrides its selected mode.
 Owner invitation export reads the canonical per-home operator credential if
 MOLD_API_KEY is absent. Invitations expire in two minutes and are single use.

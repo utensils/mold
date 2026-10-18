@@ -152,6 +152,15 @@ verifies the committed bootstrap identity without restoring revoked clients or
 overwriting renewed grants. Never replace an existing volume's identity or log
 the bootstrap envelope. Reuse its original paired profile on volume resume.
 
+CLI host registry: `mold_secure_client::hosts` reads the credential profiles
+themselves (no second store). Names are additive `name`/`instance_id`/`hostname`
+profile fields; unnamed legacy profiles list under a derived name and are never
+rewritten implicitly. The default host is an owner-only `default-host` origin
+file. `hosts::resolve` (saved name → saved origin → advertised endpoint, then the
+unique same-machine match when no port was typed; never loopback) feeds
+`mold_core::client::resolve_host`: `--host` > `MOLD_HOST` > default host >
+localhost. Keep every CLI client construction on `MoldClient::for_host`.
+
 Browser pairing-change notifications carry the exact namespace and whether
 credential authority changed. Route discovery and certificate renewal must not
 close established encrypted channels. Removal/replacement closes only that
