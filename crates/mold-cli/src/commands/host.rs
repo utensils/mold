@@ -413,13 +413,21 @@ fn key_outcome(status: u16, code: &str, regular: bool) -> Result<KeyOutcome> {
 /// on the network) and allowed, with a warning, for an explicit Regular
 /// direct connection.
 fn plain_http_policy(origin: &str, regular: bool) -> Result<bool> {
+    plain_http_policy_with(origin, regular, resolve_bounded)
+}
+
+fn plain_http_policy_with(
+    origin: &str,
+    regular: bool,
+    resolve: impl Fn(&str) -> Option<Vec<std::net::IpAddr>>,
+) -> Result<bool> {
     let Ok(url) = reqwest::Url::parse(origin) else {
         return Ok(false);
     };
     let machine = url.host_str().unwrap_or_default();
     if url.scheme() != "http"
         || crate::control::is_loopback_host(origin)
-        || mold_secure_client::hosts::is_tailscale_address(machine)
+        || is_tailscale_machine(machine, resolve)
     {
         return Ok(false);
     }
@@ -428,6 +436,48 @@ fn plain_http_policy(origin: &str, regular: bool) -> Result<bool> {
         "refusing to start a Secure pairing over plain HTTP to {origin}: the invitation would cross the network unencrypted. Use the host's https:// address, add --regular for a direct HTTP connection, or run `mold host invite` on the host and pair with its link"
     );
     Ok(true)
+}
+
+/// A Tailscale path: an address in its ranges, a MagicDNS `*.ts.net` name,
+/// or a name whose every resolved address is a Tailscale address (a bare
+/// MagicDNS name such as `workstation`).
+fn is_tailscale_machine(
+    machine: &str,
+    resolve: impl Fn(&str) -> Option<Vec<std::net::IpAddr>>,
+) -> bool {
+    use mold_secure_client::hosts::is_tailscale_address;
+    if is_tailscale_address(machine) {
+        return true;
+    }
+    let name = machine.trim_end_matches('.').to_ascii_lowercase();
+    if name.parse::<std::net::IpAddr>().is_ok() || name.trim_matches(['[', ']']).contains(':') {
+        return false;
+    }
+    if name.ends_with(".ts.net") {
+        return true;
+    }
+    resolve(&name).is_some_and(|ips| {
+        !ips.is_empty() && ips.iter().all(|ip| is_tailscale_address(&ip.to_string()))
+    })
+}
+
+/// The system resolver, given at most two seconds; `None` on failure or
+/// timeout.
+fn resolve_bounded(name: &str) -> Option<Vec<std::net::IpAddr>> {
+    use std::net::ToSocketAddrs;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let name = name.to_string();
+    std::thread::spawn(move || {
+        let ips = (name.as_str(), 0)
+            .to_socket_addrs()
+            .ok()
+            .map(|addrs| addrs.map(|addr| addr.ip()).collect::<Vec<_>>());
+        let _ = sender.send(ips);
+    });
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .ok()
+        .flatten()
 }
 
 async fn add_with_key(input: &str, options: &AddOptions, device: &str) -> Result<()> {
@@ -919,32 +969,52 @@ mod tests {
         assert_eq!(automatic.unwrap().0, "lab-box");
     }
 
-    /// https, loopback and Tailscale are private paths; plain HTTP to a LAN
-    /// address is refused for Secure and warned about for Regular.
+    /// A resolver for tests: no real DNS. Names map to fixed addresses.
+    fn fake_dns(host: &str) -> Option<Vec<std::net::IpAddr>> {
+        let ips = |list: &[&str]| Some(list.iter().map(|ip| ip.parse().unwrap()).collect());
+        match host {
+            "workstation" => ips(&["100.101.102.103", "fd7a:115c:a1e0::5"]),
+            "mixed" => ips(&["100.101.102.103", "192.168.1.5"]),
+            "lan-box" => ips(&["192.168.1.5"]),
+            _ => None,
+        }
+    }
+
+    /// https, loopback and Tailscale (an IP in its ranges, a `.ts.net`
+    /// name, or a name whose every address is one) are private paths;
+    /// plain HTTP to anything else is refused for Secure and warned about
+    /// for Regular.
     #[test]
     fn plain_http_is_refused_for_secure_and_warned_for_regular() {
+        let policy = |origin: &str, regular| plain_http_policy_with(origin, regular, fake_dns);
         for origin in [
             "https://192.168.1.5",
             "http://127.0.0.1:7680",
             "http://localhost:7680",
             "http://100.105.134.43:7680",
             "http://[fd7a:115c:a1e0::43]:7680",
+            "http://workstation.tail1234.ts.net:7680",
+            "http://WORKSTATION.TAIL1234.TS.NET.:7680",
+            "http://workstation:7680",
         ] {
-            assert!(!plain_http_policy(origin, false).unwrap(), "{origin}");
-            assert!(!plain_http_policy(origin, true).unwrap(), "{origin}");
+            assert!(!policy(origin, false).unwrap(), "{origin}");
+            assert!(!policy(origin, true).unwrap(), "{origin}");
         }
         for origin in [
             "http://192.168.1.5:7680",
             "http://172.17.0.1:7680",
             "http://10.0.0.8:7680",
-            "http://workstation:7680",
+            "http://mixed:7680",
+            "http://lan-box:7680",
+            "http://unknown-name:7680",
+            "http://evil-ts.net:7680",
         ] {
-            let error = plain_http_policy(origin, false).unwrap_err().to_string();
+            let error = policy(origin, false).unwrap_err().to_string();
             assert!(
                 error.contains("plain HTTP") && error.contains("--regular"),
                 "{error}"
             );
-            assert!(plain_http_policy(origin, true).unwrap(), "{origin}");
+            assert!(policy(origin, true).unwrap(), "{origin}");
         }
     }
 
