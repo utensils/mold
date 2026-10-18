@@ -976,7 +976,7 @@ fn selected_agents(args: &SkillInstallArgs) -> Result<Vec<Agent>> {
             .map(|spec| spec.agent)
             .filter(|agent| *agent != Agent::Agents && agent.is_detected(&home))
             .collect::<Vec<_>>();
-        if desktop_detected(&home) {
+        if auto_includes_desktop(args, &home) {
             detected.push(Agent::ClaudeDesktop);
         }
         if detected.is_empty() {
@@ -988,7 +988,7 @@ fn selected_agents(args: &SkillInstallArgs) -> Result<Vec<Agent>> {
     }
     if args.all {
         let mut all = AGENTS.iter().map(|spec| spec.agent).collect::<Vec<_>>();
-        if dirs::home_dir().is_some_and(|home| desktop_detected(&home)) {
+        if dirs::home_dir().is_some_and(|home| auto_includes_desktop(args, &home)) {
             all.push(Agent::ClaudeDesktop);
         }
         return Ok(all);
@@ -1045,6 +1045,12 @@ fn desktop_config_dir(home: &Path) -> Option<PathBuf> {
         home,
         std::env::var_os("APPDATA").map(PathBuf::from).as_deref(),
     )
+}
+
+/// `--detected` and `--all` add Claude Desktop only in user scope: it lives
+/// on the Claude account, so a project install never includes it.
+fn auto_includes_desktop(args: &SkillInstallArgs, home: &Path) -> bool {
+    !args.project && args.dir.is_none() && desktop_detected(home)
 }
 
 fn desktop_detected(home: &Path) -> bool {
@@ -2428,6 +2434,33 @@ mod claude_desktop_tests {
         assert!(parse(&["install", "claude-desktop"]).takes_host());
         assert!(!parse(&["install", "claude"]).takes_host());
         assert!(!parse(&["show", "claude-desktop"]).takes_host());
+    }
+
+    #[test]
+    fn bulk_project_installs_never_pick_up_claude_desktop() {
+        let home = tempfile::tempdir().unwrap();
+        if let Some(dir) = desktop_config_dir(home.path()) {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        for args in [
+            &["install", "--all", "--project"][..],
+            &["install", "--detected", "--dir", "/project"],
+        ] {
+            let SkillCommand::Install(install_args) = parse(args).command else {
+                panic!("not an install");
+            };
+            assert!(
+                !auto_includes_desktop(&install_args, home.path()),
+                "{args:?}"
+            );
+        }
+        let SkillCommand::Install(user) = parse(&["install", "--all"]).command else {
+            panic!("not an install");
+        };
+        assert_eq!(
+            auto_includes_desktop(&user, home.path()),
+            desktop_config_dir(home.path()).is_some()
+        );
     }
 
     #[test]
