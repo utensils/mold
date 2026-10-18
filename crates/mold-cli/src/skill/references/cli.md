@@ -97,11 +97,12 @@ Qwen-Image-Edit the first image is the thing being edited. `--reference` also
 carries MiniMax H3's Ref2VA inputs, which is why it additionally accepts
 `video=PATH` and `audio=PATH`; a bare path always means an image.
 
-For H3, the CLI uses request-bound upload sessions when an API key is configured
-and the host advertises that route. Otherwise it sends bounded inline references
+For H3, the CLI uses request-bound upload sessions when it has a credential for
+the host (the saved pairing, or `MOLD_API_KEY` for a host with no saved
+credential) and the host advertises that route. Otherwise it sends bounded inline references
 (32 MiB decoded reference bytes combined across all batch siblings), including
 on hosts with authentication disabled.
-An auth-enabled server still requires its valid `MOLD_API_KEY`; a rejected upload
+An auth-enabled server still requires that valid credential; a rejected upload
 never triggers an inline retry. The server owns model availability and license
 acceptance: a license already accepted there needs no matching record on this
 client. H3 has no separate acceptance gate.
@@ -230,8 +231,8 @@ do not replace its answer with a blanket system-RAM threshold.
 
 ```bash
 mold server status
-mold server status --host gpu-host
-MOLD_HOST=gpu-host mold server status
+mold server status --host workstation
+MOLD_HOST=workstation mold server status
 mold run --local flux2-klein:q8 "A graphite sketch of a lighthouse"
 ```
 
@@ -239,8 +240,11 @@ mold run --local flux2-klein:q8 "A graphite sketch of a lighthouse"
 path appear only for this machine's managed daemon. An unreachable host exits
 non-zero rather than reporting on the local machine.
 
-Never paste an API key into a prompt or command example. Supply secrets through
-the user's existing environment or approved secret store at execution time.
+A saved host (`mold host list`) needs no secret from you: pairing stored this
+client's own credential, and it always wins over `MOLD_API_KEY`, which is used
+only for a host with no saved credential. Never paste an API key into a prompt
+or command example; supply one only through the user's existing environment or
+approved secret store at execution time.
 
 ## Scripted sequences
 
@@ -367,15 +371,16 @@ mold queue retry job-abc123
 mold queue move job-abc123 --to 0
 mold queue pause job-abc123
 mold queue resume
-mold queue send job-abc123 --to http://gpu-host:7680
+mold queue send job-abc123 --to workstation
 mold queue sweep
 ```
 
 `mold queue pause` and `mold queue resume` with no job id hold and release
 host-wide dispatch, which affects everyone using that machine. `mold queue
-send` hands a HELD job to another running server with its request intact; the
-destination credential is read from `MOLD_DESTINATION_API_KEY`, never spliced
-into the command.
+send` hands a HELD job to another running server with its request intact.
+`--to` takes a saved host name or a URL; a saved destination uses its own saved
+credential, and an unsaved one reads `MOLD_DESTINATION_API_KEY`, never a key
+spliced into the command.
 
 Accepted generation is asynchronous on queue-backed servers. Retain exact job
 and batch IDs, poll them, and reconcile after transport errors. Queue semantics
@@ -402,6 +407,16 @@ mold ps
 mold unload
 mold gpu list --json
 mold version
+```
+
+`mold pull` downloads on the selected host (`--host`, `MOLD_HOST`, or the
+default host). A remote host that does not answer is an error, never a silent
+download onto this machine; `mold pull MODEL --local` downloads here on purpose,
+and `hf:`/`cv:` catalog recipes always download here.
+
+```bash
+mold pull flux2-klein:q8 --host workstation
+mold pull flux2-klein:q8 --local
 ```
 
 `mold info MODEL --verify` re-checksums the installed bytes. Normal loading
@@ -759,7 +774,6 @@ this check with a mutable `latest` tag or retry paid creation blindly.
 ## Encrypted remote connections
 
 ```bash
-mold relay connect --relay-url wss://API.execute-api.REGION.amazonaws.com/production --target 127.0.0.1:7680
 mold host invite
 mold host add
 mold host add - < /private/link.txt
@@ -768,7 +782,15 @@ mold host list
 mold host use workstation
 mold ps --host workstation
 mold host rm workstation
+# Host operator only: a separately supervised relay connector.
+mold relay connect --relay-url wss://API.execute-api.REGION.amazonaws.com/production --target 127.0.0.1:7680
 ```
+
+For an agent: `mold host list` first, `--host NAME` per command, and confirm with
+`mold ps --host NAME`. The user runs `mold host invite` on the host and
+`mold host add` in their own terminal (pasting at its prompt; a link passed as
+an argument lands in shell history); never run `host add`, `invite`, `use` or
+`rm` without being asked, and never ask for a link or key in chat.
 
 Start an authenticated host first. Its owner-only secure identity stays on the
 host; authorize its public signing key through the relay operator's IAM
@@ -780,7 +802,7 @@ the link on stdout) using the operator key; the user pastes it into
 `mold host add` on the client. With the host URL and an operator key instead,
 `mold host add` exchanges the key for this client's own grant and never stores
 it; an app/device key is saved as Regular. Never ask the user to paste a key or
-link into chat: have them run `! mold host add …` themselves. Each paired client
+link into chat: have them run `mold host add` in their own terminal. Each paired client
 stores its own key and revocable grant under a host name (`mold host list`).
 `--host NAME` (global, on every remote command), `MOLD_HOST=NAME`, or a default
 set with `mold host use NAME` selects it; a URL still works, and a Tailscale IP
@@ -797,7 +819,10 @@ upgrade and pair every Secure client again. The private engine remains loopback;
 Regular direct HTTP(S) is a separate explicit host/client choice, described
 under Connection modes below. Raw HTTP apps cannot use the encrypted proxy.
 Never fall back to a cloud-provided host key. Uploads are bounded to 64 MiB;
-responses stream with backpressure.
+responses stream with backpressure. A failed Secure request never falls back to
+HTTP. Temporary gateway pressure may retry admission at most three times with
+short backoff inside the existing connection deadline, before any HTTP request
+frame; authentication or protocol refusal is final.
 Interrupted mutations are never automatically replayed. RunPod create/run use
 owner-authenticated one-time bootstrap for fresh hosts and preserve the existing
 identity for known paired volumes. A private pre-create journal reconciles an

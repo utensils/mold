@@ -1750,10 +1750,11 @@ supply intended dialogue and reuse the speaker ID in subject and audio definitio
 
 #### CLI
 
-With a configured API key and advertised upload support, references use
-request-bound upload sessions. Otherwise the CLI sends inline media, limited to
+With a credential for the host (its saved pairing, or `MOLD_API_KEY` for a host
+with none) and advertised upload support, references use request-bound upload
+sessions. Otherwise the CLI sends inline media, limited to
 32 MiB decoded reference bytes combined across all batch siblings. This works on hosts with authentication disabled;
-auth-enabled hosts still require a valid `MOLD_API_KEY`. A rejected upload is
+auth-enabled hosts still require that valid credential. A rejected upload is
 never retried anonymously. License acceptance belongs to the rendering server;
 H3 has no separate client acceptance gate. The supplied order is part of the
 render. Uploaded references require one request per session (`--batch 1`).
