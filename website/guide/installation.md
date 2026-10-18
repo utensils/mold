@@ -60,8 +60,8 @@ thumbprint is `E8DA2990155CCC6E9278A8319008A763AC5DFC79` before trusting it;
 the [Desktop App guide](/guide/desktop#windows) has the exact PowerShell trust
 commands. Add `%LOCALAPPDATA%\Mold\bin` to your user `PATH` for a permanent
 `mold` command. This published CLI does not include CUDA; use it for CPU work
-or point it at a GPU host with `mold run --host http://gpu-host:7680 "prompt"`
-or `MOLD_HOST`. Build from source on an x64 machine with the CUDA toolkit to get a
+or pair it with a GPU host (`mold host invite` there, `mold host add` here) and
+run `mold run "prompt" --host workstation`. Build from source on an x64 machine with the CUDA toolkit to get a
 CUDA-enabled local binary; the [Windows contributor commands](/guide/desktop#commands)
 cover the supported helper. Upgrade by downloading and expanding the newest
 zip again; `mold update` cannot replace a running Windows executable yet.
@@ -84,8 +84,8 @@ including RTX 3050/30-series, RTX 50-series, and named RTX PRO variants.
 macOS builds include Metal support.
 
 A client needs no GPU, NVIDIA driver, or CUDA toolkit. Force that build even on
-a GPU machine with `MOLD_BACKEND=cpu`, then set `MOLD_HOST=http://gpu-server:7680`
-(or pass `--host`) to generate remotely. The CPU archive does not support local
+a GPU machine with `MOLD_BACKEND=cpu`, then pair a GPU host with `mold host add`
+and pass `--host NAME` (or set `MOLD_HOST=NAME`) to generate remotely. The CPU archive does not support local
 GPU generation; it still supports model management, host commands and completions.
 Automatic selection does not check CUDA user-space libraries: on a GPU machine
 missing those libraries, choose CPU explicitly for remote use.

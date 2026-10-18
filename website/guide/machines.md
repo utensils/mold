@@ -44,6 +44,9 @@ API keys are stored per host and sent in the `X-Api-Key` header. They are never
 placed in URLs. Hosts dedupe by the stable `instance_id` reported by
 `/api/status`, so adding the same server by hostname and IP updates one row.
 
+From a terminal, pair the CLI with `mold host invite` on the host and
+`mold host add` on the client; see [`mold host`](/guide/cli-reference#mold-host).
+
 ## Compatibility and configuration
 
 The web app enables **Local network** only when the primary server reports

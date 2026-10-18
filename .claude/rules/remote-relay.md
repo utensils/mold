@@ -172,7 +172,11 @@ with `studio/api/pairing.fixtures.json` (`mobilePairingUrl` field order and
 change the fixture and all three ports together. `mold host add URL` exchanges
 an operator key for the client's own grant by claiming the session at once; an
 operator key is never written to a client profile. `mold pair` / `mold pairing
-create` are hidden aliases.
+create` are hidden aliases. A request refused for want of pairing (the server's 426
+`SECURE_CONNECTION_REQUIRED`, or the client's "No secure pairing for this
+host") ends with one `errors::PAIRING_HINT` line naming `mold host invite` /
+`mold host add`; user docs pair first and then select with `--host NAME`, never
+an unpaired `MOLD_HOST=http://…`.
 
 Browser pairing-change notifications carry the exact namespace and whether
 credential authority changed. Route discovery and certificate renewal must not

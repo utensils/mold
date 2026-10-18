@@ -7,32 +7,41 @@ a person, shell script, CI job, or agent.
 One of mold's best deployment patterns is simple:
 
 - run `mold serve` on the GPU machine
-- point `MOLD_HOST` at it from everywhere else
+- pair each client with it once, then name it with `--host`
 
 That gives you local-first ergonomics with remote GPU horsepower.
 
 ## Basic Laptop → GPU Server
 
-On the GPU host:
+On the GPU host, start the server and print a one-use pairing link:
 
 ```bash
 mold serve --bind 0.0.0.0 --port 7680
+mold host invite                   # in another shell; --qr draws it for a phone
 ```
 
-From your laptop or devbox:
+On your laptop or devbox, run `mold host add` and paste the link at the prompt
+(a link passed as an argument works too, but lands in shell history). The host
+is saved under its own name:
 
 ```bash
-export MOLD_HOST=http://gpu-host:7680
-mold run "a cinematic portrait"
+mold host add
+mold run "a cinematic portrait" --host workstation
+mold host use workstation          # or make it the default for every command
 ```
 
-Every remote command also takes `--host` for one invocation, so a second
-machine needs no environment change:
+Fetch the finished print's original file from the host:
 
 ```bash
-mold ps --host http://gpu-host:7680
-mold library list --host gpu-host
+mold library download --latest --host workstation
 ```
+
+An unpaired, non-loopback host over plain HTTP refuses requests
+(`426 SECURE_CONNECTION_REQUIRED`, "No secure pairing for this host"). For a
+Regular direct connection instead, run the host with
+`mold serve --allow-direct-api` and save it with
+`mold host add URL --regular` (plus `--api-key-file KEY` when authentication is
+on).
 
 ## Saved Hosts
 
@@ -65,7 +74,7 @@ mold server discover
 # NAME          URL                       VERSION  AUTH  GPU
 # hal9000-7680  http://192.168.1.10:7680  0.26.0   -     1xNVIDIA GeForce RTX 4090
 #
-# Connect: mold ps --host http://192.168.1.10:7680  (or export MOLD_HOST=http://192.168.1.10:7680)
+# Connect: mold host add http://192.168.1.10:7680 …
 ```
 
 Add `--probe` for a `/health` latency column, `--json` for machine-readable
@@ -86,7 +95,7 @@ but can still browse peers for the web UI. See the [Machines guide](/guide/machi
 ## iPhone over Tailscale
 
 Join the iPhone and GPU host to the same tailnet, then add the host in Mold by
-its MagicDNS name, such as `plato` or `plato.example-tailnet.ts.net`. A bare
+its MagicDNS name, such as `workstation` or `workstation.example-tailnet.ts.net`. A bare
 name becomes `http://<name>:7680`; use an explicit HTTPS URL only when your own
 reverse proxy provides TLS. Bonjour remains LAN-local, so a remote Tailscale
 host is normally added by name rather than discovered.
@@ -120,8 +129,9 @@ Remote workflows pair well with both:
   server's advertised model capabilities; scripted chain jobs and durable
   mesh workflows remain CLI/API-only.
 
-In both cases, the key variable is still `MOLD_HOST` (a URL or a saved host
-name).
+In both cases, pair the host once and name it with `--host NAME`;
+`MOLD_HOST` accepts the same saved name where an environment variable fits
+better.
 
 ## LM Studio MCP
 
@@ -133,7 +143,8 @@ keep the server running separately.
 mold serve --bind 127.0.0.1 --port 7680
 ```
 
-In LM Studio, open the Program tab, choose **Install → Edit mcp.json**, and add
+For a remote GPU host, pair it first (`mold host add`) and pass its saved name
+instead of the loopback URL. In LM Studio, open the Program tab, choose **Install → Edit mcp.json**, and add
 an entry like this:
 
 ```json
@@ -141,7 +152,7 @@ an entry like this:
   "mcpServers": {
     "mold": {
       "command": "/absolute/path/to/mold",
-      "args": ["mcp", "--host", "http://localhost:7680"],
+      "args": ["mcp", "--host", "workstation"],
       "timeout": 300000
     }
   }
@@ -165,8 +176,9 @@ returned by `list_loras`; object entries can omit `scale` to use `1.0`. `generat
 `transparent_background: true` for a model advertising
 `capabilities.transparency` (PNG or WebP only). Use the
 async generation flow for cold model loads or slow generations so LM Studio does
-not need to keep one tool call open until the image is finished. Set
-`MOLD_API_KEY` in the MCP process environment when the mold server requires one.
+not need to keep one tool call open until the image is finished. A saved
+host uses its saved credential; set `MOLD_API_KEY` in the MCP process
+environment only for a host with no saved credential.
 
 Poll `generation_status` until the durable child settles. A held child advertises
 whether it is retryable; after correcting the reported cause, call
@@ -196,7 +208,7 @@ That distinction matters if your laptop has little disk space or no GPU.
 | Laptop         | Runs `mold run`, `mold list`, `mold ps`       |
 | iPhone         | Remote Create, Library, Models, and Machines  |
 | Discord worker | Runs `mold discord` or `mold serve --discord` |
-| OpenClaw host  | Uses mold via `MOLD_HOST`                     |
+| OpenClaw host  | Uses mold via `--host NAME`                   |
 
 ## Deployment Choices
 
@@ -208,12 +220,16 @@ That distinction matters if your laptop has little disk space or no GPU.
 
 If remote generation fails:
 
-- verify `MOLD_HOST`
+- run `mold host list` to confirm the host is saved and which one is the default
+- run `mold ps --host NAME` against it
+- on "No secure pairing for this host" (`426 SECURE_CONNECTION_REQUIRED`), pair
+  with `mold host invite` on the host and `mold host add` here, or run the host
+  with `--allow-direct-api` and save it with `mold host add URL --regular`
 - check firewall and bind address
-- run `mold ps`
 - hit `/health` directly with `curl`
 
 ```bash
+mold host list
+mold ps --host workstation
 curl http://gpu-host:7680/health
-curl http://gpu-host:7680/api/status
 ```

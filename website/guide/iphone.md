@@ -45,8 +45,8 @@ Tailscale is the simplest way to reach a private GPU host away from its LAN:
 
 1. Join the iPhone and GPU host to the same tailnet.
 2. Keep `mold serve` listening on an address the Tailscale interface can reach.
-3. Add the host by its MagicDNS name, for example `plato` or
-   `plato.example-tailnet.ts.net`. Mold supplies port `7680` for a bare name.
+3. Add the host by its MagicDNS name, for example `workstation` or
+   `workstation.example-tailnet.ts.net`. Mold supplies port `7680` for a bare name.
 4. Include `https://` and an explicit port only when your own reverse proxy
    provides TLS.
 

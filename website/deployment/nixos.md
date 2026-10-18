@@ -210,10 +210,17 @@ itself is uncapped — see
 
 `services.mold.apiKeyFile` configures the host's operator authority. Do not change
 it, disable authentication, or rebuild Nix merely to add an app. With Regular
-direct access enabled, run `mold pairing create --mode regular` as the service
-owner with its actual `MOLD_HOME` and `MOLD_API_KEY=@operator-key-file`, then
-claim the invitation on the client to obtain its own
-persistent device grant. The host stores that grant independently of Nix
+direct access enabled, run `mold host invite --regular --direct-url URL` as the
+service owner with its actual `MOLD_HOME` and operator key, then run
+`mold host add` on the client and paste the link to obtain its own persistent
+device grant:
+
+```bash
+# as the service user (for example `sudo -u mold -i`), with its MOLD_HOME
+MOLD_API_KEY=@/run/agenix/mold-api-key mold host invite --regular --direct-url http://HOST:7680
+```
+
+`--api-key-file` works in place of `MOLD_API_KEY`. The host stores that grant independently of Nix
 configuration; it survives restarts and can be revoked without affecting other
 apps. REST apps send the issued key in `X-API-Key`.
 

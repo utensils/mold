@@ -41,8 +41,8 @@ echo "a cinematic city at night" | mold run flux-schnell | viu -
 # Reproducible batch work from a script or CI job
 mold run flux-dev:q4 "product photo" --seed 42 --output artifact.png
 
-# Point the same CLI or an agent at a remote GPU
-MOLD_HOST=http://gpu-server:7680 mold run "a storyboard frame"
+# Point the same CLI or an agent at a paired remote GPU (mold host add)
+mold run "a storyboard frame" --host workstation
 ```
 
 For tool-calling agents, use `mold mcp`, the

@@ -586,7 +586,7 @@ clock from request to MP4 bytes on a cold process:
 
 The two 768p-native Turbo tiers added after that campaign,
 `-turbo-4step-768p-v1.1` and `-turbo-8step-768p`, were measured separately on
-plato (NVIDIA L40S 46 GB, not the hal9000 RTX 4090 above) during the lightx2v
+a workstation (NVIDIA L40S 46 GB, not the hal9000 RTX 4090 above) during the lightx2v
 Turbo tier UAT campaign (2026-09-02), same 124 frames / 24 fps, wall clock
 from request to MP4 bytes on a cold-to-warm process, VRAM peak from a 1 Hz
 `nvidia-smi` sampler, both tiers at their default shift 6:

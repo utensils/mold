@@ -11,7 +11,7 @@ REST/SSE.
 The usual setup is:
 
 1. Run `mold serve` on the machine with the GPU.
-2. Configure `MOLD_HOST` wherever OpenClaw is running.
+2. Pair the machine OpenClaw runs on with that host (`mold host add`).
 3. Install the mold skill into the workspace so agents can call the CLI or API.
 
 That keeps image generation on the GPU host while the rest of your agent work
@@ -37,24 +37,26 @@ loading every family's instructions at once.
 
 ## Configure the Connection
 
-Point OpenClaw at a running mold server:
+Pairing is done by the user, not the agent. In their own terminal, the user
+runs `mold host invite` on the GPU host and `mold host add` on the OpenClaw
+machine, then pastes the link at the prompt. An agent never pastes pairing links
+or API keys; it only uses the saved host by name:
 
 ```bash
-export MOLD_HOST=http://gpu-host:7680
+mold host list                      # saved hosts and the default
+mold list --host workstation
+mold run flux-schnell:q8 "a cinematic product shot" --host workstation
 ```
 
-Then normal mold commands work from the OpenClaw environment:
-
-```bash
-mold list
-mold run flux-schnell:q8 "a cinematic product shot"
-```
+`mold host use workstation` makes it the default so `--host` can be omitted;
+`MOLD_HOST=workstation` also works where an environment variable fits better.
+If a command reports "No secure pairing for this host", ask the user to pair it.
 
 ## Notes
 
 - If the server is remote, `HF_TOKEN` must be set on the server side for gated
   model pulls.
-- `mold ps` is the quickest way to confirm the OpenClaw environment can reach
-  the server.
+- `mold ps --host workstation` is the quickest way to confirm the OpenClaw
+  environment can reach the server.
 - The same setup works well for agent workflows that want prompt expansion,
   gallery generation, or remote batch jobs.

@@ -53,16 +53,22 @@ replacement. Unknown populated volumes refuse automatic provisioning before a
 paid request. Starting a stopped pod preserves its identity and pairing.
 
 To add another client or upgrade a legacy host, use its trusted owner console:
-run `mold pairing create --output /private/invitation.json`, transfer the
-short-lived invitation privately, and run `mold pair --invite-file
-/private/invitation.json` on the client. Then:
+run `mold host invite --output /private/invitation.json`, transfer the
+short-lived invitation privately, and run
+`mold host add /private/invitation.json` on the client. `mold runpod create`
+pairs a new pod automatically and saves it under the pod's name. Then name the
+pod with `--host` (or make it the default with `mold host use`):
 
 ```bash
-eval "$(mold runpod connect <pod-id> --check)"
-mold runpod run "a cinematic low-angle of a tiny steel robot"
+mold runpod connect <pod-id> --check
+mold runpod run "a cinematic low-angle of a tiny steel robot" --host <pod-name>
+mold ps --host <pod-name>
 ```
 
-An explicit `MOLD_HOST` selects that exact paired pod and refuses mismatched
+`mold runpod connect` still prints an `export MOLD_HOST=…` line for
+`eval "$(mold runpod connect <pod-id>)"`, but a saved name is simpler.
+
+An explicit `--host` (or `MOLD_HOST`) selects that exact paired pod and refuses mismatched
 GPU/datacenter/volume settings. Without that override, `run` reuses or resumes
 the matching tracked pod, or securely provisions its requested replacement.
 `connect --check` verifies application readiness through the pinned encrypted
@@ -110,7 +116,8 @@ mold runpod network-volume update <volume-id> --name shared-models
 mold runpod network-volume delete <volume-id>       # permanently deletes all data
 
 # Connecting
-mold runpod connect <pod-id>                    # print export MOLD_HOST=…
+mold host use <pod-name>                        # default host for every command
+mold runpod connect <pod-id>                    # print export MOLD_HOST=… (alternative)
 eval "$(mold runpod connect <pod-id>)"          # exec the export in your shell
 
 # Observability

@@ -135,8 +135,8 @@ mold upscale photo.png | convert - -resize 50% final.png
 When a mold server is running, the upscale command uses the server for inference:
 
 ```bash
-# Server handles the upscaling
-MOLD_HOST=http://gpu-server:7680 mold upscale photo.png
+# A paired remote host handles the upscaling (see mold host add)
+mold upscale photo.png --host workstation
 
 # Direct API call
 curl -X POST http://localhost:7680/api/upscale \
