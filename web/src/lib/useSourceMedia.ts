@@ -153,6 +153,16 @@ export async function attachSourceMedia(
       );
       const dimensions = imageDimensionsFromBase64(prepared.base64);
       if (keyframe) {
+        if (
+          endpoint === "last" &&
+          staged.imageAttachments[0] &&
+          !staged.keyframes.some((frame) => frame.frame === 0)
+        ) {
+          staged.keyframes.unshift({
+            frame: 0,
+            image: { ...staged.imageAttachments[0] },
+          });
+        }
         staged.keyframes = replaceEndpointKeyframe<
           SourceImageState,
           GenerateFormState["keyframes"][number]

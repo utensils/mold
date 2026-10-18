@@ -359,4 +359,6 @@ bounded original loader. Metadata copies include owning-host commands and full m
 file publication/sharing is fenced by route, instance, current owner revision and visibility.
 Release private files on dismissal/revocation. Print actions use recipe-advertised endpoints
 and keyframes; explicit first/last handoffs preserve interior LTX anchors and authored scalars.
+Adding a last LTX endpoint migrates a current source image into frame 0 unless an explicit
+first anchor already exists. Print menus retain their source handoff while recipe is absent.
 Copy File Name is available for print selections and all Info file values are selectable.

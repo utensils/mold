@@ -24,7 +24,7 @@ struct LibraryCommands: Commands {
             if let library {
                 RowActionMenu(actions: library.plan.items + library.plan.collectionItems, perform: library.perform)
                     .modifier(LibraryShortcuts(selection: library))
-                LibrarySelectionCopyToMenu(selection: library)
+                LibraryCopyToMenu(destinations: library.copyDestinations, copy: library.copyTo)
             }
         }
     }

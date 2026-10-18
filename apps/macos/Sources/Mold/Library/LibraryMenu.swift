@@ -70,8 +70,11 @@ extension View {
         // Resolve observable host/operation flags here. The native builder
         // later renders only this pure plan, without subscribing to stores.
         let plan = snapshot ?? menu.plan
+        let copyDestinations = menu.actions.copyDestinations(for: menu.targets, scope: menu.scope)
         return rowActionMenu(lazy: { plan.items }, perform: menu.perform) {
-            if !menu.scope.isTrash { LibraryCopyToMenu(entries: menu.targets) }
+            LibraryCopyToMenu(destinations: copyDestinations) { host in
+                menu.actions.copy(menu.targets, to: host)
+            }
             let shares = menu.share
             if !shares.isEmpty {
                 ShareLink(items: shares) { print in SharePreview(print.filename) }

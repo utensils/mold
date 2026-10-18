@@ -78,3 +78,12 @@ it("refuses an already aborted operation before invoking native work", async () 
   ).rejects.toThrow();
   expect(native).not.toHaveBeenCalled();
 });
+it("hydrates native legacy offer metadata while preserving its exact raw u64 recipe", async () => {
+  const { metadata: _metadata, ...wireOffer } = offer;
+  native.mockImplementation((command) =>
+    Promise.resolve(command === "library_copy_legacy_offer" ? wireOffer : undefined),
+  );
+  const value = await ipc.copyGalleryLegacyOffer(source, "old.png");
+  expect(value.metadata).toEqual({ seed: Number("18446744073709551615") });
+  expect(value.rawMetadata).toBe('{"seed":18446744073709551615}');
+});

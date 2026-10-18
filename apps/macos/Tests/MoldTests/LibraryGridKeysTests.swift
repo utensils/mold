@@ -13,6 +13,13 @@ import Testing
 @MainActor
 struct LibraryGridKeysTests {
 
+    @Test func directSelectionRestoresFocusAfterAnEditorButAutomaticMountDoesNot() {
+        #expect(!LibraryGrid.claimsFocus(afterSelection: false, editingText: true))
+        #expect(LibraryGrid.claimsFocus(afterSelection: false, editingText: false))
+        #expect(LibraryGrid.claimsFocus(afterSelection: true, editingText: true))
+        #expect(LibraryGrid.claimsFocus(afterSelection: true, editingText: false))
+    }
+
     @Test func aBareArrowMovesTheSelection() {
         #expect(LibraryGridKeys.action(for: .leftArrow, modifiers: [])
             == .move(.left, LibraryCursor.Modifier.none))
@@ -42,6 +49,15 @@ struct LibraryGridKeysTests {
     }
 
     /// What the menu item and the README both promise.
+    @Test func physicalDeleteCharacterMatchesTheCanonicalDeleteKey() {
+        let physical = KeyEquivalent("\u{7f}")
+        #expect(LibraryGridKeys.keys.contains(physical))
+        #expect(LibraryGridKeys.action(for: physical, modifiers: []) == .trash)
+        #expect(LibraryGridKeys.action(for: physical, modifiers: .command) == .trash)
+        #expect(LibraryGridKeys.action(for: physical, modifiers: [.command, .shift]) == .emptyTrash)
+        #expect(LibraryGridKeys.action(for: physical, modifiers: .option) == nil)
+    }
+
     @Test func commandBackspaceTrashesTheSelection() {
         #expect(LibraryGridKeys.action(for: .delete, modifiers: .command) == .trash)
         #expect(LibraryGridKeys.action(for: .delete, modifiers: [.command, .shift]) == .emptyTrash)

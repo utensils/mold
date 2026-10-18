@@ -117,3 +117,86 @@ it("uses the desktop original file adapters for image clipboard and Save a Copy"
   expect(URL.createObjectURL).not.toHaveBeenCalled();
   view.unmount();
 });
+it("requests browser file clipboard permission in the click before original bytes finish", async () => {
+  let finish!: (blob: Blob) => void;
+  read.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  class Item {
+    static supports() {
+      return true;
+    }
+    constructor(public values: Record<string, Promise<Blob>>) {}
+  }
+  vi.stubGlobal("ClipboardItem", Item);
+  const originalClipboard = Object.getOwnPropertyDescriptor(
+    navigator,
+    "clipboard",
+  );
+  const write = vi.fn(async (items: Item[]) => {
+    await items[0]!.values["image/png"];
+  });
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { write },
+  });
+  const view = mount(SourceMediaActions, { props: { selection } });
+  await view
+    .findAll("button")
+    .find((button) => button.text() === "Copy File")!
+    .trigger("click");
+  const calledDuringClick = write.mock.calls.length === 1;
+  finish(new Blob(["original"], { type: "application/octet-stream" }));
+  await flushPromises();
+  expect(calledDuringClick).toBe(true);
+  expect(await write.mock.calls[0]![0][0]!.values["image/png"]).toHaveProperty(
+    "type",
+    "image/png",
+  );
+  view.unmount();
+  if (originalClipboard)
+    Object.defineProperty(navigator, "clipboard", originalClipboard);
+  else delete (navigator as any).clipboard;
+  vi.unstubAllGlobals();
+});
+it("prepares the original before offering a fresh Share click", async () => {
+  const oldShare = Object.getOwnPropertyDescriptor(navigator, "share"),
+    oldCanShare = Object.getOwnPropertyDescriptor(navigator, "canShare");
+  const share = vi.fn(async () => undefined);
+  Object.defineProperty(navigator, "share", {
+    configurable: true,
+    value: share,
+  });
+  Object.defineProperty(navigator, "canShare", {
+    configurable: true,
+    value: () => true,
+  });
+  read.mockResolvedValue(
+    new Blob(["original"], { type: "application/octet-stream" }),
+  );
+  const view = mount(SourceMediaActions, { props: { selection } });
+  const prepare = view
+    .findAll("button")
+    .find((button) => button.text() === "Prepare to Share");
+  expect(prepare).toBeDefined();
+  await prepare!.trigger("click");
+  await flushPromises();
+  expect(share).not.toHaveBeenCalled();
+  await view
+    .findAll("button")
+    .find((button) => button.text() === "Share")!
+    .trigger("click");
+  expect(share).toHaveBeenCalledOnce();
+  expect(read).toHaveBeenCalledOnce();
+  invalidateSourceOwner(sourceOwnerIdentity(selection.owner));
+  await flushPromises();
+  expect(view.text()).toContain("Prepare to Share");
+  view.unmount();
+  if (oldShare) Object.defineProperty(navigator, "share", oldShare);
+  else delete (navigator as any).share;
+  if (oldCanShare) Object.defineProperty(navigator, "canShare", oldCanShare);
+  else delete (navigator as any).canShare;
+});

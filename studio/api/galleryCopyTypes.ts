@@ -43,9 +43,15 @@ export interface CopyReceipt {
   importAttempted?: boolean;
   outcome?: "complete" | "legacy_inputs_unavailable";
   recipe: string;
+  /** Exact recipe verified on the destination; archive-only source facts may differ. */
+  destinationRecipe?: string;
   stage: "intent" | "output" | "sources" | "organization" | "complete";
 }
 export interface CopyJournal {
+  runExclusive?<T>(
+    operation: (lockSignal?: AbortSignal) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T>;
   read(key: string): Promise<CopyReceipt | null>;
   write(key: string, receipt: CopyReceipt): Promise<void>;
   matching?(

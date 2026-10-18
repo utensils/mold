@@ -121,7 +121,7 @@ Ordinary local removals suppress unchanged re-additions until source remove/re-a
 explicit Copy, while hidden membership always reasserts. Legacy observation never
 retroactively owns existing values or authorizes removals. Persist immutable mutation
 intent with durable UUIDs before writes; verify resulting organization and include
-cached organization-only copies in final checkpoint verification. Partial/ambiguous
+cached organization-only copies in final checkpoint verification. Journal a newly imported output’s initial-organization obligation until verification; a bare interrupted receipt must not become a destination override. Explicit Copy discovers verified component hosts and current readable root organization; forwarded privacy changes must schedule root reconciliation even when its own cursor did not change. Union every verified raw lineage edge before canonicalization; never overwrite a shared endpoint in a neighbor dictionary. Keep provisional/unfinished receipt links separate as conservative hide-only privacy evidence, scoped to captured routes and installations. They must not grant output skip tokens, ordinary merge authority or organization ownership; preserve them through listed-facts upgrades until organization verification. Partial/ambiguous
 writes remain retryable. Keep scalar authority attached to the verified origin across
 forwarding, never traversal order. Hidden privacy checks merge live and Trash evidence
 before host projection on grids, counts, unread and source/picker access.
@@ -321,7 +321,7 @@ no key tie); otherwise it rebuilds. The legacy trash LISTING, not `trashedAt`, d
 marks the timeline for a full rebuild. Tests construct `LibraryStore` without a
 `replicaStore`; only `AppStores` persists to Application Support.
 
-Library grid/viewer Delete and forward Delete trash; in Trash they confirm deletion using
+Library grid/viewer Delete (both SwiftUI U+0008 and physical AppKit U+007F) and forward Delete trash; in Trash they confirm deletion using
 only the trash endpoint. Bare F is scoped to Library interaction focus. Editable fields keep
 all typing keys. Shift-Command-Delete confirms machine-scoped Empty Trash. Print menus never
 contain collection Rename/Hide/Delete; the collection row and menu bar own those actions.
@@ -330,4 +330,8 @@ Dismissing never stops work or acknowledges issues; toolbar status restores it a
 Source file actions use SourceMediaLoading.original with exact authority/revision fences and
 release private files on dismissal/revocation. Copy commands include the sanitized owning-host
 selector, full member ID and shell-quoted filenames. Interpolation endpoint replacement keeps
-interior keyframes; explicit refused boundary capabilities cannot use the legacy fallback.
+interior keyframes and migrates an existing first-frame source into frame 0 when adding a
+last endpoint; explicit refused boundary capabilities cannot use the legacy fallback.
+
+Library menu supplements and Commands capture destination snapshots and callbacks before
+native hosting; they cannot require window-only environment stores.

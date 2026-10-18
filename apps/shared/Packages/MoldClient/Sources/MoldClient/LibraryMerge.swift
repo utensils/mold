@@ -95,6 +95,12 @@ public enum LibraryMerge {
     /// Canonical representatives preserve chains and fan-out even when the
     /// representative is absent or arrives after its copies.
     public static func copyComponents(_ links: [PrintID: PrintID]) -> [PrintID: PrintID] {
+        copyComponents(edges: links.map { ($0.key, $0.value) })
+    }
+
+    /// Raw edges may share either endpoint; retain every verified receipt
+    /// before canonicalizing instead of overwriting a dictionary neighbor.
+    public static func copyComponents(edges: [(PrintID, PrintID)]) -> [PrintID: PrintID] {
         var parents: [PrintID: PrintID] = [:]
         func root(_ id: PrintID) -> PrintID {
             var cursor = id
@@ -102,7 +108,7 @@ public enum LibraryMerge {
             return cursor
         }
         func order(_ id: PrintID) -> String { id.host.uuidString + ":" + id.filename }
-        for (from, to) in links {
+        for (from, to) in edges {
             let a = root(from), b = root(to)
             parents[from] = a; parents[to] = b
             if a != b {

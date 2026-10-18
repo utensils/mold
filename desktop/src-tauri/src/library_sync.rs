@@ -64,27 +64,35 @@ fn write(path: &Path, value: &serde_json::Value) -> Result<(), String> {
     Ok(())
 }
 #[tauri::command]
-pub fn library_sync_read(app: tauri::AppHandle) -> Result<Option<serde_json::Value>, String> {
-    let _writer = WRITER.lock().map_err(|_| "Library sync journal is busy.")?;
+pub async fn library_sync_read(app: tauri::AppHandle) -> Result<Option<serde_json::Value>, String> {
     let path = app
         .path()
         .app_data_dir()
         .map_err(|error| error.to_string())?
         .join("library-sync-v1.json");
-    read(&path)
+    tauri::async_runtime::spawn_blocking(move || {
+        let _writer = WRITER.lock().map_err(|_| "Library sync journal is busy.")?;
+        read(&path)
+    })
+    .await
+    .map_err(|error| format!("Could not read Library sync journal: {error}"))?
 }
 #[tauri::command]
-pub fn library_sync_write(
+pub async fn library_sync_write(
     app: tauri::AppHandle,
     document: serde_json::Value,
 ) -> Result<(), String> {
-    let _writer = WRITER.lock().map_err(|_| "Library sync journal is busy.")?;
     let path = app
         .path()
         .app_data_dir()
         .map_err(|error| error.to_string())?
         .join("library-sync-v1.json");
-    write(&path, &document)
+    tauri::async_runtime::spawn_blocking(move || {
+        let _writer = WRITER.lock().map_err(|_| "Library sync journal is busy.")?;
+        write(&path, &document)
+    })
+    .await
+    .map_err(|error| format!("Could not write Library sync journal: {error}"))?
 }
 #[cfg(test)]
 mod tests {

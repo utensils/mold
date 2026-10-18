@@ -45,6 +45,12 @@ public enum SourceMediaAttachment: String, Identifiable, CaseIterable, Sendable 
         default: return []
         }
     }
+    /// Output-print menus retain their older-server source-image handoff.
+    public static func printChoices(recipe: GenerationRecipe?, media: DraftMedia) -> [Self] {
+        guard let recipe else { return [.source] }
+        let member = RetainedSourceMedia.Member(memberId: "", role: "source_image", displayName: "print.png", sizeBytes: 0, mediaKind: "image")
+        return choices(member: member, recipe: recipe, media: media)
+    }
     public func applying(data: Data, member: RetainedSourceMedia.Member, to draft: RenderDraft, recipe: GenerationRecipe) async throws -> RenderDraft {
         guard Self.choices(member: member, recipe: recipe, media: draft.media).contains(self) else {
             throw MoldClientError.unreachable("This model cannot use that source in the selected role.")
@@ -109,6 +115,13 @@ public enum SourceMediaAttachment: String, Identifiable, CaseIterable, Sendable 
         draft.media.keyframes.removeAll { $0.frame == index }
         draft.media.parked.keyframes.removeAll { $0.frame == index }
         if let picture {
+            // The ordinary source well is LTX's first-frame shorthand. Moving
+            // into explicit keyframes must retain that authored endpoint.
+            if !first, !draft.media.keyframes.contains(where: { $0.frame == 0 }),
+               !draft.media.parked.keyframes.contains(where: { $0.frame == 0 }),
+               let source = draft.media.sourceImage {
+                draft.media.addingKeyframe(.init(frame: 0, image: source, name: draft.media.sourceImageName))
+            }
             draft.media.addingKeyframe(.init(frame: index, image: picture.encoded, name: picture.name))
             draft.frames = frames
             draft.media.reconcileSourceImage(supported: false)

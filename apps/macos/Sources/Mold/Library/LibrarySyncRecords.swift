@@ -85,6 +85,7 @@ final class LibrarySyncRecords {
     private var recordsRevision = 0
     private var lineageCache: (revision: Int, authority: [UUID: String]?, incoming: [PrintID: [(key: String, record: LocalSyncRecord)]])?
     private var componentCache: (revision: Int, authority: [UUID: String]?, members: [PrintID: [PrintID]])?
+    private var privacyCache: (revision: Int, authority: [UUID: String]?, links: [PrintID: PrintID])?
 
     init(directory: URL? = nil, migrating defaults: UserDefaults? = nil) {
         journal = directory.map(LibrarySyncJournal.init)
@@ -156,7 +157,7 @@ final class LibrarySyncRecords {
         load()
         let key = instance.map(Self.bucketKey) ?? doc.lastBucket ?? ""
         if let cached = linkCache, cached.revision == linksRevision, cached.bucket == key, cached.authority == authority { return cached.links }
-        var edges: [PrintID: PrintID] = [:]
+        var edges: [(PrintID, PrintID)] = []
         // Every destination bucket participates; compressing to components
         // avoids one-neighbor dictionaries losing A->B/A->C fan-out.
         for bucket in doc.buckets.values {
@@ -170,16 +171,36 @@ final class LibrarySyncRecords {
                           authority[copy.host] == [copy.host.uuidString, route, record.destinationInstance ?? ""].joined(separator: "\n")
                     else { continue }
                 }
-                if let prior = edges[copy], prior != origin {
-                    // Preserve the prior verified edge while joining a second
-                    // independently verified source to the same output.
-                    edges[origin] = prior
-                } else { edges[copy] = origin }
+                edges.append((copy, origin))
             }
         }
-        let links = LibraryMerge.copyComponents(edges)
+        let links = LibraryMerge.copyComponents(edges: edges)
         linkCache = (linksRevision, key, authority, links)
         return links
+    }
+
+    /// Hide-only links never authorize transfer skipping or organization ownership.
+    func privacyLinks(localHost: MoldHost.ID, instance: String?, authority: [UUID: String]? = nil) -> [PrintID: PrintID] {
+        load()
+        if let cached = privacyCache, cached.revision == recordsRevision, cached.authority == authority { return cached.links }
+        var edges = links(localHost: localHost, instance: instance, authority: authority).map { ($0.key, $0.value) }
+        for bucket in doc.buckets.values {
+            for (key, record) in bucket.records where record.provisional == true || record.privacyPending == true || record.initialOrganizationPending == true || record.organizationIntent != nil {
+                guard let source = LocalSyncRecord.source(of: key) else { continue }
+                let origin = PrintID(host: source.host, filename: source.filename)
+                let copy = PrintID(host: record.destinationHost ?? localHost, filename: record.destinationFilename)
+                if let authority {
+                    guard let current = authority[origin.host], record.sourceRoute == current,
+                          let route = record.destinationRoute,
+                          authority[copy.host] == [copy.host.uuidString, route, record.destinationInstance ?? ""].joined(separator: "\n")
+                    else { continue }
+                }
+                edges.append((origin, copy))
+            }
+        }
+        let result = LibraryMerge.copyComponents(edges: edges)
+        privacyCache = (recordsRevision, authority, result)
+        return result
     }
 
     /// Incoming verified edges are immutable for a run. Rebuilding this per
@@ -191,6 +212,9 @@ final class LibrarySyncRecords {
         for bucket in doc.buckets.values {
             for (key, record) in bucket.records where record.provisional != true {
                 let copy = PrintID(host: record.destinationHost ?? MoldEngine.localHostID, filename: record.destinationFilename)
+                // Privacy reconciliation may journal a redundant path back
+                // to its own root; that does not make the original forwarded.
+                if record.originKey == LocalSyncRecord.key(hostID: copy.host, filename: copy.filename) { continue }
                 if let authority {
                     guard let source = LocalSyncRecord.source(of: key),
                           let currentOrigin = authority[source.host], record.sourceRoute == currentOrigin,

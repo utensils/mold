@@ -466,3 +466,8 @@ revoked when the view or authority changes. The ID belongs to that host’s copy
 An authenticated empty source inventory, or a legacy no-retained-media answer for a print
 without input provenance, displays **No source media.** without Retry. Missing/damaged,
 unauthorized and failed reads remain distinct and retryable. No background sync is added on iOS.
+
+Print menus offer explicit first/last frame reuse for supported recipes. LTX interpolation
+keeps interior anchors and carries an existing first-frame source into keyframe 0 when a last
+frame is added. Before an older machine supplies a recipe, **Use as source image** remains
+available; an explicit unsupported recipe still controls which actions are offered.

@@ -8,7 +8,6 @@ import {
   sourceAddress,
   sourceCommand,
   sourceFileName,
-  canCopySourceFile,
   NATIVE_SOURCE_FILE_ACTIONS,
   sourceMimeHint,
 } from "../lib/sourceMediaActions";
@@ -33,6 +32,7 @@ const choices = inject(
 );
 const error = ref("");
 const busy = ref(false);
+const preparedShare = ref<File | null>(null);
 const clipboard = true;
 const nativeFiles = inject(NATIVE_SOURCE_FILE_ACTIONS, null);
 const canCopy = computed(() => {
@@ -85,6 +85,7 @@ function invalidate() {
   for (const url of urls) URL.revokeObjectURL(url);
   urls.clear();
   busy.value = false;
+  preparedShare.value = null;
 }
 watch(
   () => [
@@ -123,12 +124,46 @@ async function publish(action: "save" | "copy" | "share") {
   const selection = props.selection;
   controller = new AbortController();
   try {
-    const blob = await retainedSourceMediaContent(
-      selection.owner.filename,
-      selection.member,
-      selection.owner.target,
-      controller.signal,
-    );
+    const readOriginal = async () => {
+      const blob = await retainedSourceMediaContent(
+        selection.owner.filename,
+        selection.member,
+        selection.owner.target,
+        controller!.signal,
+      );
+      if (token !== epoch)
+        throw new DOMException("The source changed.", "AbortError");
+      return blob;
+    };
+    if (
+      action === "copy" &&
+      !(nativeFiles && sourceMemberKind(selection.member) === "image")
+    ) {
+      const mime = sourceMimeHint(selection);
+      if (!mime || !canCopy.value)
+        throw new Error(
+          "This browser cannot copy this file type. Use Save a Copy.",
+        );
+      // Safari requires write() during the click. ClipboardItem accepts a
+      // promise, so loading the exact original does not consume activation.
+      const original = readOriginal().then(
+        (blob) => new Blob([blob], { type: mime }),
+      );
+      // A denied clipboard request may reject before consuming its promise.
+      void original.catch(() => undefined);
+      await navigator.clipboard.write([
+        new ClipboardItem({ [mime]: original }),
+      ]);
+      return;
+    }
+    if (action === "share" && preparedShare.value) {
+      // Sharing has no promised-file API: use a fresh, deliberate click once
+      // the bounded original is ready, with no download await before share().
+      await navigator.share({ files: [preparedShare.value] });
+      preparedShare.value = null;
+      return;
+    }
+    const blob = await readOriginal();
     if (token !== epoch) return;
     const filename = sourceFileName(selection);
     if (
@@ -137,21 +172,15 @@ async function publish(action: "save" | "copy" | "share") {
       sourceMemberKind(selection.member) === "image"
     ) {
       await nativeFiles.copyImage(blob, () => token === epoch);
-    } else if (action === "copy") {
-      if (!canCopySourceFile(blob))
-        throw new Error(
-          "This browser cannot copy this file type. Use Save a Copy.",
-        );
-      await navigator.clipboard.write([
-        new ClipboardItem({ [blob.type]: blob }),
-      ]);
     } else if (action === "share") {
-      const files = [new File([blob], filename, { type: blob.type })];
-      if (!navigator.canShare({ files }))
+      const file = new File([blob], filename, {
+        type: sourceMimeHint(selection) ?? blob.type,
+      });
+      if (!navigator.canShare({ files: [file] }))
         throw new Error(
           "This browser cannot share this file type. Use Save a Copy.",
         );
-      await navigator.share({ files });
+      preparedShare.value = file;
     } else if (nativeFiles) {
       await nativeFiles.saveFile(blob, filename, () => token === epoch);
     } else {
@@ -263,7 +292,7 @@ async function publish(action: "save" | "copy" | "share") {
       :disabled="busy"
       @click="publish('share')"
     >
-      Share
+      {{ preparedShare ? "Share" : "Prepare to Share" }}
     </button>
     <span v-if="busy" role="status"
       >Loading original from {{ selection.owner.hostLabel }}…</span
@@ -286,7 +315,7 @@ async function publish(action: "save" | "copy" | "share") {
   padding: 10px;
   background: var(--mold-surface, #222);
   border: 1px solid var(--mold-border, #7775);
-  border-radius: 8px;
+  border-radius: var(--mold-radius-2);
   box-shadow: 0 8px 28px #0006;
 }
 .source-actions {

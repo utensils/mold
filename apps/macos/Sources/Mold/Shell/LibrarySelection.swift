@@ -56,6 +56,8 @@ struct LibrarySelection: Equatable {
 
     var lifecycleBusy = false
     var canUseEndpoints = false
+    var copyDestinations: [MoldHost] = []
+    var copyTo: (MoldHost) -> Void = { _ in }
 
     var isEmpty: Bool { count == 0 }
 
@@ -76,7 +78,7 @@ struct LibrarySelection: Equatable {
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.canUseEndpoints == rhs.canUseEndpoints && lhs.lifecycleBusy == rhs.lifecycleBusy && lhs.targets == rhs.targets
+        lhs.copyDestinations == rhs.copyDestinations && lhs.canUseEndpoints == rhs.canUseEndpoints && lhs.lifecycleBusy == rhs.lifecycleBusy && lhs.targets == rhs.targets
             && lhs.count == rhs.count && lhs.allFavorite == rhs.allFavorite
             && lhs.scope == rhs.scope && lhs.shelves == rhs.shelves
             && lhs.enclosingShelf == rhs.enclosingShelf

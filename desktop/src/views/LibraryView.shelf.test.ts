@@ -1009,11 +1009,18 @@ describe("Trash scope", () => {
     wrapper.unmount();
   });
 
-  it("the tile menu offers Restore / Delete forever only", async () => {
+  it("the trash menu offers Restore, safe clipboard actions, and Delete forever", async () => {
     const { wrapper } = await mountView("/library?scope=trash");
     await tileFor(wrapper, trashed.filename).trigger("contextmenu");
     const labels = useContextMenuStore().entries.map((e) => ("separator" in e ? "—" : e.label));
-    expect(labels).toEqual(["Restore", "Copy prompt", "Copy seed", "—", "Delete forever"]);
+    expect(labels).toEqual([
+      "Restore",
+      "Copy File Name",
+      "Copy prompt",
+      "Copy seed",
+      "—",
+      "Delete forever",
+    ]);
     wrapper.unmount();
   });
 });

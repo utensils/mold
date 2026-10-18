@@ -16,9 +16,15 @@ extension LibraryStore {
                                syncAll: Bool) async -> MirrorDiscovery {
         var failures: [String] = []
         var hostErrors: [MoldHost.ID: String] = [:]
-        let sourceHostIDs = syncAll
+        var sourceHostIDs = syncAll
             ? Set(hosts.hosts.filter { $0.id != local.id }.map(\.id))
             : Set(selected.map(\.hostID))
+        if !syncAll {
+            for entry in selected {
+                sourceHostIDs.formUnion(syncRecords.verifiedCopies(of: entry.id, authority: syncAuthority).map(\.host))
+            }
+            sourceHostIDs.remove(local.id)
+        }
         let bucket = syncAll ? syncRecords.bucket(recordScope(local)) : nil
         var reads: [MoldHost.ID: MirrorSourceRead] = [:]
         // Every source at once: a slow machine never holds the others.
@@ -35,12 +41,10 @@ extension LibraryStore {
                 let client = hosts.backend(for: sourceHost)
                 // Sync All reads both partitions: a tombstone needs to know
                 // the source no longer holds a print anywhere.
-                let request = pullRequest(sourceHost, syncAll ? .all : .live)
+                let request = pullRequest(sourceHost, .all)
                 let context = originContext(hostID)
                 let cursor = bucket?.cursors[hostID.uuidString].flatMap { $0.route == context ? $0.cursor : nil }
-                let wantsCollections = syncAll || selected.contains {
-                    $0.hostID == hostID && !$0.print.collectionList.isEmpty
-                }
+                let wantsCollections = syncAll || !selected.isEmpty
                 group.addTask {
                     await MirrorSourceRead.read(sourceHost, replica: replica, request: request, client: client,
                                                 cursor: cursor, candidates: syncAll, collections: wantsCollections)
@@ -115,9 +119,19 @@ extension LibraryStore {
         for (host, source) in sources.hosts { if let collections = source.collections { collectionInventories[host] = Array(collections.values) } }
         collectionInventories[local.id] = localCollections
         let desiredShelves = CollectionShelf.merge(collectionInventories)
-        let selectedSlugs: Set<String> = Set(sources.selected.flatMap { entry in
+        var selectedSlugs: Set<String> = Set(sources.selected.flatMap { entry in
             entry.print.collectionList.compactMap { sources.hosts[entry.hostID]?.collections?[$0]?.slug }
         })
+        if !syncAll {
+            for entry in sources.selected {
+                let members = syncRecords.verifiedCopies(of: entry.id, authority: syncAuthority) + [entry.id]
+                for id in members {
+                    guard let source = sources.hosts[id.host], let row = source.view.rows[id.filename] else { continue }
+                    selectedSlugs.formUnion(row.collectionList.compactMap { source.collections?[$0] }
+                        .filter { $0.hidden == true }.map(\.slug))
+                }
+            }
+        }
         var shelves: [(Collection, Bool)] = []
         for shelf in desiredShelves {
             if syncStopped { break }
@@ -149,7 +163,7 @@ extension LibraryStore {
         }
         return .ready(MirrorDestination(
             host: local, backend: destination, instance: instance, recordScope: recordScope(local), view: view, changed: changed, bucket: bucket,
-            receipts: MirrorReceipts(records: syncRecords, instance: recordScope(local), destinationInstance: instance, destinationHost: local.id),
+            receipts: MirrorReceipts(records: syncRecords, instance: recordScope(local), destinationInstance: instance, destinationHost: local.id, destinationRoute: local.baseURL.absoluteString),
             collectionNames: localNames, createdCollections: createdCollections,
             failedCollectionSlugs: failedCollectionSlugs, failures: failures))
     }

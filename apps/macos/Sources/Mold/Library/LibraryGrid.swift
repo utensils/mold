@@ -138,7 +138,7 @@ struct LibraryGrid: View {
         // written in the pass that inserts the view is dropped.
         .task {
             await Task.yield()
-            if !TextEditingFocus.shared.isEditing { focused = true }
+            if Self.claimsFocus(afterSelection: false, editingText: TextEditingFocus.shared.isEditing) { focused = true }
         }
         // One handler, because what these keys mean depends on what is HELD
         // with them -- and `onKeyPress(_ key:)` matches its key whatever that
@@ -158,6 +158,10 @@ struct LibraryGrid: View {
     private func laidOut() -> [JustifiedLibraryLayout.Section] {
         guard let sectionsRevision else { return layout.resolve(sections, width: width, targetHeight: edge) }
         return layout.resolve(sections, revision: sectionsRevision, width: width, targetHeight: edge)
+    }
+
+    static func claimsFocus(afterSelection: Bool, editingText: Bool) -> Bool {
+        afterSelection || !editingText
     }
 
     static func visibleAnchor(in entries: [LibraryEntry], visibleRowIDs: Set<PrintID>) -> PrintID? {
@@ -194,7 +198,10 @@ struct LibraryGrid: View {
                 fresh: !scope.isTrash && library.unreadMedia.isUnread(entry)
             )
             .onTapGesture(count: 2) { onOpen(entry.id) }
-            .onTapGesture { click(entry) }
+            .onTapGesture {
+                focused = Self.claimsFocus(afterSelection: true, editingText: TextEditingFocus.shared.isEditing)
+                click(entry)
+            }
             .draggable(actions.draggable(entry))
             .libraryMenu(
                 LibraryMenu(targets: selection.items.contains(entry.id) ? selectedTargets : [entry],

@@ -159,6 +159,17 @@ function arrayObjects(text: string): string[] {
   }
   return result;
 }
+/** Older unavailable inventories may omit members, but malformed values prove nothing. */
+export function legacyInventoryHasNoMembers(inventory: {
+  availability?: unknown;
+  members?: unknown;
+}): boolean {
+  return (
+    inventory.availability === "unavailable_legacy" &&
+    (inventory.members === undefined ||
+      (Array.isArray(inventory.members) && inventory.members.length === 0))
+  );
+}
 async function legacyCopyOffer(
   machine: CopyMachine,
   filename: string,
@@ -172,11 +183,7 @@ async function legacyCopyOffer(
     `/api/gallery/source-media/${encodeURIComponent(filename)}`,
     signal,
   );
-  if (
-    inventory.value.availability !== "unavailable_legacy" ||
-    (inventory.value.members?.length ?? 0) !== 0
-  )
-    throw originalError;
+  if (!legacyInventoryHasNoMembers(inventory.value)) throw originalError;
   const listing = await json(machine.target, "/api/gallery", signal);
   const entry = arrayObjects(listing.text).find(
     (row) => JSON.parse(row).filename === filename,
@@ -263,7 +270,6 @@ export async function offer(
     !DIGEST.test(value.output_sha256) ||
     !Number.isSafeInteger(value.output_size_bytes) ||
     value.output_size_bytes <= 0 ||
-    value.output_size_bytes > limit ||
     !value.metadata ||
     typeof value.metadata !== "object" ||
     Array.isArray(value.metadata) ||
@@ -273,6 +279,11 @@ export async function offer(
     throw new Error(
       "The source machine cannot verify this print for copying. Update it or refresh the Library.",
     );
+  const tooLarge = () =>
+    new Error(
+      `Copy is limited to ${limit / (1024 * 1024)} MiB per print including source media.`,
+    );
+  if (value.output_size_bytes > limit) throw tooLarge();
   let total = value.output_size_bytes;
   const slots = new Set<string>();
   for (const member of value.members) {
@@ -308,10 +319,7 @@ export async function offer(
     slots.add(slot);
     total += member.size_bytes;
   }
-  if (total > limit)
-    throw new Error(
-      "Copy is limited to 64 MiB per print including source media.",
-    );
+  if (total > limit) throw tooLarge();
   return { ...value, rawMetadata: rawJsonProperty(response.text, "metadata") };
 }
 export const hash = async (bytes: Uint8Array<ArrayBuffer>) =>

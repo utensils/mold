@@ -39,15 +39,6 @@ export function sourceFileName(selection: SourceMediaSelection): string {
   return name && name !== "." && name !== ".." ? name : "source-media";
 }
 
-export function canCopySourceFile(blob: Blob): boolean {
-  return (
-    typeof ClipboardItem !== "undefined" &&
-    typeof navigator.clipboard?.write === "function" &&
-    (typeof ClipboardItem.supports !== "function" ||
-      ClipboardItem.supports(blob.type))
-  );
-}
-
 export interface NativeSourceFileActions {
   copyImage(blob: Blob, current: () => boolean): Promise<void>;
   saveFile(blob: Blob, filename: string, current: () => boolean): Promise<void>;

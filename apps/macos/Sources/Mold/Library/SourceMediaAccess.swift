@@ -22,7 +22,7 @@ extension LibraryStore {
             visibility: collectionVisibility.generation, hosts: hosts.hosts, instances: hosts.instanceIDs)) {
             let currentShelves = shelves
             let visible = LibraryScope.all.resolve(LibraryQuery(), shelves: currentShelves,
-                hiddenCollectionIDs: CollectionShelf.hiddenIDs(in: currentShelves), privacyEvidence: trashed, privacyLinks: syncLinks()).apply(to: items)
+                hiddenCollectionIDs: CollectionShelf.hiddenIDs(in: currentShelves), privacyEvidence: trashed, privacyLinks: syncPrivacyLinks()).apply(to: items)
             return .init(visible: visible.flatMap(\.everyCopy), details: (items + trashed).flatMap(\.everyCopy),
                          hosts: hosts.hosts, instances: hosts.instanceIDs)
         }

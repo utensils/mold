@@ -594,11 +594,16 @@ export const ipc = {
     filename: string,
     signal?: AbortSignal,
   ): Promise<CopyOffer> {
-    return nativeCopyOperation(
+    return nativeCopyOperation<Omit<CopyOffer, "metadata">>(
       "library_copy_legacy_offer",
       { source: source.target, sourceInstance: source.instanceId, filename },
       signal,
-    );
+    ).then((offer) => ({
+      ...offer,
+      // Parsed metadata is only a disclosure projection; rawMetadata remains
+      // untouched and is the authority for recipe equality and large u64s.
+      metadata: JSON.parse(offer.rawMetadata),
+    }));
   },
   copyGalleryOutput(
     source: CopyMachine,

@@ -177,3 +177,155 @@ it("Sync All considers every physical source even when display names group diffe
   expect(mocks.copy.mock.calls.every(([options]) => options.filename === "one.png")).toBe(true);
   sync.stop();
 });
+it("turning Keep off cancels its active automatic run", async () => {
+  const sync = useLibrarySyncStore();
+  await sync.initialize();
+  let finish!: () => void;
+  mocks.copy.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = () => resolve({ stage: "complete" });
+      }),
+  );
+  const destination = sync.machines.find((machine) => machine.id === "destination")!;
+  await sync.setKeep(destination, true);
+  await settle();
+  const signal = mocks.copy.mock.calls[0]![0].signal as AbortSignal;
+  await sync.setKeep(destination, false);
+  expect(signal.aborted).toBe(true);
+  finish();
+  await settle();
+  sync.stop();
+});
+it("Forget cancels only the affected run and preserves unrelated queued destinations", async () => {
+  mocks.hosts.all.push({
+    id: "other",
+    label: "Other",
+    status: "ready",
+    instanceId: "other-instance",
+    baseUrl: "https://other",
+    apiKey: "other-key",
+  });
+  const sync = useLibrarySyncStore();
+  await sync.initialize();
+  let finish!: () => void;
+  mocks.copy.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = () => resolve({ stage: "complete" });
+      }),
+  );
+  sync.copyTo(
+    rows as never,
+    sync.machines.find((machine) => machine.id === "destination")!,
+  );
+  sync.copyTo(
+    rows as never,
+    sync.machines.find((machine) => machine.id === "other")!,
+  );
+  await settle();
+  await sync.forget("destination");
+  expect((mocks.copy.mock.calls[0]![0].signal as AbortSignal).aborted).toBe(true);
+  finish();
+  await settle();
+  expect(mocks.copy.mock.calls.map(([options]) => options.destination.id)).toEqual([
+    "destination",
+    "other",
+  ]);
+  sync.stop();
+});
+it("forgetting the active source continues the other physical sources in that run", async () => {
+  mocks.hosts.all.push({
+    id: "other-source",
+    label: "Other Source",
+    status: "ready",
+    instanceId: "other-instance",
+    baseUrl: "https://other-source",
+    apiKey: "other-key",
+  });
+  mocks.gallery.merged = [
+    rows[0],
+    { ...rows[0], sourceKey: "other-source", item: { ...rows[0]!.item, filename: "other.png" } },
+  ];
+  const sync = useLibrarySyncStore();
+  await sync.initialize();
+  let finish!: () => void;
+  mocks.copy.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = () => resolve({ stage: "complete" });
+      }),
+  );
+  sync.syncAll(sync.machines.find((machine) => machine.id === "destination")!);
+  await settle();
+  await sync.forget("source");
+  finish();
+  await settle();
+  expect(mocks.copy.mock.calls.map(([options]) => options.source.id)).toEqual([
+    "source",
+    "other-source",
+  ]);
+  sync.stop();
+});
+it("does not retry a failed automatic copy on an unchanged telemetry poll", async () => {
+  mocks.copy.mockRejectedValue(new Error("Receiver does not support retained inputs"));
+  const sync = useLibrarySyncStore();
+  await sync.initialize();
+  await sync.setKeep(
+    sync.machines.find((machine) => machine.id === "destination")!,
+    true,
+  );
+  await settle();
+  expect(mocks.copy).toHaveBeenCalledTimes(1);
+  sync.dismissed = true;
+  mocks.hosts.all = mocks.hosts.all.map((host: object) => ({ ...host, queueDepth: 1 }));
+  await settle();
+  expect(mocks.copy).toHaveBeenCalledTimes(1);
+  expect(sync.dismissed).toBe(true);
+  sync.stop();
+});
+it("retains private output quarantine through completion until fresh physical hidden membership arrives", async () => {
+  const sync = useLibrarySyncStore();
+  const source = sync.machines.find((machine) => machine.id === "source")!;
+  const destination = sync.machines.find((machine) => machine.id === "destination")!;
+  const receipt = {
+    version: 1,
+    source: copyMachineIdentity(source),
+    destination: copyMachineIdentity(destination),
+    sourceFilename: "one.png",
+    destinationFilename: "renamed-private.png",
+    digest: "a".repeat(64),
+    size: 1,
+    recipe: "b".repeat(64),
+    stage: "output",
+    sourceOrganization: {
+      item: {},
+      collections: [{ id: "private", name: "Private", slug: "private", count: 1, hidden: true }],
+    },
+  };
+  const document = { version: 1, receipts: { edge: receipt }, keep: {} };
+  mocks.read.mockResolvedValue(document);
+  await sync.initialize();
+  expect(mocks.gallery.provisionalCopyPrivacy).toHaveLength(1);
+  receipt.stage = "complete";
+  mocks.copy.mockImplementation(async (options) => {
+    await options.journal.read("edge");
+    return { stage: "complete" };
+  });
+  sync.copyTo(rows as never, destination);
+  await settle();
+  expect(mocks.gallery.provisionalCopyPrivacy).toHaveLength(1);
+  mocks.gallery.buckets.destination = {
+    loaded: true,
+    error: null,
+    items: [{ filename: "renamed-private.png", collections: ["private"] }],
+  };
+  mocks.gallery.collectionsByHost.destination = {
+    loaded: true,
+    error: null,
+    items: [{ id: "private", hidden: true }],
+  };
+  await settle();
+  expect(mocks.gallery.provisionalCopyPrivacy).toEqual([]);
+  sync.stop();
+});

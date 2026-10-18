@@ -203,4 +203,49 @@ struct LibrarySyncRecordsTests {
         #expect(store.verifiedCopy(of: PrintID(host: source, filename: "source.png"), on: destination, authority: authority) == nil)
     }
 
+    @Test func convergingLineageKeepsEveryEdgeRegardlessOfRecordTraversal() async throws {
+        // Two independently recorded paths converge on both B and D. A
+        // dictionary keyed by just the destination loses a verified edge.
+        for _ in 0..<24 {
+            let store = LibrarySyncRecords()
+            let ids = (0..<5).map { _ in UUID() }
+            let a = PrintID(host: ids[0], filename: "a.png"), b = PrintID(host: ids[1], filename: "b.png")
+            let c = PrintID(host: ids[2], filename: "c.png"), d = PrintID(host: ids[3], filename: "d.png")
+            let e = PrintID(host: ids[4], filename: "e.png")
+            for (source, copy) in [(a,b),(c,b),(c,d),(e,d)].shuffled() {
+                var record = LocalSyncRecord(source: print(source.filename), from: source.host,
+                    local: print(copy.filename), on: copy.host, destinationInstance: "i")!
+                record.destinationHost = copy.host
+                try await store.checkpoint(record, key: LocalSyncRecord.key(hostID: source.host, filename: source.filename), instance: copy.host.uuidString)
+            }
+            let graph = store.links(localHost: ids[0], instance: nil)
+            #expect(Set([a,b,c,d,e].compactMap { graph[$0] }).count == 1)
+            #expect(graph.count == 5)
+        }
+    }
+
+    @Test func provisionalCollisionReceiptHidesOnlyAndNeverAuthorizesSkipOrOwnership() async throws {
+        let source = MoldHost(name: "Hidden origin", baseURL: URL(string: "http://hidden-origin")!)
+        let destination = MoldHost(name: "Unfiled backup", baseURL: URL(string: "http://unfiled-backup")!)
+        var hidden = GalleryPrint.Mutable(print("hidden.png")); hidden.collections = ["secret"]
+        let original = hidden.build(), copied = print("collision-renamed.png")
+        var receipt = LocalSyncRecord(receipt: original, from: source.id, as: copied.filename, destinationInstance: "destination")!
+        receipt.destinationHost = destination.id
+        receipt.sourceRoute = [source.id.uuidString, source.baseURL.absoluteString, "origin"].joined(separator: "\n")
+        receipt.destinationRoute = destination.baseURL.absoluteString
+        let authority = [source.id: receipt.sourceRoute!, destination.id: [destination.id.uuidString, destination.baseURL.absoluteString, "destination"].joined(separator: "\n")]
+        let records = LibrarySyncRecords()
+        try await records.checkpoint(receipt, key: LocalSyncRecord.key(hostID: source.id, filename: original.filename), instance: "destination")
+        var query = LibraryQuery(); query.hiddenCollectionIDs = [source.id: ["secret"]]
+        query.privacyLinks = records.privacyLinks(localHost: destination.id, instance: "destination", authority: authority)
+        #expect(query.apply(to: [LibraryEntry(host: source, print: original), LibraryEntry(host: destination, print: copied)]).isEmpty)
+        #expect(records.links(localHost: destination.id, instance: "destination", authority: authority).isEmpty)
+        #expect(records.verifiedOrigin(of: PrintID(host: destination.id, filename: copied.filename), authority: authority) == nil)
+        #expect(!receipt.sealed)
+        #expect(!receipt.matches(source: original, from: source.id, local: copied, on: destination.id))
+        var replaced = authority
+        replaced[destination.id] = "replacement route/instance"
+        #expect(records.privacyLinks(localHost: destination.id, instance: "destination", authority: replaced).isEmpty)
+    }
+
 }

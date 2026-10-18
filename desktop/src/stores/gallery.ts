@@ -1,3 +1,4 @@
+import { provisionalCopyHiddenKeys, type ProvisionalCopyPrivacy } from "@studio/lib/copyPrivacy";
 import { loadLibraryUnreadLedger, saveLibraryUnreadLedger } from "@studio/lib/libraryUnreadLedger";
 import {
   desiredCollectionHidden,
@@ -384,6 +385,8 @@ export const useGalleryStore = defineStore("gallery", {
   state: () => ({
     /** Keyed by "local" (This Mac via IPC) or a host id. */
     buckets: {} as Record<string, GalleryBucket>,
+    /** Hide-only quarantine for partially imported private outputs. Never copy or mutation authority. */
+    provisionalCopyPrivacy: [] as ProvisionalCopyPrivacy[],
     /** Session-only chip filter: "all" or a bucket key. */
     filter: "all" as string,
     /** Session-only media-kind chip: all / image / video. */
@@ -523,16 +526,29 @@ export const useGalleryStore = defineStore("gallery", {
      * one gallery mutation costs one union pass rather than one per getter
      * per tile. Live prints are indexed first so they win over trashed twins.
      */
-    organizationIndex(): Map<string, OrganizationUnion> {
+    organizationIndex(): Map<string, OrganizationUnion & { privacy: OrganizationUnion }> {
       const resolve = this.collectionResolver;
-      const index = new Map<string, OrganizationUnion>();
+      const index = new Map<string, OrganizationUnion & { privacy: OrganizationUnion }>();
+      const liveItems = new Set(Object.values(this.buckets).flatMap((bucket) => bucket.items));
       const add = (prints: MergedPrint[]) => {
         for (const print of prints) {
           const copies = print.copies ?? [{ sourceKey: print.sourceKey, item: print.item }];
-          const org = unionOrganization(
+          const privacy = unionOrganization(
             copies.map((copy) => ({ hostId: copy.sourceKey, item: copy.item })),
             { localHostId: "local", resolveCollectionSlug: resolve },
           );
+          const live = copies.filter((copy) => liveItems.has(copy.item));
+          // Trash contributes hidden/unresolved privacy evidence only. It must
+          // never lend old titles, favorites, tags or ordinary memberships to
+          // a still-live physical copy.
+          const ordinary =
+            live.length && live.length !== copies.length
+              ? unionOrganization(
+                  live.map((copy) => ({ hostId: copy.sourceKey, item: copy.item })),
+                  { localHostId: "local", resolveCollectionSlug: resolve },
+                )
+              : privacy;
+          const org = { ...ordinary, privacy };
           if (!index.has(print.item.filename)) index.set(print.item.filename, org);
           for (const copy of copies) {
             if (!index.has(copy.item.filename)) index.set(copy.item.filename, org);
@@ -548,7 +564,11 @@ export const useGalleryStore = defineStore("gallery", {
         const trash = this.trashBuckets[source.key];
         if (live || trash)
           privacyBuckets[source.key] = {
-            ...(live ?? trash!),
+            // Loading/error/stamp bookkeeping must not invalidate this data
+            // index when an idle poll keeps the exact same rows.
+            loading: false,
+            error: null,
+            loaded: true,
             items: [...(live?.items ?? []), ...(trash?.items ?? [])],
           };
       }
@@ -706,6 +726,24 @@ export const useGalleryStore = defineStore("gallery", {
     favoritesOnly(): boolean {
       return this.scope === "favorites";
     },
+    provisionalHiddenCopyKeys(): Set<string> {
+      if (!this.provisionalCopyPrivacy.length) return new Set();
+      return provisionalCopyHiddenKeys(
+        this.provisionalCopyPrivacy,
+        useHostsStore().all.flatMap((host) =>
+          host.baseUrl
+            ? [
+                {
+                  id: host.id,
+                  url: host.baseUrl,
+                  instanceId: host.instanceId ?? undefined,
+                  connectionMode: host.connectionMode,
+                },
+              ]
+            : [],
+        ),
+      );
+    },
     /** Excludes members of hidden collections only from the default grid. */
     visibleInDefaultLibrary(): (entry: MergedPrint) => boolean {
       const hiddenSlugs = new Set(
@@ -715,8 +753,15 @@ export const useGalleryStore = defineStore("gallery", {
       );
       const organizationOf = this.organizationOf;
       const global = this.organizationIndex;
+      const provisional = this.provisionalHiddenCopyKeys;
       return (entry) => {
-        const organization = global.get(entry.item.filename) ?? organizationOf(entry);
+        if (
+          (entry.copies ?? [{ sourceKey: entry.sourceKey, item: entry.item }]).some((copy) =>
+            provisional.has(`${copy.sourceKey}|${copy.item.filename}`),
+          )
+        )
+          return false;
+        const organization = global.get(entry.item.filename)?.privacy ?? organizationOf(entry);
         return (
           organization.unresolvedCollectionIds.length === 0 &&
           !organization.collections.some((slug) => hiddenSlugs.has(slug))

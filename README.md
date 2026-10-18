@@ -388,6 +388,7 @@ Native Mac shipping builds include the reviewed Metal H3 runtime. Remote generat
 Native Mac local authoring inputs are saved privately alongside the prompt and scalar settings, including first/last frames and parked attachments. Unresolved retained references still require their original machine to validate them. Save failures are visible; missing or corrupt saved inputs block Generate until you reattach what you need and explicitly choose **Use current inputs**.
 
 Before importing a source-bearing copy, clients check destination readiness. Windows local destinations currently cannot receive retained inputs, so those copies are refused before creating a local library output. Source-free copies remain supported, and Windows clients can recall retained sources from a supported remote machine.
+Unix storage-only destinations can receive retained-source backups when their gallery and encrypted media store are ready, even with generation workers disabled.
 To install Mold's Agent Skill for supported coding agents,
 run:
 

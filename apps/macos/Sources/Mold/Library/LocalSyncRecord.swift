@@ -31,6 +31,10 @@ nonisolated struct LocalSyncRecord: Codable, Sendable, Equatable {
     var destinationHost: UUID?
     var organization: LibraryOrganizationState?
     var organizationIntent: SyncOrganizationIntent?
+    /// This run imported a new output but has not verified its initial organization.
+    var initialOrganizationPending: Bool?
+    /// The output association may hide a copy before organization verification.
+    var privacyPending: Bool?
     /// Verified root authority stays attached through forwarded copies.
     var originKey: String?
 
@@ -140,6 +144,7 @@ nonisolated struct LocalSyncRecord: Codable, Sendable, Equatable {
         destinationRecipe = sourceRecipe
         self.destinationInstance = destinationInstance
         provisional = true
+        privacyPending = true
     }
 }
 

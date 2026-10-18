@@ -120,6 +120,19 @@ export async function attachRetainedSource(
         refusalReason: caps.referenceImagesReason,
       });
       if (keyframe) {
+        if (
+          attachment === "last" &&
+          staged.sourceImage &&
+          !staged.keyframes.some((frame) => frame.frame === 0)
+        ) {
+          staged.keyframes.unshift({
+            frame: 0,
+            image: {
+              filename: staged.sourceImageName ?? "first-frame.png",
+              base64: staged.sourceImage,
+            },
+          });
+        }
         staged.keyframes = replaceEndpointKeyframe(staged.keyframes, staged.frames, attachment!, {
           filename: prepared.filename,
           base64: prepared.base64,

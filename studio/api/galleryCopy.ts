@@ -19,6 +19,7 @@ import {
   hash,
   sameOutput,
   copyMachineIdentity,
+  legacyInventoryHasNoMembers,
 } from "./galleryCopyWire";
 export type {
   CopyMachine,
@@ -32,7 +33,17 @@ export { copyMachineIdentity, rawJsonProperty } from "./galleryCopyWire";
 let tail: Promise<unknown> = Promise.resolve();
 /** Globally serialized, bounded transfer. Incomplete receipts survive failures for repair. */
 export function copyGalleryPrint(options: CopyOptions): Promise<CopyReceipt> {
-  const run = tail.catch(() => undefined).then(() => transfer(options));
+  const run = tail
+    .catch(() => undefined)
+    .then(() =>
+      options.journal.runExclusive
+        ? options.journal.runExclusive(
+            (lockSignal) =>
+              transfer({ ...options, signal: lockSignal ?? options.signal }),
+            options.signal,
+          )
+        : transfer(options),
+    );
   tail = run;
   return run;
 }
@@ -95,10 +106,7 @@ async function transfer(options: CopyOptions): Promise<CopyReceipt> {
       signal,
     );
     check();
-    if (
-      inventory.value.availability !== "unavailable_legacy" ||
-      (inventory.value.members?.length ?? 0) !== 0
-    )
+    if (!legacyInventoryHasNoMembers(inventory.value))
       throw new Error(
         "This print's original source media could not be verified. The copy would be incomplete.",
       );
@@ -422,6 +430,10 @@ async function transfer(options: CopyOptions): Promise<CopyReceipt> {
     throw new Error(
       "The destination copy has different output bytes or generation settings.",
     );
+  receipt.destinationRecipe = await hash(
+    new TextEncoder().encode(targetCopyOffer.rawMetadata),
+  );
+  await checkpoint("output");
   if (origin.members.length && options.nativeTransferSources) {
     check();
     await options.nativeTransferSources(
@@ -524,7 +536,7 @@ async function transfer(options: CopyOptions): Promise<CopyReceipt> {
             ...(receipt.organization ? { prior: receipt.organization } : {}),
             contributors,
             deliberate: options.deliberate ?? true,
-            current: options.current,
+            current: () => !signal?.aborted && options.current(),
             origin: original,
             scalarAuthority:
               !copiedSource ||

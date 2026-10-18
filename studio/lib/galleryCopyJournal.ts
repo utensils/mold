@@ -1,4 +1,5 @@
 import type { CopyJournal, CopyReceipt } from "../api/galleryCopy";
+import { browserCopyLock as browserLock } from "./browserCopyLock";
 export interface LibrarySyncDocument {
   version: 1;
   receipts: Record<string, CopyReceipt>;
@@ -7,8 +8,10 @@ export interface LibrarySyncDocument {
 export interface SyncDocumentStorage {
   read(): Promise<LibrarySyncDocument | null>;
   write(document: LibrarySyncDocument): Promise<void>;
+  exclusive?<T>(operation: () => Promise<T>): Promise<T>;
 }
 export const browserSyncStorage: SyncDocumentStorage = {
+  exclusive: (operation) => browserLock("mold.library-sync.v1", operation),
   async read() {
     const text = localStorage.getItem("mold.library-sync.v1");
     if (!text) return null;
@@ -30,21 +33,32 @@ export function withSyncDocument<T>(
 ): Promise<T> {
   const run = tail
     .catch(() => undefined)
-    .then(async () => {
-      const document = (await storage.read()) ?? {
-        version: 1,
-        receipts: {},
-        keep: {},
+    .then(() => {
+      const mutate = async () => {
+        const document = (await storage.read()) ?? {
+          version: 1,
+          receipts: {},
+          keep: {},
+        };
+        const result = await update(document);
+        await storage.write(document);
+        return result;
       };
-      const result = await update(document);
-      await storage.write(document);
-      return result;
+      return storage.exclusive ? storage.exclusive(mutate) : mutate();
     });
   tail = run;
   return run;
 }
 export function copyJournal(storage: SyncDocumentStorage): CopyJournal {
   return {
+    ...(storage === browserSyncStorage
+      ? {
+          runExclusive: <T>(
+            operation: (lockSignal?: AbortSignal) => Promise<T>,
+            signal?: AbortSignal,
+          ) => browserLock("mold.library-copy.v1", operation, signal),
+        }
+      : {}),
     read: async (key) => (await storage.read())?.receipts[key] ?? null,
     matching: async (destination, digest, recipe) =>
       Object.values((await storage.read())?.receipts ?? {}).find(
@@ -65,12 +79,13 @@ export function copyJournal(storage: SyncDocumentStorage): CopyJournal {
             !!receipt.sourceOrganization,
         )
         .sort((a, b) => (b.observedAt ?? 0) - (a.observedAt ?? 0))[0] ?? null,
-    lineage: async (source, filename, digest, _recipe) =>
+    lineage: async (source, filename, digest, recipe) =>
       Object.values((await storage.read())?.receipts ?? {}).find(
         (receipt) =>
           receipt.destination === source &&
           receipt.destinationFilename === filename &&
           receipt.digest === digest &&
+          (receipt.destinationRecipe ?? receipt.recipe) === recipe &&
           !!receipt.origin,
       ) ?? null,
     contributors: async (destination, filename, excluding) =>

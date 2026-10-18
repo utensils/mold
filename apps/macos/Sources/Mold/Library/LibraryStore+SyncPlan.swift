@@ -88,6 +88,17 @@ extension LibraryStore {
             }
         }
 
+        if syncAll {
+            // A changed backup can add privacy protection even while the
+            // original's own row/checkpoints are unchanged.
+            var present = Set(consideredPairs.map { LocalSyncRecord.key(hostID: $0.0, filename: $0.1) })
+            for (hostID, name) in consideredPairs {
+                if let key = syncRecords.verifiedOrigin(of: PrintID(host: hostID, filename: name), authority: syncAuthority),
+                   let root = LocalSyncRecord.source(of: key), sources.hosts[root.host]?.view.live(root.filename) != nil,
+                   present.insert(key).inserted { consideredPairs.append((root.host, root.filename)) }
+            }
+        }
+
         // Targets for the considered prints only.
         var targets: [MirrorTarget] = []
         var unresolvedCollections: Set<String> = []
@@ -129,7 +140,7 @@ extension LibraryStore {
                                             self?.hosts.host(sourceHost.id) == sourceHost && self?.hosts.host(local.id) == local
                                                 && self?.hosts.instanceID(of: sourceHost.id) == sourceInstance
                                                 && self?.hosts.instanceID(of: local.id) == destinationInstance
-                                        }, collections: names, privacyOnly: source.view.isTrash(name)))
+                                        }, collections: names, privacyOnly: source.view.isTrash(name) || (syncAll && syncRecords.verifiedOrigin(of: sourceID, authority: syncAuthority) != nil)))
         }
 
         // Checkpoints for exactly what is considered: the whole GET only where

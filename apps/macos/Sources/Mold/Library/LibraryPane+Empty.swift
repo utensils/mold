@@ -12,7 +12,7 @@ extension LibraryPane {
         let shown = showing.visible.count
         let baseline = navigation.scope.baselineCount(in: showing.pool,
             machines: navigation.query.machineIDs, shelves: library.shelves,
-            hiddenIDs: library.hiddenCollectionIDs, privacyEvidence: library.trashed, privacyLinks: library.syncLinks())
+            hiddenIDs: library.hiddenCollectionIDs, privacyEvidence: library.trashed, privacyLinks: library.syncPrivacyLinks())
         let counted = shown == baseline ? shown : baseline
         let noun = navigation.scope.isTrash ? "in the trash" : (counted == 1 ? "print" : "prints")
         guard shown != baseline else { return "\(shown.formatted()) \(noun)" }

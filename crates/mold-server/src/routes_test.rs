@@ -5766,6 +5766,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capabilities_retained_transfer_supports_storage_only_receivers() {
+        for output_enabled in [false, true] {
+            for media_ready in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+                let (mut state, _rx) = durable_state(db, root.path());
+                assert!(!state.scheduled_work.v2_authoritative());
+                state.output_disabled_override = !output_enabled;
+                state.queue_journal.set_durable_media_ready(media_ready);
+                let response = app_with_state(state)
+                    .oneshot(
+                        Request::get("/api/capabilities")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = json_body(response).await;
+                assert!(
+                    body.get("durable_media").is_none(),
+                    "generation remains unavailable"
+                );
+                assert_eq!(
+                    body.get("retained_media_transfer").is_some(),
+                    cfg!(unix) && output_enabled && media_ready,
+                    "backup reception depends on storage, not generation workers"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn capabilities_keep_durable_media_dark_without_installed_services() {
         let state = AppState::for_tests();
         state.queue_journal.set_durable_media_ready(true);

@@ -136,6 +136,7 @@ it("inserts LTX endpoints without replacing middle keyframes or resizing the can
   form.frames = 25;
   form.keyframes = [{ frame: 12, image: { filename: "middle.png", base64: "bWlk" } }];
   form.sourceImage = "old";
+  form.sourceImageName = "existing-first.png";
   form.maskImage = "mask";
   const originalSize = [form.width, form.height];
   const outcome = await attachRetainedSource(
@@ -147,9 +148,10 @@ it("inserts LTX endpoints without replacing middle keyframes or resizing the can
     "last",
   );
   expect(outcome.ok).toBe(true);
-  expect(form.keyframes.map((frame) => frame.frame)).toEqual([12, 24]);
-  expect(form.keyframes[0]?.image.filename).toBe("middle.png");
-  expect(form.keyframes[1]?.image.base64).toBe("YWJj");
+  expect(form.keyframes.map((frame) => frame.frame)).toEqual([0, 12, 24]);
+  expect(form.keyframes[0]?.image).toEqual({ filename: "existing-first.png", base64: "old" });
+  expect(form.keyframes[1]?.image.filename).toBe("middle.png");
+  expect(form.keyframes[2]?.image.base64).toBe("YWJj");
   expect(form.sourceImage).toBeNull();
   expect(form.maskImage).toBeNull();
   expect([form.width, form.height]).toEqual(originalSize);

@@ -858,7 +858,14 @@ no retrospective removal authority. Organization intent is journaled before writ
 fresh destination/source checkpoints must confirm the result before completion. Verified
 copy lineage connects fan-out and forwarded copies without sending echoed edits back to
 the origin. Hidden evidence includes originals in Trash before machine filtering; only
-authoritative permanent removal clears that evidence.
+authoritative permanent removal clears that evidence. Explicit Copy reads verified
+component hosts for privacy evidence and the original’s current organization when
+available. Automatic runs also revisit an unchanged original when a forwarded copy’s
+privacy membership changes. A newly imported output retains its initial-organization
+obligation across interruption, so retry cannot mistake unfinished filing for a local edit.
+Route- and installation-bound output receipts also protect collision-renamed hidden
+copies while organization is unfinished. These conservative privacy links only hide;
+they do not authorize transfer skipping, ordinary grouping, or membership ownership.
 
 Sync preserves hidden collection flags, including empty shelves. Copies already
 in the destination’s Trash, or previously synced copies removed from its Library,
@@ -1003,6 +1010,7 @@ keep their editing keys.
 Library and finished-result menus offer **Use as First Frame** and **Use as Last Frame**
 when the selected recipe advertises boundary frames or keyframes. H3/Wan use their endpoint
 protocol; interpolation inserts frame 0 or frames-1 without discarding interior anchors.
+Adding a last frame also carries an existing first-frame source into keyframe 0.
 Manual canvas sizes and unrelated inputs remain authored.
 
 Source cards and details show the owning machine, selectable `source:<print>#<member>` ID,

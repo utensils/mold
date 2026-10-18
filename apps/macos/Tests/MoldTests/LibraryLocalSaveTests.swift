@@ -1125,4 +1125,118 @@ struct LibraryLocalSaveTests {
         #expect(library.localSaveFailures.isEmpty)
     }
 
+    @Test func receiptBeforeOrganizationStillInitializesAfterRestartedRun() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("receipt-organization-origin")
+        let source = FakeBackend(host: remote, noRetainedMedia: true, syncOrganization: true)
+        let destination = FakeBackend(host: local, noRetainedMedia: true, syncOrganization: true)
+        var original = GalleryPrint.Mutable(versionedPrint("receipt-org.png", prompt: "fox"))
+        original.title = "Origin title"; original.tags = ["origin"]; original.favorite = true
+        source.prints = [original.build()]; source.mediaAnswer = Data([1, 2, 3])
+        let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? destination : source }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+        // The import answered, then retained-media repair failed before organization.
+        source.plantedErrors["retainedMediaTransferOffer"] = MoldClientError.unreachable("interrupted")
+        var calls = 0
+        source.retainedTransferOfferResponder = { _ in
+            calls += 1
+            if calls > 1 { throw MoldClientError.unreachable("interrupted") }
+            return .init(archiveIdentitySha256: String(repeating: "a", count: 64), members: [],
+                outputSha256: "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81", outputSizeBytes: 3, metadata: original.build().metadata)
+        }
+        source.plantedErrors.removeValue(forKey: "retainedMediaTransferOffer")
+        await library.syncAllLocally()
+        #expect(destination.importedNames == ["receipt-org.png"])
+        source.retainedTransferOfferResponder = nil
+        await library.syncAllLocally()
+        #expect(destination.importedNames.count == 1)
+        #expect(destination.prints.first?.title == "Origin title")
+        #expect(destination.prints.first?.tagList == ["origin"])
+        #expect(destination.prints.first?.isFavorite == true)
+        #expect(library.localSaveFailures.isEmpty)
+    }
+
+    @Test func explicitForwardCopyReadsFreshOriginalAndHiddenMembershipFromAnotherCopy() async {
+        let origin = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let backup = host("explicit-privacy-backup"), destination = host("explicit-privacy-destination")
+        let machines = [origin, backup, destination]
+        let backends = Dictionary(uniqueKeysWithValues: machines.map {
+            ($0.id, FakeBackend(host: $0, noRetainedMedia: true, syncOrganization: true))
+        })
+        let original = versionedPrint("explicit-privacy.png", prompt: "fox")
+        backends[origin.id]!.prints = [original]
+        for backend in backends.values { backend.mediaAnswer = Data([1, 2, 3]) }
+        let hosts = HostStore(hosts: machines) { backends[$0.id]! }
+        for machine in machines { hosts.reachability[machine.id] = .up(FakeFixtures.serverStatus()) }
+        let library = LibraryStore(hosts: hosts)
+        await library.syncAll(to: backup)
+        // The backup's last verified origin snapshot is stale, but the
+        // original and privacy membership are both authoritatively readable.
+        var changed = GalleryPrint.Mutable(original); changed.title = "Current origin"; changed.tags = ["current"]
+        backends[origin.id]!.prints = [changed.build()]
+        backends[backup.id]!.collectionRows = [Collection(id: "backup-private", name: "Private", slug: "private", hidden: true)]
+        var filed = GalleryPrint.Mutable(backends[backup.id]!.prints[0]); filed.collections = ["backup-private"]
+        backends[backup.id]!.prints = [filed.build()]
+        backends[destination.id]!.collectionCreateResponses["Private"] = Collection(id: "dest-private", name: "Private", slug: "private", hidden: true)
+        await library.copy([LibraryEntry(host: backup, print: filed.build())], to: destination)
+        #expect(backends[destination.id]!.prints.first?.title == "Current origin")
+        #expect(backends[destination.id]!.prints.first?.tagList == ["current"])
+        #expect(backends[destination.id]!.prints.first?.collectionList == ["dest-private"])
+        #expect(library.localSaveFailures.isEmpty)
+    }
+
+    @Test func explicitOriginalCopyReadsHiddenMembershipFromAnotherVerifiedHost() async {
+        let origin = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let backup = host("hidden-evidence-backup"), destination = host("hidden-evidence-destination")
+        let machines = [origin, backup, destination]
+        let backends = Dictionary(uniqueKeysWithValues: machines.map {
+            ($0.id, FakeBackend(host: $0, noRetainedMedia: true, syncOrganization: true))
+        })
+        let original = versionedPrint("hidden-evidence.png", prompt: "fox")
+        backends[origin.id]!.prints = [original]
+        for backend in backends.values { backend.mediaAnswer = Data([1, 2, 3]) }
+        let hosts = HostStore(hosts: machines) { backends[$0.id]! }
+        for machine in machines { hosts.reachability[machine.id] = .up(FakeFixtures.serverStatus()) }
+        let library = LibraryStore(hosts: hosts)
+        await library.syncAll(to: backup)
+        backends[backup.id]!.collectionRows = [Collection(id: "backup-private", name: "Private", slug: "private", hidden: true)]
+        var filed = GalleryPrint.Mutable(backends[backup.id]!.prints[0]); filed.collections = ["backup-private"]
+        backends[backup.id]!.prints = [filed.build()]
+        backends[destination.id]!.collectionCreateResponses["Private"] = Collection(id: "dest-private", name: "Private", slug: "private", hidden: true)
+        await library.copy([LibraryEntry(host: origin, print: original)], to: destination)
+        #expect(backends[destination.id]!.prints.first?.collectionList == ["dest-private"])
+        #expect(library.localSaveFailures.isEmpty)
+    }
+
+    @Test func automaticRunReassertsHiddenMembershipChangedOnlyOnForwardedCopy() async {
+        let origin = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let backup = host("delta-private-backup"), destination = host("delta-private-destination")
+        let machines = [origin, backup, destination]
+        let backends = Dictionary(uniqueKeysWithValues: machines.map {
+            ($0.id, FakeBackend(host: $0, noRetainedMedia: true, syncOrganization: true))
+        })
+        let original = versionedPrint("delta-private.png", prompt: "fox")
+        backends[origin.id]!.prints = [original]
+        for backend in backends.values {
+            backend.mediaAnswer = Data([1, 2, 3]); backend.syncCheckpoint = [original.filename: "v1"]
+            backend.collectionRows = [Collection(id: "private", name: "Private", slug: "private", hidden: true)]
+        }
+        let hosts = HostStore(hosts: machines) { backends[$0.id]! }
+        for machine in machines { hosts.reachability[machine.id] = .up(FakeFixtures.serverStatus()) }
+        let library = LibraryStore(hosts: hosts)
+        await library.syncAll(to: backup)
+        await library.syncAll(to: destination)
+        var filed = GalleryPrint.Mutable(backends[backup.id]!.prints[0]); filed.collections = ["private"]
+        backends[backup.id]!.prints = [filed.build()]
+        await library.syncAll(to: destination, fullPlan: false)
+        #expect(backends[destination.id]!.prints.first?.collectionList == ["private"])
+        #expect(backends[destination.id]!.importedNames.count == 1)
+        #expect(library.localSaveFailures.isEmpty)
+        await library.syncAll(to: origin, fullPlan: false)
+        #expect(backends[origin.id]!.prints.first?.collectionList == ["private"])
+        #expect(backends[origin.id]!.importedNames.isEmpty)
+        #expect(library.syncRecords.verifiedOrigin(of: PrintID(host: origin.id, filename: original.filename), authority: library.syncAuthority) == nil)
+    }
+
 }

@@ -48,6 +48,14 @@ import { generationCapabilitiesForFamily } from "../lib/generateCapabilities";
 import { useRoute, useRouter } from "vue-router";
 import { observeLibraryCopyAuthority } from "../lib/libraryCopyAuthority";
 import { copyGalleryPrint, type CopyMachine } from "@studio/api/galleryCopy";
+import {
+  provisionalCopyPrivacy,
+  type ProvisionalCopyPrivacy,
+} from "@studio/lib/copyPrivacy";
+import {
+  provisionalCopyHiddenKeys,
+  retainCopyPrivacyUntilConfirmed,
+} from "../lib/copyPrivacy";
 import { apiJsonTo } from "@studio/api/client";
 import {
   browserSyncStorage,
@@ -229,6 +237,31 @@ const entries = ref<HostGalleryImage[]>([]);
 /** Concrete device copies retained behind the deduplicated All view. */
 const rawEntries = ref<HostGalleryImage[]>([]);
 const privacyEvidence = ref<HostGalleryImage[]>([]);
+const provisionalPrivacy = ref<ProvisionalCopyPrivacy[]>([]);
+const copyPrivacyReadFailed = ref(false);
+async function loadCopyPrivacy(confirmedHidden = new Set<string>()) {
+  try {
+    const document = await browserSyncStorage.read();
+    const receipts = document?.receipts ?? {};
+    provisionalPrivacy.value = retainCopyPrivacyUntilConfirmed(
+      provisionalCopyPrivacy(receipts),
+      provisionalPrivacy.value,
+      receipts,
+      confirmedHidden,
+    );
+    copyPrivacyReadFailed.value = false;
+  } catch (failure) {
+    copyPrivacyReadFailed.value = true;
+    throw failure;
+  }
+}
+function onCopyPrivacyStorage(event: StorageEvent) {
+  if (event.key !== "mold.library-sync.v1") return;
+  void loadCopyPrivacy().catch((failure) => {
+    errorMessage.value = String(failure);
+  });
+}
+
 /** Per-host organization: capabilities, collections, tags, trash listing. */
 const snapshots = ref<HostOrganizationSnapshot[]>([]);
 const galleryImageUpscaleByHost = ref<Record<string, boolean>>({});
@@ -1668,7 +1701,7 @@ const missingLinkedHost = computed(
     !getHost(hostFilter.value),
 );
 
-const globallyHiddenKeys = computed(() => {
+const physicalHiddenKeys = computed(() => {
   const keys = new Set<string>();
   for (const group of groupLogicalGalleryPrints([
     ...rawEntries.value,
@@ -1685,6 +1718,25 @@ const globallyHiddenKeys = computed(() => {
     )
       for (const copy of group.copies) keys.add(keyOf(copy));
   }
+  return keys;
+});
+const globallyHiddenKeys = computed(() => {
+  const keys = new Set(physicalHiddenKeys.value);
+  const pending = provisionalCopyHiddenKeys(
+    provisionalPrivacy.value,
+    listHosts(),
+  );
+  if (copyPrivacyReadFailed.value)
+    for (const row of rawEntries.value) keys.add(keyOf(row));
+  if (pending.size)
+    for (const group of groupLogicalGalleryPrints([
+      ...rawEntries.value,
+      ...trashRaw.value,
+      ...privacyEvidence.value,
+    ])) {
+      if (group.copies.some((copy) => pending.has(keyOf(copy))))
+        for (const copy of group.copies) keys.add(keyOf(copy));
+    }
   return keys;
 });
 const organizationFiltered = computed(() => {
@@ -1804,6 +1856,7 @@ async function performRefresh() {
   loading.value = true;
   errorMessage.value = null;
   try {
+    await loadCopyPrivacy();
     const hosts = listHosts();
     const listings = new Map<string, readonly HostListingRow[]>();
     const [merged, organization, upscaleCapabilities] = await Promise.all([
@@ -1898,6 +1951,7 @@ async function performRefresh() {
     }
     unreachableHostIds.value = merged.unreachableHostIds;
     remoteHostCount.value = merged.remoteHostCount;
+    await loadCopyPrivacy(physicalHiddenKeys.value);
     // Only a total wipe-out (no host answered) is an error; one box down just
     // shows an "unreachable" note while the rest render.
     if (
@@ -2780,7 +2834,16 @@ async function copyPrintsTo(items: GalleryImage[], destinationId: string) {
         destination,
         filename: item.filename,
         current,
-        journal: copyJournal(browserSyncStorage),
+        journal: (() => {
+          const journal = copyJournal(browserSyncStorage);
+          return {
+            ...journal,
+            write: async (...args: Parameters<typeof journal.write>) => {
+              await journal.write(...args);
+              await loadCopyPrivacy();
+            },
+          };
+        })(),
         signal: controller.signal,
       });
       if (receipt.outcome === "legacy_inputs_unavailable") legacyUnavailable++;
@@ -3069,6 +3132,7 @@ function pollTick() {
   void refresh();
 }
 onMounted(async () => {
+  window.addEventListener("storage", onCopyPrivacyStorage);
   document.addEventListener("visibilitychange", refreshWhenVisible);
   window.addEventListener("online", refreshWhenVisible);
   const [, listing] = await Promise.all([
@@ -3085,6 +3149,7 @@ onMounted(async () => {
 });
 onBeforeUnmount(() => {
   disposed = true;
+  window.removeEventListener("storage", onCopyPrivacyStorage);
   document.removeEventListener("visibilitychange", refreshWhenVisible);
   window.removeEventListener("online", refreshWhenVisible);
   stopUpscalePoll();

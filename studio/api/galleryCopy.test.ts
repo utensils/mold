@@ -295,6 +295,71 @@ it("retains narrowly verified legacy missing-input outcomes", async () => {
   });
   expect(result.outcome).toBe("legacy_inputs_unavailable");
 });
+it.each([null, {}, ""])(
+  "refuses malformed legacy inventories with members=%j",
+  async (members) => {
+    const { offer } = await existingFixture();
+    api.fetch.mockImplementation(async (target, path) => {
+      if (path === "/api/status")
+        return new Response(
+          JSON.stringify({
+            instance_id: target === source.target ? "s1" : "d1",
+          }),
+        );
+      if (path.endsWith("/print.png"))
+        return new Response(
+          JSON.stringify({ availability: "unavailable_legacy", members }),
+        );
+      return new Response(
+        JSON.stringify({
+          ...offer,
+          metadata: { seed: 1, source_image_sha256: "c".repeat(64) },
+        }),
+      );
+    });
+    await expect(
+      copyGalleryPrint({
+        source,
+        destination,
+        filename: "print.png",
+        current: () => true,
+        journal,
+      }),
+    ).rejects.toThrow("original source media could not be verified");
+  },
+);
+it.each([null, {}, ""])(
+  "refuses malformed older-host inventories with members=%j",
+  async (members) => {
+    const wire = await import("./galleryCopyWire");
+    const nativeLegacyOffer = vi.fn(async () => ({
+      archive_identity_sha256: "a".repeat(64),
+      output_sha256: "b".repeat(64),
+      output_size_bytes: 3,
+      metadata: { seed: 1 },
+      rawMetadata: '{"seed":1}',
+      members: [],
+    }));
+    api.fetch.mockImplementation(async (_target, path) => {
+      if (path.endsWith("/transfer")) throw new ApiError("old endpoint", 405);
+      if (path === "/api/gallery")
+        return new Response('[{"filename":"print.png","metadata":{"seed":1}}]');
+      return new Response(
+        JSON.stringify({ availability: "unavailable_legacy", members }),
+      );
+    });
+    await expect(
+      wire.offer(
+        source,
+        "print.png",
+        undefined,
+        wire.MAX_BYTES,
+        nativeLegacyOffer,
+      ),
+    ).rejects.toThrow("old endpoint");
+    expect(nativeLegacyOffer).not.toHaveBeenCalled();
+  },
+);
 it("preserves original organization through A to B to C to A without echoing copied local edits", async () => {
   const { offer } = await existingFixture();
   vi.mocked(journal.read).mockResolvedValue(null);
@@ -567,4 +632,62 @@ it("does not recreate an intentionally removed graph copy for a new source edge"
   expect(
     api.fetch.mock.calls.some(([, path]) => path.includes("/import/")),
   ).toBe(false);
+});
+
+it("stops organization writes when canceled even if machine authority stays current", async () => {
+  await existingFixture();
+  const controller = new AbortController();
+  vi.mocked(applyMirrorOrganization).mockImplementation(
+    async (_target, _filename, _snapshot, reconciliation) => {
+      controller.abort();
+      expect(reconciliation?.current?.()).toBe(false);
+      throw new DOMException("Canceled", "AbortError");
+    },
+  );
+  await expect(
+    copyGalleryPrint({
+      source,
+      destination,
+      filename: "print.png",
+      current: () => true,
+      journal,
+      signal: controller.signal,
+    }),
+  ).rejects.toThrow("Canceled");
+});
+
+it("persists the verified destination recipe separately from compatible source archive facts", async () => {
+  const { offer, receipt } = await existingFixture();
+  api.fetch.mockImplementation(async (target, path) => {
+    if (path === "/api/status")
+      return new Response(
+        JSON.stringify({ instance_id: target === source.target ? "s1" : "d1" }),
+      );
+    return new Response(
+      JSON.stringify({
+        ...offer,
+        metadata:
+          target === source.target
+            ? { seed: 1, generation_time_ms: 10 }
+            : { seed: 1 },
+      }),
+    );
+  });
+  const result = await copyGalleryPrint({
+    source,
+    destination,
+    filename: "print.png",
+    current: () => true,
+    journal,
+  });
+  expect(result.destinationRecipe).toBe(receipt.recipe);
+  expect(result.destinationRecipe).not.toBe(result.recipe);
+  expect(
+    vi
+      .mocked(journal.write)
+      .mock.calls.some(
+        ([, row]) =>
+          row.stage === "output" && row.destinationRecipe === receipt.recipe,
+      ),
+  ).toBe(true);
 });

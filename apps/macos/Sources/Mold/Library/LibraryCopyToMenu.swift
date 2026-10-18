@@ -1,30 +1,30 @@
 import MoldClient
 import SwiftUI
 
+/// Native menu builders and Commands do not inherit the window environment.
+/// Capture the offered destinations and owning action before entering either.
 struct LibraryCopyToMenu: View {
-    @Environment(HostStore.self) private var hosts
-    @Environment(LibraryStore.self) private var library
-    let entries: [LibraryEntry]
+    let destinations: [MoldHost]
+    let copy: (MoldHost) -> Void
     var body: some View {
-        let destinations = hosts.hosts.filter { host in
-            hosts.isUp(host) && entries.contains { $0.hostID != host.id }
-        }
-        if !entries.isEmpty, !destinations.isEmpty {
+        if !destinations.isEmpty {
             Menu("Copy to") {
                 ForEach(destinations) { host in
-                    Button(host.name) { library.syncSession.copy(entries, to: host, in: library) }
+                    Button(host.name) { copy(host) }
                 }
             }
         }
     }
 }
 
-struct LibrarySelectionCopyToMenu: View {
-    @Environment(LibraryStore.self) private var library
-    let selection: LibrarySelection
-    var body: some View {
-        if !selection.scope.isTrash {
-            LibraryCopyToMenu(entries: selection.targets.compactMap(library.entry))
+extension LibraryActions {
+    func copyDestinations(for entries: [LibraryEntry], scope: LibraryScope) -> [MoldHost] {
+        guard !scope.isTrash else { return [] }
+        return hosts.hosts.filter { host in
+            hosts.isUp(host) && entries.contains { $0.hostID != host.id }
         }
+    }
+    func copy(_ entries: [LibraryEntry], to host: MoldHost) {
+        library.syncSession.copy(entries, to: host, in: library)
     }
 }

@@ -105,6 +105,13 @@ it("uses retained image bytes as the LTX last keyframe while preserving intermed
     model: "ltx-2",
     modelFamily: "ltx-2",
     frames: 25,
+    imageAttachments: [
+      {
+        kind: "upload" as const,
+        filename: "existing-first.png",
+        base64: "first",
+      },
+    ],
     keyframes: [
       {
         frame: 12,
@@ -133,8 +140,11 @@ it("uses retained image bytes as the LTX last keyframe while preserving intermed
     () => true,
     async () => new Blob(["abc"]),
   );
-  expect(state.value.keyframes.map((frame) => frame.frame)).toEqual([12, 24]);
-  expect(state.value.keyframes[0]?.image.filename).toBe("middle.png");
-  expect(state.value.keyframes[1]?.image.base64).toBe("YWJj");
+  expect(state.value.keyframes.map((frame) => frame.frame)).toEqual([
+    0, 12, 24,
+  ]);
+  expect(state.value.keyframes[0]?.image.filename).toBe("existing-first.png");
+  expect(state.value.keyframes[1]?.image.filename).toBe("middle.png");
+  expect(state.value.keyframes[2]?.image.base64).toBe("YWJj");
   expect([state.value.width, state.value.height]).toEqual(size);
 });

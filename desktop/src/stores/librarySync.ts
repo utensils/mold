@@ -1,18 +1,79 @@
 import { computed, onScopeDispose, ref, watch } from "vue";
+import {
+  provisionalCopyPrivacy,
+  retainCopyPrivacyUntilConfirmed,
+  type ProvisionalCopyPrivacy,
+} from "@studio/lib/copyPrivacy";
 import { defineStore } from "pinia";
 import { copyGalleryPrint, copyMachineIdentity, type CopyMachine } from "@studio/api/galleryCopy";
 import {
   copyJournal,
   withSyncDocument,
   type SyncDocumentStorage,
+  type LibrarySyncDocument,
 } from "@studio/lib/galleryCopyJournal";
 import { LIBRARY_SYNC_FORGET } from "../lib/librarySyncEvents";
 import { ipc, inTauri, nativeLibraryCopyHooks } from "../lib/ipc";
 import { useGalleryStore, type MergedPrint } from "./gallery";
 import { useHostsStore } from "./hosts";
+let lastPrivacyDocument: LibrarySyncDocument | null = null;
+function publishCopyPrivacy(document: LibrarySyncDocument | null) {
+  const gallery = useGalleryStore();
+  const confirmed = new Set<string>();
+  for (const edge of gallery.provisionalCopyPrivacy ?? []) {
+    let id: string;
+    try {
+      id = JSON.parse(edge.destination)[0];
+    } catch {
+      continue;
+    }
+    const bucket = gallery.buckets[id];
+    const collections = gallery.collectionsByHost[id];
+    if (!bucket?.loaded || bucket.error || !collections?.loaded || collections.error) continue;
+    const row = gallery.bucketIndex
+      ? gallery.bucketIndex.get(id)?.byFilename.get(edge.destinationFilename)?.item
+      : bucket.items.find((item) => item.filename === edge.destinationFilename);
+    if (
+      row?.collections?.some((collectionId) =>
+        collections.items.some((collection) => collection.id === collectionId && collection.hidden),
+      )
+    )
+      confirmed.add(`${id}|${edge.destinationFilename}`);
+  }
+  gallery.provisionalCopyPrivacy = retainCopyPrivacyUntilConfirmed(
+    provisionalCopyPrivacy(document?.receipts ?? {}),
+    gallery.provisionalCopyPrivacy ?? [],
+    document?.receipts ?? {},
+    confirmed,
+  );
+}
 const storage: SyncDocumentStorage = {
-  read: () => ipc.librarySyncRead(),
-  write: (document) => ipc.librarySyncWrite(document),
+  async read() {
+    const document = await ipc.librarySyncRead();
+    lastPrivacyDocument = document;
+    publishCopyPrivacy(document);
+    return document;
+  },
+  async write(document) {
+    // Quarantine the acknowledged filename immediately, including when a
+    // later journal write fails. This is never an output-skip receipt.
+    const gallery = useGalleryStore();
+    const existing = gallery.provisionalCopyPrivacy ?? [];
+    const pending = provisionalCopyPrivacy(document.receipts);
+    const key = (edge: ProvisionalCopyPrivacy) =>
+      JSON.stringify([
+        edge.source,
+        edge.destination,
+        edge.sourceFilename,
+        edge.destinationFilename,
+      ]);
+    gallery.provisionalCopyPrivacy = [
+      ...new Map([...existing, ...pending].map((edge) => [key(edge), edge])).values(),
+    ];
+    await ipc.librarySyncWrite(document);
+    lastPrivacyDocument = document;
+    publishCopyPrivacy(document);
+  },
 };
 interface Run {
   destination: CopyMachine;
@@ -57,6 +118,8 @@ export const useLibrarySyncStore = defineStore("librarySync", () => {
   let activeMachines: CopyMachine[] = [];
   const queue: Run[] = [];
   let activeRun: Run | undefined;
+  let activeEntryIndex = -1;
+  let sourceForgotten = false;
   const observed = new Map<string, string>();
   const entryKey = (destination: CopyMachine, source: CopyMachine, filename: string) =>
     JSON.stringify([copyMachineIdentity(destination), copyMachineIdentity(source), filename]);
@@ -68,6 +131,7 @@ export const useLibrarySyncStore = defineStore("librarySync", () => {
         row.target.apiKey === machine.target.apiKey,
     );
   function stop() {
+    sourceForgotten = false;
     // Suppress only this stopped snapshot. A later source edit/new print has
     // a different fingerprint; deliberate Copy/Sync remains available now.
     for (const run of [...queue, ...(activeRun ? [activeRun] : [])])
@@ -97,10 +161,15 @@ export const useLibrarySyncStore = defineStore("librarySync", () => {
     });
     keep.value = { ...keep.value, [key]: enabled };
     if (enabled && currentMachine(machine)) syncAll(machine, true);
-    else
+    else {
+      if (!enabled && activeRun?.automatic && copyMachineIdentity(activeRun.destination) === key) {
+        sourceForgotten = false;
+        active?.abort();
+      }
       for (let index = queue.length - 1; index >= 0; index--)
         if (queue[index]!.automatic && copyMachineIdentity(queue[index]!.destination) === key)
           queue.splice(index, 1);
+    }
   }
   function selectedCopies(
     entries: MergedPrint[],
@@ -173,8 +242,11 @@ export const useLibrarySyncStore = defineStore("librarySync", () => {
         const captured = run.destination;
         let completed = 0,
           legacyUnavailable = 0;
-        for (const entry of run.entries) {
+        for (let index = 0; index < run.entries.length; index++) {
+          activeEntryIndex = index;
+          const entry = run.entries[index]!;
           if (active.signal.aborted || !currentMachine(captured)) break;
+          if (!currentMachine(entry.source)) continue;
           const message = `Copying ${++completed}/${run.entries.length} to ${captured.label}`;
           status.value = message;
           try {
@@ -203,6 +275,11 @@ export const useLibrarySyncStore = defineStore("librarySync", () => {
               dismissed.value = false;
             }
           }
+          if (active.signal.aborted && sourceForgotten && currentMachine(captured)) {
+            sourceForgotten = false;
+            active = new AbortController();
+            activeMachines = [];
+          }
         }
         if (!active.signal.aborted)
           status.value = `Library transfer to ${captured.label} finished${error.value ? " with issues" : ""}.${legacyUnavailable ? ` Original inputs were not retained for ${legacyUnavailable} older print(s).` : ""}`;
@@ -214,9 +291,21 @@ export const useLibrarySyncStore = defineStore("librarySync", () => {
       active = undefined;
       activeMachines = [];
       activeRun = undefined;
+      activeEntryIndex = -1;
+      sourceForgotten = false;
     }
   }
   let timer: ReturnType<typeof setTimeout> | undefined;
+  watch(
+    () =>
+      (gallery.provisionalCopyPrivacy?.length ?? 0)
+        ? JSON.stringify([
+            Object.entries(gallery.buckets).map(([id, bucket]) => [id, bucket.items]),
+            gallery.collectionsByHost,
+          ])
+        : "",
+    () => publishCopyPrivacy(lastPrivacyDocument),
+  );
   watch(
     () =>
       Object.values(keep.value).some(Boolean)
@@ -234,20 +323,38 @@ export const useLibrarySyncStore = defineStore("librarySync", () => {
       }, 1000);
     },
   );
-  watch(machines, () => {
-    if (active && activeMachines.some((machine) => !currentMachine(machine))) active.abort();
-    if (initialized)
-      for (const machine of machines.value)
-        if (keep.value[copyMachineIdentity(machine)]) syncAll(machine, true);
-  });
+  // Host telemetry refreshes rebuild HostView objects. Only a real route,
+  // credential, installation or connectivity transition starts another run.
+  watch(
+    () =>
+      JSON.stringify(
+        machines.value.map((machine) => [copyMachineIdentity(machine), machine.target.apiKey]),
+      ),
+    () => {
+      if (active && activeMachines.some((machine) => !currentMachine(machine))) active.abort();
+      if (initialized)
+        for (const machine of machines.value)
+          if (keep.value[copyMachineIdentity(machine)]) syncAll(machine, true);
+    },
+  );
   async function forget(id: string) {
-    if (activeMachines.some((machine) => machine.id === id)) stop();
-    for (let index = queue.length - 1; index >= 0; index--)
-      if (
-        queue[index]!.destination.id === id ||
-        queue[index]!.entries.some((entry) => entry.source.id === id)
-      )
-        queue.splice(index, 1);
+    if (active && activeMachines.some((machine) => machine.id === id)) {
+      sourceForgotten = activeRun?.destination.id !== id;
+      active.abort();
+    }
+    // A forgotten source removes its own future rows, preserving unrelated
+    // selections and destinations. Stop remains the explicit global action.
+    if (activeRun && activeRun.destination.id !== id)
+      for (let index = activeRun.entries.length - 1; index > activeEntryIndex; index--)
+        if (activeRun.entries[index]!.source.id === id) activeRun.entries.splice(index, 1);
+    for (let index = queue.length - 1; index >= 0; index--) {
+      const run = queue[index]!;
+      if (run.destination.id === id) queue.splice(index, 1);
+      else {
+        run.entries = run.entries.filter((entry) => entry.source.id !== id);
+        if (!run.entries.length) queue.splice(index, 1);
+      }
+    }
     const keys = Object.keys(keep.value).filter((key) => {
       try {
         return JSON.parse(key)[0] === id;

@@ -87,15 +87,20 @@ struct MirrorReceipts: Sendable {
     let instance: String?
     var destinationInstance: String? = nil
     var destinationHost: UUID? = nil
+    var destinationRoute: String? = nil
 
     func markPending(_ key: String, _ filename: String) async throws {
         try await records.markPending(key, filename: filename, instance: instance)
     }
 
-    func receipt(_ record: LocalSyncRecord, key: String) async throws {
+    func receipt(_ record: LocalSyncRecord, key: String, sourceRoute: String? = nil) async throws {
         var bound = record
         bound.destinationHost = destinationHost
+        bound.sourceRoute = sourceRoute ?? bound.sourceRoute
+        bound.destinationRoute = destinationRoute ?? bound.destinationRoute
         if let previous = await records.records(instance)[key], previous.destinationFilename == bound.destinationFilename {
+            bound.privacyPending = bound.privacyPending ?? previous.privacyPending
+            bound.initialOrganizationPending = bound.initialOrganizationPending ?? previous.initialOrganizationPending
             bound.organization = bound.organization ?? previous.organization
             bound.organizationIntent = bound.organizationIntent ?? previous.organizationIntent
             bound.originKey = bound.originKey ?? previous.originKey
@@ -273,7 +278,7 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
                 guard await target.isCurrent() else { throw MoldClientError.unreachable(routeChanged) }
                 if let receipts, let receipt = LocalSyncRecord(receipt: target.print, from: target.hostID,
                     as: requestedName, destinationInstance: receipts.destinationInstance) {
-                    try await receipts.receipt(receipt, key: target.key)
+                    try await receipts.receipt(receipt, key: target.key, sourceRoute: target.originContext)
                     receipted = true
                 }
                 let sourceMedia = try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
@@ -291,7 +296,7 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
                 guard await target.isCurrent() else { throw MoldClientError.unreachable(routeChanged) }
                 if let receipts, let receipt = LocalSyncRecord(receipt: target.print, from: target.hostID,
                     as: filename, destinationInstance: receipts.destinationInstance) {
-                    try await receipts.receipt(receipt, key: target.key)
+                    try await receipts.receipt(receipt, key: target.key, sourceRoute: target.originContext)
                     receipted = true
                 }
                 let sourceMedia = try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
@@ -312,9 +317,10 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
         // checkpoint tokens means a resume MUST repair retained inputs
         // before declaring the copy complete. A receipt that cannot be made
         // durable fails the item here, before any retained input moves.
-        if let receipts, let receipt = LocalSyncRecord(receipt: target.print, from: target.hostID, as: imported,
+        if let receipts, var receipt = LocalSyncRecord(receipt: target.print, from: target.hostID, as: imported,
                                                        destinationInstance: receipts.destinationInstance) {
-            try await receipts.receipt(receipt, key: target.key)
+            receipt.initialOrganizationPending = true
+            try await receipts.receipt(receipt, key: target.key, sourceRoute: target.originContext)
             receipted = true
         }
         let sourceMedia = try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
@@ -489,7 +495,7 @@ extension LibraryStore {
         var transferred = 0
         var completed = 0
         func record(_ target: MirrorTarget, as filename: String, organize: Bool) {
-            successfulCopies.append(MirrorCopy(target: target, filename: filename, newCopy: organize && syncedCopies[target.key] == nil))
+            successfulCopies.append(MirrorCopy(target: target, filename: filename, newCopy: (organize && syncedCopies[target.key] == nil) || syncedCopies[target.key]?.initialOrganizationPending == true))
             let existing = syncedCopies[target.key]
             // A receipt is not a finished copy: its organization may never
             // have landed, so file its memberships again.
@@ -563,7 +569,7 @@ extension LibraryStore {
                        let receipt = LocalSyncRecord(receipt: target.print, from: target.hostID, as: name,
                                                      destinationInstance: prepared.instance) {
                         do {
-                            try await receipts.receipt(receipt, key: target.key)
+                            try await receipts.receipt(receipt, key: target.key, sourceRoute: target.originContext)
                             receipted.insert(target.key)
                         } catch {
                             failures.append("\(target.print.filename): its sync receipt could not be saved: \(error.sentence)")
@@ -631,6 +637,12 @@ extension LibraryStore {
     func syncLinks() -> [PrintID: PrintID] {
         syncRecords.links(localHost: MoldEngine.localHostID,
                           instance: hosts.instanceID(of: MoldEngine.localHostID), authority: syncAuthority)
+    }
+
+    /// Conservative hide-only receipt links never enter the ordinary merge graph.
+    func syncPrivacyLinks() -> [PrintID: PrintID] {
+        syncRecords.privacyLinks(localHost: MoldEngine.localHostID,
+            instance: hosts.instanceID(of: MoldEngine.localHostID), authority: syncAuthority)
     }
 
     /// The records' document, now. For quitting.

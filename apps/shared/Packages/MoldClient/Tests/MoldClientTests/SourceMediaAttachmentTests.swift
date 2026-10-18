@@ -52,6 +52,31 @@ struct SourceMediaAttachmentTests {
         let recipe = try recipe(capabilities: ["boundary_frames": ["mode": "unsupported", "wire": "wan-pair", "min_frames": 9, "first_required": false, "last_required": false], "wan_recipe": ["mode": "adjustable", "supports_distill_strength": false, "supports_first_last_frame": true]])
         #expect(BoundaryFramePolicy.resolve(capabilities: recipe.capabilities) == nil)
     }
+    @Test func printMenusKeepLegacySourceHandoffUntilARecipeCanAnswer() throws {
+        #expect(SourceMediaAttachment.printChoices(recipe: nil, media: .init()) == [.source])
+        let unsupported = try recipe(capabilities: ["source_image": "unsupported"])
+        #expect(SourceMediaAttachment.printChoices(recipe: unsupported, media: .init()).isEmpty)
+    }
+    @Test func interpolationLastEndpointPreservesAnAuthoredSourceAsFirstKeyframe() throws {
+        let recipe = try recipe(capabilities: ["keyframes": ["mode": "adjustable", "required": false]])
+        var draft = RenderDraft(); draft.frames = 49
+        draft.media.sourceImage = "authored-first"; draft.media.sourceImageName = "first.png"
+        draft.media.keyframes = [.init(frame: 16, image: "middle")]
+        SourceMediaAttachment.setEndpoint(first: false, picture: ImportedPicture(encoded: "last", name: "last.png", data: Data([1])), draft: &draft, recipe: recipe)
+        #expect(draft.media.keyframes.map(\.frame) == [0, 16, 48])
+        #expect(draft.media.keyframes.first?.image == "authored-first")
+        #expect(draft.media.keyframes.first?.name == "first.png")
+        #expect(draft.media.sourceImage == nil)
+    }
+    @Test func interpolationLastEndpointKeepsAnExplicitFirstKeyframeOverAnOlderSource() throws {
+        let recipe = try recipe(capabilities: ["keyframes": ["mode": "adjustable", "required": false]])
+        var draft = RenderDraft(); draft.frames = 49
+        draft.media.sourceImage = "older-first"
+        draft.media.keyframes = [.init(frame: 0, image: "explicit-first")]
+        SourceMediaAttachment.setEndpoint(first: false, picture: ImportedPicture(encoded: "last", name: "last.png", data: Data([1])), draft: &draft, recipe: recipe)
+        #expect(draft.media.keyframes.map(\.frame) == [0, 48])
+        #expect(draft.media.keyframes.first?.image == "explicit-first")
+    }
     @Test func interpolationEndpointReplacementPreservesInteriorFramesAndCanvas() throws {
         let recipe = try recipe(capabilities: ["keyframes": ["mode": "adjustable", "required": false]])
         var draft = RenderDraft(); draft.frames = 49; draft.width = 768; draft.height = 512

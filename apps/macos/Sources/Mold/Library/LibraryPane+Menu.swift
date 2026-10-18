@@ -43,7 +43,9 @@ extension LibraryPane {
                                 open: entries.count == 1 ? { viewing = entries[0].id } : nil)
             },
             lifecycleBusy: library.isBulkBusy,
-            canUseEndpoints: entries.count == 1 && entries[0].isAttachableRaster && attachmentOffer.canUseEndpoints
+            canUseEndpoints: entries.count == 1 && entries[0].isAttachableRaster && attachmentOffer.canUseEndpoints,
+            copyDestinations: actions.copyDestinations(for: entries, scope: navigation.scope),
+            copyTo: { host in actions.copy(entries, to: host) }
         )
     }
 

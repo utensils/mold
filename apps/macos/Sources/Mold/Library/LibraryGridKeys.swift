@@ -13,9 +13,12 @@ enum LibraryGridAction: Hashable {
 }
 
 enum LibraryGridKeys {
+    /// AppKit sends U+007F for the physical backward-delete key, while
+    /// SwiftUI's canonical `.delete` is U+0008.
+    static let physicalDelete = KeyEquivalent("\u{7f}")
     /// Every key the grid answers, so the binding and the map cannot drift.
     static let keys: Set<KeyEquivalent> = [
-        .leftArrow, .rightArrow, .upArrow, .downArrow, .return, .space, .delete, .deleteForward, .escape, "f",
+        .leftArrow, .rightArrow, .upArrow, .downArrow, .return, .space, .delete, .deleteForward, physicalDelete, .escape, "f",
     ]
 
     static func action(for key: KeyEquivalent,
@@ -31,7 +34,7 @@ enum LibraryGridKeys {
         case .space: return held.isEmpty ? .quickLook : nil
         case .escape: return held.isEmpty ? .clearSelection : nil
         case "f": return held.isEmpty ? .favorite : nil
-        case .delete, .deleteForward:
+        case .delete, .deleteForward, physicalDelete:
             if held == [.command, .shift] { return .emptyTrash }
             return held.isEmpty || held == .command ? .trash : nil
         default: return nil

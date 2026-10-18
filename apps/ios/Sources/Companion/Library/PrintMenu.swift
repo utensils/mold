@@ -92,8 +92,7 @@ struct PrintMenu: View {
     }
 
     private var attachmentChoices: [SourceMediaAttachment] {
-        let member = RetainedSourceMedia.Member(memberId: "", role: "source_image", displayName: "print.png", sizeBytes: 0, mediaKind: "image")
-        return SourceMediaAttachment.choices(member: member, recipe: generate.recipe, media: generate.draft.media)
+        SourceMediaAttachment.printChoices(recipe: generate.recipe, media: generate.draft.media)
     }
 
     private var single: Bool { entries.count == 1 }

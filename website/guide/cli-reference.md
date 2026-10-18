@@ -521,7 +521,6 @@ reports an incomplete copy rather than claiming the sources were saved.
 thumbnail. An unreachable host or rejected gallery credential is an error;
 `mold library` never switches to local files.
 
-
 ### Reusing Library inputs from the CLI
 
 Image input flags accept an existing local path, `print:FILENAME`, or

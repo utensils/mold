@@ -114,6 +114,8 @@ extension LibraryStore {
                         continue
                     }
                 }
+                record.privacyPending = organization.states[sourceKey] == nil ? syncRecords.records(prepared.recordScope)[sourceKey]?.privacyPending : nil
+                record.initialOrganizationPending = organization.states[sourceKey] == nil ? syncRecords.records(prepared.recordScope)[sourceKey]?.initialOrganizationPending : nil
                 record.destinationHost = local.id
                 record.organization = organization.states[sourceKey] ?? prepared.records[sourceKey]?.organization
                 record.originKey = prepared.records[sourceKey]?.originKey ?? syncRecords.verifiedOrigin(of: PrintID(host: target.hostID, filename: target.print.filename), authority: syncAuthority)
@@ -143,6 +145,10 @@ extension LibraryStore {
             else { continue }
             // Upgrading output facts must not discard an organization intent
             // whose response failed or whose readback is not yet confirmed.
+            listed.privacyPending = receipt.privacyPending
+            listed.sourceRoute = receipt.sourceRoute
+            listed.destinationRoute = receipt.destinationRoute
+            listed.initialOrganizationPending = receipt.initialOrganizationPending
             listed.destinationHost = receipt.destinationHost
             listed.organization = receipt.organization
             listed.organizationIntent = receipt.organizationIntent

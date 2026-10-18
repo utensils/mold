@@ -84,6 +84,14 @@ extension LibraryStore {
                 let sourceID = PrintID(host: target.hostID, filename: target.print.filename)
                 if !target.privacyOnly, let original = syncRecords.organizationAtOrigin(of: sourceID, authority: syncAuthority) {
                     source = original
+                    if let rootKey = syncRecords.verifiedOrigin(of: sourceID, authority: syncAuthority),
+                       let root = LocalSyncRecord.source(of: rootKey), let rootHost = sources.hosts[root.host],
+                       let row = rootHost.view.live(root.filename) {
+                        let collections = row.collectionList.compactMap { rootHost.collections?[$0]?.slug }
+                        guard collections.count == row.collectionList.count else { throw MoldClientError.malformedResponse }
+                        source = LibraryOrganizationSnapshot(collections: Set(collections), tags: Set(row.tagList),
+                            title: row.title ?? "", favorite: row.isFavorite)
+                    }
                 }
                 source.collections.formUnion(hiddenByComponent[components[sourceID] ?? sourceID] ?? [])
                 let root = journalRecord.originKey ?? syncRecords.verifiedOrigin(of: PrintID(host: target.hostID, filename: target.print.filename), authority: syncAuthority) ?? key
