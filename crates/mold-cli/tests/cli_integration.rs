@@ -3691,3 +3691,35 @@ async fn an_unpaired_host_error_says_how_to_pair() {
             "pair it first: run `mold host invite` on that machine, then `mold host add` here",
         ));
 }
+
+/// `mold upscale --local` downloads a missing upscaler on THIS machine: the
+/// selected host is never asked to pull it, and a pull that fails ends the
+/// command instead of retrying.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_upscale_pulls_its_missing_model_here() {
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let env = TestEnv::new();
+    let remote = MockServer::start().await;
+    let hub = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&hub)
+        .await;
+    let input = env.home.join("input.png");
+    std::fs::write(&input, [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]).unwrap();
+    env.cmd()
+        .env("MOLD_HOST", remote.uri())
+        .env("HF_ENDPOINT", hub.uri())
+        .env("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+        .args(["upscale", input.to_str().unwrap(), "--local"])
+        .args(["--model", "real-esrgan-x4plus:fp16"])
+        .timeout(std::time::Duration::from_secs(60))
+        .assert()
+        .failure();
+    let asked = remote.received_requests().await.unwrap_or_default();
+    assert!(asked.is_empty(), "the selected host was asked: {asked:?}");
+    assert!(
+        !hub.received_requests().await.unwrap_or_default().is_empty(),
+        "the pull never ran here"
+    );
+}
