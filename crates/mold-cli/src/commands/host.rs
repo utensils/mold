@@ -550,17 +550,41 @@ fn tailnet_peer_ips() -> Option<IpSet> {
     parse_tailnet_ips(&output)
 }
 
-/// The first `tailscale` on PATH, else the macOS app's bundled CLI.
+/// The first `tailscale` on PATH (`tailscale.exe` on Windows), else the
+/// platform's standard install location.
 fn tailscale_cli() -> Option<PathBuf> {
-    let on_path = std::env::var_os("PATH").and_then(|path| {
-        std::env::split_paths(&path)
-            .map(|dir| dir.join("tailscale"))
-            .find(|candidate| candidate.is_file())
-    });
+    let on_path = std::env::var_os("PATH").and_then(|path| find_tailscale_on(&path));
     on_path.or_else(|| {
-        let app = PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale");
-        (cfg!(target_os = "macos") && app.is_file()).then_some(app)
+        tailscale_install_locations()
+            .into_iter()
+            .find(|candidate| candidate.is_file())
     })
+}
+
+/// `Path::is_file` resolves no executable extension, so Windows' installer
+/// name `tailscale.exe` is spelled out.
+fn find_tailscale_on(path: &std::ffi::OsStr) -> Option<PathBuf> {
+    let name = format!("tailscale{}", std::env::consts::EXE_SUFFIX);
+    std::env::split_paths(path)
+        .map(|dir| dir.join(&name))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Where the Tailscale installers put the CLI when it is not on PATH.
+fn tailscale_install_locations() -> Vec<PathBuf> {
+    if cfg!(target_os = "macos") {
+        vec![PathBuf::from(
+            "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+        )]
+    } else if cfg!(windows) {
+        ["ProgramFiles", "ProgramFiles(x86)"]
+            .iter()
+            .filter_map(std::env::var_os)
+            .map(|root| PathBuf::from(root).join("Tailscale").join("tailscale.exe"))
+            .collect()
+    } else {
+        Vec::new()
+    }
 }
 
 /// Only `Self.TailscaleIPs` and each `Peer.*.TailscaleIPs` are read; the
@@ -1043,6 +1067,18 @@ mod tests {
             named: true,
             ambiguous: false,
         }
+    }
+
+    #[test]
+    fn the_tailscale_cli_is_found_by_its_platform_file_name() {
+        let empty = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let name = format!("tailscale{}", std::env::consts::EXE_SUFFIX);
+        std::fs::write(bin.path().join(&name), b"").unwrap();
+        let path = std::env::join_paths([empty.path(), bin.path()]).unwrap();
+        assert_eq!(find_tailscale_on(&path), Some(bin.path().join(&name)));
+        let none = std::env::join_paths([empty.path()]).unwrap();
+        assert_eq!(find_tailscale_on(&none), None);
     }
 
     #[test]
