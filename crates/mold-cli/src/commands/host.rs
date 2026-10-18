@@ -788,13 +788,15 @@ pub(crate) async fn add_manual_regular(
         ..Default::default()
     })?;
     retire_superseded(superseded, &origin, ConnectionMode::Regular)?;
-    finish(
+    // The manual alias always saved offline; it still does not probe.
+    finish_with(
         Added {
             name,
             origin,
             mode: ConnectionMode::Regular,
         },
         false,
+        None,
     )
     .await
 }
@@ -896,8 +898,22 @@ fn default_device_name() -> String {
     format!("Mold CLI on {machine}")
 }
 
-/// Report a saved pairing, check it once, and apply `--default`.
+/// How long the check after saving may take before it is only a warning.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Report a saved pairing, apply `--default`, and check the host once.
 pub(crate) async fn finish(added: Added, make_default: bool) -> Result<()> {
+    finish_with(added, make_default, Some(PROBE_TIMEOUT)).await
+}
+
+/// [`finish`] with the check bounded by `probe` (`None`: no check at all,
+/// for a connection saved offline). Everything that saves state happens
+/// before the check, so a host that stalls cannot undo or hold it.
+async fn finish_with(
+    added: Added,
+    make_default: bool,
+    probe: Option<std::time::Duration>,
+) -> Result<()> {
     let mode = added.mode.as_str();
     println!(
         "{} Added {} ({mode}) → {}",
@@ -905,21 +921,31 @@ pub(crate) async fn finish(added: Added, make_default: bool) -> Result<()> {
         added.name,
         added.origin
     );
-    match mold_core::MoldClient::for_host(Some(&added.name)) {
-        Ok(client) => match client.server_status().await {
-            Ok(status) => eprintln!("  reachable: mold server v{}", status.version),
-            Err(error) => eprintln!(
-                "{} saved, but the host did not answer just now: {error}",
-                theme::icon_warn()
-            ),
-        },
-        Err(error) => eprintln!("{} saved, but {error:#}", theme::icon_warn()),
+    let other_hosts = hosts::list()?.len() > 1;
+    if make_default {
+        hosts::set_default(&added.name)?;
+    }
+    if let Some(limit) = probe {
+        match mold_core::MoldClient::for_host(Some(&added.name)) {
+            Ok(client) => match tokio::time::timeout(limit, client.server_status()).await {
+                Ok(Ok(status)) => eprintln!("  reachable: mold server v{}", status.version),
+                Ok(Err(error)) => eprintln!(
+                    "{} saved, but the host did not answer just now: {error}",
+                    theme::icon_warn()
+                ),
+                Err(_) => eprintln!(
+                    "{} saved, but the host did not answer within {}s",
+                    theme::icon_warn(),
+                    limit.as_secs().max(1)
+                ),
+            },
+            Err(error) => eprintln!("{} saved, but {error:#}", theme::icon_warn()),
+        }
     }
     println!("  Try: mold ps --host {}", added.name);
     if make_default {
-        hosts::set_default(&added.name)?;
         println!("  Default host is now '{}'.", added.name);
-    } else if hosts::list()?.len() > 1 {
+    } else if other_hosts {
         println!("  Make it the default: mold host use {}", added.name);
     }
     Ok(())
@@ -1330,6 +1356,54 @@ mod tests {
             .any(|r| r.url.path() == "/api/pairing/sessions"));
         assert!(reached.iter().any(|r| r.url.path() == "/api/status"));
         assert!(elsewhere.received_requests().await.unwrap().is_empty());
+    }
+
+    /// A host that accepts and never answers cannot hold `host add`: the
+    /// check after saving is bounded and only warns, and `--default` was
+    /// applied before it ran.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stalled_host_cannot_hold_up_finishing_an_add() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        // Accept and hold every connection without ever writing a byte.
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming().flatten() {
+                held.push(stream);
+            }
+        });
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("MOLD_HOME");
+        std::env::set_var("MOLD_HOME", home.path());
+        mold_secure_client::save_regular_host(&mold_secure_client::RegularHost {
+            origin: origin.clone(),
+            name: Some("stalled".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        let started = std::time::Instant::now();
+        let result = finish_with(
+            Added {
+                name: "stalled".into(),
+                origin: origin.clone(),
+                mode: ConnectionMode::Regular,
+            },
+            true,
+            Some(std::time::Duration::from_millis(300)),
+        )
+        .await;
+        let default = hosts::default().map(|h| h.map(|h| h.name));
+        match previous {
+            Some(value) => std::env::set_var("MOLD_HOME", value),
+            None => std::env::remove_var("MOLD_HOME"),
+        }
+        result.unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(default.unwrap().as_deref(), Some("stalled"));
     }
 
     #[test]

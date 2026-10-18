@@ -29,11 +29,33 @@ const UNSUPPORTED: &str = "that is not a supported Mold pairing link";
 pub fn parse_pairing_link(input: &str) -> Result<Value> {
     let input = input.trim();
     ensure!(input.len() <= MAX_INPUT, NOT_A_CODE);
-    let value = match serde_json::from_str::<Value>(input) {
-        Ok(value) => value,
-        Err(_) => link_payload(&link_fields(input).context(NOT_A_CODE)?).context(NOT_A_CODE)?,
-    };
-    normalized(value).context(UNSUPPORTED)
+    match serde_json::from_str::<Value>(input) {
+        Ok(value) => json_invitation(value).context(UNSUPPORTED),
+        Err(_) => {
+            let value =
+                link_payload(&link_fields(input).context(NOT_A_CODE)?).context(NOT_A_CODE)?;
+            normalized(value).context(UNSUPPORTED)
+        }
+    }
+}
+
+/// A JSON invitation (the file `mold host invite --output` writes, or one
+/// from an older CLI) keeps the contract the client always had: whatever
+/// [`crate::PairingInvite`] / [`crate::RegularInvite`] accept, so a Secure
+/// invitation without `name`/`instance_id` still pairs. The claim itself
+/// verifies the host binding and invitation signature. Only a link is held
+/// to `parseMobilePairingPayload`'s stricter rules.
+fn json_invitation(value: Value) -> Result<Value> {
+    if value["mode"] == "regular" {
+        let _: crate::RegularInvite = serde_json::from_value(value.clone())?;
+    } else {
+        let invite: crate::PairingInvite = serde_json::from_value(value.clone())?;
+        ensure!(
+            [2, 3].contains(&invite.protocol),
+            "unsupported invitation version"
+        );
+    }
+    Ok(value)
 }
 
 /// The form-encoded fragment of a pairing link, or `None` for anything else.
@@ -551,20 +573,44 @@ mod tests {
         with_header(&fixture()["links"][0]["payload"])
     }
 
-    fn parses(value: &Value) -> Result<Value> {
-        parse_pairing_link(&serde_json::to_string(value).unwrap())
+    /// The link the TypeScript would print for `value`, but without the
+    /// encoder's own sanitizing, so a test can hand the parser bad fields.
+    fn raw_link(value: &Value) -> String {
+        let mut fields: Vec<(&str, String)> = Vec::new();
+        for key in [
+            "version",
+            "base_url",
+            "instance_id",
+            "name",
+            "namespace",
+            "host_key",
+            "host_noise_key",
+            "host_binding_signature",
+            "websocket_url",
+            "invite_seed",
+            "invite",
+            "endpoints",
+        ] {
+            match &value[key] {
+                Value::Null => {}
+                Value::String(text) => fields.push((key, text.clone())),
+                other => fields.push((key, other.to_string())),
+            }
+        }
+        encode(&fields)
     }
 
-    /// `validPairingAddress`: a Secure API origin has path `/`; the relay
-    /// WebSocket is wss only; a JSON payload names `websocket_url` (null is
-    /// fine) like the link always does.
+    fn parses(value: &Value) -> Result<Value> {
+        parse_pairing_link(&raw_link(value))
+    }
+
+    /// `validPairingAddress`: a Secure API origin has path `/` and the relay
+    /// WebSocket is wss only.
     #[test]
     fn secure_addresses_follow_valid_pairing_address() {
         let mut value = secure_json();
         value["websocket_url"] = Value::Null;
         assert!(parses(&value).is_ok());
-        value.as_object_mut().unwrap().remove("websocket_url");
-        assert!(parses(&value).is_err(), "websocket_url must be present");
         for websocket in ["ws://relay.example/ws", "https://relay.example/ws"] {
             let mut value = secure_json();
             value["websocket_url"] = websocket.into();
@@ -573,6 +619,31 @@ mod tests {
         let mut value = secure_json();
         value["base_url"] = "http://studio.local:7680/api".into();
         assert!(parses(&value).is_err());
+    }
+
+    /// A JSON invitation keeps the client's old contract: a Secure one
+    /// without `name` or `instance_id` (or `websocket_url`, or `type`) still
+    /// reads, as PairingInvite always accepted it; a link may not.
+    #[test]
+    fn a_legacy_json_invitation_still_reads() {
+        let mut value = secure_json();
+        for key in ["name", "instance_id", "websocket_url", "type"] {
+            value.as_object_mut().unwrap().remove(key);
+        }
+        let parsed = parse_pairing_link(&serde_json::to_string(&value).unwrap()).unwrap();
+        let invite: crate::PairingInvite = serde_json::from_value(parsed).unwrap();
+        assert_eq!(invite.name, None);
+        assert_eq!(invite.instance_id, None);
+        assert!(
+            parses(&value).is_err(),
+            "a link still needs name and instance_id"
+        );
+        let mut regular = with_header(&fixture()["links"][4]["payload"]);
+        regular.as_object_mut().unwrap().remove("name");
+        assert!(parse_pairing_link(&serde_json::to_string(&regular).unwrap()).is_ok());
+        regular.as_object_mut().unwrap().remove("instance_id");
+        assert!(parse_pairing_link(&serde_json::to_string(&regular).unwrap()).is_err());
+        assert!(parse_pairing_link(r#"{"version": 2, "base_url": "x"}"#).is_err());
     }
 
     /// Link numbers are read the way `Number()` reads them.
