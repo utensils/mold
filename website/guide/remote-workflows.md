@@ -181,7 +181,10 @@ outcome is still being confirmed.
 Behavior depends on where the command runs:
 
 - `mold pull` against a reachable server downloads onto that server
-- if no server is reachable, the CLI falls back to local pulling
+- a remote host (`--host`, `MOLD_HOST` or the default host) that does not
+  answer is an error; nothing is downloaded onto this machine
+- with no host named and no local server running, the CLI pulls locally
+- `mold pull --local` always downloads onto this machine
 
 That distinction matters if your laptop has little disk space or no GPU.
 

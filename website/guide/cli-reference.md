@@ -25,9 +25,11 @@ exactly. Which machine a command talks to:
 Commands that only ever run on this machine (`serve`, `system`, `config`,
 `stats`, `clean`, `rm`, `quantize`, `update`, `version`, `completions`,
 `skill`, `chain`, `expand`, `remix`, `default`, `host`, `pair`, `pairing`,
-`relay`, `runpod`, `lambda`, `server start|stop|discover`, `info MODEL`) refuse
-a typed `--host` instead of ignoring it; `MOLD_HOST` in the environment stays
-ignored there.
+`relay`, `lambda`, every `runpod` verb except `runpod run`,
+`server start|stop|discover`, `info MODEL`, `run --local`, `pull --local`, and a
+`pull` of an `hf:`/`cv:` catalog recipe) refuse a typed `--host` instead of
+ignoring it; `MOLD_HOST` in the environment stays ignored there.
+`runpod run --host NAME` reuses that paired pod.
 
 ## `mold run`
 
@@ -717,14 +719,18 @@ embedding local inference.
 ```bash
 mold pull flux-schnell:q8
 mold pull pulid-flux --accept-license insightface-antelopev2
+mold pull flux-schnell:q8 --local
 mold list
 mold info
 mold info flux-dev:q4
 mold info flux-dev:q4 --verify
 ```
 
-`mold pull <MODEL> [--skip-verify] [--accept-license <ID>]` downloads manifest
-models locally or through the reachable server. `--skip-verify` skips the
+`mold pull <MODEL> [--skip-verify] [--accept-license <ID>] [--local]` downloads
+manifest models on the server `--host`/`MOLD_HOST` names. When that target is
+this machine and nothing answers, it pulls locally; a remote host that does not
+answer is an error (nothing is downloaded here), and `--local` always pulls on
+this machine. `hf:`/`cv:` catalog recipes always download here. `--skip-verify` skips the
 SHA-256 pass after the download; `--accept-license` records a third-party
 model-license acceptance before pulling (see
 [Configuration](/guide/configuration#third-party-model-licenses)).
@@ -895,7 +901,9 @@ See [mold runpod CLI](/deployment/runpod-cli).
 
 Manage the saved hosts that `--host` and `MOLD_HOST` accept by name. Pairing
 (`mold pair`, `mold runpod create`) saves each one under the host's own name
-(or the pod's), made unique with a `-2` suffix when needed. A pairing saved by
+(or the pod's), made unique with a `-2` suffix when needed; pairing the same
+server again under a new address replaces its entry and keeps its name and
+default. A pairing saved by
 an older mold lists under a name derived from its hostname or origin; the first
 `mold host` command writes that name into the profile so it never changes. Two
 older pairings that derive the same name are both listed as `(ambiguous)`, and

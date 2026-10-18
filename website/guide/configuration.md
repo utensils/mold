@@ -511,11 +511,12 @@ including the pinned commit and digest.
 The acceptance has to live on the machine that does the downloading, and
 `mold pull` follows the pull:
 
-- **A server answers at `MOLD_HOST`** (including the local `mold serve`): the
-  id is sent with the request and the **server** writes it into its own
-  `$MOLD_HOME`. Nothing is recorded on the calling machine.
-- **No server, or `--local`**: the pull runs here, so the acceptance is
-  recorded here.
+- **A server answers at `--host`/`MOLD_HOST`** (including the local
+  `mold serve`): the id is sent with the request and the **server** writes it
+  into its own `$MOLD_HOME`. Nothing is recorded on the calling machine.
+- **`--local`, or no server answering on this machine**: the pull runs here,
+  so the acceptance is recorded here. A remote host that does not answer is an
+  error rather than a pull here.
 
 Either way the terms are printed before the request goes out — and they are the
 terms of the machine that will record them. When a server will do the
