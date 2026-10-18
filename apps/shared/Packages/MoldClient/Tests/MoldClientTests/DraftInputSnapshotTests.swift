@@ -36,7 +36,11 @@ struct DraftInputSnapshotTests {
         try decoded.apply(to: &restored)
         #expect(restored == media)
         var scoped = media
-        scoped.generationReferences[0].media = .init(authority: "upload", data: "PRIVATE", handle: "LEASE", path: "/secret/path")
+        scoped.generationReferences[0] = scoped.generationReferences[0].mappingCanonical {
+            var value = $0
+            value.media = .init(authority: "upload", data: "PRIVATE", handle: "LEASE", path: "/secret/path")
+            return value
+        }
         scoped.parked.generationReferences = scoped.generationReferences
         let safe = DraftInputSnapshot(scoped)
         let text = String(decoding: try MoldJSON.localEncoder.encode(safe), as: UTF8.self)

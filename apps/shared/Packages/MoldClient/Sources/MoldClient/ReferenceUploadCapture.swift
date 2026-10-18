@@ -6,7 +6,7 @@ struct ReferenceUploadCapture {
     let descriptor: GenerationReference
     let bytes: Data?
 
-    static func capture(_ request: GenerateRequest, capabilities: ReferenceUploadCapabilities) throws -> [Self] {
+    static func capture(_ request: GenerateRequest, capabilities: ReferenceUploadCapabilities, requireUpload: Bool = true) throws -> [Self] {
         guard request.batchSize == 1, let references = request.references, !references.isEmpty else {
             throw ReferenceUploadPolicy.refusal("REFERENCE_UPLOAD_REQUEST_INVALID", "Reference uploads require one output and ordered references.")
         }
@@ -62,7 +62,7 @@ struct ReferenceUploadCapture {
             descriptor.media = .init(authority: "descriptor")
             return Self(index: index, original: original, descriptor: descriptor, bytes: bytes)
         }
-        guard captured.contains(where: { $0.bytes != nil }) else {
+        guard !requireUpload || captured.contains(where: { $0.bytes != nil }) else {
             throw ReferenceUploadPolicy.refusal("REFERENCE_UPLOAD_REQUEST_INVALID", "The request has no reference media to upload.")
         }
         return captured

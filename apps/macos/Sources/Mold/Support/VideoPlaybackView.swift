@@ -23,6 +23,7 @@ struct VideoPlaybackView: View {
     private var autoplay = VideoPlaybackPreferences.defaultAutoplay
     @AppStorage(VideoPlaybackPreferences.repeatKey, store: AppStorageSuite.defaults)
     private var repeats = VideoPlaybackPreferences.defaultRepeat
+    @State private var playback = VideoPlaybackSession()
     @State private var presentationSize: CGSize = .zero
     @State private var isObserving = false
     @State private var displayMode = MediaDisplayMode.fit
@@ -38,12 +39,13 @@ struct VideoPlaybackView: View {
                         presentationSize = $0
                     }
             }
-            VideoTransportBar(player: player, isMuted: $isMuted, displayMode: $displayMode)
+            VideoTransportBar(player: player, playback: playback, isMuted: $isMuted, displayMode: $displayMode)
         }
         .onAppear {
+            playback.attach(player)
             player.isMuted = isMuted
             isObserving = true
-            if autoplay { player.play() }
+            if autoplay { playback.play() }
         }
         .onChange(of: isMuted) { _, newValue in player.isMuted = newValue }
         // The native transport may change mute too. Keep that choice in the
@@ -52,15 +54,17 @@ struct VideoPlaybackView: View {
             if isObserving, isMuted != value { isMuted = value }
         }
         .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
-            guard repeats, isObserving, NSApplication.shared.isActive, let item = notification.object as? AVPlayerItem,
+            guard isObserving, NSApplication.shared.isActive, let item = notification.object as? AVPlayerItem,
                   item === player.currentItem else { return }
-            Task { @MainActor in
-                await player.seek(to: .zero)
-                guard repeats, isObserving, NSApplication.shared.isActive, player.currentItem === item else { return }
-                player.play()
-            }
+            playback.handleEnd(repeating: repeats)
         }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in player.pause() }
-        .onDisappear { isObserving = false; player.pause() }
+        .onReceive(player.publisher(for: \.rate, options: [.new])) { rate in
+            if isObserving { playback.nativeRateChanged(rate) }
+        }
+        .onReceive(player.publisher(for: \.currentItem, options: [.initial, .new])) { _ in if isObserving { playback.attach(player) } }
+
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in playback.suspend() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in if isObserving { playback.attach(player) } }
+        .onDisappear { isObserving = false; playback.cancel() }
     }
 }

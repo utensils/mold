@@ -161,6 +161,56 @@ describe("VideoDurationSlider", () => {
     expect(wrapper.text()).toContain("241 frames");
   });
 
+  it("updates the request when the recipe grid changes without changing its ceiling", async () => {
+    const wrapper = mount(VideoDurationSlider, {
+      props: {
+        frames: 69,
+        fps: 24,
+        model: {
+          min_frames: 1,
+          max_frames: 81,
+          frame_step: 4,
+          frame_offset: 1,
+        },
+      },
+    });
+    await wrapper.setProps({
+      model: { min_frames: 1, max_frames: 81, frame_step: 8, frame_offset: 1 },
+    });
+    expect(wrapper.emitted("update:frames")?.at(-1)).toEqual([73]);
+  });
+
+  it("updates a carried request below a new recipe minimum without shortening an intentional long clip", async () => {
+    const wrapper = mount(VideoDurationSlider, {
+      props: {
+        frames: 25,
+        fps: 24,
+        model: {
+          min_frames: 1,
+          max_frames: 345,
+          frame_step: 17,
+          frame_offset: 5,
+        },
+      },
+    });
+    await wrapper.setProps({
+      model: {
+        min_frames: 107,
+        max_frames: 345,
+        frame_step: 17,
+        frame_offset: 5,
+      },
+    });
+    expect(wrapper.emitted("update:frames")?.at(-1)).toEqual([107]);
+    await wrapper.setProps({ frames: 500 });
+    const count = wrapper.emitted("update:frames")?.length;
+    await wrapper.setProps({
+      fps: 12,
+      model: { min_frames: 1, max_frames: 81, frame_step: 8, frame_offset: 1 },
+    });
+    expect(wrapper.emitted("update:frames")?.length).toBe(count);
+  });
+
   it("preserves the exact one-frame value accepted by the server", () => {
     const wrapper = mount(VideoDurationSlider, {
       props: { frames: 1, fps: 24, model: { frame_step: 8 } },

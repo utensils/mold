@@ -334,6 +334,8 @@ use crate::queue::clean_error_message;
         reconcile_generation_batches,
         generate_placement_preview,
         crate::reference_uploads::create_reference_upload_session,
+        crate::reference_uploads::normalization::create_normalization_session,
+        crate::reference_uploads::normalization::finalize_normalization_session,
         crate::reference_uploads::upload_reference,
         crate::reference_uploads::cancel_reference_upload_session,
         crate::gallery_source_media::create_reuse_session,
@@ -471,6 +473,17 @@ use crate::queue::clean_error_message;
         mold_core::ReferenceUploadSessionResponse,
         mold_core::ReferenceUploadSlot,
         mold_core::ReferenceUploadCompleteResponse,
+        crate::reference_uploads::ReferenceUploadResponseBody,
+        mold_core::video_normalization::VideoNormalizationCapabilities,
+        mold_core::video_normalization::OriginalVideo,
+        mold_core::video_normalization::ReferenceCandidate,
+        mold_core::video_normalization::CandidateSessionRequest,
+        mold_core::video_normalization::CandidateSessionResponse,
+        mold_core::video_normalization::NormalizationReceipt,
+        mold_core::video_normalization::NormalizationUploadResponse,
+        mold_core::video_normalization::FinalizeReceipt,
+        mold_core::video_normalization::NormalizationFinalizeRequest,
+        mold_core::video_normalization::NormalizationFinalizeResponse,
         mold_core::minimax_h3::GenerationReferencePreparedShape,
         crate::routes_chain_jobs::ChainPlacementPreviewRequest,
         mold_core::ExpandContext,
@@ -706,6 +719,19 @@ pub fn create_router(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(
                     crate::reference_uploads::MAX_REFERENCE_UPLOAD_SESSION_REQUEST_BYTES,
                 )),
+        )
+        .route(
+            mold_core::video_normalization::CANDIDATE_PATH,
+            post(crate::reference_uploads::create_normalization_session).layer(
+                DefaultBodyLimit::max(
+                    crate::reference_uploads::MAX_REFERENCE_UPLOAD_SESSION_REQUEST_BYTES,
+                ),
+            ),
+        )
+        .route(
+            mold_core::video_normalization::FINALIZE_PATH,
+            post(crate::reference_uploads::finalize_normalization_session)
+                .layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route(
             "/api/generate/reference-upload",
@@ -6942,7 +6968,36 @@ fn enrich_queue_plan_runtime(
     registry: &crate::job_registry::JobRegistry,
 ) {
     let Some(plan) = plan else { return };
+    // A chain/admin owner absent from this registry may be healthy. Auto work
+    // gets a stalled-device reason only with complete evidence for all active
+    // device owners; hard-pinned work needs only its exact owner's evidence.
+    let active_device_work = plan
+        .work_items
+        .iter()
+        .filter(|work| {
+            work.activity_phase == mold_core::QueueActivityPhase::Active && work.gpu.is_some()
+        })
+        .collect::<Vec<_>>();
+    let all_active_stalled = !active_device_work.is_empty()
+        && active_device_work.iter().all(|work| {
+            registry
+                .entry(&work.work_id)
+                .is_some_and(|entry| entry.stall.is_some())
+        });
     for work in &mut plan.work_items {
+        work.blocked_device_reason = match work.blocked_reason {
+            Some(mold_core::QueueBlockedReason::NoIdleDevice)
+                if work.target_gpu.is_some() || all_active_stalled =>
+            {
+                registry.blocked_device_reason(work.target_gpu)
+            }
+            Some(mold_core::QueueBlockedReason::NoSchedulableDevice)
+                if work.target_gpu.is_some() =>
+            {
+                registry.blocked_device_reason(work.target_gpu)
+            }
+            _ => None,
+        };
         if work.activity_phase != mold_core::QueueActivityPhase::Active {
             continue;
         }
@@ -7548,6 +7603,7 @@ fn job_entry_from_durable_projection(
     };
     let error = row.held_reason.clone();
     crate::job_registry::JobEntry {
+        stall: None,
         id: row.id,
         model_display_name: mold_core::manifest::model_display_name(&row.model),
         model: row.model,
@@ -7799,7 +7855,8 @@ async fn patch_queue_job(
         ("only_held" = Option<bool>, Query, description = "Cancel only if the job is held right now; otherwise 409 QUEUE_JOB_NOT_HELD and nothing changes"),
     ),
     responses(
-        (status = 204, description = "Job cancellation accepted"),
+        (status = 204, description = "Queued job cancelled"),
+        (status = 202, description = "Running cancellation requested; device still held until actual worker return"),
         (status = 404, description = "Queue job not found"),
         (status = 409, description = "`only_held` was set and the job is no longer held"),
     )
@@ -7808,7 +7865,7 @@ async fn cancel_queue_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<CancelQueueJobQuery>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Response, ApiError> {
     // Serialize the durable probe, bounded registry revocation, and durable
     // cancellation with feeder publication and PATCH. SQLite can block behind
     // another connection, so the scheduler fence is acquired only for the
@@ -7836,7 +7893,15 @@ async fn cancel_queue_job(
         }
     }
     match cancel_one_queue_job(&state, &id).await? {
-        QueueJobCancelOutcome::Cancelled => Ok(StatusCode::NO_CONTENT),
+        QueueJobCancelOutcome::Cancelled => Ok(StatusCode::NO_CONTENT.into_response()),
+        QueueJobCancelOutcome::Pending => Ok((
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "cancel_requested": true, "device_still_held": true,
+                "stall": state.job_registry.entry(&id).and_then(|entry| entry.stall),
+            })),
+        )
+            .into_response()),
         QueueJobCancelOutcome::Completing => Err(ApiError::queue_job_not_found(format!(
             "queue job {id} is already completing"
         ))),
@@ -7861,6 +7926,7 @@ struct CancelQueueJobQuery {
 /// while the batch route simply skips a child nobody can cancel any more.
 #[derive(Debug, PartialEq, Eq)]
 enum QueueJobCancelOutcome {
+    Pending,
     Cancelled,
     Completing,
     NotFound,
@@ -7878,11 +7944,13 @@ async fn cancel_one_queue_job(
     let probe_id = id.to_string();
     let durable_candidate =
         spawn_queue_read(move || journal.owns_cancellable_row(&probe_id)).await?;
+    let mut pending = false;
     {
         let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
         match state.job_registry.cancel_queued(id) {
             Ok(()) => {}
             Err(crate::job_registry::QueuedJobCancelError::AlreadyRunning) => {
+                pending = true;
                 // `cancel_queued` already signalled (or latched) the exact running
                 // attempt token while holding the same lifecycle lock used by
                 // terminal publication.
@@ -7907,7 +7975,11 @@ async fn cancel_one_queue_job(
     let journal = state.queue_journal.clone();
     let id = id.to_string();
     spawn_queue_mutation(move || journal.cancel_id(&id)).await?;
-    Ok(QueueJobCancelOutcome::Cancelled)
+    Ok(if pending {
+        QueueJobCancelOutcome::Pending
+    } else {
+        QueueJobCancelOutcome::Cancelled
+    })
 }
 
 /// Fence transfer operations to one held batch child. Called under the same
@@ -8615,6 +8687,11 @@ async fn server_capabilities(
                 crate::reference_uploads::MAX_REFERENCE_UPLOAD_SESSIONS_PER_IDENTITY as u32,
             session_ttl_ms: crate::reference_uploads::REFERENCE_UPLOAD_SESSION_TTL.as_millis()
                 as u64,
+            video_normalization: if api_key_auth_enabled {
+                crate::video_reference_codec::capabilities().await
+            } else {
+                None
+            },
         },
         devices: device_capabilities(&state.scheduled_work),
         dispatch: dispatch_capabilities(&state.scheduled_work),

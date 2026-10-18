@@ -249,3 +249,25 @@ describe("a queue row's meter agrees with its sentence", () => {
     expect(rowProgressFraction(shared({ current: -2, total: 15 }))).toBe(0);
   });
 });
+
+it("prioritizes stall and accepted cancellation evidence over denoise counters and ETA", () => {
+  const stall = {
+    stage: "VAE decode",
+    last_completed_work_unix_ms: 1700000000000,
+    elapsed_stall_ms: 90000,
+    cancel_requested: false,
+    device_still_held: true,
+  };
+  const stalled = print({ status: "denoising", step: 28, total: 28, stall });
+  expect(rowStatusLine(stalled, { etaSeconds: 1 })).toBe("Stalled · VAE decode");
+  expect(rowProgressFraction(stalled)).toBeNull();
+  const pending = print({
+    status: "denoising",
+    step: 28,
+    total: 28,
+    cancelling: true,
+    cancelAccepted: { deviceStillHeld: true },
+  });
+  expect(rowStatusLine(pending)).toBe("Cancel requested; device still held");
+  expect(rowProgressFraction(pending)).toBeNull();
+});

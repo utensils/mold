@@ -1,4 +1,7 @@
-import type { GenerationReference } from "../lib/generationReferences";
+import type {
+  GenerationReference,
+  GenerationReferenceProvenance,
+} from "../lib/generationReferences";
 import { minimaxH3TaskForModel } from "../lib/minimaxH3Authoring";
 import {
   Base64DigestError,
@@ -26,6 +29,9 @@ const RESERVED_SECRET_HEADERS = new Set([
 ]);
 
 export interface ReferenceUploadCapabilities {
+  video_normalization?:
+    | import("./referenceNormalizationTypes").VideoNormalizationCapabilities
+    | null;
   /** The request-bound upload protocol is offered exactly when the host has
    * API-key auth enabled; otherwise validated inline references are sent. */
   available: boolean;
@@ -140,7 +146,7 @@ function validateSecretHeader(value: unknown, field: string): string {
   return value;
 }
 
-function validateCapabilities(
+export function validateReferenceUploadCapabilities(
   value: ReferenceUploadCapabilities | null | undefined,
 ): ReferenceUploadCapabilities {
   if (
@@ -634,9 +640,9 @@ function positiveSafeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) > 0;
 }
 
-function canonicalDescriptorFromMetadata(
+export function canonicalDescriptorFromMetadata(
   metadata: Record<string, unknown>,
-  entry: CapturedReference,
+  entry: Pick<CapturedReference, "original" | "oneBased">,
 ): GenerationReference | null {
   const reference = entry.original;
   const oneBased = entry.oneBased;
@@ -720,8 +726,17 @@ function canonicalDescriptorFromMetadata(
       },
     };
   }
+  if (reference.mime_type !== "video/mp4") return null;
+  return canonicalVideoDescriptorFromMetadata(metadata, provenance);
+}
+
+/** Shared checked canonical video facts. Candidate receipts bind their own
+ * original digest separately before this canonical descriptor is admitted. */
+export function canonicalVideoDescriptorFromMetadata(
+  metadata: Record<string, unknown>,
+  provenance: GenerationReferenceProvenance,
+): GenerationReference | null {
   if (
-    reference.mime_type !== "video/mp4" ||
     metadata.mime_type !== "video/mp4" ||
     !positiveSafeInteger(metadata.width) ||
     !positiveSafeInteger(metadata.height) ||
@@ -730,7 +745,8 @@ function canonicalDescriptorFromMetadata(
     typeof metadata.fps !== "number" ||
     !Number.isFinite(metadata.fps) ||
     metadata.fps <= 0 ||
-    typeof metadata.has_audio !== "boolean"
+    (metadata.has_audio !== undefined &&
+      typeof metadata.has_audio !== "boolean")
   ) {
     return null;
   }
@@ -762,7 +778,7 @@ function canonicalDescriptorFromMetadata(
     frame_count: metadata.frame_count,
     duration_ms: metadata.duration_ms,
     fps: metadata.fps,
-    has_audio: metadata.has_audio,
+    has_audio: metadata.has_audio === true,
     audio_duration_ms: metadata.has_audio
       ? (metadata.audio_duration_ms as number)
       : null,
@@ -826,7 +842,9 @@ export async function prepareReferenceUploads<
   uploadBodies?: ReadonlyMap<number, Blob> | undefined;
 }): Promise<ReferenceUploadLease<T>> {
   throwIfAborted(options.signal);
-  const capabilities = validateCapabilities(options.capabilities);
+  const capabilities = validateReferenceUploadCapabilities(
+    options.capabilities,
+  );
   if (!options.target.apiKey?.trim()) {
     protocolError(
       "REFERENCE_UPLOAD_AUTH_REQUIRED",

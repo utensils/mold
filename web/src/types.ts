@@ -1,3 +1,4 @@
+import type { JobStallDiagnostic } from "@studio/lib/jobStall";
 import type {
   CatalogProviderError,
   DevicePlacement,
@@ -400,6 +401,7 @@ export interface ModelInfoExtended
 export type QueueJobState = "queued" | "running" | "paused" | "held";
 
 export interface QueueEntry {
+  stall?: JobStallDiagnostic | null;
   id: string;
   model: string;
   state: QueueJobState;
@@ -439,6 +441,7 @@ export interface QueueListing {
 }
 
 export type SseProgressEvent =
+  | { type: "stall"; stall: JobStallDiagnostic | null }
   | { type: "dependency_wait"; dependency: string; reason: string }
   | { type: "stage_start"; name: string }
   | { type: "stage_done"; name: string; elapsed_ms: number }

@@ -8,6 +8,11 @@ public nonisolated enum RetainedReferenceGuard {
         if original.media.generationReferences.isEmpty { return draft == original }
         return draft.media == original.media && draft.pipeline == original.pipeline
     }
+    public static func canHydrate(references: [AuthoringReference], original: [AuthoringReference],
+                                  members: [RetainedSourceMedia.Member]) -> Bool {
+        guard let references = references.canonicalReferences, let original = original.canonicalReferences else { return false }
+        return canHydrate(references: references, original: original, members: members)
+    }
     public static func canHydrate(references: [GenerationReference], original: [GenerationReference],
                                   members: [RetainedSourceMedia.Member]) -> Bool {
         !references.isEmpty && references == original

@@ -15,20 +15,23 @@ function cloneDraftForm(form: GenerateForm): GenerateForm {
       references: state.references.map((draft) => ({
         ...draft,
         ...(draft.crop ? { crop: { ...draft.crop } } : {}),
-        reference: {
-          ...draft.reference,
-          media: { ...draft.reference.media },
-          ...(draft.reference.provenance
-            ? {
-                provenance: {
-                  ...draft.reference.provenance,
-                  ...(draft.reference.provenance.crop
-                    ? { crop: { ...draft.reference.provenance.crop } }
-                    : {}),
-                },
-              }
-            : {}),
-        },
+        reference:
+          draft.reference.kind === "fresh_video"
+            ? { ...draft.reference, original: { ...draft.reference.original } }
+            : {
+                ...draft.reference,
+                media: { ...draft.reference.media },
+                ...(draft.reference.provenance
+                  ? {
+                      provenance: {
+                        ...draft.reference.provenance,
+                        ...(draft.reference.provenance.crop
+                          ? { crop: { ...draft.reference.provenance.crop } }
+                          : {}),
+                      },
+                    }
+                  : {}),
+              },
       })),
     };
   }
@@ -101,6 +104,7 @@ function mediaSlots(form: GenerateForm): MediaSlot[] {
     }
   }
   form.h3Authoring?.references.forEach(({ reference }, index) => {
+    if (reference.kind === "fresh_video") return;
     slots.push({
       name: `h3Authoring/references/${index}`,
       bytes: reference.media.authority === "inline" ? reference.media.data : "",
@@ -131,6 +135,13 @@ export function partitionMobileDraftMedia(form: GenerateForm, revision: string) 
     if (slot.bytes) media.push({ draftId, base64: slot.bytes });
     slot.replace("");
   }
+  metadata.h3Authoring?.references.forEach((draft, index) => {
+    if (draft.reference.kind !== "fresh_video") return;
+    const { body, ...reference } = draft.reference;
+    if (body)
+      media.push({ draftId: mediaId(revision, `h3Authoring/references/${index}`), blob: body });
+    draft.reference = reference;
+  });
   return { form: metadata, media };
 }
 
@@ -156,13 +167,27 @@ export async function hydrateMobileDraftMedia(
       missing.push(slot.name);
     }
   }
+  for (const [index, draft] of (form.h3Authoring?.references ?? []).entries()) {
+    if (draft.reference.kind !== "fresh_video") continue;
+    const slot = `h3Authoring/references/${index}`;
+    const stored = await read(mediaId(revision, slot)).catch(() => null);
+    if (stored?.blob instanceof Blob) draft.reference = { ...draft.reference, body: stored.blob };
+    else missing.push(slot);
+  }
   return { form, missing };
 }
 
 export function unavailableMobileDraftMedia(form: GenerateForm): string[] {
-  return mediaSlots(cloneDraftForm(form))
-    .filter((slot) => !slot.bytes)
-    .map((slot) => slot.name);
+  return [
+    ...mediaSlots(cloneDraftForm(form))
+      .filter((slot) => !slot.bytes)
+      .map((slot) => slot.name),
+    ...(form.h3Authoring?.references ?? []).flatMap((draft, index) =>
+      draft.reference.kind === "fresh_video" && !draft.reference.body
+        ? [`h3Authoring/references/${index}`]
+        : [],
+    ),
+  ];
 }
 
 /** Explicit recovery action: remove only the unavailable wells, preserving
@@ -195,8 +220,10 @@ export function discardUnavailableMobileDraftMedia(form: GenerateForm): Generate
     if (clone.h3Authoring?.[name] && !clone.h3Authoring[name].data) clone.h3Authoring[name] = null;
   }
   if (clone.h3Authoring)
-    clone.h3Authoring.references = clone.h3Authoring.references.filter(
-      ({ reference }) => reference.media.authority === "inline" && !!reference.media.data,
+    clone.h3Authoring.references = clone.h3Authoring.references.filter(({ reference }) =>
+      reference.kind === "fresh_video"
+        ? !!reference.body
+        : reference.media.authority === "inline" && !!reference.media.data,
     );
   return clone;
 }

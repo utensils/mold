@@ -1,4 +1,8 @@
 import {
+  parseQueueCancellationResponse,
+  type QueueCancellationResult,
+} from "@studio/lib/jobStall";
+import {
   CONNECTION_MODE_HEADER,
   type ConnectionMode,
 } from "@studio/api/connectionMode";
@@ -152,7 +156,7 @@ export async function listGalleryFrom(
 export async function cancelQueueJob(
   id: string,
   target?: StreamTarget,
-): Promise<void> {
+): Promise<QueueCancellationResult> {
   const res = await fetch(
     `${targetBase(target)}/api/queue/${encodeURIComponent(id)}`,
     { method: "DELETE", headers: targetHeaders(target) },
@@ -163,6 +167,7 @@ export async function cancelQueueJob(
       `Cancel failed (${res.status})${detail ? `: ${detail}` : ""}`,
     );
   }
+  return parseQueueCancellationResponse(res);
 }
 
 export async function updateQueueJobTargetGpu(

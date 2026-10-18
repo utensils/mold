@@ -256,6 +256,17 @@ pub(crate) async fn render_progress(
     let mut queued_seen = false;
     while let Some(event) = rx.recv().await {
         match event {
+            SseProgressEvent::Stall { stall } => {
+                let message = stall.map_or_else(
+                    || "Work resumed".to_string(),
+                    |diagnostic| diagnostic.summary(),
+                );
+                pb.set_message(message.clone());
+                if let Some(bar) = denoise_bar.as_ref() {
+                    bar.set_message(message);
+                }
+                pb.tick();
+            }
             // Latent previews are for canvas clients; the terminal keeps
             // its step progress bar.
             SseProgressEvent::Preview { .. } => {}

@@ -528,7 +528,9 @@ describe("useQueueCommands — resuming an auto-chain parked by a restart", () =
     const api = commands();
     const row = pausedChainRow({ execution, phase: "loading", can_cancel: true });
     expect(api.canCancel(row)).toBe(true);
-    const cancelJob = vi.spyOn(useJobsStore(), "cancelJob").mockResolvedValue();
+    const cancelJob = vi
+      .spyOn(useJobsStore(), "cancelJob")
+      .mockResolvedValue({ terminal: true, deviceStillHeld: false, stall: null });
     await api.cancel(row);
     if (execution === null) {
       expect(cancelJob).toHaveBeenCalledWith("local", "chain-7", { onlyHeld: false });
@@ -556,7 +558,9 @@ describe("useQueueCommands — resuming an auto-chain parked by a restart", () =
           items: [{ id: "chain-7", kind: "generation", phase: "loading", can_cancel: true }],
         });
       vi.spyOn(useLiveActivityStore(), "refresh").mockResolvedValue(undefined as never);
-      const cancel = vi.spyOn(useJobsStore(), "cancelJob").mockResolvedValue();
+      const cancel = vi
+        .spyOn(useJobsStore(), "cancelJob")
+        .mockResolvedValue({ terminal: true, deviceStillHeld: false, stall: null });
       await commands().cancel(
         pausedChainRow({ execution: null, phase: "queued", can_cancel: true }),
       );

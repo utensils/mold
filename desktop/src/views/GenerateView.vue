@@ -1,4 +1,9 @@
 <script setup lang="ts">
+import { missingModelReferenceRetry } from "../lib/missingModelReferenceRetry";
+import { jobStallLabel } from "@studio/lib/jobStall";
+import { hasActiveFreshVideoReferences } from "@studio/lib/minimaxH3Authoring";
+import { prepareH3VideoReferences } from "@studio/lib/prepareH3VideoReferences";
+import type { ReferenceUploadLease } from "@studio/api/referenceUploads";
 import { SourceCanvasController } from "@studio/lib/sourceCanvasController";
 import { canvasSource } from "@studio/lib/canvasSource";
 import { PromptClearRecovery } from "@studio/lib/promptClearRecovery";
@@ -460,6 +465,7 @@ function offerMissingModelPull(
   result: Exclude<FeasibleRouteResult, { kind: "route" }>,
   submission: MissingModelSubmission,
 ): boolean {
+  submission = missingModelReferenceRetry(submission);
   const failures = missingModelFailures(result);
   if (failures.length === 0) return false;
   const preferredId =
@@ -1007,7 +1013,8 @@ const showStarterCards = computed(() =>
 
 /** The request the estimate badge previews — null until a model is chosen. */
 const estimateRequest = computed(() => {
-  if (!form.model) return null;
+  if (!form.model || hasActiveFreshVideoReferences(form.h3Authoring, caps.value.sourceImageMode))
+    return null;
   return buildGenerationEstimateRequest(buildRequest(form), form.family, selectedEntry.value);
 });
 
@@ -1449,6 +1456,7 @@ const liveGenerationStatus = computed(() => {
   const selected = selectedQueueRender.value;
   if (selected) {
     const preview = selected.preview;
+    if (preview?.stall) return jobStallLabel(preview.stall);
     if (preview && preview.step !== null && preview.total !== null) {
       return `Developing ${preview.step}/${preview.total}`;
     }
@@ -1456,6 +1464,7 @@ const liveGenerationStatus = computed(() => {
   }
   const j = job.value;
   if (!j || j.status === "complete" || j.status === "error") return "";
+  if (j.stall || j.cancelAccepted) return jobProgressCopy(j);
   if (j.status === "queued") {
     return queueWaitLabel(
       resolveQueueWait(queueStatusFor(queueStatus.value, j.hostId ?? hosts.primaryHost?.id, j.id)),
@@ -3510,8 +3519,15 @@ async function generate(batchOverride: number | null = null) {
   const submitSignal = submissionGuard.signalFor(submitToken);
   preparedSubmitting.value = preparedSubmission !== null;
   submissionPlanning.value = true;
+  let preparedReferenceLease: ReferenceUploadLease<GenerateRequest> | undefined;
+  let preparedLeaseHandedOff = false;
+  let normalizationCurrent: (() => boolean) | undefined;
+  let freshVideoStamp: string | null = null;
   try {
     const draft = cloneGenerateForm(form);
+    freshVideoStamp = hasActiveFreshVideoReferences(draft.h3Authoring, caps.value.sourceImageMode)
+      ? JSON.stringify(cloneGenerateForm(form))
+      : null;
     if (batchOverride !== null) draft.batchSize = batchOverride;
     const routingModel = selectedEntry.value
       ? {
@@ -3557,12 +3573,75 @@ async function generate(batchOverride: number | null = null) {
     const routeRequiredForPreprocessing = sourcePreprocessingNeedsRoute(draft);
     let routeResolvedAgainstFinalRequest = false;
     let sourcePreprocessed = false;
+    if (hasActiveFreshVideoReferences(draft.h3Authoring, caps.value.sourceImageMode)) {
+      const selection = stickyTarget.value;
+      const eligible = hosts.all
+        .filter((host) => {
+          const cap = hosts.capabilities[host.id]?.reference_uploads?.video_normalization;
+          return (
+            cap?.available &&
+            cap.protocol_version === 1 &&
+            cap.input_roles.includes("reference_video")
+          );
+        })
+        .map((host) => host.id);
+      if (selection && selection !== "capable" && !eligible.includes(selection))
+        throw new Error(
+          "The selected machine does not advertise fresh video-reference normalization.",
+        );
+      route =
+        route && eligible.includes(route.hostId)
+          ? route
+          : hosts.resolveRoute(selection, draft.model, eligible);
+      if (!route?.referenceUploads || !route.instanceId)
+        throw new Error("No eligible machine advertises fresh video-reference normalization.");
+      route = {
+        ...route,
+        target: { ...route.target },
+        referenceUploads: JSON.parse(JSON.stringify(route.referenceUploads)),
+      };
+      const capturedRoute = route;
+      const current = () => {
+        const live = hosts.resolveRoute(capturedRoute.hostId, draft.model);
+        return (
+          submissionGuard.isCurrent(submitToken) &&
+          JSON.stringify(cloneGenerateForm(form)) === freshVideoStamp &&
+          !!live &&
+          live.instanceId === capturedRoute.instanceId &&
+          live.target.baseUrl === capturedRoute.target.baseUrl &&
+          live.target.apiKey === capturedRoute.target.apiKey &&
+          live.target.connectionMode === capturedRoute.target.connectionMode
+        );
+      };
+      normalizationCurrent = current;
+      const capturedRequest = buildRequest(draft);
+      if (quickExpansionSnapshot.value?.promptTransform)
+        capturedRequest.prompt_transform = JSON.parse(
+          JSON.stringify(quickExpansionSnapshot.value.promptTransform),
+        );
+      if (!(await preprocessSourceFit(route, draft, submitSignal)) || !current()) return;
+      sourcePreprocessed = true;
+      preprocessingStatus.value = `Preparing video on ${route.label}`;
+      preparedReferenceLease = await prepareH3VideoReferences<GenerateRequest>({
+        state: draft.h3Authoring!,
+        request: capturedRequest,
+        target: capturedRoute.target,
+        expectedInstanceId: capturedRoute.instanceId!,
+        capabilities: capturedRoute.referenceUploads!,
+        current,
+        signal: submitSignal,
+      });
+      draft.h3Authoring!.references = preparedReferenceLease.request.references!.map(
+        (reference) => ({ reference }),
+      );
+      preprocessingStatus.value = null;
+    }
     if (!route && !routeRequiredForPreprocessing) {
       if (!(await preprocessSourceFit(null, draft, submitSignal))) return;
       if (!submissionGuard.isCurrent(submitToken)) return;
       sourcePreprocessed = true;
     }
-    const preliminaryRequest = buildRequest(draft);
+    const preliminaryRequest = preparedReferenceLease?.request ?? buildRequest(draft);
     const preliminaryRouting = decideGenerateRequestRouting(
       preliminaryRequest,
       draft.family,
@@ -3693,8 +3772,8 @@ async function generate(batchOverride: number | null = null) {
         return;
       }
     }
-    let request = buildRequest(draft);
-    if (quickExpansionSnapshot.value?.promptTransform) {
+    let request = preparedReferenceLease?.request ?? buildRequest(draft);
+    if (!preparedReferenceLease && quickExpansionSnapshot.value?.promptTransform) {
       request.prompt_transform = quickExpansionSnapshot.value.promptTransform;
     }
     let retainedSourceOption: BatchRequestOptions["retainedSource"];
@@ -3702,7 +3781,11 @@ async function generate(batchOverride: number | null = null) {
     if (retainedRestoreError.value) throw new Error(retainedRestoreError.value);
     const retained = composer.retainedSource;
     const retainedVersion = retained ? composer.retainedSourceVersion : null;
-    if (retained?.inventory.availability === "available" && retained.inventory.members.length > 0) {
+    if (
+      !preparedReferenceLease &&
+      retained?.inventory.availability === "available" &&
+      retained.inventory.members.length > 0
+    ) {
       const fieldForRole: Record<string, keyof GenerateRequest> = {
         source_image: "source_image",
         identity_image: "id_image",
@@ -3807,6 +3890,7 @@ async function generate(batchOverride: number | null = null) {
         }
       : {};
     if (retainedSourceOption) requestOptions.retainedSource = retainedSourceOption;
+    if (preparedReferenceLease) requestOptions.preparedReferenceLease = preparedReferenceLease;
     if (route && !routeResolvedAgainstFinalRequest) {
       const finalized = await hosts.resolveFeasible(route.hostId, finalizedPlanningRequest, batch, {
         signal: submitSignal,
@@ -3850,7 +3934,12 @@ async function generate(batchOverride: number | null = null) {
       target: route.target,
       requirements: licenseRequirements(placementPreview?.pending_downloads),
     });
-    if (!accepted || !submissionGuard.isCurrent(submitToken)) return;
+    if (
+      !accepted ||
+      !submissionGuard.isCurrent(submitToken) ||
+      (normalizationCurrent && !normalizationCurrent())
+    )
+      return;
     if (retainedVersion !== null && !composer.isRetainedSourceCurrent(retainedVersion)) return;
     // Stash exact img2img/Qwen-edit bytes by the hashes the server records so
     // Reuse settings can restore local files and fitted sources later.
@@ -3870,6 +3959,7 @@ async function generate(batchOverride: number | null = null) {
     let settled: ReturnType<typeof generation.submitBatch>["settled"];
     try {
       ({ settled } = generation.submitBatch(request, batch, route, chainRouting, requestOptions));
+      preparedLeaseHandedOff = true;
     } catch (error) {
       toasts.push(error instanceof Error ? error.message : String(error), "error");
       preparedSubmitting.value = false;
@@ -3944,18 +4034,25 @@ async function generate(batchOverride: number | null = null) {
         ) {
           // The routed host doesn't have the model — offer pull-and-resume
           // instead of the raw HTTP error.
-          missingModel.value = {
+          missingModel.value = missingModelReferenceRetry({
             model: request.model,
             route,
             request,
             batch,
             chainRouting: chainRouting.kind === "chain" ? chainRouting : null,
             requestOptions,
-          };
+          });
         }
       }
     });
+  } catch (error) {
+    if (freshVideoStamp === null) throw error;
+    if (!submitSignal.aborted && submissionGuard.isCurrent(submitToken))
+      toasts.push(error instanceof Error ? error.message : String(error), "error");
   } finally {
+    if (preparedReferenceLease && !preparedLeaseHandedOff)
+      await preparedReferenceLease.cancel().catch(() => undefined);
+    preprocessingStatus.value = null;
     if (submissionGuard.isCurrent(submitToken)) {
       preparedSubmitting.value = false;
       submissionPlanning.value = false;

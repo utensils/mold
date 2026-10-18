@@ -2611,6 +2611,51 @@ async fn bind_remote_reference_uploads(
     uploads: Vec<ReferenceUpload>,
     batch: u32,
 ) -> Result<Option<ReferenceUploadLease>> {
+    let has_candidates = uploads.iter().any(|upload| upload.candidate.is_some());
+    if has_candidates {
+        anyhow::ensure!(
+            batch == 1,
+            "fresh video reference normalization requires --batch 1"
+        );
+        let normalization_available = match client.server_capabilities().await {
+            Ok(capabilities) => mold_core::reference_upload::supports_video_normalization(
+                &capabilities.reference_uploads,
+            ),
+            Err(error) if mold_core::client::is_missing_endpoint_error(&error) => false,
+            Err(error) => return Err(error),
+        };
+        if client.has_api_key() && normalization_available {
+            let candidates = uploads
+                .iter()
+                .map(|upload| {
+                    upload
+                        .candidate
+                        .clone()
+                        .context("mixed pending/canonical reference wrappers are invalid")
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let sources = uploads
+                .into_iter()
+                .map(|upload| ReferenceUploadSource::open_file(upload.file))
+                .collect::<Result<Vec<_>>>()?;
+            let lease = client
+                .bind_reference_candidates_v1(request, candidates, sources)
+                .await?;
+            *request = lease.request().clone();
+            return Ok(Some(lease));
+        }
+        // Older/unsupported hosts keep the exact canonical probe and error.
+        // Never turn a failed negotiated upload into an inline retry.
+        let mut descriptors = Vec::with_capacity(uploads.len());
+        for upload in &uploads {
+            let descriptor = match upload.candidate.as_ref().context("mixed pending reference wrappers are invalid")? {
+                mold_core::video_normalization::ReferenceCandidate::Canonical { reference, .. } => reference.clone(),
+                mold_core::video_normalization::ReferenceCandidate::FreshVideo { original, .. } => crate::commands::h3::probe_video(upload.file.try_clone()?, mold_core::GenerationReferenceProvenance { name: original.name.clone(), sha256: Some(original.sha256.clone()), crop: None }).context("host does not advertise fresh video normalization; canonical H.264 MP4 reference required")?,
+            };
+            descriptors.push(descriptor);
+        }
+        request.references = Some(descriptors);
+    }
     let descriptors = request
         .references
         .clone()
@@ -5565,6 +5610,7 @@ mod tests {
             &MoldClient::new(&server.uri()),
             &mut request,
             vec![ReferenceUpload {
+                candidate: None,
                 file: std::fs::File::open(path).unwrap(),
             }],
             3,
@@ -5591,6 +5637,7 @@ mod tests {
             &MoldClient::new("http://127.0.0.1:9"),
             &mut request,
             vec![ReferenceUpload {
+                candidate: None,
                 file: std::fs::File::open(path).unwrap(),
             }],
             1,
@@ -5614,7 +5661,10 @@ mod tests {
         let error = bind_remote_reference_uploads(
             &MoldClient::new("http://127.0.0.1:9"),
             &mut request,
-            vec![ReferenceUpload { file }],
+            vec![ReferenceUpload {
+                candidate: None,
+                file,
+            }],
             1,
         )
         .await
@@ -5683,6 +5733,7 @@ mod tests {
             &MoldClient::with_api_key(&server.uri(), "key".into()),
             &mut request,
             vec![ReferenceUpload {
+                candidate: None,
                 file: std::fs::File::open(path).unwrap()
             }],
             2
@@ -5720,6 +5771,7 @@ mod tests {
                 &MoldClient::with_api_key(&server.uri(), "key".into()),
                 &mut request,
                 vec![ReferenceUpload {
+                    candidate: None,
                     file: tempfile::tempfile().unwrap(),
                 }],
                 1,
@@ -5762,6 +5814,7 @@ mod tests {
                 &client,
                 &mut request,
                 vec![ReferenceUpload {
+                    candidate: None,
                     file: std::fs::File::open(path).unwrap(),
                 }],
                 1,
@@ -5792,7 +5845,10 @@ mod tests {
         let error = bind_remote_reference_uploads(
             &MoldClient::new("http://127.0.0.1:9"),
             &mut request,
-            vec![ReferenceUpload { file }],
+            vec![ReferenceUpload {
+                candidate: None,
+                file,
+            }],
             2,
         )
         .await
@@ -5823,6 +5879,7 @@ mod tests {
             &MoldClient::with_api_key(&server.uri(), "key".into()),
             &mut request,
             vec![ReferenceUpload {
+                candidate: None,
                 file: tempfile::tempfile().unwrap(),
             }],
             2,
@@ -5850,6 +5907,7 @@ mod tests {
                 max_session_bytes: 1024 * 1024 * 1024,
                 max_active_sessions: 4,
                 session_ttl_ms: 120_000,
+                video_normalization: None,
             },
             ..Default::default()
         };
@@ -5955,9 +6013,11 @@ mod tests {
             &mut request,
             vec![
                 ReferenceUpload {
+                    candidate: None,
                     file: mold_core::secure_file::open_regular_file_no_follow(&first_path).unwrap(),
                 },
                 ReferenceUpload {
+                    candidate: None,
                     file: mold_core::secure_file::open_regular_file_no_follow(&second_path)
                         .unwrap(),
                 },
@@ -6008,6 +6068,7 @@ mod tests {
             &MoldClient::with_api_key(&server.uri(), "sekrit".into()),
             &mut request,
             vec![ReferenceUpload {
+                candidate: None,
                 file: mold_core::secure_file::open_regular_file_no_follow(&path).unwrap(),
             }],
             1,
@@ -8030,7 +8091,7 @@ mod tests {
     }
 
     #[test]
-    fn forced_local_policy_respects_compiled_h3_artifact_activation() {
+    fn forced_local_policy_rejects_caller_selected_h3_artifact_identities() {
         let root = "/Volumes/ExternalStorage/mold-uat/minimax-h3/models";
         let mut config = Config {
             models_dir: root.to_string(),
@@ -8064,12 +8125,7 @@ mod tests {
 
             expert: None,
         });
-        let h3_artifact_result = require_local_request_model_activation(&request, &config);
-        if cfg!(feature = "h3") {
-            h3_artifact_result.expect("public H3 builds accept trusted H3 artifact paths");
-        } else {
-            assert!(h3_artifact_result.is_err());
-        }
+        assert!(require_local_request_model_activation(&request, &config).is_err());
 
         request.lora.as_mut().unwrap().path = format!("{root}/flux/ordinary-adapter.safetensors");
         assert!(require_local_request_model_activation(&request, &config).is_ok());

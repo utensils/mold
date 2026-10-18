@@ -1303,6 +1303,21 @@ pub async fn run(
         ));
     }
     let keyframe = resolved_keyframes;
+    let fresh_video_indices = references
+        .iter()
+        .enumerate()
+        .filter_map(|(index, reference)| {
+            (!local
+                && reference.kind == h3::ReferenceKind::Video
+                && reference.path.to_str().is_some_and(|value| {
+                    matches!(
+                        super::media_address::parse(value),
+                        Ok(super::media_address::MediaAddress::Local(_))
+                    )
+                }))
+            .then_some(index)
+        })
+        .collect::<std::collections::HashSet<_>>();
     let mut references = references;
     for reference in &mut references {
         let kind = match reference.kind {
@@ -1355,7 +1370,7 @@ pub async fn run(
         anyhow::ensure!(batch == 1, "Hunyuan3D 2mv named views require --batch 1");
     }
 
-    let mut h3_authoring = h3::prepare_authoring(
+    let mut h3_authoring = h3::prepare_authoring_candidates(
         &model,
         &family,
         duration,
@@ -1367,6 +1382,7 @@ pub async fn run(
         image.first().map(String::as_str),
         last_frame.as_deref(),
         h3_references,
+        &fresh_video_indices,
     )?;
     let frames = h3_authoring.frames.or(frames);
     let fps = h3_authoring.fps.or(fps);
@@ -1643,11 +1659,7 @@ pub async fn run(
     if should_expand {
         mold_core::expand::validate_expansion_variation_count(batch.max(1) as usize)?;
     }
-    let expansion_task = if h3_authoring
-        .references
-        .as_ref()
-        .is_some_and(|references| !references.is_empty())
-    {
+    let expansion_task = if !h3_references.is_empty() {
         mold_core::ExpandTask::ReferenceToAudioVideo
     } else {
         mold_core::ExpandTask::for_conditioning(
@@ -1680,6 +1692,19 @@ pub async fn run(
                             ..
                         }
                     ),
+                    role: Some(mold_core::ExpandReferenceRole::Reference),
+                });
+            }
+        }
+        if h3_authoring.references.is_none() {
+            for reference in h3_references {
+                references.push(mold_core::ExpandReference {
+                    kind: match reference.kind {
+                        h3::ReferenceKind::Image => mold_core::GenerationReferenceKind::Image,
+                        h3::ReferenceKind::Video => mold_core::GenerationReferenceKind::Video,
+                        h3::ReferenceKind::Audio => mold_core::GenerationReferenceKind::Audio,
+                    },
+                    has_audio: false,
                     role: Some(mold_core::ExpandReferenceRole::Reference),
                 });
             }

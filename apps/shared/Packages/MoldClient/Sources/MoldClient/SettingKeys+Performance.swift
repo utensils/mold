@@ -14,6 +14,10 @@ public extension SettingKeys {
             // config_keys.rs:651: parse_u16(raw, 1, 65535, key)
             help: "The port this machine's server listens on.",
             editor: .number(min: 1, max: 65_535, step: nil)),
+        SettingKey(
+            key: "queue.no_progress_timeout_seconds", label: "Report stalled work after (seconds)",
+            help: "Reports no completed work without declaring failure. Zero disables diagnostics; it never releases a device. Changes apply when the next job is prepared.",
+            editor: .number(min: 0, max: 86_400, step: nil)),
     ]
 
     static let performanceScheduler: [SettingKey] = [

@@ -86,11 +86,13 @@ public struct DraftInputSnapshot: Codable, Hashable, Sendable {
     private static func withoutScopedAuthority(_ inputs: ParkedConditioning) -> ParkedConditioning {
         var result = inputs
         result.generationReferences = inputs.generationReferences.map { reference in
-            var copy = reference
-            copy.media = reference.media.authority == "inline" && reference.media.data != nil
-                ? .init(authority: "inline", data: reference.media.data)
-                : .init(authority: "descriptor")
-            return copy
+            reference.mappingCanonical { original in
+                var copy = original
+                copy.media = original.media.authority == "inline" && original.media.data != nil
+                    ? .init(authority: "inline", data: original.media.data)
+                    : .init(authority: "descriptor")
+                return copy
+            }
         }
         return result
     }

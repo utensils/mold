@@ -25,7 +25,7 @@ final class RetainedReuse {
     var originalRevisions: [RetainedSourceMedia.Field: Int] = [:]
     var settledFields: Set<RetainedSourceMedia.Field> = []
     weak var hosts: HostStore?
-    private var originalReferences: [GenerationReference] = []
+    private var originalReferences: [AuthoringReference] = []
 
     func begin(_ draft: RenderDraft, metadata: OutputMetadata? = nil, sourceRevision: Int? = nil, mediaRevisions: [RetainedSourceMedia.Field: Int] = [:]) -> Int {
         originalRevisions = mediaRevisions
@@ -142,7 +142,7 @@ final class RetainedReuse {
         return authority
     }
 
-    func originalFile(reference: GenerationReference, index: Int, references: [GenerationReference]) async throws -> SourceMediaFile {
+    func originalFile(reference: AuthoringReference, index: Int, references: [AuthoringReference]) async throws -> SourceMediaFile {
         guard let authority = snapshot(), let hosts else { throw MoldClientError.malformedResponse }
         let fence = version
         let file = try await InputMediaPreview.retainedFile(reference: reference, index: index,
@@ -152,7 +152,7 @@ final class RetainedReuse {
         return file
     }
 
-    func canHydrateReferences(_ references: [GenerationReference]) -> Bool {
+    func canHydrateReferences(_ references: [AuthoringReference]) -> Bool {
         guard !probing, let authority = snapshot() else { return false }
         return RetainedReferenceGuard.canHydrate(references: references, original: originalReferences,
             members: authority.members)

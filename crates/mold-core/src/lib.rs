@@ -57,12 +57,14 @@ pub mod request_media;
 pub mod runpod;
 pub mod safetensors_probe;
 pub mod secure_file;
+pub mod stall;
 pub mod still_image;
 pub mod time;
 pub mod transparency;
 pub mod types;
 pub mod user_error;
 pub mod validation;
+pub mod video_normalization;
 pub mod video_upscale;
 pub mod wan_expert_marker;
 

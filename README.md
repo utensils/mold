@@ -134,6 +134,12 @@ and `ffprobe` on `PATH` before the server advertises that feature.
   Remote Ref2VA automatically selects authenticated uploads or bounded inline
   references on hosts with authentication disabled; no client
   API key is needed for the latter. Server license acceptance remains server-owned.
+  Fresh H3 reference videos can use MOV/HEVC, WebM/VP9, MKV/AV1, ProRes and
+  VFR MP4 when the authenticated host advertises video normalization. The host
+  preserves already canonical clips or converts to H.264 MP4, then validates
+  exact canonical facts before admission. This requires working server-side
+  ffmpeg/ffprobe tools; the embedded Mac engine does not bundle them.
+  [Video-reference limits and compatibility](https://utensils.io/mold/guide/generating#fresh-reference-video-imports).
   Qwen Image 2.1 (non-commercial Qwen Research License) edits from up to ten
   ordered references, renders transparent PNG/WebP cut-outs, runs native 2K
   presets, and ships BF16, INT8, FP8, GGUF and 6-step turbo tiers; its CUDA

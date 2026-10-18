@@ -19,7 +19,7 @@ struct DraftPictureAttachmentTests {
         draft.prompt = "preserve me"; draft.steps = 17
         try DraftPictureAttachment.addTypedReference(reference, to: &draft, recipe: recipe)
         #expect(draft.prompt == "preserve me" && draft.steps == 17)
-        #expect(draft.media.generationReferences == [reference])
+        #expect(draft.media.generationReferences == [.canonical(reference)])
         let before = draft
         #expect(throws: (any Error).self) {
             try DraftPictureAttachment.addTypedReference(reference, to: &draft, recipe: recipe)

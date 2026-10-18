@@ -900,3 +900,21 @@ it("fences a held cancellation at the server even after its confirmation was ope
     "https://gpu.example/api/queue/held%2Fjob?only_held=true",
   );
 });
+
+it("reports running-worker cancellation as pending for HTTP 202 instead of terminal", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () =>
+      Response.json(
+        { cancel_requested: true, device_still_held: true },
+        { status: 202 },
+      ),
+    ),
+  );
+  await expect(
+    cancelQueueJob(
+      { baseUrl: "https://gpu.example", apiKey: "secret" },
+      "running",
+    ),
+  ).resolves.toEqual({ terminal: false, deviceStillHeld: true, stall: null });
+});

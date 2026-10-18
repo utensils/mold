@@ -2331,6 +2331,9 @@ fn job_summary_json(job: &AsyncGenerationJob) -> Value {
 
 fn progress_summary(event: &SseProgressEvent) -> String {
     match event {
+        SseProgressEvent::Stall { stall } => stall
+            .as_ref()
+            .map_or_else(|| "work resumed".into(), |diagnostic| diagnostic.summary()),
         SseProgressEvent::DependencyWait { dependency, reason } => {
             format!("waiting for dependency {dependency}: {reason}")
         }

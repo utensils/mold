@@ -115,3 +115,50 @@ private func temporal(_ name: String, _ id: String = "default") throws -> Tempor
     #expect(ClipLengthBounds.singleClipCeiling(
         family: nil, model: nil, sourceImage: .unsupported, tierDefault: nil) == nil)
 }
+
+@Test func lengthMenuUsesDurationBoundsAndKeepsTheValidCurrentChoice() throws {
+    let profile = try temporal("recipe-ltx2.json", "auto")
+    let menu = profile.lengthSelection(fps: 24, frames: 601, family: "ltx2", model: nil, sourceImage: .optional)
+    #expect(menu.fps == 24)
+    #expect(menu.frames == 481)
+    #expect(menu.options.contains { $0.frames == menu.frames })
+    #expect(menu.options.allSatisfy { $0.frames <= 481 && $0.seconds > 0 })
+    #expect(Set(menu.options.map(\.frames)).count == menu.options.count)
+    #expect(menu.options.contains { $0.frames == 25 })
+    let custom = profile.lengthSelection(fps: 24, frames: 137, family: nil, model: nil, sourceImage: nil)
+    #expect(custom.options.contains { $0.frames == 137 })
+}
+
+@Test func lengthMenuSettlesRateBeforeClampingAndNeverOffersZeroSeconds() throws {
+    let profile = try temporal("recipe-ltx2.json", "auto")
+    let lowRate = profile.lengthSelection(fps: 16, frames: 481, family: nil, model: nil, sourceImage: nil)
+    #expect(lowRate.frames == 321)
+    let invalidRate = profile.lengthSelection(fps: 0, frames: 601, family: nil, model: nil, sourceImage: nil)
+    #expect(invalidRate.fps == 24)
+    #expect(invalidRate.frames == 481)
+    #expect(invalidRate.options.allSatisfy { $0.seconds.isFinite && $0.seconds > 0 })
+    let shortest = profile.lengthSelection(fps: 120, frames: 1, family: nil, model: nil, sourceImage: nil)
+    #expect(shortest.options.contains { $0.frames == 1 && $0.seconds > 0 })
+}
+
+@Test func lengthMenuRespectsFixedRateAndTextOnlyClipCeiling() throws {
+    let profile = try temporal("recipe-wan.json")
+    let menu = profile.lengthSelection(fps: 120, frames: 257, family: "wan", model: "wan22-t2v-a14b:q8", sourceImage: .unsupported)
+    #expect(menu.fps == 120)
+    #expect(FpsControl.fixed(value: 16).resolvedRate(120) == 16)
+    #expect(menu.frames == 73)
+    #expect(menu.options.allSatisfy { $0.frames <= 73 })
+}
+
+@Test func recipeAdoptionRepairsInvalidRateBeforeDurationClamping() throws {
+    let set = try MoldJSON.decoder.decode(GenerationProfileSet.self, from: RepoFixtures.fixture("recipe-ltx2.json"))
+    let recipe = try #require(set.recipe(named: "auto"))
+    var draft = RenderDraft()
+    draft.fps = 0
+    draft.frames = 601
+    draft.prefersAutomaticDuration = true
+    let adopted = draft.adopting(recipe, isNewModel: false)
+    #expect(adopted.fps == 24)
+    #expect(adopted.frames == 481)
+    #expect(adopted.prefersAutomaticDuration)
+}

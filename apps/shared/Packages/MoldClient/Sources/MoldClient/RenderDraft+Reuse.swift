@@ -54,7 +54,7 @@ public extension RenderDraft {
 
         restoreSampler(from: metadata)
         restoreConditioning(from: metadata)
-        media.generationReferences = (metadata.references ?? []).compactMap(\.generationReference)
+        media.generationReferences = (metadata.references ?? []).compactMap(\.generationReference).map(AuthoringReference.canonical)
         restoreOutput(from: metadata)
     }
 

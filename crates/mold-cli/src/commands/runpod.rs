@@ -116,6 +116,9 @@ pub struct RunPodState {
 fn format_progress_event(ev: &mold_core::types::SseProgressEvent) -> String {
     use mold_core::types::SseProgressEvent as E;
     match ev {
+        E::Stall { stall } => stall
+            .as_ref()
+            .map_or_else(|| "work resumed".into(), |diagnostic| diagnostic.summary()),
         E::DependencyWait { dependency, reason } => {
             format!("waiting for dependency {dependency}: {reason}")
         }

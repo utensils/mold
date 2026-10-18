@@ -36,7 +36,12 @@ extension QueueStore {
                 switch action {
                 case .cancel:
                     if current.state == .held { _ = try await client.cancelHeldJob(id: entry.id) }
-                    else { try await client.cancelJob(id: entry.id) }
+                    else {
+                        let receipt = try await client.requestJobCancellation(id: entry.id)
+                        if hosts.host(host) == machine, hosts.instanceID(of: host) == instance {
+                            cancelReceipts[host, default: [:]][entry.id] = receipt
+                        }
+                    }
                 case .pause: try await client.pauseJob(id: entry.id)
                 case .resume: try await client.resumeJob(id: entry.id)
                 // Retry needs a `QueueAuthority` per row, not a bare id, and

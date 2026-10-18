@@ -3134,6 +3134,92 @@ mod tests {
     }
 
     #[test]
+    fn stalled_cancel_intent_becomes_terminal_on_restart_without_resurrecting_owner() {
+        let journal = journal_with_db();
+        let request = request();
+        journal
+            .record_batch(BatchJournalAdmission {
+                id: "cancelled-restart-batch",
+                client_batch_id: "cancelled-restart-client",
+                request_sha256: "digest",
+                children: &[
+                    admission("cancelled-first", &request, Path::new("/gallery")),
+                    admission("later-second", &request, Path::new("/gallery")),
+                ],
+            })
+            .unwrap();
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+        assert_eq!(ticket.claim_dispatch(), DispatchClaim::Granted);
+        assert!(journal.cancel_id("cancelled-first").unwrap());
+        assert_eq!(
+            journal
+                .generation_batch("cancelled-restart-batch")
+                .unwrap()
+                .children[0]
+                .state,
+            "cancelling"
+        );
+        journal.retain_all();
+        drop(ticket);
+        // New process startup, after the prior CUDA owner has actually exited.
+        journal.recover_feeder_runtime().unwrap();
+        assert_eq!(
+            journal
+                .generation_batch("cancelled-restart-batch")
+                .unwrap()
+                .children[0]
+                .state,
+            "cancelled"
+        );
+        assert_eq!(rows(&journal), vec!["later-second"]);
+        journal.resume_all_paused().unwrap();
+        assert_eq!(
+            journal.claim_next_feeder().unwrap().unwrap().row.id,
+            "later-second"
+        );
+    }
+
+    #[test]
+    fn stalled_attempt_then_process_recovery_retains_queue_order_and_requires_resume() {
+        let journal = journal_with_db();
+        let request = request();
+        journal
+            .record_batch(BatchJournalAdmission {
+                id: "stalled-restart-batch",
+                client_batch_id: "stalled-restart-client",
+                request_sha256: "digest",
+                children: &[
+                    admission("stalled-first", &request, Path::new("/gallery")),
+                    admission("queued-second", &request, Path::new("/gallery")),
+                    admission("queued-third", &request, Path::new("/gallery")),
+                ],
+            })
+            .unwrap();
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+        assert_eq!(ticket.claim_dispatch(), DispatchClaim::Granted);
+        let registry = crate::job_registry::JobRegistry::new();
+        registry.register("stalled-first", "fake-model");
+        registry.mark_running("stalled-first", Some(0));
+        registry.age_progress_for_tests("stalled-first", std::time::Duration::from_secs(301));
+        assert!(registry.entry("stalled-first").unwrap().stall.is_some());
+        let before = rows(&journal);
+        // Recovery is only legal after the prior process and its CUDA objects are gone.
+        journal.retain_all();
+        drop(ticket);
+        drop(registry);
+        let recovered = journal.recover_feeder_runtime().unwrap();
+        assert_eq!(recovered.running_paused, 1);
+        assert_eq!(rows(&journal), before);
+        assert!(journal.claim_next_feeder().unwrap().is_none());
+        assert!(crate::job_registry::JobRegistry::new().is_empty());
+        journal.resume_all_paused().unwrap();
+        let next = journal.claim_next_feeder().unwrap().unwrap();
+        assert_eq!(next.row.id, "stalled-first");
+    }
+
+    #[test]
     fn direct_record_is_feeder_invisible_until_runtime_recovery() {
         let journal = journal_with_db();
         let request = request();

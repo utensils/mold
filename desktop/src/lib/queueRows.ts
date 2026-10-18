@@ -1,3 +1,4 @@
+import { cancellationRequestedLabel, jobStallLabel } from "@studio/lib/jobStall";
 /**
  * Plain-English queue vocabulary (README §02): Being made · Waiting ·
  * Finished · Needs a download first. Every sentence a first-timer can act on,
@@ -50,6 +51,7 @@ function waitStatus(job: Job, context?: QueueRowContext): string {
     state: live?.state,
     position: live?.position ?? job.queuePosition,
     blockedReason: live?.blockedReason,
+    blockedDeviceReason: live?.blockedDeviceReason,
     preparation: live?.preparation,
     explicitlyPaused: live?.explicitlyPaused,
   });
@@ -69,6 +71,10 @@ function waitStatus(job: Job, context?: QueueRowContext): string {
 }
 
 function printStatus(job: Job, context?: QueueRowContext): string {
+  if (job.status !== "complete" && job.status !== "error") {
+    if (job.stall) return jobStallLabel(job.stall);
+    if (job.cancelAccepted) return cancellationRequestedLabel(job.cancelAccepted.deviceStillHeld);
+  }
   if (job.cancelling) return "Stopping…";
   switch (job.status) {
     case "denoising":
@@ -125,6 +131,7 @@ export function rowStatusLine(row: QueueRow, context?: QueueRowContext): string 
 export function rowProgressFraction(row: QueueRow): number | null {
   switch (row.kind) {
     case "print":
+      if (row.print.stall || row.print.cancelAccepted) return null;
       return row.print.status === "denoising" && row.print.total > 0
         ? clampFraction(row.print.step / row.print.total)
         : null;

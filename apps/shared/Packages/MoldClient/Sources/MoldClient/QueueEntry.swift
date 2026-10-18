@@ -8,6 +8,7 @@ public struct QueueEntry: Codable, Hashable, Sendable, Identifiable {
     /// Nil means an older response omitted the hint. A present malformed hint
     /// remains non-nil with no model, so legacy recovery cannot override it.
     public var modelDownload: ModelDownload? = nil
+    public var stall: StallDiagnostic? = nil
     public let id: String
     public let model: String?
     public var metadata: OutputMetadata? = nil
@@ -56,7 +57,7 @@ public struct QueueEntry: Codable, Hashable, Sendable, Identifiable {
         case modelDisplayName, state, position, startedAtUnixMs, heldReason
         case error, errorDetail, retryable, durable, batchId
         case clientBatchId, dispatchAttempts, gpu, targetGpu, batchIndex
-        case explicitlyPaused, replayed
+        case explicitlyPaused, replayed, stall
     }
 
     public var startedAt: Date? {
@@ -105,6 +106,18 @@ public struct QueueListing: Codable, Sendable {
     }
 
     /// Absent on older hosts and on an unpaginated default response.
+    public struct Plan: Codable, Sendable {
+        public struct Item: Codable, Sendable {
+            public let workId: String
+            public let blockedDeviceReason: String?
+        }
+        public let workItems: [Item]
+    }
+    public var plan: Plan? = nil
+    public func blockedDeviceReason(for id: String) -> String? {
+        plan?.workItems.first { $0.workId == id }?.blockedDeviceReason
+    }
+
     public var page: Page? = nil
     public let entries: [QueueEntry]
     /// Rows the durable store does not know about yet. They are NOT a separate

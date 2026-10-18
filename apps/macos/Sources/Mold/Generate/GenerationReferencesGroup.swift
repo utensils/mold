@@ -8,10 +8,16 @@ struct GenerationReferencesGroup: View {
     let recipe: GenerationRecipe
     @Binding var draft: RenderDraft
     @Environment(GenerateController.self) var controller
+    @Environment(ModelStore.self) var models
     @Environment(ReuseStore.self) var reuse
     @State var failure: String?
     @State var importing = false
     @State var importTask: Task<Void, Never>?
+
+    var referenceImportHost: MoldHost? {
+        models.referenceNormalizationHost(model: controller.modelName, hardSelection: controller.machineChoice, adopted: controller.hostID)
+            ?? (controller.machineChoice ?? controller.hostID).flatMap(controller.hosts.host)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -52,7 +58,8 @@ struct GenerationReferencesGroup: View {
         .onDisappear { importTask?.cancel() }
     }
 
-    private func viewReference(_ reference: GenerationReference, index: Int) async throws -> SourceMediaFile {
+    private func viewReference(_ reference: AuthoringReference, index: Int) async throws -> SourceMediaFile {
+        if let source = reference.freshVideo { return try await InputMediaPreview.file(bytes: source.data) }
         if let data = reference.media.data { return try await InputMediaPreview.file(base64: data) }
         guard let authority = reuse.pending(for: draft), let restored = reuse.restored,
               let route = reuse.hosts.host(authority.origin) else { throw MoldClientError.malformedResponse }
@@ -67,7 +74,7 @@ struct GenerationReferencesGroup: View {
     }
 
     private var imageAddWell: some View {
-        let session = ReferenceImportSession(controller: controller, recipe: recipe, media: draft.media)
+        let session = ReferenceImportSession(controller: controller, recipe: recipe, media: draft.media, authority: referenceImportHost)
         return PictureWell(
             rows: GenerateMenus.referenceAdd(canPaste: PicturePaste.hasPicture),
             placeholder: "plus", actionTitle: "Add image",
@@ -75,8 +82,8 @@ struct GenerationReferencesGroup: View {
             pick: { attachPicture($0, session: session) })
     }
 
-    private func referenceRow(_ reference: GenerationReference, index: Int) -> some View {
-        let session = ReferenceImportSession(controller: controller, recipe: recipe, media: draft.media)
+    private func referenceRow(_ reference: AuthoringReference, index: Int) -> some View {
+        let session = ReferenceImportSession(controller: controller, recipe: recipe, media: draft.media, authority: referenceImportHost)
         return HStack(alignment: .top, spacing: GenerationReferenceLayout.columnGap) {
             if reference.kind == "image" {
                 PictureWell(
@@ -84,7 +91,7 @@ struct GenerationReferencesGroup: View {
                     picture: reference.media.data ?? reuse.preview(for: reference, in: draft),
                     originalIdentity: "\(reuse.currentFence)|\(String(describing: reuse.authority))|\(reference)",
                     originalLoader: { try await viewReference(reference, index: index) },
-                    originalIsCurrent: { draft.media.generationReferences.indices.contains(index) && draft.media.generationReferences[index] == reference && (reference.media.data != nil || reuse.pending(for: draft) != nil) },
+                    originalIsCurrent: { draft.media.generationReferences.indices.contains(index) && draft.media.generationReferences[index] == reference && (reference.hasOriginalBytes || reuse.pending(for: draft) != nil) },
                     size: GenerationReferenceLayout.previewSize(count: draft.media.generationReferences.count),
                     label: "Replace image reference \(index + 1)",
                     pick: { attachPicture($0, replacing: index, expected: reference, session: session) })
@@ -103,7 +110,7 @@ struct GenerationReferencesGroup: View {
                 if reference.kind != "image" {
                     InputMediaViewButton(title: reference.name, identity: "\(reuse.currentFence)|\(String(describing: reuse.authority))|\(index)|\(reference)",
                         load: { try await viewReference(reference, index: index) },
-                        isCurrent: { draft.media.generationReferences.indices.contains(index) && draft.media.generationReferences[index] == reference && (reference.media.data != nil || reuse.pending(for: draft) != nil) })
+                        isCurrent: { draft.media.generationReferences.indices.contains(index) && draft.media.generationReferences[index] == reference && (reference.hasOriginalBytes || reuse.pending(for: draft) != nil) })
                 }
                 HStack(spacing: GenerationReferenceLayout.actionGap) {
                     if reference.kind != "image" {
@@ -131,7 +138,7 @@ struct GenerationReferencesGroup: View {
     private func namedWell(_ role: GenerationImageReferenceRole) -> some View {
         let index = draft.media.generationReferences.firstIndex { $0.role == role }
         let expected = index.map { draft.media.generationReferences[$0] }
-        let session = ReferenceImportSession(controller: controller, recipe: recipe, media: draft.media)
+        let session = ReferenceImportSession(controller: controller, recipe: recipe, media: draft.media, authority: referenceImportHost)
         return HStack {
             PictureWell(
                 rows: GenerateMenus.referenceAdd(canPaste: PicturePaste.hasPicture),

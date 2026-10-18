@@ -1671,6 +1671,7 @@ mod tests {
                 max_session_bytes,
                 max_active_sessions: 4,
                 session_ttl_ms: 0,
+                video_normalization: None,
             };
         assert!(refuse_a_mesh_this_host_will_not_accept(&capabilities(100, 100), 100).is_ok());
 

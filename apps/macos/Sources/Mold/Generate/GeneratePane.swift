@@ -127,7 +127,10 @@ struct GeneratePane: View {
     /// Not `private`, same reason. An explicit Machine choice wins; else the
     /// machine the model was adopted on; else Auto's own answer (decision 2).
     var host: MoldHost? {
-        controller.machineChoice.flatMap(hosts.host)
+        if controller.draft.media.generationReferences.contains(where: { $0.freshVideo != nil }) {
+            return models.referenceNormalizationHost(model: controller.modelName, hardSelection: controller.machineChoice, adopted: controller.hostID)
+        }
+        return controller.machineChoice.flatMap(hosts.host)
             ?? hosts.hosts.first { $0.id == controller.hostID }
             ?? hosts.preferredHost
     }

@@ -1,5 +1,6 @@
 import AVFoundation
 import CoreVideo
+import CoreGraphics
 import Foundation
 import Testing
 @testable import MoldClient
@@ -77,6 +78,70 @@ import Testing
         let image = try await generator.image(at: CMTime(seconds: duration.seconds * 0.8, preferredTimescale: 600))
         #expect(image.image.width > 0)
     }
+    @Test(arguments: [("endpoint-bframes.mp4", 2.0), ("endpoint-vfr.mp4", 3.0),
+                      ("endpoint-audio-overhang.mp4", 2.0), ("endpoint-offset.mp4", 3.0),
+                      ("endpoint-single.mp4", 0.0)], [false, true])
+    func endpointIsTheFinalPresentationSampleOnLocalAndSecureMedia(fixture: (String, Double), secure: Bool) async throws {
+        let url = self.fixture.deletingLastPathComponent().appending(path: fixture.0)
+        let item: AVPlayerItem
+        if secure {
+            let transport = MediaRangeFixture(data: try Data(contentsOf: url))
+            let backend = HTTPBackend(host: .init(name: "Endpoint fixture", baseURL: URL(string: "https://not-fetched.invalid")!, apiKey: "fixture-key"), transport: transport)
+            item = try await backend.playableMedia(for: fixture.0).playerItem()
+        } else { item = AVPlayerItem(url: url) }
+        defer { item.asset.cancelLoading() }
+        let endpoint = try await VideoPlaybackEndpoint.resolve(in: item.asset)
+        #expect(endpoint.isNumeric)
+        #expect(abs(endpoint.seconds - fixture.1) < 0.0001, "Use presentation order and edit-list mapping, not last decode sample or item duration")
+        let generator = AVAssetImageGenerator(asset: item.asset)
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let image = try await generator.image(at: endpoint)
+        #expect(abs(image.actualTime.seconds - fixture.1) < 0.0001)
+        var rgba = [UInt8](repeating: 0, count: 4)
+        let drew = rgba.withUnsafeMutableBytes { pixels -> Bool in
+            guard let context = CGContext(data: pixels.baseAddress, width: 1, height: 1,
+                bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return false }
+            context.draw(image.image, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+            return true
+        }
+        #expect(drew && rgba[2] > 180 && rgba[0] < 60, "The final frame is blue, not the preceding red frame or a black endpoint")
+    }
+
+    @Test(arguments: [false, true])
+    func realAudioTailFinishesBeforeLocalOrSecureSessionHoldsTheVisualEndpoint(secure: Bool) async throws {
+        let url = fixture.deletingLastPathComponent().appending(path: "endpoint-audio-overhang.mp4")
+        let media: PlayableMedia
+        if secure {
+            let backend = HTTPBackend(host: .init(name: "Audio endpoint fixture", baseURL: URL(string: "https://not-fetched.invalid")!, apiKey: "fixture-key"), transport: MediaRangeFixture(data: try Data(contentsOf: url)))
+            media = try await backend.playableMedia(for: "endpoint-audio-overhang.mp4")
+        } else { media = PlayableMedia(url: url) }
+        let item = media.playerItem()
+        let player = AVPlayer(playerItem: item)
+        player.isMuted = true
+        let session = VideoPlaybackSession()
+        defer { session.cancel(); player.pause(); player.replaceCurrentItem(with: nil); item.asset.cancelLoading() }
+        media.configure(player); try await media.prepare(player)
+        session.attach(player); player.play()
+        let clock = ContinuousClock(), deadline = ContinuousClock.now + .seconds(10)
+        while clock.now < deadline && (player.currentTime().seconds < 2.9 || player.rate != 0) {
+            if let error = item.error { throw error }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(player.currentTime().seconds >= 2.9, "The actual player must reach the legitimate audio tail, beyond video end 2.25")
+        #expect(player.rate == 0)
+        #expect(!item.forwardPlaybackEndTime.isNumeric)
+        session.handleEnd(repeating: false)
+        let heldDeadline = clock.now + .seconds(3)
+        while clock.now < heldDeadline && abs(player.currentTime().seconds - 2) > 0.001 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(session.ended)
+        #expect(abs(player.currentTime().seconds - 2) < 0.001)
+        #expect(player.rate == 0)
+    }
+
     @Test func malformedRangesNeverReachThePlayer() {
         let url = URL(string: "https://fixture/movie.mp4")!
         let response = HTTPURLResponse(url: url, statusCode: 206, httpVersion: nil, headerFields: ["Content-Range": "bytes 0-999/20"])!

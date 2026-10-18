@@ -1,3 +1,4 @@
+import type { GenerationTemplateMediaInput } from "@studio/lib/templateMediaStore";
 /**
  * Client-side generation templates for the desktop app. Templates are the
  * Generate form snapshotted to `localStorage` so a set of params can be
@@ -301,20 +302,35 @@ export async function saveGenerationTemplateWithMedia(
           },
         ]
       : []),
-    ...h3.references.flatMap(({ reference }, index) =>
-      reference.media.authority === "inline" && reference.media.data
-        ? [
-            {
-              field: "h3References" as const,
-              index,
-              filename: reference.provenance?.name || `${reference.kind} reference ${index + 1}`,
-              kind: "upload" as const,
-              mime: reference.mime_type,
-              reference: redactGenerationReference(reference),
-              base64: reference.media.data,
-            },
-          ]
-        : [],
+    ...h3.references.flatMap<GenerationTemplateMediaInput>(({ reference }, index) =>
+      reference.kind === "fresh_video"
+        ? reference.body
+          ? [
+              {
+                field: "h3References" as const,
+                index,
+                filename: reference.original.name ?? "Video reference",
+                kind: "upload" as const,
+                mime: reference.original.mime_type,
+                reference: { kind: "fresh_video" as const, original: { ...reference.original } },
+                base64: "",
+                blob: reference.body,
+              },
+            ]
+          : []
+        : reference.media.authority === "inline" && reference.media.data
+          ? [
+              {
+                field: "h3References" as const,
+                index,
+                filename: reference.provenance?.name || `${reference.kind} reference ${index + 1}`,
+                kind: "upload" as const,
+                mime: reference.mime_type,
+                reference: redactGenerationReference(reference),
+                base64: reference.media.data,
+              },
+            ]
+          : [],
     ),
   ];
   const mediaAssets = await persistGenerationTemplateMedia(id, inputs, persistence);
@@ -382,10 +398,13 @@ export async function hydrateGenerationTemplate(
   for (const asset of h3References) {
     const index = asset.index ?? 0;
     form.h3Authoring.references[index] = {
-      reference: {
-        ...asset.reference!,
-        media: { authority: "inline", data: asset.base64 },
-      },
+      reference:
+        asset.reference!.kind === "fresh_video"
+          ? { ...asset.reference!, ...(asset.blob ? { body: asset.blob } : {}) }
+          : {
+              ...asset.reference!,
+              media: { authority: "inline" as const, data: asset.base64 },
+            },
       draftId: asset.assetId,
     };
   }

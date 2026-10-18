@@ -35,7 +35,7 @@ public struct DraftMedia: Hashable, Sendable {
     /// Ordered reference images, base64. For a recipe whose first image is the
     /// Target, index 0 is that one.
     public var editImages: [String] = []
-    public var generationReferences: [GenerationReference] = []
+    public var generationReferences: [AuthoringReference] = []
     public var adoptedReferenceCapabilities: RecipeCapabilities?
     /// Separate authoring spaces preserve interpolation indices and each endpoint protocol.
     public var boundaryKeyframes: [String: [KeyframeCondition]] = [:]

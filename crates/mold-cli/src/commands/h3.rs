@@ -91,6 +91,7 @@ impl FromStr for ReferenceArg {
 
 pub(crate) struct ReferenceUpload {
     pub file: File,
+    pub candidate: Option<mold_core::video_normalization::ReferenceCandidate>,
 }
 
 impl std::fmt::Debug for ReferenceUpload {
@@ -138,6 +139,7 @@ impl std::fmt::Debug for PreparedAuthoring {
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_authoring(
     model: &str,
@@ -151,6 +153,37 @@ pub(crate) fn prepare_authoring(
     legacy_image: Option<&str>,
     last_frame: Option<&Path>,
     references: &[ReferenceArg],
+) -> Result<PreparedAuthoring> {
+    prepare_authoring_candidates(
+        model,
+        family,
+        duration_seconds,
+        frames,
+        fps,
+        width,
+        height,
+        first_frame,
+        legacy_image,
+        last_frame,
+        references,
+        &std::collections::HashSet::new(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_authoring_candidates(
+    model: &str,
+    family: &str,
+    duration_seconds: Option<f64>,
+    frames: Option<u32>,
+    fps: Option<u32>,
+    width: Option<u32>,
+    height: Option<u32>,
+    first_frame: Option<&Path>,
+    legacy_image: Option<&str>,
+    last_frame: Option<&Path>,
+    references: &[ReferenceArg],
+    fresh_video_indices: &std::collections::HashSet<usize>,
 ) -> Result<PreparedAuthoring> {
     let is_h3 = minimax_h3::is_family(family);
     let has_h3_authoring = duration_seconds.is_some()
@@ -286,7 +319,14 @@ pub(crate) fn prepare_authoring(
         _ => unreachable!("partial MiniMax H3 dimensions were rejected above"),
     };
 
-    let (reference_descriptors, uploads) = prepare_references(references)?;
+    let (reference_descriptors, uploads) =
+        prepare_references_candidates(references, fresh_video_indices)?;
+    let pending = uploads.iter().any(|upload| {
+        matches!(
+            upload.candidate,
+            Some(mold_core::video_normalization::ReferenceCandidate::FreshVideo { .. })
+        )
+    });
     Ok(PreparedAuthoring {
         frames: Some(frames),
         fps: Some(minimax_h3::FIXED_FPS),
@@ -295,7 +335,8 @@ pub(crate) fn prepare_authoring(
         source_image,
         source_image_name,
         keyframes,
-        references: (!reference_descriptors.is_empty()).then_some(reference_descriptors),
+        references: (!pending && !reference_descriptors.is_empty())
+            .then_some(reference_descriptors),
         uploads,
     })
 }
@@ -530,8 +571,16 @@ fn h3_image_decode_limits() -> image::Limits {
     limits
 }
 
+#[cfg(test)]
 fn prepare_references(
     inputs: &[ReferenceArg],
+) -> Result<(Vec<GenerationReference>, Vec<ReferenceUpload>)> {
+    prepare_references_candidates(inputs, &std::collections::HashSet::new())
+}
+
+fn prepare_references_candidates(
+    inputs: &[ReferenceArg],
+    fresh_video_indices: &std::collections::HashSet<usize>,
 ) -> Result<(Vec<GenerationReference>, Vec<ReferenceUpload>)> {
     let mut descriptors = Vec::with_capacity(inputs.len());
     let mut uploads = Vec::with_capacity(inputs.len());
@@ -562,6 +611,31 @@ fn prepare_references(
             sha256: Some(sha256),
             crop: None,
         };
+        if fresh_video_indices.contains(&index) && input.kind == ReferenceKind::Video {
+            let name = provenance.name.clone();
+            let mime =
+                mold_core::reference_upload::video_mime_hint(name.as_deref().unwrap_or_default())
+                    .context("video reference requires a supported MP4/MOV/M4V/WebM/MKV filename")?;
+            uploads.push(ReferenceUpload {
+                file,
+                candidate: Some(
+                    mold_core::video_normalization::ReferenceCandidate::FreshVideo {
+                        index: index as u32 + 1,
+                        kind: mold_core::GenerationReferenceKind::Video,
+                        original: mold_core::video_normalization::OriginalVideo {
+                            mime_type: mime.into(),
+                            name,
+                            byte_length: length,
+                            sha256: provenance
+                                .sha256
+                                .clone()
+                                .context("video reference digest missing")?,
+                        },
+                    },
+                ),
+            });
+            continue;
+        }
         let descriptor = match input.kind {
             ReferenceKind::Image => probe_image(file.try_clone()?, provenance)
                 .with_context(|| format!("reference {} image probe failed", index + 1))?,
@@ -571,10 +645,20 @@ fn prepare_references(
                 .with_context(|| format!("reference {} audio probe failed", index + 1))?,
         };
         file.seek(SeekFrom::Start(0))?;
-        uploads.push(ReferenceUpload { file });
+        uploads.push(ReferenceUpload {
+            file,
+            candidate: (!fresh_video_indices.is_empty()).then(|| {
+                mold_core::video_normalization::ReferenceCandidate::Canonical {
+                    index: index as u32 + 1,
+                    upload: true,
+                    reference: descriptor.clone(),
+                    byte_length: Some(length),
+                }
+            }),
+        });
         descriptors.push(descriptor);
     }
-    if !descriptors.is_empty() {
+    if !descriptors.is_empty() && descriptors.len() == uploads.len() {
         minimax_h3::validate_reference_descriptors(&descriptors).map_err(anyhow::Error::new)?;
     }
     Ok((descriptors, uploads))
@@ -631,7 +715,7 @@ fn probe_image(
     })
 }
 
-fn probe_video(
+pub(crate) fn probe_video(
     file: File,
     provenance: GenerationReferenceProvenance,
 ) -> Result<GenerationReference> {
@@ -1084,6 +1168,45 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("must be PNG or JPEG"));
+    }
+
+    #[test]
+    fn fresh_video_candidates_defer_facts_without_weakening_canonical_probing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reference.mov");
+        std::fs::write(&path, b"unprobed original container bytes").unwrap();
+        let inputs = [ReferenceArg {
+            kind: ReferenceKind::Video,
+            path,
+        }];
+        assert!(
+            prepare_references(&inputs).is_err(),
+            "legacy canonical path must still probe"
+        );
+        let (descriptors, uploads) =
+            prepare_references_candidates(&inputs, &std::collections::HashSet::from([0])).unwrap();
+        assert!(
+            descriptors.is_empty(),
+            "pending bytes must not invent canonical facts"
+        );
+        let Some(mold_core::video_normalization::ReferenceCandidate::FreshVideo {
+            index,
+            original,
+            ..
+        }) = &uploads[0].candidate
+        else {
+            panic!("missing fresh candidate")
+        };
+        assert_eq!(*index, 1);
+        assert_eq!(original.mime_type, "video/quicktime");
+        assert_eq!(
+            original.byte_length,
+            b"unprobed original container bytes".len() as u64
+        );
+        assert_eq!(
+            original.sha256,
+            mold_core::secure_file::sha256_open_file(&uploads[0].file).unwrap()
+        );
     }
 
     #[test]

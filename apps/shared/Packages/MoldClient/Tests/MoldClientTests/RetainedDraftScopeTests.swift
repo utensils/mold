@@ -5,7 +5,7 @@ import Testing
 struct RetainedDraftScopeTests {
     private var original: RenderDraft {
         var draft = RenderDraft()
-        draft.media.generationReferences = [GenerationReference(kind: "image",
+        draft.media.generationReferences = [.init(kind: "image",
             media: .init(authority: "descriptor"), mimeType: "image/png",
             provenance: .init(sha256: String(repeating: "a", count: 64)), width: 32, height: 32)]
         return draft

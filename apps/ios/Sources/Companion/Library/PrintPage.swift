@@ -147,6 +147,7 @@ struct ClipPlayer: View {
     @State private var playbackFile: URL?
     @State private var ready = false
     @State private var playbackID: PrintID?
+    @State private var playback = VideoPlaybackSession()
 
     var body: some View {
         ZStack {
@@ -158,6 +159,10 @@ struct ClipPlayer: View {
                         if playbackID == entry.id && player.currentItem === item { ready = status == .readyToPlay }
                     }
                 if !ready { ProgressView().tint(.white).accessibilityIdentifier("viewer-clip-loading") }
+                Color.clear.frame(width: 0, height: 0)
+                    .onReceive(player.publisher(for: \.rate, options: [.new])) { rate in
+                        if isSelected && scenePhase == .active { playback.nativeRateChanged(rate) }
+                    }
             } else if let problem {
                 Text(problem).foregroundStyle(.white).padding()
             } else {
@@ -168,9 +173,10 @@ struct ClipPlayer: View {
         // clip may fetch a stream or play audio; a swipe cancels that task.
         .task(id: "\(entry.id)|\(isSelected)") {
             if isSelected { await load() }
-            else { ClipPlayback.sync(player, isSelected: false) }
+            else { playback.cancel(); ClipPlayback.sync(player, isSelected: false) }
         }
         .onDisappear {
+            playback.cancel()
             ClipPlayback.sync(player, isSelected: false)
             player?.replaceCurrentItem(with: nil)
             releasePlaybackFile()
@@ -179,17 +185,21 @@ struct ClipPlayer: View {
             if displayed && playbackID == entry.id && isSelected && scenePhase == .active && entry.print.trashedAt == nil { library.markViewed(entry.id) }
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase != .active { player?.pause() }
-            else if ready && playbackID == entry.id && isSelected && entry.print.trashedAt == nil { library.markViewed(entry.id) }
+            if phase != .active { playback.suspend(); player?.pause() }
+            else if ready && playbackID == entry.id && isSelected && entry.print.trashedAt == nil {
+                if let player { playback.attach(player) }
+                library.markViewed(entry.id)
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
-            guard repeats, isSelected, scenePhase == .active, let player,
+            guard isSelected, scenePhase == .active, let player,
                   let item = notification.object as? AVPlayerItem, item === player.currentItem else { return }
-            Task { @MainActor in
-                await player.seek(to: .zero)
-                guard repeats, isSelected, scenePhase == .active, player.currentItem === item else { return }
-                player.play()
-            }
+            playback.handleEnd(repeating: repeats)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemTimeJumped)) { notification in
+            guard isSelected, scenePhase == .active, let player, let item = notification.object as? AVPlayerItem,
+                  item === player.currentItem else { return }
+            playback.nativeTimeJumped()
         }
     }
 
@@ -199,6 +209,7 @@ struct ClipPlayer: View {
     }
 
     private func load() async {
+        playback.cancel()
         ready = false
         playbackID = nil
         player?.pause()
@@ -212,6 +223,7 @@ struct ClipPlayer: View {
     /// item; that is re-minted ONCE, resuming where it stopped -- a second
     /// failure is a real one and says so.
     private func play(from time: CMTime?, reminted: Bool) async {
+        let intent = reminted ? playback.captureIntent() : nil
         guard let host = hosts.host(entry.hostID) else { return }
         let item: AVPlayerItem
         let media: PlayableMedia
@@ -246,7 +258,12 @@ struct ClipPlayer: View {
         }
         guard !Task.isCancelled, isSelected else { nextPlayer.pause(); return }
         player = nextPlayer
-        if autoplay || reminted { ClipPlayback.sync(player, isSelected: scenePhase == .active) }
+        if let intent {
+            playback.restore(intent, on: nextPlayer, isActive: scenePhase == .active)
+        } else {
+            playback.attach(nextPlayer)
+            if autoplay && scenePhase == .active { playback.play() }
+        }
         for await status in item.publisher(for: \.status).values {
             guard !Task.isCancelled, isSelected else { return }
             if status == .readyToPlay { ready = true }

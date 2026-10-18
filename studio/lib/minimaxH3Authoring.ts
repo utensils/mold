@@ -1,3 +1,4 @@
+import type { FreshVideoReference } from "./freshVideoReference";
 import { inputImageFacts } from "./inputImage";
 import type {
   GenerationReference,
@@ -111,7 +112,7 @@ export interface MinimaxH3BoundaryImage {
 /** UI wrapper keeps draft-storage identity outside the public generation
  * reference wire contract. */
 export interface MinimaxH3ReferenceDraft {
-  reference: GenerationReference;
+  reference: GenerationReference | FreshVideoReference;
   draftId?: string;
   /** Pending user crop of an IMAGE reference, in the reference's own source
    * pixels. Applied by {@link applyMinimaxH3ReferenceCrops} at submit; until
@@ -406,7 +407,20 @@ export function cloneMinimaxH3AuthoringState(
   state: MinimaxH3AuthoringState | null | undefined,
 ): MinimaxH3AuthoringState {
   return state
-    ? (JSON.parse(JSON.stringify(state)) as MinimaxH3AuthoringState)
+    ? {
+        ...JSON.parse(JSON.stringify(state)),
+        references: state.references.map((draft) =>
+          draft.reference.kind === "fresh_video"
+            ? {
+                ...draft,
+                reference: {
+                  ...draft.reference,
+                  original: { ...draft.reference.original },
+                },
+              }
+            : JSON.parse(JSON.stringify(draft)),
+        ),
+      }
     : emptyMinimaxH3AuthoringState();
 }
 
@@ -420,10 +434,13 @@ export function stripMinimaxH3AuthoringMedia(
   if (clone.lastFrame) clone.lastFrame.data = "";
   clone.references = clone.references.map((draft) => ({
     ...draft,
-    reference: {
-      ...draft.reference,
-      media: { authority: "descriptor" },
-    } as GenerationReference,
+    reference:
+      draft.reference.kind === "fresh_video"
+        ? { kind: "fresh_video", original: { ...draft.reference.original } }
+        : ({
+            ...draft.reference,
+            media: { authority: "descriptor" },
+          } as GenerationReference),
   }));
   return clone;
 }
@@ -519,6 +536,10 @@ export function minimaxH3ReferenceBudget(
 
   drafts.forEach(({ reference }, index) => {
     const oneBased = index + 1;
+    if (reference.kind === "fresh_video") {
+      videos += 1;
+      return;
+    }
     if (reference.kind === "image") {
       images += 1;
       return;
@@ -623,9 +644,11 @@ export function minimaxH3ReferenceBudget(
 }
 
 export function minimaxH3ReferenceName(
-  reference: GenerationReference,
+  reference: GenerationReference | FreshVideoReference,
   index: number,
 ): string {
+  if (reference.kind === "fresh_video")
+    return reference.original.name ?? `Video ${index + 1}`;
   return (
     reference.provenance?.name?.trim() ||
     `${reference.kind[0]!.toUpperCase()}${reference.kind.slice(1)} ${index + 1}`
@@ -633,8 +656,9 @@ export function minimaxH3ReferenceName(
 }
 
 export function minimaxH3ReferenceDurationMs(
-  reference: GenerationReference,
+  reference: GenerationReference | FreshVideoReference,
 ): number | null {
+  if (reference.kind === "fresh_video") return null;
   return reference.kind === "image" ||
     reference.kind === "named_image" ||
     reference.kind === "mesh"
@@ -731,7 +755,9 @@ export function reattachMinimaxH3Reference(
   replacement: MinimaxH3ReferenceDraft,
 ): MinimaxH3ReattachResult {
   const current = state.references[index];
-  if (!current || replacement.reference.kind !== current.reference.kind) {
+  const kind = (value: MinimaxH3ReferenceDraft["reference"]) =>
+    value.kind === "fresh_video" ? "video" : value.kind;
+  if (!current || kind(replacement.reference) !== kind(current.reference)) {
     throw new Error(
       `Reference ${index + 1} must be reattached as ${current?.reference.kind ?? "the same media kind"}.`,
     );
@@ -816,7 +842,9 @@ export async function applyMinimaxH3ReferenceCrops(
 export function minimaxH3ReferenceNeedsMedia(
   draft: MinimaxH3ReferenceDraft,
 ): boolean {
-  return draft.reference.media.authority === "descriptor";
+  return draft.reference.kind === "fresh_video"
+    ? !draft.reference.body
+    : draft.reference.media.authority === "descriptor";
 }
 
 export function minimaxH3AuthoringError(
@@ -950,7 +978,8 @@ export function serializeMinimaxH3Authoring<T extends H3Request>(
     delete next.source_image;
     delete next.source_image_name;
     delete next.keyframes;
-    next.references = minimaxH3ReferenceProjection(state);
+    if (hasFreshVideoReferences(state)) delete next.references;
+    else next.references = minimaxH3ReferenceProjection(state);
   } else {
     delete next.references;
     if (state.firstFrame) {
@@ -979,10 +1008,33 @@ export function serializeMinimaxH3Authoring<T extends H3Request>(
  * stales on it; the bytes stay the source's until
  * {@link applyMinimaxH3ReferenceCrops} rewrites them, and a projection that
  * reached the server unapplied is refused by name (size mismatch). */
+/** A request built from this draft is a preparation skeleton, not admission-ready. */
+export function hasActiveFreshVideoReferences(
+  state: MinimaxH3AuthoringState | null | undefined,
+  sourceImageMode: string,
+): boolean {
+  return (
+    sourceImageMode === "ordered-references" && hasFreshVideoReferences(state)
+  );
+}
+
+export function hasFreshVideoReferences(
+  state: MinimaxH3AuthoringState | null | undefined,
+): boolean {
+  return (
+    state?.references.some((draft) => draft.reference.kind === "fresh_video") ??
+    false
+  );
+}
+
 export function minimaxH3ReferenceProjection(
   state: MinimaxH3AuthoringState,
 ): GenerationReference[] {
   return state.references.map(({ reference, crop }) => {
+    if (reference.kind === "fresh_video")
+      throw new Error(
+        "Fresh video references must be finalized on the selected machine before generating.",
+      );
     const projection = JSON.parse(
       JSON.stringify(reference),
     ) as GenerationReference;

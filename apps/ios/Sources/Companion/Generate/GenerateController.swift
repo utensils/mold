@@ -15,6 +15,12 @@ final class GenerateController {
     private(set) var mediaRevisions: [RetainedSourceMedia.Field: Int] = [:]
     var draft = RenderDraft() {
         didSet {
+            if oldValue.fps != draft.fps, let recipe, let temporal = recipe.temporal {
+                let length = temporal.lengthSelection(fps: draft.fps, frames: draft.frames,
+                    family: model?.family, model: modelName, sourceImage: recipe.capabilities.sourceImage)
+                draft.fps = length.fps
+                draft.frames = length.frames
+            }
             for field in RetainedSourceMedia.changedDraftFields(from: oldValue.media, to: draft.media) {
                 mediaRevisions[field, default: 0] += 1
             }
@@ -26,6 +32,7 @@ final class GenerateController {
     }
     /// Still picture, Short clip, 3-D object.
     var kind: PrintKind = .picture
+    var referencePreparation: String?
     var modelName: String?
     var recipeID: String?
     /// "Auto" follows the Default machine (or the first that is up and has
@@ -124,8 +131,19 @@ final class GenerateController {
 
     /// The machine this press of Generate goes to.
     var target: MoldHost? {
+        target(requiringNormalization: draft.media.generationReferences.contains { $0.freshVideo != nil })
+    }
+
+    /// Picking originals in Auto uses the same eligible-host order as this prepared attempt.
+    var referenceImportTarget: MoldHost? { target(requiringNormalization: true) ?? target }
+
+    private func target(requiringNormalization: Bool) -> MoldHost? {
         guard let modelName else { return nil }
-        let holds = { (host: MoldHost) in self.hosts.models[host.id]?.contains { $0.name == modelName } == true }
+        let holds = { (host: MoldHost) in
+            self.hosts.models[host.id]?.contains { $0.name == modelName } == true
+                && (!requiringNormalization || VideoNormalizationPolicy.capability(
+                    self.hosts.capabilities[host.id]?.referenceUploads, apiKey: host.apiKey) != nil)
+        }
         switch machine {
         case let .pinned(id):
             return hosts.host(id).flatMap { hosts.isUp($0) && holds($0) ? $0 : nil }

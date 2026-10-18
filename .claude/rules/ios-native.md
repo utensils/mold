@@ -320,7 +320,9 @@ The image Library picker keeps machine filters in a full-width ordinary content 
 **Encrypted transport.** All remote HTTP, SSE, uploads, thumbnails and media use the shared Rust `mold-secure` C ABI and the pull-driven Swift WebSocket/HTTP adapter. Only an unpaired numeric loopback host may use direct HTTP for the embedded engine. Never restore relay v2, HTTP/S3 staging, media bearer URLs or mutation replay. AVPlayer uses `PlayableMedia` and its HEAD/Range resource loader. Private installation identity lives in the app Keychain (Mac: owner-only SecretStore), never preferences. Public pins and host-signed grants persist with the host; renew grants only through the authenticated channel. Bonjour identity remains a hint. `make gen`/archive builds the ignored XCFramework from source for all Apple targets, and secure-crate/lockfile changes trigger Apple builds. Protocol authority: `relay/aws/SECURE-PROTOCOL.md`.
 
 Call `PlayableMedia.prepare(_:)` before publishing a streamed player for playback;
-it primes up to two seconds of measured media without starting the player.
+it awaits AVFoundation native preroll without starting the player, with a 30-second
+timeout and cancellation/item fences. Do not require a fixed buffered duration:
+a paused custom-loaded audio/video item may validly buffer only half a second.
 For a resumed item, call `configure(_:)` before seeking, then prepare at the
 new position. Apple's `AVAssetResourceLoader.setDelegate(_:queue:)`
 contract requires predictive stall waiting to be disabled when the delegate
@@ -362,3 +364,17 @@ and keyframes; explicit first/last handoffs preserve interior LTX anchors and au
 Adding a last LTX endpoint migrates a current source image into frame 0 unless an explicit
 first anchor already exists. Print menus retain their source handoff while recipe is absent.
 Copy File Name is available for print selections and all Info file values are selectable.
+
+Native clip length choices use MoldClient’s `TemporalProfile.lengthSelection`: resolve a valid rate before duration bounds, snap whole-second choices, deduplicate and include only the settled current custom frame count. Subsecond lengths must not format as zero. Rate/recipe changes reclamp frames without clearing the automatic-duration preference; output temporal upscaling never changes this inference-frame authority. Mac controls preserve `ClipRouting` chain bounds.
+
+
+**Fresh typed-video preparation.** Keep ordered authoring inputs in `AuthoringReference`: canonical descriptors and immutable fresh original snapshots are distinct. Pending facts cannot encode through `GenerateRequest` or placement. Use only negotiated keyed upload V2 + nested normalization V1 for fresh typed `reference_video`; scalar source/continuation paths, retained archives and old leases stay on their existing contracts. Freeze the candidate POST bytes and domain-separated digest, validate original/canonical receipts and exact final descriptors, explicitly finalize, then price and admit the unchanged canonical request on the captured normalizer. Auto filters existing host order by health/model/capability; a hard machine selection never falls back. Full route/key/mode/secure identity/instance and cancellation checks fence every await; release every unused session. Persist originals, never ephemeral handles or candidate authority.
+
+**Playback endpoints.** `VideoPlaybackEndpoint` resolves the last displayed sample in asset presentation time, including edit lists and B-frame ordering; item duration minus guessed frame intervals is not an endpoint. Both native transports share `VideoPlaybackSession` for ended/replay/repeat/full-end seek behavior and item/seek-generation fencing. Preserve legitimate audio tails and native controls. Cancel asynchronous endpoint/seeks on replacement or dismissal, and prevent late resumes after pause/inactivity. Keep local and encrypted fixture coverage for CFR/VFR, offset timelines, one-frame video and audio overhang.
+
+**Observational stalls.** Poll previews for running and cancelling jobs. The
+shared optional stall diagnostic must suppress stale ETA, fractions and step
+announcements, retain phase/cancel/device-held truth and clear on authoritative
+null. Decode block/chunk counts belong to the current phase, not video-frame
+completion. HTTP 202 is accepted intent, never terminal cancellation; retain the
+live job and offer copyable diagnostics plus explicit operator recovery guidance.

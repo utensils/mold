@@ -133,39 +133,32 @@ struct LengthChip: View {
 
     var body: some View {
         @Bindable var generate = generate
-        let fps = Double(generate.draft.fps ?? temporal.fps.value)
-        let frames = generate.draft.frames ?? temporal.frames.default
-        let seconds = fps > 0 ? Double(frames) / fps : 0
+        let selection = temporal.lengthSelection(fps: generate.draft.fps, frames: generate.draft.frames,
+            family: generate.model?.family, model: generate.modelName, sourceImage: generate.recipe?.capabilities.sourceImage)
+        let fps = selection.fps
+        let frames = selection.frames
+        let seconds = Double(frames) / Double(fps)
         Menu {
             if generate.draft.supportsDurationPrediction {
                 Toggle("Automatic from prompt", isOn: $generate.draft.prefersAutomaticDuration)
                 Divider()
             }
-            ForEach(lengths(fps: fps), id: \.frames) { option in
+            ForEach(selection.options, id: \.frames) { option in
                 Button { generate.draft.prefersAutomaticDuration = false; generate.draft.frames = option.frames } label: {
-                    let text = String(localized: "\(option.seconds.formatted(.number.precision(.fractionLength(0...1)))) s")
+                    let text = String(localized: "\(durationText(option.seconds)) s")
                     if !generate.draft.usesAutomaticDuration && option.frames == frames { Label(text, systemImage: "checkmark") } else { Text(text) }
                 }
             }
         } label: {
-            chipLabel(generate.draft.usesAutomaticDuration ? "Auto length" : String(localized: "\(seconds.formatted(.number.precision(.fractionLength(0...1)))) s"),
+            chipLabel(generate.draft.usesAutomaticDuration ? "Auto length" : String(localized: "\(durationText(seconds)) s"),
                       detail: generate.draft.usesAutomaticDuration ? "From prompt" : "\(frames) f · \(Int(fps)) fps")
         }
         .buttonStyle(.bordered)
-        .accessibilityLabel(generate.draft.usesAutomaticDuration ? "Length, automatic from prompt" : String(localized: "Length, \(seconds.formatted(.number.precision(.fractionLength(0...1)))) seconds"))
+        .accessibilityLabel(generate.draft.usesAutomaticDuration ? "Length, automatic from prompt" : String(localized: "Length, \(durationText(seconds)) seconds"))
     }
 
-    /// Whole seconds up to the recipe's ceiling, each snapped to the grid.
-    private func lengths(fps: Double) -> [(frames: Int, seconds: Double)] {
-        let control = temporal.frames
-        let step = max(1, control.step)
-        var out: [(Int, Double)] = []
-        var frames = control.min
-        while frames <= control.max {
-            let seconds = fps > 0 ? Double(frames) / fps : 0
-            if out.last.map({ seconds - $0.1 >= 0.9 }) ?? true { out.append((frames, seconds)) }
-            frames += step
-        }
-        return out.map { (frames: $0.0, seconds: $0.1) }
+
+    private func durationText(_ seconds: Double) -> String {
+        seconds.formatted(.number.precision(.fractionLength(0...(seconds < 0.1 ? 3 : 1))))
     }
 }

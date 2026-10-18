@@ -6,7 +6,9 @@ paths:
 # Native Mac interaction contracts
 
 Every streamed `PlayableMedia` player awaits `prepare(_:)` before publication;
-it primes up to two seconds of measured media without starting playback.
+it awaits AVFoundation native preroll without starting playback, with a 30-second
+timeout and cancellation/item fences. Do not require a fixed buffered duration:
+a paused custom-loaded audio/video item may validly buffer only half a second.
 Apply `configure(_:)` before a resumed seek, then prepare at that position.
 AVFoundation's predictive stall waiting does not support media bytes
 supplied by a resource-loader delegate; the shared policy disables it and keeps
@@ -335,3 +337,17 @@ last endpoint; explicit refused boundary capabilities cannot use the legacy fall
 
 Library menu supplements and Commands capture destination snapshots and callbacks before
 native hosting; they cannot require window-only environment stores.
+
+
+**Fresh typed-video preparation.** Keep ordered authoring inputs in `AuthoringReference`: canonical descriptors and immutable fresh original snapshots are distinct. Pending facts cannot encode through `GenerateRequest` or placement. Use only negotiated keyed upload V2 + nested normalization V1 for fresh typed `reference_video`; scalar source/continuation paths, retained archives and old leases stay on their existing contracts. Freeze the candidate POST bytes and domain-separated digest, validate original/canonical receipts and exact final descriptors, explicitly finalize, then price and admit the unchanged canonical request on the captured normalizer. Auto filters existing host order by health/model/capability; a hard machine selection never falls back. Full route/key/mode/secure identity/instance and cancellation checks fence every await; release every unused session. Persist originals, never ephemeral handles or candidate authority.
+
+**Playback endpoints.** `VideoPlaybackEndpoint` resolves the last displayed sample in asset presentation time, including edit lists and B-frame ordering; item duration minus guessed frame intervals is not an endpoint. Both native transports share `VideoPlaybackSession` for ended/replay/repeat/full-end seek behavior and item/seek-generation fencing. Preserve legitimate audio tails and native controls. Cancel asynchronous endpoint/seeks on replacement or dismissal, and prevent late resumes after pause/inactivity. Keep local and encrypted fixture coverage for CFR/VFR, offset timelines, one-frame video and audio overhang.
+
+**Observational stalls.** Native Queue rows/detail render the optional shared
+`StallDiagnostic`; executing preview polling includes cancelling work and clears
+on authoritative null. Hide stale ETA/fractions while stalled, label decode
+counts as completed current-phase work, and preserve pending cancellation after
+202 until actual host state settles. Queue row builders receive captured status
+text rather than introducing an environment dependency in detached content.
+The curated Performance threshold mirrors 0–86400 seconds and never changes
+lease ownership. Keep copyable diagnostic facts and operator recovery guidance.

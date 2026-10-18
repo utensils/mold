@@ -65,3 +65,23 @@ extension ProgressWordsTests {
         #expect(ProgressWords.quarter(try progress(28, 28)) == 4)
     }
 }
+
+extension ProgressWordsTests {
+    @Test func aStallSuppressesEtaAndStepCompletionAnnouncements() throws {
+        var progress = try progress(stage: "Denoising", step: 3, total: 8)
+        progress.stall = StallDiagnostic(stage: "Decode attention", lastCompletedWorkUnixMs: 1, elapsedStallMs: 300_000, cancelRequested: true, deviceStillHeld: true)
+        #expect(ProgressWords.sentence(progress, remaining: .seconds(12)).hasPrefix("Stalled:"))
+        #expect(!ProgressWords.sentence(progress, remaining: .seconds(12)).contains("left"))
+        #expect(ProgressWords.quarter(progress) == nil)
+        #expect(ProgressWords.spoken(progress).contains("device still held"))
+        var rate = StepRate()
+        _ = rate.remaining(try self.progress(stage: "Denoising", step: 1, total: 8), now: .init(timeIntervalSince1970: 0))
+        #expect(rate.remaining(progress, now: .init(timeIntervalSince1970: 2)) == nil)
+    }
+
+    @Test func decodeCountersAreCompletedPhaseWork() throws {
+        let value = try MoldJSON.decoder.decode(JobProgress.self, from: Data(#"{"stage":"Decode QKV chunks","stage_current":2,"stage_total":9}"#.utf8))
+        #expect(ProgressWords.figure(value) == "decode qkv chunks 2/9")
+        #expect(ProgressWords.spoken(value) == "2 of 9")
+    }
+}

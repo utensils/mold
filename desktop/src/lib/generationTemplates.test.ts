@@ -129,7 +129,7 @@ describe("save / load round-trip", () => {
       hydrated.form.h3Authoring?.references.map((draft) => [
         draft.reference.kind,
         draft.reference.provenance?.name,
-        draft.reference.media.authority === "inline" ? draft.reference.media.data : null,
+        draft.reference.media?.authority === "inline" ? draft.reference.media.data : null,
       ]),
     ).toEqual([
       ["audio", "voice.wav", "H3_AUDIO_BYTES"],

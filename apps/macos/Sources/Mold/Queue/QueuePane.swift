@@ -68,6 +68,12 @@ struct QueuePane: View {
         }
         .destructionDialog($pendingDestruction)
         .task { await load() }
+        .task {
+            while !Task.isCancelled {
+                await queue.pollProgress()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
         // The clip upscales already running on each machine. Not the
         // Library's alone: this pane is where they are DRAWN, and it must
         // not depend on somebody having opened the Library first. One

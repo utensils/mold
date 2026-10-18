@@ -46,6 +46,7 @@ struct QueueBatchRow: View {
                 } else {
                 QueueRow(entry: entry, actions: childActions(entry),
                          caption: entry.batchWaitDescription, sourceHost: sourceHost,
+                         statusOverride: sourceHost.flatMap { queue.statusOverride(entry, on: $0.id) },
                          inspect: inspect.map { inspect in { inspect(entry) } },
                          moveToDestinations: sourceHost.map { host in queue.canTransfer(entry, on: host.id) && transfers.transferring == nil ? transfers.transferDestinations(from: host.id) : [] } ?? [],
                          moveTo: { destination in if let sourceHost { Task { await transfers.transfer(entry, from: sourceHost.id, to: destination); await queue.poll(sourceHost.id) } } },

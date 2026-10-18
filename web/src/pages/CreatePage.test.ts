@@ -3198,6 +3198,51 @@ describe("CreatePage layout and behavior", () => {
     }
   });
 
+  it("reports unavailable video preparation and retains the original instead of rejecting Generate", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("minimax-h3-ref2va:comfy-pruned-int8", "minimax-h3"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "minimax-h3-ref2va:comfy-pruned-int8";
+    form.state.value.modelFamily = "minimax-h3";
+    form.state.value.prompt = "a subject in a new shot";
+    const body = new Blob(["original MOV"], { type: "video/quicktime" });
+    form.state.value.h3Authoring = {
+      firstFrame: null,
+      lastFrame: null,
+      references: [
+        {
+          reference: {
+            kind: "fresh_video",
+            original: {
+              mime_type: "video/quicktime",
+              name: "original.mov",
+              byte_length: body.size,
+              sha256: "a".repeat(64),
+            },
+            body,
+          },
+        },
+      ],
+    };
+    await nextTick();
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+    expect(
+      useNotifications()
+        .toasts.map((item) => item.text)
+        .join(" "),
+    ).toContain(
+      "No eligible machine advertises fresh video-reference normalization.",
+    );
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(form.state.value.h3Authoring.references[0]?.reference).toMatchObject(
+      { kind: "fresh_video", body },
+    );
+  });
+
   it("applies a pending Ref2VA reference crop at the original resolution before submitting", async () => {
     hostModelsMock.mockResolvedValue([
       {

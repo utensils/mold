@@ -218,7 +218,7 @@ import Testing
         fake.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .available, members: [reference]))
         generate.reuse(try reuseEntry(generate, name: "missing-model", extra: #""references":[{"kind":"image","mime_type":"image/png","name":"original.png"}]"#))
         try await waitUntil { !generate.retainedReuse.probing }
-        generate.draft.media.generationReferences[0].provenance = .init(name: "different.png")
+        generate.draft.media.generationReferences[0] = generate.draft.media.generationReferences[0].mappingCanonical { var value = $0; value.provenance = .init(name: "different.png"); return value }
         generate.retainedReuse.retry(controller: generate)
         try await waitUntil { !generate.retainedReuse.probing }
         #expect(!generate.retainedReuse.canHydrateReferences(generate.draft.media.generationReferences))

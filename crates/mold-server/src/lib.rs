@@ -82,6 +82,7 @@ pub mod metrics;
 pub mod model_cache;
 pub mod model_manager;
 mod paint_dependencies;
+mod progress_watchdog;
 pub mod queue;
 mod queue_input_thumbnail;
 pub mod queue_journal;
@@ -113,6 +114,7 @@ mod signals;
 pub mod state;
 pub mod thumbnails;
 pub mod variant_dependencies;
+mod video_reference_codec;
 pub mod video_upscale;
 mod wan_admission;
 pub mod web_ui;
@@ -1144,6 +1146,7 @@ async fn run_server_inner(
     // directory of reference media under MOLD_HOME. Swept in the same startup
     // pass that recovers the queue, because the two have the same cause.
     {
+        video_reference_codec::warm_up();
         let sweep = reference_uploads::sweep_orphaned_staging_roots(state.reference_uploads.root());
         if sweep.removed > 0 || sweep.live > 0 {
             info!(

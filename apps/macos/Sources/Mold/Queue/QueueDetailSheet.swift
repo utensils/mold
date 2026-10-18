@@ -94,7 +94,7 @@ struct QueueDetailSheet: View {
         .task(id: previewIdentity) {
             let requestIdentity = previewIdentity
             guard !queue.isSeeded else { return }
-            while !Task.isCancelled, current?.state == .running, hosts.isUp(activeHost) {
+            while !Task.isCancelled, (current?.state == .running || current?.state == .cancelling), hosts.isUp(activeHost) {
                 if let value = try? await hosts.backend(for: activeHost).jobPreview(jobId: entry.id), !Task.isCancelled, previewIdentity == requestIdentity { progress = value }
                 try? await Task.sleep(for: .seconds(1))
             }

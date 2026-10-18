@@ -1,3 +1,8 @@
+import {
+  cancellationRequestedLabel,
+  jobStallLabel,
+  type JobStallDiagnostic,
+} from "@studio/lib/jobStall";
 import type {
   ChainProgressEvent,
   CompleteEvent,
@@ -63,6 +68,8 @@ export interface Job {
   /** A cancellation request has been sent and this row must not accept a
    * second tap while the host acknowledges authority revocation. */
   cancelling?: boolean;
+  cancelAccepted?: { deviceStillHeld: boolean };
+  stall?: JobStallDiagnostic | null;
   queuePosition: number | null;
   step: number;
   total: number;
@@ -339,6 +346,10 @@ export function jobProgress(job: Job): number {
 }
 
 export function jobProgressCopy(job: Job): string {
+  if (job.cancelAccepted && job.status !== "complete" && job.status !== "error")
+    return cancellationRequestedLabel(job.cancelAccepted.deviceStillHeld);
+  if (job.stall && job.status !== "complete" && job.status !== "error")
+    return jobStallLabel(job.stall);
   const phase: GenerationWorkPhase =
     job.status === "finishing"
       ? "finalizing"
@@ -388,6 +399,10 @@ export function metadataOnlyResult(result: CompleteEvent): CompleteEvent {
 
 /** Compact, plain-language status shared by every jobs surface. */
 export function jobStatusCode(job: Job): string {
+  if (job.cancelAccepted && job.status !== "complete" && job.status !== "error")
+    return cancellationRequestedLabel(job.cancelAccepted.deviceStillHeld).toUpperCase();
+  if (job.stall && job.status !== "complete" && job.status !== "error")
+    return jobStallLabel(job.stall).toUpperCase();
   switch (job.status) {
     case "denoising":
       return `${job.step}/${job.total}`;

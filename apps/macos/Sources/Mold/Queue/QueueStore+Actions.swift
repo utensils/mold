@@ -46,7 +46,10 @@ extension QueueStore {
         guard !refuseIfFixture(host, doing: "cancel that job"), actions(for: entry, on: host).cancel else { return }
         await act(entry, on: host, doing: "cancel that job") { client in
             if entry.state == .held { _ = try await client.cancelHeldJob(id: entry.id) }
-            else { try await client.cancelJob(id: entry.id) }
+            else {
+                let receipt = try await client.requestJobCancellation(id: entry.id)
+                if hosts.host(host) == client.host { cancelReceipts[host, default: [:]][entry.id] = receipt }
+            }
         }
     }
 

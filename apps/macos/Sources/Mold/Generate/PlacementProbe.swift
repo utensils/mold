@@ -37,7 +37,7 @@ final class PlacementProbe {
     func refresh(draft: RenderDraft, model: String?, on host: MoldHost, hosts: HostStore) {
         invalidate()
         let revision = self.revision
-        guard let model else { return }
+        guard let model, !draft.media.generationReferences.contains(where: { $0.freshVideo != nil }) else { return }
         let request = RenderRequest.placement(
             draft, model: model, maxIdentityPhotos: hosts.capabilities(of: host)?.maxIdentityPhotos ?? 0
         )
@@ -70,7 +70,7 @@ final class PlacementProbe {
     func settle(draft: RenderDraft, model: String?, on host: MoldHost, hosts: HostStore) async -> Bool {
         invalidate()
         let revision = self.revision
-        guard let model else { return false }
+        guard let model, !draft.media.generationReferences.contains(where: { $0.freshVideo != nil }) else { return false }
         let request = RenderRequest.placement(
             draft, model: model, maxIdentityPhotos: hosts.capabilities(of: host)?.maxIdentityPhotos ?? 0
         )

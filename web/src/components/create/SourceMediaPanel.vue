@@ -71,6 +71,10 @@ const props = withDefaults(
   defineProps<{
     modelValue: GenerateFormState;
     family: string;
+    normalizationCapabilities?:
+      | import("@studio/api/referenceNormalizationTypes").VideoNormalizationCapabilities
+      | null
+      | undefined;
     /** Installed models on the selected generation route. */
     models?: ModelInfoExtended[];
   }>(),
@@ -516,6 +520,7 @@ function clearControl() {
     <MinimaxH3AuthoringPanel
       v-else-if="plan.kind === 'h3-references'"
       :model-value="h3Authoring"
+      :normalization-capabilities="normalizationCapabilities"
       image-picker-available
       @update:model-value="setH3Authoring"
       @open-image-picker="emit('open-h3-reference-picker')"

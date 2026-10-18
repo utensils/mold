@@ -107,6 +107,48 @@ never triggers an inline retry. The server owns model availability and license
 acceptance: a license already accepted there needs no matching record on this
 client. H3 has no separate acceptance gate.
 
+
+### Fresh H3 video attachments
+
+Fresh H3 Ref2VA video attachments negotiate
+`capabilities.reference_uploads.video_normalization` v1 on an authenticated
+upload-v2 host. Supported input containers are MP4, MOV, M4V, WebM and MKV;
+H.264, HEVC, VP9, AV1 and ProRes are accepted only when that host advertises
+their working decoders. The server applies rotation and converts as needed to
+H.264 8-bit 4:2:0 MP4 with supported audio. Already canonical CFR clips keep
+their exact bytes. VFR conversion preserves source timestamps and duration
+within one output frame; it selects the nearest positive integer average fps,
+falling back to 24 fps when that rate is unavailable. H3's generation-time
+resampler is separate from this import step. Canonical metadata follows the
+existing Rust reader's integer fps; accepted rational-CFR content keeps
+its original encoded timing and bytes.
+
+The original and canonical file each have a 256 MiB limit. Sessions share the
+existing 1 GiB session / 4 GiB host scratch budget; conversion reserves space
+for the original plus the maximum canonical output before starting. A valid
+individual file can still be refused when the shared scratch budget is busy.
+Clips are limited to 8192 pixels on either axis, 16 megapixels per frame and
+15 seconds of video; the existing H3 reference-count and combined-duration
+limits still apply. Discord also retains its smaller attachment-download
+budget. Files with unsupported tracks, corrupt timing, excessive dimensions
+or failed conversion get an explicit error.
+
+The session binds the exact original digest and frozen request, then returns
+verified canonical hashes and facts. Explicit finalization must finish before
+placement and generation; a partial upload is never a usable reference. A
+failed/disconnected attempt cancels its unused lease and retries with a fresh
+session. Conversion cannot adopt an old upload handle or reinterpret retained
+source media, replay authority, `--source-video` or `--extend-video`.
+
+This optional server feature currently requires Unix child resource limits
+and working ffmpeg/ffprobe tools. Nix/server packages supply codecs; raw
+installs must provide them on PATH. The embedded Mac engine has no bundled
+codec tools. Runtime codec discovery runs in the background and retries
+transient failures. On older, keyless or incapable hosts, clients keep the
+existing canonical MP4 import path and report the actual parse/codec error.
+Auto routing prepares and admits on one eligible healthy host for the attempt.
+It preserves the saved host selection.
+
 ## Qwen Image 2.1: references, transparency, WebP stills, turbo
 
 Qwen Image 2.1 edits from up to ten ordered reference images — PNG, JPEG or
@@ -925,3 +967,21 @@ configures operator authority; runtime per-app grants are issued by pairing
 without a Nix rebuild or disabling authentication.
 
 Video batching uses the same batch count as images; `--batch 1` makes a single output. Native iOS exposes Batch in More Options for clips as well as pictures. Native queue batch headers (iOS/macOS) and web/desktop/Tauri mobile job details offer whole-batch cancellation; the CLI uses `mold queue cancel --batch <BATCH-ID>`. Completed outputs are preserved.
+
+
+### Stalled work and cancellation
+
+LTX decode progress counts completed decoder work, including supported block
+and chunk boundaries. A timer or preview is not completion evidence.
+`queue.no_progress_timeout_seconds` defaults to 300 seconds (0 disables
+reporting); `MOLD_QUEUE_NO_PROGRESS_TIMEOUT_SECONDS` overrides the profile
+preference. A stall diagnostic reports stage, last completed work, elapsed
+stall, cancellation request and device ownership. An accepted cancellation
+can remain pending: HTTP 202 means the worker/device is still held. Never
+submit replacement work onto that device based only on the cancel response.
+Healthy devices remain available under normal placement.
+
+If cooperative cancellation cannot return, inspect all host work before an
+operator-controlled service stop/restart. Respect its stop/escalation policy
+and verify the previous PID and GPU contexts are gone before restarting. No
+watchdog automatically resets a GPU, restarts the service or frees live work.

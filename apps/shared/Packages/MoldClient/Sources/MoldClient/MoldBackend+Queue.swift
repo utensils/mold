@@ -12,6 +12,7 @@ public protocol MoldQueueBackend: Sendable {
     func queueInputThumbnail(id: String, index: Int?) async throws -> Data
     func queueInputThumbnail(id: String) async throws -> Data
     func cancelJob(id: String) async throws
+    func requestJobCancellation(id: String) async throws -> QueueCancellationDisposition
     /// Cancels the row ONLY if it is held right now (`?only_held=true`).
     /// Returns `false` when the machine says it is no longer held -- a Retry
     /// got there first -- and nothing was touched. An older machine ignores
@@ -51,6 +52,11 @@ public protocol MoldQueueBackend: Sendable {
 }
 
 public extension MoldQueueBackend {
+    func requestJobCancellation(id: String) async throws -> QueueCancellationDisposition {
+        try await cancelJob(id: id)
+        return .unconfirmed
+    }
+
     func abortDestinationTransfer(_ request: QueueTransferAbortRequest) async throws -> QueueTransferAbortResult { throw MoldClientError.malformedResponse }
     func transferReservation(id: String) async throws -> QueueTransferReservation? { throw MoldClientError.malformedResponse }
     func reserveTransfer(_ request: QueueTransferReservationRequest) async throws { throw MoldClientError.malformedResponse }

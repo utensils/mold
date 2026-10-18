@@ -1,3 +1,4 @@
+import { parseQueueCancellationResponse } from "@studio/lib/jobStall";
 import { defineStore } from "pinia";
 import { listDevices, type DeviceInfo } from "@studio/api/devices";
 import {
@@ -23,6 +24,7 @@ const POLL_INTERVAL_MS = 5_000;
 
 /** One row of a host's `GET /api/queue` listing. */
 export interface QueueEntry {
+  stall?: import("@studio/lib/jobStall").JobStallDiagnostic | null;
   id: string;
   model: string;
   /** `held` is additive: a journalled job the host parked after it exhausted
@@ -470,17 +472,24 @@ export const useJobsStore = defineStore("jobs", {
       const onlyHeld =
         options.onlyHeld ??
         this.queues[hostId]?.entries.find((entry) => entry.id === jobId)?.state === "held";
-      await this.queueControl(
-        hostId,
-        `/api/queue/${encodeURIComponent(jobId)}${onlyHeld ? "?only_held=true" : ""}`,
-        "DELETE",
+      const outcome = await parseQueueCancellationResponse(
+        await this.queueControl(
+          hostId,
+          `/api/queue/${encodeURIComponent(jobId)}${onlyHeld ? "?only_held=true" : ""}`,
+          "DELETE",
+        ),
       );
+      if (!outcome.terminal) {
+        void this.refresh();
+        return outcome;
+      }
       const snapshot = this.queues[hostId];
       if (snapshot) {
         snapshot.entries = snapshot.entries.filter(({ id }) => id !== jobId);
         snapshot.tailEntries = snapshot.tailEntries?.filter(({ id }) => id !== jobId) ?? [];
       }
       void this.refresh();
+      return outcome;
     },
     /** Read the selected row's persisted request. Queue polling stays
      * payload-free; this explicit path powers details and Reuse settings. */
@@ -595,6 +604,7 @@ export const useJobsStore = defineStore("jobs", {
         rowPath && !["pause", "resume"].includes(rowPath[1]!)
           ? decodeURIComponent(rowPath[1]!)
           : null;
+      let response!: Response;
       const execute = async () => {
         const hosts = useHostsStore();
         const host = hosts.all.find((h) => h.id === hostId);
@@ -623,10 +633,11 @@ export const useJobsStore = defineStore("jobs", {
           init.body = JSON.stringify(body);
           init.headers = { "Content-Type": "application/json" };
         }
-        await apiFetchTo(target, path, init);
+        response = await apiFetchTo(target, path, init);
       };
       if (jobId) await this.withJobMutation(hostId, jobId, execute);
       else await execute();
+      return response;
     },
     startPolling() {
       this.pollConsumers += 1;

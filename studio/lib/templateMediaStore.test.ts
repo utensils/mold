@@ -117,3 +117,45 @@ describe("template media store", () => {
     expect(persistence.records.size).toBe(0);
   });
 });
+
+it("keeps original pending-video blobs outside template metadata and restores them without canonical facts", async () => {
+  const records = new Map<string, StoredTemplateMedia>();
+  const persistence: TemplateMediaPersistence = {
+    put: async (record) => {
+      records.set(record.assetId, record);
+      return true;
+    },
+    get: async (id) => records.get(id) ?? null,
+    delete: async (id) => {
+      records.delete(id);
+    },
+  };
+  const blob = new Blob(["original-video"]);
+  const assets = await persistGenerationTemplateMedia(
+    "pending",
+    [
+      {
+        field: "h3References",
+        index: 0,
+        filename: "clip.mov",
+        base64: "",
+        blob,
+        reference: {
+          kind: "fresh_video",
+          original: {
+            mime_type: "video/quicktime",
+            name: "clip.mov",
+            byte_length: blob.size,
+            sha256: "a".repeat(64),
+          },
+        },
+      },
+    ],
+    persistence,
+  );
+  expect(assets[0]).not.toHaveProperty("blob");
+  const hydrated = await hydrateGenerationTemplateMedia(assets, persistence);
+  expect(hydrated.missing).toEqual([]);
+  expect(await hydrated.media[0]!.blob!.text()).toBe("original-video");
+  expect(hydrated.media[0]!.reference).not.toHaveProperty("duration_ms");
+});

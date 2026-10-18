@@ -76,6 +76,10 @@ import {
 const props = withDefaults(
   defineProps<{
     form: GenerateForm;
+    normalizationCapabilities?:
+      | import("@studio/api/referenceNormalizationTypes").VideoNormalizationCapabilities
+      | null
+      | undefined;
     target?: ApiTarget | null;
     gallerySources?: MobileGallerySource[];
     controlModels?: ModelEntry[];
@@ -709,6 +713,7 @@ function applyMask(mask: string): void {
       <legend class="mobile-source-legend">Ordered references · Required</legend>
       <MinimaxH3AuthoringPanel
         :model-value="h3Authoring"
+        :normalization-capabilities="normalizationCapabilities"
         touch-friendly
         image-picker-available
         @update:model-value="setH3Authoring"

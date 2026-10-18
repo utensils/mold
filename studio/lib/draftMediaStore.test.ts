@@ -256,3 +256,22 @@ describe("draft media store", () => {
     });
   });
 });
+
+it("durably replaces original candidate blobs sharing a draft id instead of treating all blobs as empty JSON", async () => {
+  const { Blob: NativeBlob } = await import("node:buffer");
+  const first = new NativeBlob(["first-original"]) as unknown as Blob;
+  const second = new NativeBlob(["second-original"]) as unknown as Blob;
+  expect(
+    await putDurableMediaBatch([
+      { draftId: "candidate-original", blob: first },
+    ]),
+  ).toBe(true);
+  expect(
+    await putDurableMediaBatch([
+      { draftId: "candidate-original", blob: second },
+    ]),
+  ).toBe(true);
+  clearMemoryDraftsForTest();
+  const stored = await getDraftMedia("candidate-original");
+  expect(await stored?.blob?.text()).toBe("second-original");
+});

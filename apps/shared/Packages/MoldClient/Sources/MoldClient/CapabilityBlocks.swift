@@ -87,6 +87,7 @@ public struct DurableMediaCapabilities: Codable, Hashable, Sendable {
 }
 
 public struct ReferenceUploadCapabilities: Codable, Hashable, Sendable {
+    public var videoNormalization: VideoNormalizationCapabilities? = nil
     /// Advertised-but-off is real: the protocol needs API-key auth, so a
     /// keyless host reports the block with `available: false`.
     public let available: Bool

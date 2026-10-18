@@ -211,7 +211,16 @@ pub fn save_queue_to_db(db: &MetadataDb, queue: mold_core::config::QueueSettings
         keys::QUEUE_HELD_RETENTION_DAYS,
         mold_core::config::GALLERY_TRASH_RETENTION_MAX_DAYS
     );
-    Settings::new(db).set_int(
+    anyhow::ensure!(
+        queue.no_progress_timeout_seconds <= 86400,
+        "queue.no_progress_timeout_seconds must be between 0 and 86400"
+    );
+    let settings = Settings::new(db);
+    settings.set_int(
+        mold_core::config_keys::QUEUE_NO_PROGRESS_TIMEOUT_SECONDS_KEY,
+        i64::from(queue.no_progress_timeout_seconds),
+    )?;
+    settings.set_int(
         keys::QUEUE_HELD_RETENTION_DAYS,
         i64::from(queue.held_retention_days),
     )
@@ -225,23 +234,33 @@ pub fn hydrate_queue_from_db(
     queue: &mut mold_core::config::QueueSettings,
 ) -> Result<bool> {
     let s = Settings::new(db);
-    let Some(value) = s.get_int(keys::QUEUE_HELD_RETENTION_DAYS)? else {
-        return Ok(false);
-    };
-    match u32::try_from(value) {
-        Ok(days) if days <= mold_core::config::GALLERY_TRASH_RETENTION_MAX_DAYS => {
-            queue.held_retention_days = days;
-            Ok(true)
-        }
-        _ => {
+    let mut applied = false;
+    for (key, maximum, target) in [
+        (
+            keys::QUEUE_HELD_RETENTION_DAYS,
+            mold_core::config::GALLERY_TRASH_RETENTION_MAX_DAYS,
+            &mut queue.held_retention_days,
+        ),
+        (
+            mold_core::config_keys::QUEUE_NO_PROGRESS_TIMEOUT_SECONDS_KEY,
+            86400,
+            &mut queue.no_progress_timeout_seconds,
+        ),
+    ] {
+        if let Some(value) = s.get_int(key)? {
+            if let Ok(number) = u32::try_from(value) {
+                if number <= maximum {
+                    *target = number;
+                    applied = true;
+                    continue;
+                }
+            }
             tracing::warn!(
-                "ignoring out-of-range {} = {value} in settings DB (expected 0..={})",
-                keys::QUEUE_HELD_RETENTION_DAYS,
-                mold_core::config::GALLERY_TRASH_RETENTION_MAX_DAYS
+                "ignoring out-of-range {key} = {value} in settings DB (expected 0..={maximum})"
             );
-            Ok(false)
         }
     }
+    Ok(applied)
 }
 
 /// Persist the gallery slice (`gallery.trash_retention_days`,
@@ -1028,6 +1047,24 @@ mod tests {
         let mut reset = Config::default();
         hydrate_config_from_db(&db, &mut reset).unwrap();
         assert_eq!(reset.gallery.trash_retention_days, 30);
+    }
+
+    #[test]
+    fn stall_threshold_uses_profile_settings_and_resets_to_default() {
+        let db = db();
+        let mut cfg = Config::default();
+        assert_eq!(cfg.queue.no_progress_timeout_seconds, 300);
+        let key = mold_core::config_keys::QUEUE_NO_PROGRESS_TIMEOUT_SECONDS_KEY;
+        mold_core::config_keys::set_value(&mut cfg, key, "42").unwrap();
+        persist_config_key(&db, &cfg, key).unwrap();
+        let mut hydrated = Config::default();
+        hydrate_config_from_db(&db, &mut hydrated).unwrap();
+        assert_eq!(hydrated.queue.no_progress_timeout_seconds, 42);
+        assert!(mold_core::config_keys::set_value(&mut cfg, key, "86401").is_err());
+        reset_global_key(&db, keys::DEFAULT_PROFILE, key).unwrap();
+        let mut reset = Config::default();
+        hydrate_config_from_db(&db, &mut reset).unwrap();
+        assert_eq!(reset.queue.no_progress_timeout_seconds, 300);
     }
 
     #[test]

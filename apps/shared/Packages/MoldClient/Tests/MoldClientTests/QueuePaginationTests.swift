@@ -28,6 +28,17 @@ struct QueuePaginationTests {
         #expect(URLComponents(url: second, resolvingAgainstBaseURL: false)?.queryItems?.first?.value == "a+b/c=")
     }
 
+    @Test func paginationPreservesTheLatestFullPlanAndClearsOldDeviceReasons() async throws {
+        let client = backend([
+            #"{"entries":[{"id":"one","state":"queued"}],"plan":{"work_items":[{"work_id":"one","blocked_device_reason":"stale"}]},"page":{"next_cursor":"next"}}"#,
+            #"{"entries":[{"id":"two","state":"queued"}],"plan":{"work_items":[{"work_id":"one"},{"work_id":"two","blocked_device_reason":"Device still held"}]}}"#,
+        ])
+        let listing = try await client.queue()
+        #expect(listing.plan != nil)
+        #expect(listing.blockedDeviceReason(for: "one") == nil)
+        #expect(listing.blockedDeviceReason(for: "two") == "Device still held")
+    }
+
     @Test func legacyListingNeedsOneRequest() async throws {
         let listing = try await backend([#"{"entries":[{"id":"old","state":"queued"}]}"#]).queue()
         #expect(listing.merged.count == 1)

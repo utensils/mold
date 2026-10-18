@@ -229,9 +229,21 @@ async fn queue_cancel(
             .cancel_generation_batch(batch_id)
             .await
             .with_context(|| format!("could not cancel batch {batch_id} on {}", client.host()))?;
+        let pending = status.children.iter().any(|child| {
+            !matches!(
+                child.state,
+                mold_core::GenerationBatchChildState::Complete
+                    | mold_core::GenerationBatchChildState::Failed
+                    | mold_core::GenerationBatchChildState::Cancelled
+            )
+        });
         println!(
             "{} {} ({} children)",
-            "batch cancelled".green(),
+            if pending {
+                "Batch cancel requested; waiting for terminal confirmation".to_string()
+            } else {
+                "batch cancelled".green().to_string()
+            },
             batch_id,
             status.children.len()
         );
@@ -260,11 +272,18 @@ async fn queue_cancel(
         bail!("name at least one job id, or pass --all or --batch <BATCH-ID>");
     }
     for id in job_ids {
-        client
-            .cancel_queue_job(id)
+        let disposition = client
+            .request_queue_job_cancellation(id)
             .await
             .with_context(|| format!("cancel failed for {id} on {}", client.host()))?;
-        println!("{} {id}", "cancelled".green());
+        match disposition {
+            mold_core::stall::QueueCancellationDisposition::Cancelled => {
+                println!("{} {id}", "cancelled".green())
+            }
+            mold_core::stall::QueueCancellationDisposition::Pending { .. } => {
+                println!("Cancel requested; device still held: {id}")
+            }
+        }
     }
     Ok(())
 }
@@ -469,6 +488,14 @@ fn now_secs() -> u64 {
 /// longer waiting, so it reports its own step counter (or the stage line when
 /// the host reports no steps).
 pub(crate) fn state_label(row: &QueueRow) -> String {
+    if let Some(stall) = row
+        .entry
+        .stall
+        .as_ref()
+        .or_else(|| row.progress.as_ref().and_then(|p| p.stall.as_ref()))
+    {
+        return stall.summary();
+    }
     if row.entry.state == STATE_RUNNING {
         return match row.progress.as_ref() {
             Some(progress) => match (

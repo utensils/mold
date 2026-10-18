@@ -24,6 +24,9 @@ const DISCORD_EMBED_TOTAL_MAX: usize = 6000;
 /// Format an SSE progress event into a human-readable status line.
 pub fn format_progress(event: &SseProgressEvent) -> String {
     match event {
+        SseProgressEvent::Stall { stall } => stall
+            .as_ref()
+            .map_or_else(|| "Work resumed".into(), |diagnostic| diagnostic.summary()),
         SseProgressEvent::DependencyWait { dependency, reason } => {
             format!("Waiting for {dependency}: {reason}")
         }

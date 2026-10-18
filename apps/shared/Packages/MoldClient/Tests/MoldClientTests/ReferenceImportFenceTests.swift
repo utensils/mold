@@ -27,9 +27,19 @@ import Testing
     let duplicate = GenerationReference(kind: "audio", media: .init(authority: "inline", data: "AA=="), mimeType: "audio/wav")
     let replacement = GenerationReference(kind: "audio", media: .init(authority: "inline", data: "AQ=="), mimeType: "audio/wav")
     var media = DraftMedia()
-    media.generationReferences = [duplicate, duplicate]
+    media.generationReferences = [.canonical(duplicate), .canonical(duplicate)]
     let fence = ReferenceImportFence(model: "h3", host: nil, recipe: nil, media: media)
     #expect(fence.isCurrent(model: "h3", host: nil, recipe: nil, media: media))
     media.replaceGenerationReference(at: 1, with: replacement)
-    #expect(media.generationReferences == [duplicate, replacement])
+    #expect(media.generationReferences == [.canonical(duplicate), .canonical(replacement)])
+}
+
+@Test func normalizedReferenceImportRejectsCredentialAndInstanceChangesWithSameHostID() {
+    let host = MoldHost(name: "machine", baseURL: URL(string: "http://host")!, apiKey: "old")
+    let fence = ReferenceImportFence(model: "h3", host: host.id, recipe: nil, media: DraftMedia(),
+        authority: host, instance: "one")
+    #expect(fence.isCurrent(model: "h3", host: host.id, recipe: nil, media: DraftMedia(), authority: host, instance: "one"))
+    var changed = host; changed.apiKey = "new"
+    #expect(!fence.isCurrent(model: "h3", host: host.id, recipe: nil, media: DraftMedia(), authority: changed, instance: "one"))
+    #expect(!fence.isCurrent(model: "h3", host: host.id, recipe: nil, media: DraftMedia(), authority: host, instance: "two"))
 }

@@ -347,6 +347,40 @@ describe("showGalleryPrint", () => {
 });
 
 describe("generation store multi-host routing", () => {
+  it("preserves the exact finalized singleton and never persists its request lease", async () => {
+    const store = useGenerationStore();
+    const finalized = request();
+    finalized.model = "minimax-h3-ref2va";
+    finalized.references = [
+      {
+        kind: "image",
+        mime_type: "image/png",
+        width: 64,
+        height: 64,
+        media: { authority: "upload", handle: "request-only-secret" },
+      },
+    ];
+    const original = JSON.stringify(finalized);
+    const lease = {
+      request: finalized,
+      expiresAtMs: Date.now() + 30000,
+      requestScopeSha256: "a".repeat(64),
+      cancel: vi.fn(async () => {}),
+    };
+    store.submitBatch(finalized, 1, halRoute, null, { preparedReferenceLease: lease });
+    await flushPromises();
+    expect(JSON.stringify(admittedRequests()[0])).toBe(original);
+    expect(lease.cancel).not.toHaveBeenCalled();
+    expect(() =>
+      store.submitBatch({ ...finalized }, 1, halRoute, null, { preparedReferenceLease: lease }),
+    ).toThrow(/exact finalized singleton/);
+    expect(() =>
+      store.submitBatch(finalized, 2, halRoute, null, { preparedReferenceLease: lease }),
+    ).toThrow(/exact finalized singleton/);
+    for (let index = 0; index < localStorage.length; index++)
+      expect(localStorage.getItem(localStorage.key(index)!)).not.toContain("request-only-secret");
+  });
+
   it("tags jobs with their host and admits against its target", async () => {
     const store = useGenerationStore();
     const { jobs } = store.submitBatch(request(), 1, halRoute);
@@ -356,6 +390,21 @@ describe("generation store multi-host routing", () => {
     expect(sseStream).not.toHaveBeenCalled();
   });
 
+  it("refuses an expired prepared lease before creating a retry admission", () => {
+    const store = useGenerationStore();
+    const finalized = request();
+    const lease = {
+      request: finalized,
+      expiresAtMs: Date.now() - 1,
+      requestScopeSha256: "a".repeat(64),
+      cancel: vi.fn(async () => {}),
+    };
+    expect(() =>
+      store.submitBatch(finalized, 1, halRoute, null, { preparedReferenceLease: lease }),
+    ).toThrow(/expired/i);
+    expect(durableApi.admit).not.toHaveBeenCalled();
+    expect(store.jobs).toHaveLength(0);
+  });
   it("fails closed instead of falling back after a job target is released", async () => {
     const store = useGenerationStore();
     const { jobs } = store.submitBatch(request(), 1, halRoute);

@@ -49,9 +49,9 @@ import Testing
     #expect(media.generationReferenceError(capabilities: capable) != nil)
     media.reconcile(for: plain)
     #expect(media.generationReferences.isEmpty)
-    #expect(media.parked.generationReferences == [audio])
+    #expect(media.parked.generationReferences == [.canonical(audio)])
     media.reconcile(for: capable)
-    #expect(media.generationReferences == [audio])
+    #expect(media.generationReferences == [.canonical(audio)])
 }
 
 @Test func importedMp4UsesVideoProbeEvenWhenImageIOSuppliesAThumbnail() async throws {

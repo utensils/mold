@@ -347,6 +347,67 @@ impl MoldClient {
             .await?)
     }
 
+    pub(crate) async fn create_reference_normalization_session(
+        &self,
+        body: Vec<u8>,
+        fingerprint: &str,
+    ) -> Result<crate::video_normalization::CandidateSessionResponse> {
+        let response = self
+            .client
+            .post(format!(
+                "{}{}",
+                self.base_url,
+                crate::video_normalization::CANDIDATE_PATH
+            ))
+            .header(
+                crate::video_normalization::CANDIDATE_DIGEST_HEADER,
+                fingerprint,
+            )
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(response).await?.json().await?)
+    }
+
+    pub(crate) async fn upload_normalization_body(
+        &self,
+        handle: &str,
+        mime: &str,
+        length: u64,
+        body: reqwest::Body,
+    ) -> Result<crate::video_normalization::NormalizationUploadResponse> {
+        let response = self
+            .client
+            .put(format!("{}/api/generate/reference-upload", self.base_url))
+            .header(REFERENCE_UPLOAD_HANDLE_HEADER, handle)
+            .header(reqwest::header::CONTENT_TYPE, mime)
+            .header(reqwest::header::CONTENT_LENGTH, length)
+            .body(body)
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(response).await?.json().await?)
+    }
+
+    pub(crate) async fn finalize_reference_normalization(
+        &self,
+        handle: &str,
+        payload: &crate::video_normalization::NormalizationFinalizeRequest,
+    ) -> Result<crate::video_normalization::NormalizationFinalizeResponse> {
+        let response = self
+            .client
+            .post(format!(
+                "{}{}",
+                self.base_url,
+                crate::video_normalization::FINALIZE_PATH
+            ))
+            .header(REFERENCE_UPLOAD_SESSION_HEADER, handle)
+            .json(payload)
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(response).await?.json().await?)
+    }
+
     /// Best-effort cleanup for an unconsumed reference upload session.
     pub async fn cancel_reference_upload_session(&self, handle: &str) -> Result<()> {
         let response = self
@@ -2236,14 +2297,16 @@ impl MoldClient {
             .await?)
     }
 
-    /// Cancel a still-queued job (`DELETE /api/queue/{id}`).
-    ///
-    /// The server answers `204` on success, `404` for unknown ids, and `409`
-    /// when the job is already running on a GPU worker (running jobs are not
-    /// cancelable — there is no safe preemption point). Non-2xx responses
-    /// surface as errors carrying the response body text, so the 409 reason
-    /// reaches the caller verbatim.
+    /// Request cancellation; a running device is retained until its owner returns.
+    /// Compatibility wrapper for callers that already reconcile durable state.
     pub async fn cancel_queue_job(&self, id: &str) -> Result<()> {
+        self.request_queue_job_cancellation(id).await.map(|_| ())
+    }
+
+    pub async fn request_queue_job_cancellation(
+        &self,
+        id: &str,
+    ) -> Result<crate::stall::QueueCancellationDisposition> {
         let resp = self
             .client
             .delete(format!(
@@ -2253,8 +2316,25 @@ impl MoldClient {
             ))
             .send()
             .await?;
-        error_for_status_with_body(resp).await?;
-        Ok(())
+        let pending = resp.status() == reqwest::StatusCode::ACCEPTED;
+        let resp = error_for_status_with_body(resp).await?;
+        if pending {
+            #[derive(serde::Deserialize)]
+            struct Pending {
+                cancel_requested: bool,
+                device_still_held: bool,
+                #[serde(default)]
+                stall: Option<crate::stall::StallDiagnostic>,
+            }
+            let body: Pending = resp.json().await?;
+            anyhow::ensure!(
+                body.cancel_requested && body.device_still_held,
+                "invalid pending cancellation response"
+            );
+            Ok(crate::stall::QueueCancellationDisposition::Pending { stall: body.stall })
+        } else {
+            Ok(crate::stall::QueueCancellationDisposition::Cancelled)
+        }
     }
 
     /// Read ONE queued job with the planner's own work item for it
@@ -5266,6 +5346,26 @@ mod tests {
         let client = MoldClient::with_api_key(&server.uri(), "sekrit".to_string());
         let listing = client.list_queue_for_capacity(None).await.unwrap();
         assert!(listing.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancellation_acceptance_is_not_terminal_while_device_is_held() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::method("DELETE"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "cancel_requested":true,"device_still_held":true,"stall":null
+            })))
+            .mount(&server)
+            .await;
+        let client = MoldClient::new(&server.uri());
+        assert!(matches!(
+            client
+                .request_queue_job_cancellation("job-1")
+                .await
+                .unwrap(),
+            crate::stall::QueueCancellationDisposition::Pending { .. }
+        ));
     }
 
     #[tokio::test]

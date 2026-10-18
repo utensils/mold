@@ -15,6 +15,11 @@ enum QueueDetailPresentation {
         guard let current else {
             return Status(title: "No longer queued", message: "This job is no longer in the queue.", stepText: nil, fraction: nil)
         }
+        if current.state == .running || current.state == .cancelling,
+           let stall = progress.map({ $0.stall }) ?? current.stall {
+            return Status(title: "Stalled", message: stall.statusMessage + " " + stall.recoveryMessage,
+                          stepText: nil, fraction: nil)
+        }
         let title: String = switch current.state {
         case .queued: "Queued"
         case .running: "Rendering"
@@ -32,6 +37,12 @@ enum QueueDetailPresentation {
         }
         let stage = progress?.stage?.trimmingCharacters(in: .whitespacesAndNewlines)
         let message = stage.flatMap { $0.isEmpty ? nil : $0 } ?? "Getting ready…"
+        if let done = progress?.stageCurrent, let total = progress?.stageTotal,
+           total > 0, done >= 0 {
+            let completed = min(done, total)
+            return Status(title: title, message: message, stepText: "Completed \(completed) of \(total)",
+                          fraction: Double(completed) / Double(total))
+        }
         guard let step = progress?.step, let total = progress?.total, total > 0, step >= 0 else {
             return Status(title: title, message: message, stepText: nil, fraction: nil)
         }

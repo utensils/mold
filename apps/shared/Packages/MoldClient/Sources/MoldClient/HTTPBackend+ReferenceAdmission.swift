@@ -2,6 +2,9 @@ import Foundation
 
 extension HTTPBackend {
     func submitWithReferenceUploads(_ admission: BatchAdmission) async throws -> BatchStatus {
+        if admission.requests.contains(where: { $0.pendingReferenceInputs != nil }) {
+            return try await submitNormalizedAdmission(admission)
+        }
         // Drafts and persisted recovery records must carry original authority, never spent handles.
         guard !admission.requests.contains(where: { $0.references?.contains(where: { $0.media.authority == "upload" }) == true }) else {
             throw ReferenceUploadPolicy.refusal("REFERENCE_UPLOAD_REQUEST_INVALID", "Retry reference admission from the original media snapshot.")

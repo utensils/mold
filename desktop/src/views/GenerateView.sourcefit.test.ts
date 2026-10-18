@@ -627,6 +627,55 @@ describe("GenerateView source-fit submit path", () => {
     expect(form.imageAttachments).toEqual(["TARGET", "REFERENCE"]);
   });
 
+  it("reports unavailable video preparation and keeps the original draft instead of rejecting the UI action", async () => {
+    const ref2va = {
+      ...model,
+      name: "minimax-h3-ref2va:comfy-pruned-int8",
+      family: "minimax-h3",
+    } as ModelEntry;
+    apiJsonTo.mockResolvedValue([ref2va]);
+    useModelStore().all = [ref2va];
+    setupMultiHost();
+    const submit = vi.spyOn(useGenerationStore(), "submitBatch");
+    mount(GenerateView, { shallow: true, attachTo: document.body });
+    await flushPromises();
+    const form = useGenerateFormStore().form;
+    form.prompt = "a subject in a new shot";
+    form.model = ref2va.name;
+    form.family = ref2va.family;
+    const body = new Blob(["original MOV"], { type: "video/quicktime" });
+    form.h3Authoring = {
+      firstFrame: null,
+      lastFrame: null,
+      references: [
+        {
+          reference: {
+            kind: "fresh_video",
+            original: {
+              mime_type: "video/quicktime",
+              name: "original.mov",
+              byte_length: body.size,
+              sha256: "a".repeat(64),
+            },
+            body,
+          },
+        },
+      ],
+    };
+    useUiStore().generateTick++;
+    await flushPromises();
+    expect(useToastStore().items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "error",
+          message: "No eligible machine advertises fresh video-reference normalization.",
+        }),
+      ]),
+    );
+    expect(submit).not.toHaveBeenCalled();
+    expect(form.h3Authoring.references[0]?.reference).toMatchObject({ kind: "fresh_video", body });
+  });
+
   it("applies pending Ref2VA reference crops on the frozen draft before placement", async () => {
     const ref2va = {
       ...model,

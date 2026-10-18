@@ -37,6 +37,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{auth::ApiKeyAuthenticated, routes::ApiError, state::AppState};
 
+pub(crate) mod normalization;
+pub(crate) use normalization::{create_normalization_session, finalize_normalization_session};
+
 pub const UPLOAD_HANDLE_HEADER: &str = "x-mold-reference-upload";
 pub const SESSION_HANDLE_HEADER: &str = "x-mold-reference-upload-session";
 pub const MAX_REFERENCE_UPLOAD_FILE_BYTES: u64 = 256 * 1024 * 1024;
@@ -55,6 +58,7 @@ pub const REFERENCE_UPLOAD_SESSION_TTL: Duration = Duration::from_secs(30 * 60);
 pub struct ReferenceUploadStore {
     inner: Arc<tokio::sync::Mutex<StoreInner>>,
     writers: Arc<tokio::sync::Semaphore>,
+    converters: Arc<tokio::sync::Semaphore>,
     root: Arc<PathBuf>,
     _lifetime: Arc<StoreLifetime>,
     resolved_bytes: Arc<AtomicU64>,
@@ -116,6 +120,9 @@ struct UploadSession {
     slots: HashMap<String, UploadSlot>,
     reserved_bytes: u64,
     consuming: bool,
+    normalization: Option<normalization::NormalizationSession>,
+    /// Active conversion charges live in resolved_bytes until child reaping.
+    active_bytes: u64,
 }
 
 struct UploadSlot {
@@ -751,6 +758,7 @@ impl ReferenceUploadStore {
             writers: Arc::new(tokio::sync::Semaphore::new(
                 MAX_CONCURRENT_REFERENCE_UPLOADS,
             )),
+            converters: Arc::new(tokio::sync::Semaphore::new(2)),
             root: Arc::new(root.clone()),
             _lifetime: Arc::new(StoreLifetime {
                 claim: std::sync::OnceLock::new(),
@@ -981,6 +989,8 @@ impl ReferenceUploadStore {
                 slots,
                 reserved_bytes: 0,
                 consuming: false,
+                normalization: None,
+                active_bytes: 0,
             },
         );
         Ok(ReferenceUploadSessionResponse {
@@ -1027,7 +1037,10 @@ impl ReferenceUploadStore {
                     .sessions
                     .get_mut(&session_digest)
                     .ok_or_else(unknown_upload)?;
-                if session.identity != identity || session.consuming {
+                if session.identity != identity
+                    || session.consuming
+                    || session.normalization.is_some()
+                {
                     return Err(unknown_upload());
                 }
                 if session.reserved_bytes.saturating_add(content_length)
@@ -1270,7 +1283,15 @@ impl ReferenceUploadStore {
             }
             session_digest.get_or_insert(candidate.clone());
             let session = inner.sessions.get(&candidate).ok_or_else(unknown_upload)?;
-            if session.identity != identity || session.scope_sha256 != scope || session.consuming {
+            if session.identity != identity
+                || session.scope_sha256 != scope
+                || session.consuming
+                || session
+                    .normalization
+                    .as_ref()
+                    .is_some_and(|value| !value.finalized)
+                || session.active_bytes != 0
+            {
                 return Err(unknown_upload());
             }
             let slot = session
@@ -1573,7 +1594,9 @@ fn remove_session_locked(inner: &mut StoreInner, digest: &str) -> Option<PathBuf
     for upload_digest in session.slots.keys() {
         inner.upload_sessions.remove(upload_digest);
     }
-    inner.reserved_bytes = inner.reserved_bytes.saturating_sub(session.reserved_bytes);
+    inner.reserved_bytes = inner
+        .reserved_bytes
+        .saturating_sub(session.reserved_bytes.saturating_sub(session.active_bytes));
     Some(session.dir)
 }
 
@@ -2532,6 +2555,15 @@ pub(crate) async fn create_reference_upload_session(
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(response)))
 }
 
+/// Typed untagged union preserves the existing V2 struct's exact JSON
+/// serialization while documenting the negotiated V1 receipt alternative.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+#[serde(untagged)]
+pub(crate) enum ReferenceUploadResponseBody {
+    Canonical(ReferenceUploadCompleteResponse),
+    Normalized(mold_core::video_normalization::NormalizationUploadResponse),
+}
+
 #[utoipa::path(
     put,
     path = "/api/generate/reference-upload",
@@ -2542,7 +2574,7 @@ pub(crate) async fn create_reference_upload_session(
         ("Content-Type" = String, Header, description = "Declared media type, verified by content probe"),
     ),
     responses(
-        (status = 200, description = "Content-sniffed canonical metadata and rebound request scope", body = ReferenceUploadCompleteResponse),
+        (status = 200, description = "Canonical V2 completion or explicitly negotiated normalization receipt", body = ReferenceUploadResponseBody),
         (status = 401, description = "Explicit API-key authentication is required"),
         (status = 404, description = "Unknown, expired, or unauthorized upload handle"),
         (status = 413, description = "Upload exceeds a file, session, or host quota"),
@@ -2578,6 +2610,27 @@ pub(crate) async fn upload_reference(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
             )
         })?;
+    if state
+        .reference_uploads
+        .is_normalization_upload(handle)
+        .await
+    {
+        let response = state
+            .reference_uploads
+            .upload_normalized(
+                &identity,
+                &state.instance_id,
+                handle,
+                content_type,
+                content_length,
+                body,
+            )
+            .await?;
+        return Ok((
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(ReferenceUploadResponseBody::Normalized(response)),
+        ));
+    }
     let response = state
         .reference_uploads
         .upload(
@@ -2589,7 +2642,10 @@ pub(crate) async fn upload_reference(
             body,
         )
         .await?;
-    Ok(([(header::CACHE_CONTROL, "no-store")], Json(response)))
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(ReferenceUploadResponseBody::Canonical(response)),
+    ))
 }
 
 #[utoipa::path(

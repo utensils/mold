@@ -108,6 +108,9 @@ public struct BatchResult: Codable, Hashable, Sendable {
 
 /// A running job's live progress, polled from `GET /api/queue/{id}/preview`.
 public struct JobProgress: Codable, Hashable, Sendable {
+    public var stall: StallDiagnostic? = nil
+    public var stageCurrent: Int? = nil
+    public var stageTotal: Int? = nil
     public let step: Int?
     public let total: Int?
     public let stage: String?

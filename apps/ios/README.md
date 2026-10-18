@@ -408,7 +408,7 @@ that print's Info, and permanent deletion releases its ownership. Hidden
 collections remain excluded from general source browsing. Older servers retain
 per-print browsing; individual keyframe reuse requires the content endpoint.
 
-Library connection status is always available in the toolbar. Offline and reconnecting updates change its icon and details without moving the gallery. Qualified models advertising duration prediction offer Automatic from prompt or an explicit clip length; the authored choice survives draft restoration and settings reuse, and parks on unsupported destinations.
+Library connection status is always available in the toolbar. Offline and reconnecting updates change its icon and details without moving the gallery. Length choices use the selected frame rate and duration-aware frame bounds, keep a valid custom selection, and never offer a zero-second item. Changing rate or recipe clamps the authored frame count before display; LTX keeps its 20-second admission ceiling. Qualified models advertising duration prediction offer Automatic from prompt or an explicit clip length; the authored choice survives draft restoration and settings reuse, and parks on unsupported destinations.
 
 The Queue navigation badge reads every server page and totals unfinished jobs across all machines: rendering, queued, paused, held, and cancelling jobs. Finished, failed, and cancelled history is excluded; batches contribute their individual unfinished children, with runtime and durable copies counted once per machine.
 
@@ -471,3 +471,18 @@ Print menus offer explicit first/last frame reuse for supported recipes. LTX int
 keeps interior anchors and carries an existing first-frame source into keyframe 0 when a last
 frame is added. Before an older machine supplies a recipe, **Use as source image** remains
 available; an explicit unsupported recipe still controls which actions are offered.
+
+
+Fresh MiniMax H3 typed video references can also use MOV/HEVC, M4V, WebM and Matroska when the keyed host advertises video normalization. The file picker preserves the bounded original bytes; **Preparing video on <machine>** probes or converts them on that machine before pricing and admission. Auto chooses an eligible connected host; an explicit machine choice stays fixed. Exact canonical facts and receipts must finalize before generating. Changing the host route, key, pairing or server instance cancels preparation and releases its session. Drafts keep original files, never spent upload handles. Older/keyless hosts retain the existing H.264 MP4 path and explain unsupported files. This does not add normalization for scalar source/continuation-video inputs or archived replay.
+
+Video playback holds the last real presentation frame when it ends or is scrubbed to the full end. Play restarts at zero, and Repeat still loops. Audio may finish after the final video sample; its legitimate tail is preserved. Encrypted clips use AVFoundation’s native preroll to become ready without starting playback or waiting for an arbitrary buffer length. Item changes, dismissal and inactivity fence pending seeks so an old clip cannot restart the next one.
+
+The Queue continues polling running and cancelling jobs and shows the host's
+observational stall diagnostic with its stage, elapsed gap, cancellation intent
+and device ownership. Job Details includes copyable diagnostics and operator
+recovery guidance. Stalled work suppresses stale ETA, completion fractions and
+step announcements; real decode counters describe completed blocks or chunks
+within their current phase, rather than completed video frames. A successful
+202 cancellation response means the request is pending while the device remains
+held. The app follows authoritative queue/preview snapshots until real worker
+return, and a null diagnostic clears the stalled presentation when work resumes.

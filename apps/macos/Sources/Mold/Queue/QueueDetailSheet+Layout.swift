@@ -21,9 +21,19 @@ extension QueueDetailSheet {
             QueueSourceThumbnail(entry: entry, host: activeHost, size: 120, detailed: true)
             VStack(alignment: .leading, spacing: 8) {
                 Text(status.title).font(.headline)
+                if current?.stall == nil, progress?.stall == nil,
+                   let current, let override = queue.statusOverride(current, on: host.id) {
+                    Text(override).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if let message = status.message {
                     Text(message).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+                if let stall = progress.map({ $0.stall }) ?? current?.stall {
+                    Text("Last completed work: \(stall.lastCompletedWorkUnixMs) ms since Unix epoch")
+                        .font(.caption).textSelection(.enabled)
+                    CopyButton(what: "Stall Diagnostics", value: stall.copyText(machine: activeHost.name, job: entry.id))
                 }
                 if let recovery = downloads.queueDownloads.state(host: host.id, job: entry.id) {
                     Text(recovery.message).foregroundStyle(.secondary)
@@ -33,7 +43,7 @@ extension QueueDetailSheet {
                 if let fraction = status.fraction {
                     ProgressView(value: fraction)
                         .accessibilityLabel("Render progress")
-                } else if current?.state == .running {
+                } else if current?.state == .running, status.title != "Stalled" {
                     ProgressView().controlSize(.small)
                         .accessibilityLabel("Preparing the render")
                 }

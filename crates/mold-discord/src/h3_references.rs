@@ -28,8 +28,15 @@ const MAX_REFERENCE_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_REFERENCE_TOTAL_BYTES: usize = 47 * 1024 * 1024;
 
 pub(crate) struct PreparedReferences {
-    pub descriptors: Vec<GenerationReference>,
+    descriptors: Vec<GenerationReference>,
+    candidates: Option<Vec<mold_core::video_normalization::ReferenceCandidate>>,
     uploads: Vec<ReferenceUpload>,
+}
+
+impl PreparedReferences {
+    pub(crate) fn canonical_descriptors(&self) -> Option<Vec<GenerationReference>> {
+        self.candidates.is_none().then(|| self.descriptors.clone())
+    }
 }
 
 impl std::fmt::Debug for PreparedReferences {
@@ -97,6 +104,19 @@ pub(crate) async fn prepare_attachments(
         "combined original reference downloads must stay under 128 MiB"
     );
 
+    let normalize = if attachments.iter().any(|attachment| {
+        mold_core::reference_upload::video_mime_hint(&attachment.filename).is_some()
+    }) {
+        match client.server_capabilities().await {
+            Ok(capabilities) => mold_core::reference_upload::supports_video_normalization(
+                &capabilities.reference_uploads,
+            ),
+            Err(error) if mold_core::client::is_missing_endpoint_error(&error) => false,
+            Err(error) => return Err(error),
+        }
+    } else {
+        false
+    };
     let mut bodies = Vec::with_capacity(attachments.len());
     for (index, attachment) in attachments.iter().enumerate() {
         let bytes = attachment
@@ -108,19 +128,28 @@ pub(crate) async fn prepare_attachments(
     }
     tokio::task::spawn_blocking(move || {
         let (names, data): (Vec<_>, Vec<_>) = bodies.into_iter().unzip();
-        prepare_named_bytes(
+        prepare_named_bytes_with_normalization(
             names
                 .iter()
                 .zip(data)
                 .map(|(name, bytes)| (name.as_str(), bytes)),
+            normalize,
         )
     })
     .await
     .context("reference preparation task failed")?
 }
 
+#[cfg(test)]
 fn prepare_named_bytes<'a>(
     bodies: impl IntoIterator<Item = (&'a str, Vec<u8>)>,
+) -> Result<PreparedReferences> {
+    prepare_named_bytes_with_normalization(bodies, false)
+}
+
+fn prepare_named_bytes_with_normalization<'a>(
+    bodies: impl IntoIterator<Item = (&'a str, Vec<u8>)>,
+    normalize: bool,
 ) -> Result<PreparedReferences> {
     let bodies = bodies.into_iter().collect::<Vec<_>>();
     anyhow::ensure!(
@@ -162,6 +191,8 @@ fn prepare_named_bytes<'a>(
         "combined reference attachments must stay under 47 MiB"
     );
 
+    let mut candidates = Vec::with_capacity(bodies.len());
+    let mut pending = false;
     let mut descriptors = Vec::with_capacity(bodies.len());
     let mut uploads = Vec::with_capacity(bodies.len());
     for (index, (name, bytes)) in bodies.into_iter().enumerate() {
@@ -173,8 +204,37 @@ fn prepare_named_bytes<'a>(
             sha256: Some(format!("{:x}", Sha256::digest(&bytes))),
             crop: None,
         };
-        let descriptor = probe_reference(&bytes, provenance)
-            .with_context(|| format!("reference {} media probe failed", index + 1))?;
+        if normalize
+            && mold_core::validation::sniff_image_input_format(&bytes).is_none()
+            && !(bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WAVE"))
+        {
+            if let Some(mime) = mold_core::reference_upload::video_mime_hint(&name) {
+                pending = true;
+                candidates.push(
+                    mold_core::video_normalization::ReferenceCandidate::FreshVideo {
+                        index: index as u32 + 1,
+                        kind: mold_core::GenerationReferenceKind::Video,
+                        original: mold_core::video_normalization::OriginalVideo {
+                            name: provenance.name.clone(),
+                            sha256: provenance
+                                .sha256
+                                .clone()
+                                .context("original digest missing")?,
+                            mime_type: mime.into(),
+                            byte_length: bytes.len() as u64,
+                        },
+                    },
+                );
+                uploads.push(ReferenceUpload { bytes });
+                continue;
+            }
+        }
+        let descriptor = probe_reference(&bytes, provenance).map_err(|error| {
+            // Discord displays the outer message, so retain the parser cause
+            // there as well as in the error chain on hosts without conversion.
+            let message = format!("reference {} media probe failed: {error:#}", index + 1);
+            error.context(message)
+        })?;
         if matches!(descriptor, GenerationReference::Image { .. }) {
             anyhow::ensure!(
                 bytes.len() <= MAX_REFERENCE_IMAGE_BYTES,
@@ -182,12 +242,23 @@ fn prepare_named_bytes<'a>(
                 index + 1
             );
         }
+        candidates.push(
+            mold_core::video_normalization::ReferenceCandidate::Canonical {
+                index: index as u32 + 1,
+                upload: true,
+                reference: descriptor.clone(),
+                byte_length: Some(bytes.len() as u64),
+            },
+        );
         uploads.push(ReferenceUpload { bytes });
         descriptors.push(descriptor);
     }
-    minimax_h3::validate_reference_descriptors(&descriptors).map_err(anyhow::Error::new)?;
+    if !pending {
+        minimax_h3::validate_reference_descriptors(&descriptors).map_err(anyhow::Error::new)?;
+    }
     Ok(PreparedReferences {
         descriptors,
+        candidates: pending.then_some(candidates),
         uploads,
     })
 }
@@ -197,6 +268,18 @@ pub(crate) async fn bind_remote_references(
     request: &mut GenerateRequest,
     prepared: PreparedReferences,
 ) -> Result<ReferenceUploadLease> {
+    if let Some(candidates) = prepared.candidates {
+        let sources = prepared
+            .uploads
+            .into_iter()
+            .map(|upload| ReferenceUploadSource::bytes(upload.bytes))
+            .collect::<Result<Vec<_>>>()?;
+        let lease = client
+            .bind_reference_candidates_v1(request, candidates, sources)
+            .await?;
+        *request = lease.request().clone();
+        return Ok(lease);
+    }
     anyhow::ensure!(
         prepared.descriptors.len() == prepared.uploads.len(),
         "reference descriptor/body count mismatch"
@@ -559,6 +642,41 @@ mod tests {
         bytes.extend_from_slice(&data_len.to_le_bytes());
         bytes.resize(44 + data_len as usize, 0);
         bytes
+    }
+
+    #[test]
+    fn negotiated_video_candidates_keep_original_bytes_out_of_canonical_descriptors() {
+        let bytes = b"original WebM bytes".to_vec();
+        assert!(prepare_named_bytes([("reference.webm", bytes.clone())]).is_err());
+        let prepared =
+            prepare_named_bytes_with_normalization([("reference.webm", bytes.clone())], true)
+                .unwrap();
+        assert!(prepared.canonical_descriptors().is_none());
+        assert!(prepared.descriptors.is_empty());
+        assert_eq!(prepared.uploads[0].bytes, bytes);
+        let Some(mold_core::video_normalization::ReferenceCandidate::FreshVideo {
+            original, ..
+        }) = prepared
+            .candidates
+            .as_ref()
+            .and_then(|candidates| candidates.first())
+        else {
+            panic!("missing fresh candidate")
+        };
+        assert_eq!(original.mime_type, "video/webm");
+        assert_eq!(original.sha256, format!("{:x}", Sha256::digest(&bytes)));
+    }
+
+    #[test]
+    fn old_host_video_refusal_preserves_the_actual_parser_reason_for_discord_display() {
+        let error =
+            prepare_named_bytes([("reference.webm", b"original WebM bytes".to_vec())]).unwrap_err();
+        let parser_reason = error.chain().last().unwrap().to_string();
+        assert!(
+            error.to_string().contains(&parser_reason),
+            "Discord displays the top-level preparation error: {error}"
+        );
+        assert!(error.to_string().contains("H.264 MP4"));
     }
 
     #[test]

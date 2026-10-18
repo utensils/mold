@@ -392,5 +392,11 @@ pub async fn put_config_profile(
     let db = settings_db(&state)?;
     mold_db::settings::set_active_profile(db, name)
         .map_err(|e| ApiError::internal(format!("failed to switch profile: {e:#}")))?;
+    // Queue preferences are DB-owned and hot. Reset their defaults before
+    // hydrating the newly effective profile; bootstrap namespaces stay put.
+    let mut queue = mold_core::config::QueueSettings::default();
+    mold_db::config_sync::hydrate_queue_from_db(db, &mut queue)
+        .map_err(|e| ApiError::internal(format!("failed to load queue preferences: {e:#}")))?;
+    state.config.write().await.queue = queue;
     Ok(Json(profiles_snapshot(db)?))
 }

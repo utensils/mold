@@ -19,7 +19,7 @@ struct LibraryAttachmentTests {
         var media = DraftMedia()
         #expect(LibraryAttachmentOffer.resolve(recipe: recipe, model: model, media: media).canAddReference)
         media.generationReferences = (0..<9).map { _ in
-            GenerationReference(kind: "image", media: .init(authority: "inline", data: "AA=="), mimeType: "image/png")
+            AuthoringReference(kind: "image", media: .init(authority: "inline", data: "AA=="), mimeType: "image/png")
         }
         #expect(!LibraryAttachmentOffer.resolve(recipe: recipe, model: model, media: media).canAddReference)
     }

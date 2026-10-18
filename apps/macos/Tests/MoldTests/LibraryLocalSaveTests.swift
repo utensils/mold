@@ -425,7 +425,7 @@ struct LibraryLocalSaveTests {
         #expect(authority.members.map(\.memberId) == (0..<4).map { "destination-\($0)" })
         target.retainedSession = try MoldJSON.decoder.decode(RetainedSourceMedia.ReuseSession.self, from: Data(#"{"instance_id":"destination","expires_at":100,"request_sha256":"digest","session_handle":"fixture-session"}"#.utf8))
         var request = GenerateRequest(prompt: "changed", model: "minimax-h3-ref2va:fixture", width: 32, height: 32, steps: 4, guidance: 0)
-        request.references = draft.media.generationReferences
+        request.references = try #require(draft.media.generationReferences.canonicalReferences)
         let admission = try await RetainedSourceMedia.hydrated(.init(requests: [request]), filename: authority.filename,
             members: authority.members, sameHost: true, origin: target, target: target)
         #expect(admission.retainedMediaSession == "fixture-session")
