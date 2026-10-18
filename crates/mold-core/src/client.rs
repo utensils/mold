@@ -2574,6 +2574,63 @@ impl MoldClient {
         Ok(resp.bytes().await?.to_vec())
     }
 
+    /// Stream one saved print's original bytes
+    /// (`GET /api/gallery/image/:filename`, `?view=trash` for a trashed one)
+    /// into `sink` without holding the file in memory, over whichever
+    /// transport the host uses (Secure Noise responses stream like plain
+    /// HTTP ones). `progress` sees the bytes written so far and the length
+    /// the host announced, if any. Returns the bytes written; a body shorter
+    /// than its announced length is an error.
+    pub async fn download_gallery_image<W>(
+        &self,
+        filename: &str,
+        trash: bool,
+        sink: &mut W,
+        mut progress: impl FnMut(u64, Option<u64>),
+    ) -> Result<u64>
+    where
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        use tokio::io::AsyncWriteExt;
+        let mut request = self.client.get(format!(
+            "{}/api/gallery/image/{}",
+            self.base_url,
+            encode_path_segment(filename)
+        ));
+        if trash {
+            request = request.query(&[("view", "trash")]);
+        }
+        let resp = request.send().await.with_context(|| {
+            format!("requesting saved print '{filename}' from {}", self.base_url)
+        })?;
+        let mut resp = error_for_status_with_body(resp)
+            .await
+            .with_context(|| format!("downloading '{filename}' from {}", self.base_url))?;
+        let length = resp
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok()?.parse::<u64>().ok());
+        let mut written = 0u64;
+        progress(0, length);
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .with_context(|| format!("downloading '{filename}' from {}", self.base_url))?
+        {
+            sink.write_all(&chunk).await?;
+            written += chunk.len() as u64;
+            progress(written, length);
+        }
+        sink.flush().await?;
+        if let Some(expected) = length {
+            anyhow::ensure!(
+                written == expected,
+                "'{filename}' ended after {written} of {expected} bytes"
+            );
+        }
+        Ok(written)
+    }
+
     /// Delete a gallery image on the server.
     pub async fn delete_gallery_image(&self, filename: &str) -> Result<()> {
         self.client
@@ -4152,6 +4209,81 @@ mod tests {
         unsafe { std::env::set_var("MOLD_HOST", unique_url) };
         let client = MoldClient::from_env();
         assert_eq!(client.host(), unique_url);
+    }
+
+    /// A saved print streams to the sink chunk by chunk with its length when
+    /// the host sends one, and the trash view is asked for with `?view=trash`.
+    #[tokio::test]
+    async fn a_gallery_download_streams_into_the_sink() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let body: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/image/clip%20one.mp4"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/image/gone.png"))
+            .and(query_param("view", "trash"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"trashed".to_vec()))
+            .mount(&server)
+            .await;
+        let client = MoldClient::new(&server.uri());
+        let mut sink = Vec::new();
+        let mut seen = Vec::new();
+        let written = client
+            .download_gallery_image("clip one.mp4", false, &mut sink, |done, total| {
+                seen.push((done, total))
+            })
+            .await
+            .unwrap();
+        assert_eq!(written, body.len() as u64);
+        assert_eq!(sink, body);
+        assert_eq!(
+            seen.last(),
+            Some(&(body.len() as u64, Some(body.len() as u64)))
+        );
+        let mut trashed = Vec::new();
+        client
+            .download_gallery_image("gone.png", true, &mut trashed, |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(trashed, b"trashed");
+        let error = client
+            .download_gallery_image("missing.png", false, &mut Vec::new(), |_, _| {})
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("missing.png"), "{error:#}");
+    }
+
+    /// Without a Content-Length (a chunked response) the length is unknown
+    /// and the whole body still arrives.
+    #[tokio::test]
+    async fn a_gallery_download_streams_a_chunked_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 4096];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let mut sink = Vec::new();
+        let mut totals = Vec::new();
+        MoldClient::new(&origin)
+            .download_gallery_image("a.png", false, &mut sink, |_, total| totals.push(total))
+            .await
+            .unwrap();
+        assert_eq!(sink, b"hello world");
+        assert!(totals.iter().all(Option::is_none));
     }
 
     /// A saved Regular credential always wins over `MOLD_API_KEY`: the env
