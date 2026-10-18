@@ -2429,8 +2429,10 @@ Examples:
   mold pull flux-schnell:q8
   mold pull sdxl-turbo:fp16
 
-If MOLD_HOST is reachable, the download happens on that server.
-If no server is reachable, mold pulls locally.
+The download happens on the server --host/MOLD_HOST names (default:
+localhost). If that is this machine and nothing answers, mold pulls locally;
+a remote that does not answer is an error. --local always pulls here, and
+hf:/cv: catalog recipes always download on this machine.
 
 For gated or private Hugging Face repos, export HF_TOKEN=hf_... before pulling.
 When using a remote server, HF_TOKEN must be set in the server process
@@ -2452,6 +2454,10 @@ Run 'mold list' to see all available models.")]
         /// the flag for a bundle covered by more than one agreement.
         #[arg(long, value_name = "ID", action = clap::ArgAction::Append)]
         accept_license: Vec<String>,
+
+        /// Download on this machine without asking any server
+        #[arg(long)]
+        local: bool,
     },
 
     /// Create and register a local quantized Hunyuan3D shape model
@@ -2724,7 +2730,7 @@ Set up once:
   export RUNPOD_API_KEY=<key>                       Or use env var
   mold runpod doctor                                Verify auth
 
-Generate on a paired pod selected by MOLD_HOST:
+Generate on a paired pod selected by --host or MOLD_HOST:
   mold runpod run \"a cat on a skateboard\"           Uses paired host → generates → saves
   mold runpod run \"a sunset\" --keep                Leave pod up for reuse
 
@@ -3095,6 +3101,22 @@ fn apply_spatial_tile_override(value: Option<&str>) {
     unsafe { std::env::set_var("MOLD_LTX2_SPATIAL_TILE", value) };
 }
 
+/// After re-pairing a server that was saved under another origin, delete the
+/// old entry (its name and default already moved to the new one).
+fn retire_superseded(
+    superseded: Option<mold_secure_client::hosts::SavedHost>,
+    origin: &str,
+) -> anyhow::Result<()> {
+    if let Some(old) = superseded {
+        mold_secure_client::hosts::retire(&old, origin)?;
+        eprintln!(
+            "Replaced the earlier pairing of '{}' at {}.",
+            old.name, old.origin
+        );
+    }
+    Ok(())
+}
+
 /// Report a newly saved pairing by the name `--host` now accepts.
 fn print_saved_host(what: &str, origin: &str, name: &Option<String>) {
     match name {
@@ -3115,6 +3137,9 @@ fn host_given_on_command_line(matches: &clap::ArgMatches) -> bool {
 /// machine, or `None` when the command talks to the host `--host` names.
 fn local_only_command(command: &Commands) -> Option<&'static str> {
     Some(match command {
+        // `--local` skips the server, so a host would be silently ignored.
+        Commands::Run { local: true, .. } => "run --local",
+        Commands::Pull { local: true, .. } => "pull --local",
         Commands::Run { .. }
         | Commands::Mcp
         | Commands::Jobs { .. }
@@ -3138,6 +3163,11 @@ fn local_only_command(command: &Commands) -> Option<&'static str> {
         } => return None,
         #[cfg(feature = "discord")]
         Commands::Discord => return None,
+        // `runpod run` reuses the paired pod `--host` names; every other
+        // runpod verb manages pods through the provider API.
+        Commands::Runpod {
+            action: RunpodAction::Run { .. },
+        } => return None,
         Commands::Server { action } => match action {
             ServerAction::Start { .. } => "server start",
             ServerAction::Stop => "server stop",
@@ -3174,11 +3204,18 @@ fn local_only_command(command: &Commands) -> Option<&'static str> {
 /// `MOLD_HOST` from the environment stays ignored there, as it always was.
 fn reject_misplaced_host(command: &Commands, typed: bool) -> anyhow::Result<()> {
     match local_only_command(command) {
-        Some(name) if typed => {
-            anyhow::bail!("--host does not apply to `mold {name}`: it runs on this machine only")
-        }
-        _ => Ok(()),
+        Some(name) => refuse_typed_host(name, typed),
+        None => Ok(()),
     }
+}
+
+/// The one refusal for a typed `--host` that would be ignored.
+fn refuse_typed_host(name: &str, typed: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !typed,
+        "--host does not apply to `mold {name}`: it runs on this machine only"
+    );
+    Ok(())
 }
 
 fn main() {
@@ -3348,7 +3385,8 @@ async fn run(
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
     let matches = Cli::command().get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
-    reject_misplaced_host(&cli.command, host_given_on_command_line(&matches))?;
+    let host_typed = host_given_on_command_line(&matches);
+    reject_misplaced_host(&cli.command, host_typed)?;
     anyhow::ensure!(
         bootstrap.is_none() || matches!(&cli.command, Commands::Serve { .. }),
         "secure bootstrap is accepted only by mold serve"
@@ -3887,6 +3925,7 @@ async fn run(
             model,
             skip_verify,
             accept_license,
+            local,
         } => {
             // Passed through rather than recorded here: `pull::run` decides
             // whether the pull lands locally or on `MOLD_HOST`, and the
@@ -3897,14 +3936,17 @@ async fn run(
             if model.starts_with("hf:") || model.starts_with("cv:") {
                 match resolve_catalog_id(&model).await? {
                     CatalogIdResolution::Manifest(name) => {
-                        commands::pull::run(&name, &opts, &accept_licenses, host.as_deref()).await?
+                        commands::pull::run(&name, &opts, &accept_licenses, host.as_deref(), local)
+                            .await?
                     }
                     CatalogIdResolution::Recipe(entry) => {
+                        refuse_typed_host("pull <catalog recipe>", host_typed)?;
                         commands::pull::run_recipe(*entry, &opts).await?
                     }
                 }
             } else {
-                commands::pull::run(&model, &opts, &accept_licenses, host.as_deref()).await?;
+                commands::pull::run(&model, &opts, &accept_licenses, host.as_deref(), local)
+                    .await?;
             }
         }
         Commands::Quantize {
@@ -4142,6 +4184,7 @@ async fn run(
                     create,
                     wait_ready_timeout_secs: wait_timeout,
                     no_save,
+                    host,
                 };
                 commands::runpod::run_run(opts).await?
             }
@@ -4208,11 +4251,15 @@ async fn run(
                     "invitation mode does not match --mode"
                 );
                 let mut host = mold_secure_client::pair_regular(value, &name).await?;
-                host.name = Some(mold_secure_client::hosts::available_name(
+                let (saved_name, superseded) = mold_secure_client::hosts::name_for_pairing(
                     host.name.as_deref().unwrap_or_default(),
                     &host.origin,
-                )?);
+                    host.instance_id.as_deref(),
+                    mold_secure_client::ConnectionMode::Regular,
+                )?;
+                host.name = Some(saved_name);
                 mold_secure_client::save_regular_host(&host)?;
+                retire_superseded(superseded, &host.origin)?;
                 print_saved_host("Paired in Regular mode with", &host.origin, &host.name);
                 return Ok(());
             }
@@ -4222,11 +4269,15 @@ async fn run(
             );
             let invite = serde_json::from_value(value)?;
             let mut host = mold_secure_client::pair(invite, &name).await?;
-            host.name = Some(mold_secure_client::hosts::available_name(
+            let (saved_name, superseded) = mold_secure_client::hosts::name_for_pairing(
                 host.name.as_deref().unwrap_or_default(),
                 &host.origin,
-            )?);
+                host.instance_id.as_deref(),
+                mold_secure_client::ConnectionMode::Secure,
+            )?;
+            host.name = Some(saved_name);
             mold_secure_client::save_pairing(&host)?;
+            retire_superseded(superseded, &host.origin)?;
             mold_secure_client::select_connection_mode(
                 &host.origin,
                 mold_secure_client::ConnectionMode::Secure,
@@ -4784,6 +4835,7 @@ mod tests {
             &["upscale", "a.png", "--host", "workstation"],
             &["video-upscale", "list", "--host", "workstation"],
             &["video-upscale", "status", "job-1", "--host", "workstation"],
+            &["runpod", "run", "a cat", "--host", "workstation"],
             #[cfg(feature = "discord")]
             &["discord", "--host", "workstation"],
         ] {
@@ -4796,9 +4848,26 @@ mod tests {
             );
         }
         // Absent is absent: the client then reads MOLD_HOST / the default host.
-        if std::env::var_os("MOLD_HOST").is_none() {
-            assert_eq!(parse(&["mesh-workflow", "list"]).host, None);
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("MOLD_HOST");
+        std::env::remove_var("MOLD_HOST");
+        let absent = parse(&["mesh-workflow", "list"]).host;
+        if let Some(value) = previous {
+            std::env::set_var("MOLD_HOST", value);
         }
+        assert_eq!(absent, None);
+    }
+
+    #[test]
+    fn a_recipe_pull_refuses_a_typed_host() {
+        let error = refuse_typed_host("pull <catalog recipe>", true).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "--host does not apply to `mold pull <catalog recipe>`: it runs on this machine only"
+        );
+        assert!(refuse_typed_host("pull <catalog recipe>", false).is_ok());
     }
 
     /// A command that only ever runs here refuses a typed `--host` rather
@@ -4832,6 +4901,14 @@ mod tests {
             &["host", "list", "--host", "workstation"],
             &["pair", "--invite-file", "i.json", "--host", "workstation"],
             &["runpod", "list", "--host", "workstation"],
+            &["run", "a cat", "--local", "--host", "workstation"],
+            &[
+                "pull",
+                "flux-schnell:q8",
+                "--local",
+                "--host",
+                "workstation",
+            ],
             &["lambda", "status", "--host", "workstation"],
         ] {
             let Ok((cli, typed)) = try_parse_with_source(args) else {

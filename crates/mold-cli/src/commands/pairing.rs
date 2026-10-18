@@ -185,6 +185,8 @@ mod tests {
         assert_eq!(output["base_url"], response["base_url"]);
         assert_eq!(output["pairing_token"], response["pairing_token"]);
         assert_eq!(output["mode"], response["mode"]);
+        assert_eq!(output["instance_id"], "host-instance");
+        assert_eq!(output["name"], "Host");
         assert!(output.get("auth_required").is_none());
     }
     #[test]
@@ -203,8 +205,11 @@ mod tests {
     }
     #[test]
     fn owner_export_uses_shared_qr_contract_and_never_private_engine_origin() {
-        let value = serde_json::json!({"protocol":3,"hostname":"host","endpoints":[{"kind":"lan","url":"http://192.168.1.5:4321"},{"kind":"relay","url":"https://host.example"}],"websocket_url":"wss://relay.example"});
+        let value = serde_json::json!({"protocol":3,"hostname":"host","instance_id":"inst-1","endpoints":[{"kind":"lan","url":"http://192.168.1.5:4321"},{"kind":"relay","url":"https://host.example"}],"websocket_url":"wss://relay.example"});
         let output = invitation_payload(value, None).unwrap();
+        // The client names the pairing and recognises a re-pair from these.
+        assert_eq!(output["hostname"], "host");
+        assert_eq!(output["instance_id"], "inst-1");
         assert_eq!(output["version"], 2);
         assert!(output.get("protocol").is_none());
         assert_eq!(output["type"], "mold.mobile-pairing");

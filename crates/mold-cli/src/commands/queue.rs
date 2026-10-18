@@ -45,6 +45,10 @@ pub async fn run(action: QueueAction, host: Option<&str>) -> Result<()> {
         } => {
             // A saved host name works here too; its paired credentials, not
             // this shell's MOLD_API_KEY, authorize the destination.
+            anyhow::ensure!(
+                !to.trim().is_empty(),
+                "--to needs a destination host: a saved host name or URL"
+            );
             let to = crate::control::resolve_target(Some(&to))?;
             let destination = match destination_api_key {
                 Some(key) => MoldClient::with_api_key(&to, key),

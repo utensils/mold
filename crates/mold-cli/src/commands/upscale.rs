@@ -132,6 +132,7 @@ async fn upscale_local(
             &mold_core::download::PullOptions::default(),
             &[],
             None,
+            false,
         )
         .await?;
         // Reload config after pull

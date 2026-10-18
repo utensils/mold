@@ -2909,3 +2909,15 @@ async fn a_saved_host_name_targets_its_paired_origin() {
         .success()
         .stdout(predicate::str::contains("No saved hosts"));
 }
+
+/// `queue send --to` with nothing in it is refused before anything is
+/// resolved or sent.
+#[test]
+fn queue_send_refuses_a_blank_destination() {
+    let env = TestEnv::new();
+    env.cmd()
+        .args(["queue", "send", "job-1", "--to", "  "])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--to needs a destination host"));
+}

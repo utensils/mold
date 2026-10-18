@@ -843,8 +843,55 @@ pub async fn pair(invite: PairingInvite, client_name: &str) -> Result<PairedHost
         .context("pairing response missing device credential")?
         .to_string();
     host.grant = serde_json::from_value(value["grant"].clone())?;
+    adopt_claim_identity(&mut host, &value);
     host.validate()?;
     Ok(host)
+}
+
+/// Fill the host's name, hostname and instance id from the encrypted claim
+/// answer when the invitation carried none (an app's QR link omits them).
+fn adopt_claim_identity(host: &mut PairedHost, claim: &serde_json::Value) {
+    let text = |key: &str| {
+        claim[key]
+            .as_str()
+            .filter(|v| !v.trim().is_empty())
+            .map(str::to_owned)
+    };
+    if host.instance_id.is_none() {
+        host.instance_id = text("instance_id");
+    }
+    if host.hostname.is_none() {
+        host.hostname = text("hostname");
+    }
+    if host.name.is_none() {
+        host.name = host.hostname.as_deref().and_then(crate::hosts::slug);
+    }
+}
+
+#[cfg(test)]
+mod claim_identity_tests {
+    #[test]
+    fn the_claim_fills_what_the_invitation_left_out() {
+        let mut host = crate::prepare_bootstrap("claim", "cli")
+            .unwrap()
+            .profile("https://claim.invalid")
+            .unwrap();
+        host.instance_id = None;
+        let claim = serde_json::json!({"instance_id": "inst-9", "hostname": "Work Station"});
+        super::adopt_claim_identity(&mut host, &claim);
+        assert_eq!(host.instance_id.as_deref(), Some("inst-9"));
+        assert_eq!(host.hostname.as_deref(), Some("Work Station"));
+        assert_eq!(host.name.as_deref(), Some("work-station"));
+        // What the invitation already said wins.
+        host.instance_id = Some("from-invite".into());
+        host.name = Some("chosen".into());
+        super::adopt_claim_identity(
+            &mut host,
+            &serde_json::json!({"instance_id": "x", "hostname": "y"}),
+        );
+        assert_eq!(host.instance_id.as_deref(), Some("from-invite"));
+        assert_eq!(host.name.as_deref(), Some("chosen"));
+    }
 }
 
 impl Drop for PairedHost {

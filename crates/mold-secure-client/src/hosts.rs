@@ -507,7 +507,15 @@ pub fn remove(name: &str) -> Result<SavedHost> {
 
 pub fn remove_at(root: &Path, name: &str) -> Result<SavedHost> {
     let host = find_at(root, name)?.with_context(|| unknown(name))?;
-    let digest = crate::store::origin_digest(&host.origin);
+    delete_profiles(root, &host.origin)?;
+    if read_default_origin(root)?.as_deref() == Some(host.origin.as_str()) {
+        clear_default_at(root)?;
+    }
+    Ok(host)
+}
+
+fn delete_profiles(root: &Path, origin: &str) -> Result<()> {
+    let digest = crate::store::origin_digest(origin);
     for file in [
         format!("{digest}.json"),
         format!("regular-{digest}.json"),
@@ -518,10 +526,7 @@ pub fn remove_at(root: &Path, name: &str) -> Result<SavedHost> {
             _ => {}
         }
     }
-    if read_default_origin(root)?.as_deref() == Some(host.origin.as_str()) {
-        clear_default_at(root)?;
-    }
-    Ok(host)
+    Ok(())
 }
 
 /// Make `name` the host every command targets when neither `--host` nor
@@ -723,12 +728,72 @@ fn is_loopback(machine: &str) -> bool {
 
 /// Bail with a clear message when a requested name is unusable or taken.
 pub fn require_free_name(name: &str, origin: &str) -> Result<String> {
+    require_free_name_at(&crate::default_store(), name, origin)
+}
+
+pub fn require_free_name_at(root: &Path, name: &str, origin: &str) -> Result<String> {
     let name = name.trim().to_ascii_lowercase();
     validate_name(&name)?;
-    if !name_is_free(&name, origin)? {
-        bail!("a saved host is already named '{name}'; choose another with --name")
+    if !name_is_free_at(root, &name, origin)? {
+        bail!("a saved host is already named '{name}'; choose another name")
     }
     Ok(name)
+}
+
+/// The name to save a new `mode` pairing of `origin` under, and the saved
+/// host it supersedes: when the same server (`instance_id`) is already saved
+/// in the same mode under a different origin, the new pairing takes that
+/// host's name, and the caller [`retire`]s the old entry after saving. A
+/// pairing in the other mode is a second, deliberate route and is kept.
+/// Otherwise see [`available_name`].
+pub fn name_for_pairing(
+    reported: &str,
+    origin: &str,
+    instance_id: Option<&str>,
+    mode: ConnectionMode,
+) -> Result<(String, Option<SavedHost>)> {
+    name_for_pairing_at(&crate::default_store(), reported, origin, instance_id, mode)
+}
+
+pub fn name_for_pairing_at(
+    root: &Path,
+    reported: &str,
+    origin: &str,
+    instance_id: Option<&str>,
+    mode: ConnectionMode,
+) -> Result<(String, Option<SavedHost>)> {
+    if let Some(previous) = instance_id
+        .map(|id| find_by_instance_id_at(root, id))
+        .transpose()?
+        .flatten()
+        .filter(|h| h.origin != origin && h.mode == mode && !h.ambiguous)
+    {
+        return Ok((previous.name.clone(), Some(previous)));
+    }
+    Ok((available_name_at(root, reported, origin)?, None))
+}
+
+/// Delete a superseded pairing's credentials after its server was saved
+/// again at `origin`, moving the default along with it.
+pub fn retire(superseded: &SavedHost, origin: &str) -> Result<()> {
+    retire_at(&crate::default_store(), superseded, origin)
+}
+
+pub fn retire_at(root: &Path, superseded: &SavedHost, origin: &str) -> Result<()> {
+    anyhow::ensure!(
+        superseded.origin != origin,
+        "a pairing cannot supersede itself"
+    );
+    let was_default = read_default_origin(root)?.as_deref() == Some(superseded.origin.as_str());
+    delete_profiles(root, &superseded.origin)?;
+    if was_default {
+        mold_secure::identity_file::write_private_file(
+            &root.join(DEFAULT_FILE),
+            origin.as_bytes(),
+            true,
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1117,6 +1182,158 @@ mod tests {
         );
         assert_eq!(resolved(&root, "hal9000.tailnet.ts.net"), None);
         assert_eq!(resolved(&root, "http://hal9000:7680"), None);
+    }
+
+    /// Re-pairing the same server (same instance id) under a new origin
+    /// replaces the old entry: it keeps the old name and default, and the
+    /// stale origin's credentials are deleted.
+    #[test]
+    fn a_re_pair_under_a_new_origin_replaces_the_old_entry() {
+        let (_dir, root) = store();
+        let mut old = crate::prepare_bootstrap("hosts", "cli")
+            .unwrap()
+            .profile("https://old.invalid")
+            .unwrap();
+        old.name = Some("workstation".into());
+        old.instance_id = Some("instance-1".into());
+        crate::save_pairing_at(&root, &old).unwrap();
+        set_default_at(&root, "workstation").unwrap();
+        let (name, superseded) = name_for_pairing_at(
+            &root,
+            "Other Label",
+            "https://new.invalid",
+            Some("instance-1"),
+            ConnectionMode::Secure,
+        )
+        .unwrap();
+        assert_eq!(name, "workstation");
+        let superseded = superseded.expect("same instance at another origin");
+        assert_eq!(superseded.origin, "https://old.invalid");
+        let mut new = crate::prepare_bootstrap("hosts", "cli")
+            .unwrap()
+            .profile("https://new.invalid")
+            .unwrap();
+        new.name = Some(name);
+        new.instance_id = Some("instance-1".into());
+        crate::save_pairing_at(&root, &new).unwrap();
+        retire_at(&root, &superseded, "https://new.invalid").unwrap();
+        let hosts = list_at(&root).unwrap();
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].origin, "https://new.invalid");
+        assert_eq!(hosts[0].name, "workstation");
+        assert_eq!(
+            default_at(&root).unwrap().unwrap().origin,
+            "https://new.invalid",
+            "the default follows the host"
+        );
+        // Same origin, or no instance id: an ordinary name, nothing replaced.
+        let (_, none) = name_for_pairing_at(
+            &root,
+            "x",
+            "https://new.invalid",
+            Some("instance-1"),
+            ConnectionMode::Secure,
+        )
+        .unwrap();
+        assert!(none.is_none());
+        let (name, none) = name_for_pairing_at(
+            &root,
+            "Lab",
+            "https://lab.invalid",
+            None,
+            ConnectionMode::Secure,
+        )
+        .unwrap();
+        // A Regular route to the same server is a second pairing, kept.
+        let (_, none_regular) = name_for_pairing_at(
+            &root,
+            "x",
+            "http://10.1.2.3:7680",
+            Some("instance-1"),
+            ConnectionMode::Regular,
+        )
+        .unwrap();
+        assert!(none_regular.is_none());
+        assert_eq!((name.as_str(), none), ("lab", None));
+    }
+
+    #[test]
+    fn a_taken_name_error_does_not_name_a_flag() {
+        let (_dir, root) = store();
+        secure(&root, "https://one.invalid", Some("one"), &[]);
+        let error = require_free_name_at(&root, "one", "https://two.invalid")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already named 'one'"), "{error}");
+        assert!(!error.contains("--"), "{error}");
+        assert_eq!(
+            require_free_name_at(&root, "One", "https://one.invalid").unwrap(),
+            "one"
+        );
+    }
+
+    /// A store directory that cannot be read at all stops a bare name.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_store_stops_a_bare_name() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, root) = store();
+        workstation(&root);
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let result = resolve_at(&root, "hal9000");
+        let address = resolve_at(&root, "http://hal9000:7680");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains(&root.display().to_string()), "{error}");
+        assert_eq!(address.unwrap(), None, "an address is used as typed");
+    }
+
+    /// Derived names do not depend on what else is saved, so removing one
+    /// host never renames another.
+    #[test]
+    fn removing_a_host_never_renames_another() {
+        let (_dir, root) = store();
+        legacy_regular(&root, "http://10.0.0.8:7680", Some("lab"));
+        legacy_regular(&root, "http://10.0.0.9:7680", Some("lab"));
+        legacy_regular(&root, "http://10.0.0.7:7680", Some("bench"));
+        legacy_regular(&root, "http://10.0.0.6:7680", Some("desk"));
+        let before: Vec<(String, String)> = list_at(&root)
+            .unwrap()
+            .into_iter()
+            .map(|h| (h.origin, h.name))
+            .collect();
+        remove_at(&root, "bench").unwrap();
+        let after: Vec<(String, String)> = list_at(&root)
+            .unwrap()
+            .into_iter()
+            .map(|h| (h.origin, h.name))
+            .collect();
+        let expected: Vec<_> = before
+            .into_iter()
+            .filter(|(origin, _)| origin != "http://10.0.0.7:7680")
+            .collect();
+        assert_eq!(after, expected);
+        assert!(list_at(&root)
+            .unwrap()
+            .iter()
+            .filter(|h| h.name == "lab")
+            .all(|h| h.ambiguous));
+    }
+
+    /// `https://IP` with no port is that exact origin, not the saved Regular
+    /// `http://IP:7680` on the same machine.
+    #[test]
+    fn https_without_a_port_is_not_the_saved_http_origin() {
+        let (_dir, root) = store();
+        legacy_regular(&root, "http://100.64.5.5:7680", None);
+        legacy_regular(&root, "http://10.0.0.5:7680", None);
+        for input in ["https://100.64.5.5", "https://10.0.0.5"] {
+            assert_eq!(resolved(&root, input), None, "{input}");
+        }
+        assert_eq!(
+            resolved(&root, "10.0.0.5"),
+            Some(("http://10.0.0.5:7680".into(), Match::Origin))
+        );
     }
 
     #[test]
