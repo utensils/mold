@@ -37,8 +37,9 @@ mold library list --host gpu-host
 ## Saved Hosts
 
 Pairing saves each host under a name, so you rarely type an origin again.
-`--host`, `MOLD_HOST`, and a default host all accept it, and an address the
-host advertised (its LAN or Tailscale IP) finds the same pairing:
+`--host`, `MOLD_HOST`, and a default host all accept it, and a Tailscale IP the
+host advertised finds the same pairing (mold says so on stderr; LAN addresses
+are always used as typed):
 
 ```bash
 mold host list                     # NAME  MODE  ORIGIN  DEFAULT

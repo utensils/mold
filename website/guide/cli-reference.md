@@ -10,10 +10,12 @@ forms where automation needs them.
 `--host` is a global flag: it works on every command that talks to a server,
 before or after the verb (`mold --host workstation ps`,
 `mold ps --host workstation`). It takes a saved host name (see [`mold host`](#mold-host)), a
-URL, or `host[:port]` (a bare host gets `http://` and port `7680`). An address
-the paired host advertised — a LAN or Tailscale IP, say — also finds the saved
-pairing, even when it was paired under a relay origin. Which machine a command
-talks to:
+URL, or `host[:port]` (a bare host gets `http://` and port `7680`). A Tailscale
+IP the paired host advertised also finds the saved pairing, even when it was
+paired under a relay origin, and mold prints the redirect on stderr
+(`100.105.134.43 → workstation (https://…)`). A LAN address never redirects,
+and an address typed with a scheme or port must match an advertised endpoint
+exactly. Which machine a command talks to:
 
 1. `--host`
 2. `MOLD_HOST` (same forms, including a saved name)
@@ -893,9 +895,13 @@ See [mold runpod CLI](/deployment/runpod-cli).
 
 Manage the saved hosts that `--host` and `MOLD_HOST` accept by name. Pairing
 (`mold pair`, `mold runpod create`) saves each one under the host's own name
-(or the pod's), made unique with a `-2` suffix when needed; a pairing saved by
-an older mold lists under a name derived from its origin. Nothing here touches
-the network.
+(or the pod's), made unique with a `-2` suffix when needed. A pairing saved by
+an older mold lists under a name derived from its hostname or origin; the first
+`mold host` command writes that name into the profile so it never changes. Two
+older pairings that derive the same name are both listed as `(ambiguous)`, and
+the name is an error until one is re-paired. If a saved profile cannot be read,
+an unknown bare name is an error naming the file instead of a DNS lookup.
+Nothing here touches the network.
 
 ```bash
 mold host list                   # NAME  MODE  ORIGIN  DEFAULT
