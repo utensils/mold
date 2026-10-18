@@ -2611,6 +2611,51 @@ async fn bind_remote_reference_uploads(
     uploads: Vec<ReferenceUpload>,
     batch: u32,
 ) -> Result<Option<ReferenceUploadLease>> {
+    let has_candidates = uploads.iter().any(|upload| upload.candidate.is_some());
+    if has_candidates {
+        let normalization_available = match client.server_capabilities().await {
+            Ok(capabilities) => mold_core::reference_upload::supports_video_normalization(
+                &capabilities.reference_uploads,
+            ),
+            Err(error) if mold_core::client::is_missing_endpoint_error(&error) => false,
+            Err(error) => return Err(error),
+        };
+        if client.has_api_key() && normalization_available {
+            anyhow::ensure!(
+                batch == 1,
+                "fresh video reference normalization requires --batch 1"
+            );
+            let candidates = uploads
+                .iter()
+                .map(|upload| {
+                    upload
+                        .candidate
+                        .clone()
+                        .context("mixed pending/canonical reference wrappers are invalid")
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let sources = uploads
+                .into_iter()
+                .map(|upload| ReferenceUploadSource::open_file(upload.file))
+                .collect::<Result<Vec<_>>>()?;
+            let lease = client
+                .bind_reference_candidates_v1(request, candidates, sources)
+                .await?;
+            *request = lease.request().clone();
+            return Ok(Some(lease));
+        }
+        // Older/unsupported hosts keep the exact canonical probe and error.
+        // Never turn a failed negotiated upload into an inline retry.
+        let mut descriptors = Vec::with_capacity(uploads.len());
+        for upload in &uploads {
+            let descriptor = match upload.candidate.as_ref().context("mixed pending reference wrappers are invalid")? {
+                mold_core::video_normalization::ReferenceCandidate::Canonical { reference, .. } => reference.clone(),
+                mold_core::video_normalization::ReferenceCandidate::FreshVideo { original, .. } => crate::commands::h3::probe_video(upload.file.try_clone()?, mold_core::GenerationReferenceProvenance { name: original.name.clone(), sha256: Some(original.sha256.clone()), crop: None }).context("host does not advertise fresh video normalization; canonical H.264 MP4 reference required")?,
+            };
+            descriptors.push(descriptor);
+        }
+        request.references = Some(descriptors);
+    }
     let descriptors = request
         .references
         .clone()
@@ -5551,6 +5596,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn h3_canonical_video_batches_remain_inline_on_keyless_and_older_hosts() {
+        use sha2::{Digest as _, Sha256};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let bytes = general_purpose::STANDARD
+            .decode(
+                include_str!("../../../mold-server/tests/fixtures/reference-video.mp4.b64").trim(),
+            )
+            .unwrap();
+        let sha256 = format!("{:x}", Sha256::digest(&bytes));
+        for keyed in [false, true] {
+            for status in [200, 404] {
+                let server = MockServer::start().await;
+                let reply = if status == 200 {
+                    ResponseTemplate::new(200)
+                        .set_body_json(mold_core::ServerCapabilities::default())
+                } else {
+                    ResponseTemplate::new(status)
+                };
+                Mock::given(method("GET"))
+                    .and(path("/api/capabilities"))
+                    .respond_with(reply)
+                    .expect(if keyed { 2 } else { 1 })
+                    .mount(&server)
+                    .await;
+                let directory = tempfile::tempdir().unwrap();
+                let video = directory.path().join("reference.mp4");
+                std::fs::write(&video, &bytes).unwrap();
+                let mut request = h3_request(mold_core::minimax_h3::REF2VA_COMFY);
+                let client = if keyed {
+                    MoldClient::with_api_key(&server.uri(), "test-key".into())
+                } else {
+                    MoldClient::new(&server.uri())
+                };
+                let lease = bind_remote_reference_uploads(
+                    &client,
+                    &mut request,
+                    vec![ReferenceUpload {
+                        file: std::fs::File::open(&video).unwrap(),
+                        candidate: Some(
+                            mold_core::video_normalization::ReferenceCandidate::FreshVideo {
+                                index: 1,
+                                kind: mold_core::GenerationReferenceKind::Video,
+                                original: mold_core::video_normalization::OriginalVideo {
+                                    mime_type: "video/mp4".into(),
+                                    name: Some("reference.mp4".into()),
+                                    byte_length: bytes.len() as u64,
+                                    sha256: sha256.clone(),
+                                },
+                            },
+                        ),
+                    }],
+                    3,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("keyed={keyed}, status={status}: {error:#}"));
+                assert!(lease.is_none());
+                let reference = &request.references.as_ref().unwrap()[0];
+                assert_eq!(
+                    reference.provenance().sha256.as_deref(),
+                    Some(sha256.as_str())
+                );
+                assert!(
+                    matches!(reference.media(), GenerationReferenceAuthority::Inline { data } if data == &bytes)
+                );
+                assert!(server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .all(|request| request.method == "GET"));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn h3_keyless_references_are_inline_without_upload_requests() {
         use sha2::{Digest as _, Sha256};
         let server = wiremock::MockServer::start().await;
@@ -5565,6 +5687,7 @@ mod tests {
             &MoldClient::new(&server.uri()),
             &mut request,
             vec![ReferenceUpload {
+                candidate: None,
                 file: std::fs::File::open(path).unwrap(),
             }],
             3,
@@ -5591,6 +5714,7 @@ mod tests {
             &MoldClient::new("http://127.0.0.1:9"),
             &mut request,
             vec![ReferenceUpload {
+                candidate: None,
                 file: std::fs::File::open(path).unwrap(),
             }],
             1,
@@ -5614,7 +5738,10 @@ mod tests {
         let error = bind_remote_reference_uploads(
             &MoldClient::new("http://127.0.0.1:9"),
             &mut request,
-            vec![ReferenceUpload { file }],
+            vec![ReferenceUpload {
+                candidate: None,
+                file,
+            }],
             1,
         )
         .await
@@ -5683,6 +5810,7 @@ mod tests {
             &MoldClient::with_api_key(&server.uri(), "key".into()),
             &mut request,
             vec![ReferenceUpload {
+                candidate: None,
                 file: std::fs::File::open(path).unwrap()
             }],
             2
@@ -5720,6 +5848,7 @@ mod tests {
                 &MoldClient::with_api_key(&server.uri(), "key".into()),
                 &mut request,
                 vec![ReferenceUpload {
+                    candidate: None,
                     file: tempfile::tempfile().unwrap(),
                 }],
                 1,
@@ -5762,6 +5891,7 @@ mod tests {
                 &client,
                 &mut request,
                 vec![ReferenceUpload {
+                    candidate: None,
                     file: std::fs::File::open(path).unwrap(),
                 }],
                 1,
@@ -5792,7 +5922,10 @@ mod tests {
         let error = bind_remote_reference_uploads(
             &MoldClient::new("http://127.0.0.1:9"),
             &mut request,
-            vec![ReferenceUpload { file }],
+            vec![ReferenceUpload {
+                candidate: None,
+                file,
+            }],
             2,
         )
         .await
@@ -5823,6 +5956,7 @@ mod tests {
             &MoldClient::with_api_key(&server.uri(), "key".into()),
             &mut request,
             vec![ReferenceUpload {
+                candidate: None,
                 file: tempfile::tempfile().unwrap(),
             }],
             2,
@@ -5850,6 +5984,7 @@ mod tests {
                 max_session_bytes: 1024 * 1024 * 1024,
                 max_active_sessions: 4,
                 session_ttl_ms: 120_000,
+                video_normalization: None,
             },
             ..Default::default()
         };
@@ -5955,9 +6090,11 @@ mod tests {
             &mut request,
             vec![
                 ReferenceUpload {
+                    candidate: None,
                     file: mold_core::secure_file::open_regular_file_no_follow(&first_path).unwrap(),
                 },
                 ReferenceUpload {
+                    candidate: None,
                     file: mold_core::secure_file::open_regular_file_no_follow(&second_path)
                         .unwrap(),
                 },
@@ -6008,6 +6145,7 @@ mod tests {
             &MoldClient::with_api_key(&server.uri(), "sekrit".into()),
             &mut request,
             vec![ReferenceUpload {
+                candidate: None,
                 file: mold_core::secure_file::open_regular_file_no_follow(&path).unwrap(),
             }],
             1,
@@ -8030,7 +8168,7 @@ mod tests {
     }
 
     #[test]
-    fn forced_local_policy_respects_compiled_h3_artifact_activation() {
+    fn forced_local_policy_rejects_caller_selected_h3_artifact_identities() {
         let root = "/Volumes/ExternalStorage/mold-uat/minimax-h3/models";
         let mut config = Config {
             models_dir: root.to_string(),
@@ -8064,12 +8202,7 @@ mod tests {
 
             expert: None,
         });
-        let h3_artifact_result = require_local_request_model_activation(&request, &config);
-        if cfg!(feature = "h3") {
-            h3_artifact_result.expect("public H3 builds accept trusted H3 artifact paths");
-        } else {
-            assert!(h3_artifact_result.is_err());
-        }
+        assert!(require_local_request_model_activation(&request, &config).is_err());
 
         request.lora.as_mut().unwrap().path = format!("{root}/flux/ordinary-adapter.safetensors");
         assert!(require_local_request_model_activation(&request, &config).is_ok());

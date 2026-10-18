@@ -1,3 +1,4 @@
+import { parseJobStall, type JobStallDiagnostic } from "./jobStall";
 import { queueModelDownloadAvailability } from "./queueModelDownload";
 import { userFacingError } from "./userFacingError";
 /**
@@ -103,6 +104,7 @@ export interface QueueDetailProblem {
 }
 
 export interface QueueEntryDetailModel {
+  stall: JobStallDiagnostic | null;
   jobId: string;
   /** Raw id retained for requests, matching, and persistence. */
   modelId: string;
@@ -529,6 +531,12 @@ export function queueEntryDetailModel(
     { label: "Model", value: entry.model },
     { label: "Host", value: hostLabel },
     { label: "State", value: entry.state },
+    parseJobStall(entry.stall)
+      ? {
+          label: "Stall diagnostic",
+          value: JSON.stringify(parseJobStall(entry.stall)),
+        }
+      : null,
     problem ? { label: "Problem", value: problem.detail } : null,
     technicalDetail
       ? { label: "Machine diagnostic", value: technicalDetail }
@@ -554,6 +562,7 @@ export function queueEntryDetailModel(
 
   return {
     jobId: entry.id,
+    stall: parseJobStall(entry.stall),
     modelId: entry.model,
     modelLabel,
     hostLabel,

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { VideoNormalizationCapabilities } from "../api/referenceNormalizationTypes";
 import OriginalMediaButton from "./OriginalMediaButton.vue";
 import { computed, ref, watch } from "vue";
 import { minimaxH3PickedMediaReference as referenceDraft } from "../lib/minimaxH3PickedMedia";
@@ -10,6 +11,7 @@ import {
   MINIMAX_H3_RESYNTHESIS_GUIDANCE,
   MINIMAX_H3_RESYNTHESIS_TITLE,
   cloneMinimaxH3AuthoringState,
+  hasFreshVideoReferences,
   minimaxH3ReferenceBudget,
   minimaxH3ReferenceDurationMs,
   minimaxH3ReferenceName,
@@ -29,6 +31,8 @@ const props = withDefaults(
     disabled?: boolean;
     touchFriendly?: boolean;
     imagePickerAvailable?: boolean;
+    normalizationCapabilities?:
+      VideoNormalizationCapabilities | null | undefined;
   }>(),
   {
     disabled: false,
@@ -61,6 +65,30 @@ function patch(next: Partial<MinimaxH3AuthoringState>): void {
   });
 }
 
+function attachmentSnapshot() {
+  const state = props.modelValue;
+  const capabilityStamp = JSON.stringify(
+    props.normalizationCapabilities ?? null,
+  );
+  const capability = props.normalizationCapabilities
+    ? (JSON.parse(capabilityStamp) as VideoNormalizationCapabilities)
+    : null;
+  return {
+    state,
+    capability,
+    check() {
+      if (
+        props.modelValue !== state ||
+        JSON.stringify(props.normalizationCapabilities ?? null) !==
+          capabilityStamp
+      )
+        throw new Error(
+          "References or machine changed while reading the original. Choose it again.",
+        );
+    },
+  };
+}
+
 async function addReferences(event: Event): Promise<void> {
   const input = event.target as HTMLInputElement;
   const files = [...(input.files ?? [])];
@@ -68,10 +96,13 @@ async function addReferences(event: Event): Promise<void> {
   if (files.length === 0) return;
   error.value = "";
   busy.value = true;
+  const captured = attachmentSnapshot();
   try {
     const additions: MinimaxH3ReferenceDraft[] = [];
-    for (const file of files) additions.push(await referenceDraft(file));
-    patch({ references: [...props.modelValue.references, ...additions] });
+    for (const file of files)
+      additions.push(await referenceDraft(file, captured.capability));
+    captured.check();
+    patch({ references: [...captured.state.references, ...additions] });
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : String(reason);
   } finally {
@@ -79,13 +110,25 @@ async function addReferences(event: Event): Promise<void> {
   }
 }
 
+const videoAccept = computed(() =>
+  props.normalizationCapabilities?.available &&
+  props.normalizationCapabilities.protocol_version === 1 &&
+  props.normalizationCapabilities.input_roles.includes("reference_video")
+    ? [
+        ...props.normalizationCapabilities.accepted_mime_types,
+        ...props.normalizationCapabilities.accepted_extensions.map(
+          (extension) => `.${extension}`,
+        ),
+      ].join(",")
+    : ".mp4,video/mp4",
+);
 function referenceAccept(
   reference: MinimaxH3ReferenceDraft["reference"],
 ): string {
-  return reference.kind === "audio"
-    ? ".wav,audio/wav,audio/x-wav,audio/wave"
-    : reference.kind === "video"
-      ? ".mp4,video/mp4"
+  return reference.kind === "fresh_video" || reference.kind === "video"
+    ? videoAccept.value
+    : reference.kind === "audio"
+      ? ".wav,audio/wav,audio/x-wav,audio/wave"
       : "image/*";
 }
 
@@ -96,8 +139,10 @@ async function reattachReference(index: number, event: Event): Promise<void> {
   if (!file) return;
   error.value = "";
   busy.value = true;
+  const captured = attachmentSnapshot();
   try {
-    const replacement = await referenceDraft(file);
+    const replacement = await referenceDraft(file, captured.capability);
+    captured.check();
     const result = reattachMinimaxH3Reference(
       props.modelValue,
       index,
@@ -274,7 +319,7 @@ function imagePreview(
     <ol class="h3-authoring__references" aria-label="Ordered H3 references">
       <li
         v-for="(draft, index) in modelValue.references"
-        :key="`${draft.reference.provenance?.sha256 ?? draft.reference.provenance?.name ?? index}:${index}`"
+        :key="`${draft.reference.kind === 'fresh_video' ? draft.reference.original.sha256 : (draft.reference.provenance?.sha256 ?? draft.reference.provenance?.name ?? index)}:${index}`"
         class="h3-authoring__reference"
         :data-test="`h3-reference-${index}`"
       >
@@ -288,7 +333,8 @@ function imagePreview(
             :alt="minimaxH3ReferenceName(draft.reference, index)"
           />
           <span v-else aria-hidden="true">{{
-            draft.reference.kind === "video"
+            draft.reference.kind === "video" ||
+            draft.reference.kind === "fresh_video"
               ? "VID"
               : draft.reference.kind === "audio"
                 ? "AUD"
@@ -305,7 +351,11 @@ function imagePreview(
         <div class="h3-authoring__reference-copy">
           <strong>{{ minimaxH3ReferenceName(draft.reference, index) }}</strong>
           <span>
-            {{ draft.reference.kind }}
+            {{
+              draft.reference.kind === "fresh_video"
+                ? "video · verified on submission"
+                : draft.reference.kind
+            }}
             <template v-if="durationLabel(draft.reference)">
               · {{ durationLabel(draft.reference) }}</template
             >
@@ -330,7 +380,10 @@ function imagePreview(
           :aria-label="`Reference ${index + 1} controls`"
         >
           <OriginalMediaButton
-            v-if="draft.reference.media.authority === 'inline'"
+            v-if="
+              draft.reference.kind !== 'fresh_video' &&
+              draft.reference.media.authority === 'inline'
+            "
             :data="draft.reference.media.data"
             :mime-type="
               draft.reference.kind === 'audio'
@@ -411,7 +464,7 @@ function imagePreview(
           <input
             type="file"
             multiple
-            accept="image/*,.mp4,video/mp4,.wav,audio/wav,audio/x-wav,audio/wave"
+            :accept="`image/*,${videoAccept},.wav,audio/wav,audio/x-wav,audio/wave`"
             :disabled="
               disabled ||
               busy ||
@@ -440,8 +493,14 @@ function imagePreview(
 
     <p class="h3-authoring__budget" data-test="h3-reference-budget">
       {{ budget.total }}/{{ MINIMAX_H3_MAX_REFERENCES }} files ·
-      {{ (budget.videoDurationMs / 1_000).toFixed(1) }}/15s video ·
-      {{ (budget.audioDurationMs / 1_000).toFixed(1) }}/15s audio + soundtracks
+      <template v-if="hasFreshVideoReferences(modelValue)"
+        >Video duration and soundtrack budget verified on submission</template
+      >
+      <template v-else
+        >{{ (budget.videoDurationMs / 1_000).toFixed(1) }}/15s video ·
+        {{ (budget.audioDurationMs / 1_000).toFixed(1) }}/15s audio +
+        soundtracks</template
+      >
     </p>
     <ul v-if="budget.errors.length" class="h3-authoring__errors" role="alert">
       <li v-for="message in budget.errors" :key="message">{{ message }}</li>

@@ -1,4 +1,8 @@
 <script setup lang="ts">
+import { jobStallLabel, parseQueueCancellationResponse } from "@studio/lib/jobStall";
+import { hasActiveFreshVideoReferences } from "@studio/lib/minimaxH3Authoring";
+import { prepareH3VideoReferences } from "@studio/lib/prepareH3VideoReferences";
+import type { ReferenceUploadLease } from "@studio/api/referenceUploads";
 import { provide } from "vue";
 import {
   SOURCE_ATTACHMENT_CHOICES,
@@ -630,6 +634,7 @@ interface ActivityRow {
   /** Effective lifecycle after applying the host-wide queue pause. */
   queueState: string | null;
   blockedReason: string | null;
+  blockedDeviceReason: string | null;
   preparation: Extract<ActivityJobVM, { kind: "print" }>["preparation"];
   /** Matching fresh `/api/activity` lifecycle, when the host has one. */
   live: FleetActiveWork | null;
@@ -1650,6 +1655,24 @@ const generationTargetHost = computed<MobileHost | null>(() => {
   }
   return browsed;
 });
+const normalizationPickerCapability = computed(() => {
+  const eligible = routingHosts.value
+    .filter((host) => {
+      const capability = serverCapabilities[host.id]?.reference_uploads?.video_normalization;
+      return (
+        capability?.available &&
+        capability.protocol_version === 1 &&
+        capability.input_roles.includes("reference_video")
+      );
+    })
+    .map((host) => host.id);
+  const host = automaticRouting.value
+    ? provisionalAutomaticHost(form.model, form.family, formCarriesIdentity.value, eligible)
+    : selectedHost.value;
+  return host && eligible.includes(host.id)
+    ? (serverCapabilities[host.id]?.reference_uploads?.video_normalization ?? null)
+    : null;
+});
 const generationTarget = computed<ApiTarget | null>(() =>
   generationTargetHost.value ? mobileHostTarget(generationTargetHost.value) : null,
 );
@@ -2558,7 +2581,8 @@ const developDisabled = computed(
     developBlockerReason.value !== null,
 );
 const estimateRequest = computed(() => {
-  if (!form.model) return null;
+  if (!form.model || hasActiveFreshVideoReferences(form.h3Authoring, caps.value.sourceImageMode))
+    return null;
   return buildGenerationEstimateRequest(
     buildRequest(form),
     form.family,
@@ -2760,6 +2784,7 @@ function syncDurableGenerationJobs(): void {
               if (url) job.previewUrl = url;
               if (progress.step !== null) job.step = progress.step;
               if (progress.total !== null) job.total = progress.total;
+              if (Object.hasOwn(progress, "stall")) job.stall = progress.stall ?? null;
               if (progress.stage) job.stage = progress.stage;
             },
           );
@@ -2899,6 +2924,7 @@ const activityRows = computed<ActivityRow[]>(() =>
             queuePosition: vm.queuePosition ?? null,
             queueState: vm.queueState ?? null,
             blockedReason: vm.blockedReason ?? null,
+            blockedDeviceReason: vm.blockedDeviceReason ?? null,
             preparation: vm.preparation ?? null,
             live: liveGenerationActivityFor(print),
           },
@@ -3093,6 +3119,7 @@ function activityRowRunning(row: ActivityRow): boolean {
 function activityRowStatus(row: ActivityRow): string {
   // A running row says what is happening, in the host's own sentence. Only a
   // waiting, held or settled row answers with a code.
+  if (row.print.stall || row.print.cancelAccepted) return jobProgressCopy(row.print);
   if (activityRowRunning(row)) return activeWorkPhaseLabel(row.live!);
   if (row.print.status !== "queued") return jobStatusCode(row.print);
   if (durableHold(row.print)) return "HELD";
@@ -3102,6 +3129,7 @@ function activityRowStatus(row: ActivityRow): string {
       state: row.queueState,
       position: row.queuePosition ?? row.print.queuePosition,
       blockedReason: row.blockedReason,
+      blockedDeviceReason: row.blockedDeviceReason,
       preparation: row.preparation,
     }),
   );
@@ -3425,11 +3453,22 @@ function sharedQueueRunning(row: FleetActiveWork): boolean {
 }
 
 function sharedQueueStatus(row: FleetActiveWork): string {
+  if (row.kind === "generation") {
+    const entry = liveQueues.value[row.hostId]?.entries.find((entry) => entry.id === row.id);
+    if (entry?.stall) return jobStallLabel(entry.stall);
+    const status = queueStatusFor(queueStatusIndex.value, row.hostId, row.id);
+    if (status?.blockedDeviceReason) return queueWaitLabel(resolveQueueWait(status));
+  }
   const label = activeWorkPhaseLabel(row);
   return sharedQueueRunning(row) ? label : label.toLocaleUpperCase();
 }
 
 function sharedQueueProgress(row: FleetActiveWork): number | null {
+  if (
+    row.kind === "generation" &&
+    liveQueues.value[row.hostId]?.entries.find((entry) => entry.id === row.id)?.stall
+  )
+    return null;
   if (row.total == null || !row.total || row.current == null) return null;
   return Math.max(0, Math.min(100, Math.round((row.current / row.total) * 100)));
 }
@@ -4141,6 +4180,7 @@ const generationStatus = computed(() => {
   const selected = selectedQueueRender.value;
   if (selected) {
     const preview = selected.preview;
+    if (preview?.stall) return jobStallLabel(preview.stall);
     if (preview && preview.step !== null && preview.total !== null) {
       return `Developing ${preview.step} / ${preview.total}`;
     }
@@ -4148,6 +4188,12 @@ const generationStatus = computed(() => {
   }
   const active = activeGeneration.value;
   if (!active) return progress.value;
+  if (
+    (active.stall || active.cancelAccepted) &&
+    active.status !== "complete" &&
+    active.status !== "error"
+  )
+    return jobProgressCopy(active);
   const live = liveGenerationActivityFor(active);
   if (live && live.phase !== "queued" && live.phase !== "paused") {
     return activeWorkPhaseLabel(live);
@@ -4167,6 +4213,7 @@ const generationStatus = computed(() => {
           explicitlyPaused: live?.explicitlyPaused,
           position: live?.position ?? active.queuePosition,
           blockedReason: live?.blockedReason,
+          blockedDeviceReason: live?.blockedDeviceReason,
           preparation: live?.preparation,
         }),
       );
@@ -4293,9 +4340,16 @@ async function fulfillMobileDurableCancelIntent(
     const host = resolveMobileDurableHost(recovery, connectedHosts.value);
     if (!host?.online) return false;
     try {
-      await apiFetchTo(mobileHostTarget(host), `/api/queue/${encodeURIComponent(job.id)}`, {
-        method: "DELETE",
-      });
+      const response = await apiFetchTo(
+        mobileHostTarget(host),
+        `/api/queue/${encodeURIComponent(job.id)}`,
+        { method: "DELETE" },
+      );
+      const outcome = await parseQueueCancellationResponse(response);
+      if (!outcome.terminal && !durableGenerationJobIsTerminal(job)) {
+        job.cancelAccepted = { deviceStillHeld: outcome.deviceStillHeld };
+        job.stall = outcome.stall;
+      }
     } catch (error) {
       await reconcileMobileDurableHost(recovery.tracker.hostId);
       if (durableGenerationJobIsTerminal(job)) {
@@ -4604,6 +4658,7 @@ async function reconcileMobileDurableHost(
 async function submitMobileDurableGenerationChunk(input: {
   route: HostRoute;
   requests: GenerateRequest[];
+  preparedReferenceLease?: ReferenceUploadLease<GenerateRequest>;
 }): Promise<void> {
   const instanceId = input.route.instanceId?.trim() ?? "";
   if (!instanceId) throw new Error("This host did not provide a stable server instance.");
@@ -4646,6 +4701,7 @@ async function submitMobileDurableGenerationChunk(input: {
     });
   } catch (error) {
     const authoritativeRejection = isDefiniteGenerationAdmissionRejection(error);
+    if (authoritativeRejection) await input.preparedReferenceLease?.cancel().catch(() => undefined);
     const latest =
       durableGenerationRecoveries.value.find(
         (candidate) => candidate.tracker.clientBatchId === clientBatchId,
@@ -4672,6 +4728,7 @@ async function submitMobileDurableGenerationChunk(input: {
           batch: lookup.batch,
         });
       } else if (lookup?.kind === "missing") {
+        await input.preparedReferenceLease?.cancel().catch(() => undefined);
         // The host answered and has no such batch: the POST never committed,
         // so the print is rejected with the host's own sentence rather than
         // left "waiting for host confirmation" forever.
@@ -4700,6 +4757,7 @@ async function submitMobileDurableGenerationChunk(input: {
 async function submitMobileDurableGeneration(input: {
   route: HostRoute;
   requests: GenerateRequest[];
+  preparedReferenceLease?: ReferenceUploadLease<GenerateRequest>;
 }): Promise<void> {
   const limit = canonicalGenerationBatchLimit({
     heterogeneous_batch_max_outputs: input.route.heterogeneousBatchMaxOutputs ?? null,
@@ -4709,7 +4767,13 @@ async function submitMobileDurableGeneration(input: {
   }
   await Promise.all(
     chunkGenerationBatchRequests(input.requests, limit).map((requests) =>
-      submitMobileDurableGenerationChunk({ route: input.route, requests }),
+      submitMobileDurableGenerationChunk({
+        route: input.route,
+        requests,
+        ...(input.preparedReferenceLease
+          ? { preparedReferenceLease: input.preparedReferenceLease }
+          : {}),
+      }),
     ),
   );
 }
@@ -5737,13 +5801,16 @@ function provisionalAutomaticHost(
   model: string,
   family: string,
   requiresIdentity = false,
+  eligibleHostIds?: readonly string[],
 ): MobileHost | null {
   const { hosts: candidates } = automaticRoutingCandidates(model, family, { requiresIdentity });
   // The usual fallback to the whole fleet is deliberately skipped for identity
   // work: a machine that cannot hold the face is not a better provisional
   // target than none at all.
   const fallback = requiresIdentity ? [] : routingHosts.value;
-  const views = (candidates.length > 0 ? candidates : fallback).map(routingHostView);
+  const views = (candidates.length > 0 ? candidates : fallback)
+    .filter((host) => !eligibleHostIds || eligibleHostIds.includes(host.id))
+    .map(routingHostView);
   const chosen =
     generateTarget.value === CAPABLE_TARGET_ID
       ? pickMostCapableHost(views, null, { lowestIdWins: true })
@@ -7143,12 +7210,13 @@ async function prepareGenerationRequest(
   draft: GenerateForm,
   isCurrent: () => boolean = () => true,
   signal?: AbortSignal,
+  selectedModel: typeof selectedGenerationModel.value = selectedGenerationModel.value,
 ) {
   return prepareMobileGenerationRequest(
     {
       target,
       draft,
-      selectedModel: selectedGenerationModel.value,
+      selectedModel,
       isCurrent,
       ...(signal ? { signal } : {}),
     },
@@ -7266,25 +7334,53 @@ async function generate(): Promise<void> {
   // Prepared and quick work keeps the machine it was frozen on. An ordinary
   // submission under Auto / Most capable starts on a provisional machine — the
   // placement fan-out below replaces it before anything is queued.
-  const automaticOrdinary = automaticRouting.value && !preparedSubmission && !quickSubmission;
-  const provisionalHost = automaticOrdinary
-    ? provisionalAutomaticHost(form.model, form.family, formCarriesIdentity.value)
+  const preparingFreshVideo = hasActiveFreshVideoReferences(
+    form.h3Authoring,
+    caps.value.sourceImageMode,
+  );
+  const automaticPreparation = automaticRouting.value && !preparedSubmission && !quickSubmission;
+  const automaticOrdinary = automaticPreparation && !preparingFreshVideo;
+  const normalizationEligible = preparingFreshVideo
+    ? routingHosts.value
+        .filter((host) => {
+          const cap = serverCapabilities[host.id]?.reference_uploads?.video_normalization;
+          return (
+            cap?.available &&
+            cap.protocol_version === 1 &&
+            cap.input_roles.includes("reference_video")
+          );
+        })
+        .map((host) => host.id)
+    : undefined;
+  const provisionalHost = automaticPreparation
+    ? provisionalAutomaticHost(
+        form.model,
+        form.family,
+        formCarriesIdentity.value,
+        normalizationEligible,
+      )
     : null;
   const host = preparedSubmission
     ? hosts.value.find((candidate) => candidate.id === preparedSubmission.route.hostId)
     : quickSubmission
       ? hosts.value.find((candidate) => candidate.id === quickSubmission.route.hostId)
-      : automaticOrdinary
+      : automaticPreparation
         ? provisionalHost
         : selectedHost.value;
   const initialRoute =
     preparedSubmission?.route ??
     quickSubmission?.route ??
-    (automaticOrdinary
+    (automaticPreparation
       ? provisionalHost
         ? routeForMobileHost(provisionalHost)
         : null
       : selectedRoute.value);
+  if (preparingFreshVideo && automaticPreparation && (!host || !initialRoute)) {
+    const message = "No eligible machine advertises fresh video-reference normalization.";
+    setGenerationStatus(message, true);
+    generationAnnouncement.value = message;
+    return;
+  }
   const target = initialRoute?.target ?? null;
   // Automatic routing filters restricted machines out of its candidate set, so
   // only an explicit machine is checked up front.
@@ -7328,8 +7424,6 @@ async function generate(): Promise<void> {
   )
     return;
 
-  const backgroundTask = await beginMobileBackgroundTask("Preparing remote generation");
-
   // Replaced by the fan-out winner under Auto / Most capable; frozen from here
   // on for every other path.
   let route: HostRoute = initialRoute;
@@ -7370,8 +7464,42 @@ async function generate(): Promise<void> {
     : draftCaps.forcesBatchSizeOne
       ? 1
       : draft.batchSize;
-  const guardedSubmission = !!preparedSubmission || !!quickSubmission;
+  const guardedSubmission = !!preparedSubmission || !!quickSubmission || preparingFreshVideo;
   const liveFormIdentity = guardedSubmission ? JSON.stringify(cloneGenerateForm(form)) : "";
+  const capturedFreshRoute = preparingFreshVideo
+    ? {
+        ...route,
+        target: { ...route.target },
+        referenceUploads: route.referenceUploads
+          ? (JSON.parse(JSON.stringify(route.referenceUploads)) as NonNullable<
+              typeof route.referenceUploads
+            >)
+          : null,
+      }
+    : null;
+  const capturedFreshRequest = preparingFreshVideo
+    ? fileUnderForFrozenRoute(buildRequest(draft), route)
+    : null;
+  const capturedRemix = appliedRemix.value
+    ? (JSON.parse(JSON.stringify(appliedRemix.value)) as typeof appliedRemix.value)
+    : null;
+  if (
+    preparingFreshVideo &&
+    (!capturedFreshRoute?.referenceUploads?.video_normalization?.available ||
+      !capturedFreshRoute.instanceId)
+  ) {
+    setGenerationStatus(
+      "The selected machine does not advertise fresh video-reference normalization.",
+      true,
+    );
+    return;
+  }
+  const preparationModel = selectedGenerationModel.value
+    ? (JSON.parse(
+        JSON.stringify(selectedGenerationModel.value),
+      ) as typeof selectedGenerationModel.value)
+    : null;
+  const backgroundTask = await beginMobileBackgroundTask("Preparing remote generation");
   const submissionAttempt = submissionAttempts.begin(backgroundTask);
   const submitSignal = submissionAttempt.signal;
   const uiId = ++submissionUiId;
@@ -7380,7 +7508,11 @@ async function generate(): Promise<void> {
     uiId === submissionUiId &&
     submissionAttempt.isCurrent() &&
     (!preparedSubmission || preparedBatch.value?.batchId === preparedSubmission.batchId);
+  let preparedReferenceLease: ReferenceUploadLease<GenerateRequest> | undefined;
+  let preparedLeaseHandedOff = false;
   const releasePreparedSubmission = () => {
+    if (preparedReferenceLease && !preparedLeaseHandedOff)
+      void preparedReferenceLease.cancel().catch(() => undefined);
     if (!unmounted && uiId === submissionUiId) {
       preparingGeneration.value = false;
       generationSubmissionPhase.value = null;
@@ -7393,12 +7525,61 @@ async function generate(): Promise<void> {
   generationSubmissionPhase.value = "preparing";
   preparedSubmitting.value = !!preparedSubmission;
   try {
+    if (
+      preparingFreshVideo &&
+      (JSON.stringify(cloneGenerateForm(form)) !== liveFormIdentity ||
+        !sameFrozenHost(
+          capturedFreshRoute!,
+          hosts.value.find((host) => host.id === capturedFreshRoute!.hostId),
+        ))
+    )
+      throw new Error("The draft or machine changed before video preparation. Submit again.");
     request = await prepareGenerationRequest(
       target,
       draft,
       () => submissionAttempt.isCurrent(),
       submitSignal,
+      preparationModel,
     );
+    if (preparingFreshVideo) {
+      if (
+        !route.referenceUploads ||
+        !route.instanceId ||
+        !draft.h3Authoring ||
+        !capturedFreshRequest
+      )
+        throw new Error(
+          "The selected machine does not advertise fresh video-reference normalization.",
+        );
+      const capturedRoute = capturedFreshRoute!;
+      const current = () =>
+        submissionAttempt.isCurrent() &&
+        JSON.stringify(cloneGenerateForm(form)) === liveFormIdentity &&
+        sameFrozenHost(
+          capturedRoute,
+          hosts.value.find((host) => host.id === capturedRoute.hostId),
+        );
+      if (capturedRemix && capturedRemix.prompt === draft.prompt)
+        capturedFreshRequest.prompt_transform = {
+          operation: "remix",
+          ...(capturedRemix.rootPrompt ? { root_prompt: capturedRemix.rootPrompt } : {}),
+          source_prompt: capturedRemix.sourcePrompt,
+          source_kind: capturedRemix.sourceKind,
+          task: capturedRemix.task,
+          dimensions: [...capturedRemix.dimensions],
+        };
+      setGenerationStatus(`Preparing video on ${route.label}`);
+      preparedReferenceLease = await prepareH3VideoReferences<GenerateRequest>({
+        state: draft.h3Authoring,
+        request: capturedFreshRequest,
+        target: capturedRoute.target,
+        expectedInstanceId: capturedRoute.instanceId!,
+        capabilities: capturedRoute.referenceUploads!,
+        current,
+        signal: submitSignal,
+      });
+      request = preparedReferenceLease.request;
+    }
     if (request.source_image && originalSource) {
       void persistGenerationSourceMedia(request.source_image, originalSource);
     }
@@ -7411,7 +7592,11 @@ async function generate(): Promise<void> {
         filename: request.id_image_name ?? "identity photo",
       });
     }
-    if (appliedRemix.value && appliedRemix.value.prompt === form.prompt) {
+    if (
+      !preparedReferenceLease &&
+      appliedRemix.value &&
+      appliedRemix.value.prompt === form.prompt
+    ) {
       request.prompt_transform = {
         operation: "remix",
         ...(appliedRemix.value.rootPrompt ? { root_prompt: appliedRemix.value.rootPrompt } : {}),
@@ -7483,7 +7668,7 @@ async function generate(): Promise<void> {
   if (retainedRestoreError.value) throw new Error(retainedRestoreError.value);
   const retainedSnapshot = retainedSourceAuthority.snapshot();
   const retainedSourceReuse = retainedSnapshot?.value;
-  if (retainedSourceReuse?.inventory.availability === "available") {
+  if (!preparedReferenceLease && retainedSourceReuse?.inventory.availability === "available") {
     const retainedMembers = retainedSourceMediaMembersForRequest(
       retainedSourceReuse.inventory.members,
       request,
@@ -7646,7 +7831,16 @@ async function generate(): Promise<void> {
     target: route.target,
     requirements: licenseRequirements(placement?.pending_downloads),
   });
-  if (!accepted || !submissionAttempt.isCurrent()) {
+  if (
+    !accepted ||
+    !submissionAttempt.isCurrent() ||
+    (preparingFreshVideo &&
+      (JSON.stringify(cloneGenerateForm(form)) !== liveFormIdentity ||
+        !sameFrozenHost(
+          capturedFreshRoute!,
+          hosts.value.find((host) => host.id === capturedFreshRoute!.hostId),
+        )))
+  ) {
     releasePreparedSubmission();
     return;
   }
@@ -7664,14 +7858,19 @@ async function generate(): Promise<void> {
   // `route` is final for every path here — the automatic fan-out's winner, a
   // prepared/quick submission's frozen route, or the pinned machine. Every
   // Batch sibling spreads this one request, so they share the outcome.
-  request = fileUnderForFrozenRoute(request, route);
+  if (!preparedReferenceLease) request = fileUnderForFrozenRoute(request, route);
   requestAdvisories.value = [];
-  const durablePlans = planBatchRequests(
-    request,
-    batchSize,
-    resolveBaseSeed(request.seed),
-    requestOptions,
-  );
+  if (preparedReferenceLease && preparedReferenceLease.expiresAtMs <= Date.now()) {
+    setGenerationStatus(
+      "Prepared video references expired. Generate again to prepare the original video.",
+      true,
+    );
+    releasePreparedSubmission();
+    return;
+  }
+  const durablePlans = preparedReferenceLease
+    ? [preparedReferenceLease.request]
+    : planBatchRequests(request, batchSize, resolveBaseSeed(request.seed), requestOptions);
   if (chainRouting.kind !== "chain") {
     // Every print is admitted through the durable queue. A machine that cannot
     // carry it is refused BY NAME with nothing queued — there is no attached
@@ -7688,7 +7887,12 @@ async function generate(): Promise<void> {
       releasePreparedSubmission();
       return;
     }
-    const admission = submitMobileDurableGeneration({ route, requests: durablePlans });
+    const admission = submitMobileDurableGeneration({
+      route,
+      requests: durablePlans,
+      ...(preparedReferenceLease ? { preparedReferenceLease } : {}),
+    });
+    preparedLeaseHandedOff = true;
     retainedSourceAuthority.invalidate();
     const admissionBackgroundTask = submissionAttempt.handoffBackgroundTask();
     void admission.finally(() => admissionBackgroundTask.release());
@@ -13258,6 +13462,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               :form="form"
               :model="selectedGenerationModel"
               :target="generationTarget"
+              :normalization-capabilities="normalizationPickerCapability"
               :gallery-sources="sourceGalleryHosts"
               :control-models="controlModels"
               :upscalers="upscalers"

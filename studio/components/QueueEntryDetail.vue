@@ -1,4 +1,9 @@
 <script setup lang="ts">
+import {
+  parseJobStall,
+  jobStallLabel,
+  type JobStallDiagnostic,
+} from "../lib/jobStall";
 /**
  * One server-queue row, in full, on every surface.
  *
@@ -28,6 +33,7 @@ const props = withDefaults(
     /** The host's folded progress snapshot: a denoise image is optional,
      * and a host with previews disabled still reports the step counter. */
     preview?: {
+      stall?: JobStallDiagnostic | null;
       preview_image: string | null;
       step: number | null;
       total: number | null;
@@ -68,6 +74,16 @@ const cancelArmed = ref(false);
 const copied = ref(false);
 const missingModelDownload = ref(false);
 
+const stall = computed(() =>
+  parseJobStall(
+    props.preview && Object.hasOwn(props.preview, "stall")
+      ? props.preview.stall
+      : props.model.stall,
+  ),
+);
+const stallLabel = computed(() =>
+  stall.value ? jobStallLabel(stall.value) : "",
+);
 const cancelLabel = computed(() => {
   if (props.cancelling) return "Cancelling…";
   if (props.confirm === "inline" && cancelArmed.value) return "Cancel job?";
@@ -91,7 +107,9 @@ function onCancel(): void {
 }
 
 async function copyDetail(): Promise<void> {
-  copied.value = await copyTextToClipboard(props.model.copyText);
+  copied.value = await copyTextToClipboard(
+    `${props.model.copyText}${stall.value ? `\nLive stall diagnostic: ${JSON.stringify(stall.value)}` : ""}`,
+  );
   if (copied.value) setTimeout(() => (copied.value = false), 2000);
 }
 </script>
@@ -119,6 +137,24 @@ async function copyDetail(): Promise<void> {
     </header>
 
     <div class="qed__body">
+      <p
+        v-if="stall"
+        class="qed__problem"
+        role="status"
+        data-test="queue-stall-diagnostic"
+      >
+        <strong>{{ stallLabel }}</strong>
+        <span
+          >{{ stall.stage }} · {{ Math.floor(stall.elapsed_stall_ms / 1000) }}s
+          without completed work.
+          {{
+            stall.device_still_held ? "The worker still owns its device." : ""
+          }}
+          Request cancellation if needed. If it remains stuck, ask the operator
+          to inspect diagnostics and account for other jobs before restarting
+          the service.</span
+        >
+      </p>
       <QueueSourceThumbnail
         :target="inputTarget"
         :instance-id="inputInstanceId"

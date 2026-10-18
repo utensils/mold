@@ -30,7 +30,16 @@ extension GenerateController {
             return
         }
         let capturedDraft = draft
-        let feedbackID = submissionFeedback.begin("Sending to \(host.name)…", phase: .submitting)
+        let capturedInstance = hosts.instanceID(of: host.id)
+        let backend: any MoldBackend = if let http = backend as? HTTPBackend {
+            http.checkingReferenceAuthority { [weak hosts] in
+                await MainActor.run {
+                    hosts?.host(host.id) == host && hosts?.instanceID(of: host.id) == capturedInstance
+                }
+            }
+        } else { backend }
+        let feedbackID = submissionFeedback.begin(capturedDraft.media.generationReferences.contains { $0.freshVideo != nil }
+            ? "Preparing video on \(host.name)…" : "Sending to \(host.name)…", phase: .submitting)
         // The Batch control already caps at `maxBatchOutputs`; this is a belt
         // on the one path a stale draft could still exceed it.
         let caps = hosts.capabilities(of: host)

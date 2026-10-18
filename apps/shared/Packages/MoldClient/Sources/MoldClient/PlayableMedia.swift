@@ -20,28 +20,17 @@ public struct PlayableMedia: Sendable {
         player.automaticallyWaitsToMinimizeStalling = backend == nil
     }
 
-    /// Client-loaded assets cannot use AVPlayer's predictive waiting. Prime a
-    /// small, measured playback window before starting instead of racing the
-    /// first response buffer. This never waits for an entire long movie.
+    /// Let AVFoundation prime its render pipeline without starting playback. A ready
+    /// custom-loaded movie may buffer less than two seconds while paused, especially
+    /// when audio extends beyond the final video sample.
     @MainActor public func prepare(_ player: AVPlayer) async throws {
+        try await prepare(player, timeout: .seconds(30))
+    }
+
+    @MainActor func prepare(_ player: AVPlayer, timeout: Duration) async throws {
         configure(player)
         guard backend != nil, let item = player.currentItem else { return }
-        let duration = try await item.asset.load(.duration).seconds
-        let clock = ContinuousClock()
-        let deadline = clock.now + .seconds(30)
-        while true {
-            try Task.checkCancellation()
-            if let error = item.error { throw error }
-            guard player.currentItem === item else { throw CancellationError() }
-            let position = max(0, player.currentTime().seconds)
-            let ahead = duration.isFinite ? min(2, max(0, duration - position)) : 2
-            if item.status == .readyToPlay, item.loadedTimeRanges.contains(where: {
-                let range = $0.timeRangeValue
-                return range.start.seconds <= position + 0.05 && CMTimeRangeGetEnd(range).seconds >= position + ahead - 0.05
-            }) { return }
-            guard clock.now < deadline else { throw URLError(.timedOut) }
-            try await Task.sleep(for: .milliseconds(50))
-        }
+        try await MediaPreroll.prepare(player, item: item, timeout: timeout)
     }
 
     @MainActor public func playerItem() -> AVPlayerItem {

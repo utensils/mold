@@ -1674,7 +1674,7 @@ pub async fn generate(
         source_image_name: source_name,
         references: prepared_references
             .as_ref()
-            .map(|prepared| prepared.descriptors.clone()),
+            .and_then(|prepared| prepared.canonical_descriptors()),
         frames: resolved_frames,
         fps: resolved_fps,
         strength,

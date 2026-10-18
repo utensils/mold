@@ -15440,3 +15440,66 @@ it("lets a hand-attached input retire a failed retained restore", async () => {
   // Giving up the archive: nothing archived is relayed beside the new input.
   expect(authority.snapshot()).toBeNull();
 });
+
+it("explains when Auto has no eligible machine for a restored fresh video reference", async () => {
+  const h3: ModelEntry = {
+    ...model,
+    name: "minimax-h3-ref2va:comfy-pruned-int8",
+    family: "minimax-h3",
+    default_steps: 50,
+    default_guidance: 0,
+    default_width: 1344,
+    default_height: 768,
+    default_frames: 124,
+    default_fps: 24,
+    supports_audio: true,
+  };
+  const base = apiJsonTo.getMockImplementation()!;
+  apiJsonTo.mockImplementation((target, path, init) =>
+    path === "/api/models" ? Promise.resolve([h3]) : base(target, path, init),
+  );
+  wrapper = mountMobileApp();
+  await flushPromises();
+  const vm = wrapper.vm as unknown as {
+    form: GenerateForm;
+    generate(): Promise<void>;
+    hosts: Array<Record<string, unknown>>;
+    generateTargetPolicy: string;
+  };
+  vm.hosts.push({
+    ...vm.hosts[0]!,
+    id: "second-normalizer",
+    name: "Second",
+    baseUrl: "http://second:7680",
+    online: true,
+    connected: true,
+    instanceId: "second-instance",
+  });
+  vm.generateTargetPolicy = "auto";
+  vm.form.prompt = "A synchronized scene";
+  vm.form.h3Authoring!.references = [
+    {
+      reference: {
+        kind: "fresh_video",
+        original: {
+          mime_type: "video/quicktime",
+          name: "clip.mov",
+          byte_length: 8,
+          sha256: "a".repeat(64),
+        },
+        body: new Blob(["original"]),
+      },
+    },
+  ];
+  await flushPromises();
+  await vm.generate();
+  await flushPromises();
+  expect(wrapper.text()).toContain(
+    "No eligible machine advertises fresh video-reference normalization",
+  );
+  expect(
+    apiJsonTo.mock.calls.some((call) =>
+      String(call[1]).includes("reference-normalization-sessions"),
+    ),
+  ).toBe(false);
+});

@@ -1063,7 +1063,7 @@ async function unload(name: string): Promise<void> {
 
 function queueCode(entry: QueueEntry): string {
   if (entry.state === "running") {
-    const runtime = queueRuntimeCode(queuePlan.value, entry.id);
+    const runtime = queueRuntimeCode(queuePlan.value, entry.id, entry.stall);
     if (runtime) return runtime;
     return entry.gpu == null ? "RUNNING" : `RUNNING · GPU ${entry.gpu}`;
   }

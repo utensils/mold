@@ -1,3 +1,4 @@
+import type { GenerationTemplateMediaInput } from "@studio/lib/templateMediaStore";
 import type { GenerateFormState, SourceImageState } from "../types";
 import { cloneTemplateForm } from "../composables/useGenerateForm";
 import { createUuid } from "@studio/lib/id";
@@ -121,7 +122,10 @@ export function collectTemplateMediaReferences(
     ).map<GenerationTemplateMediaReference>(({ reference }) => ({
       field: "h3References",
       kind: "upload",
-      filename: reference.provenance?.name || `${reference.kind} reference`,
+      filename:
+        reference.kind === "fresh_video"
+          ? (reference.original.name ?? "Video reference")
+          : reference.provenance?.name || `${reference.kind} reference`,
     })),
   ].filter((ref): ref is GenerationTemplateMediaReference => ref !== null);
 }
@@ -259,22 +263,41 @@ export async function saveGenerationTemplateWithMedia(
             },
           ]
         : []),
-      ...h3.references.flatMap(({ reference }, index) =>
-        reference.media.authority === "inline" && reference.media.data
-          ? [
-              {
-                field: "h3References" as const,
-                index,
-                filename:
-                  reference.provenance?.name ||
-                  `${reference.kind} reference ${index + 1}`,
-                kind: "upload" as const,
-                mime: reference.mime_type,
-                reference: redactGenerationReference(reference),
-                base64: reference.media.data,
-              },
-            ]
-          : [],
+      ...h3.references.flatMap<GenerationTemplateMediaInput>(
+        ({ reference }, index) =>
+          reference.kind === "fresh_video"
+            ? reference.body
+              ? [
+                  {
+                    field: "h3References" as const,
+                    index,
+                    filename: reference.original.name ?? "Video reference",
+                    kind: "upload" as const,
+                    mime: reference.original.mime_type,
+                    reference: {
+                      kind: "fresh_video" as const,
+                      original: { ...reference.original },
+                    },
+                    base64: "",
+                    blob: reference.body,
+                  },
+                ]
+              : []
+            : reference.media.authority === "inline" && reference.media.data
+              ? [
+                  {
+                    field: "h3References" as const,
+                    index,
+                    filename:
+                      reference.provenance?.name ||
+                      `${reference.kind} reference ${index + 1}`,
+                    kind: "upload" as const,
+                    mime: reference.mime_type,
+                    reference: redactGenerationReference(reference),
+                    base64: reference.media.data,
+                  },
+                ]
+              : [],
       ),
     ],
     persistence,
@@ -360,10 +383,13 @@ export async function hydrateGenerationTemplate(
   for (const asset of restoredH3References) {
     const index = asset.index ?? 0;
     form.h3Authoring.references[index] = {
-      reference: {
-        ...asset.reference!,
-        media: { authority: "inline", data: asset.base64 },
-      },
+      reference:
+        asset.reference!.kind === "fresh_video"
+          ? { ...asset.reference!, ...(asset.blob ? { body: asset.blob } : {}) }
+          : {
+              ...asset.reference!,
+              media: { authority: "inline" as const, data: asset.base64 },
+            },
       draftId: asset.assetId,
     };
   }

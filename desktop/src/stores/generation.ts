@@ -1,3 +1,5 @@
+import type { ReferenceUploadLease } from "@studio/api/referenceUploads";
+import { jobStallLabel, parseQueueCancellationResponse } from "@studio/lib/jobStall";
 import { reactive } from "vue";
 import { defineStore } from "pinia";
 import { compareNewestSubmitted } from "@studio/lib/activityOrder";
@@ -185,6 +187,7 @@ export function resolveBaseSeed(seed: number | undefined, rng: () => number = ra
 }
 
 export interface BatchRequestOptions {
+  preparedReferenceLease?: ReferenceUploadLease<GenerateRequest>;
   /** Ordered prompt override for each sibling. Must exactly match the normalized batch size. */
   prompts?: readonly string[];
   /** Shared source prompt retained as provenance on every sibling request. */
@@ -909,6 +912,7 @@ export const useGenerationStore = defineStore("generation", {
               if (url) job.previewUrl = url;
               if (progress.step !== null) job.step = progress.step;
               if (progress.total !== null) job.total = progress.total;
+              if (Object.hasOwn(progress, "stall")) job.stall = progress.stall ?? null;
               if (progress.stage) job.stage = progress.stage;
             },
           );
@@ -1025,11 +1029,16 @@ export const useGenerationStore = defineStore("generation", {
         );
         if (!host?.baseUrl) return false;
         try {
-          await apiFetchTo(
+          const response = await apiFetchTo(
             { baseUrl: host.baseUrl, apiKey: host.apiKey, connectionMode: host.connectionMode },
             `/api/queue/${encodeURIComponent(job.id)}${current.cancelOnlyHeldChildIndexes?.includes(childIndex) ? "?only_held=true" : ""}`,
             { method: "DELETE" },
           );
+          const outcome = await parseQueueCancellationResponse(response);
+          if (!outcome.terminal && !jobHasSettled(job)) {
+            job.cancelAccepted = { deviceStillHeld: outcome.deviceStillHeld };
+            job.stall = outcome.stall;
+          }
         } catch (error) {
           if (
             current.cancelOnlyHeldChildIndexes?.includes(childIndex) &&
@@ -1227,6 +1236,7 @@ export const useGenerationStore = defineStore("generation", {
       requests: GenerateRequest[],
       route: Pick<JobRoute, "referenceUploads"> | null = null,
       retainedSource?: { filename: string; memberIds: readonly string[] },
+      preparedReferenceLease?: ReferenceUploadLease<GenerateRequest>,
     ): Promise<void> {
       const hosts = useHostsStore();
       const host = hosts.all.find(
@@ -1253,7 +1263,7 @@ export const useGenerationStore = defineStore("generation", {
         route?.referenceUploads ??
         (host ? (hosts.capabilities[host.id]?.reference_uploads ?? null) : null);
       let transport = requests;
-      let releaseLeases = async (): Promise<void> => {};
+      let releaseLeases = preparedReferenceLease?.cancel ?? (async (): Promise<void> => {});
       if (
         requests.some((request) =>
           requestShouldUseReferenceUploads(request, target, referenceUploads),
@@ -1379,9 +1389,25 @@ export const useGenerationStore = defineStore("generation", {
     ): { jobs: Job[]; admitted?: Promise<Job[]>; settled: Promise<Job[]> } {
       this.selectedClientId = null;
       if (chainRouting?.kind === "reject") throw new Error(chainRouting.reason);
+      if (
+        requestOptions.preparedReferenceLease &&
+        requestOptions.preparedReferenceLease.expiresAtMs <= Date.now()
+      )
+        throw new Error(
+          "Prepared video references expired. Generate again to prepare the original video.",
+        );
       const size = Math.max(1, Math.floor(batchSize));
       const baseSeed = resolveBaseSeed(req.seed);
-      const plans = planBatchRequests(req, size, baseSeed, requestOptions);
+      if (
+        requestOptions.preparedReferenceLease &&
+        (size !== 1 || req !== requestOptions.preparedReferenceLease.request)
+      )
+        throw new Error(
+          "Prepared video references require their exact finalized singleton request.",
+        );
+      const plans = requestOptions.preparedReferenceLease
+        ? [req]
+        : planBatchRequests(req, size, baseSeed, requestOptions);
       if (requestOptions.retainedSource && plans.length !== 1) {
         throw new Error("Retained source-media reuse requires a single print per submission.");
       }
@@ -1517,13 +1543,20 @@ export const useGenerationStore = defineStore("generation", {
                     requestChunk,
                     host,
                     requestOptions.retainedSource,
+                    requestOptions.preparedReferenceLease,
                   ),
                 ),
               Promise.resolve(),
             )
           : Promise.all(
               chunks.map(({ record, requestChunk }) =>
-                this.admitDurableRecord(record, requestChunk, host, requestOptions.retainedSource),
+                this.admitDurableRecord(
+                  record,
+                  requestChunk,
+                  host,
+                  requestOptions.retainedSource,
+                  requestOptions.preparedReferenceLease,
+                ),
               ),
             ).then(() => undefined);
         const admitted = admitChunks.then(() => jobs);
@@ -1728,13 +1761,24 @@ export const useGenerationStore = defineStore("generation", {
       const chainJobId = chainJobIds.get(job.clientId);
       if (chainJobId || job.id) {
         try {
-          await apiFetchTo(
+          const response = await apiFetchTo(
             targets.get(job.clientId) ?? currentTarget(),
             chainJobId
               ? `/api/chain-jobs/${encodeURIComponent(chainJobId)}/cancel`
               : `/api/queue/${encodeURIComponent(job.id!)}`,
             { method: chainJobId ? "POST" : "DELETE" },
           );
+          const outcome = await parseQueueCancellationResponse(response);
+          if (!outcome.terminal && !jobHasSettled(job)) {
+            job.stall = outcome.stall;
+            job.cancelAccepted = { deviceStillHeld: outcome.deviceStillHeld };
+            job.stage = outcome.stall
+              ? jobStallLabel(outcome.stall)
+              : outcome.deviceStillHeld
+                ? "Cancel requested; device still held"
+                : "Cancel requested";
+            return false;
+          }
         } catch (err) {
           // A terminal SSE frame may win while DELETE is in flight. Preserve
           // that authoritative outcome; otherwise the failed DELETE means the

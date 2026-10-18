@@ -38,6 +38,8 @@ pub const GALLERY_AUTHORITY_LOG_ENV: &str = "MOLD_GALLERY_AUTHORITY_LOG";
 /// days a fully settled batch summary is kept after its last child settled.
 /// `0` keeps both forever. Profile-scoped DB key.
 pub const QUEUE_HELD_RETENTION_DAYS_KEY: &str = "queue.held_retention_days";
+pub const QUEUE_NO_PROGRESS_TIMEOUT_SECONDS_KEY: &str = "queue.no_progress_timeout_seconds";
+pub const QUEUE_NO_PROGRESS_TIMEOUT_SECONDS_ENV: &str = "MOLD_QUEUE_NO_PROGRESS_TIMEOUT_SECONDS";
 pub const QUEUE_HELD_RETENTION_DAYS_ENV: &str = "MOLD_QUEUE_HELD_RETENTION_DAYS";
 
 /// Whether a titled print is also tagged with its title slug, by the CLIENT
@@ -217,6 +219,12 @@ pub const ALL_KEYS: &[ConfigKeyInfo] = &[
         section: "Gallery",
     },
     // Queue
+    ConfigKeyInfo {
+        key: QUEUE_NO_PROGRESS_TIMEOUT_SECONDS_KEY,
+        value_type: ValueType::U32,
+        env_var: Some(QUEUE_NO_PROGRESS_TIMEOUT_SECONDS_ENV),
+        section: "Queue",
+    },
     ConfigKeyInfo {
         key: QUEUE_HELD_RETENTION_DAYS_KEY,
         value_type: ValueType::U32,
@@ -522,6 +530,9 @@ pub fn get_static_value(config: &Config, key: &str) -> Result<ConfigValue> {
         GALLERY_AUTHORITY_LOG_KEY => ConfigValue::Bool(config.gallery.authority_log),
         // Queue
         QUEUE_HELD_RETENTION_DAYS_KEY => ConfigValue::U32(config.queue.held_retention_days),
+        QUEUE_NO_PROGRESS_TIMEOUT_SECONDS_KEY => {
+            ConfigValue::U32(config.queue.no_progress_timeout_seconds)
+        }
         // Generate
         GENERATE_AUTO_TAG_TITLE_KEY => ConfigValue::Bool(config.generate.auto_tag_title),
         // Logging
@@ -713,6 +724,9 @@ fn set_static_value(config: &mut Config, key: &str, raw: &str) -> Result<()> {
             config.gallery.authority_log = parse_bool(raw, key)?;
         }
         // Queue
+        QUEUE_NO_PROGRESS_TIMEOUT_SECONDS_KEY => {
+            config.queue.no_progress_timeout_seconds = parse_u32(raw, 0, 86400, key)?;
+        }
         QUEUE_HELD_RETENTION_DAYS_KEY => {
             config.queue.held_retention_days =
                 parse_u32(raw, 0, crate::config::GALLERY_TRASH_RETENTION_MAX_DAYS, key)

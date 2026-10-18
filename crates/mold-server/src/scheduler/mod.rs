@@ -7773,6 +7773,7 @@ fn queue_plan_projection_at_unix(
             let hard_id = work.hard_device_id.as_ref().map(ToString::to_string);
             let host_utility = device_id == CPU_UTILITY_DEVICE_ID;
             mold_core::QueueWorkItem {
+                blocked_device_reason: None,
                 work_id: work.id.to_string(),
                 parent_id: work.parent_id.to_string(),
                 work_kind: snake_debug(work.kind),
@@ -7917,6 +7918,7 @@ fn queue_plan_projection_at_unix(
                     .as_ref()
                     .and_then(|id| ordinals.get(id.as_str()).copied());
                 mold_core::QueueWorkItem {
+                    blocked_device_reason: None,
                     work_id: work.id.to_string(),
                     parent_id: work.parent_id.to_string(),
                     work_kind: snake_debug(work.kind),
@@ -12294,6 +12296,7 @@ mod tests {
     #[test]
     fn queue_plan_event_dedup_ignores_versions_and_wall_clock_drift() {
         let work = mold_core::QueueWorkItem {
+            blocked_device_reason: None,
             work_id: "work-a".into(),
             parent_id: "job-a".into(),
             work_kind: "generation".into(),
@@ -12326,6 +12329,7 @@ mod tests {
             dirty_since_unix_ms: Some(10_000),
             next_replan_at_unix_ms: Some(12_000),
             work_items: vec![mold_core::QueueWorkItem {
+                blocked_device_reason: None,
                 estimated_start_unix_ms: Some(11_000),
                 estimated_finish_unix_ms: Some(16_000),
                 preparation_progress: Some(mold_core::QueuePreparationProgress {

@@ -52,3 +52,22 @@ struct QueueDetailPresentationTests {
         #expect(prompt.value == "Prompt")
     }
 }
+
+extension QueueDetailPresentationTests {
+    @Test func liveStallSuppressesStaleFractionAndCancellationStaysPending() throws {
+        var last = try MoldJSON.decoder.decode(JobProgress.self, from: Data(#"{"step":8,"total":8,"stage":"Denoising"}"#.utf8))
+        last.stall = StallDiagnostic(stage: "Decode attention", lastCompletedWorkUnixMs: 1, elapsedStallMs: 300_000, cancelRequested: true, deviceStillHeld: true)
+        let status = QueueDetailPresentation.status(current: FakeFixtures.queueEntry("job", state: "running"), progress: last)
+        #expect(status.title == "Stalled")
+        #expect(status.message?.contains("device still held") == true)
+        #expect(status.fraction == nil)
+        #expect(status.stepText == nil)
+    }
+
+    @Test func decodeCountersUseCompletedWorkRatherThanDenoiseOrFrameLabels() throws {
+        let progress = try MoldJSON.decoder.decode(JobProgress.self, from: Data(#"{"stage":"Decode QKV chunks","stage_current":2,"stage_total":9}"#.utf8))
+        let status = QueueDetailPresentation.status(current: FakeFixtures.queueEntry("job", state: "running"), progress: progress)
+        #expect(status.stepText == "Completed 2 of 9")
+        #expect(status.fraction == 2.0 / 9.0)
+    }
+}

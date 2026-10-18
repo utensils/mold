@@ -19,7 +19,8 @@ enum PreviewPoll {
         return Task { [weak controller] in
             while !Task.isCancelled {
                 if case let .running(current, _) = controller?.run {
-                    target = current.children.first { $0.state.isLive }?.jobId ?? target
+                    target = (current.children.first { $0.state == .running || $0.state == .cancelling }
+                        ?? current.children.first { $0.state.isLive })?.jobId ?? target
                 }
                 if let jobId = target,
                    let progress = try? await backend.jobPreview(jobId: jobId),

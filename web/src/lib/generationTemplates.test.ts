@@ -211,7 +211,7 @@ describe("generation templates", () => {
       hydrated.form.h3Authoring?.references.map((draft) => [
         draft.reference.kind,
         draft.reference.provenance?.name,
-        draft.reference.media.authority === "inline"
+        draft.reference.media?.authority === "inline"
           ? draft.reference.media.data
           : null,
       ]),

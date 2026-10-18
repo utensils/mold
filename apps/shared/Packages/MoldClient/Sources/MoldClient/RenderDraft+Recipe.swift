@@ -71,8 +71,7 @@ public extension RenderDraft {
             // The RATE first: the requestable ceiling moves with it
             // (`TemporalProfile.lengthBounds`), so a length settled before it
             // could be one admission narrows away.
-            if !temporal.fps.isAdjustable { draft.fps = temporal.fps.value }
-            if draft.fps == nil { draft.fps = temporal.fps.value }
+            draft.fps = temporal.fps.resolvedRate(draft.fps)
             let bounds = temporal.lengthBounds(
                 fps: draft.fps ?? temporal.fps.value, family: family, model: model,
                 sourceImage: recipe.capabilities.sourceImage)

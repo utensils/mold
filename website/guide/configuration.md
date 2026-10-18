@@ -927,3 +927,26 @@ These are intended for troubleshooting and development rather than normal use.
 
 This variable is set during the build and is not normally configured by users at
 runtime.
+
+### No-progress diagnostics
+
+`queue.no_progress_timeout_seconds` is a profile-scoped SQLite preference,
+default `300`, range `0`–`86400`; `0` disables stall diagnostics.
+`MOLD_QUEUE_NO_PROGRESS_TIMEOUT_SECONDS` overrides it. Set it with
+`mold config set queue.no_progress_timeout_seconds 300`.
+
+The clock advances only on completed work. Timers, preview arrivals and duplicate
+progress do not make a blocked stage look healthy. The additive stall diagnostic
+reports stage, last completed work time, elapsed stall, cancellation request and
+whether the device is still held. Cancellation accepted while work is active
+returns HTTP 202; the job and device remain occupied until the worker returns.
+Queued jobs can show a blocked-device reason while healthy devices continue
+through ordinary placement.
+
+Cooperative cancellation stops at supported decoder boundaries. A long kernel
+or driver stall can still prevent return. Inspect the job/queue diagnostics and
+other host work before an explicit operator-controlled service restart. Follow
+the host service's configured stop timeout/escalation, verify the prior process
+and GPU contexts are gone, then restart. No watchdog automatically restarts the
+service, resets a GPU, or releases a live device. Startup settles interrupted
+cancelling attempts honestly and restores durable queue ordering.

@@ -17,7 +17,7 @@ public struct ParkedConditioning: Codable, Hashable, Sendable {
     public var sourceImageOriginal: String?
     public var sourceImageOriginalName: String?
     public var editImages: [String] = []
-    public var generationReferences: [GenerationReference] = []
+    public var generationReferences: [AuthoringReference] = []
     /// The IP-Adapter weight, held for a recipe that advertises no weight
     /// control. Parked rather than dropped for the same reason a picture is:
     /// a switch to a model with no `reference_images.weight` and back used to

@@ -4524,6 +4524,8 @@ pub struct QueueModelDownload {
 ///   (queued rows carry no `gpu` key at all — never `"gpu": null`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct QueueJobEntryWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall: Option<crate::stall::StallDiagnostic>,
     pub id: String,
     pub model: String,
     /// Job lifecycle state — `"queued"` or `"running"` on current servers.
@@ -4942,6 +4944,9 @@ impl<'de> Deserialize<'de> for QueuePlannedLaneKind {
 /// client can continue rendering a plan after a server adds a work kind.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct QueueWorkItem {
+    /// Live explanation when a required device is still owned by stalled work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_device_reason: Option<String>,
     pub work_id: String,
     pub parent_id: String,
     pub work_kind: String,
@@ -5526,6 +5531,10 @@ pub struct AdvancedPlacement {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SseProgressEvent {
+    /// Observational watchdog diagnostic. Null clears it after real work resumes.
+    Stall {
+        stall: Option<crate::stall::StallDiagnostic>,
+    },
     /// The job is waiting for a concrete model dependency to become locally
     /// available. No accelerator lease has been granted at this point.
     DependencyWait {
@@ -11898,6 +11907,9 @@ pub struct ReferenceUploadCapabilities {
     /// client chunks such batches to this many siblings.
     pub max_active_sessions: u32,
     pub session_ttl_ms: u64,
+    /// Fresh typed H3 video conversion, independently negotiated from V2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_normalization: Option<crate::video_normalization::VideoNormalizationCapabilities>,
 }
 
 /// Prompt-expansion backend category. The API intentionally reports the

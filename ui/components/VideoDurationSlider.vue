@@ -8,6 +8,7 @@ import {
   videoGenerationCount,
   videoGenerationMarks,
   videoFrameStep,
+  videoFrameOffset,
   type VideoFrameContract,
 } from "@studio/lib/videoDuration";
 import type { GenerateRoutingRequest } from "@studio/lib/chainRouting";
@@ -84,14 +85,21 @@ const marks = computed(() =>
 // FPS/model changes can lower a previously legal single-shot value. Clamp that
 // transition, but preserve an intentional above-ceiling exact frame count: the
 // advanced fields use those to request automatic long-video chaining.
-watch(maximum, (next, previous) => {
-  if (props.frames <= previous && props.frames > next) {
-    emit(
-      "update:frames",
-      clampVideoFrames(props.frames, rate.value, contract.value),
-    );
-  }
-});
+watch(
+  [
+    maximum,
+    () => minVideoFrames(contract.value),
+    () => videoFrameStep(contract.value),
+    () => videoFrameOffset(contract.value),
+  ],
+  (_next, previous) => {
+    // An above-ceiling exact value is an intentional long-video request. Only
+    // reconcile carried single-render values when the actual grid changes.
+    if (props.frames > previous[0]) return;
+    const next = clampVideoFrames(props.frames, rate.value, contract.value);
+    if (next !== props.frames) emit("update:frames", next);
+  },
+);
 
 function update(frames: number): void {
   emit("update:frames", clampVideoFrames(frames, rate.value, contract.value));

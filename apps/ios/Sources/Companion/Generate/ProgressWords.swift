@@ -9,6 +9,7 @@ import MoldClient
 enum ProgressWords {
     /// The sentence. `remaining` is the time left when a rate is known.
     static func sentence(_ progress: JobProgress?, position: Int? = nil, remaining: Duration? = nil) -> String {
+        if let stall = progress?.stall { return stall.statusMessage }
         if let position, position > 0 {
             return position == 1 ? String(localized: "Waiting — next in line")
                                  : String(localized: "Waiting — \(position - 1) ahead")
@@ -22,9 +23,10 @@ enum ProgressWords {
 
     /// The mono figure: the stage the machine named, and the step count.
     static func figure(_ progress: JobProgress?) -> String? {
-        guard let progress else { return nil }
+        guard let progress, progress.stall == nil else { return nil }
         let stage = progress.stage.map { isDenoising($0) ? "denoise" : $0.lowercased() }
-        if let step = progress.step, let total = progress.total, total > 0 {
+        if let step = progress.stageCurrent ?? progress.step,
+           let total = progress.stageTotal ?? progress.total, total > 0 {
             return "\(stage ?? "step") \(step)/\(total)"
         }
         return stage
@@ -32,7 +34,9 @@ enum ProgressWords {
 
     /// What VoiceOver reads for the bar: "18 of 28, about 12 seconds left".
     static func spoken(_ progress: JobProgress?, remaining: Duration? = nil) -> String {
-        guard let step = progress?.step, let total = progress?.total else { return String(localized: "In progress") }
+        if let stall = progress?.stall { return stall.statusMessage }
+        guard let step = progress?.stageCurrent ?? progress?.step,
+              let total = progress?.stageTotal ?? progress?.total else { return String(localized: "In progress") }
         var words = String(localized: "\(step) of \(total)")
         if let remaining, remaining > .seconds(1) {
             words += ", " + String(localized: "about \(remaining.formatted(.units(allowed: [.minutes, .seconds], width: .wide))) left")
@@ -43,7 +47,7 @@ enum ProgressWords {
     /// Which quarter of the steps are done (0 through 4), for the VoiceOver
     /// announcement every 25%. `nil` before a step count is known.
     static func quarter(_ progress: JobProgress?) -> Int? {
-        guard let step = progress?.step, let total = progress?.total, total > 0 else { return nil }
+        guard progress?.stall == nil, let step = progress?.step, let total = progress?.total, total > 0 else { return nil }
         return min(4, step * 4 / total)
     }
 
@@ -77,6 +81,7 @@ struct StepRate {
     private var first: (step: Int, at: Date)?
 
     mutating func remaining(_ progress: JobProgress?, now: Date = .now) -> Duration? {
+        guard progress?.stall == nil else { reset(); return nil }
         guard let step = progress?.step, let total = progress?.total, total > step else { return nil }
         guard let first, step > first.step else {
             if first == nil || (first.map { step < $0.step } ?? false) { self.first = (step, now) }

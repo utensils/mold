@@ -112,7 +112,7 @@ function laneValue(entry: QueueEntry): string {
 
 function entryStateLabel(entry: QueueEntry): string {
   if (entry.state === "running") {
-    return queueRuntimeLabel(props.plan, entry.id) ?? "Running";
+    return queueRuntimeLabel(props.plan, entry.id, entry.stall) ?? "Running";
   }
   return queueWaitLabel(
     resolveQueueWait(

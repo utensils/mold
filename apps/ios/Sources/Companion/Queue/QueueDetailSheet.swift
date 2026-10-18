@@ -22,8 +22,15 @@ struct QueueDetailSheet: View {
                     Text(queue.headline(for: current ?? entry, on: host.id)).font(.title3.weight(.semibold))
                     Text(host.name).foregroundStyle(.secondaryText)
                     if let current {
-                        Text(current.state == .held ? "Held" : current.waitDescription).foregroundStyle(.secondaryText)
-                        if current.state == .running {
+                        Text(current.state == .held ? "Held" : queue.statusDescription(current, on: host.id)).foregroundStyle(.secondaryText)
+                        if let stall = queue.stall(for: current) {
+                            Text(stall.recoveryMessage).fixedSize(horizontal: false, vertical: true)
+                            Text("Last completed work: \(stall.lastCompletedWorkUnixMs) ms since Unix epoch")
+                                .font(.caption).textSelection(.enabled)
+                            Button("Copy Stall Diagnostics") {
+                                UIPasteboard.general.string = stall.copyText(machine: host.name, job: entry.id)
+                            }.buttonStyle(.borderless)
+                        } else if current.state == .running {
                             Text(ProgressWords.sentence(queue.progress[entry.id]))
                             if let figure = ProgressWords.figure(queue.progress[entry.id]) {
                                 Text(figure).font(.callout.monospacedDigit()).foregroundStyle(.secondaryText)

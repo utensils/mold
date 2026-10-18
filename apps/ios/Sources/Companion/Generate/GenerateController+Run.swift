@@ -18,13 +18,19 @@ enum RunState: Equatable {
     }
 
     var steps: (done: Int, total: Int)? {
-        guard case let .running(_, progress) = self, let step = progress?.step,
-              let total = progress?.total, total > 0 else { return nil }
+        guard case let .running(status, progress) = self, progress?.stall == nil,
+              !status.children.contains(where: { $0.state == .cancelling }),
+              let step = progress?.stageCurrent ?? progress?.step,
+              let total = progress?.stageTotal ?? progress?.total, total > 0 else { return nil }
         return (step, total)
     }
 
     var stage: String? {
-        guard case let .running(_, progress) = self else { return nil }
+        guard case let .running(status, progress) = self else { return nil }
+        if let stall = progress?.stall { return stall.statusMessage }
+        if status.children.contains(where: { $0.state == .cancelling }) {
+            return "Cancel requested; awaiting host confirmation."
+        }
         return progress?.stage
     }
 
@@ -55,7 +61,15 @@ struct PendingAdmission {
 extension GenerateController {
     func generate() {
         guard blocker == nil, let host = target, let modelName else { return }
-        let backend = hosts.backend(for: host)
+        let capturedInstance = hosts.instanceID(of: host.id)
+        let ordinaryBackend = hosts.backend(for: host)
+        let backend: any MoldBackend = if let http = ordinaryBackend as? HTTPBackend {
+            http.checkingReferenceAuthority { [weak hosts] in
+                await MainActor.run {
+                    hosts?.host(host.id) == host && hosts?.instanceID(of: host.id) == capturedInstance
+                }
+            }
+        } else { ordinaryBackend }
         let copies = min(draft.batchSize, referenceBatchLimit)
         let retained = retainedReuse.snapshot()
         let snapshot = draft
@@ -65,7 +79,11 @@ extension GenerateController {
         // Decided now, before the task: a second press right after this one
         // still queues, however the two tasks interleave.
         let followNow = activeBatch == nil && !run.isBusy
-        if followNow { run = .submitting }
+        if followNow {
+            run = .submitting
+            referencePreparation = draft.media.generationReferences.contains { $0.freshVideo != nil }
+                ? "Preparing video on \(host.name)…" : nil
+        }
         saveDraft()
 
         // A finite background task covers ONLY the upload and admission; once
@@ -99,6 +117,7 @@ extension GenerateController {
                 try Task.checkCancellation()
                 let accepted = try await backend.submit(admission)
                 guard let self else { return }
+                if self.currentAdmissionID == token { self.referencePreparation = nil }
                 let active = ActiveBatch(id: accepted.id, clientBatchId: admission.clientBatchId,
                                          host: host.id, prompt: prompt, startedAt: .now)
                 self.ledger.add(active)
@@ -136,6 +155,7 @@ extension GenerateController {
         admissions[token] = nil
         guard currentAdmissionID == token else { return }
         currentAdmissionID = nil
+        referencePreparation = nil
         followNext()
     }
 
@@ -181,7 +201,8 @@ extension GenerateController {
         Task { [weak self] in
             while !Task.isCancelled {
                 if let self, case let .running(status, _) = self.run,
-                   let job = status.children.first(where: { $0.state.isLive })?.jobId ?? status.children.first?.jobId,
+                   let job = (status.children.first(where: { $0.state == .running || $0.state == .cancelling })
+                       ?? status.children.first(where: { $0.state.isLive }))?.jobId,
                    let progress = try? await backend.jobPreview(jobId: job),
                    !Task.isCancelled, case let .running(current, _) = self.run, current.id == status.id {
                     self.run = .running(current, progress)

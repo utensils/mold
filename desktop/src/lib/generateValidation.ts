@@ -123,6 +123,7 @@ export function inlineGenerationMediaBytes(
   }
   if (h3Task === "ref2va" && exclude !== "h3References") {
     total += (form.h3Authoring?.references ?? []).reduce((sum, draft) => {
+      if (draft.reference.kind === "fresh_video") return sum;
       const media = draft.reference.media;
       return sum + (media.authority === "inline" ? decodedBase64Bytes(media.data) : 0);
     }, 0);

@@ -1,6 +1,18 @@
 use crate::manifest::{known_manifests, model_base_name, variant_quality_rank, visible_manifests};
 use crate::{Config, ModelDefaults, ModelInfo, ModelInfoExtended, RecommendedDimensions};
 
+/// Config-only discovery has no reviewed manifest identity to authorize a
+/// raw H3 artifact. The loader's artifact gate is intentionally less strict:
+/// registered H3 manifests must be able to open their pinned upstream files.
+/// Never use that loader permission alone to register a custom alias.
+fn config_artifact_registration_available(
+    path: &std::path::Path,
+    artifact_root: &std::path::Path,
+    family: Option<&str>,
+) -> bool {
+    crate::model_policy::require_user_artifact_activation(path, Some(artifact_root), family).is_ok()
+}
+
 /// The resolution contract `/api/models` advertises for one model.
 pub struct ResolutionDefaults {
     pub max_pixels: Option<u64>,
@@ -394,12 +406,11 @@ pub fn build_model_catalog(
             crate::manifest::find_manifest(name).is_none()
                 && crate::require_model_activation(name, model_cfg.family.as_deref()).is_ok()
                 && model_cfg.all_file_paths().iter().all(|path| {
-                    crate::require_model_artifact_activation(
+                    config_artifact_registration_available(
                         std::path::Path::new(path),
-                        Some(&artifact_root),
+                        &artifact_root,
                         model_cfg.family.as_deref(),
                     )
-                    .is_ok()
                 })
         })
         .collect();
@@ -1392,6 +1403,36 @@ mod tests {
                 .and_then(|recipe| recipe.capabilities.source_image),
             Some(crate::SourceImageCapability::Unsupported)
         );
+    }
+
+    #[test]
+    fn config_registration_distinguishes_storage_root_from_unreviewed_artifact_identity() {
+        let root = std::path::Path::new("/storage/minimax-h3/models");
+        assert!(config_artifact_registration_available(
+            &root.join("flux/transformer.safetensors"),
+            root,
+            Some("custom")
+        ));
+        assert!(!config_artifact_registration_available(
+            &root.join("private/MiniMax-H3/transformer.safetensors"),
+            root,
+            Some("custom")
+        ));
+        assert!(!config_artifact_registration_available(
+            std::path::Path::new("/outside/MiniMax-H3/transformer.safetensors"),
+            root,
+            Some("custom")
+        ));
+        // Loader permission remains independently available in the shipping
+        // graph for the exact registered manifests that were already admitted.
+        if cfg!(feature = "h3") {
+            assert!(crate::require_model_artifact_activation(
+                &root.join("MiniMax-H3/transformer.safetensors"),
+                Some(root),
+                Some("minimax-h3")
+            )
+            .is_ok());
+        }
     }
 
     #[test]

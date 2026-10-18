@@ -330,11 +330,22 @@ pub async fn queue_cancel(
     #[description = "Exact queue job id"] job_id: String,
 ) -> Result<()> {
     ctx.defer_ephemeral().await?;
-    match ctx.data().client.cancel_queue_job(&job_id).await {
-        Ok(()) => {
+    match ctx
+        .data()
+        .client
+        .request_queue_job_cancellation(&job_id)
+        .await
+    {
+        Ok(disposition) => {
+            let label = match disposition {
+                mold_core::stall::QueueCancellationDisposition::Cancelled => "Cancelled",
+                mold_core::stall::QueueCancellationDisposition::Pending { .. } => {
+                    "Cancel requested; device still held"
+                }
+            };
             ctx.send(
                 poise::CreateReply::default()
-                    .content(format!("Cancelled `{}`.", safe_text(&job_id)))
+                    .content(format!("{label}: `{}`.", safe_text(&job_id)))
                     .ephemeral(true),
             )
             .await?

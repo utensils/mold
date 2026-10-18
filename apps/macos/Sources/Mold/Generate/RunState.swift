@@ -38,8 +38,10 @@ enum RunState {
             guard let step = chain.step, let total = chain.total, total > 0 else { return nil }
             return (step, total)
         }
-        guard case let .running(_, progress) = self,
-              let step = progress?.step, let total = progress?.total, total > 0
+        guard case let .running(status, progress) = self, progress?.stall == nil,
+              !status.children.contains(where: { $0.state == .cancelling }),
+              let step = progress?.stageCurrent ?? progress?.step,
+              let total = progress?.stageTotal ?? progress?.total, total > 0
         else { return nil }
         return (step, total)
     }
@@ -48,7 +50,11 @@ enum RunState {
         // A chain's stage IS its clip counter -- the one thing on screen that
         // says a long render was made in pieces.
         if case let .runningChain(chain) = self { return chain.label }
-        guard case let .running(_, progress) = self else { return nil }
+        guard case let .running(status, progress) = self else { return nil }
+        if let stall = progress?.stall { return stall.statusMessage }
+        if status.children.contains(where: { $0.state == .cancelling }) {
+            return "Cancel requested; awaiting host confirmation."
+        }
         return progress?.stage
     }
 

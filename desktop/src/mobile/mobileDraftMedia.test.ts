@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { newGenerateForm } from "../lib/generateForm";
 import {
   hydrateMobileDraftMedia,
+  unavailableMobileDraftMedia,
   partitionMobileDraftMedia,
   MOBILE_DRAFT_MEDIA_PREFIX,
 } from "./mobileDraftMedia";
@@ -133,7 +134,7 @@ describe("mobile draft media", () => {
     expect(JSON.stringify(partition.form)).not.toMatch(/PRIVATE_HANDLE|PRIVATE_PATH/);
     const restored = await hydrateMobileDraftMedia(partition.form, "scope", async () => null);
     expect(restored.missing).toEqual(["h3Authoring/references/0", "h3Authoring/references/1"]);
-    expect(form.h3Authoring!.references[0]!.reference.media.authority).toBe("upload");
+    expect(form.h3Authoring!.references[0]!.reference.media?.authority).toBe("upload");
   });
 
   it("separates H3 payloads without JSON-copying them", () => {
@@ -168,4 +169,56 @@ describe("mobile draft media", () => {
       "Invalid mobile draft revision",
     );
   });
+});
+
+it("persists only original candidate bytes outside form metadata and restores deferred facts", async () => {
+  const form = newGenerateForm();
+  const body = new Blob(["original-candidate"]);
+  form.h3Authoring!.references = [
+    {
+      reference: {
+        kind: "fresh_video",
+        original: {
+          mime_type: "video/quicktime",
+          name: "clip.mov",
+          byte_length: body.size,
+          sha256: "a".repeat(64),
+        },
+        body,
+      },
+    },
+  ];
+  const partition = partitionMobileDraftMedia(form, "candidate-revision");
+  expect(partition.media).toHaveLength(1);
+  expect(JSON.stringify(partition.form)).not.toContain("original-candidate");
+  expect(partition.form.h3Authoring!.references[0]!.reference).not.toHaveProperty("body");
+  const hydrated = await hydrateMobileDraftMedia(
+    partition.form,
+    "candidate-revision",
+    async (id) => partition.media.find((record) => record.draftId === id) ?? null,
+  );
+  expect(hydrated.missing).toEqual([]);
+  const restored = hydrated.form.h3Authoring!.references[0]!.reference;
+  expect(restored.kind).toBe("fresh_video");
+  if (restored.kind !== "fresh_video") throw new Error("candidate was replaced by canonical facts");
+  expect(await restored.body!.text()).toBe("original-candidate");
+  expect(restored).not.toHaveProperty("duration_ms");
+});
+
+it("discloses restored fresh video descriptors whose original bytes were evicted", () => {
+  const form = newGenerateForm();
+  form.h3Authoring!.references = [
+    {
+      reference: {
+        kind: "fresh_video",
+        original: {
+          mime_type: "video/quicktime",
+          name: "clip.mov",
+          byte_length: 16,
+          sha256: "a".repeat(64),
+        },
+      },
+    },
+  ];
+  expect(unavailableMobileDraftMedia(form)).toEqual(["h3Authoring/references/0"]);
 });

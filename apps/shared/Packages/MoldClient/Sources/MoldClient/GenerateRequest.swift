@@ -7,6 +7,9 @@ import Foundation
 /// present-but-null field is not the same as an absent one to a server that
 /// distinguishes "unset" from "explicitly cleared".
 public struct GenerateRequest: Codable, Hashable, Sendable {
+    /// Authoring-only originals. Encoding refuses these until negotiated preparation finalizes them.
+    public var pendingReferenceInputs: [AuthoringReference]? = nil
+
     public var prompt: String
     public var model: String
     public var width: Int

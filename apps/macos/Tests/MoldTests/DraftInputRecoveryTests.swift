@@ -55,7 +55,7 @@ struct DraftInputRecoveryTests {
         #expect(saved.acceptsSnapshot(original, model: "fixture", recipe: nil))
         #expect(!saved.acceptsSnapshot(original, model: "different", recipe: nil))
         #expect(!saved.acceptsSnapshot(original, model: "fixture", recipe: "other"))
-        media.generationReferences[0].provenance?.sha256 = "changed"
+        media.generationReferences[0] = media.generationReferences[0].mappingCanonical { var value = $0; value.provenance?.sha256 = "changed"; return value }
         let changed = DraftInputSnapshot(media, retainedReuseFingerprint: saved.fingerprint)
         #expect(!saved.acceptsSnapshot(changed, model: "fixture", recipe: nil))
         let stale = DraftInputSnapshot(RenderDraft(reusing: metadata).media, retainedReuseFingerprint: "old")

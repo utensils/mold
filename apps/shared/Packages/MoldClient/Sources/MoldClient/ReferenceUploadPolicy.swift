@@ -50,7 +50,8 @@ public enum ReferenceUploadPolicy {
     }
 
     public static func batchLimit(requests: [GenerateRequest], apiKey: String?, capabilities: ReferenceUploadCapabilities?, batchLimit: Int) -> Int {
-        guard requests.contains(where: { shouldUpload($0, apiKey: apiKey, capabilities: capabilities) }),
+        guard requests.contains(where: { shouldUpload($0, apiKey: apiKey, capabilities: capabilities)
+            || ($0.pendingReferenceInputs != nil && VideoNormalizationPolicy.capability(capabilities, apiKey: apiKey) != nil) }),
               let active = capabilities?.maxActiveSessions, active > 0 else { return batchLimit }
         return min(batchLimit, active)
     }

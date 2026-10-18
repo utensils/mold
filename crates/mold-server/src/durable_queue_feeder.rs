@@ -1389,6 +1389,13 @@ async fn feed_available(
                 (None, None)
             }
         };
+        let threshold = state
+            .config
+            .read()
+            .await
+            .queue
+            .effective_no_progress_timeout_seconds();
+        state.job_registry.set_stall_threshold_seconds(threshold);
         let progress_tx =
             crate::job_registry::progress_relay(&state.job_registry, &row.id, observer_tx);
         if let Some((outcome_rx, warnings)) = sse_outcome_rx {

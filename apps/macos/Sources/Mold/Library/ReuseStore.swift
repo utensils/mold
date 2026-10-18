@@ -39,8 +39,8 @@ final class ReuseStore {
     /// Submission releases live work; only reselection/discard replaces this identity.
     private(set) var locatorVersion = 0
     var attachingSource = false
-    var referencePreviews: [GenerationReference: String] = [:]
-    var previewFailures: Set<GenerationReference> = []
+    var referencePreviews: [AuthoringReference: String] = [:]
+    var previewFailures: Set<AuthoringReference> = []
     var selectionModel: String?
     var selectionRecipe: String?
     var savedRecipe: SavedReuse?

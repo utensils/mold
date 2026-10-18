@@ -315,6 +315,21 @@ pub fn require_model_artifact_activation(
     }
 }
 
+/// Caller-selected artifacts need identity admission as well as loader
+/// permission. Reviewed manifests resolve their own pinned upstream artifacts
+/// through the loader gate instead of accepting those identities from a user.
+pub(crate) fn require_user_artifact_activation(
+    path: &Path,
+    artifact_root: Option<&Path>,
+    family: Option<&str>,
+) -> Result<(), ModelActivationError> {
+    let identity = artifact_root
+        .and_then(|root| path.strip_prefix(root).ok())
+        .unwrap_or(path);
+    require_model_activation(&identity.to_string_lossy(), family)?;
+    require_model_artifact_activation(path, artifact_root, family)
+}
+
 fn is_minimax_h3_identity(value: &str) -> bool {
     let normalized = value.trim().to_ascii_lowercase().chars().fold(
         String::with_capacity(value.len()),

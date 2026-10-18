@@ -563,3 +563,24 @@ describe("preparing", () => {
     });
   });
 });
+
+it("shows a host-confirmed stalled-device hold without changing queue position or generic busy-device policy", () => {
+  const status = resolveQueueWait({
+    state: "queued",
+    position: 3,
+    blockedReason: "no_idle_device",
+    blockedDeviceReason: "Waiting for stalled GPU 0; device still held",
+  });
+  expect(queueWaitLabel(status)).toBe(
+    "Waiting for stalled GPU 0; device still held",
+  );
+  expect(
+    queueWaitLabel(
+      resolveQueueWait({
+        state: "queued",
+        position: 3,
+        blockedReason: "no_idle_device",
+      }),
+    ),
+  ).toBe("#3 in line");
+});

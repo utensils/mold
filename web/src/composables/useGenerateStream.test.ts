@@ -1312,7 +1312,11 @@ describe("useGenerateStream host routing", () => {
     lookupGenerationBatchByClientId.mockReset();
     lookupGenerationBatchByClientId.mockResolvedValue({ kind: "missing" });
     vi.mocked(cancelQueueJob).mockReset();
-    vi.mocked(cancelQueueJob).mockResolvedValue(undefined);
+    vi.mocked(cancelQueueJob).mockResolvedValue({
+      terminal: true,
+      deviceStillHeld: false,
+      stall: null,
+    });
     mutateQueueJobOnExpectedInstance.mockReset();
     mutateQueueJobOnExpectedInstance.mockResolvedValue(undefined);
   });
@@ -1338,6 +1342,49 @@ describe("useGenerateStream host routing", () => {
     },
     eventsAvailable: true,
   };
+
+  it("submits an exact finalized request without adding a seed, batch size or reference facts", async () => {
+    const stream = useGenerateStream();
+    const request = singleGen({ frames: 124 });
+    delete request.seed;
+    delete request.batch_size;
+    request.model = "minimax-h3-ref2va";
+    request.references = [
+      {
+        kind: "image",
+        mime_type: "image/png",
+        width: 64,
+        height: 64,
+        media: { authority: "upload", handle: "request-only-secret" },
+      },
+    ];
+    const original = JSON.stringify(request);
+    const lease = {
+      request,
+      expiresAtMs: Date.now() + 30000,
+      requestScopeSha256: "a".repeat(64),
+      cancel: vi.fn(async () => {}),
+    };
+    serveDurableArtifacts();
+    admitGenerationBatch.mockImplementation(
+      (_target: unknown, body: { client_batch_id: string }) =>
+        Promise.resolve(durableBatch(body.client_batch_id)),
+    );
+    stream.submit(request, { kind: "single" }, studioDurableRoute, lease);
+    await flushDurable();
+    expect(
+      JSON.stringify(admitGenerationBatch.mock.calls[0]![1].requests[0]),
+    ).toBe(original);
+    expect(lease.cancel).not.toHaveBeenCalled();
+    expect(() =>
+      stream.submit(
+        { ...request },
+        { kind: "single" },
+        studioDurableRoute,
+        lease,
+      ),
+    ).toThrow(/exact finalized singleton/);
+  });
 
   it("admits a print on the routed host with its key", async () => {
     const stream = useGenerateStream();
@@ -1672,6 +1719,27 @@ describe("useGenerateStream host routing", () => {
       { onlyHeld: false },
     );
     expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("canceled");
+  });
+
+  it("keeps a worker live after cancellation is accepted while its device remains held", async () => {
+    mutateQueueJobOnExpectedInstance.mockResolvedValueOnce({
+      terminal: false,
+      deviceStillHeld: true,
+      stall: null,
+    });
+    const stream = useGenerateStream();
+    const id = await submitDurable(
+      stream,
+      singleGen({ frames: 1 }),
+      studioDurableRoute,
+    );
+    await stream.cancel(id);
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    expect(job.state).toBe("running");
+    expect(job.controller.signal.aborted).toBe(false);
+    expect(job.cancelRequested).toBe(true);
+    expect(job.progress.stage).toBe("Cancel requested; device still held");
+    expect(job.cancelAccepted).toEqual({ deviceStillHeld: true });
   });
 
   it("repaints as cancelling before the host acknowledges a running job", async () => {

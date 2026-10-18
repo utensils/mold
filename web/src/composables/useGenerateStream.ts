@@ -1,3 +1,9 @@
+import type { ReferenceUploadLease } from "@studio/api/referenceUploads";
+import {
+  cancellationRequestedLabel,
+  jobStallLabel,
+  type JobStallDiagnostic,
+} from "@studio/lib/jobStall";
 import { sourceMediaGalleryEvent } from "@studio/lib/sourceMediaResources";
 import { originAuthenticatedFetch } from "../lib/originAuth";
 import {
@@ -91,6 +97,7 @@ function surfaceRequestWarnings(warnings: string[]): void {
 }
 
 export interface JobProgress {
+  stall?: JobStallDiagnostic | null;
   stage: string;
   step: number | null;
   totalSteps: number | null;
@@ -119,6 +126,7 @@ export interface Job {
    * terminal outcome wins. This survives ambiguous admission, where the
    * client UUID is known before the server job UUID is. */
   cancelRequested?: boolean;
+  cancelAccepted?: { deviceStillHeld: boolean };
   /** Frozen intent: a failed held-only DELETE must never broaden on retry. */
   cancelOnlyHeld?: boolean;
   /** Durable hold details remain visible without turning the live job into a
@@ -451,6 +459,7 @@ export interface UseGenerateStream {
     req: GenerateRequestWire | ChainRequestWire,
     decision?: ChainRoutingDecision,
     route?: HostRoute | null,
+    preparedReferenceLease?: ReferenceUploadLease<GenerateRequestWire>,
   ) => string;
   /** Admit every sibling request in one durable parent on the frozen host,
    * or refuse the whole batch by name with nothing queued. */
@@ -1502,7 +1511,15 @@ function applyDurableTracker(tracker: GenerationBatchTracker): void {
           if (url) job.previewUrl = url;
           if (progress.step !== null) job.progress.step = progress.step;
           if (progress.total !== null) job.progress.totalSteps = progress.total;
+          if (Object.hasOwn(progress, "stall"))
+            job.progress.stall = progress.stall ?? null;
           if (progress.stage) job.progress.stage = progress.stage;
+          if (job.progress.stall)
+            job.progress.stage = jobStallLabel(job.progress.stall);
+          else if (job.cancelAccepted)
+            job.progress.stage = cancellationRequestedLabel(
+              job.cancelAccepted.deviceStillHeld,
+            );
           job.lastProgressAt = Date.now();
         },
       );
@@ -1624,11 +1641,13 @@ async function admitDurableBatch(
   route: HostRoute,
   clientBatchId: string,
   requests: readonly GenerateRequestWire[],
+  preparedReferenceLease?: ReferenceUploadLease<GenerateRequestWire>,
 ): Promise<void> {
   let transport = requests;
   // A lease is consumed only by an admitted POST; a definite refusal of the
   // chunk hands its sessions back so a retry is not locked out.
-  let releaseLeases = async (): Promise<void> => {};
+  let releaseLeases =
+    preparedReferenceLease?.cancel ?? (async (): Promise<void> => {});
   // MiniMax H3 references are staged on the frozen host right before the
   // POST — one lease per sibling, on a keyed host; an authless host keeps the
   // validated inline references. Nothing has been POSTed yet, so a failure
@@ -1660,7 +1679,9 @@ async function admitDurableBatch(
   try {
     const batch = await admitGenerationBatch(routeApiTarget(route), {
       client_batch_id: clientBatchId,
-      requests: transport.map((request) => ({ ...request, batch_size: 1 })),
+      requests: preparedReferenceLease
+        ? [...transport]
+        : transport.map((request) => ({ ...request, batch_size: 1 })),
     });
     applyDurableBatchStatus(clientBatchId, batch);
   } catch (error) {
@@ -1690,7 +1711,22 @@ function submitDurableJobs(
   requests: readonly GenerateRequestWire[],
   decision: ChainRoutingDecision,
   route: HostRoute | null,
+  preparedReferenceLease?: ReferenceUploadLease<GenerateRequestWire>,
 ): string[] {
+  if (
+    preparedReferenceLease &&
+    preparedReferenceLease.expiresAtMs <= Date.now()
+  )
+    throw new Error(
+      "Prepared video references expired. Generate again to prepare the original video.",
+    );
+  if (
+    preparedReferenceLease &&
+    (requests.length !== 1 || requests[0] !== preparedReferenceLease.request)
+  )
+    throw new Error(
+      "Prepared video references require their exact finalized singleton request.",
+    );
   if (requests.length === 0) return [];
   route = freezeGenerationRoute(route);
   const refusal = generationRefusal(route);
@@ -1742,10 +1778,20 @@ function submitDurableJobs(
     applyDurableTracker(tracker);
     if (uploadWork) {
       previousChunk = previousChunk.then(() =>
-        admitDurableBatch(host, clientBatchId, requestChunk),
+        admitDurableBatch(
+          host,
+          clientBatchId,
+          requestChunk,
+          preparedReferenceLease,
+        ),
       );
     } else {
-      void admitDurableBatch(host, clientBatchId, requestChunk);
+      void admitDurableBatch(
+        host,
+        clientBatchId,
+        requestChunk,
+        preparedReferenceLease,
+      );
     }
   }
   jobs.value = [...admitted, ...jobs.value];
@@ -2236,10 +2282,16 @@ function submitJob(
   req: GenerateRequestWire | ChainRequestWire,
   decision: ChainRoutingDecision = { kind: "single" },
   route: HostRoute | null = null,
+  preparedReferenceLease?: ReferenceUploadLease<GenerateRequestWire>,
 ): string {
   route = freezeGenerationRoute(route);
   if (decision.kind !== "chain" && !isPrebuiltChainRequest(req)) {
-    return submitDurableJobs([req as GenerateRequestWire], decision, route)[0]!;
+    return submitDurableJobs(
+      [req as GenerateRequestWire],
+      decision,
+      route,
+      preparedReferenceLease,
+    )[0]!;
   }
   selectedJobId.value = null;
   canvasErrorJobId.value = null;
@@ -2359,9 +2411,20 @@ async function confirmDurableCancellation(job: Job): Promise<void> {
     "cancel",
     { onlyHeld },
   )
-    .then(() => {
+    .then((outcome) => {
+      if (job.state !== "running") return;
+      if (outcome && !outcome.terminal) {
+        job.cancelAccepted = { deviceStillHeld: outcome.deviceStillHeld };
+        job.progress.stall = outcome.stall;
+        job.progress.stage = outcome.stall
+          ? jobStallLabel(outcome.stall)
+          : outcome.deviceStillHeld
+            ? "Cancel requested; device still held"
+            : "Cancel requested";
+        return;
+      }
       // Complete/failed/cancelled authority may have arrived during DELETE.
-      if (job.state === "running") markCancellationConfirmed(job);
+      markCancellationConfirmed(job);
     })
     .catch((error) => {
       if (job.state === "running") {
@@ -2429,7 +2492,18 @@ async function cancelJob(id: string): Promise<void> {
   }
   if (job.serverId) {
     try {
-      await cancelQueueJob(job.serverId, target);
+      const outcome = await cancelQueueJob(job.serverId, target);
+      if (outcome && !outcome.terminal) {
+        job.cancelRequested = true;
+        job.cancelAccepted = { deviceStillHeld: outcome.deviceStillHeld };
+        job.progress.stall = outcome.stall;
+        job.progress.stage = outcome.stall
+          ? jobStallLabel(outcome.stall)
+          : outcome.deviceStillHeld
+            ? "Cancel requested; device still held"
+            : "Cancel requested";
+        return;
+      }
     } catch (error) {
       // Completion can race the DELETE. If the stream already settled, its
       // terminal frame is authoritative; otherwise cancellation was not

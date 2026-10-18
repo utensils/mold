@@ -2197,7 +2197,7 @@ pub fn require_generate_request_model_activation(
         crate::require_model_activation(identity, None)?;
     }
     for lora in req.lora.iter().chain(req.loras.iter().flatten()) {
-        crate::require_model_artifact_activation(
+        crate::model_policy::require_user_artifact_activation(
             std::path::Path::new(&lora.path),
             artifact_root,
             None,
@@ -2459,6 +2459,16 @@ pub fn validate_generate_request_fields(
     family_hint: Option<&str>,
 ) -> Result<(), String> {
     validate_generate_request_after_activation(req, family_hint)
+}
+
+/// Validate resolved, payload-free settings after a caller has separately
+/// enforced model activation. Reference preparation uses this before atomic
+/// finalization; it confers no execution or media authority.
+pub fn validate_resolved_generate_request_fields(
+    req: &GenerateRequest,
+    family_hint: Option<&str>,
+) -> Result<(), String> {
+    validate_generate_request_after_activation_with(req, family_hint, ReferenceForm::Resolved)
 }
 
 /// Validate the exact MiniMax H3 private-UAT request partition after the
@@ -3380,7 +3390,7 @@ fn validate_generate_request_after_activation_with(
                     delivered_cap
                 };
                 return Err(format!(
-                    "frames ({frames}) exceeds the LTX-2 / LTX-2.3 temporal RoPE budget of \
+                    "frames ({frames}) exceeds the LTX-2 family temporal RoPE budget of \
                      {LTX2_MAX_RUNTIME_SECONDS}s: at {fps} fps the ceiling is {delivered_cap} frames. \
                      Raise --fps, lower --frames, or render the shot as a multi-clip sequence"
                 ));
@@ -5509,6 +5519,20 @@ mod tests {
 
         req.lora.as_mut().unwrap().path = root
             .join("flux/ordinary-adapter.safetensors")
+            .to_string_lossy()
+            .into_owned();
+        assert!(require_generate_request_model_activation(&req, Some(root), Some("flux")).is_ok());
+
+        // The ordered adapter list has the same caller-selected identity
+        // boundary, including artifacts outside the trusted storage root.
+        req.loras = Some(vec![crate::LoraWeight {
+            path: "/outside/MiniMax-H3/adapter.safetensors".into(),
+            scale: 1.0,
+            expert: None,
+        }]);
+        assert!(require_generate_request_model_activation(&req, Some(root), Some("flux")).is_err());
+        req.loras.as_mut().unwrap()[0].path = root
+            .join("flux/ordinary-second-adapter.safetensors")
             .to_string_lossy()
             .into_owned();
         assert!(require_generate_request_model_activation(&req, Some(root), Some("flux")).is_ok());
@@ -7973,6 +7997,19 @@ mod tests {
                 frames as f64 / 24.0,
             );
         }
+    }
+
+    #[test]
+    fn ltx25_duration_refusal_names_the_current_family_without_raising_the_ceiling() {
+        let mut req = valid_req();
+        req.model = "ltx-2.5-22b-distilled:bf16".to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.fps = Some(24);
+        req.frames = Some(489);
+        let error = validate_generate_request(&req).unwrap_err();
+        assert!(error.contains("LTX-2 family"), "{error}");
+        assert!(error.contains("481"), "{error}");
+        assert!(error.contains("20s"), "{error}");
     }
 
     #[test]

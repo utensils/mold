@@ -619,6 +619,8 @@ mod tests {
 
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = make_tmp_dir("shared-hf");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tmp.canonicalize().unwrap();
         let shared_flux = tmp.join("shared").join("flux");
         let repo = tmp
             .join(".hf-cache")

@@ -44,3 +44,26 @@ Moved from the root CLAUDE.md; loaded only when working under the paths above. Q
   persistence continues to omit all media bytes and scoped handles.
 
 - **Processing budgets are not raw input limits.** `max_pixels_single/multi` describe engine reference preparation. Native `StillReferenceValidation` enforces only the general reference ingestion envelope (16384 axis, 100 MP, 200:1), required/count and readable-header checks. CPU-only `mold_core::input_image` prepares fresh identity photographs and transport-heavy authoring before role validation and sealed media facts; unchanged inputs preserve their bytes. Never re-encode an existing upload lease or retained authority. Normalization applies EXIF to pixels, retains ICC in PNG, resamples alpha premultiplied, and names transformed media by its actual container. Explicit source-fit and paired mask geometry stay with their existing authorities.
+
+
+- **Fresh video normalization is provisional authority, separate from canonical
+  references.** Authenticated upload-v2 hosts may advertise nested
+  `reference_uploads.video_normalization` v1 only after actual bounded codec
+  runtime proof. Candidate JSON binds the exact frozen request without a
+  `references` key, ordered original digests/lengths and explicit fresh-video
+  candidates. Private placeholder facts authorize no generation or placement.
+  Upload receipts bind original and canonical bytes independently; explicit
+  finalization verifies the complete receipt set and publishes the ordinary
+  canonical request scope. Preserve existing V2 response serialization and
+  existing canonical bytes. Never normalize retained/replay/server-path/old
+  lease authorities. Existing paths in mixed sessions are privately snapshotted,
+  hashed and probed together, then clients restore only the captured path
+  authority. Scope checks still happen at ordinary generation consumption.
+  Original + maximum output scratch is reserved before conversion; active
+  workers retain global charge until children are reaped and scratch removed,
+  including disconnect/session deletion. Conversion has its own smaller
+  semaphore so ordinary V2 upload writers remain available. Unix resource
+  limits are required for this implementation; other hosts keep canonical V2.
+  Clients retain original bytes and freeze request/host/instance/identity/route
+  before awaits, recheck ownership after every await, prepare canonical facts
+  before placement, admit on that same host and cancel every unused lease.

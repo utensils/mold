@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { cancellationRequestedLabel } from "@studio/lib/jobStall";
 import { queueModelDownloadAvailability } from "@studio/lib/queueModelDownload";
 import QueueDownloadControl from "@studio/components/QueueDownloadControl.vue";
 import { userFacingError } from "@studio/lib/userFacingError";
@@ -129,8 +130,10 @@ function ownJob(entry: EnrichedQueueEntry): Job | null {
 function entryCode(entry: EnrichedQueueEntry): string {
   if (entry.state === "running") {
     const job = ownJob(entry);
-    if (job && job.total > 0 && job.status === "denoising") return `${job.step}/${job.total}`;
-    const runtime = queueRuntimeCode(snapshot.value?.plan, entry.id);
+    if (job?.cancelAccepted) return cancellationRequestedLabel(job.cancelAccepted.deviceStillHeld);
+    if (job && !entry.stall && !job.stall && job.total > 0 && job.status === "denoising")
+      return `${job.step}/${job.total}`;
+    const runtime = queueRuntimeCode(snapshot.value?.plan, entry.id, entry.stall);
     if (runtime) return runtime;
     return entry.gpu !== undefined ? `RUNNING · GPU ${entry.gpu}` : "RUNNING";
   }
@@ -295,7 +298,11 @@ async function cancelEntry(entry: EnrichedQueueEntry) {
     } else
       cancelled = await jobs
         .cancelJob(props.host.id, entry.id, { onlyHeld: entry.state === "held" })
-        .then(() => true);
+        .then((outcome) => {
+          if (outcome && !outcome.terminal)
+            toasts.push(cancellationRequestedLabel(outcome.deviceStillHeld));
+          return outcome?.terminal ?? true;
+        });
     if (cancelled) toasts.push("Cancelled");
   } catch (err) {
     toasts.push(String(err), "error");

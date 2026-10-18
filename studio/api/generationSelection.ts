@@ -1,3 +1,4 @@
+import { parseJobStall, type JobStallDiagnostic } from "../lib/jobStall";
 import { ApiError, apiJsonTo, type ApiTarget } from "./client";
 import type { QueueEntry } from "./queuePlan";
 
@@ -48,6 +49,7 @@ export function selectedQueueGeneration<T extends object>(
  * why every field is independently optional.
  */
 export interface QueueJobProgress {
+  stall?: JobStallDiagnostic | null;
   step: number | null;
   total: number | null;
   stage: string | null;
@@ -66,6 +68,7 @@ function parseQueueJobProgress(value: unknown): QueueJobProgress | null {
   const row = value as Record<string, unknown>;
   const total = finiteOrNull(row.total);
   const progress: QueueJobProgress = {
+    ...(Object.hasOwn(row, "stall") ? { stall: parseJobStall(row.stall) } : {}),
     step: finiteOrNull(row.step),
     total: total !== null && total > 0 ? total : null,
     stage: typeof row.stage === "string" && row.stage ? row.stage : null,
@@ -81,7 +84,8 @@ function parseQueueJobProgress(value: unknown): QueueJobProgress | null {
   return progress.step === null &&
     progress.stage === null &&
     progress.queue_position === null &&
-    progress.preview_image === null
+    progress.preview_image === null &&
+    !Object.hasOwn(row, "stall")
     ? null
     : progress;
 }

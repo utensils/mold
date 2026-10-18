@@ -588,6 +588,28 @@ describe("queue mutation authority", () => {
       else expect(apiFetchTo).not.toHaveBeenCalled();
     },
   );
+  it("keeps a running queue row when cancellation is accepted but the worker still holds its device", async () => {
+    seedHosts();
+    const jobs = useJobsStore();
+    jobs.queues["hal9000-7680"] = {
+      entries: [
+        { id: "running-job", model: "ltx2", state: "running", position: 0, started_at_unix_ms: 1 },
+      ],
+      hostId: "hal9000-7680",
+      paused: null,
+      gpuOrdinals: [],
+      caps: null,
+      error: null,
+    };
+    vi.spyOn(jobs, "refreshHost").mockResolvedValue(undefined);
+    vi.spyOn(jobs, "refresh").mockResolvedValue(undefined);
+    vi.mocked(apiFetchTo).mockResolvedValueOnce(
+      Response.json({ cancel_requested: true, device_still_held: true }, { status: 202 }),
+    );
+    const result = await jobs.cancelJob("hal9000-7680", "running-job");
+    expect(jobs.queues["hal9000-7680"]!.entries.map((entry) => entry.id)).toEqual(["running-job"]);
+    expect(result).toMatchObject({ terminal: false, deviceStillHeld: true });
+  });
   it("reserves a job across surfaces until its mutation refresh finishes", async () => {
     seedHosts();
     const jobs = useJobsStore();

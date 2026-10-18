@@ -46,7 +46,7 @@ extension ClipRouting {
         limits: ChainLimits? = nil
     ) -> ClipRouting? {
         guard let temporal = recipe.temporal else { return nil }
-        let fps = draft.fps ?? temporal.fps.value
+        let fps = temporal.fps.resolvedRate(draft.fps)
         let sourceImage = recipe.capabilities.sourceImage
         let single = temporal.lengthBounds(
             fps: fps, family: model?.family, model: model?.name, sourceImage: sourceImage)

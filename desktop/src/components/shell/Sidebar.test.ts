@@ -347,7 +347,9 @@ describe("Sidebar queue", () => {
     setLocalAuthority();
     const liveActivity = useLiveActivityStore();
     vi.spyOn(liveActivity, "refresh").mockResolvedValue(undefined);
-    const cancel = vi.spyOn(useJobsStore(), "cancelJob").mockResolvedValue(undefined);
+    const cancel = vi
+      .spyOn(useJobsStore(), "cancelJob")
+      .mockResolvedValue({ terminal: true, deviceStillHeld: false, stall: null });
     liveActivity.hosts = {
       local: {
         hostId: "local",
@@ -393,7 +395,9 @@ describe("Sidebar queue", () => {
     setLocalAuthority();
     const liveActivity = useLiveActivityStore();
     vi.spyOn(liveActivity, "refresh").mockResolvedValue(undefined);
-    const queueCancel = vi.spyOn(useJobsStore(), "cancelJob").mockResolvedValue(undefined);
+    const queueCancel = vi
+      .spyOn(useJobsStore(), "cancelJob")
+      .mockResolvedValue({ terminal: true, deviceStillHeld: false, stall: null });
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 202 });
     vi.stubGlobal("fetch", fetchMock);
     liveActivity.hosts = {
@@ -468,7 +472,14 @@ describe("Sidebar queue", () => {
     let finishCancel!: () => void;
     const cancel = vi
       .spyOn(useJobsStore(), "cancelJob")
-      .mockImplementation(() => new Promise<void>((resolve) => (finishCancel = resolve)));
+      .mockImplementation(
+        () =>
+          new Promise<{ terminal: boolean; deviceStillHeld: boolean; stall: null }>(
+            (resolve) =>
+              (finishCancel = () =>
+                resolve({ terminal: true, deviceStillHeld: false, stall: null })),
+          ),
+      );
     await flushPromises();
 
     const row = wrapper.get("[data-test='queue-active']");
@@ -516,7 +527,9 @@ describe("Sidebar queue", () => {
         ],
       },
     };
-    const cancel = vi.spyOn(useJobsStore(), "cancelJob").mockResolvedValue(undefined);
+    const cancel = vi
+      .spyOn(useJobsStore(), "cancelJob")
+      .mockResolvedValue({ terminal: true, deviceStillHeld: false, stall: null });
     await flushPromises();
 
     await wrapper.get("[data-test='queue-active']").trigger("contextmenu");

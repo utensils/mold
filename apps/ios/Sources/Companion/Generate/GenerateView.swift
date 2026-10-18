@@ -36,6 +36,7 @@ struct GenerateView: View {
                 .accessibilityIdentifier("phone-generate-form")
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     VStack(spacing: 8) {
+                        if generate.run == .submitting, let preparing = generate.referencePreparation { Text(preparing).font(.subheadline).accessibilityIdentifier("reference-preparation-status") }
                         QueueStatusLink()
                         GenerateRow(estimate: estimate, promptEditorPresented: showsPromptEditor)
                     }
@@ -86,11 +87,12 @@ struct GenerateView: View {
     }
 
     private var estimateKey: String {
-        "\(generate.modelName ?? "")|\(generate.target?.id.uuidString ?? "")|\(generate.draft.width)x\(generate.draft.height)|\(generate.draft.steps)|\(generate.draft.batchSize)|\(generate.draft.frames ?? 0)"
+        "\(generate.modelName ?? "")|\(generate.target?.id.uuidString ?? "")|\(generate.draft.width)x\(generate.draft.height)|\(generate.draft.steps)|\(generate.draft.batchSize)|\(generate.draft.frames ?? 0)|\(generate.draft.media.generationReferences.map { $0.provenance?.sha256 ?? "\($0.kind):\($0.durationMs ?? 0):\($0.width ?? 0)x\($0.height ?? 0)" }.joined(separator: ","))"
     }
 
     /// Debounced; a guess is said as a guess ("about"), never as a measurement.
     private func refreshEstimate() async {
+        guard !generate.draft.media.generationReferences.contains(where: { $0.freshVideo != nil }) else { estimate = nil; return }
         try? await Task.sleep(for: .milliseconds(400))
         guard !Task.isCancelled, let host = generate.target, let model = generate.modelName else {
             estimate = nil

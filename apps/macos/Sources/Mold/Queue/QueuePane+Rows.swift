@@ -61,7 +61,7 @@ extension QueuePane {
                 QueueRow(
                     entry: entry,
                     actions: queue.actions(for: entry, on: host.id),
-                    sourceHost: host, isReorderable: reorderable,
+                    sourceHost: host, statusOverride: queue.statusOverride(entry, on: host.id), isReorderable: reorderable,
                     canMoveUp: reorderable && QueueRow.canMove(entry.id, .up, in: entries),
                     canMoveDown: reorderable && QueueRow.canMove(entry.id, .down, in: entries),
                     moveUp: { move(entry.id, .up, host: host, entries: entries) },

@@ -4971,7 +4971,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let pending = json_body(resp).await;
+        assert_eq!(pending["cancel_requested"], true);
+        assert_eq!(pending["device_still_held"], true);
         assert_eq!(
             state.job_registry.len(),
             1,
@@ -12552,6 +12555,13 @@ mod tests {
         std::env::remove_var("MOLD_PROFILE");
 
         let (app, db) = app_with_settings_db();
+        let handle = db.as_ref().as_ref().unwrap();
+        mold_db::Settings::for_profile(handle, "dev")
+            .set_int(
+                mold_core::config_keys::QUEUE_NO_PROGRESS_TIMEOUT_SECONDS_KEY,
+                42,
+            )
+            .unwrap();
         let resp = put_json(&app, "/api/config/profile", r#"{"name":"dev"}"#).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = json_body(resp).await;
@@ -12564,6 +12574,33 @@ mod tests {
             .get_str(mold_db::settings::ACTIVE_PROFILE)
             .unwrap();
         assert_eq!(stored.as_deref(), Some("dev"));
+
+        let configured = json_body(
+            app.clone()
+                .oneshot(
+                    Request::get("/api/config/queue.no_progress_timeout_seconds")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(configured["value"], 42);
+        let resp = put_json(&app, "/api/config/profile", r#"{"name":"unconfigured"}"#).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let defaults = json_body(
+            app.clone()
+                .oneshot(
+                    Request::get("/api/config/queue.no_progress_timeout_seconds")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(defaults["value"], 300);
 
         // Empty names are rejected.
         let resp = put_json(&app, "/api/config/profile", r#"{"name":"  "}"#).await;
@@ -14712,7 +14749,7 @@ mod tests {
             "guidance": 0.0,
             "batch_size": 1,
             "output_format": "png",
-            "id_image": "iVBORw0KGgo="
+            "id_image": base64::engine::general_purpose::STANDARD.encode(minimal_png())
         });
 
         let response = app
@@ -14726,10 +14763,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        assert!(json_body(response).await["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("face-identity"));
+        let error = json_body(response).await;
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("face-identity"),
+            "unexpected admission refusal: {error}"
+        );
         assert!(journal.list_all().is_empty());
         assert!(state.job_registry.is_empty());
         assert!(queue_rx.try_recv().is_err());

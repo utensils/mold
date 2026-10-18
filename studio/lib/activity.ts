@@ -52,6 +52,7 @@ export interface ActivityJobVM {
   queueExplicitlyPaused?: boolean | null;
   /** Raw scheduler `blocked_reason` for this job, when the plan named one. */
   blockedReason?: string | null;
+  blockedDeviceReason?: string | null;
   /** Live dependency preparation detail from the scheduler plan. */
   preparation?: QueuePreparation | null;
 }
@@ -88,6 +89,8 @@ export function withLiveQueueStatus(
     next.queueExplicitlyPaused = status.explicitlyPaused;
   if (status.position !== null) next.queuePosition = status.position;
   if (status.blockedReason !== null) next.blockedReason = status.blockedReason;
+  if (status.blockedDeviceReason)
+    next.blockedDeviceReason = status.blockedDeviceReason;
   if (status.preparation !== null) next.preparation = status.preparation;
   return next;
 }
@@ -107,6 +110,7 @@ export function queueStatusLabel(vm: ActivityJobVM): string | null {
       explicitlyPaused: vm.queueExplicitlyPaused,
       position: vm.queuePosition,
       blockedReason: vm.blockedReason,
+      blockedDeviceReason: vm.blockedDeviceReason,
       preparation: vm.preparation,
     }),
   );

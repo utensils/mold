@@ -665,6 +665,24 @@ struct GenerateControllerTests {
         #expect(generate.recipe?.makes == .picture)
     }
 
+    @Test func changingClipRateReclampsFramesWithoutClearingAutomaticPreference() async throws {
+        let (generate, _) = try await setUp()
+        let clip = try model("ltx-2.5-22b-distilled:bf16")
+        let host = try #require(generate.hosts.hosts.first)
+        generate.hosts.setModels([clip], for: host.id)
+        generate.setKind(.clip)
+        generate.choose(clip)
+        generate.draft.frames = 481
+        generate.draft.prefersAutomaticDuration = true
+        generate.draft.fps = 16
+        #expect(generate.draft.fps == 16)
+        #expect(generate.draft.frames == 321)
+        #expect(generate.draft.prefersAutomaticDuration)
+        generate.draft.fps = 0
+        #expect(generate.draft.fps == 24)
+        #expect(generate.draft.frames == 321, "repairing a rate must keep an already valid authored length")
+    }
+
     func waitUntil(_ condition: () -> Bool) async throws {
         for _ in 0..<200 where !condition() { try await Task.sleep(for: .milliseconds(20)) }
         #expect(condition())

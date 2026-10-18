@@ -9,11 +9,11 @@ struct ReferenceReuseGuardTests {
         let backend = FakeBackend(host: MoldHost(name: "Fixture", baseURL: URL(string: "http://fixture")!))
         let store = ReuseStore(hosts: HostStore(hosts: []) { _ in backend })
         var draft = RenderDraft()
-        draft.media.generationReferences = [GenerationReference(
+        draft.media.generationReferences = [AuthoringReference(
             kind: "image", media: .init(authority: "descriptor"), mimeType: "image/png",
             provenance: .init(name: "retained.png"), width: 32, height: 32)]
         #expect(store.referenceRefusal(for: draft) != nil)
-        draft.media.generationReferences[0].media = .init(authority: "inline", data: "AAAA")
+        draft.media.generationReferences[0] = draft.media.generationReferences[0].mappingCanonical { var value = $0; value.media = .init(authority: "inline", data: "AAAA"); return value }
         #expect(store.referenceRefusal(for: draft) == nil)
     }
 }

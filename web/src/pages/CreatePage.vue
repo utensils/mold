@@ -1,4 +1,8 @@
 <script setup lang="ts">
+import { jobStallLabel } from "@studio/lib/jobStall";
+import { hasActiveFreshVideoReferences } from "@studio/lib/minimaxH3Authoring";
+import { prepareH3VideoReferences } from "@studio/lib/prepareH3VideoReferences";
+import type { ReferenceUploadLease } from "@studio/api/referenceUploads";
 import { canvasSource } from "@studio/lib/canvasSource";
 import { PromptClearRecovery } from "@studio/lib/promptClearRecovery";
 import { useRetainedSourceRestore } from "../composables/useRetainedSourceRestore";
@@ -1640,8 +1644,40 @@ const singleShotPreservationNote = computed(() => {
 // Keep the preflight small: source/control media do not change the model's
 // static peak estimate enough to justify serializing their base64 payloads on
 // every form edit.
+const normalizationPickerCapability = computed(() => {
+  const eligible = routing.hosts.value
+    .filter((host) => {
+      const capability =
+        routing.capabilitiesByHost.value[host.id]?.reference_uploads
+          ?.video_normalization;
+      return (
+        capability?.available &&
+        capability.protocol_version === 1 &&
+        capability.input_roles.includes("reference_video")
+      );
+    })
+    .map((host) => host.id);
+  const selection = routing.targetId.value;
+  if (
+    selection !== AUTO_TARGET_ID &&
+    selection !== CAPABLE_TARGET_ID &&
+    !eligible.includes(selection)
+  )
+    return null;
+  return (
+    routing.resolve(form.state.value.model, eligible)?.referenceUploads
+      ?.video_normalization ?? null
+  );
+});
 const estimateRequest = computed<GenerateRequestWire | null>(() => {
-  if (!form.state.value.model) return null;
+  if (
+    !form.state.value.model ||
+    hasActiveFreshVideoReferences(
+      form.state.value.h3Authoring,
+      capabilities.value.sourceImageMode,
+    )
+  )
+    return null;
   const request = { ...form.toRequest(currentModel.value) };
   delete request.source_image;
   delete request.mask_image;
@@ -2530,6 +2566,7 @@ const genProgress = computed(() => {
 const genStage = computed(() => {
   const selected = selectedQueueRender.value;
   if (selected) {
+    if (selected.preview?.stall) return jobStallLabel(selected.preview.stall);
     const steps = progressSteps(selected.preview);
     if (steps) return `Developing ${steps.step} / ${steps.total}`;
     return selected.preview?.stage ?? "Preparing selected print";
@@ -2537,6 +2574,8 @@ const genStage = computed(() => {
   const j = runningJob.value;
   if (!j) return "";
   const p = j.progress;
+  if (p.stall) return jobStallLabel(p.stall);
+  if (j.cancelRequested) return p.stage;
   if (p.step !== null && p.totalSteps) {
     const phase =
       p.step >= p.totalSteps && p.stage !== "Denoising"
@@ -3367,7 +3406,10 @@ function missingModelFailures(
 function routeForHostId(hostId: string): HostRoute | null {
   const host = routing.hosts.value.find((entry) => entry.id === hostId);
   if (!host) return null;
-  const target: HostRoute["target"] = { baseUrl: host.url };
+  const target: HostRoute["target"] = {
+    baseUrl: host.url,
+    ...(host.connectionMode ? { connectionMode: host.connectionMode } : {}),
+  };
   if (host.apiKey) target.apiKey = host.apiKey;
   return {
     hostId: host.id,
@@ -3725,7 +3767,17 @@ function submitRequestCopies(
   base: GenerateRequestWire,
   decision: ReturnType<typeof decideGenerateRequestRouting>,
   route: HostRoute | null,
+  preparedReferenceLease?: ReferenceUploadLease<GenerateRequestWire>,
 ): boolean {
+  if (preparedReferenceLease)
+    return submitOrRefuse(() =>
+      stream.submit(
+        preparedReferenceLease.request,
+        decision,
+        normalizeSubmitRoute(route, preparedReferenceLease.request),
+        preparedReferenceLease,
+      ),
+    );
   // Batch N shares ONE File under choice, exactly like it shares the prompt
   // and the title: every sibling lands with the same tags and collection.
   const request: GenerateRequestWire = {
@@ -3812,403 +3864,539 @@ async function onSubmitInner(
   batchSize: number | null = null,
 ) {
   if (ordinarySubmitBlocked.value) return;
-  // The route is settled first, and before source preprocessing, for two
-  // reasons: an unreachable pinned machine is the real complaint (its model
-  // list is empty, so a model check first would blame the model instead), and
-  // an upscale cache miss has to land on the same machine as the render.
-  const quick = quickPrepared.value;
-  if (quick) {
-    const stale = quickStaleReasons(quick);
-    if (stale.length && !allowStaleQuick) {
-      pendingVariationBatch.value = batchSize;
-      return;
-    }
-  }
-  let route =
-    quick && !allowStaleQuick && quickRouteIsCurrent(quick)
-      ? cloneRoute(quick.route)
-      : resolveSubmitRoute();
-  if (route === false) return;
-  if (!validateSubmit()) return;
-  const decision = chainDecision.value;
-  if (decision.kind === "reject") {
-    toast("error", decision.reason);
-    return;
-  }
-  // Ref2VA: pending image crops are applied at the original resolution BEFORE
-  // the first planning request exists, so placement preview, upload
-  // conversion, and the route all see the cropped reference; only the
-  // requests receive the cropped bytes — the composer keeps the original.
-  let h3Cropped: MinimaxH3AuthoringState | null = null;
-  if (
-    isMinimaxH3Identity(currentFamily.value, form.state.value.model) &&
-    form.state.value.h3Authoring &&
-    minimaxH3TaskForModel(form.state.value.model) === "ref2va"
-  ) {
-    try {
-      h3Cropped = await applyMinimaxH3ReferenceCrops(
-        form.state.value.h3Authoring,
-        domCanvasOps,
-      );
-    } catch (error) {
-      if (!isCurrent()) return;
-      const message = error instanceof Error ? error.message : String(error);
-      composerError.value = `Reference preprocessing failed: ${message}`;
-      return;
-    }
-    if (!isCurrent()) return;
-  }
-  const boundaryStamp = () =>
-    JSON.stringify([
-      form.state.value.model,
-      form.state.value.pipeline,
-      form.state.value.width,
-      form.state.value.height,
-      form.state.value.sourceFitPolicy,
-      form.state.value.imageAttachments[0],
-      form.state.value.endFrame,
-      form.state.value.h3Authoring?.firstFrame,
-      form.state.value.h3Authoring?.lastFrame,
-    ]);
-  const boundaryExpected =
-    capabilities.value.supportsEndFrame ||
-    capabilities.value.sourceImageMode === "h3-boundaries";
-  const submittedBoundaryStamp = boundaryStamp();
-  const boundaryIsCurrent = () => {
-    if (!isCurrent()) return false;
-    if (boundaryStamp() === submittedBoundaryStamp) return true;
-    composerError.value =
-      "Frame endpoints or canvas settings changed while preparing. Generate again to use the current settings.";
-    return false;
-  };
-  const currentRequest = withBatchOverride(
-    form.toRequest(currentModel.value),
-    batchSize,
+  const preparingFreshVideo = hasActiveFreshVideoReferences(
+    form.state.value.h3Authoring,
+    capabilities.value.sourceImageMode,
   );
-  if (h3Cropped) {
-    currentRequest.references = minimaxH3ReferenceProjection(h3Cropped);
-  }
-  const originalSource = form.state.value.imageAttachments[0]
+  const formStamp = JSON.stringify(form.state.value);
+  const filingStamp = JSON.stringify(fileUnder.requestFields());
+  const capturedFreshRequest = preparingFreshVideo
     ? {
-        ...form.state.value.imageAttachments[0],
-        sourceFit:
-          parseSourceFitPolicy(form.state.value.sourceFitPolicy) ??
-          defaultSourceFitPolicy(),
+        ...withBatchOverride(form.toRequest(currentModel.value), batchSize),
+        ...fileUnder.requestFields(),
       }
-    : form.state.value.h3Authoring?.firstFrame?.data
+    : null;
+  let preparedReferenceLease:
+    ReferenceUploadLease<GenerateRequestWire> | undefined;
+  let preparedLeaseHandedOff = false;
+  let normalizationCurrent: (() => boolean) | undefined;
+  try {
+    // The route is settled first, and before source preprocessing, for two
+    // reasons: an unreachable pinned machine is the real complaint (its model
+    // list is empty, so a model check first would blame the model instead), and
+    // an upscale cache miss has to land on the same machine as the render.
+    const quick = quickPrepared.value;
+    if (quick) {
+      const stale = quickStaleReasons(quick);
+      if (stale.length && !allowStaleQuick) {
+        pendingVariationBatch.value = batchSize;
+        return;
+      }
+    }
+    const preparedRoute =
+      quick && !allowStaleQuick && quickRouteIsCurrent(quick)
+        ? cloneRoute(quick.route)
+        : null;
+    let route = preparedRoute ?? resolveSubmitRoute();
+    if (route === false) return;
+    if (preparingFreshVideo) {
+      const eligible = routing.hosts.value
+        .filter((host) => {
+          const cap =
+            routing.capabilitiesByHost.value[host.id]?.reference_uploads
+              ?.video_normalization;
+          return (
+            cap?.available &&
+            cap.protocol_version === 1 &&
+            cap.input_roles.includes("reference_video")
+          );
+        })
+        .map((host) => host.id);
+      // A current quick rewrite retains its captured generation authority.
+      // Ordinary Auto submissions can still select an eligible normalizer.
+      if (
+        preparedRoute &&
+        (!eligible.includes(preparedRoute.hostId) ||
+          !preparedRoute.referenceUploads?.video_normalization?.available)
+      )
+        throw new Error(
+          `${preparedRoute.label} is the prepared generation machine and does not advertise fresh video-reference normalization. Choose another machine and prepare the prompt again.`,
+        );
+      const selection = routing.targetId.value;
+      if (
+        selection !== AUTO_TARGET_ID &&
+        selection !== CAPABLE_TARGET_ID &&
+        !eligible.includes(selection)
+      )
+        throw new Error(
+          "The selected machine does not advertise fresh video-reference normalization.",
+        );
+      route =
+        route && eligible.includes(route.hostId)
+          ? cloneRoute(route)
+          : routing.resolve(form.state.value.model, eligible);
+      if (!route?.referenceUploads || !route.instanceId)
+        throw new Error(
+          "No eligible machine advertises fresh video-reference normalization.",
+        );
+    }
+    if (!validateSubmit()) return;
+    if (preparingFreshVideo && route?.referenceUploads) {
+      route = {
+        ...route,
+        target: { ...route.target },
+        referenceUploads: JSON.parse(JSON.stringify(route.referenceUploads)),
+      };
+      if (quick && capturedFreshRequest)
+        capturedFreshRequest.original_prompt = quick.originalPrompt;
+      if (quick?.promptTransform && capturedFreshRequest)
+        capturedFreshRequest.prompt_transform = JSON.parse(
+          JSON.stringify(quick.promptTransform),
+        );
+    }
+    const decision = chainDecision.value;
+    if (decision.kind === "reject") {
+      toast("error", decision.reason);
+      return;
+    }
+    // Ref2VA: pending image crops are applied at the original resolution BEFORE
+    // the first planning request exists, so placement preview, upload
+    // conversion, and the route all see the cropped reference; only the
+    // requests receive the cropped bytes — the composer keeps the original.
+    let h3Cropped: MinimaxH3AuthoringState | null = null;
+    if (
+      isMinimaxH3Identity(currentFamily.value, form.state.value.model) &&
+      form.state.value.h3Authoring &&
+      minimaxH3TaskForModel(form.state.value.model) === "ref2va"
+    ) {
+      try {
+        h3Cropped = await applyMinimaxH3ReferenceCrops(
+          form.state.value.h3Authoring,
+          domCanvasOps,
+        );
+      } catch (error) {
+        if (!isCurrent()) return;
+        const message = error instanceof Error ? error.message : String(error);
+        composerError.value = `Reference preprocessing failed: ${message}`;
+        return;
+      }
+      if (!isCurrent()) return;
+    }
+    const boundaryStamp = () =>
+      JSON.stringify([
+        form.state.value.model,
+        form.state.value.pipeline,
+        form.state.value.width,
+        form.state.value.height,
+        form.state.value.sourceFitPolicy,
+        form.state.value.imageAttachments[0],
+        form.state.value.endFrame,
+        form.state.value.h3Authoring?.firstFrame,
+        form.state.value.h3Authoring?.lastFrame,
+      ]);
+    const boundaryExpected =
+      capabilities.value.supportsEndFrame ||
+      capabilities.value.sourceImageMode === "h3-boundaries";
+    const submittedBoundaryStamp = boundaryStamp();
+    const boundaryIsCurrent = () => {
+      if (!isCurrent()) return false;
+      if (boundaryStamp() === submittedBoundaryStamp) return true;
+      composerError.value =
+        "Frame endpoints or canvas settings changed while preparing. Generate again to use the current settings.";
+      return false;
+    };
+    if (preparingFreshVideo) {
+      if (
+        !route?.referenceUploads ||
+        !route.instanceId ||
+        !h3Cropped ||
+        !capturedFreshRequest
+      )
+        throw new Error(
+          "The captured video-reference preparation is unavailable.",
+        );
+      const frozenRoute = cloneRoute(route)!;
+      const current = () =>
+        isCurrent() &&
+        JSON.stringify(form.state.value) === formStamp &&
+        JSON.stringify(fileUnder.requestFields()) === filingStamp &&
+        sameRoute(frozenRoute, routeForHostId(frozenRoute.hostId));
+      normalizationCurrent = current;
+      delete capturedFreshRequest.references;
+      placementStatus.value = `Preparing video on ${route.label}`;
+      preparedReferenceLease =
+        await prepareH3VideoReferences<GenerateRequestWire>({
+          state: h3Cropped,
+          request: capturedFreshRequest,
+          target: {
+            baseUrl: route.target.baseUrl,
+            apiKey: route.target.apiKey ?? null,
+            ...(route.target.connectionMode
+              ? { connectionMode: route.target.connectionMode }
+              : {}),
+          },
+          expectedInstanceId: route.instanceId,
+          capabilities: route.referenceUploads,
+          current,
+          signal,
+        });
+    }
+    const currentRequest =
+      preparedReferenceLease?.request ??
+      withBatchOverride(form.toRequest(currentModel.value), batchSize);
+    if (h3Cropped && !preparedReferenceLease)
+      currentRequest.references = minimaxH3ReferenceProjection(h3Cropped);
+    const originalSource = form.state.value.imageAttachments[0]
       ? {
-          base64: form.state.value.h3Authoring.firstFrame.data,
-          filename: form.state.value.h3Authoring.firstFrame.filename,
-          width: form.state.value.h3Authoring.firstFrame.width,
-          height: form.state.value.h3Authoring.firstFrame.height,
-          mime: form.state.value.h3Authoring.firstFrame.mimeType,
+          ...form.state.value.imageAttachments[0],
           sourceFit:
             parseSourceFitPolicy(form.state.value.sourceFitPolicy) ??
             defaultSourceFitPolicy(),
         }
-      : null;
-  const copies = requestCopyCount(currentRequest);
-  if (quick && !allowStaleQuick) {
-    const result = route
-      ? decision.kind === "chain"
-        ? await routing.revalidateFeasibleChain(
-            route,
-            resolveChainRequest(currentRequest, decision),
-            copies,
-            { signal },
-          )
-        : await routing.revalidateFeasible(route, currentRequest, copies, {
+      : form.state.value.h3Authoring?.firstFrame?.data
+        ? {
+            base64: form.state.value.h3Authoring.firstFrame.data,
+            filename: form.state.value.h3Authoring.firstFrame.filename,
+            width: form.state.value.h3Authoring.firstFrame.width,
+            height: form.state.value.h3Authoring.firstFrame.height,
+            mime: form.state.value.h3Authoring.firstFrame.mimeType,
+            sourceFit:
+              parseSourceFitPolicy(form.state.value.sourceFitPolicy) ??
+              defaultSourceFitPolicy(),
+          }
+        : null;
+    const copies = requestCopyCount(currentRequest);
+    if ((quick && !allowStaleQuick) || preparedReferenceLease) {
+      const result = route
+        ? decision.kind === "chain"
+          ? await routing.revalidateFeasibleChain(
+              route,
+              resolveChainRequest(currentRequest, decision),
+              copies,
+              { signal },
+            )
+          : await routing.revalidateFeasible(route, currentRequest, copies, {
+              signal,
+            })
+        : await resolveFeasibleSubmitRoute(
+            currentRequest,
+            decision,
+            quick,
             signal,
-          })
-      : await resolveFeasibleSubmitRoute(
-          currentRequest,
-          decision,
-          quick,
-          signal,
-          copies,
-        );
-    if (!isCurrent()) return;
-    if (result === false) return;
-    if ("kind" in result && result.kind !== "route") {
-      toast("error", feasibilityMessage(result, "this prepared print"));
-      return;
-    }
-    const feasible = "kind" in result ? result.route : result;
-    if (!sameRoute(route, feasible)) {
-      toast(
-        "error",
-        "The prepared machine is no longer the feasible route for this print. Re-expand or choose Generate anyway.",
-      );
-      return;
-    }
-    route = feasible;
-  } else {
-    const result =
-      decision.kind === "chain"
-        ? await routing.resolveFeasibleChain(
-            resolveChainRequest(currentRequest, decision),
             copies,
-            { signal },
-          )
-        : await routing.resolveFeasible(currentRequest, copies, { signal });
-    if (!isCurrent()) return;
-    if (result.kind !== "route") {
-      if (
-        !(await offerMissingModelPull(
-          result,
-          currentRequest,
-          decision,
-          quick,
-          signal,
-        ))
-      ) {
-        toast("error", feasibilityMessage(result, "this print"));
+          );
+      if (!isCurrent()) return;
+      if (result === false) return;
+      if ("kind" in result && result.kind !== "route") {
+        toast("error", feasibilityMessage(result, "this prepared print"));
+        return;
       }
-      return;
+      const feasible = "kind" in result ? result.route : result;
+      if (!sameRoute(route, feasible)) {
+        toast(
+          "error",
+          "The prepared machine is no longer the feasible route for this print. Re-expand or choose Generate anyway.",
+        );
+        return;
+      }
+      route = feasible;
+    } else {
+      const result =
+        decision.kind === "chain"
+          ? await routing.resolveFeasibleChain(
+              resolveChainRequest(currentRequest, decision),
+              copies,
+              { signal },
+            )
+          : await routing.resolveFeasible(currentRequest, copies, { signal });
+      if (!isCurrent()) return;
+      if (result.kind !== "route") {
+        if (
+          !(await offerMissingModelPull(
+            result,
+            currentRequest,
+            decision,
+            quick,
+            signal,
+          ))
+        ) {
+          toast("error", feasibilityMessage(result, "this print"));
+        }
+        return;
+      }
+      route = result.route;
     }
-    route = result.route;
-  }
-  if (boundaryExpected && !boundaryIsCurrent()) return;
-  const preparedSource = await prepareStillSourceToRequest(
-    route,
-    undefined,
-    signal,
-  );
-  if (!isCurrent()) return;
-  if (preparedSource === false) return;
-  if (boundaryExpected && !boundaryIsCurrent()) return;
-  let req = withBatchOverride(form.toRequest(currentModel.value), batchSize);
-  const finalizedCopies = requestCopyCount(req);
-  if (quick) req.original_prompt = quick.originalPrompt;
-  if (quick?.promptTransform) req.prompt_transform = quick.promptTransform;
-  // H3's dedicated FL2VA boundaries own first/last endpoints. The legacy
-  // still preprocessor has no corresponding attachment and must never erase
-  // that serialized first-frame authority — instead each boundary takes the
-  // same client-side fit, coerced maskless.
-  if (isMinimaxH3Identity(currentFamily.value, form.state.value.model)) {
-    const h3 = form.state.value.h3Authoring;
-    if (h3?.firstFrame?.data || h3?.lastFrame?.data)
-      req.source_fit = coerceSourceFitForMaskless(
-        parseSourceFitPolicy(form.state.value.sourceFitPolicy) ??
-          defaultSourceFitPolicy(),
-      );
-    if (h3Cropped) req.references = minimaxH3ReferenceProjection(h3Cropped);
-    const boundaryRoute: HostRoute | null = route || null;
-    const fitBoundary = async (
-      base64: string,
-      boundary: {
-        filename: string;
-        width: number;
-        height: number;
-        mimeType: string;
-      },
-    ): Promise<string | false> => {
-      const fitted = await prepareStillSourceToRequest(
-        boundaryRoute,
-        {
-          source: {
-            kind: "upload",
-            filename: boundary.filename,
-            base64,
-            width: boundary.width,
-            height: boundary.height,
-            mime: boundary.mimeType,
+    if (boundaryExpected && !boundaryIsCurrent()) return;
+    const preparedSource = await prepareStillSourceToRequest(
+      route,
+      undefined,
+      signal,
+    );
+    if (!isCurrent()) return;
+    if (preparedSource === false) return;
+    if (boundaryExpected && !boundaryIsCurrent()) return;
+    let req =
+      preparedReferenceLease?.request ??
+      withBatchOverride(form.toRequest(currentModel.value), batchSize);
+    const finalizedCopies = requestCopyCount(req);
+    if (quick && !preparedReferenceLease)
+      req.original_prompt = quick.originalPrompt;
+    if (quick?.promptTransform && !preparedReferenceLease)
+      req.prompt_transform = quick.promptTransform;
+    // H3's dedicated FL2VA boundaries own first/last endpoints. The legacy
+    // still preprocessor has no corresponding attachment and must never erase
+    // that serialized first-frame authority — instead each boundary takes the
+    // same client-side fit, coerced maskless.
+    if (isMinimaxH3Identity(currentFamily.value, form.state.value.model)) {
+      const h3 = form.state.value.h3Authoring;
+      if (h3?.firstFrame?.data || h3?.lastFrame?.data)
+        req.source_fit = coerceSourceFitForMaskless(
+          parseSourceFitPolicy(form.state.value.sourceFitPolicy) ??
+            defaultSourceFitPolicy(),
+        );
+      if (h3Cropped && !preparedReferenceLease)
+        req.references = minimaxH3ReferenceProjection(h3Cropped);
+      const boundaryRoute: HostRoute | null = route || null;
+      const fitBoundary = async (
+        base64: string,
+        boundary: {
+          filename: string;
+          width: number;
+          height: number;
+          mimeType: string;
+        },
+      ): Promise<string | false> => {
+        const fitted = await prepareStillSourceToRequest(
+          boundaryRoute,
+          {
+            source: {
+              kind: "upload",
+              filename: boundary.filename,
+              base64,
+              width: boundary.width,
+              height: boundary.height,
+              mime: boundary.mimeType,
+            },
+            mask: null,
+            maskless: true,
           },
+          signal,
+        );
+        if (fitted === false || !boundaryIsCurrent()) return false;
+        return fitted.source?.base64 ?? base64;
+      };
+      if (typeof req.source_image === "string" && h3?.firstFrame) {
+        const fitted = await fitBoundary(req.source_image, h3.firstFrame);
+        if (fitted === false) return;
+        req.source_image = fitted;
+      }
+      const keyframes = (req as { keyframes?: { image: string }[] }).keyframes;
+      if (keyframes?.[0] && h3?.lastFrame) {
+        const fitted = await fitBoundary(keyframes[0].image, h3.lastFrame);
+        if (fitted === false) return;
+        keyframes[0].image = fitted;
+      }
+    } else if (
+      isQwenImageEditFamily(currentFamily.value) &&
+      req.edit_images?.[0]
+    ) {
+      req.edit_images[0] = preparedSource.source?.base64 ?? req.edit_images[0];
+    } else if ("source_image" in req) {
+      req.source_image = preparedSource.source?.base64 ?? null;
+      if (preparedSource.mask) req.mask_image = preparedSource.mask.base64;
+      else delete req.mask_image;
+    }
+    // Ordinary boundary recipes serialize BOTH frames as keyframes. Fit the
+    // closing frame too and replace only wire bytes, preserving indices/names.
+    if (
+      capabilities.value.supportsEndFrame &&
+      form.state.value.endFrame &&
+      req.keyframes?.length
+    ) {
+      const end = form.state.value.endFrame;
+      const endpointSettings = {
+        family: currentFamily.value,
+        frames: req.frames ?? null,
+        width: req.width ?? form.state.value.width,
+        height: req.height ?? form.state.value.height,
+        policy:
+          parseSourceFitPolicy(form.state.value.sourceFitPolicy) ??
+          defaultSourceFitPolicy(),
+      };
+      req.source_fit = coerceSourceFitForMaskless(endpointSettings.policy);
+      delete req.mask_image;
+      const opening = await prepareStillSourceToRequest(
+        route,
+        {
+          source: form.state.value.imageAttachments[0] ?? null,
           mask: null,
           maskless: true,
+          settings: endpointSettings,
         },
         signal,
       );
-      if (fitted === false || !boundaryIsCurrent()) return false;
-      return fitted.source?.base64 ?? base64;
-    };
-    if (typeof req.source_image === "string" && h3?.firstFrame) {
-      const fitted = await fitBoundary(req.source_image, h3.firstFrame);
-      if (fitted === false) return;
-      req.source_image = fitted;
+      if (!boundaryIsCurrent() || opening === false) return;
+      if (req.source_image && opening.source)
+        req.source_image = opening.source.base64;
+      const fitted = await prepareStillSourceToRequest(
+        route,
+        {
+          source: {
+            kind: "upload",
+            filename: end.filename,
+            base64: end.base64,
+          },
+          mask: null,
+          maskless: true,
+          settings: endpointSettings,
+        },
+        signal,
+      );
+      if (!boundaryIsCurrent() || fitted === false) return;
+      req.keyframes = req.keyframes.map((frame) => ({
+        ...frame,
+        image:
+          frame.frame === 0
+            ? (opening.source?.base64 ?? frame.image)
+            : frame.image === end.base64
+              ? (fitted.source?.base64 ?? frame.image)
+              : frame.image,
+      }));
     }
-    const keyframes = (req as { keyframes?: { image: string }[] }).keyframes;
-    if (keyframes?.[0] && h3?.lastFrame) {
-      const fitted = await fitBoundary(keyframes[0].image, h3.lastFrame);
-      if (fitted === false) return;
-      keyframes[0].image = fitted;
+    if (req.source_image && originalSource) {
+      void persistGenerationSourceMedia(req.source_image, originalSource);
     }
-  } else if (
-    isQwenImageEditFamily(currentFamily.value) &&
-    req.edit_images?.[0]
-  ) {
-    req.edit_images[0] = preparedSource.source?.base64 ?? req.edit_images[0];
-  } else if ("source_image" in req) {
-    req.source_image = preparedSource.source?.base64 ?? null;
-    if (preparedSource.mask) req.mask_image = preparedSource.mask.base64;
-    else delete req.mask_image;
-  }
-  // Ordinary boundary recipes serialize BOTH frames as keyframes. Fit the
-  // closing frame too and replace only wire bytes, preserving indices/names.
-  if (
-    capabilities.value.supportsEndFrame &&
-    form.state.value.endFrame &&
-    req.keyframes?.length
-  ) {
-    const end = form.state.value.endFrame;
-    const endpointSettings = {
-      family: currentFamily.value,
-      frames: req.frames ?? null,
-      width: req.width ?? form.state.value.width,
-      height: req.height ?? form.state.value.height,
-      policy:
-        parseSourceFitPolicy(form.state.value.sourceFitPolicy) ??
-        defaultSourceFitPolicy(),
-    };
-    req.source_fit = coerceSourceFitForMaskless(endpointSettings.policy);
-    delete req.mask_image;
-    const opening = await prepareStillSourceToRequest(
-      route,
-      {
-        source: form.state.value.imageAttachments[0] ?? null,
-        mask: null,
-        maskless: true,
-        settings: endpointSettings,
-      },
-      signal,
-    );
-    if (!boundaryIsCurrent() || opening === false) return;
-    if (req.source_image && opening.source)
-      req.source_image = opening.source.base64;
-    const fitted = await prepareStillSourceToRequest(
-      route,
-      {
-        source: { kind: "upload", filename: end.filename, base64: end.base64 },
-        mask: null,
-        maskless: true,
-        settings: endpointSettings,
-      },
-      signal,
-    );
-    if (!boundaryIsCurrent() || fitted === false) return;
-    req.keyframes = req.keyframes.map((frame) => ({
-      ...frame,
-      image:
-        frame.frame === 0
-          ? (opening.source?.base64 ?? frame.image)
-          : frame.image === end.base64
-            ? (fitted.source?.base64 ?? frame.image)
-            : frame.image,
-    }));
-  }
-  if (req.source_image && originalSource) {
-    void persistGenerationSourceMedia(req.source_image, originalSource);
-  }
-  // The identity photo never reaches the server's metadata as bytes, only as
-  // `id_image_sha256`, so keep the payload in the same content-addressed
-  // local stash a source image uses or Reuse settings has nothing to find.
-  if (req.id_image) {
-    const staged = form.state.value.identityImage;
-    void persistIdentityPhoto(req.id_image, {
-      filename: req.id_image_name || staged?.filename || "identity photo",
-      width: staged?.width ?? null,
-      height: staged?.height ?? null,
-      mime: staged?.mime ?? null,
-    });
-  }
-  if (retainedRestorePending.value)
-    throw new Error("Restoring the original input files…");
-  if (retainedRestoreError.value) throw new Error(retainedRestoreError.value);
-  const retainedSnapshot = retainedSourceReuseSnapshot();
-  const retainedIntent = retainedSnapshot?.intent;
-  if (retainedIntent?.inventory.availability === "available") {
-    const retainedMembers = retainedSourceMediaMembersForRequest(
-      retainedIntent.inventory.members,
-      req,
-    );
-    if (retainedMembers.length > 0) {
-      try {
-        req = await relayRetainedSourceMedia(
-          retainedIntent.filename,
-          retainedMembers,
-          req,
-          retainedIntent.origin,
-          signal,
-        );
-      } catch (error) {
-        toast(
-          "error",
-          `Couldn’t restore retained source media: ${error instanceof Error ? error.message : String(error)}`,
-        );
-        return;
+    // The identity photo never reaches the server's metadata as bytes, only as
+    // `id_image_sha256`, so keep the payload in the same content-addressed
+    // local stash a source image uses or Reuse settings has nothing to find.
+    if (req.id_image) {
+      const staged = form.state.value.identityImage;
+      void persistIdentityPhoto(req.id_image, {
+        filename: req.id_image_name || staged?.filename || "identity photo",
+        width: staged?.width ?? null,
+        height: staged?.height ?? null,
+        mime: staged?.mime ?? null,
+      });
+    }
+    if (retainedRestorePending.value)
+      throw new Error("Restoring the original input files…");
+    if (retainedRestoreError.value) throw new Error(retainedRestoreError.value);
+    const retainedSnapshot = retainedSourceReuseSnapshot();
+    const retainedIntent = retainedSnapshot?.intent;
+    if (
+      !preparedReferenceLease &&
+      retainedIntent?.inventory.availability === "available"
+    ) {
+      const retainedMembers = retainedSourceMediaMembersForRequest(
+        retainedIntent.inventory.members,
+        req,
+      );
+      if (retainedMembers.length > 0) {
+        try {
+          req = await relayRetainedSourceMedia(
+            retainedIntent.filename,
+            retainedMembers,
+            req,
+            retainedIntent.origin,
+            signal,
+          );
+        } catch (error) {
+          toast(
+            "error",
+            `Couldn’t restore retained source media: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return;
+        }
+        if (
+          !isCurrent() ||
+          !retainedSourceReuseIsCurrent(retainedSnapshot!.version)
+        )
+          return;
       }
-      if (
-        !isCurrent() ||
-        !retainedSourceReuseIsCurrent(retainedSnapshot!.version)
-      )
-        return;
     }
-  }
-  const finalizedResult = route
-    ? decision.kind === "chain"
-      ? await routing.revalidateFeasibleChain(
-          route,
-          resolveChainRequest(req, decision),
-          finalizedCopies,
-          { signal },
-        )
-      : await routing.revalidateFeasible(route, req, finalizedCopies, {
-          signal,
-        })
-    : decision.kind === "chain"
-      ? await routing.resolveFeasibleChain(
-          resolveChainRequest(req, decision),
-          finalizedCopies,
-          { signal },
-        )
-      : await routing.resolveFeasible(req, finalizedCopies, { signal });
-  if (!isCurrent() || (boundaryExpected && !boundaryIsCurrent())) return;
-  if (finalizedResult.kind !== "route") {
-    toast("error", feasibilityMessage(finalizedResult, "this finalized print"));
-    return;
-  }
-  const finalizedRoute = finalizedResult.route;
-  if (!sameRoute(route, finalizedRoute)) {
-    toast(
-      "error",
-      "The finalized source request is no longer feasible on the selected machine. Nothing was queued.",
+    const finalizedResult = route
+      ? decision.kind === "chain"
+        ? await routing.revalidateFeasibleChain(
+            route,
+            resolveChainRequest(req, decision),
+            finalizedCopies,
+            { signal },
+          )
+        : await routing.revalidateFeasible(route, req, finalizedCopies, {
+            signal,
+          })
+      : decision.kind === "chain"
+        ? await routing.resolveFeasibleChain(
+            resolveChainRequest(req, decision),
+            finalizedCopies,
+            { signal },
+          )
+        : await routing.resolveFeasible(req, finalizedCopies, { signal });
+    if (!isCurrent() || (boundaryExpected && !boundaryIsCurrent())) return;
+    if (finalizedResult.kind !== "route") {
+      toast(
+        "error",
+        feasibilityMessage(finalizedResult, "this finalized print"),
+      );
+      return;
+    }
+    const finalizedRoute = finalizedResult.route;
+    if (!sameRoute(route, finalizedRoute)) {
+      toast(
+        "error",
+        "The finalized source request is no longer feasible on the selected machine. Nothing was queued.",
+      );
+      return;
+    }
+    route = finalizedRoute;
+    const { accepted } = await licenseAcceptance.request({
+      hostLabel: route.label,
+      target: {
+        baseUrl: route.target.baseUrl,
+        apiKey: route.target.apiKey ?? null,
+        connectionMode: route.target.connectionMode,
+      },
+      requirements: licenseRequirements(
+        finalizedResult.preview?.pending_downloads,
+      ),
+    });
+    if (
+      !accepted ||
+      !isCurrent() ||
+      (normalizationCurrent && !normalizationCurrent())
+    )
+      return;
+    if (boundaryExpected && !boundaryIsCurrent()) return;
+    if (!submitRequestCopies(req, decision, route, preparedReferenceLease))
+      return;
+    preparedLeaseHandedOff = true;
+    clearRetainedSourceReuseIntent();
+    quickPrepared.value = null;
+    pendingVariationBatch.value = null;
+    // Push to history immediately so ↑ recalls it before the server round-trips.
+    composerCardRef.value?.record(req.prompt);
+    recordPromptHistoryCache(
+      availablePromptHistoryStorage(),
+      routing.hosts.value.map((host) => ({
+        hostId: host.id,
+        hostLabel: host.label,
+      })),
+      route.hostId,
+      { prompt: req.prompt, model: req.model, used_at: Date.now() },
     );
-    return;
-  }
-  route = finalizedRoute;
-  const { accepted } = await licenseAcceptance.request({
-    hostLabel: route.label,
-    target: {
-      baseUrl: route.target.baseUrl,
-      apiKey: route.target.apiKey ?? null,
-      connectionMode: route.target.connectionMode,
-    },
-    requirements: licenseRequirements(
-      finalizedResult.preview?.pending_downloads,
-    ),
-  });
-  if (!accepted || !isCurrent()) return;
-  if (boundaryExpected && !boundaryIsCurrent()) return;
-  if (!submitRequestCopies(req, decision, route)) return;
-  clearRetainedSourceReuseIntent();
-  quickPrepared.value = null;
-  pendingVariationBatch.value = null;
-  // Push to history immediately so ↑ recalls it before the server round-trips.
-  composerCardRef.value?.record(req.prompt);
-  recordPromptHistoryCache(
-    availablePromptHistoryStorage(),
-    routing.hosts.value.map((host) => ({
-      hostId: host.id,
-      hostLabel: host.label,
-    })),
-    route.hostId,
-    { prompt: req.prompt, model: req.model, used_at: Date.now() },
-  );
-  if (
-    form.state.value.seedMode === "increment" &&
-    form.state.value.seed !== null
-  ) {
-    form.state.value.seed += Math.max(1, form.state.value.batchSize);
+    if (
+      form.state.value.seedMode === "increment" &&
+      form.state.value.seed !== null
+    ) {
+      form.state.value.seed += Math.max(1, form.state.value.batchSize);
+    }
+  } catch (error) {
+    if (!preparingFreshVideo) throw error;
+    if (!signal.aborted && isCurrent())
+      toast("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    if (preparedReferenceLease && !preparedLeaseHandedOff)
+      await preparedReferenceLease.cancel().catch(() => undefined);
   }
 }
 
@@ -6107,6 +6295,7 @@ onBeforeUnmount(() => {
               v-model="form.state.value"
               :family="currentFamily"
               :models="models"
+              :normalization-capabilities="normalizationPickerCapability"
               @open-picker="showPicker = true"
               @open-target-picker="openTargetPicker"
               @clear-source="onClearSource"

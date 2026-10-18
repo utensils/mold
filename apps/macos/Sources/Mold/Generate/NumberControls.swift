@@ -90,14 +90,21 @@ struct LengthControl: View {
             Text(seconds)
         }
         .disabled(draft.usesAutomaticDuration)
+        .onChange(of: draft.fps) {
+            draft.fps = temporal.fps.resolvedRate(draft.fps)
+            draft.frames = min(max(temporal.snap(draft.frames ?? temporal.frames.default), bounds.min), bounds.max)
+        }
+        .onChange(of: bounds) {
+            draft.frames = min(max(temporal.snap(draft.frames ?? temporal.frames.default), bounds.min), bounds.max)
+        }
         .accessibilityValue(seconds)
-        .help("Choose the clip’s length. It currently uses \(draft.frames ?? temporal.frames.default) frames at \(temporal.fps.value) frames per second.")
+        .help("Choose the clip’s length. It currently uses \(draft.frames ?? temporal.frames.default) frames at \(temporal.fps.resolvedRate(draft.fps)) frames per second.")
         }
     }
 
     private var seconds: String {
         if draft.usesAutomaticDuration { return "Auto" }
-        let duration = temporal.duration(forFrames: draft.frames ?? temporal.frames.default)
+        let duration = Double(draft.frames ?? temporal.frames.default) / Double(temporal.fps.resolvedRate(draft.fps))
         return duration.formatted(.number.precision(.fractionLength(1))) + "s"
     }
 }

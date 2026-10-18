@@ -52,6 +52,9 @@ pub struct QueueJobDownload {
 /// human-facing "what is happening now" line every surface already renders.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct QueueJobProgress {
+    /// Explicit null clears a prior diagnostic on new-server snapshots.
+    #[serde(default)]
+    pub stall: Option<crate::stall::StallDiagnostic>,
     /// Latest denoise step, once one has been reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<usize>,
@@ -113,6 +116,9 @@ impl QueueJobProgress {
     /// already reads — there is deliberately no second emitter.
     pub fn apply(&mut self, event: &SseProgressEvent, now_ms: u64) {
         match event {
+            SseProgressEvent::Stall { stall } => {
+                self.stall = stall.clone();
+            }
             SseProgressEvent::DenoiseStep { step, total, .. } => {
                 self.step = Some(*step);
                 self.total = Some(*total);
@@ -124,6 +130,10 @@ impl QueueJobProgress {
             }
             SseProgressEvent::StageStart { name } => {
                 self.stage = Some(name.clone());
+                // A stage transition owns the current phase; old byte counters
+                // must not hide active decode behind a completed weight load.
+                self.weight_load = None;
+                self.download = None;
                 self.step = None;
                 self.total = None;
                 self.stage_current = None;
@@ -213,6 +223,11 @@ impl QueueJobProgress {
     /// that has never seen this job gets everything the snapshot holds.
     pub fn events_since(&self, previous: Option<&Self>) -> Vec<SseProgressEvent> {
         let mut events = Vec::new();
+        if self.stall.as_ref() != previous.and_then(|p| p.stall.as_ref()) {
+            events.push(SseProgressEvent::Stall {
+                stall: self.stall.clone(),
+            });
+        }
         if self.queue_position != previous.and_then(|p| p.queue_position) {
             if let Some(position) = self.queue_position {
                 events.push(SseProgressEvent::Queued {
@@ -335,6 +350,39 @@ impl ProgressEventStream {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stall_diagnostic_round_trips_and_null_authoritatively_clears_it() {
+        let stall = crate::stall::StallDiagnostic {
+            stage: "Decode".into(),
+            last_completed_work_unix_ms: 123,
+            elapsed_stall_ms: 300_000,
+            cancel_requested: true,
+            device_still_held: true,
+        };
+        let mut progress = QueueJobProgress::default();
+        progress.apply(
+            &SseProgressEvent::Stall {
+                stall: Some(stall.clone()),
+            },
+            456,
+        );
+        let encoded = serde_json::to_value(&progress).unwrap();
+        assert_eq!(encoded["stall"]["stage"], "Decode");
+        let resumed = QueueJobProgress::default();
+        assert!(matches!(
+            resumed.events_since(Some(&progress)).as_slice(),
+            [SseProgressEvent::Stall { stall: None }]
+        ));
+        assert!(serde_json::to_value(resumed).unwrap()["stall"].is_null());
+        // An older extensible queue row ignores the new diagnostic field.
+        #[derive(serde::Deserialize)]
+        struct OldRow {
+            stage: Option<String>,
+        }
+        let old: OldRow = serde_json::from_value(encoded).unwrap();
+        assert!(old.stage.is_none());
+    }
+
     use super::*;
 
     fn folded(events: &[SseProgressEvent]) -> QueueJobProgress {
@@ -343,6 +391,40 @@ mod tests {
             progress.apply(event, 1_000 + index as u64);
         }
         progress
+    }
+
+    #[test]
+    fn a_new_decode_stage_replaces_prior_weight_bytes_and_reports_execution() {
+        let mut progress = QueueJobProgress::default();
+        progress.apply(
+            &SseProgressEvent::WeightLoad {
+                component: "VAE".into(),
+                bytes_loaded: 10,
+                bytes_total: 100,
+            },
+            1,
+        );
+        assert!(!progress.is_executing());
+        progress.apply(
+            &SseProgressEvent::StageStart {
+                name: "Decoding video frames".into(),
+            },
+            2,
+        );
+        assert!(progress.is_executing());
+        assert!(progress.weight_load.is_none());
+        progress.apply(
+            &SseProgressEvent::WeightLoad {
+                component: "Next encoder".into(),
+                bytes_loaded: 1,
+                bytes_total: 100,
+            },
+            3,
+        );
+        assert!(
+            !progress.is_executing(),
+            "new byte events restore loading authority"
+        );
     }
 
     #[test]
@@ -480,24 +562,8 @@ mod tests {
         ]);
         assert_eq!(progress.queue_position, Some(2));
         assert_eq!(progress.stage.as_deref(), Some("auto pipeline"));
-        assert_eq!(
-            progress.weight_load,
-            Some(QueueJobWeightLoad {
-                bytes_loaded: 5,
-                bytes_total: 50,
-                component: "transformer".into(),
-            })
-        );
-        assert_eq!(
-            progress.download,
-            Some(QueueJobDownload {
-                filename: "t5.safetensors".into(),
-                file_index: 1,
-                total_files: 3,
-                bytes_downloaded: 100,
-                bytes_total: 100,
-            })
-        );
+        assert_eq!(progress.weight_load, None);
+        assert_eq!(progress.download, None);
         assert_eq!(progress.step, Some(3));
         assert_eq!(progress.total, Some(8));
         assert_eq!(progress.preview_image.as_deref(), Some("UFJFVklFVw=="));

@@ -230,4 +230,30 @@ describe("generation settings selection", () => {
     expect(onEnded).not.toHaveBeenCalled();
     stop();
   });
+  it("clears a recovered stall even when no other progress facts remain", async () => {
+    vi.useFakeTimers();
+    const stall = {
+      stage: "VAE decode",
+      last_completed_work_unix_ms: 1700000000000,
+      elapsed_stall_ms: 90000,
+      cancel_requested: false,
+      device_still_held: true,
+    };
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ stall }))
+      .mockResolvedValue(Response.json({ stall: null }));
+    vi.stubGlobal("fetch", fetch);
+    const received = vi.fn();
+    const stop = watchSelectedQueuePreview(
+      { baseUrl: "https://gpu.example", apiKey: null },
+      "job",
+      received,
+      500,
+    );
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(received.mock.calls[0]?.[0].stall).toEqual(stall);
+    expect(received.mock.calls.at(-1)?.[0].stall).toBeNull();
+    stop();
+  });
 });

@@ -150,6 +150,7 @@ const errors = computed(() =>
 
 function percentFor(job: Job): number | null {
   const p = job.progress;
+  if (p.stall || job.cancelRequested) return null;
   return p.step !== null && p.totalSteps
     ? Math.round((p.step / p.totalSteps) * 100)
     : null;
@@ -157,6 +158,7 @@ function percentFor(job: Job): number | null {
 
 function isFinalizing(job: Job): boolean {
   const { stage, step, totalSteps } = job.progress;
+  if (job.progress.stall || job.cancelRequested) return false;
   return (
     step !== null &&
     totalSteps !== null &&

@@ -38,6 +38,10 @@ extension GenerateRequest {
 // are deliberately different instances.
 public extension GenerateRequest {
     func encode(to encoder: Encoder) throws {
+        guard pendingReferenceInputs == nil else {
+            throw EncodingError.invalidValue("pending video references", .init(codingPath: encoder.codingPath,
+                debugDescription: "Prepare fresh video references on the selected machine before generation or placement."))
+        }
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(prompt, forKey: .prompt)
         try container.encode(model, forKey: .model)

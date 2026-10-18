@@ -938,6 +938,9 @@ impl GallerySettings {
 /// state.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub struct QueueSettings {
+    /// Observational stall threshold; zero disables diagnostics, never work.
+    #[serde(default = "default_no_progress_timeout_seconds")]
+    pub no_progress_timeout_seconds: u32,
     /// Days a HELD durable queue row survives before the retention sweeper
     /// purges it and releases its encrypted request media, and — on the same
     /// horizon — days a fully settled batch summary survives after its last
@@ -960,6 +963,10 @@ pub struct QueueSettings {
     pub held_retention_days: u32,
 }
 
+const fn default_no_progress_timeout_seconds() -> u32 {
+    300
+}
+
 const fn default_held_retention_days() -> u32 {
     30
 }
@@ -968,11 +975,29 @@ impl Default for QueueSettings {
     fn default() -> Self {
         Self {
             held_retention_days: default_held_retention_days(),
+            no_progress_timeout_seconds: default_no_progress_timeout_seconds(),
         }
     }
 }
 
 impl QueueSettings {
+    pub fn effective_no_progress_timeout_seconds(&self) -> u32 {
+        match std::env::var("MOLD_QUEUE_NO_PROGRESS_TIMEOUT_SECONDS") {
+            Ok(value) => match value.trim().parse::<u32>() {
+                Ok(seconds) if seconds <= 86400 => seconds,
+                _ => {
+                    static WARNED: std::sync::atomic::AtomicBool =
+                        std::sync::atomic::AtomicBool::new(false);
+                    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        eprintln!("warning: invalid MOLD_QUEUE_NO_PROGRESS_TIMEOUT_SECONDS value '{value}' (expected 0..=86400) — using config/default");
+                    }
+                    self.no_progress_timeout_seconds
+                }
+            },
+            Err(_) => self.no_progress_timeout_seconds,
+        }
+    }
+
     /// Name of the env var that overrides `held_retention_days`.
     pub const HELD_RETENTION_DAYS_ENV: &'static str = "MOLD_QUEUE_HELD_RETENTION_DAYS";
 

@@ -119,3 +119,24 @@ auth-disabled hosts; it never grants access to an auth-enabled host without a va
 other than legacy 404/405 must surface, and rejected uploads or license refusals
 must never trigger a downgrade or forced-local retry. Server-owned model/license
 decisions remain authoritative; H3 has no client acceptance gate.
+
+
+## Fresh reference-video normalization
+
+Authenticated V2 upload hosts may advertise nested `video_normalization` v1
+only after bounded server codec proof. This extends fresh `reference_video`
+authoring; canonical H3 references and all admission/license/memory policy
+remain authoritative. The candidate request excludes `references` entirely and
+freezes its exact JSON before original-byte reads/uploads. Canonical facts are
+published only by explicit receipt-set finalization, before placement; the
+same frozen request and host are used for admission. No client may invent video
+facts or turn retained/replay/old leased inputs into fresh candidates.
+
+`video_reference_codec` converts only in server ingress, never inside inference.
+It preserves accepted CFR bytes; supported MOV/WebM/MKV/VFR inputs convert to
+canonical H.264 MP4 with original timestamps, applied rotation and distinct
+soundtrack duration. Output facts come from the existing canonical Rust probe.
+The upload-v2 writer pool remains available while the smaller conversion pool
+works. Both input/output bytes and immutable existing-path validation copies
+share quota accounting, held until owned workers/children finish cleanup even
+if the request disconnects. Unsupported hosts retain the old canonical path.

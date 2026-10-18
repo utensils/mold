@@ -12,9 +12,25 @@ public extension HTTPBackend {
     // MARK: - Queue
 
     func cancelJob(id: String) async throws {
+        _ = try await requestJobCancellation(id: id)
+    }
+
+    func requestJobCancellation(id: String) async throws -> QueueCancellationDisposition {
         var request = self.request("/api/queue/\(escaped(id))")
         request.httpMethod = "DELETE"
-        _ = try await bytes(for: request)
+        let (data, response) = try await send(request)
+        try HTTPRefusal.check(response, data)
+        guard response.statusCode == 202 else { return .cancelled }
+        struct Accepted: Decodable {
+            let cancelRequested: Bool
+            let deviceStillHeld: Bool
+            let stall: StallDiagnostic?
+        }
+        let accepted = try decoded(Accepted.self, from: data, route: request.url?.path ?? "/api/queue")
+        guard accepted.cancelRequested, accepted.deviceStillHeld else {
+            throw MoldClientError.malformedResponse
+        }
+        return .pending(stall: accepted.stall)
     }
 
     func cancelHeldJob(id: String) async throws -> Bool {

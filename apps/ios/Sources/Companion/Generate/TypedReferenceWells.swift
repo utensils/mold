@@ -9,7 +9,7 @@ struct TypedReferenceWells: View {
     @State private var files = false
     @State private var problem: String?
     @State private var importing = false
-    @State private var replacement: GenerationReference?
+    @State private var replacement: AuthoringReference?
     @State private var replacementIndex: Int?
     @State private var fileFence: ReferenceImportFence?
     @State private var importTask: Task<Void, Never>?
@@ -63,13 +63,13 @@ struct TypedReferenceWells: View {
                 if let problem { Text(problem).foregroundStyle(.secondaryText).accessibilityIdentifier("reference-error") }
             }
             .onDisappear { importTask?.cancel() }
-            .fileImporter(isPresented: $files, allowedContentTypes: [.image, .movie, .audio], allowsMultipleSelection: replacement == nil) { result in
+            .fileImporter(isPresented: $files, allowedContentTypes: GenerationReferenceImporter.authoringContentTypes(capabilities: importHost.flatMap { generate.hosts.capabilities[$0.id]?.referenceUploads }, apiKey: importHost?.apiKey), allowsMultipleSelection: replacement == nil) { result in
                 if case let .success(urls) = result { importFiles(urls, capabilities: caps) }
             }
         }
     }
 
-    @ViewBuilder private func referenceWell(_ reference: GenerationReference, index: Int) -> some View {
+    @ViewBuilder private func referenceWell(_ reference: AuthoringReference, index: Int) -> some View {
         VStack(spacing: 4) {
             if reference.kind == "image" {
                 Well(title: reference.name, image: reference.media.data,
@@ -108,10 +108,11 @@ struct TypedReferenceWells: View {
         guard let authority = generate.retainedReuse.snapshot() else { return "unavailable" }
         return "\(authority.filename)|\(authority.route)|\(authority.instance ?? "unknown")"
     }
-    private func viewReference(_ reference: GenerationReference, index selectedIndex: Int? = nil) async throws -> SourceMediaFile {
+    private func viewReference(_ reference: AuthoringReference, index selectedIndex: Int? = nil) async throws -> SourceMediaFile {
         guard let index = selectedIndex ?? generate.draft.media.generationReferences.firstIndex(of: reference),
               generate.draft.media.generationReferences.indices.contains(index),
               generate.draft.media.generationReferences[index] == reference else { throw CancellationError() }
+        if let source = reference.freshVideo { return try await InputMediaPreview.file(bytes: source.data) }
         if let data = reference.media.data { return try await InputMediaPreview.file(base64: data) }
         return try await generate.retainedReuse.originalFile(reference: reference, index: index,
             references: generate.draft.media.generationReferences)
@@ -134,11 +135,12 @@ struct TypedReferenceWells: View {
             problem = nil
         } catch { problem = error.sentence }
     }
+    private var importHost: MoldHost? { generate.referenceImportTarget }
     private var currentFence: ReferenceImportFence {
         ReferenceImportFence(model: generate.modelName, host: generate.target?.id,
-            recipe: generate.recipe, media: generate.draft.media)
+            recipe: generate.recipe, media: generate.draft.media, authority: importHost, instance: importHost.flatMap { generate.hosts.instanceID(of: $0.id) })
     }
-    private func openFiles(replacing reference: GenerationReference? = nil, at index: Int? = nil) {
+    private func openFiles(replacing reference: AuthoringReference? = nil, at index: Int? = nil) {
         replacementIndex = index
         replacement = reference; fileFence = currentFence; files = true
     }
@@ -149,14 +151,16 @@ struct TypedReferenceWells: View {
         var fence = fileFence ?? currentFence
         replacement = nil; replacementIndex = nil; fileFence = nil
         importTask?.cancel()
+        let capturedHost = importHost
+        let uploadCapabilities = capturedHost.flatMap { generate.hosts.capabilities[$0.id]?.referenceUploads }
         importTask = Task {
             defer { importing = false }
             do {
                 for url in urls {
-                    let reference = try await GenerationReferenceImporter.load(url: url)
+                    let reference = try await GenerationReferenceImporter.loadAuthoring(url: url, capabilities: uploadCapabilities, apiKey: capturedHost?.apiKey)
                     try Task.checkCancellation()
                     guard fence.isCurrent(model: generate.modelName, host: generate.target?.id,
-                                          recipe: generate.recipe, media: generate.draft.media) else {
+                                          recipe: generate.recipe, media: generate.draft.media, authority: importHost, instance: importHost.flatMap { generate.hosts.instanceID(of: $0.id) }) else {
                         throw ReferenceImportError("Attachments changed while choosing. Choose the file again.")
                     }
                     var media = generate.draft.media

@@ -8,6 +8,125 @@ use anyhow::{ensure, Result};
 use candle_core::{DType, Device, IndexOp, Module, Tensor, D};
 use candle_nn::{linear_b, linear_no_bias, Linear, VarBuilder};
 
+use crate::progress::{InferenceCancellationToken, ProgressCallback, ProgressEvent};
+
+/// All CUDA work stays on its owner thread, including cancellation cleanup.
+struct DecodeControl<'a> {
+    cancellation: Option<&'a InferenceCancellationToken>,
+    progress: Option<&'a ProgressCallback>,
+}
+impl DecodeControl<'_> {
+    fn started(&self, name: &str) {
+        if let Some(progress) = self.progress {
+            progress(ProgressEvent::StageStart { name: name.into() });
+        }
+    }
+    fn checkpoint(&self, device: &Device) -> Result<()> {
+        if let Some(token) = self.cancellation.filter(|token| token.is_cancelled()) {
+            device.synchronize()?;
+            token.checkpoint()?;
+        }
+        Ok(())
+    }
+    fn completed(&self, device: &Device, name: &str, current: usize, total: usize) -> Result<()> {
+        // A launch is not completed work. A stuck kernel cannot emit a heartbeat.
+        device.synchronize()?;
+        if let Some(progress) = self.progress {
+            progress(ProgressEvent::StageProgress {
+                name: name.into(),
+                current,
+                total,
+            });
+        }
+        self.checkpoint(device)
+    }
+}
+
+/// Official LTX-2 e98f6d9 rope_math.py:39-107/145-171 caches per-axis
+/// tables within one decode. Preserve Mold's existing f64 angle construction
+/// and working-dtype rotation; never retain an expanded T*H*W table.
+struct AxisRopeTables {
+    axes: Vec<(Tensor, Tensor)>,
+}
+impl AxisRopeTables {
+    fn new(
+        time: usize,
+        height: usize,
+        width: usize,
+        dtype: DType,
+        device: &Device,
+    ) -> Result<Self> {
+        let axes = [time, height, width]
+            .into_iter()
+            .zip(ROPE_SPLIT)
+            .enumerate()
+            .map(|(axis, (extent, dim))| {
+                let mut cos = Vec::with_capacity(extent * dim / 2);
+                let mut sin = Vec::with_capacity(cos.capacity());
+                let frequencies = (0..dim / 2)
+                    .map(|pair| 10_000f64.powf(-((2 * pair) as f64) / dim as f64))
+                    .collect::<Vec<_>>();
+                for position in 0..extent {
+                    for frequency in &frequencies {
+                        let angle = position as f64 * frequency;
+                        cos.push(angle.cos() as f32);
+                        sin.push(angle.sin() as f32);
+                    }
+                }
+                let mut shape = vec![1; 6];
+                shape[axis + 1] = extent;
+                shape[5] = dim / 2;
+                Ok((
+                    Tensor::from_vec(cos, shape.as_slice(), &Device::Cpu)?
+                        .to_device(device)?
+                        .to_dtype(dtype)?,
+                    Tensor::from_vec(sin, shape.as_slice(), &Device::Cpu)?
+                        .to_device(device)?
+                        .to_dtype(dtype)?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self { axes })
+    }
+    #[cfg(test)]
+    fn elements(&self) -> usize {
+        self.axes
+            .iter()
+            .map(|(cos, sin)| cos.elem_count() + sin.elem_count())
+            .sum()
+    }
+    fn apply(&self, xs: &Tensor, time_offset: usize) -> Result<Tensor> {
+        ensure!(
+            xs.rank() == 6 && xs.dim(D::Minus1)? == HEAD_DIM,
+            "diffusion VAE RoPE expects 64-wide rank-6 attention tensors"
+        );
+        let mut offset = 0;
+        let mut rotated = Vec::with_capacity(3);
+        for (axis, ((cos, sin), dim)) in self.axes.iter().zip(ROPE_SPLIT).enumerate() {
+            let chunk = xs.narrow(D::Minus1, offset, dim)?;
+            offset += dim;
+            let mut shape = chunk.dims().to_vec();
+            shape[5] = dim / 2;
+            shape.push(2);
+            let pairs = chunk.contiguous()?.reshape(shape.as_slice())?;
+            let even = pairs.i((.., .., .., .., .., .., 0))?;
+            let odd = pairs.i((.., .., .., .., .., .., 1))?;
+            let (cos, sin) = if axis == 0 {
+                (
+                    cos.narrow(1, time_offset, xs.dim(1)?)?,
+                    sin.narrow(1, time_offset, xs.dim(1)?)?,
+                )
+            } else {
+                (cos.clone(), sin.clone())
+            };
+            let re = (even.broadcast_mul(&cos)? - odd.broadcast_mul(&sin)?)?;
+            let ro = (even.broadcast_mul(&sin)? + odd.broadcast_mul(&cos)?)?;
+            rotated.push(Tensor::stack(&[re, ro], D::Minus1)?.reshape(chunk.shape())?);
+        }
+        Ok(Tensor::cat(&rotated, D::Minus1)?)
+    }
+}
+
 const HEAD_DIM: usize = 64;
 const MLP_TOKEN_CHUNK: usize = 16_384;
 const QKV_WORKSPACE_ELEMENTS: usize = 1 << 25;
@@ -71,26 +190,37 @@ impl SwiGlu {
         })
     }
 
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+    fn forward(&self, xs: &Tensor, control: &DecodeControl) -> Result<Tensor> {
         let (batch, time, height, width, dim) = xs.dims5()?;
         let tokens = time * height * width;
         // candle's `Linear` only matmuls rank <= 4 inputs, so every branch
         // runs on the (batch, tokens, dim) flattening of the rank-5 grid.
         let flat = xs.reshape((batch, tokens, dim))?;
+        control.checkpoint(xs.device())?;
+        control.started("Diffusion video decode MLP chunks");
         if tokens <= MLP_TOKEN_CHUNK {
             let gate = candle_nn::ops::silu(&self.gate.forward(&flat)?)?;
-            return Ok(self
+            let output = self
                 .down
                 .forward(&(gate * self.up.forward(&flat)?)?)?
-                .reshape(xs.shape())?);
+                .reshape(xs.shape())?;
+            control.completed(xs.device(), "Diffusion video decode MLP chunks", 1, 1)?;
+            return Ok(output);
         }
 
         let mut output = Vec::with_capacity(tokens.div_ceil(MLP_TOKEN_CHUNK));
         for start in (0..tokens).step_by(MLP_TOKEN_CHUNK) {
+            control.checkpoint(xs.device())?;
             let length = MLP_TOKEN_CHUNK.min(tokens - start);
             let tile = flat.narrow(1, start, length)?;
             let gate = candle_nn::ops::silu(&self.gate.forward(&tile)?)?;
             output.push(self.down.forward(&(gate * self.up.forward(&tile)?)?)?);
+            control.completed(
+                xs.device(),
+                "Diffusion video decode MLP chunks",
+                start / MLP_TOKEN_CHUNK + 1,
+                tokens.div_ceil(MLP_TOKEN_CHUNK),
+            )?;
         }
         let output = output.iter().collect::<Vec<_>>();
         Ok(Tensor::cat(&output, 1)?.reshape(xs.shape())?)
@@ -123,32 +253,48 @@ impl NeighborhoodAttention {
         })
     }
 
+    #[cfg(test)]
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let tables =
+            AxisRopeTables::new(xs.dim(1)?, xs.dim(2)?, xs.dim(3)?, xs.dtype(), xs.device())?;
+        self.forward_controlled(
+            xs,
+            &DecodeControl {
+                cancellation: None,
+                progress: None,
+            },
+            &tables,
+        )
+    }
+    fn forward_controlled(
+        &self,
+        xs: &Tensor,
+        control: &DecodeControl,
+        tables: &AxisRopeTables,
+    ) -> Result<Tensor> {
+        control.started("Diffusion video decode QKV chunks");
         let (batch, time, height, width, dim) = xs.dims5()?;
         let time_chunk = (QKV_WORKSPACE_ELEMENTS / (height * width * dim).max(1)).max(1);
         let mut q_tiles = Vec::with_capacity(time.div_ceil(time_chunk));
         let mut k_tiles = Vec::with_capacity(q_tiles.capacity());
         let mut v_tiles = Vec::with_capacity(q_tiles.capacity());
         for start in (0..time).step_by(time_chunk) {
+            control.checkpoint(xs.device())?;
             let length = time_chunk.min(time - start);
             let qkv = linear_5d(&self.qkv, &xs.narrow(1, start, length)?)?;
             let shape = (batch, length, height, width, self.heads, HEAD_DIM);
             let q = qkv.narrow(D::Minus1, 0, dim)?.reshape(shape)?;
             let k = qkv.narrow(D::Minus1, dim, dim)?.reshape(shape)?;
             let v = qkv.narrow(D::Minus1, dim * 2, dim)?.reshape(shape)?;
-            q_tiles.push(apply_absolute_rope(
-                &self.q_norm.forward(&q)?,
-                start,
-                height,
-                width,
-            )?);
-            k_tiles.push(apply_absolute_rope(
-                &self.k_norm.forward(&k)?,
-                start,
-                height,
-                width,
-            )?);
+            q_tiles.push(tables.apply(&self.q_norm.forward(&q)?, start)?);
+            k_tiles.push(tables.apply(&self.k_norm.forward(&k)?, start)?);
             v_tiles.push(v);
+            control.completed(
+                xs.device(),
+                "Diffusion video decode QKV chunks",
+                start / time_chunk + 1,
+                time.div_ceil(time_chunk),
+            )?;
         }
         let q_refs = q_tiles.iter().collect::<Vec<_>>();
         let k_refs = k_tiles.iter().collect::<Vec<_>>();
@@ -156,6 +302,8 @@ impl NeighborhoodAttention {
         let q = Tensor::cat(&q_refs, 1)?;
         let k = Tensor::cat(&k_refs, 1)?;
         let v = Tensor::cat(&v_refs, 1)?;
+        control.checkpoint(xs.device())?;
+        control.started("Diffusion video decode neighborhood attention");
         let attended = candle_core::neighborhood_attention::neighborhood_attention3d(
             &q.contiguous()?,
             &k.contiguous()?,
@@ -163,11 +311,25 @@ impl NeighborhoodAttention {
             self.kernel,
             (HEAD_DIM as f32).sqrt().recip(),
         )?;
+        control.completed(
+            xs.device(),
+            "Diffusion video decode neighborhood attention",
+            1,
+            1,
+        )?;
+        control.started("Diffusion video decode projection chunks");
         let attended = attended.reshape((batch, time, height, width, dim))?;
         let mut output = Vec::with_capacity(time.div_ceil(time_chunk));
         for start in (0..time).step_by(time_chunk) {
+            control.checkpoint(xs.device())?;
             let length = time_chunk.min(time - start);
             output.push(linear_5d(&self.proj, &attended.narrow(1, start, length)?)?);
+            control.completed(
+                xs.device(),
+                "Diffusion video decode projection chunks",
+                start / time_chunk + 1,
+                time.div_ceil(time_chunk),
+            )?;
         }
         let output = output.iter().collect::<Vec<_>>();
         Ok(Tensor::cat(&output, 1)?)
@@ -192,9 +354,17 @@ impl NaBlock {
         })
     }
 
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let xs = (xs + self.attention.forward(&self.norm1.forward(xs)?)?)?;
-        Ok((&xs + self.mlp.forward(&self.norm2.forward(&xs)?)?)?)
+    fn forward(
+        &self,
+        xs: &Tensor,
+        control: &DecodeControl,
+        tables: &AxisRopeTables,
+    ) -> Result<Tensor> {
+        let xs = (xs
+            + self
+                .attention
+                .forward_controlled(&self.norm1.forward(xs)?, control, tables)?)?;
+        Ok((&xs + self.mlp.forward(&self.norm2.forward(&xs)?, control)?)?)
     }
 }
 
@@ -277,7 +447,14 @@ impl DiffusionBlock {
         })
     }
 
-    fn forward(&self, xs: &Tensor, context: &Tensor, modulation: &[Tensor]) -> Result<Tensor> {
+    fn forward(
+        &self,
+        xs: &Tensor,
+        context: &Tensor,
+        modulation: &[Tensor],
+        control: &DecodeControl,
+        tables: &AxisRopeTables,
+    ) -> Result<Tensor> {
         let table = self
             .scale_shift_table
             .unsqueeze(0)?
@@ -293,9 +470,12 @@ impl DiffusionBlock {
         let shift_mlp = parameter(4)?;
         let mut xs = (xs + linear_5d(&self.context_proj, context)?)?;
         let normed = modulate(&self.norm1.forward(&xs)?, &scale_msa, &shift_msa)?;
-        xs = (&xs + self.attention.forward(&normed)?)?;
+        xs = (&xs
+            + self
+                .attention
+                .forward_controlled(&normed, control, tables)?)?;
         let normed = modulate(&self.norm2.forward(&xs)?, &scale_mlp, &shift_mlp)?;
-        Ok((&xs + self.mlp.forward(&normed)?)?)
+        Ok((&xs + self.mlp.forward(&normed, control)?)?)
     }
 }
 
@@ -359,6 +539,32 @@ impl Ltx2DiffusionVideoDecoder {
     }
 
     pub fn forward(&self, latents: &Tensor) -> Result<Tensor> {
+        self.forward_with_control(latents, None, None)
+    }
+    pub fn forward_with_control(
+        &self,
+        latents: &Tensor,
+        cancellation: Option<&InferenceCancellationToken>,
+        progress: Option<&ProgressCallback>,
+    ) -> Result<Tensor> {
+        let control = DecodeControl {
+            cancellation,
+            progress,
+        };
+        control.checkpoint(latents.device())?;
+        if let Some(progress) = progress {
+            progress(ProgressEvent::StageStart {
+                name: "Decoding video frames (whole-clip diffusion decoder)".into(),
+            });
+        }
+        let total = self
+            .deterministic
+            .iter()
+            .map(|stage| stage.blocks.len() + 1)
+            .sum::<usize>()
+            + self.diffusion.len()
+            + 2;
+        let mut completed = 0;
         let (_, _, latent_time, _, _) = latents.dims5()?;
         let trailing = latents.narrow(2, latent_time - 1, 1)?.broadcast_as((
             latents.dim(0)?,
@@ -372,11 +578,26 @@ impl Ltx2DiffusionVideoDecoder {
             &self.conv_in,
             &padded.permute((0, 2, 3, 4, 1))?.contiguous()?,
         )?;
+        completed += 1;
+        control.completed(latents.device(), "Decoding video frames", completed, total)?;
         for stage in &self.deterministic {
+            let tables = AxisRopeTables::new(
+                context.dim(1)?,
+                context.dim(2)?,
+                context.dim(3)?,
+                context.dtype(),
+                context.device(),
+            )?;
             for block in &stage.blocks {
-                context = block.forward(&context)?;
+                control.checkpoint(latents.device())?;
+                context = block.forward(&context, &control, &tables)?;
+                completed += 1;
+                control.completed(latents.device(), "Decoding video frames", completed, total)?;
             }
+            control.checkpoint(latents.device())?;
             context = stage.upsample.forward(&context)?;
+            completed += 1;
+            control.completed(latents.device(), "Decoding video frames", completed, total)?;
         }
         let context_time = context.dim(1)?;
         context = context.narrow(1, 0, context_time - 16)?;
@@ -410,12 +631,19 @@ impl Ltx2DiffusionVideoDecoder {
                     .unsqueeze(1)
             })
             .collect::<candle_core::Result<Vec<_>>>()?;
+        let tables = AxisRopeTables::new(time, height, width, xs.dtype(), xs.device())?;
         for block in &self.diffusion {
-            xs = block.forward(&xs, &context, &modulation)?;
+            control.checkpoint(latents.device())?;
+            xs = block.forward(&xs, &context, &modulation, &control, &tables)?;
+            completed += 1;
+            control.completed(latents.device(), "Decoding video frames", completed, total)?;
         }
         let pixels =
             linear_5d(&self.conv_out, &self.norm_out.forward(&xs)?)?.permute((0, 4, 1, 2, 3))?;
-        unpatchify_pixels(&pixels, PATCH_SIZE)
+        let output = unpatchify_pixels(&pixels, PATCH_SIZE)?;
+        completed += 1;
+        control.completed(latents.device(), "Decoding video frames", completed, total)?;
+        Ok(output)
     }
 }
 
@@ -423,6 +651,7 @@ fn modulate(xs: &Tensor, scale: &Tensor, shift: &Tensor) -> Result<Tensor> {
     Ok(xs.broadcast_mul(&(scale + 1.0)?)?.broadcast_add(shift)?)
 }
 
+#[cfg(test)]
 fn apply_absolute_rope(
     xs: &Tensor,
     time_offset: usize,
@@ -533,6 +762,133 @@ mod tests {
     use super::*;
 
     #[test]
+    fn decoder_control_checks_typed_cancellation_before_work_and_reports_only_completed_work() {
+        let token = crate::progress::InferenceCancellationToken::default();
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let callback: crate::progress::ProgressCallback =
+            Box::new(move |event| sink.lock().unwrap().push(event));
+        let control = DecodeControl {
+            cancellation: Some(&token),
+            progress: Some(&callback),
+        };
+        control.checkpoint(&Device::Cpu).unwrap();
+        assert!(events.lock().unwrap().is_empty());
+        control
+            .completed(&Device::Cpu, "Decoding video frames", 1, 30)
+            .unwrap();
+        assert!(matches!(
+            events.lock().unwrap().as_slice(),
+            [crate::progress::ProgressEvent::StageProgress {
+                current: 1,
+                total: 30,
+                ..
+            }]
+        ));
+        token.cancel();
+        let error = control.checkpoint(&Device::Cpu).unwrap_err();
+        assert!(crate::progress::is_inference_cancelled(&error));
+        assert_eq!(events.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn bounded_axis_tables_preserve_existing_arithmetic_and_upstream_goldens() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../testdata/diffusion-rope/upstream-e98f6d9.json"
+        ))
+        .unwrap();
+        for (dtype, key, tolerance) in [
+            (DType::F32, "torch.float32", 0.00001f32),
+            // Existing Mold rotates in working BF16; official attention uses
+            // F32 intermediates. Independent old-formula CPU oracle records a
+            // 0.5 maximum (two BF16 ulps near 64), unchanged by table reuse.
+            (DType::BF16, "torch.bfloat16", 0.5),
+        ] {
+            let xs = Tensor::arange(0f32, 3072f32, &Device::Cpu)
+                .unwrap()
+                .affine(1.0 / 64.0, 0.0)
+                .unwrap()
+                .reshape((1, 3, 2, 4, 2, 64))
+                .unwrap()
+                .to_dtype(dtype)
+                .unwrap();
+            let tables = AxisRopeTables::new(6, 2, 4, dtype, &Device::Cpu).unwrap();
+            assert_eq!(tables.elements(), 2 * (6 * 8 + 2 * 12 + 4 * 12));
+            let actual = tables
+                .apply(&xs, 3)
+                .unwrap()
+                .to_dtype(DType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            let legacy = apply_absolute_rope(&xs, 3, 2, 4)
+                .unwrap()
+                .to_dtype(DType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            assert_eq!(
+                actual, legacy,
+                "reuse must preserve existing dtype/arithmetic exactly"
+            );
+            let golden = fixture["values"][key].as_array().unwrap();
+            let max = actual
+                .iter()
+                .zip(golden)
+                .map(|(a, b)| (a - b.as_f64().unwrap() as f32).abs())
+                .fold(0f32, f32::max);
+            assert!(
+                max <= tolerance,
+                "{dtype:?} upstream golden maximum error {max}"
+            );
+            assert_eq!(
+                tables.apply(&xs, 3).unwrap().dims(),
+                xs.dims(),
+                "same tables reuse across Q/K and blocks"
+            );
+        }
+    }
+
+    #[test]
+    fn rope_reuse_microbenchmark_legacy() {
+        rope_reuse_microbenchmark("legacy");
+    }
+
+    #[test]
+    fn rope_reuse_microbenchmark_reused() {
+        rope_reuse_microbenchmark("reused");
+    }
+
+    fn rope_reuse_microbenchmark(mode: &str) {
+        let xs = Tensor::arange(0f32, (16 * 16 * 16 * HEAD_DIM) as f32, &Device::Cpu)
+            .unwrap()
+            .reshape((1, 16, 16, 16, 1, HEAD_DIM))
+            .unwrap();
+        let start = std::time::Instant::now();
+        let tables = (mode == "reused")
+            .then(|| AxisRopeTables::new(16, 16, 16, DType::F32, &Device::Cpu).unwrap());
+        let table_elements = tables
+            .as_ref()
+            .map_or(2 * 16 * 16 * 16 * HEAD_DIM / 2, AxisRopeTables::elements);
+        for _ in 0..20 {
+            let output = match &tables {
+                Some(tables) => tables.apply(&xs, 0).unwrap(),
+                None => apply_absolute_rope(&xs, 0, 16, 16).unwrap(),
+            };
+            std::hint::black_box(output);
+        }
+        eprintln!(
+            "RoPE microbenchmark mode={mode} calls=20 table_payload_bytes={} elapsed_ms={:.3}",
+            table_elements * 4,
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    #[test]
     fn pixel_patch_round_trip() {
         let xs = Tensor::arange(0f32, 3.0 * 2.0 * 8.0 * 8.0, &Device::Cpu)
             .unwrap()
@@ -575,7 +931,18 @@ mod tests {
         let vb = VarBuilder::from_tensors(tensors, DType::F32, &dev);
         let mlp = SwiGlu::new(dim, vb).expect("bias-free SwiGLU weights must load");
         let xs = Tensor::zeros((1, 1, 2, 2, dim), DType::F32, &dev).unwrap();
-        assert_eq!(mlp.forward(&xs).unwrap().dims(), &[1, 1, 2, 2, dim]);
+        assert_eq!(
+            mlp.forward(
+                &xs,
+                &DecodeControl {
+                    cancellation: None,
+                    progress: None
+                }
+            )
+            .unwrap()
+            .dims(),
+            &[1, 1, 2, 2, dim]
+        );
     }
 
     #[test]

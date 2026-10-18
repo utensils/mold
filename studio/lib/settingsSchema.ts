@@ -509,6 +509,15 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
     needsEngineRestart: true,
   },
   {
+    key: "queue.no_progress_timeout_seconds",
+    section: "performance",
+    label: "Report stalled work after (seconds)",
+    help: "Seconds without completed work before reporting a stalled job. 0 disables reporting. This never cancels work or releases its device; the next job applies the new threshold.",
+    editor: "number",
+    min: 0,
+    max: 86400,
+  },
+  {
     key: "queue.held_retention_days",
     section: "performance",
     label: "Keep held work for",

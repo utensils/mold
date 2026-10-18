@@ -13,6 +13,9 @@ import Testing
 /// This is that test, and it is deliberately reflective rather than a second
 /// hand-written list: a list would have to be remembered too.
 @Suite struct GenerateRequestExhaustiveTests {
+    // Preparation carries immutable originals only until explicit finalization. It must
+    // never become an ordinary generation field; every other stored property is wire data.
+    private static let preparationOnlyProperties: Set<String> = ["pendingReferenceInputs"]
     /// Every stored property populated. A new one added to the struct with no
     /// value here fails `everyStoredPropertyIsPopulated` below, which is the
     /// nudge to decide whether it belongs on the wire.
@@ -77,7 +80,7 @@ import Testing
     /// check below would silently stop checking the new field.
     @Test func everyStoredPropertyIsPopulated() {
         let unset = Mirror(reflecting: populated()).children.compactMap { child -> String? in
-            guard let label = child.label else { return nil }
+            guard let label = child.label, !Self.preparationOnlyProperties.contains(label) else { return nil }
             // `Optional.none` reflects as a `.optional` display style with no
             // children; anything else is a value.
             let mirror = Mirror(reflecting: child.value)
@@ -95,14 +98,24 @@ import Testing
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
         let encoded = Set(json.keys)
 
-        let expected = Set(Mirror(reflecting: populated()).children.compactMap {
-            $0.label.map(Self.snakeCased)
+        let expected = Set(Mirror(reflecting: populated()).children.compactMap { child -> String? in
+            guard let label = child.label, !Self.preparationOnlyProperties.contains(label) else { return nil }
+            return Self.snakeCased(label)
         })
         #expect(expected.subtracting(encoded).isEmpty,
                 "never reach the wire: \(expected.subtracting(encoded).sorted())")
         // And nothing is invented: every key on the wire is a property.
         #expect(encoded.subtracting(expected).isEmpty,
                 "encoded but not stored: \(encoded.subtracting(expected).sorted())")
+    }
+
+    @Test func preparationOnlyOriginalsCannotBeSerializedAsGenerationFacts() throws {
+        var request = populated()
+        let ordinary = try #require(JSONSerialization.jsonObject(with: MoldJSON.encoder.encode(request)) as? [String: Any])
+        #expect(ordinary["pending_reference_inputs"] == nil)
+        request.pendingReferenceInputs = [.freshVideo(.init(data: Data([1]), mimeType: "video/quicktime", name: "original.mov"))]
+        #expect(throws: (any Error).self) { try MoldJSON.encoder.encode(request) }
+        #expect(throws: (any Error).self) { try MoldJSON.encoder.encode(request.redactedForPlacement()) }
     }
 
     /// `JSONEncoder.keyEncodingStrategy = .convertToSnakeCase`'s own rule, for

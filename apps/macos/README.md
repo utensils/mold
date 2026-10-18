@@ -955,7 +955,7 @@ print deletion releases only that print's ownership. Hidden collections protect
 their source media from general browsing. Older machines use individual
 inventories; individual keyframe reuse requires the newer content endpoint.
 
-Library connection status is always available in the toolbar. Offline and reconnecting updates change its icon and details without moving the gallery. Qualified models advertising duration prediction offer Automatic from prompt or an explicit clip length; the authored choice survives draft restoration and settings reuse, and parks on unsupported destinations.
+Library connection status is always available in the toolbar. Offline and reconnecting updates change its icon and details without moving the gallery. Length displays the selected frame rate and reclamps when rate or recipe bounds change, while preserving the existing chain limits. Qualified models advertising duration prediction offer Automatic from prompt or an explicit clip length; the authored choice survives draft restoration and settings reuse, and parks on unsupported destinations.
 
 The Queue navigation badge reads every server page and totals unfinished jobs across all machines: rendering, queued, paused, held, and cancelling jobs. Finished, failed, and cancelled history is excluded; batches contribute their individual unfinished children, with runtime and durable copies counted once per machine.
 
@@ -1029,3 +1029,20 @@ Operation status reserves space below the Library content column, leaving the in
 and viewer transport visible. Dismiss hides the current operation without stopping it or
 acknowledging issues. A new operation or issue reopens status; the Library Status toolbar
 control restores dismissed status and keeps Stop Sync reachable through the finishing phase.
+
+
+Fresh MiniMax H3 typed video references can also use MOV/HEVC, M4V, WebM and Matroska when the keyed host advertises video normalization. The file picker preserves the bounded original bytes; **Preparing video on <machine>** probes or converts them on that machine before pricing and admission. Auto chooses an eligible connected host; an explicit machine choice stays fixed. Exact canonical facts and receipts must finalize before generating. Changing the host route, key, pairing or server instance cancels preparation and releases its session. Drafts keep original files, never spent upload handles. Older/keyless hosts retain the existing H.264 MP4 path and explain unsupported files. A malformed advertised normalization V1 contract surfaces a specific error when importing or submitting fresh video while preserving the host’s other capabilities. Absent, unversioned or unsupported future protocols follow the compatible canonical path. This does not add normalization for scalar source/continuation-video inputs or archived replay.
+
+Video playback holds the last real presentation frame when it ends or is scrubbed to the full end. Play restarts at zero, and Repeat still loops. Audio may finish after the final video sample; its legitimate tail is preserved. Encrypted clips use AVFoundation’s native preroll to become ready without starting playback or waiting for an arbitrary buffer length. An unexplained native preroll failure is shown as a preparation error. Item changes, dismissal and inactivity fence pending seeks so an old clip cannot restart the next one.
+
+Running jobs expose an observational stall diagnostic after the machine's
+configured interval without completed work. Queue rows and Job Details retain
+the stage, elapsed gap and device ownership, provide copyable diagnostics and
+an explicit operator recovery path, and suppress stale progress fractions.
+Accepted cancellation remains pending until the host confirms actual return;
+it never marks a held device reusable. Decode counters describe completed
+blocks or chunks in the current phase, rather than completed video frames.
+The Queue polls only executing previews while visible, including cancelling
+jobs, and follows authoritative null diagnostics when work resumes. Settings
+→ Performance offers the server's 0–86400-second threshold (zero disables it);
+changing it takes effect when the next job is prepared and never frees a GPU.

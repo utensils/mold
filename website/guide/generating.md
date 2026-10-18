@@ -779,3 +779,48 @@ pick's ability to update the form. These limits concern local file selection;
 server capability and admission limits still apply when generating.
 
 Batch size works for both images and videos. Choose **1** to disable batching. To stop a whole batch, use its native iOS/macOS queue header or open a job’s details and choose **Cancel batch** on web, desktop or Tauri mobile. The CLI also supports `mold queue cancel --batch <BATCH-ID>`. Finished outputs stay in the Library.
+
+### Fresh reference video imports
+
+Fresh H3 Ref2VA video attachments negotiate
+`capabilities.reference_uploads.video_normalization` v1 on an authenticated
+upload-v2 host. Supported input containers are MP4, MOV, M4V, WebM and MKV;
+H.264, HEVC, VP9, AV1 and ProRes are accepted only when that host advertises
+their working decoders. The server applies rotation and converts as needed to
+H.264 8-bit 4:2:0 MP4 with supported audio. Already canonical CFR clips keep
+their exact bytes. VFR conversion preserves source timestamps and duration
+within one output frame; it selects the nearest positive integer average fps,
+falling back to 24 fps when that rate is unavailable. H3's generation-time
+resampler is separate from this import step. Canonical metadata follows the
+existing Rust reader's integer fps; accepted rational-CFR content keeps
+its original encoded timing and bytes.
+
+The original and canonical file each have a 256 MiB limit. Sessions share the
+existing 1 GiB session / 4 GiB host scratch budget; conversion reserves space
+for the original plus the maximum canonical output before starting. A valid
+individual file can still be refused when the shared scratch budget is busy.
+Clips are limited to 8192 pixels on either axis, 16 megapixels per frame and
+15 seconds of video; the existing H3 reference-count and combined-duration
+limits still apply. Discord also retains its smaller attachment-download
+budget. Files with unsupported tracks, corrupt timing, excessive dimensions
+or failed conversion get an explicit error.
+
+The session binds the exact original digest and frozen request, then returns
+verified canonical hashes and facts. Explicit finalization must finish before
+placement and generation; a partial upload is never a usable reference. A
+failed/disconnected attempt cancels its unused lease when its handle is known
+and retries from the retained original bytes with a fresh session. A lost
+successful upload response requires re-uploading in that fresh session; upload
+handles are one-use. If the session-creation response is lost, the client cannot
+cancel its unknown handle, so its session slot expires after the 30-minute TTL.
+Conversion cannot adopt an old upload handle or reinterpret retained source
+media, replay authority, `--source-video` or `--extend-video`.
+
+This optional server feature currently requires Unix child resource limits
+and working ffmpeg/ffprobe tools. Nix/server packages supply codecs; raw
+installs must provide them on PATH. The embedded Mac engine has no bundled
+codec tools. Runtime codec discovery runs in the background and retries
+transient failures. On older, keyless or incapable hosts, clients keep the
+existing canonical MP4 import path and report the actual parse/codec error.
+Auto routing prepares and admits on one eligible healthy host for the attempt.
+It preserves the saved host selection.

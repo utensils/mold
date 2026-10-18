@@ -390,6 +390,28 @@ const stickyHost = computed(() => {
   return hosts.all.find((h) => h.id === sel && h.status === "ready" && h.baseUrl) ?? null;
 });
 
+const normalizationPickerCapability = computed(() => {
+  const selection = appPrefs.settings?.generateTargetHost ?? null;
+  const eligible = hosts.all
+    .filter((host) => {
+      const capability = hosts.capabilities?.[host.id]?.reference_uploads?.video_normalization;
+      return (
+        host.status === "ready" &&
+        capability?.available &&
+        capability.protocol_version === 1 &&
+        capability.input_roles.includes("reference_video")
+      );
+    })
+    .map((host) => host.id);
+  if (selection && selection !== "capable" && !eligible.includes(selection)) return null;
+  const route = hosts.resolveRoute?.(selection, props.form.model, eligible);
+  return (
+    route?.referenceUploads?.video_normalization ??
+    hosts.capabilities?.[eligible[0] ?? ""]?.reference_uploads?.video_normalization ??
+    null
+  );
+});
+
 /** Installed-model source: the pinned host's inventory when known, else the
  * primary's canonical list. "Known" is a successful fetch (`fetchedAt > 0`),
  * not a non-empty list — a host that genuinely has no models must scope to its
@@ -611,6 +633,7 @@ function setSourceFitMode(e: Event) {
     </div>
     <MinimaxH3AuthoringPanel
       :model-value="h3Authoring"
+      :normalization-capabilities="normalizationPickerCapability"
       image-picker-available
       @update:model-value="setH3Authoring"
       @open-image-picker="h3ReferencePickerOpen = true"

@@ -6,6 +6,24 @@ import MoldClient
 @Observable
 final class QueueStore {
     var acting: [MoldHost.ID: Set<String>] = [:]
+    var blockedReasons: [MoldHost.ID: [String: String]] = [:]
+    var cancelReceipts: [MoldHost.ID: [String: QueueCancellationDisposition]] = [:]
+    var progress: [String: JobProgress] = [:]
+
+    func statusOverride(_ entry: QueueEntry, on host: MoldHost.ID) -> String? {
+        if entry.state == .running || entry.state == .cancelling {
+            if let stall = progress[entry.id].map({ $0.stall }) ?? entry.stall { return stall.statusMessage }
+            if let receipt = cancelReceipts[host]?[entry.id] {
+                switch receipt {
+                case .pending: return "Cancel requested; device still held."
+                case .unconfirmed: return "Cancel requested; awaiting host confirmation."
+                case .cancelled: break
+                }
+            }
+        }
+        return entry.state == .queued ? blockedReasons[host]?[entry.id] : nil
+    }
+
     let hosts: HostStore
     /// `internal(set)`: `QueueStore+Fixture.seed(from:)` writes it too, and
     /// `private(set)` does not cross a file boundary.
@@ -71,11 +89,48 @@ final class QueueStore {
     func poll(_ host: MoldHost.ID) async {
         guard !isSeeded, !Task.isCancelled, let client = hosts.backend(for: host) else { return }
         do {
-            byHost[host] = try await client.queue().merged
+            let snapshot = try await client.queue()
+            let entries = snapshot.merged
+            byHost[host] = entries
+            blockedReasons[host] = Dictionary((snapshot.plan?.workItems ?? []).compactMap { item in
+                item.blockedDeviceReason.map { (item.workId, $0) }
+            }, uniquingKeysWith: { _, latest in latest })
+            let active = Set(entries.filter { $0.state == .running || $0.state == .cancelling }.map(\.id))
+            cancelReceipts[host] = cancelReceipts[host]?.filter { active.contains($0.key) }
+            let allEntries: [QueueEntry] = byHost.values.flatMap { $0 }
+            let executingEntries: [QueueEntry] = allEntries.filter { entry in
+                entry.state == .running || entry.state == .cancelling
+            }
+            let allActive: Set<String> = Set(executingEntries.map(\.id))
+            progress = progress.filter { allActive.contains($0.key) }
             hosts.succeeded(on: host, doing: "list its queue")
         } catch {
             hosts.report(error, on: host, doing: "list its queue")
         }
+    }
+
+    /// Diagnostics are observational, so the lifecycle stream need not emit a
+    /// state change. Poll only executing previews while the Queue is visible.
+    func pollProgress() async {
+        guard !isSeeded else { return }
+        var refreshHosts: Set<MoldHost.ID> = []
+        for host in hosts.hosts where hosts.isUp(host) {
+            guard let client = hosts.backend(for: host.id) else { continue }
+            let instance = hosts.instanceID(of: host.id)
+            for entry in entries(on: host.id) where entry.state == .running || entry.state == .cancelling {
+                guard !Task.isCancelled else { return }
+                do {
+                    let value = try await client.jobPreview(jobId: entry.id)
+                    guard hosts.host(host.id) == host, hosts.instanceID(of: host.id) == instance else { continue }
+                    let old = progress[entry.id]?.stall
+                    progress[entry.id] = value
+                    if (old != nil) != (value?.stall != nil) || old?.cancelRequested != value?.stall?.cancelRequested {
+                        refreshHosts.insert(host.id)
+                    }
+                } catch { continue }
+            }
+        }
+        for host in refreshHosts { await refresh(on: host) }
     }
 
     /// Whether this machine cannot stream and needs an explicit poll instead.

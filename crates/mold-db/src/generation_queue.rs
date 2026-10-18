@@ -1251,7 +1251,7 @@ pub fn hold_media_jobs(
     })
 }
 
-/// Park every queued or running row this installation owns as `paused`.
+/// Settle retained cancellation intents and park other owned queued/running rows.
 ///
 /// Startup recovery for runtime-only ownership.
 ///
@@ -1300,6 +1300,35 @@ fn recover_runtime_claims_inner(
               WHERE owner_uuid = ?1 AND claim_token IS NOT NULL",
             params![owner_uuid],
             |row| row.get(0),
+        )?;
+        // This startup-only boundary is reached after the previous process and
+        // its device owners are gone. A retained cancel intent must settle,
+        // never become a replayable or permanently cancelling orphan. Both
+        // queue and batch ownership are checked in the same transaction.
+        conn.execute(
+            "UPDATE generation_batch_children
+                SET state = 'cancelled', error = 'Cancelled', result_json = NULL,
+                    terminal_error_json = '{\"message\":\"Cancelled\"}',
+                    completed_at_ms = ?2, updated_at_ms = MAX(?2, updated_at_ms + 1),
+                    revision = revision + 1
+              WHERE state = 'cancelling'
+                AND EXISTS (
+                    SELECT 1 FROM generation_batches AS batch
+                     WHERE batch.id = generation_batch_children.batch_id
+                       AND batch.owner_uuid = ?1
+                )
+                AND job_id IN (SELECT id FROM generation_queue WHERE owner_uuid = ?1)",
+            params![owner_uuid, now_ms],
+        )?;
+        // DELETE is also the authority that retires any retained-media pins.
+        conn.execute(
+            "DELETE FROM generation_queue
+              WHERE owner_uuid = ?1 AND id IN (
+                  SELECT child.job_id FROM generation_batch_children AS child
+                  JOIN generation_batches AS batch ON batch.id = child.batch_id
+                   WHERE batch.owner_uuid = ?1 AND child.state = 'cancelled'
+              )",
+            params![owner_uuid],
         )?;
         let mut replays_charged = 0usize;
         let mut replays_held = 0usize;

@@ -269,6 +269,9 @@ export interface ServerCapabilities {
   /** Stable-URL, header-secret reference ingress. H3 activation remains a
    * separate model_access decision. */
   reference_uploads?: {
+    video_normalization?:
+      | import("../../api/referenceNormalizationTypes").VideoNormalizationCapabilities
+      | null;
     available: boolean;
     protocol_version: number;
     requires_api_key: boolean;

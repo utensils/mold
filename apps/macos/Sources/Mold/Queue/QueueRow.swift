@@ -15,6 +15,7 @@ struct QueueRow: View {
     /// `QueueBatchRow`.
     var caption: String?
     var sourceHost: MoldHost? = nil
+    var statusOverride: String? = nil
     /// Drawn only on a `queued` row on a machine that advertises reorder --
     /// SwiftUI's own "absent, not disabled" rule the whole app follows.
     var isReorderable = false
@@ -42,10 +43,10 @@ struct QueueRow: View {
                 .frame(width: 16)
             VStack(alignment: .leading, spacing: 2) {
                 Text(entry.modelHeadline)
-                Text(caption ?? entry.waitDescription)
+                Text(statusOverride ?? entry.stall?.statusMessage ?? caption ?? entry.waitDescription)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    .lineLimit(entry.stall == nil ? 2 : nil)
             }
             Spacer(minLength: 12)
             if let started = entry.startedAt {

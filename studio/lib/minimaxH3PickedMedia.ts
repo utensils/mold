@@ -1,3 +1,5 @@
+import { captureFreshVideoReference } from "./freshVideoReference";
+import type { VideoNormalizationCapabilities } from "../api/referenceNormalizationTypes";
 import { inputImageBase64, inputImageFacts } from "./inputImage";
 import { probeMinimaxH3Mp4, probeMinimaxH3Wav } from "./minimaxH3MediaProbe";
 import {
@@ -59,8 +61,19 @@ async function imageDimensions(
 
 export async function minimaxH3PickedMediaReference(
   file: File,
+  normalization?: VideoNormalizationCapabilities | null,
 ): Promise<MinimaxH3ReferenceDraft> {
   const mime = file.type.toLowerCase();
+  const extension = file.name.split(".").at(-1)?.toLowerCase() ?? "";
+  if (
+    normalization?.available &&
+    normalization.protocol_version === 1 &&
+    normalization.input_roles.includes("reference_video") &&
+    (mime.startsWith("video/") ||
+      normalization.accepted_extensions.includes(extension))
+  ) {
+    return { reference: await captureFreshVideoReference(file, normalization) };
+  }
   if (mime.startsWith("image/")) {
     const data = await inputImageBase64(file);
     const facts = inputImageFacts(data, file.name);

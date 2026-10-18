@@ -2562,6 +2562,62 @@ mod tests {
         assert!(workers.is_empty());
     }
 
+    #[tokio::test]
+    async fn stalled_cancelled_owner_keeps_device_after_observer_disconnect_until_real_return() {
+        let (worker, _rx) = test_worker(0, 24_000_000_000);
+        let (healthy, _rx2) = test_worker(1, 24_000_000_000);
+        let registry = crate::job_registry::JobRegistry::new();
+        let cancel = registry.register("blocked", "fake-model");
+        registry.mark_running("blocked", Some(0));
+        let token = mold_inference::InferenceCancellationToken::default();
+        registry.install_running_cancellation("blocked", token.clone());
+        registry.age_progress_for_tests("blocked", Duration::from_secs(301));
+        assert!(worker.try_claim_in_flight());
+        let supervised = crate::job_supervisor::supervise_job("blocked".into(), cancel);
+        // The HTTP observer disappearing must not close the owner result receiver.
+        drop(supervised.outcome_rx);
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let owner_worker = worker.clone();
+        let owner_registry = registry.clone();
+        let owner = std::thread::spawn(move || {
+            release_rx.recv().unwrap();
+            assert!(!supervised.result_tx.is_closed());
+            assert!(token.checkpoint().is_err());
+            let _ = supervised.result_tx.send(Err("inference cancelled".into()));
+            owner_registry.remove("blocked");
+            owner_worker.release_in_flight();
+        });
+        assert!(registry.entry("blocked").unwrap().stall.is_some());
+        assert_eq!(
+            registry.cancel_queued("blocked"),
+            Err(crate::job_registry::QueuedJobCancelError::AlreadyRunning)
+        );
+        let stalled = registry
+            .progress_snapshot("blocked")
+            .unwrap()
+            .unwrap()
+            .stall
+            .unwrap();
+        assert!(stalled.cancel_requested && stalled.device_still_held);
+        assert!(
+            !worker.try_claim_in_flight(),
+            "diagnosis or cancellation must not release a live owner"
+        );
+        assert!(
+            healthy.try_claim_in_flight(),
+            "healthy device remains available"
+        );
+        healthy.release_in_flight();
+        release_tx.send(()).unwrap();
+        owner.join().unwrap();
+        assert!(registry.entry("blocked").is_none());
+        assert!(
+            worker.try_claim_in_flight(),
+            "reuse starts only after actual return"
+        );
+        worker.release_in_flight();
+    }
+
     #[test]
     fn in_flight_claim_is_binary_and_reusable_after_release() {
         let (worker, _job_rx) = test_worker(0, 24_000_000_000);

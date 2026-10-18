@@ -1470,6 +1470,35 @@ impl AutoencoderKLLtx2Video {
         }
     }
 
+    pub(crate) fn is_diffusion_decoder(&self) -> bool {
+        matches!(self.decoder, Ltx2VideoDecoderKind::Diffusion(_))
+    }
+
+    /// Keep the typed cancellation cause intact across the Candle VAE wrapper.
+    pub(crate) fn decode_with_control(
+        &self,
+        latents: &Tensor,
+        cancellation: Option<&crate::progress::InferenceCancellationToken>,
+        progress: Option<&crate::progress::ProgressCallback>,
+    ) -> anyhow::Result<Tensor> {
+        if let Ltx2VideoDecoderKind::Diffusion(decoder) = &self.decoder {
+            return decoder.forward_with_control(
+                &self.denormalize_latents(latents)?,
+                cancellation,
+                progress,
+            );
+        }
+        if let Some(token) = cancellation {
+            token.checkpoint()?;
+        }
+        let (_, output) = self.decode(latents, None, false, false)?;
+        latents.device().synchronize()?;
+        if let Some(token) = cancellation {
+            token.checkpoint()?;
+        }
+        Ok(output)
+    }
+
     pub fn decode(
         &self,
         latents: &Tensor,

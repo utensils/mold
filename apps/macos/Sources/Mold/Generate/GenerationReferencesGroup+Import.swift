@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 
 extension GenerationReferencesGroup {
     func attachPicture(_ picture: ImportedPicture, replacing: Int? = nil,
-                               role: GenerationImageReferenceRole? = nil, expected: GenerationReference? = nil, session: ReferenceImportSession) {
+                               role: GenerationImageReferenceRole? = nil, expected: AuthoringReference? = nil, session: ReferenceImportSession) {
         guard session.isCurrent(controller: controller, media: draft.media) else { return }
         if let replacing, let expected {
             guard draft.media.generationReferences.indices.contains(replacing),
@@ -25,9 +25,12 @@ extension GenerationReferencesGroup {
     }
 
     func choose(kind: String, replacing: Int? = nil, role: GenerationImageReferenceRole? = nil) {
-        let session = ReferenceImportSession(controller: controller, recipe: recipe, media: draft.media)
+        let session = ReferenceImportSession(controller: controller, recipe: recipe, media: draft.media, authority: referenceImportHost)
         guard ["video", "audio"].contains(kind) else { return }
-        let urls = MediaWell.chooseFiles(types: kind == "video" ? [.movie] : [.audio],
+        let capturedHost = referenceImportHost
+        let uploadCapabilities = capturedHost.flatMap { controller.hosts.capabilities(of: $0)?.referenceUploads }
+        let videoTypes = GenerationReferenceImporter.authoringContentTypes(capabilities: uploadCapabilities, apiKey: capturedHost?.apiKey).filter { !$0.conforms(to: .image) && !$0.conforms(to: .audio) }
+        let urls = MediaWell.chooseFiles(types: kind == "video" ? videoTypes : [.audio],
                                         multiple: replacing == nil && role == nil)
         guard !urls.isEmpty else { return }
         let expected = replacing.flatMap { draft.media.generationReferences.indices.contains($0)
@@ -38,7 +41,7 @@ extension GenerationReferencesGroup {
             defer { importing = false }
             do {
                 for url in urls {
-                    let reference = try await GenerationReferenceImporter.load(url: url, role: role)
+                    let reference = try await GenerationReferenceImporter.loadAuthoring(url: url, capabilities: uploadCapabilities, apiKey: capturedHost?.apiKey, role: role)
                     guard !Task.isCancelled, session.isCurrent(controller: controller, media: draft.media) else { return }
                     if let replacing, let expected {
                         guard draft.media.generationReferences.indices.contains(replacing),

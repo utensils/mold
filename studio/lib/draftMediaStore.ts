@@ -7,6 +7,8 @@
 export interface DraftMediaRecord {
   draftId?: string;
   base64?: string | null;
+  /** Immutable original candidate bytes; never a normalized lease or handle. */
+  blob?: Blob;
 }
 
 const DB_NAME = "mold-generate-drafts";
@@ -33,10 +35,11 @@ const latestWriteByDraftId = new Map<string, InFlightWrite>();
  * base64 payload. IndexedDB performs its own structured clone at the durable
  * boundary; this copy only protects the in-process cache from caller mutation. */
 function cloneRecord<T extends DraftMediaRecord>(value: T): T {
-  const { base64, ...metadata } = value;
+  const { base64, blob, ...metadata } = value;
   return {
     ...(structuredClone(metadata) as Omit<T, "base64">),
     ...(base64 === undefined ? {} : { base64 }),
+    ...(blob === undefined ? {} : { blob }),
   } as T;
 }
 
@@ -44,7 +47,7 @@ function recordsMatch(
   left: DraftMediaRecord,
   right: DraftMediaRecord,
 ): boolean {
-  if (left.base64 !== right.base64) return false;
+  if (left.base64 !== right.base64 || left.blob !== right.blob) return false;
   const leftRecord = left as Record<string, unknown>;
   const rightRecord = right as Record<string, unknown>;
   const keys = new Set([
@@ -52,7 +55,7 @@ function recordsMatch(
     ...Object.keys(rightRecord),
   ]);
   for (const key of keys) {
-    if (key === "base64") continue;
+    if (key === "base64" || key === "blob") continue;
     if (JSON.stringify(leftRecord[key]) !== JSON.stringify(rightRecord[key])) {
       return false;
     }
@@ -232,7 +235,7 @@ function enqueueRecords(
 export async function putDraftMedia<T extends DraftMediaRecord>(
   media: T,
 ): Promise<void> {
-  if (!media.draftId || !media.base64) return;
+  if (!media.draftId || (!media.base64 && !media.blob?.size)) return;
   const existing = memory.get(media.draftId);
   if (
     durableDraftIds.has(media.draftId) &&
@@ -261,7 +264,7 @@ export async function putDraftMedia<T extends DraftMediaRecord>(
 export async function putDurableMedia<T extends DraftMediaRecord>(
   media: T,
 ): Promise<boolean> {
-  if (!media.draftId || !media.base64) return false;
+  if (!media.draftId || (!media.base64 && !media.blob?.size)) return false;
   const existing = memory.get(media.draftId);
   if (
     durableDraftIds.has(media.draftId) &&
@@ -285,7 +288,12 @@ export async function putDurableMedia<T extends DraftMediaRecord>(
 export async function putDurableMediaBatch<T extends DraftMediaRecord>(
   media: readonly T[],
 ): Promise<boolean> {
-  if (media.some((record) => !record.draftId || !record.base64)) return false;
+  if (
+    media.some(
+      (record) => !record.draftId || (!record.base64 && !record.blob?.size),
+    )
+  )
+    return false;
   if (media.length === 0) return true;
   let saved: T[];
   try {

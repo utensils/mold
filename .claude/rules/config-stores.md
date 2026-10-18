@@ -36,3 +36,5 @@ Pairing issues persistent runtime grants independently of config preferences;
 adding or revoking one app does not require a Nix rebuild or auth disable.
 CLI client credentials stay in owner-private `$MOLD_HOME/secure/clients`
 profiles. Keep those credentials and host authority intact during config sync.
+
+`queue.no_progress_timeout_seconds` is a profile-scoped SQLite preference, default 300, range 0–86400; 0 disables observational stall diagnostics. `MOLD_QUEUE_NO_PROGRESS_TIMEOUT_SECONDS` overrides it. The feeder reads the live server config asynchronously when preparing a job; relays never reload disk config. Profile switches hydrate only the DB-owned queue preferences. Invalid environment overrides warn once and fall back to the active value. It never changes lease ownership or forces cancellation.

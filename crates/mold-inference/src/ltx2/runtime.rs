@@ -3391,6 +3391,7 @@ fn render_real_distilled_av(
         debug_enabled,
         plan_hdr_exr_target(plan).as_ref(),
         progress,
+        cancellation,
     )?;
     let frames = decoded.frames;
     let hdr_frames_written = decoded.hdr_frames_written;
@@ -4364,6 +4365,7 @@ fn render_real_two_stage_av(
         false,
         plan_hdr_exr_target(plan).as_ref(),
         progress,
+        cancellation,
     )?;
     let frames = decoded.frames;
     let hdr_frames_written = decoded.hdr_frames_written;
@@ -4594,6 +4596,7 @@ fn render_real_one_stage_av(
         debug_enabled,
         plan_hdr_exr_target(plan).as_ref(),
         progress,
+        cancellation,
     )?;
     let frames = decoded.frames;
     let hdr_frames_written = decoded.hdr_frames_written;
@@ -4797,6 +4800,7 @@ fn render_real_retake_av(
         debug_enabled,
         plan_hdr_exr_target(plan).as_ref(),
         progress,
+        cancellation,
     )?;
     let frames = decoded.frames;
     let hdr_frames_written = decoded.hdr_frames_written;
@@ -7817,6 +7821,7 @@ fn decode_video_frames_with_telemetry(
     debug_enabled: bool,
     hdr_exr: Option<&HdrExrTarget>,
     progress: Option<&ProgressCallback>,
+    cancellation: Option<&InferenceCancellationToken>,
 ) -> Result<DecodedVideo> {
     let decode_start = Instant::now();
     let probe = PhaseVramProbe::enter_if(format!("{pipeline}.vae_decode"), device.is_cuda());
@@ -7824,7 +7829,7 @@ fn decode_video_frames_with_telemetry(
     let decoded = (|| -> Result<DecodedVideo> {
         let decode_latents = latents.to_dtype(dtype)?;
         configure_ltx2_vae_decode_memory_mode(vae, &decode_latents, device)?;
-        let (_dec_output, video) = vae.decode(&decode_latents, None, false, false)?;
+        let video = vae.decode_with_control(&decode_latents, cancellation, progress)?;
         if debug_enabled {
             log_tensor_stats("decoded_video", &video)?;
         }
@@ -7872,6 +7877,14 @@ fn configure_ltx2_vae_decode_memory_mode(
     latents: &Tensor,
     device: &candle_core::Device,
 ) -> Result<()> {
+    if vae.is_diffusion_decoder() {
+        vae.use_framewise_decoding = false;
+        vae.spatial_decode_tiling = None;
+        tracing::info!(
+            "LTX-2 whole-clip diffusion decode; spatial and temporal VAE tiling are not used"
+        );
+        return Ok(());
+    }
     vae.use_framewise_decoding = should_use_ltx2_framewise_decode(vae, latents, device)?;
     if vae.use_framewise_decoding {
         tracing::info!(

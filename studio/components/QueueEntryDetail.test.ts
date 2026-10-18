@@ -304,3 +304,52 @@ it("shows the machine diagnostic without settings and retains held cancellation"
     view.get('[data-test="queue-detail-cancel"]').attributes("disabled"),
   ).toBeUndefined();
 });
+
+it("shows stall duration and explicit recovery without presenting terminal cancellation", async () => {
+  const diagnostic = {
+    stage: "VAE decode",
+    last_completed_work_unix_ms: 1700000000000,
+    elapsed_stall_ms: 90000,
+    cancel_requested: true,
+    device_still_held: true,
+  };
+  const wrapper = mount(QueueEntryDetail, {
+    props: {
+      model: model({ state: "running" }),
+      preview: { preview_image: null, step: 4, total: 4, stall: diagnostic },
+    },
+  });
+  const notice = wrapper.get('[data-test="queue-stall-diagnostic"]');
+  expect(notice.text()).toContain("Cancel requested; device still held");
+  expect(notice.text()).toContain("90s without completed work");
+  expect(notice.text()).toContain("VAE decode");
+  expect(notice.text()).toContain("operator");
+  await wrapper.setProps({
+    preview: { preview_image: null, step: 4, total: 4, stall: null },
+  });
+  expect(wrapper.find('[data-test="queue-stall-diagnostic"]').exists()).toBe(
+    false,
+  );
+});
+
+it("uses listing stall evidence before preview and lets explicit preview recovery clear it", async () => {
+  const diagnostic = {
+    stage: "VAE decode",
+    last_completed_work_unix_ms: 1700000000000,
+    elapsed_stall_ms: 90000,
+    cancel_requested: false,
+    device_still_held: true,
+  };
+  const details = model({ state: "running", stall: diagnostic });
+  const wrapper = mount(QueueEntryDetail, { props: { model: details } });
+  expect(wrapper.get('[data-test="queue-stall-diagnostic"]').text()).toContain(
+    "Stalled · VAE decode",
+  );
+  expect(details.copyText).toContain('"device_still_held":true');
+  await wrapper.setProps({
+    preview: { preview_image: null, step: 4, total: 4, stall: null },
+  });
+  expect(wrapper.find('[data-test="queue-stall-diagnostic"]').exists()).toBe(
+    false,
+  );
+});

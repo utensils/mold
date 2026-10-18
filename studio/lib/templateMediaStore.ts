@@ -1,3 +1,4 @@
+import type { FreshVideoReference } from "./freshVideoReference";
 import {
   deleteDraftMedia,
   getDraftMedia,
@@ -23,7 +24,7 @@ export interface GenerationTemplateMediaAsset {
   mime?: string | null;
   sha256?: string | null;
   /** Descriptor-only H3 reference shape. Media bytes remain in IndexedDB. */
-  reference?: GenerationReference;
+  reference?: GenerationReference | FreshVideoReference;
 }
 
 export interface GenerationTemplateMediaInput extends Omit<
@@ -31,15 +32,18 @@ export interface GenerationTemplateMediaInput extends Omit<
   "assetId"
 > {
   base64: string;
+  blob?: Blob;
 }
 
 export interface StoredTemplateMedia extends GenerationTemplateMediaAsset {
   draftId: string;
   base64: string;
+  blob?: Blob;
 }
 
 export interface HydratedGenerationTemplateMedia extends GenerationTemplateMediaAsset {
   base64: string;
+  blob?: Blob;
 }
 
 export interface TemplateMediaPersistence {
@@ -95,7 +99,7 @@ export async function persistGenerationTemplateMedia(
     throw error;
   }
   return stored.map(
-    ({ base64: _base64, draftId: _draftId, ...asset }) => asset,
+    ({ base64: _base64, blob: _blob, draftId: _draftId, ...asset }) => asset,
   );
 }
 
@@ -109,7 +113,13 @@ export async function hydrateGenerationTemplateMedia(
   const resolved = await Promise.all(
     assets.map(async (asset) => {
       const stored = await persistence.get(asset.assetId).catch(() => null);
-      return stored?.base64 ? { ...asset, base64: stored.base64 } : null;
+      return stored?.base64 || stored?.blob instanceof Blob
+        ? {
+            ...asset,
+            base64: stored.base64,
+            ...(stored.blob ? { blob: stored.blob } : {}),
+          }
+        : null;
     }),
   );
   return {

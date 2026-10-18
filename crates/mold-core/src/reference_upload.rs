@@ -981,3 +981,542 @@ mod tests {
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 }
+
+/// Accept only the explicit additive fresh-reference contract. Unsupported
+/// versions retain ordinary canonical probing and its actionable errors.
+pub fn supports_video_normalization(caps: &ReferenceUploadCapabilities) -> bool {
+    use crate::video_normalization::*;
+    validate_capabilities(caps).is_ok()
+        && caps.video_normalization.as_ref().is_some_and(|value| {
+            value.available
+                && value.protocol_version == VERSION
+                && value
+                    .input_roles
+                    .iter()
+                    .any(|role| role == "reference_video")
+                && value.candidate_session_path == CANDIDATE_PATH
+                && value.finalize_path == FINALIZE_PATH
+                && value
+                    .candidate_digest_header
+                    .eq_ignore_ascii_case(CANDIDATE_DIGEST_HEADER)
+                && value.canonical_mime_type == "video/mp4"
+                && value.max_original_file_bytes > 0
+                && value.max_canonical_file_bytes > 0
+                && value.max_session_bytes >= value.max_original_file_bytes
+                && value.max_original_file_bytes <= caps.max_file_bytes
+                && value.max_canonical_file_bytes <= caps.max_file_bytes
+        })
+}
+
+/// Filename hints never prove format; the server performs bounded demux/probe.
+pub fn video_mime_hint(name: &str) -> Option<&'static str> {
+    match std::path::Path::new(name)
+        .extension()?
+        .to_str()?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "mp4" => Some("video/mp4"),
+        "mov" => Some("video/quicktime"),
+        "m4v" => Some("video/x-m4v"),
+        "webm" => Some("video/webm"),
+        "mkv" => Some("video/x-matroska"),
+        _ => None,
+    }
+}
+
+fn normalized_video_descriptor(
+    metadata: &crate::GenerationReferenceMetadata,
+) -> Result<GenerationReference> {
+    ensure!(
+        metadata.kind == GenerationReferenceKind::Video
+            && metadata.mime_type == "video/mp4"
+            && valid_sha256(&metadata.sha256),
+        "normalization returned invalid canonical video identity"
+    );
+    if metadata.has_audio {
+        ensure!(
+            metadata
+                .audio_channels
+                .is_some_and(|channels| matches!(channels, 1 | 2))
+                && metadata.audio_sample_rate.is_some_and(|rate| rate > 0)
+                && metadata.audio_sample_count.is_some_and(|count| count > 0)
+                && metadata
+                    .audio_duration_ms
+                    .is_some_and(|duration| duration > 0),
+            "canonical video soundtrack facts are missing or unsupported"
+        );
+    } else {
+        ensure!(
+            metadata.audio_channels.is_none()
+                && metadata.audio_sample_rate.is_none()
+                && metadata.audio_sample_count.is_none()
+                && metadata.audio_duration_ms.is_none(),
+            "silent normalized video contains soundtrack facts"
+        );
+    }
+    let descriptor = GenerationReference::Video {
+        media: GenerationReferenceAuthority::Descriptor,
+        provenance: GenerationReferenceProvenance {
+            name: metadata.name.clone(),
+            sha256: Some(metadata.sha256.clone()),
+            crop: None,
+        },
+        mime_type: metadata.mime_type.clone(),
+        width: metadata.width.context("canonical video width missing")?,
+        height: metadata.height.context("canonical video height missing")?,
+        frame_count: metadata.frame_count,
+        duration_ms: metadata
+            .duration_ms
+            .context("canonical video duration missing")?,
+        fps: metadata.fps.context("canonical video rate missing")?,
+        has_audio: metadata.has_audio,
+        audio_duration_ms: metadata.audio_duration_ms,
+        audio_sample_count: metadata.audio_sample_count,
+        audio_sample_rate: metadata.audio_sample_rate,
+        audio_channels: metadata.audio_channels,
+    };
+    crate::minimax_h3::reference_prepared_shape(&descriptor).map_err(anyhow::Error::new)?;
+    ensure!(
+        descriptor
+            .redacted_metadata(metadata.index.saturating_sub(1) as usize)
+            .as_ref()
+            == Some(metadata),
+        "normalization metadata includes inconsistent video facts"
+    );
+    Ok(descriptor)
+}
+
+impl MoldClient {
+    /// One frozen candidate attempt, finalized before placement or admission.
+    /// This helper accepts fresh local bodies only; existing server authorities
+    /// continue through the ordinary canonical request path.
+    pub async fn bind_reference_candidates_v1(
+        &self,
+        request: &GenerateRequest,
+        candidates: Vec<crate::video_normalization::ReferenceCandidate>,
+        sources: Vec<ReferenceUploadSource>,
+    ) -> Result<ReferenceUploadLease> {
+        use crate::video_normalization::*;
+        // Capture everything before the first await, including private file
+        // handles; no later selected host or mutable authoring state is read.
+        ensure!(request.references.is_none(), "candidate request must omit canonical references; supply the complete ordered candidate set");
+        let scoped_request = request.clone();
+        let mut payload = CandidateSessionRequest {
+            protocol_version: VERSION,
+            request: scoped_request.clone(),
+            reference_candidates: candidates,
+        };
+        ensure!(
+            sources.len() == payload.reference_candidates.len() && !sources.is_empty(),
+            "candidate/body count mismatch"
+        );
+        ensure!(
+            self.has_api_key(),
+            "fresh reference normalization requires API-key authentication"
+        );
+        payload.request = crate::prompt_text::protect_generate_request_for_wire(&payload.request);
+        let body = serde_json::to_vec(&payload)?;
+        let fingerprint = candidate_scope_sha256(&body);
+        let (caps, status) = tokio::try_join!(self.server_capabilities(), self.server_status())?;
+        ensure!(
+            supports_video_normalization(&caps.reference_uploads),
+            "host does not advertise fresh video normalization v1"
+        );
+        let capability = caps
+            .reference_uploads
+            .video_normalization
+            .as_ref()
+            .context("normalization capability missing")?;
+        let instance = status
+            .instance_id
+            .filter(|value| !value.is_empty())
+            .context("host instance identity missing")?;
+        let mut originals = Vec::new();
+        let mut total = 0_u64;
+        let mut fresh = false;
+        for (position, (candidate, source)) in payload
+            .reference_candidates
+            .iter()
+            .zip(&sources)
+            .enumerate()
+        {
+            ensure!(
+                candidate.index() as usize == position + 1,
+                "candidate order is invalid"
+            );
+            let original = match candidate {
+                ReferenceCandidate::FreshVideo { kind, original, .. } => {
+                    ensure!(
+                        *kind == GenerationReferenceKind::Video
+                            && capability.accepted_mime_types.contains(&original.mime_type),
+                        "fresh video kind/MIME is unsupported"
+                    );
+                    fresh = true;
+                    original.clone()
+                }
+                ReferenceCandidate::Canonical {
+                    upload: true,
+                    reference,
+                    byte_length: Some(length),
+                    ..
+                } if matches!(reference.media(), GenerationReferenceAuthority::Descriptor) => {
+                    OriginalVideo {
+                        mime_type: mime_type(reference).into(),
+                        name: reference.provenance().name.clone(),
+                        sha256: reference
+                            .content_sha256()
+                            .context("canonical reference digest missing")?,
+                        byte_length: *length,
+                    }
+                }
+                _ => anyhow::bail!(
+                    "fresh local candidate helper refuses existing upload/server authorities"
+                ),
+            };
+            ensure!(
+                source.length == original.byte_length
+                    && source.length > 0
+                    && source.length <= capability.max_original_file_bytes
+                    && source.sha256()? == original.sha256,
+                "reference original changed after capture or exceeds upload limit"
+            );
+            total = total
+                .checked_add(source.length)
+                .context("candidate sizes overflow")?;
+            ensure!(
+                total <= capability.max_session_bytes,
+                "reference candidates exceed session limit"
+            );
+            originals.push(original);
+        }
+        ensure!(fresh, "candidate normalization requires a fresh video");
+        let session = self
+            .create_reference_normalization_session(body, &fingerprint)
+            .await?;
+        let mut cancellation = SessionCancellationGuard::new(self.clone(), &session.session_handle);
+        let result: Result<(Vec<GenerationReference>, String)> = async {
+            ensure!(
+                session.protocol_version == VERSION
+                    && session.instance_id == instance
+                    && session.candidate_scope_sha256 == fingerprint
+                    && !session.session_complete
+                    && !session.session_id.is_empty(),
+                "candidate session identity mismatch"
+            );
+            let handles = validate_session(
+                &ReferenceUploadSessionResponse {
+                    instance_id: session.instance_id.clone(),
+                    expires_at_ms: session.expires_at_ms,
+                    request_scope_sha256: fingerprint.clone(),
+                    session_handle: session.session_handle.clone(),
+                    uploads: session.uploads.clone(),
+                },
+                &instance,
+                originals.len(),
+                now_ms()?,
+            )?;
+            let mut descriptors = Vec::new();
+            let mut receipts = Vec::new();
+            for (position, (((candidate, original), source), handle)) in payload
+                .reference_candidates
+                .iter()
+                .zip(&originals)
+                .zip(sources)
+                .zip(&handles)
+                .enumerate()
+            {
+                let reference = position as u32 + 1;
+                let body = match source.body {
+                    ReferenceUploadBody::OpenFile(mut file) => {
+                        use std::io::{Seek, SeekFrom};
+                        file.seek(SeekFrom::Start(0))?;
+                        reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(
+                            tokio::fs::File::from_std(file),
+                        ))
+                    }
+                    ReferenceUploadBody::Bytes(bytes) => reqwest::Body::from(bytes),
+                };
+                let completed = self
+                    .upload_normalization_body(
+                        handle,
+                        &original.mime_type,
+                        original.byte_length,
+                        body,
+                    )
+                    .await?;
+                let receipt = &completed.receipt;
+                let is_fresh = matches!(candidate, ReferenceCandidate::FreshVideo { .. });
+                let kind = match candidate {
+                    ReferenceCandidate::FreshVideo { kind, .. } => *kind,
+                    ReferenceCandidate::Canonical { reference, .. } => reference.kind(),
+                };
+                ensure!(
+                    completed.protocol_version == VERSION
+                        && completed.instance_id == instance
+                        && completed.session_id == session.session_id
+                        && completed.candidate_scope_sha256 == fingerprint
+                        && completed.reference == reference
+                        && !completed.session_complete
+                        && completed.metadata.index == reference,
+                    "normalization upload is from a different session/slot"
+                );
+                ensure!(
+                    receipt.version == VERSION
+                        && receipt.kind == kind
+                        && completed.metadata.kind == kind
+                        && receipt.original_sha256 == original.sha256
+                        && receipt.original_byte_length == original.byte_length
+                        && receipt.original_mime_type == original.mime_type
+                        && receipt.canonical_sha256 == completed.metadata.sha256
+                        && valid_sha256(&receipt.canonical_sha256)
+                        && receipt.canonical_mime_type == completed.metadata.mime_type
+                        && receipt.canonical_byte_length > 0
+                        && receipt.canonical_byte_length <= capability.max_canonical_file_bytes
+                        && completed.metadata.name == original.name,
+                    "normalization original/canonical receipt mismatch"
+                );
+                ensure!(
+                    !receipt.converted || is_fresh,
+                    "server converted a byte-preserving canonical slot"
+                );
+                ensure!(
+                    receipt.converted
+                        || (receipt.original_sha256 == receipt.canonical_sha256
+                            && receipt.original_byte_length == receipt.canonical_byte_length),
+                    "unchanged normalization receipt changed bytes"
+                );
+                let descriptor = match candidate {
+                    ReferenceCandidate::FreshVideo { .. } => {
+                        normalized_video_descriptor(&completed.metadata)?
+                    }
+                    ReferenceCandidate::Canonical {
+                        reference: provisional,
+                        ..
+                    } => {
+                        let complete = ReferenceUploadCompleteResponse {
+                            instance_id: instance.clone(),
+                            reference,
+                            metadata: completed.metadata.clone(),
+                            request_scope_sha256: fingerprint.clone(),
+                            session_complete: false,
+                        };
+                        let bound = canonical_reference(
+                            provisional,
+                            &complete,
+                            &instance,
+                            reference,
+                            false,
+                            handle.clone(),
+                        )?;
+                        with_authority(bound, GenerationReferenceAuthority::Descriptor)
+                    }
+                };
+                receipts.push(FinalizeReceipt {
+                    reference,
+                    kind,
+                    original_sha256: receipt.original_sha256.clone(),
+                    canonical_sha256: receipt.canonical_sha256.clone(),
+                });
+                descriptors.push(descriptor);
+            }
+            let finalized = self
+                .finalize_reference_normalization(
+                    &session.session_handle,
+                    &NormalizationFinalizeRequest {
+                        protocol_version: VERSION,
+                        instance_id: instance.clone(),
+                        session_id: session.session_id.clone(),
+                        candidate_scope_sha256: fingerprint.clone(),
+                        receipts: receipts.clone(),
+                    },
+                )
+                .await?;
+            ensure!(
+                finalized.protocol_version == VERSION
+                    && finalized.instance_id == instance
+                    && finalized.session_id == session.session_id
+                    && finalized.candidate_scope_sha256 == fingerprint
+                    && finalized.session_complete
+                    && valid_sha256(&finalized.request_scope_sha256)
+                    && finalized.receipts == receipts
+                    && serde_json::to_value(&finalized.references)?
+                        == serde_json::to_value(&descriptors)?,
+                "normalization finalization changed the complete canonical receipt set"
+            );
+            ensure_session_live(session.expires_at_ms, now_ms()?)?;
+            let references = descriptors
+                .into_iter()
+                .zip(handles)
+                .map(|(descriptor, handle)| {
+                    with_authority(descriptor, GenerationReferenceAuthority::Upload { handle })
+                })
+                .collect::<Vec<_>>();
+            crate::minimax_h3::validate_references(&references).map_err(anyhow::Error::new)?;
+            Ok((references, finalized.request_scope_sha256))
+        }
+        .await;
+        match result {
+            Ok((references, request_scope_sha256)) => Ok(ReferenceUploadLease {
+                request: rebind_canonical_request(scoped_request, references),
+                expires_at_ms: session.expires_at_ms,
+                request_scope_sha256,
+                cancellation,
+            }),
+            Err(error) => {
+                let _ = cancellation.cancel().await;
+                Err(error)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod normalization_tests {
+    use super::*;
+    use crate::video_normalization::*;
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+    fn caps() -> ReferenceUploadCapabilities {
+        serde_json::from_value(serde_json::json!({"available":true,"protocol_version":2,"requires_api_key":true,"session_path":SESSION_PATH,"upload_path":UPLOAD_PATH,"session_handle_header":SESSION_HANDLE_HEADER,"upload_handle_header":UPLOAD_HANDLE_HEADER,"max_file_bytes":268435456u64,"max_session_bytes":1073741824u64,"max_active_sessions":4,"session_ttl_ms":1800000,"video_normalization":{"available":true,"protocol_version":1,"input_roles":["reference_video"],"candidate_session_path":CANDIDATE_PATH,"finalize_path":FINALIZE_PATH,"candidate_digest_header":CANDIDATE_DIGEST_HEADER,"max_original_file_bytes":268435456u64,"max_canonical_file_bytes":268435456u64,"max_session_bytes":1073741824u64,"accepted_mime_types":["video/quicktime","video/x-m4v"],"accepted_extensions":["mov","m4v"],"accepted_video_codecs":["h264","hevc"],"canonical_mime_type":"video/mp4"}})).unwrap()
+    }
+    #[test]
+    fn additive_capability_is_not_authority_without_the_exact_role_and_protocol() {
+        let mut value = caps();
+        assert!(supports_video_normalization(&value));
+        value.video_normalization.as_mut().unwrap().protocol_version = 9;
+        assert!(!supports_video_normalization(&value));
+        value = caps();
+        value.video_normalization.as_mut().unwrap().input_roles = vec!["source_video".into()];
+        assert!(!supports_video_normalization(&value));
+        value = caps();
+        value.video_normalization = None;
+        assert!(!supports_video_normalization(&value));
+        assert_eq!(video_mime_hint("reference.MKV"), Some("video/x-matroska"));
+        assert_eq!(video_mime_hint("reference.m3u8"), None);
+    }
+    async fn attempt(tamper: &str, converted: bool) -> Result<ReferenceUploadLease> {
+        let server = MockServer::start().await;
+        let original = b"exact original bytes".to_vec();
+        let original_hash = format!("{:x}", Sha256::digest(&original));
+        let canonical_hash = if converted {
+            "c".repeat(64)
+        } else {
+            original_hash.clone()
+        };
+        let request: GenerateRequest = serde_json::from_value(
+            serde_json::json!({"model":"minimax-h3-ref2va:bf16","prompt":"A shot","seed":u64::MAX,"width":512,"height":512,"steps":4}),
+        )?;
+        let candidate = ReferenceCandidate::FreshVideo {
+            index: 1,
+            kind: GenerationReferenceKind::Video,
+            original: OriginalVideo {
+                name: Some("reference.m4v".into()),
+                mime_type: "video/x-m4v".into(),
+                byte_length: original.len() as u64,
+                sha256: original_hash.clone(),
+            },
+        };
+        let payload = CandidateSessionRequest {
+            protocol_version: VERSION,
+            request: crate::prompt_text::protect_generate_request_for_wire(&request),
+            reference_candidates: vec![candidate.clone()],
+        };
+        let body = serde_json::to_vec(&payload)?;
+        let fingerprint = candidate_scope_sha256(&body);
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(crate::ServerCapabilities {
+                    reference_uploads: caps(),
+                    ..Default::default()
+                }),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET")).and(path("/api/status")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"version":"test","instance_id":"instance-a","uptime_secs":0,"models_loaded":[],"gpu_info":null}))).mount(&server).await;
+        Mock::given(method("POST")).and(path(CANDIDATE_PATH)).and(wiremock::matchers::body_bytes(body)).and(wiremock::matchers::header(CANDIDATE_DIGEST_HEADER, fingerprint.as_str())).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"protocol_version":1,"instance_id":"instance-a","session_id":"public-session","candidate_scope_sha256":fingerprint,"expires_at_ms":now_ms()?+60000,"session_handle":"mrs_test","session_complete":false,"uploads":[{"reference":1,"handle":"mru_test"}]}))).expect(1).mount(&server).await;
+        let metadata = serde_json::json!({"index":1,"kind":"video","name":"reference.m4v","sha256":canonical_hash,"mime_type":"video/mp4","width":32,"height":32,"frame_count":48,"duration_ms":2000,"fps":24.0,"has_audio":false});
+        let mut canonical = metadata.clone();
+        canonical["media"] = serde_json::json!({"authority":"descriptor"});
+        canonical["provenance"] =
+            serde_json::json!({"name":"reference.m4v","sha256":canonical_hash});
+        let canonical: GenerationReference = serde_json::from_value(canonical)?;
+        let metadata = serde_json::to_value(
+            canonical
+                .redacted_metadata(0)
+                .context("test canonical metadata missing")?,
+        )?;
+        let mut upload = serde_json::json!({"protocol_version":1,"instance_id":"instance-a","session_id":"public-session","candidate_scope_sha256":fingerprint,"reference":1,"session_complete":false,"receipt":{"version":1,"kind":"video","original_sha256":original_hash,"original_byte_length":original.len(),"original_mime_type":"video/x-m4v","canonical_sha256":canonical_hash,"canonical_byte_length":if converted {123}else{original.len()},"canonical_mime_type":"video/mp4","converted":converted},"metadata":metadata});
+        match tamper {
+            "original" => upload["receipt"]["original_sha256"] = "a".repeat(64).into(),
+            "session" => upload["session_id"] = "other".into(),
+            "unnegotiated_hash" => upload["receipt"]["converted"] = false.into(),
+            _ => {}
+        }
+        Mock::given(method("PUT"))
+            .and(path(UPLOAD_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(upload))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut descriptor = metadata;
+        descriptor.as_object_mut().unwrap().remove("index");
+        descriptor.as_object_mut().unwrap().remove("name");
+        descriptor.as_object_mut().unwrap().remove("sha256");
+        descriptor["media"] = serde_json::json!({"authority":"descriptor"});
+        descriptor["provenance"] =
+            serde_json::json!({"name":"reference.m4v","sha256":canonical_hash});
+        let receipts = serde_json::json!([{"reference":1,"kind":"video","original_sha256":original_hash,"canonical_sha256":canonical_hash}]);
+        let mut finalization = serde_json::json!({"protocol_version":1,"instance_id":"instance-a","session_id":"public-session","candidate_scope_sha256":fingerprint,"request_scope_sha256":"f".repeat(64),"session_complete":true,"references":[descriptor],"receipts":receipts});
+        if tamper == "final_descriptor" {
+            finalization["references"][0]["width"] = 64.into();
+        }
+        Mock::given(method("POST"))
+            .and(path(FINALIZE_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(finalization))
+            .expect(if matches!(tamper, "" | "final_descriptor") {
+                1
+            } else {
+                0
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path(SESSION_PATH))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        let client = MoldClient::with_api_key(&server.uri(), "test-key".into());
+        let result = client
+            .bind_reference_candidates_v1(
+                &request,
+                vec![candidate],
+                vec![ReferenceUploadSource::bytes(original)?],
+            )
+            .await;
+        // Explicit cleanup while this mock transport is still alive.
+        if let Ok(mut lease) = result {
+            lease.cancel().await?;
+            return Ok(lease);
+        }
+        result
+    }
+    #[tokio::test]
+    async fn original_receipt_and_explicit_finalize_are_required_before_a_lease() {
+        attempt("", true).await.unwrap();
+        attempt("", false)
+            .await
+            .expect("unchanged M4V MIME alias must be accepted");
+        for tamper in [
+            "original",
+            "session",
+            "unnegotiated_hash",
+            "final_descriptor",
+        ] {
+            assert!(attempt(tamper, true).await.is_err(), "accepted {tamper}");
+        }
+    }
+}

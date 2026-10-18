@@ -105,6 +105,7 @@ import { emptyNamedViews, serializeNamedViews } from "@studio/lib/namedViews";
 import {
   MINIMAX_H3_REVIEWED_COMPACT_FRAMES,
   emptyMinimaxH3AuthoringState,
+  cloneMinimaxH3AuthoringState,
   isMinimaxH3Family,
   minimaxH3BoundaryFromSourceMetadata,
   minimaxH3BoundaryFromStagedImage,
@@ -223,7 +224,21 @@ function defaultForm(): GenerateFormState {
 }
 
 function cloneFormState<T>(state: T): T {
-  return JSON.parse(JSON.stringify(state)) as T;
+  const clone = JSON.parse(JSON.stringify(state)) as T;
+  if (
+    state &&
+    typeof state === "object" &&
+    "h3Authoring" in state &&
+    clone &&
+    typeof clone === "object"
+  ) {
+    const authoring = (state as { h3Authoring?: MinimaxH3AuthoringState })
+      .h3Authoring;
+    if (authoring)
+      (clone as { h3Authoring?: MinimaxH3AuthoringState }).h3Authoring =
+        cloneMinimaxH3AuthoringState(authoring);
+  }
+  return clone;
 }
 
 /** Remove browser-only binary media from a form snapshot before writing it to
@@ -869,6 +884,14 @@ function stripH3AuthoringMedia(
     lastFrame: boundary(state?.lastFrame ?? null),
     references: (state?.references ?? []).map((draft) => {
       const { reference, ...draftMetadata } = draft;
+      if (reference.kind === "fresh_video")
+        return {
+          ...cloneFormState(draftMetadata),
+          reference: {
+            kind: "fresh_video" as const,
+            original: { ...reference.original },
+          },
+        };
       return {
         ...cloneFormState(draftMetadata),
         reference: cloneFormState({
@@ -903,6 +926,10 @@ function ensureDraftIds(state: GenerateFormState) {
     if (boundary?.data && !boundary.draftId) boundary.draftId = newDraftId();
   }
   for (const draft of h3.references) {
+    if (draft.reference.kind === "fresh_video") {
+      if (draft.reference.body && !draft.draftId) draft.draftId = newDraftId();
+      continue;
+    }
     const media = draft.reference.media;
     if (media.authority === "inline" && media.data && !draft.draftId) {
       draft.draftId = newDraftId();
@@ -920,6 +947,11 @@ function h3MediaFromState(state: GenerateFormState): DraftMediaRecord[] {
     }
   }
   for (const draft of h3.references) {
+    if (draft.reference.kind === "fresh_video") {
+      if (draft.reference.body)
+        records.push({ draftId: draft.draftId, blob: draft.reference.body });
+      continue;
+    }
     const media = draft.reference.media;
     if (media.authority === "inline" && media.data) {
       records.push({ draftId: draft.draftId, base64: media.data });
@@ -1062,6 +1094,13 @@ async function hydrateDraftMedia(state: GenerateFormState) {
   const hydrateReference = async (
     draft: MinimaxH3ReferenceDraft,
   ): Promise<MinimaxH3ReferenceDraft> => {
+    if (draft.reference.kind === "fresh_video") {
+      if (draft.reference.body || !draft.draftId) return draft;
+      const stored = await getDraftMedia(draft.draftId);
+      return stored?.blob instanceof Blob
+        ? { ...draft, reference: { ...draft.reference, body: stored.blob } }
+        : draft;
+    }
     if (
       !draft.draftId ||
       (draft.reference.media.authority === "inline" &&
@@ -1075,7 +1114,7 @@ async function hydrateDraftMedia(state: GenerateFormState) {
       ...draft,
       reference: {
         ...draft.reference,
-        media: { authority: "inline", data: stored.base64 },
+        media: { authority: "inline" as const, data: stored.base64 },
       },
     };
   };

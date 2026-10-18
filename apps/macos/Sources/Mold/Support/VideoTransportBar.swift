@@ -1,9 +1,11 @@
 import AVKit
+import MoldClient
 import SwiftUI
 
 /// Transport stays outside the media; hovering never changes picture opacity.
 struct VideoTransportBar: View {
     let player: AVPlayer
+    var playback: VideoPlaybackSession? = nil
     @Binding var isMuted: Bool
     @Binding var displayMode: MediaDisplayMode
     @State private var position = 0.0
@@ -17,13 +19,16 @@ struct VideoTransportBar: View {
             HStack(spacing: 12) {
                 Button {
                     if player.rate == 0 {
-                        if Self.shouldRestart(position: player.currentTime().seconds,
-                                              duration: player.currentItem?.duration.seconds ?? 0) {
-                            player.seek(to: .zero)
+                        if let playback { playback.play() }
+                        else {
+                            if Self.shouldRestart(position: player.currentTime().seconds,
+                                                  duration: player.currentItem?.duration.seconds ?? 0) {
+                                player.seek(to: .zero)
+                            }
+                            player.play()
                         }
-                        player.play()
                     } else {
-                        player.pause()
+                        if let playback { playback.pause() } else { player.pause() }
                     }
                 } label: {
                     Label(isPlaying ? "Pause" : "Play", systemImage: isPlaying ? "pause.fill" : "play.fill")
@@ -34,8 +39,9 @@ struct VideoTransportBar: View {
                 // changes. Timer updates only change local state, never seek.
                 Slider(value: Binding(get: { position }, set: { value in
                     position = value
-                    player.seek(to: CMTime(seconds: value, preferredTimescale: 600),
-                                    toleranceBefore: .zero, toleranceAfter: .zero)
+                    if let playback { playback.seek(to: value) }
+                    else { player.seek(to: CMTime(seconds: value, preferredTimescale: 600),
+                                       toleranceBefore: .zero, toleranceAfter: .zero) }
                 }), in: 0...max(duration, 1), onEditingChanged: { isScrubbing = $0 })
                 .disabled(duration <= 0)
                 .accessibilityLabel("Playback position")
@@ -67,7 +73,7 @@ struct VideoTransportBar: View {
             duration = seconds.isFinite && seconds > 0 ? seconds : 0
             if !isScrubbing {
                 let current = player.currentTime().seconds
-                position = current.isFinite ? min(max(0, current), duration) : 0
+                position = playback?.ended == true ? duration : current.isFinite ? min(max(0, current), duration) : 0
             }
         }
         .onReceive(player.publisher(for: \.rate, options: [.initial, .new])) { isPlaying = $0 != 0 }

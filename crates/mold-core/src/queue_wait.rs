@@ -282,6 +282,16 @@ pub fn resolve_listed_wait(
     entry: &QueueJobEntryWire,
     position: Option<usize>,
 ) -> QueueWaitStatus {
+    if entry.state == "queued" {
+        if let Some(reason) = plan.and_then(|plan| {
+            plan.work_items
+                .iter()
+                .filter(|work| work.work_id == entry.id || work.parent_id == entry.id)
+                .find_map(|work| work.blocked_device_reason.as_ref())
+        }) {
+            return QueueWaitStatus::Blocked(reason.clone());
+        }
+    }
     let (reason, preparation) = match plan {
         Some(plan) => plan_reason_for_job(plan, &entry.id),
         None => (None, None),
@@ -479,6 +489,30 @@ mod tests {
                 "{benign:?} must fall through to the position"
             );
         }
+    }
+
+    #[test]
+    fn stalled_device_explanation_is_additive_without_changing_queue_order() {
+        let mut work = QueueWorkItem {
+            work_id: "queued".into(),
+            blocked_reason: Some(QueueBlockedReason::NoIdleDevice),
+            blocked_device_reason: Some("Waiting for stalled device; device still held".into()),
+            ..Default::default()
+        };
+        let entry = QueueJobEntryWire {
+            id: "queued".into(),
+            state: "queued".into(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            resolve_listed_wait(Some(&plan_with(vec![work.clone()])), &entry, Some(2)),
+            QueueWaitStatus::Blocked(_)
+        ));
+        work.blocked_device_reason = None;
+        assert_eq!(
+            resolve_listed_wait(Some(&plan_with(vec![work])), &entry, Some(2)),
+            QueueWaitStatus::Position(2)
+        );
     }
 
     #[test]

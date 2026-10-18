@@ -26,10 +26,16 @@ private let sharedConstantKeys: Set<String> = [
 /// literal (`theThreeSchedulerBoundsAreTheSharedConstant`,
 /// `theTwoRetentionBoundsAreTheSharedConstant`), which is what
 /// `sharedConstantKeys` excludes them for.
-private func oneLineNumericBounds(_ body: Substring) -> [String: (min: Double, max: Double)] {
+private func oneLineNumericBounds(_ body: Substring, source: String) -> [String: (min: Double, max: Double)] {
+    // Named registry keys and rustfmt block arms have the same numeric
+    // contract as literal one-line keys. Resolve names from Rust itself.
+    var normalized = String(body)
+    for declaration in source.matches(of: /pub const ([A-Z][A-Z0-9_]+): &str = "([^"]+)";/) {
+        normalized = normalized.replacingOccurrences(of: "\(declaration.1) =>", with: "\"\(declaration.2)\" =>")
+    }
     var result: [String: (min: Double, max: Double)] = [:]
-    let pattern = /"([a-zA-Z0-9_.]+)"\s*=>\s*config\.[\w.]+\s*=\s*parse_(u16|u32|f64)\(raw,\s*([\d.]+),\s*([\d.]+),\s*key\)\?,/
-    for match in body.matches(of: pattern) {
+    let pattern = /"([a-zA-Z0-9_.]+)"\s*=>\s*(?:\{\s*)?config\.[\w.]+\s*=\s*parse_(u16|u32|f64)\(raw,\s*([\d.]+),\s*([\d.]+),\s*key\)\?[;,]/
+    for match in normalized.matches(of: pattern) {
         result[String(match.1)] = (Double(match.3) ?? 0, Double(match.4) ?? 0)
     }
     return result
@@ -37,8 +43,9 @@ private func oneLineNumericBounds(_ body: Substring) -> [String: (min: Double, m
 
 @Test func everyNumericBoundIsTheOneTheSetterEnforces() throws {
     let root = try #require(RepoFixtures.repoRoot)
-    let body = try setStaticValueBody(rustSource(root, "crates/mold-core/src/config_keys.rs"))
-    let bounds = oneLineNumericBounds(body)
+    let source = try rustSource(root, "crates/mold-core/src/config_keys.rs")
+    let body = try setStaticValueBody(source)
+    let bounds = oneLineNumericBounds(body, source: source)
 
     for setting in curatedSettingKeys().compactMap(curatedSetting) {
         guard case let .number(min, max, _) = setting.editor else { continue }

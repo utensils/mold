@@ -14,6 +14,27 @@ final class QueueStore {
     private(set) var gate: [MoldHost.ID: Bool] = [:]
     /// Each running row's latest step and denoise preview, by job id.
     private(set) var progress: [String: JobProgress] = [:]
+    private var blockedReasons: [MoldHost.ID: [String: String]] = [:]
+    private var cancelReceipts: [MoldHost.ID: [String: QueueCancellationDisposition]] = [:]
+
+    func stall(for entry: QueueEntry) -> StallDiagnostic? {
+        guard entry.state == .running || entry.state == .cancelling else { return nil }
+        return progress[entry.id].map { $0.stall } ?? entry.stall
+    }
+
+    func statusDescription(_ entry: QueueEntry, on host: MoldHost.ID) -> String {
+        if let stall = stall(for: entry) { return stall.statusMessage }
+        if let receipt = cancelReceipts[host]?[entry.id] {
+            switch receipt {
+            case .pending: return "Cancel requested; device still held."
+            case .unconfirmed: return "Cancel requested; awaiting host confirmation."
+            case .cancelled: break
+            }
+        }
+        if entry.state == .queued, let reason = blockedReasons[host]?[entry.id] { return reason }
+        return entry.waitDescription
+    }
+
     /// A one-line result a person should see ("Sent to hal9000."), in place.
     var summary: String?
     private(set) var acting: Set<String> = []
@@ -132,6 +153,7 @@ final class QueueStore {
         }
         for id in Set(listings.keys).subtracting(hosts.hosts.map(\.id)) {
             listings[id] = nil; children[id] = nil; gate[id] = nil
+            blockedReasons[id] = nil; cancelReceipts[id] = nil
         }
         pruneSourcePreviews()
     }
@@ -140,8 +162,14 @@ final class QueueStore {
         guard let host = hosts.host(id), hosts.isUp(host) else { listings[id] = nil; return }
         let client = hosts.backend(for: host)
         do {
-            let entries = try await client.queue().merged.filter(\.state.isLive)
+            let snapshot = try await client.queue()
+            let entries = snapshot.merged.filter(\.state.isLive)
             listings[id] = entries
+            blockedReasons[id] = Dictionary((snapshot.plan?.workItems ?? []).compactMap { item in
+                item.blockedDeviceReason.map { (item.workId, $0) }
+            }, uniquingKeysWith: { _, latest in latest })
+            let active = Set(entries.filter { $0.state == .running || $0.state == .cancelling }.map(\.id))
+            cancelReceipts[id] = cancelReceipts[id]?.filter { active.contains($0.key) }
             pruneSourcePreviews()
             let batches = Array(Set(entries.compactMap(\.batchId))).sorted()
             if !batches.isEmpty, let listing = try? await client.batchStatuses(batchIds: batches) {
@@ -216,7 +244,7 @@ final class QueueStore {
         while !Task.isCancelled {
             var fresh: [String: JobProgress] = [:]
             for host in hosts.upHosts {
-                for entry in listings[host.id] ?? [] where entry.state == .running {
+                for entry in listings[host.id] ?? [] where entry.state == .running || entry.state == .cancelling {
                     if let value = try? await hosts.backend(for: host).jobPreview(jobId: entry.id) { fresh[entry.id] = value }
                 }
             }
@@ -336,7 +364,8 @@ final class QueueStore {
         guard canCancel(entry, on: id), let row = current(entry, on: id), row.state == entry.state else { return }
         await actOn(row, on: id, String(localized: "cancel that job")) { client in
             if row.state == .held { _ = try await client.cancelHeldJob(id: entry.id) } else {
-                try await client.cancelJob(id: entry.id)
+                let receipt = try await client.requestJobCancellation(id: entry.id)
+                if hosts.host(id) == client.host { cancelReceipts[id, default: [:]][entry.id] = receipt }
             }
         }
     }
@@ -369,7 +398,12 @@ final class QueueStore {
                     || (row.state == .running && hosts.capabilities[id]?.canCancelRunningJob == true) else { continue }
                 do {
                     if row.state == .held { _ = try await client.cancelHeldJob(id: row.id) }
-                    else { try await client.cancelJob(id: row.id) }
+                    else {
+                        let receipt = try await client.requestJobCancellation(id: row.id)
+                        if hosts.host(id) == host, hosts.instanceID(of: id) == instance {
+                            cancelReceipts[id, default: [:]][row.id] = receipt
+                        }
+                    }
                 } catch { hosts.report(host, doing: String(localized: "cancel that batch"), error) }
             }
         }

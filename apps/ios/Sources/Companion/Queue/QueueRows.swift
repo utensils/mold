@@ -99,13 +99,15 @@ struct QueueEntryRow: View {
                                 .accessibilityIdentifier("queue-input-caption-" + entry.id)
                         }
                         HStack {
-                            Text(entry.state == .held ? String(localized: "Held") : entry.state == .running ? String(localized: "Rendering") : caption)
+                            Text(entry.state == .held ? String(localized: "Held") : caption)
                             Spacer()
                             Image(systemName: "chevron.right").accessibilityHidden(true)
                         }
                         .font(.callout).foregroundStyle(.secondaryText)
-                        if entry.state == .running, let step = queue.progress[entry.id]?.step,
-                           let total = queue.progress[entry.id]?.total, total > 0 {
+                        if entry.state == .running, queue.stall(for: entry) == nil,
+                           let value = queue.progress[entry.id],
+                           let step = value.stageCurrent ?? value.step,
+                           let total = value.stageTotal ?? value.total, total > 0 {
                             ProgressView(value: Double(step), total: Double(total))
                                 .accessibilityValue(ProgressWords.spoken(queue.progress[entry.id]))
                         }
@@ -187,9 +189,9 @@ struct QueueEntryRow: View {
 
     private var caption: String {
         if inBatch, let index = entry.batchIndex {
-            return String(localized: "Job \(index) · \(entry.state == .held ? "Held" : entry.waitDescription)")
+            return String(localized: "Job \(index) · \(entry.state == .held ? "Held" : queue.statusDescription(entry, on: host.id))")
         }
-        return entry.state == .held ? String(localized: "Held") : entry.waitDescription
+        return entry.state == .held ? String(localized: "Held") : queue.statusDescription(entry, on: host.id)
     }
 
     @ViewBuilder private var inputPreview: some View {

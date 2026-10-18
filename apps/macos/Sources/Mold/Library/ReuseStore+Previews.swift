@@ -5,7 +5,7 @@ import AppKit
 import MoldClient
 
 extension ReuseStore {
-    func preview(for reference: GenerationReference, in draft: RenderDraft) -> String? {
+    func preview(for reference: AuthoringReference, in draft: RenderDraft) -> String? {
         guard pending(for: draft) != nil else { return nil }
         return referencePreviews[reference]
     }

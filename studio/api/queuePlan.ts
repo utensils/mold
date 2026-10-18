@@ -1,4 +1,9 @@
 import {
+  parseQueueCancellationResponse,
+  type QueueCancellationResult,
+  type JobStallDiagnostic,
+} from "../lib/jobStall";
+import {
   ApiError,
   IncompatibleHostError,
   apiFetchTo,
@@ -18,6 +23,7 @@ export type QueueLaneKind = "device" | "host_utility" | (string & {});
 
 export interface QueueEntry {
   id: string;
+  stall?: JobStallDiagnostic | null;
   model: string;
   model_display_name?: string | null;
   state: string;
@@ -85,6 +91,7 @@ export interface QueueWorkItem {
   estimate_confidence: EstimateConfidence;
   reason?: string | null;
   blocked_reason?: string | null;
+  blocked_device_reason?: string | null;
   assignment_reason?: string | null;
   /** Milliseconds this job's preparation has been running (additive). */
   preparation_elapsed_ms?: number | null;
@@ -410,14 +417,15 @@ export async function cancelQueueJob(
   target: ApiTarget,
   workId: string,
   options: { onlyHeld?: boolean } = {},
-): Promise<void> {
-  await apiFetchTo(
+): Promise<QueueCancellationResult> {
+  const response = await apiFetchTo(
     target,
     `/api/queue/${encodeURIComponent(workId)}${options.onlyHeld ? "?only_held=true" : ""}`,
     {
       method: "DELETE",
     },
   );
+  return parseQueueCancellationResponse(response);
 }
 
 /** Set the host-wide queue dispatch gate on one explicit authenticated host. */
@@ -577,7 +585,7 @@ export async function mutateQueueJobOnExpectedInstance(
   authority: QueueJobAuthority,
   mutation: QueueJobMutation,
   options: { onlyHeld?: boolean } = {},
-): Promise<void> {
+): Promise<QueueCancellationResult | void> {
   if (!authority.instanceId.trim()) {
     throw new TypeError("queue mutation requires an expected server instance");
   }
@@ -590,7 +598,7 @@ export async function mutateQueueJobOnExpectedInstance(
     );
   }
   if (mutation === "cancel") {
-    await cancelQueueJob(target, authority.jobId, options);
+    return cancelQueueJob(target, authority.jobId, options);
   } else {
     await retryQueueJob(target, authority);
   }

@@ -153,7 +153,7 @@ fn discard_incompatible_checkpoints(
     0
 }
 
-fn codec_command(tool: &str) -> Command {
+pub(crate) fn codec_command(tool: &str) -> Command {
     let bundled = match tool {
         "ffmpeg" => option_env!("MOLD_BUNDLED_FFMPEG"),
         "ffprobe" => option_env!("MOLD_BUNDLED_FFPROBE"),

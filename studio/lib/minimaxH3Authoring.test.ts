@@ -12,6 +12,9 @@ import {
   appendMinimaxH3PickedImageReferences,
   canonicalMinimaxH3ModelName,
   emptyMinimaxH3AuthoringState,
+  cloneMinimaxH3AuthoringState,
+  hasActiveFreshVideoReferences,
+  minimaxH3ReferenceProjection,
   isMinimaxH3Family,
   isMinimaxH3Identity,
   minimaxH3AuthoringCapabilities,
@@ -39,7 +42,7 @@ import {
 
 const image = (name: string): GenerationReference => ({
   kind: "image",
-  media: { authority: "inline", data: name.toUpperCase() },
+  media: { authority: "inline" as const, data: name.toUpperCase() },
   provenance: { name, sha256: name.repeat(64).slice(0, 64) },
   mime_type: "image/png",
   width: 1024,
@@ -342,7 +345,7 @@ describe("MiniMax H3 Studio authority", () => {
     expect(result.state.references[0]).toBe(original);
     expect(result.state.references[1]?.reference).toEqual({
       kind: "image",
-      media: { authority: "inline", data: "U1VCSkVDVA==" },
+      media: { authority: "inline" as const, data: "U1VCSkVDVA==" },
       provenance: {
         name: "subject.png",
         sha256:
@@ -653,7 +656,9 @@ describe("MiniMax H3 Studio authority", () => {
       "audio",
     ]);
     expect(
-      drafts.every((draft) => draft.reference.media.authority === "descriptor"),
+      drafts.every(
+        (draft) => draft.reference.media?.authority === "descriptor",
+      ),
     ).toBe(true);
     expect(
       minimaxH3AuthoringError("minimax-h3", "minimax-h3-ref2va:official-bf16", {
@@ -786,7 +791,7 @@ describe("reference crop", () => {
     expect(first.crop).toBeUndefined();
     expect(first.reference).toEqual({
       kind: "image",
-      media: { authority: "inline", data: "Q1JPUFBFRA==" },
+      media: { authority: "inline" as const, data: "Q1JPUFBFRA==" },
       mime_type: "image/png",
       width: 768,
       height: 768,
@@ -830,7 +835,7 @@ describe("reference crop", () => {
       {
         reference: {
           ...image("gone.png"),
-          media: { authority: "descriptor" },
+          media: { authority: "descriptor" as const },
         },
         crop: CROP,
       },
@@ -884,7 +889,7 @@ describe("reference crop", () => {
     expect(draft!.crop).toEqual(CROP);
     expect(draft!.reference).toMatchObject({
       kind: "image",
-      media: { authority: "descriptor" },
+      media: { authority: "descriptor" as const },
       width: 1024,
       height: 768,
       provenance: { name: "subject.png", sha256: "d".repeat(64) },
@@ -898,7 +903,7 @@ describe("reference crop", () => {
       {
         reference: {
           ...image("subject.png"),
-          media: { authority: "descriptor" },
+          media: { authority: "descriptor" as const },
         },
         crop: CROP,
       },
@@ -942,7 +947,7 @@ describe("reference crop", () => {
     });
     expect(stripMinimaxH3AuthoringMedia(set).references[0]).toMatchObject({
       crop: { x: 0, y: 0, width: 900, height: 768 },
-      reference: { media: { authority: "descriptor" } },
+      reference: { media: { authority: "descriptor" as const } },
     });
     const identity = setMinimaxH3ReferenceCrop(set, 0, {
       x: 0,
@@ -982,4 +987,56 @@ it("serializes a positively advertised endpoint task without routing on the mode
       null,
     ),
   ).not.toHaveProperty("source_image");
+});
+
+it("keeps fresh video candidates distinct from canonical generation descriptors", () => {
+  const state = emptyMinimaxH3AuthoringState();
+  state.references.push({
+    reference: {
+      kind: "fresh_video",
+      original: {
+        name: "clip.mov",
+        mime_type: "video/quicktime",
+        byte_length: 1,
+        sha256: "a".repeat(64),
+      },
+      body: new Blob(["x"]),
+    },
+  });
+  expect(minimaxH3ReferenceBudget(state.references).videos).toBe(1);
+  expect(
+    minimaxH3AuthoringError("minimax-h3", "minimax-h3-ref2va", state),
+  ).toBeNull();
+  expect(() => minimaxH3ReferenceProjection(state)).toThrow(/finalized/i);
+  const clone = cloneMinimaxH3AuthoringState(state);
+  expect(clone.references[0]!.reference).toEqual(
+    state.references[0]!.reference,
+  );
+  const stripped = stripMinimaxH3AuthoringMedia(state);
+  expect(stripped.references[0]!.reference).not.toHaveProperty("body");
+  expect(
+    minimaxH3AuthoringError("minimax-h3", "minimax-h3-ref2va", stripped),
+  ).toMatch(/Reattach/);
+});
+
+it("keeps parked fresh video candidates out of other recipes' preparation and estimates", () => {
+  const state = emptyMinimaxH3AuthoringState();
+  state.references = [
+    {
+      reference: {
+        kind: "fresh_video",
+        original: {
+          mime_type: "video/quicktime",
+          name: "clip.mov",
+          byte_length: 8,
+          sha256: "a".repeat(64),
+        },
+        body: new Blob(["original"]),
+      },
+    },
+  ];
+  expect(hasActiveFreshVideoReferences(state, "ordered-references")).toBe(true);
+  expect(hasActiveFreshVideoReferences(state, "h3-boundaries")).toBe(false);
+  expect(hasActiveFreshVideoReferences(state, "single")).toBe(false);
+  expect(hasActiveFreshVideoReferences(state, "references")).toBe(false);
 });

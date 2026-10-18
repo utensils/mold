@@ -1,6 +1,7 @@
 import { mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as inputImage from "../lib/inputImage";
+import * as pickedMedia from "../lib/minimaxH3PickedMedia";
 import MinimaxH3AuthoringPanel from "./MinimaxH3AuthoringPanel.vue";
 import type { MinimaxH3AuthoringState } from "../lib/minimaxH3Authoring";
 import {
@@ -396,3 +397,77 @@ describe("MinimaxH3AuthoringPanel — reference crop", () => {
     );
   });
 });
+
+it("discloses deferred canonical duration and audio verification for a fresh video", () => {
+  const value = state();
+  value.references = [
+    {
+      reference: {
+        kind: "fresh_video",
+        original: {
+          mime_type: "video/quicktime",
+          name: "clip.mov",
+          byte_length: 8,
+          sha256: "a".repeat(64),
+        },
+        body: new Blob(["original"]),
+      },
+    },
+  ];
+  const wrapper = mount(MinimaxH3AuthoringPanel, {
+    props: { modelValue: value },
+  });
+  expect(wrapper.text()).toContain(
+    "Video duration and soundtrack budget verified on submission",
+  );
+  expect(wrapper.text()).not.toContain("0.0/15s video");
+  expect(wrapper.get(".h3-authoring__preview").text()).toBe("VID");
+});
+
+it.each(["add", "reattach"] as const)(
+  "refuses a late %s attachment when the ordered draft was replaced",
+  async (mode) => {
+    let finish!: (
+      value: ReturnType<typeof state>["references"][number],
+    ) => void;
+    vi.spyOn(
+      pickedMedia,
+      "minimaxH3PickedMediaReference",
+    ).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const initial = state();
+    initial.references[0]!.reference = {
+      kind: "image",
+      mime_type: "image/png",
+      width: 64,
+      height: 64,
+      media: { authority: "descriptor" },
+    };
+    const wrapper = mount(MinimaxH3AuthoringPanel, {
+      props: { modelValue: initial },
+    });
+    const input = wrapper.get(
+      mode === "add"
+        ? '[data-test="h3-reference-files"]'
+        : '[data-test="h3-reference-reattach-0"]',
+    );
+    Object.defineProperty(input.element, "files", {
+      configurable: true,
+      value: [new File(["original"], "new.mov", { type: "video/quicktime" })],
+    });
+    await input.trigger("change");
+    await wrapper.setProps({
+      modelValue: { firstFrame: null, lastFrame: null, references: [] },
+    });
+    finish(state().references[0]!);
+    await vi.waitFor(() =>
+      expect(wrapper.text()).toContain("References or machine changed"),
+    );
+    expect(wrapper.emitted("update:modelValue")).toBeUndefined();
+    vi.restoreAllMocks();
+  },
+);

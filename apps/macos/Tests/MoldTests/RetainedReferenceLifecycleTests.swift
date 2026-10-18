@@ -12,7 +12,7 @@ struct RetainedReferenceLifecycleTests {
         backend.retainedInventories["clip.mp4"] = .init(availability: .available, members: members)
         let store = ReuseStore(hosts: HostStore(hosts: [host]) { _ in backend })
         var draft = RenderDraft()
-        draft.media.generationReferences = (0..<4).map { GenerationReference(kind: "image",
+        draft.media.generationReferences = (0..<4).map { AuthoringReference(kind: "image",
             media: .init(authority: "descriptor"), mimeType: "image/png",
             provenance: .init(sha256: String(repeating: String($0), count: 64)), width: 32, height: 32) }
         let metadata = try! MoldJSON.decoder.decode(OutputMetadata.self, from: Data(#"{"prompt":"fixture","model":"fixture","seed":1,"steps":4,"guidance":0,"width":32,"height":32,"version":"fixture"}"#.utf8))
@@ -38,7 +38,7 @@ struct RetainedReferenceLifecycleTests {
         draft.media.generationReferences.removeFirst()
         #expect(store.referenceRefusal(for: draft) != nil)
         draft = original
-        draft.media.generationReferences[0].media = .init(authority: "inline", data: "replacement")
+        draft.media.generationReferences[0] = draft.media.generationReferences[0].mappingCanonical { var value = $0; value.media = .init(authority: "inline", data: "replacement"); return value }
         #expect(store.referenceRefusal(for: draft) != nil)
         store.clear()
         #expect(store.referenceRefusal(for: original) != nil)

@@ -2,9 +2,16 @@ import Foundation
 
 public extension DraftMedia {
     mutating func appendGenerationReference(_ reference: GenerationReference) {
-        generationReferences.append(reference)
+        generationReferences.append(.canonical(reference))
     }
     mutating func replaceGenerationReference(at index: Int, with reference: GenerationReference) {
+        guard generationReferences.indices.contains(index) else { return }
+        generationReferences[index] = .canonical(reference)
+    }
+    mutating func appendGenerationReference(_ reference: AuthoringReference) {
+        generationReferences.append(reference)
+    }
+    mutating func replaceGenerationReference(at index: Int, with reference: AuthoringReference) {
         guard generationReferences.indices.contains(index) else { return }
         generationReferences[index] = reference
     }
@@ -49,7 +56,7 @@ public extension DraftMedia {
             if !allowIncomplete && cap.requiresVisual && !generationReferences.isEmpty && !generationReferences.contains(where: { ["image", "video"].contains($0.kind) }) {
                 return "Audio references require an image or video reference."
             }
-            for reference in generationReferences where ["video", "audio"].contains(reference.kind) {
+            for reference in generationReferences where reference.freshVideo == nil && ["video", "audio"].contains(reference.kind) {
                 guard let duration = reference.durationMs, (cap.minDurationMs...cap.maxDurationMs).contains(duration) else { return "Reference clips must be 2–15 seconds long." }
                 if reference.kind == "video" && (reference.frameCount ?? 0) <= 0 { return "The video reference needs an exact decoded frame count." }
                 if reference.kind == "audio" && (reference.sampleCount ?? 0) <= 0 { return "The audio reference needs an exact decoded sample count." }

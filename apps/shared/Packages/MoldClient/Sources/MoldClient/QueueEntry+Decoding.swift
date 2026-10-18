@@ -6,6 +6,7 @@ extension QueueEntry {
         if container.contains(.modelDownload) {
             modelDownload = (try? container.decode(ModelDownload.self, forKey: .modelDownload)) ?? ModelDownload(model: nil)
         }
+        stall = try container.decodeIfPresent(StallDiagnostic.self, forKey: .stall)
         id = try container.decode(String.self, forKey: .id)
         model = try container.decodeIfPresent(String.self, forKey: .model)
         metadata = try container.decodeIfPresent(OutputMetadata.self, forKey: .metadata)

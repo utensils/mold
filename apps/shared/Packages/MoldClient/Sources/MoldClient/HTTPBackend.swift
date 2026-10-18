@@ -8,6 +8,8 @@ public struct HTTPBackend: MoldBackend {
     public let host: MoldHost
     let session: URLSession
     let injectedTransport: (any MoldHTTPTransport)?
+    var referenceUploadClock: @Sendable () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }
+    var referenceAuthority: (@Sendable () async -> Bool)? = nil
 
     public init(host: MoldHost, session: URLSession = APISession.api) {
         self.host = host
@@ -59,7 +61,9 @@ public struct HTTPBackend: MoldBackend {
             }
             listing = try await get("/api/queue?cursor=" + RouteEscaping.escapedQueryValue(cursor))
         }
-        return QueueListing(entries: entries, liveOnlyEntries: nil)
+        // Each page carries a full current plan. Preserve the latest snapshot,
+        // including cleared device reasons, when flattening durable pages.
+        return QueueListing(plan: listing.plan, entries: entries, liveOnlyEntries: nil)
     }
 
     public func gallery(etag: String?) async throws -> Fetched<[GalleryPrint]> {

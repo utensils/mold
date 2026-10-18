@@ -4,6 +4,7 @@ import {
   applyChainProgress,
   chainCompleteToComplete,
   jobStatusCode,
+  jobProgressCopy,
   markJobSettled,
   newJob,
 } from "./generationJob";
@@ -217,4 +218,20 @@ describe("jobStatusCode queue vocabulary", () => {
     // No evidence at all still says the one true thing.
     expect(jobStatusCode(queued(null))).toBe("QUEUED");
   });
+});
+
+it("shows stalled held-device cancellation without settling the worker", () => {
+  const job = newJob({ model: "ltx-2", prompt: "test", width: 64, height: 64, steps: 4 });
+  job.status = "denoising";
+  job.stall = {
+    stage: "VAE decode",
+    last_completed_work_unix_ms: 1700000000000,
+    elapsed_stall_ms: 90000,
+    cancel_requested: true,
+    device_still_held: true,
+  };
+  expect(jobProgressCopy(job)).toBe("Cancel requested; device still held");
+  expect(jobStatusCode(job)).toBe("CANCEL REQUESTED; DEVICE STILL HELD");
+  expect(job.status).toBe("denoising");
+  expect(job.settledAtMs).toBeNull();
 });

@@ -42,6 +42,16 @@ public enum InputMediaPreview {
 }
 
 public extension InputMediaPreview {
+    static func retainedFile(reference: AuthoringReference, index: Int, references: [AuthoringReference],
+                             original: [AuthoringReference], members: [RetainedSourceMedia.Member],
+                             filename: String, backend: any MoldBackend) async throws -> SourceMediaFile {
+        guard let reference = reference.canonicalReference,
+              let references = references.canonicalReferences, let original = original.canonicalReferences else {
+            throw MoldClientError.malformedResponse
+        }
+        return try await retainedFile(reference: reference, index: index, references: references,
+            original: original, members: members, filename: filename, backend: backend)
+    }
     static func retainedFile(reference: GenerationReference, index: Int, references: [GenerationReference],
                              original: [GenerationReference], members: [RetainedSourceMedia.Member],
                              filename: String, backend: any MoldBackend) async throws -> SourceMediaFile {

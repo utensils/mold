@@ -1,3 +1,4 @@
+import { parseJobStall, jobStallLabel } from "./jobStall";
 import { queueModelDownloadAvailability } from "./queueModelDownload";
 /**
  * Live queue position and blocked-reason copy, shared by web, desktop, and
@@ -21,6 +22,7 @@ export interface QueueStatus {
   position: number | null;
   /** Raw scheduler reason this work is parked, or null when it is simply waiting. */
   blockedReason: string | null;
+  blockedDeviceReason?: string | null;
   /** What a preparing job is working through, when its host reports it. */
   preparation: QueuePreparation | null;
   /** For a paused row: whether the host says someone paused THIS row. Null
@@ -75,7 +77,10 @@ export function queueWorkItemFor(
 export function queueRuntimeLabel(
   plan: QueuePlan | null | undefined,
   jobId: string,
+  diagnostic?: unknown,
 ): string | null {
+  const stall = parseJobStall(diagnostic);
+  if (stall) return jobStallLabel(stall);
   const item = queueWorkItemFor(plan, jobId);
   if (!item?.runtime_phase) return null;
   const stage =
@@ -98,8 +103,11 @@ export function queueRuntimeLabel(
 export function queueRuntimeCode(
   plan: QueuePlan | null | undefined,
   jobId: string,
+  diagnostic?: unknown,
 ): string | null {
-  return queueRuntimeLabel(plan, jobId)?.toLocaleUpperCase() ?? null;
+  return (
+    queueRuntimeLabel(plan, jobId, diagnostic)?.toLocaleUpperCase() ?? null
+  );
 }
 
 function planPreparation(
@@ -309,6 +317,15 @@ export function buildQueueStatusIndex(
           source.paused === true && state === "queued"
             ? "queue_paused"
             : planBlockedReason(source.plan, entry.id),
+        ...(queueWorkItemFor(
+          source.plan,
+          entry.id,
+        )?.blocked_device_reason?.trim()
+          ? {
+              blockedDeviceReason: queueWorkItemFor(source.plan, entry.id)!
+                .blocked_device_reason!,
+            }
+          : {}),
         preparation: planPreparation(source.plan, entry.id),
         explicitlyPaused:
           typeof entry.explicitly_paused === "boolean"
@@ -380,6 +397,7 @@ export interface QueueWaitInput {
   state?: string | null | undefined;
   position?: number | null | undefined;
   blockedReason?: string | null | undefined;
+  blockedDeviceReason?: string | null | undefined;
   preparation?: QueuePreparation | null | undefined;
   /**
    * The host's `explicitly_paused` for a paused row. Absent means the host
@@ -397,6 +415,8 @@ export function resolveQueueWait(
     return { kind: "paused", explicit: input.explicitlyPaused === true };
   }
   if (input?.state === "held") return { kind: "held" };
+  if (input?.blockedDeviceReason?.trim())
+    return { kind: "blocked", label: input.blockedDeviceReason };
   if (input?.blockedReason === "preparing") {
     return { kind: "blocked", label: preparationLabel(input.preparation) };
   }

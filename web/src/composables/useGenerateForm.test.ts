@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { nextTick } from "vue";
+import { nextTick, toRaw } from "vue";
 import { IDBFactory } from "fake-indexeddb";
 import {
   applyMetadataToForm,
@@ -71,6 +71,89 @@ describe("useGenerateForm", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("preserves original fresh-video bytes while changing H3 model defaults", () => {
+    const form = useGenerateForm();
+    const body = new Blob(["original-video"]);
+    form.state.value.h3Authoring!.references = [
+      {
+        reference: {
+          kind: "fresh_video",
+          original: {
+            mime_type: "video/quicktime",
+            name: "clip.mov",
+            byte_length: body.size,
+            sha256: "a".repeat(64),
+          },
+          body,
+        },
+      },
+    ];
+    form.applyModelDefaults(
+      makeModel({ name: "minimax-h3-ref2va", family: "minimax-h3" }),
+    );
+    const reference = form.state.value.h3Authoring!.references[0]!.reference;
+    expect(reference.kind).toBe("fresh_video");
+    if (reference.kind !== "fresh_video")
+      throw new Error("original candidate changed authority");
+    expect(toRaw(reference.body)).toBe(body);
+    expect(
+      sanitizePersistedForm(form.state.value).h3Authoring!.references[0]!
+        .reference,
+    ).not.toHaveProperty("body");
+  });
+
+  it("reloads original video candidates from IndexedDB without persisting canonical handles or facts", async () => {
+    const { Blob: NativeBlob } = await import("node:buffer");
+    const previousBlob = globalThis.Blob;
+    Object.defineProperty(globalThis, "Blob", {
+      value: NativeBlob,
+      writable: true,
+      configurable: true,
+    });
+    try {
+      const first = useGenerateForm();
+      const body = new Blob(["ORIGINAL_VIDEO_ONLY"]);
+      first.state.value.h3Authoring!.references = [
+        {
+          reference: {
+            kind: "fresh_video",
+            original: {
+              mime_type: "video/quicktime",
+              name: "clip.mov",
+              byte_length: body.size,
+              sha256: "a".repeat(64),
+            },
+            body,
+          },
+        },
+      ];
+      await nextTick();
+      await flushDraftPersistence();
+      const raw = localStorage.getItem(STORAGE_KEY)!;
+      expect(raw).not.toContain("ORIGINAL_VIDEO_ONLY");
+      expect(
+        JSON.parse(raw).h3Authoring.references[0].reference,
+      ).not.toHaveProperty("body");
+      __testing__.clearDraftsForTest();
+      __testing__.resetForTest();
+      const second = useGenerateForm();
+      await flushDraftHydration();
+      const restored = second.state.value.h3Authoring!.references[0]!.reference;
+      expect(restored.kind).toBe("fresh_video");
+      if (restored.kind !== "fresh_video")
+        throw new Error("canonical authority replaced original");
+      expect(await restored.body!.text()).toBe("ORIGINAL_VIDEO_ONLY");
+      expect(restored).not.toHaveProperty("media");
+      expect(restored).not.toHaveProperty("duration_ms");
+    } finally {
+      Object.defineProperty(globalThis, "Blob", {
+        value: previousBlob,
+        writable: true,
+        configurable: true,
+      });
+    }
   });
 
   it("hydrates defaults when localStorage is empty", () => {

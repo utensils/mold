@@ -16,6 +16,7 @@
 //! actively running on some worker.
 
 use crate::events::EventBroadcaster;
+use crate::progress_watchdog::ProgressWatchdog;
 use mold_core::queue_progress::QueueJobProgress;
 use mold_core::types::SseProgressEvent;
 use mold_core::ServerEvent;
@@ -23,7 +24,7 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Notify;
 
 /// Wire-facing job state. Mirrors the actual lifecycle:
@@ -75,6 +76,8 @@ pub(crate) fn assign_positions(entries: &mut [JobEntry], offset: usize) {
 /// not just the reported snapshot.
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct JobEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall: Option<mold_core::stall::StallDiagnostic>,
     pub id: String,
     pub model: String,
     /// Curated manifest title; the stable model id remains the request value.
@@ -197,6 +200,7 @@ pub(crate) struct SchedulerQueueEntry {
 
 #[derive(Debug, Clone)]
 struct EntryInternal {
+    watchdog: Option<ProgressWatchdog>,
     id: String,
     model: String,
     state: JobLifecycle,
@@ -275,6 +279,7 @@ pub(crate) enum DispatchAttemptError<T> {
 /// state rather than propagating the panic into the dispatcher hot path.
 pub struct JobRegistry {
     inner: RwLock<Vec<EntryInternal>>,
+    stall_threshold_seconds: AtomicU64,
     mutation_sequence: AtomicU64,
     queue_patch_sequence: AtomicU64,
     mutation_notify: Arc<Notify>,
@@ -307,12 +312,24 @@ pub fn progress_relay(
     let registry = Arc::clone(registry);
     let job_id = job_id.to_string();
     tokio::spawn(async move {
-        while let Some(message) = rx.recv().await {
-            if let crate::state::SseMessage::Progress(event) = &message {
-                registry.record_progress(&job_id, event);
-            }
-            if let Some(observer) = observer.as_ref() {
-                let _ = observer.send(message);
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            tokio::select! {
+                message = rx.recv() => {
+                    let Some(message) = message else { break; };
+                    let cleared = if let crate::state::SseMessage::Progress(event) = &message {
+                        registry.record_progress(&job_id, event)
+                    } else { false };
+                    if let Some(observer) = observer.as_ref() {
+                        let _ = observer.send(message);
+                        if cleared { let _ = observer.send(crate::state::SseMessage::Progress(SseProgressEvent::Stall { stall: None })); }
+                    }
+                }
+                _ = tick.tick() => {
+                    if let Some(event) = registry.stall_event(&job_id) {
+                        if let Some(observer) = observer.as_ref() { let _ = observer.send(crate::state::SseMessage::Progress(event)); }
+                    }
+                }
             }
         }
     });
@@ -320,9 +337,17 @@ pub fn progress_relay(
 }
 
 impl JobRegistry {
+    /// The live server config is the authority; relays never reload a different
+    /// profile or bootstrap namespace from disk on the async feeder path.
+    pub(crate) fn set_stall_threshold_seconds(&self, seconds: u32) {
+        self.stall_threshold_seconds
+            .store(u64::from(seconds), Ordering::Relaxed);
+    }
+
     pub fn new() -> SharedJobRegistry {
         Arc::new(Self {
             inner: RwLock::new(Vec::new()),
+            stall_threshold_seconds: AtomicU64::new(300),
             mutation_sequence: AtomicU64::new(0),
             queue_patch_sequence: AtomicU64::new(0),
             mutation_notify: Arc::new(Notify::new()),
@@ -335,6 +360,7 @@ impl JobRegistry {
     pub fn with_events(events: Arc<EventBroadcaster>) -> SharedJobRegistry {
         Arc::new(Self {
             inner: RwLock::new(Vec::new()),
+            stall_threshold_seconds: AtomicU64::new(300),
             mutation_sequence: AtomicU64::new(0),
             queue_patch_sequence: AtomicU64::new(0),
             mutation_notify: Arc::new(Notify::new()),
@@ -429,6 +455,7 @@ impl JobRegistry {
             entries.insert(
                 insert_at,
                 EntryInternal {
+                    watchdog: None,
                     id: id.clone(),
                     model: model.clone(),
                     state: JobLifecycle::Queued,
@@ -528,6 +555,10 @@ impl JobRegistry {
             let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
             entries.iter_mut().find(|e| e.id == id).map(|e| {
                 e.state = JobLifecycle::Running;
+                e.watchdog = Some(ProgressWatchdog::new(
+                    Instant::now(),
+                    mold_core::time::now_epoch_ms_u64(),
+                ));
                 e.gpu = gpu;
                 e.target_gpu = None;
                 e.model.clone()
@@ -658,6 +689,10 @@ impl JobRegistry {
             return Err(DispatchAttemptError::Transport(payload));
         }
         entry.state = JobLifecycle::Running;
+        entry.watchdog = Some(ProgressWatchdog::new(
+            Instant::now(),
+            mold_core::time::now_epoch_ms_u64(),
+        ));
         entry.gpu = Some(gpu);
         entry.target_gpu = None;
         let model = entry.model.clone();
@@ -860,6 +895,7 @@ impl JobRegistry {
         let entries = self.inner.read().unwrap_or_else(|e| e.into_inner());
         entries.iter().enumerate().find_map(|(i, e)| {
             (e.id == id).then(|| JobEntry {
+                stall: self.current_stall(e),
                 id: e.id.clone(),
                 model: e.model.clone(),
                 model_display_name: mold_core::manifest::model_display_name(&e.model),
@@ -898,18 +934,83 @@ impl JobRegistry {
     ///
     /// This is fed from the same `progress_tx` fan-out the attached observer
     /// reads, so a durable child and an attached stream describe one render.
-    pub fn record_progress(&self, id: &str, event: &SseProgressEvent) {
+    pub fn record_progress(&self, id: &str, event: &SseProgressEvent) -> bool {
         let mut entries = self
             .inner
             .write()
             .unwrap_or_else(|error| error.into_inner());
         let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) else {
-            return;
+            return false;
         };
-        entry
-            .progress
-            .get_or_insert_with(QueueJobProgress::default)
-            .apply(event, mold_core::time::now_epoch_ms_u64());
+        let now_ms = mold_core::time::now_epoch_ms_u64();
+        let progressed = entry
+            .watchdog
+            .as_mut()
+            .is_some_and(|clock| clock.observe(event, Instant::now(), now_ms));
+        let progress = entry.progress.get_or_insert_with(QueueJobProgress::default);
+        let cleared = progressed && progress.stall.is_some();
+        progress.apply(event, now_ms);
+        if progressed {
+            progress.stall = None;
+        }
+        cleared
+    }
+
+    fn current_stall(&self, entry: &EntryInternal) -> Option<mold_core::stall::StallDiagnostic> {
+        if entry.state != JobLifecycle::Running || entry.completion_claimed {
+            return None;
+        }
+        entry.watchdog.as_ref()?.diagnostic(
+            Instant::now(),
+            self.stall_threshold_seconds.load(Ordering::Relaxed) as u32,
+            entry.cancel_requested,
+        )
+    }
+
+    pub(crate) fn blocked_device_reason(&self, target: Option<usize>) -> Option<String> {
+        let entries = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let running = entries
+            .iter()
+            .filter(|e| e.state == JobLifecycle::Running)
+            .collect::<Vec<_>>();
+        let required = running
+            .iter()
+            .filter(|e| target.is_none_or(|gpu| e.gpu == Some(gpu)))
+            .collect::<Vec<_>>();
+        if required.is_empty() || required.iter().any(|e| self.current_stall(e).is_none()) {
+            return None;
+        }
+        Some("Waiting for stalled device; device still held. Inspect the running job's diagnostics before recovery.".into())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn age_progress_for_tests(&self, id: &str, age: std::time::Duration) {
+        let mut entries = self.inner.write().unwrap();
+        let entry = entries.iter_mut().find(|e| e.id == id).unwrap();
+        entry.watchdog = Some(ProgressWatchdog::new(Instant::now() - age, 1000));
+    }
+
+    fn stall_event(&self, id: &str) -> Option<SseProgressEvent> {
+        let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        let entry = entries.iter_mut().find(|e| e.id == id)?;
+        let stall = self.current_stall(entry);
+        if entry.progress.is_none() && stall.is_none() {
+            return None;
+        }
+        let progress = entry.progress.get_or_insert_with(QueueJobProgress::default);
+        if progress.stall == stall {
+            return None;
+        }
+        if let Some(diagnostic) = &stall {
+            if progress.stall.as_ref().is_none_or(|previous| {
+                previous.stage != diagnostic.stage
+                    || previous.cancel_requested != diagnostic.cancel_requested
+            }) {
+                tracing::warn!(job = %id, stage = %diagnostic.stage, elapsed_stall_ms = diagnostic.elapsed_stall_ms, cancel_requested = diagnostic.cancel_requested, device_still_held = true, "generation has no completed work boundary; inspect diagnostics before operator-controlled recovery");
+            }
+        }
+        progress.stall = stall.clone();
+        Some(SseProgressEvent::Stall { stall })
     }
 
     /// The outer option is live-row existence; the inner option is whether
@@ -920,7 +1021,15 @@ impl JobRegistry {
             .unwrap_or_else(|error| error.into_inner())
             .iter()
             .find(|entry| entry.id == id)
-            .map(|entry| entry.progress.clone())
+            .map(|entry| {
+                let stall = self.current_stall(entry);
+                if entry.progress.is_none() && stall.is_none() {
+                    return None;
+                }
+                let mut progress = entry.progress.clone().unwrap_or_default();
+                progress.stall = stall;
+                Some(progress)
+            })
     }
 
     /// Drop the entry — call once on every terminal path (success, error,
@@ -996,6 +1105,7 @@ impl JobRegistry {
             .iter()
             .enumerate()
             .map(|(i, e)| JobEntry {
+                stall: self.current_stall(e),
                 id: e.id.clone(),
                 model: e.model.clone(),
                 model_display_name: mold_core::manifest::model_display_name(&e.model),
@@ -1122,6 +1232,110 @@ impl JobRegistry {
 mod tests {
     use super::*;
 
+    #[test]
+    fn stall_tick_preserves_absent_progress_before_any_work_or_diagnostic() {
+        let registry = JobRegistry::new();
+        registry.register("no-progress", "fake");
+        registry.mark_running("no-progress", Some(0));
+        registry.set_stall_threshold_seconds(0);
+        assert_eq!(registry.progress_snapshot("no-progress"), Some(None));
+        assert_eq!(registry.stall_event("no-progress"), None);
+        assert_eq!(registry.progress_snapshot("no-progress"), Some(None));
+    }
+
+    #[test]
+    fn stall_tick_creates_actual_diagnostic_and_explicitly_clears_prior_stall() {
+        let registry = JobRegistry::new();
+        registry.register("diagnostic-only", "fake");
+        registry.mark_running("diagnostic-only", Some(0));
+        registry.set_stall_threshold_seconds(1);
+        registry.age_progress_for_tests("diagnostic-only", std::time::Duration::from_secs(2));
+        assert!(matches!(
+            registry.stall_event("diagnostic-only"),
+            Some(SseProgressEvent::Stall { stall: Some(_) })
+        ));
+        assert!(registry
+            .progress_snapshot("diagnostic-only")
+            .flatten()
+            .unwrap()
+            .stall
+            .is_some());
+        registry.set_stall_threshold_seconds(0);
+        assert_eq!(
+            registry.stall_event("diagnostic-only"),
+            Some(SseProgressEvent::Stall { stall: None })
+        );
+        let snapshot = registry
+            .progress_snapshot("diagnostic-only")
+            .flatten()
+            .expect("a prior diagnostic remains an explicit recovered snapshot");
+        assert!(snapshot.stall.is_none());
+        assert_eq!(registry.stall_event("diagnostic-only"), None);
+        assert_eq!(
+            registry.progress_snapshot("diagnostic-only"),
+            Some(Some(snapshot))
+        );
+    }
+
+    #[tokio::test]
+    async fn progress_relay_keeps_the_live_runtime_threshold_instead_of_reloading_disk() {
+        let registry = JobRegistry::new();
+        registry.register("disabled-stall", "fake");
+        registry.mark_running("disabled-stall", Some(0));
+        registry.age_progress_for_tests("disabled-stall", std::time::Duration::from_secs(301));
+        registry.stall_threshold_seconds.store(0, Ordering::Relaxed);
+        let tx = progress_relay(&registry, "disabled-stall", None);
+        assert!(registry.entry("disabled-stall").unwrap().stall.is_none());
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn progress_relay_ticks_without_fake_work_then_explicitly_clears_stall_on_real_work() {
+        let registry = JobRegistry::new();
+        registry.register("tick-stall", "fake");
+        registry.mark_running("tick-stall", Some(0));
+        registry.age_progress_for_tests("tick-stall", std::time::Duration::from_secs(301));
+        let (observer, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = progress_relay(&registry, "tick-stall", Some(observer));
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            first,
+            crate::state::SseMessage::Progress(SseProgressEvent::Stall { stall: Some(_) })
+        ));
+        tx.send(crate::state::SseMessage::Progress(
+            SseProgressEvent::StageProgress {
+                name: "Decode chunks".into(),
+                current: 1,
+                total: 4,
+            },
+        ))
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if matches!(
+                    rx.recv().await,
+                    Some(crate::state::SseMessage::Progress(
+                        SseProgressEvent::Stall { stall: None }
+                    ))
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(registry
+            .progress_snapshot("tick-stall")
+            .flatten()
+            .unwrap()
+            .stall
+            .is_none());
+        drop(tx);
+    }
+
     /// The relay is what makes the snapshot complete: a frame sent on the
     /// job's `progress_tx` lands in the registry whether or not anyone is
     /// attached, and an attached observer still sees every message.
@@ -1185,6 +1399,7 @@ mod tests {
         let mut entries = ["held-a", "queued-b", "held-c", "queued-d"]
             .into_iter()
             .map(|id| JobEntry {
+                stall: None,
                 id: id.to_string(),
                 model: "m".to_string(),
                 model_display_name: None,
