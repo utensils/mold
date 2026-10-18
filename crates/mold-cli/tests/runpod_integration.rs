@@ -202,19 +202,46 @@ fn runpod_delete_runs_without_confirmation() {
         .stdout(predicate::str::contains("cancelled").not());
 }
 
+/// `connect` refuses a pod this client never paired with, so the fixture
+/// pairs one first, in this test's own `MOLD_HOME`.
+fn pair_pod(env: &TestEnv, origin: &str) {
+    let profile = mold_secure_client::prepare_bootstrap("runpod connect test", "cli")
+        .unwrap()
+        .profile(origin)
+        .unwrap();
+    mold_secure_client::save_pairing_at(&env.home.join("secure/clients"), &profile).unwrap();
+}
+
+#[test]
+fn runpod_connect_refuses_an_unpaired_pod() {
+    let env = TestEnv::new();
+    env.cmd()
+        .env_remove("RUNPOD_API_KEY")
+        .args(["runpod", "connect", "abc123"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "Pair this RunPod host before using it",
+        ));
+}
+
 #[test]
 fn runpod_connect_prints_export_line() {
     let env = TestEnv::new();
+    pair_pod(&env, "https://abc123-7680.proxy.runpod.net");
+    // No RunPod key: connect skips the provider lookup and only prints.
     env.cmd()
-        .env("RUNPOD_API_KEY", "fake-test-key")
+        .env_remove("RUNPOD_API_KEY")
         .args(["runpod", "connect", "abc123"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "export MOLD_HOST=https://abc123-7680.proxy.runpod.net",
+        .stdout(predicate::str::diff(
+            "export MOLD_HOST=https://abc123-7680.proxy.runpod.net\n",
         ))
-        // Gallery URL hint is on stderr so `eval $(mold runpod connect …)`
-        // stays clean for the shell.
+        // Hints are on stderr so `eval $(mold runpod connect …)` stays
+        // clean for the shell: the saved host name, then the gallery URL.
+        .stderr(predicate::str::contains("mold ps --host runpod-abc123"))
         .stderr(predicate::str::contains(
             "https://abc123-7680.proxy.runpod.net",
         ));
