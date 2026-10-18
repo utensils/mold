@@ -32,6 +32,16 @@ pub(crate) async fn request_session(
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
+    request_session_with(&client, base_url, key, regular_direct).await
+}
+
+/// [`request_session`] through the caller's no-proxy, no-redirect client.
+pub(crate) async fn request_session_with(
+    client: &reqwest::Client,
+    base_url: &str,
+    key: &str,
+    regular_direct: Option<&str>,
+) -> Result<SessionReply> {
     let mut request = client.post(format!(
         "{}/api/pairing/sessions",
         base_url.trim_end_matches('/')

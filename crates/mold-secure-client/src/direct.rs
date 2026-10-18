@@ -357,6 +357,21 @@ pub struct RegularInvite {
     expires_at: u64,
 }
 pub async fn pair_regular(value: serde_json::Value, name: &str) -> Result<RegularHost> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    pair_regular_with(value, name, &client).await
+}
+
+/// [`pair_regular`] through the caller's client, e.g. one pinned to the
+/// addresses a caller already verified for the origin's hostname. It must
+/// not follow redirects.
+pub async fn pair_regular_with(
+    value: serde_json::Value,
+    name: &str,
+    client: &reqwest::Client,
+) -> Result<RegularHost> {
     let invite: RegularInvite = serde_json::from_value(value)?;
     anyhow::ensure!(
         invite.kind == "mold.mobile-pairing"
@@ -379,10 +394,7 @@ pub async fn pair_regular(value: serde_json::Value, name: &str) -> Result<Regula
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
     anyhow::ensure!(now < invite.expires_at, "Regular invitation expired");
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(10))
-        .build()?;
+
     let mut response = client.post(format!("{origin}/api/pairing/regular/claim")).json(&serde_json::json!({"token":invite.pairing_token,"client_name":name,"client_kind":"cli"})).send().await?.error_for_status()?;
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await? {

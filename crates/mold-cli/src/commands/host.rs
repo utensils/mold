@@ -292,6 +292,24 @@ pub(crate) async fn pair_invitation(
     requested: Option<&str>,
     device: &str,
 ) -> Result<Added> {
+    pair_invitation_with(
+        invitation,
+        requested,
+        device,
+        &Transport::default().client()?,
+    )
+    .await
+}
+
+/// [`pair_invitation`] with the Regular claim sent through `client` (pinned
+/// by the caller). A Secure claim travels inside Noise to the invitation's
+/// own endpoints, authenticated by the pinned host key.
+async fn pair_invitation_with(
+    invitation: serde_json::Value,
+    requested: Option<&str>,
+    device: &str,
+    client: &reqwest::Client,
+) -> Result<Added> {
     let text = |key: &str| invitation[key].as_str().map(str::to_owned);
     let reported = text("name")
         .or_else(|| text("hostname"))
@@ -308,7 +326,7 @@ pub(crate) async fn pair_invitation(
             instance.as_deref(),
             ConnectionMode::Regular,
         )?;
-        let mut host = mold_secure_client::pair_regular(invitation, device).await?;
+        let mut host = mold_secure_client::pair_regular_with(invitation, device, client).await?;
         host.name = Some(name.clone());
         mold_secure_client::save_regular_host(&host)?;
         retire_superseded(superseded, &host.origin, ConnectionMode::Regular)?;
@@ -411,66 +429,112 @@ fn key_outcome(status: u16, code: &str, regular: bool) -> Result<KeyOutcome> {
     })
 }
 
-/// Whether pairing with `origin` may go ahead, and whether to warn: https,
-/// loopback and Tailscale (WireGuard) are private paths; plain HTTP to any
-/// other address is refused for Secure (the invitation would be readable
-/// on the network) and allowed, with a warning, for an explicit Regular
-/// direct connection.
-fn plain_http_policy(origin: &str, regular: bool) -> Result<bool> {
-    plain_http_policy_with(origin, regular, resolve_bounded, tailnet_peer_ips)
+/// What the plain-HTTP rule decided for one `host add`: whether to warn,
+/// and the addresses a verified tailnet name resolved to. Every request the
+/// run makes is pinned to those, so the name is never resolved again
+/// between verification and use.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Transport {
+    warn: bool,
+    pin: Option<(String, Vec<std::net::SocketAddr>)>,
+}
+
+impl Transport {
+    /// A pairing/probe client: no proxy and no redirects, like the session
+    /// request, so credentials only ever reach the origin named, and pinned
+    /// to the verified addresses when there are any.
+    fn client(&self) -> Result<reqwest::Client> {
+        let mut builder = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(10));
+        if let Some((host, addrs)) = &self.pin {
+            builder = builder.resolve_to_addrs(host, addrs);
+        }
+        Ok(builder.build()?)
+    }
 }
 
 type IpSet = std::collections::HashSet<std::net::IpAddr>;
 
-fn plain_http_policy_with(
-    origin: &str,
-    regular: bool,
-    resolve: impl Fn(&str) -> Option<Vec<std::net::IpAddr>>,
-    peers: impl Fn() -> Option<IpSet>,
-) -> Result<bool> {
+/// Where the plain-HTTP rule looks things up: a resolver, Tailscale's peer
+/// list, and the cheap address-range pre-filter. Injected so tests use no
+/// real DNS or Tailscale.
+struct Net<'a> {
+    resolve: &'a dyn Fn(&str) -> Option<Vec<std::net::IpAddr>>,
+    peers: &'a dyn Fn() -> Option<IpSet>,
+    prefilter: fn(&std::net::IpAddr) -> bool,
+}
+
+impl Net<'static> {
+    fn system() -> Self {
+        Net {
+            resolve: &resolve_bounded,
+            peers: &tailnet_peer_ips,
+            prefilter: |ip| mold_secure_client::hosts::is_tailscale_address(&ip.to_string()),
+        }
+    }
+}
+
+/// Whether pairing with `origin` may go ahead, and whether to warn: https,
+/// loopback and a tailnet peer Tailscale confirms are private paths; plain
+/// HTTP to anything else is refused for Secure (the invitation would be
+/// readable on the network) and allowed, with a warning, for an explicit
+/// Regular direct connection.
+fn plain_http_policy_with(origin: &str, regular: bool, net: &Net) -> Result<Transport> {
     let Ok(url) = reqwest::Url::parse(origin) else {
-        return Ok(false);
+        return Ok(Transport::default());
     };
     let machine = url.host_str().unwrap_or_default();
-    if url.scheme() != "http"
-        || crate::control::is_loopback_host(origin)
-        || is_verified_tailnet_peer(machine, resolve, peers)
-    {
-        return Ok(false);
+    if url.scheme() != "http" || crate::control::is_loopback_host(origin) {
+        return Ok(Transport::default());
+    }
+    if let Some(verified) = verified_tailnet_peer(machine, net) {
+        let port = url.port_or_known_default().unwrap_or(80);
+        let pin = (!verified.is_empty()).then(|| {
+            (
+                machine.to_string(),
+                verified
+                    .into_iter()
+                    .map(|ip| std::net::SocketAddr::new(ip, port))
+                    .collect(),
+            )
+        });
+        return Ok(Transport { warn: false, pin });
     }
     anyhow::ensure!(
         regular,
         "refusing to start a Secure pairing over plain HTTP to {origin}: the invitation would cross the network unencrypted. Use the host's https:// address, add --regular for a direct HTTP connection, or run `mold host invite` on the host and pair with its link"
     );
-    Ok(true)
+    Ok(Transport {
+        warn: true,
+        pin: None,
+    })
 }
 
 /// Whether Tailscale itself confirms `machine` is a tailnet peer: the
 /// literal address, or EVERY address the name resolves to, must be in the
 /// IP lists `tailscale status` reports. The address ranges are only a cheap
 /// pre-filter (100.64.0.0/10 is also carrier-grade NAT); a missing or
-/// failing CLI verifies nothing.
-fn is_verified_tailnet_peer(
-    machine: &str,
-    resolve: impl Fn(&str) -> Option<Vec<std::net::IpAddr>>,
-    peers: impl Fn() -> Option<IpSet>,
-) -> bool {
-    use mold_secure_client::hosts::is_tailscale_address;
+/// failing CLI verifies nothing. Returns the verified addresses of a name
+/// (empty for a literal address, which needs no pinning).
+fn verified_tailnet_peer(machine: &str, net: &Net) -> Option<Vec<std::net::IpAddr>> {
     let bare = machine.trim_matches(['[', ']']);
-    let candidates = match bare.parse::<std::net::IpAddr>() {
-        Ok(ip) => vec![ip],
-        Err(_) => match resolve(&machine.trim_end_matches('.').to_ascii_lowercase()) {
-            Some(ips) if !ips.is_empty() => ips,
-            _ => return false,
+    let (candidates, literal) = match bare.parse::<std::net::IpAddr>() {
+        Ok(ip) => (vec![ip], true),
+        Err(_) => match (net.resolve)(&machine.trim_end_matches('.').to_ascii_lowercase()) {
+            Some(ips) if !ips.is_empty() => (ips, false),
+            _ => return None,
         },
     };
-    if !candidates
-        .iter()
-        .all(|ip| is_tailscale_address(&ip.to_string()))
-    {
-        return false;
+    if !candidates.iter().all(net.prefilter) {
+        return None;
     }
-    peers().is_some_and(|known| candidates.iter().all(|ip| known.contains(ip)))
+    let known = (net.peers)()?;
+    if !candidates.iter().all(|ip| known.contains(ip)) {
+        return None;
+    }
+    Some(if literal { Vec::new() } else { candidates })
 }
 
 /// Every Tailscale IP of this machine and its peers, from
@@ -586,16 +650,28 @@ async fn add_with_key(input: &str, options: &AddOptions, device: &str) -> Result
         let name = name.trim().to_ascii_lowercase();
         hosts::validate_name(&name)?;
     }
-    let warn = plain_http_policy(&origin, options.regular)?;
+    add_with_key_using(origin, options, device, &Net::system()).await
+}
+
+async fn add_with_key_using(
+    origin: String,
+    options: &AddOptions,
+    device: &str,
+    net: &Net<'_>,
+) -> Result<()> {
+    // Read the key first: then the only gap after verifying the route is
+    // the requests themselves, which are pinned to what was verified.
     let key = api_key(options)?;
-    if warn {
+    let transport = plain_http_policy_with(&origin, options.regular, net)?;
+    let client = transport.client()?;
+    if transport.warn {
         eprintln!(
             "{} the key and the invitation it buys travel unencrypted to {origin}; prefer https, or `mold host invite` on the host",
             theme::icon_warn()
         );
     }
     let regular_direct = options.regular.then_some(origin.as_str());
-    let reply = pairing::request_session(&origin, &key, regular_direct)
+    let reply = pairing::request_session_with(&client, &origin, &key, regular_direct)
         .await
         .map_err(|error| {
             error.context(
@@ -611,7 +687,7 @@ async fn add_with_key(input: &str, options: &AddOptions, device: &str) -> Result
         } => (status, code, message, None),
     };
     let outcome = key_outcome(status, &code, options.regular)?;
-    if outcome == KeyOutcome::SaveKeyless && !answers_without_a_key(&origin).await {
+    if outcome == KeyOutcome::SaveKeyless && !answers_without_a_key(&client, &origin).await {
         // PAIRING_UNAVAILABLE also means "auth on, Secure pairing not set
         // up"; only a host that answers keyless has authentication off.
         bail!(
@@ -634,29 +710,20 @@ async fn add_with_key(input: &str, options: &AddOptions, device: &str) -> Result
             } else {
                 pairing::invitation_payload(session, None)?
             };
-            pair_invitation(invitation, options.name.as_deref(), device).await?
+            pair_invitation_with(invitation, options.name.as_deref(), device, &client).await?
         }
-        KeyOutcome::SaveKey => save_key(&origin, Some(key), options.name.as_deref()).await?,
-        KeyOutcome::SaveKeyless => save_key(&origin, None, options.name.as_deref()).await?,
+        KeyOutcome::SaveKey => {
+            save_key(&client, &origin, Some(key), options.name.as_deref()).await?
+        }
+        KeyOutcome::SaveKeyless => {
+            save_key(&client, &origin, None, options.name.as_deref()).await?
+        }
     };
     finish(added, options.default).await
 }
 
-/// A pairing/probe client: no proxy and no redirects, like the session
-/// request, so credentials only ever reach the origin named.
-fn direct_client() -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(10))
-        .build()?)
-}
-
 /// Whether `GET /api/status` succeeds with no key at all.
-async fn answers_without_a_key(origin: &str) -> bool {
-    let Ok(client) = direct_client() else {
-        return false;
-    };
+async fn answers_without_a_key(client: &reqwest::Client, origin: &str) -> bool {
     client
         .get(format!("{origin}/api/status"))
         .send()
@@ -667,6 +734,7 @@ async fn answers_without_a_key(origin: &str) -> bool {
 /// Save a Regular connection with an app/device key (or none, for a host
 /// with authentication off), after one authenticated read proves it.
 async fn save_key(
+    client: &reqwest::Client,
     origin: &str,
     key: Option<Zeroizing<String>>,
     requested: Option<&str>,
@@ -674,7 +742,6 @@ async fn save_key(
     let key = key.filter(|k| !k.is_empty());
     // Directly, as the saved Regular connection will talk: no pairing for
     // this origin exists yet, so the normal client cannot be used here.
-    let client = direct_client()?;
     let mut request = client.get(format!("{origin}/api/status"));
     if let Some(key) = key.as_deref() {
         request = request.header("x-api-key", key.as_str());
@@ -1118,7 +1185,12 @@ mod tests {
     fn plain_http_is_refused_for_secure_and_warned_for_regular() {
         type Peers = fn() -> Option<std::collections::HashSet<std::net::IpAddr>>;
         let policy = |origin: &str, regular, peers: Peers| {
-            plain_http_policy_with(origin, regular, fake_dns, peers)
+            let net = Net {
+                resolve: &fake_dns,
+                peers: &peers,
+                prefilter: Net::system().prefilter,
+            };
+            plain_http_policy_with(origin, regular, &net).map(|t| t.warn)
         };
         for peers in [peers as Peers, no_tailscale] {
             for origin in [
@@ -1158,6 +1230,106 @@ mod tests {
             );
             assert!(policy(origin, true, peers).unwrap(), "{origin}");
         }
+    }
+
+    /// A verified name is pinned to the addresses that were verified; a
+    /// literal address needs no pin.
+    #[test]
+    fn a_verified_name_is_pinned_to_what_was_verified() {
+        let net = Net {
+            resolve: &fake_dns,
+            peers: &peers,
+            prefilter: Net::system().prefilter,
+        };
+        let transport = plain_http_policy_with("http://workstation:7680", false, &net).unwrap();
+        let (host, mut addrs) = transport.pin.unwrap();
+        addrs.sort();
+        assert_eq!(host, "workstation");
+        assert_eq!(
+            addrs,
+            vec![
+                "100.101.102.103:7680".parse().unwrap(),
+                "[fd7a:115c:a1e0::5]:7680".parse().unwrap()
+            ]
+        );
+        let literal = plain_http_policy_with("http://100.105.134.43:7680", false, &net).unwrap();
+        assert_eq!(literal, Transport::default());
+    }
+
+    /// The name is resolved once, for the check, and every request of the
+    /// run goes to what was verified: a second answer (a different address)
+    /// is never asked for and never reached.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn every_request_goes_to_the_verified_address() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let verified = MockServer::start().await;
+        let elsewhere = MockServer::start().await;
+        for server in [&verified, &elsewhere] {
+            Mock::given(method("POST"))
+                .and(path("/api/pairing/sessions"))
+                .respond_with(ResponseTemplate::new(503).set_body_json(
+                    serde_json::json!({"error": "off", "code": "PAIRING_UNAVAILABLE"}),
+                ))
+                .mount(server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/api/status"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "version": "0.36.0", "git_sha": null, "build_date": null,
+                    "models_loaded": [], "busy": false, "uptime_secs": 1
+                })))
+                .mount(server)
+                .await;
+        }
+        let port = verified.address().port();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let elsewhere_ip = elsewhere.address().ip();
+        let resolve = |_: &str| -> Option<Vec<std::net::IpAddr>> {
+            let first = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+            Some(vec![if first {
+                "127.0.0.1".parse().unwrap()
+            } else {
+                elsewhere_ip
+            }])
+        };
+        let peer_set = || Some(IpSet::from(["127.0.0.1".parse().unwrap()]));
+        let net = Net {
+            resolve: &resolve,
+            peers: &peer_set,
+            prefilter: |_| true,
+        };
+        let home = tempfile::tempdir().unwrap();
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("MOLD_HOME");
+        std::env::set_var("MOLD_HOME", home.path());
+        // An unresolvable name: reaching the listener at all proves the pin.
+        let origin = format!("http://workstation.invalid:{port}");
+        let options = AddOptions {
+            input: None,
+            name: Some("workstation".into()),
+            api_key_file: None,
+            api_key_stdin: false,
+            regular: false,
+            default: false,
+            device_name: None,
+        };
+        let outcome = add_with_key_using(origin, &options, "test", &net).await;
+        match previous {
+            Some(value) => std::env::set_var("MOLD_HOME", value),
+            None => std::env::remove_var("MOLD_HOME"),
+        }
+        outcome.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let reached = verified.received_requests().await.unwrap();
+        assert!(reached
+            .iter()
+            .any(|r| r.url.path() == "/api/pairing/sessions"));
+        assert!(reached.iter().any(|r| r.url.path() == "/api/status"));
+        assert!(elsewhere.received_requests().await.unwrap().is_empty());
     }
 
     #[test]
