@@ -530,7 +530,7 @@ extension LibraryStore {
         // Keep those batches serial; do the same when free space cannot
         // comfortably hold three 512 MiB transfers with three staged copies.
         var next = 0
-        publishSyncProgress("Checking \(work.count.formatted()) changed prints · Already here \(alreadyLocal.formatted())", force: true)
+        publishSyncProgress(SyncProgressCopy.checking(work.count, present: alreadyLocal, on: local.name), force: true)
         await withTaskGroup(of: (Int, MirrorResult).self) { group in
             let free = (try? FileManager.default.attributesOfFileSystem(
                 forPath: FileManager.default.temporaryDirectory.path)[.systemFreeSize]
@@ -580,7 +580,8 @@ extension LibraryStore {
                     failures.append(failure)
                     if result.repeatAcknowledgable { recordMirrorIssue(failure, target: target, local: local) }
                 }
-                publishSyncProgress("Checked \(completed.formatted()) of \(work.count.formatted()) · Copied \(transferred.formatted()) · Already here \(alreadyLocal.formatted()) · Issues \(failures.count.formatted())",
+                publishSyncProgress(SyncProgressCopy.checked(completed, of: work.count, copied: transferred, present: alreadyLocal,
+                                                             on: local.name, issues: failures.count),
                                     force: completed == work.count)
             }
         }
@@ -650,5 +651,20 @@ extension LibraryStore {
     /// The records' document, now. For quitting.
     func flushSyncRecords() async {
         await syncRecords.flush()
+    }
+}
+
+/// The transfer banner. The destination is named because "here" read as this
+/// Mac while syncing to another machine; the count leads its phrase so a name
+/// ending in digits ("hal9000") never runs into the number.
+nonisolated enum SyncProgressCopy {
+    static func checking(_ changed: Int, present: Int, on destination: String) -> String {
+        "Checking \(changed.formatted()) changed prints · \(present.formatted()) already on \(destination)"
+    }
+
+    static func checked(_ completed: Int, of total: Int, copied: Int, present: Int,
+                        on destination: String, issues: Int) -> String {
+        "Checked \(completed.formatted()) of \(total.formatted()) · Copied \(copied.formatted()) · "
+            + "\(present.formatted()) already on \(destination) · Issues \(issues.formatted())"
     }
 }
