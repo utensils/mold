@@ -131,14 +131,17 @@ struct Sidebar: View {
     /// one: the number is in the pane's subtitle, and repeating four figures in
     /// a sidebar row is noise.
     private func count(of scope: LibraryScope) -> Int? {
+        // Read once: two reads straddling the sync batch could key one count
+        // on half an epoch and empty the shared cache.
+        let epoch = library.countEpoch
         return switch scope {
         case .favorites:
             library.countCache.count(in: library.items,
                 query: LibraryScope.favorites.resolve(navigation.query, shelves: library.shelves,
                     hiddenCollectionIDs: library.hiddenCollectionIDs, privacyEvidence: library.trashed, privacyLinks: library.syncPrivacyLinks()),
-                revision: library.sourceAccessRevision, privacyRevision: library.sourcePrivacyRevision.receipts)
+                revision: epoch.rows, privacyRevision: epoch.receipts)
         case .trash: library.countCache.count(in: library.trashed, query: navigation.query,
-            partition: .trash, revision: library.sourceAccessRevision, privacyRevision: library.sourcePrivacyRevision.receipts)
+            partition: .trash, revision: epoch.rows, privacyRevision: epoch.receipts)
         case .all, .collection: nil
         }
     }

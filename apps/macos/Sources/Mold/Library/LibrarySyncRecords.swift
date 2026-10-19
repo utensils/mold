@@ -89,9 +89,16 @@ final class LibrarySyncRecords {
     /// invalidate source previews/indexes one write at a time.
     var privacyRevision: Int { privacyChanges.value }
 
-    private func privacyEdge(_ record: LocalSyncRecord?) -> [String]? {
-        record.map { [$0.destinationHost?.uuidString ?? "", $0.destinationFilename,
-            $0.sourceRoute ?? "", $0.destinationRoute ?? "", $0.destinationInstance ?? ""] }
+    /// The record's whole contribution to `privacyLinks`; the identity clock
+    /// moves only when this changes, never per organization checkpoint.
+    /// Always the engine's own host: the clock and the cache must agree on
+    /// what an unstamped destination is.
+    private static func privacyEdge(_ key: String, _ record: LocalSyncRecord?) -> SyncPrivacyEdge? {
+        guard let record, let source = LocalSyncRecord.source(of: key) else { return nil }
+        return SyncPrivacyEdge(origin: PrintID(host: source.host, filename: source.filename),
+            destinationHost: record.destinationHost, destinationFilename: record.destinationFilename,
+            localHost: MoldEngine.localHostID, sourceRoute: record.sourceRoute, destinationRoute: record.destinationRoute,
+            destinationInstance: record.destinationInstance)
     }
 
     private var lineageCache: (revision: Int, authority: [UUID: String]?, incoming: [PrintID: [(key: String, record: LocalSyncRecord)]])?
@@ -192,26 +199,18 @@ final class LibrarySyncRecords {
     }
 
     /// Hide-only links never authorize transfer skipping or organization ownership.
-    func privacyLinks(localHost: MoldHost.ID, instance: String?, authority: [UUID: String]? = nil) -> [PrintID: PrintID] {
+    /// Every record contributes, provisional or not: a conservative superset of
+    /// the verified `links` snapshot, so a copy verified mid-run never drops out
+    /// of privacy evidence before `finishRun` publishes it. Cached on the
+    /// identity clock, which moves only when some record's edge does.
+    func privacyLinks(authority: [UUID: String]? = nil) -> [PrintID: PrintID] {
         load()
-        if let cached = privacyCache, cached.revision == recordsRevision, cached.authority == authority { return cached.links }
-        var edges = links(localHost: localHost, instance: instance, authority: authority).map { ($0.key, $0.value) }
-        for bucket in doc.buckets.values {
-            for (key, record) in bucket.records where record.provisional == true || record.privacyPending == true || record.initialOrganizationPending == true || record.organizationIntent != nil {
-                guard let source = LocalSyncRecord.source(of: key) else { continue }
-                let origin = PrintID(host: source.host, filename: source.filename)
-                let copy = PrintID(host: record.destinationHost ?? localHost, filename: record.destinationFilename)
-                if let authority {
-                    guard let current = authority[origin.host], record.sourceRoute == current,
-                          let route = record.destinationRoute,
-                          authority[copy.host] == [copy.host.uuidString, route, record.destinationInstance ?? ""].joined(separator: "\n")
-                    else { continue }
-                }
-                edges.append((origin, copy))
-            }
+        if let cached = privacyCache, cached.revision == privacyRevision, cached.authority == authority { return cached.links }
+        let edges = doc.buckets.values.flatMap { bucket in
+            bucket.records.compactMap { Self.privacyEdge($0.key, $0.value) }
         }
-        let result = LibraryMerge.copyComponents(edges: edges)
-        privacyCache = (recordsRevision, authority, result)
+        let result = SyncPrivacyEdge.components(edges, authority: authority)
+        privacyCache = (privacyRevision, authority, result)
         return result
     }
 
@@ -297,13 +296,13 @@ final class LibrarySyncRecords {
         let previous = doc.buckets[bucketKey]?.records[key]
         doc.buckets[bucketKey, default: Bucket()].records[key] = record
         recordsRevision += 1
-        if privacyEdge(previous) != privacyEdge(record) { privacyChanges.value &+= 1 }
+        if Self.privacyEdge(key, previous) != Self.privacyEdge(key, record) { privacyChanges.value &+= 1 }
         do {
             try await append(.record(bucket: bucketKey, key: key, record: record))
         } catch {
             doc.buckets[bucketKey]?.records[key] = previous
             recordsRevision += 1
-            if privacyEdge(previous) != privacyEdge(record) { privacyChanges.value &+= 1 }
+            if Self.privacyEdge(key, previous) != Self.privacyEdge(key, record) { privacyChanges.value &+= 1 }
             throw error
         }
     }

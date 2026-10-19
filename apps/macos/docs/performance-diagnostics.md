@@ -85,3 +85,16 @@ quit flush pending state. A 10,000-row regression verifies that one arrival
 processes one changed logical group. The isolated 20,000-row hidden-collection
 benchmark measured approximately 441 ms per full projection and observation;
 this supports coalescing but does not establish a live before/after speedup.
+
+An October 19, 2026 capture on native build 1555 during "Reconciling
+organization" found the main thread with almost no idle samples: of about 8,260
+main-thread stacks, roughly 2,570 included the Library subtitle's baseline
+count, 2,470 the sidebar Favorites/Trash counts, and 560 privacy-link
+projection. The count cache was correct but keyed on a receipt privacy revision
+that reconcile moved once per print: stamping This Mac onto older sync records
+without a destination host changed the fingerprint without changing the copy,
+and privacy links were cached on every journal write. The fingerprint is now
+`SyncPrivacyEdge`, privacy links cache on that revision, counts key on a
+`countEpoch` that advances at most once a second during sync, and an unfiltered
+subtitle needs no count at all. As before, only a rebuilt app compared against
+the same library during the same sync phase is performance evidence.

@@ -15,6 +15,10 @@ import MoldClient
 final class LibraryStore {
     let sourceMediaCatalog = SourceMediaCatalog()
     @ObservationIgnored let countCache = LibraryQueryCountCache()
+    @ObservationIgnored var countEpochBatch = SyncBatchedValue<SourcePrivacyRevision>()
+    @ObservationIgnored var countEpochTask: Task<Void, Never>?
+    /// Wakes count readers when a held `countEpoch` comes due.
+    var countEpochWake = 0
     @ObservationIgnored let sourceAccessIndex = SourceMediaAccessIndex()
     var sourceAccessRevision = 0
     var openSourceBrowsers: Set<UUID> = []
