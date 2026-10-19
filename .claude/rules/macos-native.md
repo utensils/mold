@@ -362,3 +362,12 @@ against the existing PID for private local evidence; never commit raw stack
 samples. See `apps/macos/docs/performance-diagnostics.md`.
 
 Source Media is a separate Library section, not a Prints/Source toggle or interleaved collection content. Reuse Library filter labels, machine selection, sort, tokenized search and thumbnail sizing. Cache owner projections independently of scan progress and zoom. Keep empty source details invisible and one-shot; negative inventory answers expire on relevant owner/host invalidation. Keep same-authority previews visible while refreshing. Library subtitle/sidebar count caches must key on row and receipt privacy revisions, never sync progress; ordinary print hiding is unchanged.
+
+Source Media uses shared `JustifiedLayout` geometry, oriented source ratios (never generated-output dimensions), stable source identities and a single bounded synchronous warm-pixel cache. Batch ratio discoveries and retain a visible anchor through reflow. Do not poll inventories/thumbnails or turn warm cache hits into loading states. Invalidate old pixel work before publishing the next content epoch; keep same-authority display rows read-only during revalidation, while revoked authority and server refusal still remove access. Display-only sync updates never invalidate source content; identical-content row events remain conservative because retained-source repairs can arrive independently of output media versions.
+
+Unread ledger derived copy indexes/counts are transient and retain the persisted
+wire shape. Safe timeline patches may observe only changed logical groups when
+there is no hidden privacy graph; a merge/visibility/host change uses a full
+projection. During Library Sync, bound full unread projection to one leading
+one-second update, with immediate view/visit, sync completion and quit flushes.
+Never mark hidden, unvisited or later-arriving prints read through this batching.

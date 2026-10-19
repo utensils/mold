@@ -8,9 +8,14 @@ private struct SourcePreviewImage: @unchecked Sendable {
     let image: CGImage
 }
 @MainActor enum SourceMediaPreview {
-    private static let cache = BoundedAsyncCache<SourcePreviewKey, SourcePreviewImage>(
-        maximumCost: 32 * 1024 * 1024, concurrency: 4, maximumAge: 60,
+    private static let cache = SourceMediaPreviewCache<SourcePreviewImage>(
+        maximumCost: 32 * 1024 * 1024, concurrency: 4,
         cost: { $0.image.bytesPerRow * $0.image.height })
+
+    static func peek(key: SourcePreviewKey) -> UIImage? {
+        guard let decoded = cache.peek(for: key) else { return nil }
+        return UIImage(cgImage: decoded.image)
+    }
 
     static func image(key: SourcePreviewKey, backend: any MoldBackend) async -> UIImage? {
         let decoded = await cache.value(for: key) {

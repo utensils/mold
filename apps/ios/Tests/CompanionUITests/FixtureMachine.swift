@@ -30,6 +30,8 @@ final class FixtureMachine: @unchecked Sendable {
     private let removePrintOnFavorite: String?
     private let retainedMediaFixture: Bool
     private let sourceMediaLibraryFixture: Bool
+    private let sourceAspectFixture: Bool
+    private let sourceThumbnailFailures: Mutex<Int>
     private let eventConnections = Mutex<[NWConnection]>([])
     let retainedFrameFixture: Bool
     private let sourceFreeQueueFixture: Bool
@@ -65,7 +67,7 @@ final class FixtureMachine: @unchecked Sendable {
     private let modelMemoryFixture: Bool
     private var residentModels: Set<String> = []
 
-    init(justifiedFixture: Bool = false, landscapePlaybackFixture: Bool = false, exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, hiddenCollectionFixture: Bool = false, omitOrganizationCapabilities: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, retainedFrameFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil, queueDownloadFixture: Bool = false, requiresDownloadLicense: Bool = false, trashFixture: Bool = false, queueFailureFixture: Bool = false, queueSwipeFixture: Bool = false, queueDestinationFixture: Bool = false, promptExpansionFixture: Bool = false, batchQueueFixture: Bool = false, sourceFreeQueueFixture: Bool = false, sourceMediaLibraryFixture: Bool = false, playbackData: Data? = nil) throws {
+    init(justifiedFixture: Bool = false, landscapePlaybackFixture: Bool = false, exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, hiddenCollectionFixture: Bool = false, omitOrganizationCapabilities: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, retainedFrameFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil, queueDownloadFixture: Bool = false, requiresDownloadLicense: Bool = false, trashFixture: Bool = false, queueFailureFixture: Bool = false, queueSwipeFixture: Bool = false, queueDestinationFixture: Bool = false, promptExpansionFixture: Bool = false, batchQueueFixture: Bool = false, sourceFreeQueueFixture: Bool = false, sourceMediaLibraryFixture: Bool = false, sourceAspectFixture: Bool = false, failFirstSourceThumbnail: Bool = false, playbackData: Data? = nil) throws {
         self.landscapePlaybackFixture = landscapePlaybackFixture
         self.playbackData = playbackData
         self.exportFixture = exportFixture
@@ -77,6 +79,8 @@ final class FixtureMachine: @unchecked Sendable {
         self.collectionHidden = hiddenCollectionFixture
         self.retainedMediaFixture = retainedMediaFixture
         self.sourceMediaLibraryFixture = sourceMediaLibraryFixture
+        self.sourceAspectFixture = sourceAspectFixture
+        self.sourceThumbnailFailures = Mutex(failFirstSourceThumbnail ? 1 : 0)
         self.retainedFrameFixture = retainedFrameFixture
         self.sourceFreeQueueFixture = sourceFreeQueueFixture
         self.batchQueueFixture = batchQueueFixture
@@ -177,6 +181,33 @@ final class FixtureMachine: @unchecked Sendable {
         }
     }
 
+    var eventConnectionCount: Int { eventConnections.withLock { $0.count } }
+
+    /// Change presentation-only owner fields while its source bytes stay fixed.
+    func emitSourceDisplayOnlyUpdates(count: Int) async {
+        await withCheckedContinuation { continuation in
+            queue.async { [self] in
+                var rows = (try? JSONSerialization.jsonObject(with: gallery)) as? [[String: Any]] ?? []
+                guard !rows.isEmpty else { continuation.resume(); return }
+                for index in 0..<count {
+                    rows[0]["title"] = "Source owner update \(index)"
+                    rows[0]["favorite"] = index.isMultiple(of: 2)
+                    let payload: [String: Any] = ["type": "gallery_updated", "filename": rows[0]["filename"]!, "image": rows[0]]
+                    let json = try! JSONSerialization.data(withJSONObject: payload)
+                    var event = Data("event: event\ndata: ".utf8)
+                    event.append(json); event.append(Data("\n\n".utf8))
+                    var chunk = Data((String(event.count, radix: 16) + "\r\n").utf8)
+                    chunk.append(event); chunk.append(Data("\r\n".utf8))
+                    eventConnections.withLock { connections in
+                        for connection in connections { connection.send(content: chunk, completion: .contentProcessed { _ in }) }
+                    }
+                }
+                gallery = (try? JSONSerialization.data(withJSONObject: rows)) ?? gallery
+                continuation.resume()
+            }
+        }
+    }
+
     func completeQueueDownload() async {
         await withCheckedContinuation { continuation in
             queue.async { self.queueDownloadComplete = true; continuation.resume() }
@@ -242,6 +273,17 @@ final class FixtureMachine: @unchecked Sendable {
                 let reply = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n"
                     + String(comment.utf8.count, radix: 16) + "\r\n" + comment + "\r\n"
                 connection.send(content: Data(reply.utf8), completion: .contentProcessed { _ in })
+                return
+            }
+            if sourceAspectFixture, path == "/api/gallery/source-media/fixture-0.png/fixture-portrait/thumbnail",
+               sourceThumbnailFailures.withLock({ remaining in
+                   guard remaining > 0 else { return false }
+                   remaining -= 1; return true
+               }) {
+                let body = Data(#"{"error":"Synthetic transient thumbnail failure"}"#.utf8)
+                var reply = Data("HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
+                reply.append(body)
+                connection.send(content: reply, completion: .contentProcessed { _ in connection.cancel() })
                 return
             }
             if path == "/api/gallery", unavailableGallery.withLock({ $0 }) {
@@ -349,12 +391,31 @@ final class FixtureMachine: @unchecked Sendable {
             let licenseBody = Data(#"{"error":"Accept the model license","code":"LICENSE_NOT_ACCEPTED","license":{"id":"fixture-terms","name":"Fixture Model Terms","url":"https://example.com/terms","canonical":"https://example.com/terms","sha256":"abc","summary":"Fixture terms for a simulated download."}}"#.utf8)
             let body = refuseLicense ? licenseBody : acceptLicense ? Data("[]".utf8) : refusedExport ? Data(#"{"error":"Fixture refused this export"}"#.utf8) : export ? exportResponse(exportRequest) : libraryMutation ? Data("{}".utf8) : isTrashListing ? trashGallery : install ? Data(#"{"id":"fixture-download"}"#.utf8) : unload ? Data("{}".utf8) : patchCollection ? collection() : allowed ? response(path, historyQuery: historyQuery) : Data(#"{"error":"Fixture is read-only"}"#.utf8)
             let status = refuseLicense ? "403 Forbidden" : refusedExport ? "500 Internal Server Error" : allowed ? "200 OK" : "405 Method Not Allowed"
-            let contentType = export ? "application/octet-stream" : path.hasSuffix(".mp4") ? "video/mp4" : path.hasPrefix("/api/gallery/image/") || path.hasPrefix("/api/gallery/thumbnail/") || path.hasSuffix("/input-thumbnail") || (retainedMediaFixture && path.hasPrefix("/api/gallery/source-media/fixture-0.png/fixture-source"))
+            let contentType = export ? "application/octet-stream" : path.hasSuffix(".mp4") ? "video/mp4" : path.hasPrefix("/api/gallery/image/") || path.hasPrefix("/api/gallery/thumbnail/") || path.hasSuffix("/input-thumbnail") || ((retainedMediaFixture || sourceAspectFixture) && path.hasPrefix("/api/gallery/source-media/fixture-0.png/") && (path.hasSuffix("/thumbnail") || path.hasSuffix("/content")))
                 ? "image/png" : "application/json"
             var reply = Data("HTTP/1.1 \(status)\r\nContent-Type: \(contentType)\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
             reply.append(body)
             connection.send(content: reply, completion: .contentProcessed { _ in connection.cancel() })
         }
+    }
+
+    /// Color, visible edges and real aspect ratios make letterboxing observable.
+    private static func sourceAspectImage(portrait: Bool) -> Data {
+        let width = portrait ? 180 : 320, height = portrait ? 320 : 180
+        let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+            bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.setFillColor(CGColor(red: 0.08, green: 0.35, blue: 0.75, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.setFillColor(CGColor(red: 1, green: 0.8, blue: 0.12, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: 12))
+        context.fill(CGRect(x: 0, y: height - 12, width: width, height: 12))
+        context.setFillColor(CGColor(red: 0.9, green: 0.15, blue: 0.2, alpha: 1))
+        context.fill(CGRect(x: width / 4, y: height / 4, width: width / 2, height: height / 2))
+        let data = NSMutableData()
+        let destination = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil)!
+        CGImageDestinationAddImage(destination, context.makeImage()!, nil)
+        precondition(CGImageDestinationFinalize(destination))
+        return data as Data
     }
 
     private func queueRow(_ id: String) -> [String: Any] {
@@ -384,6 +445,17 @@ final class FixtureMachine: @unchecked Sendable {
 
     private func response(_ path: String, historyQuery: String? = nil) -> Data {
         if let retainedFrames = retainedFrameResponse(path) { return retainedFrames }
+        if sourceAspectFixture, path == "/api/gallery/source-media/fixture-0.png" {
+            let members: [[String: Any]] = [
+                ["member_id": "fixture-portrait", "role": "source_image", "display_name": "Portrait source.png", "media_kind": "image", "size_bytes": 4_096],
+                ["member_id": "fixture-landscape", "role": "last_frame", "display_name": "Landscape source.png", "media_kind": "image", "size_bytes": 8_192]
+            ]
+            return try! JSONSerialization.data(withJSONObject: ["availability": "available", "members": members])
+        }
+        if sourceAspectFixture, path.hasPrefix("/api/gallery/source-media/fixture-0.png/"),
+           path.hasSuffix("/thumbnail") || path.hasSuffix("/content") {
+            return Self.sourceAspectImage(portrait: path.contains("fixture-portrait"))
+        }
         // A visible coastal illustration makes queue screenshots useful for
         // visual acceptance, rather than a white one-pixel placeholder.
         if sourceFreeQueueFixture && path.hasSuffix("/fixture-video/inputs") { return Data("[]".utf8) }

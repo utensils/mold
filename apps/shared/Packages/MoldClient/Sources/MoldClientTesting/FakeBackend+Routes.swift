@@ -145,6 +145,7 @@ extension FakeBackend {
     public func retainedSourceMediaFile(for filename: String, member: RetainedSourceMedia.Member) async throws -> SourceMediaFile { try await respond("retainedSourceMediaFile(for:member:)", [filename, member]) }
     public func retainedSourceMedia(for filename: String) async throws -> RetainedSourceMedia.Inventory { try await respond("retainedSourceMedia(for:)", [filename]) }
     public func retainedSourceMediaBytes(for filename: String, member memberId: String) async throws -> Data { try await respond("retainedSourceMediaBytes(for:member:)", [filename, memberId]) }
+    public func retainedSourceMediaThumbnail(for filename: String, member memberId: String) async throws -> Data { try await respond("retainedSourceMediaThumbnail(for:member:)", [filename, memberId]) }
     public func retainedMediaReuseSession(for filename: String, members memberIds: [String], target: GenerateRequest) async throws -> RetainedSourceMedia.ReuseSession { try await respond("retainedMediaReuseSession(for:members:target:)", [filename, memberIds, target]) }
 
     // MARK: MoldStatusBackend

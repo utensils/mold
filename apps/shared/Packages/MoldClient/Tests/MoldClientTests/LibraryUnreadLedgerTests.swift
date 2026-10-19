@@ -176,3 +176,103 @@ struct LibraryUnreadLedgerTests {
         print("20k ledger repeated observation: \(start.duration(to: .now))")
     }
 }
+
+extension LibraryUnreadLedgerTests {
+    @Test func incrementalArrivalProcessesOnlyChangedIdentityAndMatchesFullObservation() throws {
+        let history = try (0..<10_000).map { try entry("history-\($0).png", host: one, size: $0 + 1) }
+        var incremental = LibraryUnreadLedger(), full = LibraryUnreadLedger()
+        incremental.observe(entries: history, visible: history, loadedHosts: [one], presentHosts: [one])
+        full = incremental
+        let arriving = try entry("arrival.png", host: one, size: 20_000)
+        let work = incremental.observedEntryCount
+        incremental.observeChanges(entries: [arriving], visible: [arriving], removed: [], loadedHosts: [one], presentHosts: [one])
+        full.observe(entries: history + [arriving], visible: history + [arriving], loadedHosts: [one], presentHosts: [one])
+        #expect(incremental == full)
+        #expect(incremental.count == 1)
+        #expect(incremental.observedEntryCount == work + 1)
+        incremental.view(arriving.id)
+        #expect(incremental.count == 0)
+        incremental.observeChanges(entries: [], visible: [], removed: [arriving.id], loadedHosts: [one], presentHosts: [one])
+        full.observe(entries: history, visible: history, loadedHosts: [one], presentHosts: [one])
+        full.view(arriving.id)
+        #expect(incremental == full)
+    }
+
+    @Test func incrementalVisibilityAndNewCopyKeepBaselineAndReadInheritance() throws {
+        let original = try entry("original.png", host: one)
+        let copy = try entry("renamed.png", host: two)
+        var ledger = LibraryUnreadLedger()
+        ledger.observe(entries: [original], visible: [original], loadedHosts: [one], presentHosts: [one, two])
+        let merged = LibraryMerge.merge([original, copy], localHost: nil)
+        ledger.observeChanges(entries: merged, visible: merged, removed: [], loadedHosts: [one, two], presentHosts: [one, two])
+        #expect(ledger.count == 0)
+        let arriving = try entry("arrival.png", host: one, size: 9_000)
+        ledger.observeChanges(entries: [arriving], visible: [arriving], removed: [], loadedHosts: [one, two], presentHosts: [one, two])
+        #expect(ledger.count == 1)
+        ledger.observeChanges(entries: [arriving], visible: [], removed: [], loadedHosts: [one, two], presentHosts: [one, two])
+        #expect(ledger.count == 0)
+        ledger.observeChanges(entries: [arriving], visible: [arriving], removed: [], loadedHosts: [one, two], presentHosts: [one, two])
+        #expect(ledger.count == 1)
+        let data = try MoldJSON.encoder.encode(ledger)
+        var restored = try MoldJSON.decoder.decode(LibraryUnreadLedger.self, from: data)
+        restored.view(arriving.id)
+        #expect(restored.count == 0)
+        #expect(!restored.isUnread(original))
+    }
+}
+
+extension LibraryUnreadLedgerTests {
+    @Test func incrementalMetadataDoesNotPersistOrCountTheSameGroupTwice() throws {
+        let row = try entry("read.png", host: one)
+        var ledger = LibraryUnreadLedger()
+        ledger.observe(entries: [row], visible: [row], loadedHosts: [one], presentHosts: [one])
+        for _ in 0..<100 {
+            let changed = ledger.observeChanges(entries: [row], visible: [row], removed: [], loadedHosts: [one], presentHosts: [one])
+            #expect(!changed)
+        }
+        #expect(ledger.count == 0)
+        let encoded = try MoldJSON.encoder.encode(ledger)
+        let object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        #expect(Set(object.keys).isSubset(of: ["known", "unread", "visible_groups", "pending_viewed"]))
+        let restored = try MoldJSON.decoder.decode(LibraryUnreadLedger.self, from: encoded)
+        #expect(restored == ledger)
+    }
+}
+
+extension LibraryUnreadLedgerTests {
+    @Test func incrementalHostPruningReportsPersistenceChange() throws {
+        var ledger = LibraryUnreadLedger()
+        ledger.observe(entries: [], visible: [], loadedHosts: [one], presentHosts: [one])
+        let arrival = try entry("arrival.png", host: one)
+        ledger.observeChanges(entries: [arrival], visible: [arrival], removed: [], loadedHosts: [one], presentHosts: [one])
+        #expect(ledger.count == 1)
+        let changed = ledger.observeChanges(entries: [], visible: [], removed: [], loadedHosts: [], presentHosts: [])
+        #expect(changed)
+        #expect(ledger.count == 0)
+        let unchanged = ledger.observeChanges(entries: [], visible: [], removed: [], loadedHosts: [], presentHosts: [])
+        #expect(!unchanged)
+    }
+}
+
+extension LibraryUnreadLedgerTests {
+    @Test func largeHiddenInventoryPreservesPrivacyWhileObservingArrivals() throws {
+        let host = MoldHost(id: one, name: "Fixture", baseURL: URL(string: "http://fixture")!)
+        let history = try (0..<20_000).map { index in
+            var print = GalleryPrint.Mutable(try entry("history-\(index).png", host: one, size: index + 1).print)
+            if index.isMultiple(of: 2) { print.collections = ["private"] }
+            return LibraryEntry(host: host, print: print.build())
+        }
+        var query = LibraryQuery()
+        query.hiddenCollectionIDs = [one: ["private"]]
+        var ledger = LibraryUnreadLedger()
+        ledger.observe(entries: history, visible: query.apply(to: history), loadedHosts: [one], presentHosts: [one])
+        let all = history + [try entry("visible-arrival.png", host: one, size: 20_001)]
+        let start = ContinuousClock.now
+        for _ in 0..<3 {
+            ledger.observe(entries: all, visible: query.apply(to: all), loadedHosts: [one], presentHosts: [one])
+        }
+        #expect(ledger.count == 1)
+        #expect(query.apply(to: all).count == 10_001)
+        print("20k hidden privacy projection plus ledger, three observations: \(start.duration(to: .now))")
+    }
+}

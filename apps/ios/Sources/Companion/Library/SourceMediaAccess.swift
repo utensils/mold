@@ -4,18 +4,39 @@ import SwiftUI
 extension LibraryStore {
     func sourceMediaChanged(_ event: MoldEvent, host: UUID) {
         let filename: String?
+        let preservingDisplay: Bool
         switch event {
-        case .resyncRequired: filename = nil
+        case .resyncRequired:
+            filename = nil; preservingDisplay = true
         case .gallery(let change):
             switch change {
-            case .added(let name, _, _), .updated(let name, _), .restored(let name, _),
-                 .removed(let name), .trashed(let name): filename = name
+            case .updated(let name, let updated):
+                let previous = (pendingLive.isEmpty ? liveTimeline.copy(.init(host: host, filename: name))?.print : nil)
+                    ?? live[host]?.first { $0.filename == name }
+                if let previous, let updated,
+                   SourceMediaAuthority.isDisplayOnlyUpdate(previous: previous, updated: updated) { return }
+                filename = name; preservingDisplay = true
+            case .added(let name, _, _), .restored(let name, _):
+                filename = name; preservingDisplay = true
+            case .removed(let name), .trashed(let name):
+                filename = name; preservingDisplay = false
             case .collectionsChanged: return
             }
         default: return
         }
-        sourceMediaCatalog.invalidate(host: host, filename: filename)
-        Task { await SourceMediaPreview.invalidate(host: host, filename: filename) }
+        let route = hosts.host(host).map { host in var route = host; route.name = ""; return route }
+        let instance = hosts.instanceID(of: host)
+        Task { @MainActor [weak self] in
+            // Publish the tile's next epoch only after cancellation of OLD
+            // pixel work completes. Reversing these steps cancels the new
+            // tile load and can leave it blank until it is scrolled back in.
+            await SourceMediaPreview.invalidate(host: host, filename: filename)
+            guard let self else { return }
+            let current = self.hosts.host(host).map { host in var route = host; route.name = ""; return route }
+            guard current == route, self.hosts.instanceID(of: host) == instance else { return }
+            self.sourceMediaCatalog.invalidate(host: host, filename: filename,
+                                               preservingDisplay: preservingDisplay)
+        }
     }
     var sourceAccess: SourceMediaAccessIndex.Snapshot {
         let instances = Dictionary(uniqueKeysWithValues: hosts.hosts.compactMap { host in
