@@ -644,8 +644,7 @@ extension LibraryStore {
     func syncPrivacyLinks() -> [PrintID: PrintID] {
         guard !hiddenCollectionIDs.isEmpty else { return [:] }
         _ = syncRecords.privacyRevision
-        return syncRecords.privacyLinks(localHost: MoldEngine.localHostID,
-            instance: hosts.instanceID(of: MoldEngine.localHostID), authority: syncAuthority)
+        return syncRecords.privacyLinks(authority: syncAuthority)
     }
 
     /// The records' document, now. For quitting.

@@ -91,12 +91,13 @@ final class LibrarySyncRecords {
 
     /// The record's whole contribution to `privacyLinks`; the identity clock
     /// moves only when this changes, never per organization checkpoint.
-    private static func privacyEdge(_ key: String, _ record: LocalSyncRecord?,
-                                    localHost: MoldHost.ID = MoldEngine.localHostID) -> SyncPrivacyEdge? {
+    /// Always the engine's own host: the clock and the cache must agree on
+    /// what an unstamped destination is.
+    private static func privacyEdge(_ key: String, _ record: LocalSyncRecord?) -> SyncPrivacyEdge? {
         guard let record, let source = LocalSyncRecord.source(of: key) else { return nil }
         return SyncPrivacyEdge(origin: PrintID(host: source.host, filename: source.filename),
             destinationHost: record.destinationHost, destinationFilename: record.destinationFilename,
-            localHost: localHost, sourceRoute: record.sourceRoute, destinationRoute: record.destinationRoute,
+            localHost: MoldEngine.localHostID, sourceRoute: record.sourceRoute, destinationRoute: record.destinationRoute,
             destinationInstance: record.destinationInstance)
     }
 
@@ -202,11 +203,11 @@ final class LibrarySyncRecords {
     /// the verified `links` snapshot, so a copy verified mid-run never drops out
     /// of privacy evidence before `finishRun` publishes it. Cached on the
     /// identity clock, which moves only when some record's edge does.
-    func privacyLinks(localHost: MoldHost.ID, instance: String?, authority: [UUID: String]? = nil) -> [PrintID: PrintID] {
+    func privacyLinks(authority: [UUID: String]? = nil) -> [PrintID: PrintID] {
         load()
         if let cached = privacyCache, cached.revision == privacyRevision, cached.authority == authority { return cached.links }
         let edges = doc.buckets.values.flatMap { bucket in
-            bucket.records.compactMap { Self.privacyEdge($0.key, $0.value, localHost: localHost) }
+            bucket.records.compactMap { Self.privacyEdge($0.key, $0.value) }
         }
         let result = SyncPrivacyEdge.components(edges, authority: authority)
         privacyCache = (privacyRevision, authority, result)

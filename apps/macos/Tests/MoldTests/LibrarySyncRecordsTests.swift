@@ -236,7 +236,7 @@ struct LibrarySyncRecordsTests {
         let records = LibrarySyncRecords()
         try await records.checkpoint(record, key: key, instance: "local")
         let revision = records.privacyRevision
-        let links = records.privacyLinks(localHost: MoldEngine.localHostID, instance: "local")
+        let links = records.privacyLinks()
         record.destinationHost = MoldEngine.localHostID
         record.organization = LibraryOrganizationState(observed: .init())
         record.initialOrganizationPending = true
@@ -244,7 +244,7 @@ struct LibrarySyncRecordsTests {
         record.initialOrganizationPending = nil
         try await records.checkpoint(record, key: key, instance: "local")
         #expect(records.privacyRevision == revision)
-        #expect(records.privacyLinks(localHost: MoldEngine.localHostID, instance: "local") == links)
+        #expect(records.privacyLinks() == links)
         record.destinationRoute = "http://elsewhere"
         try await records.checkpoint(record, key: key, instance: "local")
         #expect(records.privacyRevision != revision, "a re-routed copy is a different identity")
@@ -259,13 +259,19 @@ struct LibrarySyncRecordsTests {
         let key = LocalSyncRecord.key(hostID: source.id, filename: original.filename)
         let records = LibrarySyncRecords()
         try await records.checkpoint(receipt, key: key, instance: "local")
+        // The ordinary links snapshot is taken during the run, before verification.
+        #expect(records.links(localHost: MoldEngine.localHostID, instance: "local").isEmpty)
         receipt.provisional = nil
         try await records.checkpoint(receipt, key: key, instance: "local")
         #expect(records.links(localHost: MoldEngine.localHostID, instance: "local").isEmpty)
-        let privacy = records.privacyLinks(localHost: MoldEngine.localHostID, instance: "local")
+        let privacy = records.privacyLinks()
         #expect(privacy[PrintID(host: MoldEngine.localHostID, filename: "copy.png")]
             == privacy[PrintID(host: source.id, filename: original.filename)])
         #expect(privacy[PrintID(host: source.id, filename: original.filename)] != nil)
+        var outcome = LibrarySyncRecords.RunOutcome()
+        outcome.removed = [key]
+        await records.finishRun(outcome, instance: "local")
+        #expect(records.privacyLinks().isEmpty, "a removed copy must not linger in the cached evidence")
     }
 
     @Test func provisionalCollisionReceiptHidesOnlyAndNeverAuthorizesSkipOrOwnership() async throws {
@@ -281,7 +287,7 @@ struct LibrarySyncRecordsTests {
         let records = LibrarySyncRecords()
         try await records.checkpoint(receipt, key: LocalSyncRecord.key(hostID: source.id, filename: original.filename), instance: "destination")
         var query = LibraryQuery(); query.hiddenCollectionIDs = [source.id: ["secret"]]
-        query.privacyLinks = records.privacyLinks(localHost: destination.id, instance: "destination", authority: authority)
+        query.privacyLinks = records.privacyLinks(authority: authority)
         #expect(query.apply(to: [LibraryEntry(host: source, print: original), LibraryEntry(host: destination, print: copied)]).isEmpty)
         #expect(records.links(localHost: destination.id, instance: "destination", authority: authority).isEmpty)
         #expect(records.verifiedOrigin(of: PrintID(host: destination.id, filename: copied.filename), authority: authority) == nil)
@@ -289,7 +295,7 @@ struct LibrarySyncRecordsTests {
         #expect(!receipt.matches(source: original, from: source.id, local: copied, on: destination.id))
         var replaced = authority
         replaced[destination.id] = "replacement route/instance"
-        #expect(records.privacyLinks(localHost: destination.id, instance: "destination", authority: replaced).isEmpty)
+        #expect(records.privacyLinks(authority: replaced).isEmpty)
     }
 
 }
