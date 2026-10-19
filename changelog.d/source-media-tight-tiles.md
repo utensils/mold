@@ -1,3 +1,3 @@
-- **Reliable native Source Media tiles.** Use the Library’s tight aspect-preserving rows and keep badges inside images. Preserve warm previews during resizing and sync, remove timed reloads, and recover cancelled or transiently failed thumbnails without scrolling.
+- **Reliable native Source Media tiles.** Use the Library’s tight aspect-preserving rows and keep badges inside images. Preserve warm previews during resizing and sync, remove timed reloads, and recover cancelled or transiently failed thumbnails without scrolling. Keep filtered Source Media windows independent while sharing cached inventories.
 - **Readable macOS Queue controls.** Pause/resume and empty-queue toolbar buttons and menus always show their action icons, with labels and tooltips.
 - **Responsive unread badges during sync.** Coalesce full privacy projections and ledger saves during transfers, process safe row patches incrementally, and immediately flush viewing, visit and final-sync read state.

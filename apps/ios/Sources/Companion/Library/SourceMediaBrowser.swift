@@ -109,25 +109,26 @@ private struct SourceMediaContent: View {
     @State private var retry = 0
     @State private var refreshed = 0
     var body: some View {
+        let status = catalog.progress(for: owners)
         let visible = SourceMediaDisplay.filter(catalog.sources, allowed: allowed, kind: kind, search: search, queryKinds: queryKinds, sort: sort)
         ScrollViewReader { proxy in
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 20) {
                 HStack {
-                    Text("\(visible.count) \(visible.count == 1 ? "source" : "sources") · \(catalog.completed) of \(owners.count) prints checked")
+                    Text("\(visible.count) \(visible.count == 1 ? "source" : "sources") · \(status.completed) of \(owners.count) prints checked")
                         .font(.caption).foregroundStyle(.secondaryText)
-                    if catalog.loading { ProgressView().controlSize(.small) }
+                    if status.loading { ProgressView().controlSize(.small) }
                 }
-                if !catalog.failures.isEmpty {
-                    DisclosureGroup("Sources unavailable for \(catalog.failures.count) prints") {
-                        ForEach(owners.filter { catalog.failures[$0.id] != nil }.prefix(48)) { owner in
-                            Text("\(owner.hostName) · \(owner.print.displayName): \(catalog.failures[owner.id] ?? "")")
+                if !status.failures.isEmpty {
+                    DisclosureGroup("Sources unavailable for \(status.failures.count) prints") {
+                        ForEach(owners.filter { status.failures[$0.id] != nil }.prefix(48)) { owner in
+                            Text("\(owner.hostName) · \(owner.print.displayName): \(status.failures[owner.id] ?? "")")
                                 .font(.caption).foregroundStyle(.secondaryText)
                         }
                         Button("Retry sources") { retry += 1 }
                     }
                 }
-                if visible.isEmpty && !catalog.loading {
+                if visible.isEmpty && !status.loading {
                     ContentUnavailableView(search.isEmpty ? "No Source Media" : "No Matching Sources", systemImage: "photo.stack",
                         description: Text(search.isEmpty ? "Retained inputs appear here after a creation uses them." : "Try a different source, role or owner name."))
                 }
