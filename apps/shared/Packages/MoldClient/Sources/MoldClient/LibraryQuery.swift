@@ -30,6 +30,13 @@ public struct LibraryQuery: Hashable, Sendable {
         !tokens.isEmpty || !text.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
+    /// Whether anything besides machine choice filters rows: when not, the
+    /// rows shown are exactly the machine baseline and need no second count.
+    public var narrowsBeyondMachines: Bool {
+        !text.trimmingCharacters(in: .whitespaces).isEmpty
+            || tokens.contains { if case .machine = $0 { false } else { true } }
+    }
+
     public func apply(to entries: [LibraryEntry]) -> [LibraryEntry] {
         let showHidden = tokens.contains { if case .collection = $0 { true } else { false } }
         // A merged print asked for by machine shows THAT machine's copy:

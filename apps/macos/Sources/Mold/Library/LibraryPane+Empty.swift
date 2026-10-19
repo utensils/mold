@@ -10,17 +10,22 @@ extension LibraryPane {
         // without invalidating the grid or its tracked context menu.
         if showing.selected.count > 1 { return "\(showing.selected.count.formatted()) selected" }
         let shown = showing.visible.count
+        func noun(_ count: Int) -> String { navigation.scope.isTrash ? "in the trash" : (count == 1 ? "print" : "prints") }
+        // Machine choice is part of the baseline, so nothing else narrows the
+        // grid: what it shows IS the baseline, with no second count.
+        guard navigation.query.narrowsBeyondMachines else { return "\(shown.formatted()) \(noun(shown))" }
         var baselineQuery = LibraryQuery()
         baselineQuery.tokens = navigation.query.machineIDs.map { .machine(id: $0, name: "") }
         baselineQuery = navigation.scope.resolve(baselineQuery, shelves: library.shelves,
             hiddenCollectionIDs: library.hiddenCollectionIDs, privacyEvidence: library.trashed,
             privacyLinks: library.syncPrivacyLinks())
-        let baseline = library.countCache.count(in: showing.pool, query: baselineQuery,
-            partition: navigation.scope.isTrash ? .trash : .all, revision: library.sourceAccessRevision, privacyRevision: library.sourcePrivacyRevision.receipts)
-        let counted = shown == baseline ? shown : baseline
-        let noun = navigation.scope.isTrash ? "in the trash" : (counted == 1 ? "print" : "prints")
-        guard shown != baseline else { return "\(shown.formatted()) \(noun)" }
-        return "\(shown.formatted()) of \(baseline.formatted()) \(noun)"
+        let epoch = library.countEpoch
+        // The grid is exact while the count may trail a sync by a second; a
+        // filter only removes rows, so the baseline is never below them.
+        let baseline = max(shown, library.countCache.count(in: showing.pool, query: baselineQuery,
+            partition: navigation.scope.isTrash ? .trash : .all, revision: epoch.rows, privacyRevision: epoch.receipts))
+        guard shown != baseline else { return "\(shown.formatted()) \(noun(shown))" }
+        return "\(shown.formatted()) of \(baseline.formatted()) \(noun(baseline))"
     }
 
     var pool: [LibraryEntry] {

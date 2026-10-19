@@ -224,6 +224,50 @@ struct LibrarySyncRecordsTests {
         }
     }
 
+    /// Reconcile stamps the local host on records written without one, once
+    /// per print. The copy is unchanged, so the identity clock -- which every
+    /// Library count and privacy projection keys on -- must not move.
+    @Test func reconcileBookkeepingNeverMovesThePrivacyClock() async throws {
+        let source = MoldHost(name: "Origin", baseURL: URL(string: "http://origin")!)
+        let original = print("kept.png")
+        var record = LocalSyncRecord(receipt: original, from: source.id, as: "kept.png", destinationInstance: "local")!
+        record.provisional = nil
+        let key = LocalSyncRecord.key(hostID: source.id, filename: original.filename)
+        let records = LibrarySyncRecords()
+        try await records.checkpoint(record, key: key, instance: "local")
+        let revision = records.privacyRevision
+        let links = records.privacyLinks(localHost: MoldEngine.localHostID, instance: "local")
+        record.destinationHost = MoldEngine.localHostID
+        record.organization = LibraryOrganizationState(observed: .init())
+        record.initialOrganizationPending = true
+        try await records.checkpoint(record, key: key, instance: "local")
+        record.initialOrganizationPending = nil
+        try await records.checkpoint(record, key: key, instance: "local")
+        #expect(records.privacyRevision == revision)
+        #expect(records.privacyLinks(localHost: MoldEngine.localHostID, instance: "local") == links)
+        record.destinationRoute = "http://elsewhere"
+        try await records.checkpoint(record, key: key, instance: "local")
+        #expect(records.privacyRevision != revision, "a re-routed copy is a different identity")
+    }
+
+    /// A receipt verified mid-run leaves the provisional set before `finishRun`
+    /// publishes ordinary links; it must not drop out of privacy evidence between.
+    @Test func aCopyVerifiedMidRunStaysPrivacyEvidence() async throws {
+        let source = MoldHost(name: "Origin", baseURL: URL(string: "http://origin")!)
+        let original = print("secret.png")
+        var receipt = LocalSyncRecord(receipt: original, from: source.id, as: "copy.png", destinationInstance: "local")!
+        let key = LocalSyncRecord.key(hostID: source.id, filename: original.filename)
+        let records = LibrarySyncRecords()
+        try await records.checkpoint(receipt, key: key, instance: "local")
+        receipt.provisional = nil
+        try await records.checkpoint(receipt, key: key, instance: "local")
+        #expect(records.links(localHost: MoldEngine.localHostID, instance: "local").isEmpty)
+        let privacy = records.privacyLinks(localHost: MoldEngine.localHostID, instance: "local")
+        #expect(privacy[PrintID(host: MoldEngine.localHostID, filename: "copy.png")]
+            == privacy[PrintID(host: source.id, filename: original.filename)])
+        #expect(privacy[PrintID(host: source.id, filename: original.filename)] != nil)
+    }
+
     @Test func provisionalCollisionReceiptHidesOnlyAndNeverAuthorizesSkipOrOwnership() async throws {
         let source = MoldHost(name: "Hidden origin", baseURL: URL(string: "http://hidden-origin")!)
         let destination = MoldHost(name: "Unfiled backup", baseURL: URL(string: "http://unfiled-backup")!)

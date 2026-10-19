@@ -136,9 +136,9 @@ struct Sidebar: View {
             library.countCache.count(in: library.items,
                 query: LibraryScope.favorites.resolve(navigation.query, shelves: library.shelves,
                     hiddenCollectionIDs: library.hiddenCollectionIDs, privacyEvidence: library.trashed, privacyLinks: library.syncPrivacyLinks()),
-                revision: library.sourceAccessRevision, privacyRevision: library.sourcePrivacyRevision.receipts)
+                revision: library.countEpoch.rows, privacyRevision: library.countEpoch.receipts)
         case .trash: library.countCache.count(in: library.trashed, query: navigation.query,
-            partition: .trash, revision: library.sourceAccessRevision, privacyRevision: library.sourcePrivacyRevision.receipts)
+            partition: .trash, revision: library.countEpoch.rows, privacyRevision: library.countEpoch.receipts)
         case .all, .collection: nil
         }
     }

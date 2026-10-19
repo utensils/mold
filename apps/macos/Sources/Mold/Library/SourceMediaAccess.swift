@@ -3,12 +3,31 @@ import SwiftUI
 
 extension LibraryStore {
     /// Includes hide-only receipt links, which may change without row edits.
-    struct SourcePrivacyRevision: Equatable {
+    nonisolated struct SourcePrivacyRevision: Equatable, Sendable {
         let rows: Int
         let receipts: Int?
     }
     var sourcePrivacyRevision: SourcePrivacyRevision {
         .init(rows: sourceAccessRevision, receipts: hiddenCollectionIDs.isEmpty ? nil : syncRecords.privacyRevision)
+    }
+
+    /// What the sidebar and subtitle counts key on: `sourcePrivacyRevision`,
+    /// but while a sync runs at most one new value a second (the first at
+    /// once), and exact again the moment it stops. Every copied print moves
+    /// the live revision, and each move re-filtered the whole library.
+    var countEpoch: SourcePrivacyRevision {
+        _ = countEpochWake
+        let read = countEpochBatch.read(sourcePrivacyRevision, batching: localSaveRunning,
+                                        now: ProcessInfo.processInfo.systemUptime)
+        if let due = read.dueIn, countEpochTask == nil {
+            countEpochTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(due))
+                guard let self else { return }
+                self.countEpochTask = nil
+                self.countEpochWake &+= 1
+            }
+        }
+        return read.value
     }
 
     func sourceMediaChanged(_ event: MoldEvent, host: UUID) {

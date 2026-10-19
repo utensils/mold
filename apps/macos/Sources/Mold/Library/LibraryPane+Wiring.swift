@@ -8,8 +8,9 @@ extension LibraryPane {
     /// Its own function because the body grew past what the type checker will
     /// infer in one expression.
     func fullSubtitle(_ showing: LibraryShowing) -> String {
-        guard let sentence = retentionSentence else { return subtitle(showing) }
-        return "\(subtitle(showing)) · \(sentence)"
+        let text = subtitle(showing)
+        guard let sentence = retentionSentence else { return text }
+        return "\(text) · \(sentence)"
     }
 
     /// Only worth the ink when the grid can actually be showing two machines.

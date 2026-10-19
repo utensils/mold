@@ -174,3 +174,17 @@ func searchIsForgivingAboutHowItIsTyped(typed: String) {
     query.tokens = [.collection(slug: "secret", name: "Secret", ids: [workstation: "secret"])]
     #expect(query.apply(to: [backup]).isEmpty, "Trash evidence is never a live collection member")
 }
+
+@Test func onlyTextOrNonMachineTokensNarrowBeyondTheMachineBaseline() {
+    var query = LibraryQuery()
+    #expect(!query.narrowsBeyondMachines)
+    query.tokens = [.machine(id: hal, name: "hal9000")]
+    query.text = "   "
+    query.sort = .oldest
+    #expect(!query.narrowsBeyondMachines, "machines, blank text and order never change the baseline count")
+    query.text = "cat"
+    #expect(query.narrowsBeyondMachines)
+    query.text = ""
+    query.tokens.append(.favorite)
+    #expect(query.narrowsBeyondMachines)
+}
