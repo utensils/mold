@@ -20,18 +20,22 @@ final class LibraryStore {
     var openSourceBrowsers: Set<UUID> = []
     var openSourceDetails: [UUID: SourceMediaAuthority] = [:]
     var unreadMedia: LibraryUnreadLedger
+    @ObservationIgnored var unreadSaveTask: Task<Void, Never>?
+    @ObservationIgnored var unreadRefreshTask: Task<Void, Never>?
     let readDefaults: UserDefaults
     var unreadCount: Int { unreadMedia.count }
     @ObservationIgnored var unreadCountChanged: ((Int) -> Void)?
 
     func finishVisit(_ ids: Set<PrintID>) {
         guard !ids.isEmpty else { return }
+        prepareUnreadInteraction()
         unreadMedia.markSeen(ids)
         unreadMedia.save(to: readDefaults)
         unreadCountChanged?(unreadCount)
     }
 
     func markViewed(_ id: PrintID) {
+        prepareUnreadInteraction()
         if let tile = tile(containing: id) { unreadMedia.view(tile) }
         else { unreadMedia.view(id) }
         unreadMedia.save(to: readDefaults)
@@ -120,7 +124,12 @@ final class LibraryStore {
     var bulkStopRequested = false
     var bulkTargets: Set<PrintID> = []
 
-    var localSaveRunning = false { didSet { if localSaveRunning && !oldValue { syncActivityID = UUID() } } }
+    var localSaveRunning = false {
+        didSet {
+            if localSaveRunning && !oldValue { syncActivityID = UUID() }
+            if oldValue && !localSaveRunning { flushUnreadMedia() }
+        }
+    }
     var localSaveSuppressImports = false
     var syncDestinationHost: MoldHost.ID?
     var localSaveProgress: String?

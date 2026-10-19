@@ -307,7 +307,7 @@ phone Library navigation and iPad Shelves sidebar rather than adding a phone tab
 
 Native Queue navigation badges total `QueueState.isLive` across every host listing: queued, running, paused, held and cancelling. Count merged individual entries rather than batch groups; completed, failed and cancelled history does not contribute.
 
-Source Media groups only verified reusable-byte digests and keeps every owning print/role selectable. Browser authority includes every current live owner, including hidden collections; Trash-only originals remain detail-only. Preview caches are bounded and memory-only, expire after 60 seconds, and evict revoked owners even when the browser is closed. Named gallery events invalidate only that owner; resync invalidates the host. Reuse must recheck the captured owner, route, instance and draft after downloading.
+Source Media groups only verified reusable-byte digests and keeps every owning print/role selectable. Browser authority includes every current live owner, including hidden collections; Trash-only originals remain detail-only. Preview caches are bounded and memory-only, refresh on relevant source events or explicit Refresh, and evict revoked owners even when the browser is closed. Named gallery events invalidate only that owner; resync invalidates the host. Reuse must recheck the captured owner, route, instance and draft after downloading.
 
 Native `HTTPBackend.queue()` consumes every returned cursor before publishing a queue snapshot. Merge repeated runtime/durable IDs within each host, reject malformed or repeated cursors, and never publish a partial backlog as a complete badge total. Legacy hosts without page metadata remain supported.
 
@@ -384,3 +384,5 @@ completion. HTTP 202 is accepted intent, never terminal cancellation; retain the
 live job and offer copyable diagnostics plus explicit operator recovery guidance.
 
 Source Media retains its separate Library navigation and uses the Library View Options, tokenized search, tile sizes and pinch sizing. Source-free print details stay empty after a single cached inventory check; only a relevant owner/host invalidation or explicit Retry rechecks them. Refresh retains a same-authority preview until its replacement arrives.
+
+Source Media uses shared `JustifiedLayout` geometry, oriented source ratios (never generated-output dimensions), stable source identities and a single bounded synchronous warm-pixel cache. Batch ratio discoveries and retain a visible anchor through reflow. Do not poll inventories/thumbnails or turn warm cache hits into loading states. Invalidate old pixel work before publishing the next content epoch; keep same-authority display rows read-only during revalidation, while revoked authority and server refusal still remove access. Display-only sync updates never invalidate source content; identical-content row events remain conservative because retained-source repairs can arrive independently of output media versions.

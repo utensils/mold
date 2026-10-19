@@ -1,5 +1,7 @@
 import Foundation
 import Testing
+import Observation
+import Synchronization
 import MoldClientTesting
 @testable import MoldClient
 
@@ -113,7 +115,7 @@ extension SourceMediaCatalogTests {
 }
 
 extension SourceMediaCatalogTests {
-    @Test func freshnessExpiresAndRevokedOwnerIsNotResurrected() async {
+    @Test func explicitRefreshAndRevokedOwnerAreNeverResurrected() async {
         let backend = FakeBackend(), host = UUID(), now = Date()
         backend.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .available, members: [
             .init(memberId: "source", role: "source_image", displayName: "photo.png", sizeBytes: 5)
@@ -122,7 +124,7 @@ extension SourceMediaCatalogTests {
         await catalog.load(owners: [owner], backend: { _ in backend }, now: now)
         await catalog.load(owners: [owner], backend: { _ in backend }, now: now.addingTimeInterval(59))
         #expect(backend.count("retainedSourceMedia(for:)") == 1)
-        await catalog.load(owners: [owner], backend: { _ in backend }, now: now.addingTimeInterval(61))
+        await catalog.load(owners: [owner], backend: { _ in backend }, refresh: true, now: now.addingTimeInterval(61))
         #expect(backend.count("retainedSourceMedia(for:)") == 2)
         catalog.retain(authorities: [])
         await catalog.load(owners: [], backend: { _ in backend }, now: now)
@@ -191,6 +193,24 @@ private actor CatalogConcurrencyProbe {
     }
 }
 
+/// Hold the first reads until the test has revoked authority. Wall-clock sleeps
+/// cannot establish that ordering when many MainActor suites run together.
+private actor CatalogRevocationGate {
+    var requests = 0
+    private var opened = false
+    private var readers: [CheckedContinuation<Void, Never>] = []
+    func read() async {
+        requests += 1
+        if opened { return }
+        await withCheckedContinuation { readers.append($0) }
+    }
+    func open() {
+        opened = true
+        let waiting = readers; readers = []
+        for reader in waiting { reader.resume() }
+    }
+}
+
 extension SourceMediaCatalogTests {
     @Test func coldReadsAreConcurrentButBoundedAndWarmReadsAreZero() async {
         let probe = CatalogConcurrencyProbe(), backend = FakeBackend(), host = UUID()
@@ -220,9 +240,9 @@ extension SourceMediaCatalogTests {
     }
 
     @Test func revokedAuthorityCannotReturnFromConcurrentReads() async {
-        let probe = CatalogConcurrencyProbe(), backend = FakeBackend(), host = UUID()
+        let probe = CatalogRevocationGate(), backend = FakeBackend(), host = UUID()
         backend.stub("retainedSourceMedia(for:)") { _ in
-            _ = await probe.read()
+            await probe.read()
             return RetainedSourceMedia.Inventory(availability: .available, members: [
                 .init(memberId: "one", role: "source_image", displayName: "image.png", sizeBytes: 1)
             ])
@@ -230,15 +250,16 @@ extension SourceMediaCatalogTests {
         let owners = (0..<205).map { PrintFixtures.entry("revoked-\($0).png", host: host) }
         let catalog = SourceMediaCatalog()
         let task = Task { await catalog.load(owners: owners, backend: { _ in backend }) }
-        while await probe.active == 0 { await Task.yield() }
+        while await probe.requests == 0 { await Task.yield() }
         catalog.retain(authorities: [])
+        await probe.open()
         await task.value
         #expect(catalog.rows.isEmpty && catalog.sources.isEmpty)
         #expect(!catalog.loading)
         #expect(backend.count("retainedSourceMedia(for:)") < owners.count)
     }
 
-    @Test func failedExpiredRefreshDropsPreviouslyVisibleMedia() async {
+    @Test func failedExplicitRefreshDropsPreviouslyVisibleMedia() async {
         let backend = FakeBackend(), host = UUID()
         backend.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .available, members: [
             .init(memberId: "one", role: "source_image", displayName: "image.png", sizeBytes: 1)
@@ -247,7 +268,7 @@ extension SourceMediaCatalogTests {
         await catalog.load(owners: [owner], backend: { _ in backend }, now: now)
         #expect(catalog.rows.count == 1)
         backend.stub("retainedSourceMedia(for:)") { _ in throw MoldClientError.unreachable("offline") }
-        await catalog.load(owners: [owner], backend: { _ in backend }, now: now.addingTimeInterval(61))
+        await catalog.load(owners: [owner], backend: { _ in backend }, refresh: true, now: now.addingTimeInterval(61))
         #expect(catalog.rows.isEmpty && catalog.sources.isEmpty)
         #expect(catalog.failures[owner.id] != nil)
     }
@@ -271,7 +292,7 @@ extension SourceMediaCatalogTests {
 }
 
 extension SourceMediaCatalogTests {
-    @Test func expiredSnapshotRemainsVisibleDuringRefreshButRefusalRemovesIt() async {
+    @Test func snapshotRemainsVisibleDuringExplicitRefreshButRefusalRemovesIt() async {
         let backend = FakeBackend(), host = UUID(), now = Date()
         let inventory = RetainedSourceMedia.Inventory(availability: .available, members: [
             .init(memberId: "source", role: "source_image", displayName: "photo.png", sizeBytes: 5)
@@ -283,10 +304,10 @@ extension SourceMediaCatalogTests {
             await MainActor.run { #expect(catalog.sources.count == 1) }
             return inventory
         }
-        await catalog.load(owners: [owner], backend: { _ in backend }, now: now.addingTimeInterval(61))
+        await catalog.load(owners: [owner], backend: { _ in backend }, refresh: true, now: now.addingTimeInterval(61))
         #expect(catalog.sources.count == 1)
         backend.stub("retainedSourceMedia(for:)", throwing: MoldClientError.unauthorized)
-        await catalog.load(owners: [owner], backend: { _ in backend }, now: now.addingTimeInterval(122))
+        await catalog.load(owners: [owner], backend: { _ in backend }, refresh: true, now: now.addingTimeInterval(122))
         #expect(catalog.sources.isEmpty)
         #expect(catalog.failures[owner.id] != nil)
     }
@@ -348,5 +369,129 @@ extension SourceMediaCatalogTests {
         catalog.retain(authorities: [SourceMediaAuthority(owner: owners[0], route: nil, instance: nil)])
         await catalog.load(owners: owners, backend: { _ in backend })
         #expect(backend.count("retainedSourceMedia(for:)") == 3)
+    }
+}
+
+extension SourceMediaCatalogTests {
+    @Test func sourceFreeBrowserAnswersDoNotExpireOnAnIdleClock() async {
+        let backend = FakeBackend(), host = UUID(), now = Date()
+        backend.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .available, members: []))
+        let owner = PrintFixtures.entry("no-source.png", host: host), catalog = SourceMediaCatalog()
+        await catalog.load(owners: [owner], backend: { _ in backend }, now: now)
+        for seconds in [61.0, 120.0, 3600.0] {
+            await catalog.load(owners: [owner], backend: { _ in backend }, now: now.addingTimeInterval(seconds))
+        }
+        #expect(backend.count("retainedSourceMedia(for:)") == 1)
+        catalog.invalidate(host: host, filename: owner.print.filename)
+        await catalog.load(owners: [owner], backend: { _ in backend })
+        #expect(backend.count("retainedSourceMedia(for:)") == 2)
+    }
+
+    @Test func warmAvailableBrowserDoesNotReloadBecauseOneMinutePassed() async {
+        let backend = FakeBackend(), host = UUID(), now = Date()
+        backend.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .available,
+            members: [.init(memberId: "source", role: "source_image", displayName: "photo.png", sizeBytes: 5)]))
+        let owner = PrintFixtures.entry("owner.png", host: host), catalog = SourceMediaCatalog()
+        await catalog.load(owners: [owner], backend: { _ in backend }, now: now)
+        await catalog.load(owners: [owner], backend: { _ in backend }, now: now.addingTimeInterval(3600))
+        #expect(backend.count("retainedSourceMedia(for:)") == 1)
+        #expect(catalog.rows.count == 1)
+    }
+}
+
+extension SourceMediaCatalogTests {
+    @Test func aWarmNoOpScanNeverPublishesALoadingTransition() async {
+        let backend = FakeBackend(), host = UUID()
+        backend.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .available, members: []))
+        let owner = PrintFixtures.entry("warm.png", host: host), catalog = SourceMediaCatalog()
+        await catalog.load(owners: [owner], backend: { _ in backend })
+        let changes = Mutex(0)
+        withObservationTracking { _ = catalog.loading } onChange: { changes.withLock { $0 += 1 } }
+        await catalog.load(owners: [owner], backend: { _ in backend })
+        #expect(changes.withLock { $0 } == 0)
+    }
+}
+
+extension SourceMediaCatalogTests {
+    @Test func displayOnlySyncChurnUpdatesLabelsWithoutRequestsOrLoading() async {
+        let backend = FakeBackend(), host = UUID()
+        backend.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .available,
+            members: [.init(memberId: "source", role: "source_image", displayName: "photo.png", sizeBytes: 5)]))
+        let original = PrintFixtures.entry("owner.png", host: host), catalog = SourceMediaCatalog()
+        await catalog.load(owners: [original], backend: { _ in backend })
+        let changes = Mutex(0)
+        withObservationTracking { _ = catalog.loading } onChange: { changes.withLock { $0 += 1 } }
+        for index in 0..<100 {
+            let updated = PrintFixtures.entry("owner.png", host: host, tags: ["tag\(index)"], favorite: index % 2 == 0,
+                                              title: "Title \(index)", collections: ["collection\(index)"])
+            #expect(SourceMediaAuthority.isDisplayOnlyUpdate(previous: original.print, updated: updated.print))
+            catalog.updatePresentation(owners: [updated])
+        }
+        #expect(catalog.rows[0].owner.print.title == "Title 99")
+        #expect(catalog.sources[0].searchKey.contains("title 99"))
+        #expect(backend.count("retainedSourceMedia(for:)") == 1)
+        #expect(changes.withLock { $0 } == 0)
+        #expect(!SourceMediaAuthority.isDisplayOnlyUpdate(previous: original.print, updated: original.print),
+                "Identical rows may announce retained-source repair independently of output bytes")
+        #expect(!SourceMediaAuthority.isDisplayOnlyUpdate(previous: original.print,
+            updated: PrintFixtures.print("owner.png", title: "Title", prompt: "changed recipe")))
+    }
+
+    @Test func sameAuthorityInvalidationPreservesDisplayButRevokesReuseUntilAnswer() async {
+        let backend = FakeBackend(), host = UUID()
+        let inventory = RetainedSourceMedia.Inventory(availability: .available,
+            members: [.init(memberId: "source", role: "source_image", displayName: "photo.png", sizeBytes: 5)])
+        backend.stub("retainedSourceMedia(for:)", returning: inventory)
+        let owner = PrintFixtures.entry("owner.png", host: host), catalog = SourceMediaCatalog()
+        await catalog.load(owners: [owner], backend: { _ in backend })
+        let captured = catalog.rows[0]
+        catalog.invalidate(owners: [owner.id], preservingDisplay: true)
+        #expect(catalog.sources.count == 1)
+        #expect(!catalog.contains(captured))
+        catalog.updatePresentation(owners: [owner])
+        #expect(catalog.sources.count == 1)
+        backend.stub("retainedSourceMedia(for:)") { _ in
+            await MainActor.run { #expect(catalog.sources.count == 1) }
+            return inventory
+        }
+        await catalog.load(owners: [owner], backend: { _ in backend })
+        #expect(catalog.contains(captured))
+        catalog.invalidate(owners: [owner.id], preservingDisplay: true)
+        backend.stub("retainedSourceMedia(for:)", throwing: MoldClientError.unauthorized)
+        await catalog.load(owners: [owner], backend: { _ in backend })
+        #expect(catalog.sources.isEmpty)
+        #expect(!catalog.contains(captured))
+    }
+
+    @Test func unrelatedOwnerInvalidationDoesNotAbortAnActiveScopedScan() async {
+        let backend = FakeBackend(), host = UUID()
+        backend.stub("retainedSourceMedia(for:)") { _ in
+            try await Task.sleep(for: .milliseconds(20))
+            return RetainedSourceMedia.Inventory(availability: .available,
+                members: [.init(memberId: "source", role: "source_image", displayName: "photo.png", sizeBytes: 5)])
+        }
+        let owner = PrintFixtures.entry("visible.png", host: host), catalog = SourceMediaCatalog()
+        let task = Task { await catalog.load(owners: [owner], backend: { _ in backend }) }
+        while backend.count("retainedSourceMedia(for:)") == 0 { await Task.yield() }
+        catalog.invalidate(host: host, filename: "outside-filter.png")
+        await task.value
+        #expect(catalog.rows.count == 1)
+        #expect(catalog.completed == 1)
+    }
+}
+
+extension SourceMediaCatalogTests {
+    @Test func aDisplayEditDuringAnInFlightScanIsNotOverwrittenByItsOlderOwnerSnapshot() async {
+        let backend = FakeBackend(), host = UUID(), catalog = SourceMediaCatalog()
+        let original = PrintFixtures.entry("owner.png", host: host)
+        let updated = PrintFixtures.entry("owner.png", host: host, title: "Edited while syncing")
+        backend.stub("retainedSourceMedia(for:)") { _ in
+            await MainActor.run { catalog.updatePresentation(owners: [updated]) }
+            return RetainedSourceMedia.Inventory(availability: .available,
+                members: [.init(memberId: "source", role: "source_image", displayName: "photo.png", sizeBytes: 5)])
+        }
+        await catalog.load(owners: [original], backend: { _ in backend })
+        #expect(catalog.rows[0].owner.print.title == "Edited while syncing")
+        #expect(catalog.sources[0].searchKey.contains("edited while syncing"))
     }
 }

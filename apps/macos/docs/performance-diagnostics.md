@@ -74,3 +74,14 @@ unified-log emission: startup, a 151 ms sync interval, and a deliberately blocke
 main queue produced the expected `diagnostics_started`, `slow_operation` and
 `main_thread_unresponsive` events. This validates the plumbing independently of
 the user's running app; it is not a before/after Library responsiveness result.
+
+A second capture during sync on native build 1554 found 983 of 2,196 main-thread
+sample stacks inside unread-ledger observation, under timeline settlement. These
+are inclusive samples rather than elapsed-time measurements. Unread observation
+now handles safe timeline patches incrementally, coalesces full privacy-aware
+observations to a bounded one-second window during transfers, and coalesces
+ledger persistence. Viewing, visit completion, sync completion and application
+quit flush pending state. A 10,000-row regression verifies that one arrival
+processes one changed logical group. The isolated 20,000-row hidden-collection
+benchmark measured approximately 441 ms per full projection and observation;
+this supports coalescing but does not establish a live before/after speedup.

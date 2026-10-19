@@ -110,6 +110,7 @@ private struct SourceMediaContent: View {
     @State private var refreshed = 0
     var body: some View {
         let visible = SourceMediaDisplay.filter(catalog.sources, allowed: allowed, kind: kind, search: search, queryKinds: queryKinds, sort: sort)
+        ScrollViewReader { proxy in
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 20) {
                 HStack {
@@ -130,38 +131,36 @@ private struct SourceMediaContent: View {
                     ContentUnavailableView(search.isEmpty ? "No Source Media" : "No Matching Sources", systemImage: "photo.stack",
                         description: Text(search.isEmpty ? "Retained inputs appear here after a creation uses them." : "Try a different source, role or owner name."))
                 }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: edge, maximum: edge * 1.5), spacing: JustifiedLayout.gap)],
-                          alignment: .leading, spacing: JustifiedLayout.gap) {
-                    ForEach(visible) { source in
-                        SourceMediaTile(source: source, openOwner: openOwner)
-                    }
+                SourceMediaGrid(sources: visible, edge: edge, openOwner: openOwner) {
+                    proxy.scrollTo($0, anchor: .top)
                 }
                 Text("Sources remain available while a library print uses them. Deleting the final owning print releases its sources.")
                     .font(.caption).foregroundStyle(.secondaryText)
             }
         }
+        }
+        .onChange(of: owners) { _, latest in catalog.updatePresentation(owners: latest) }
         .toolbar { Button("Refresh", systemImage: "arrow.clockwise") { retry += 1 } }
-        .task(id: SourceBrowserKey(owners: owners, routes: routes, instances: instances, retry: retry, revision: catalog.revision)) {
+        .task(id: SourceBrowserKey(authorities: owners.compactMap { allowed[$0.id] }, retry: retry, revisions: owners.map { catalog.contentRevision(for: $0.id) })) {
             let force = retry != refreshed
             refreshed = retry
-            if force { await SourceMediaPreview.invalidate(authorities: Set(allowed.values)) }
+            if force {
+                await SourceMediaPreview.invalidate(authorities: Set(allowed.values))
+                guard !Task.isCancelled else { return }
+                catalog.invalidate(owners: Set(allowed.keys), preservingDisplay: true)
+                return
+            }
             // The access monitor prunes by all authorized owners; filters must keep warm previews.
             await catalog.load(owners: owners, backend: { hosts.backend(for: $0) }, route: { hosts.host($0) },
                                instance: { hosts.instanceID(of: $0) }, refresh: force)
-            while !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(60)) } catch { return }
-                await catalog.load(owners: owners, backend: { hosts.backend(for: $0) }, route: { hosts.host($0) },
-                                   instance: { hosts.instanceID(of: $0) })
-            }
+
         }
     }
 }
 private struct SourceBrowserKey: Hashable {
-    let owners: [LibraryEntry]
-    let routes: [UUID: MoldHost]
-    let instances: [UUID: String?]
+    let authorities: [SourceMediaAuthority]
     let retry: Int
-    let revision: Int
+    let revisions: [Int]
 }
 struct SourceMediaUsageCard: View {
     @Environment(HostStore.self) private var hosts

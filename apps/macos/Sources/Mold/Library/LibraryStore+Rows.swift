@@ -95,7 +95,7 @@ extension LibraryStore {
             pendingLive = PendingRows()
             if liveTimeline.patch(upserted: changed, removed: gone, links: links) {
                 items = liveTimeline.tiles
-                refreshUnreadMedia()
+                refreshUnreadMedia(changed: changed, removed: gone)
                 rows.bump()
             } else {
                 rebuild()
@@ -108,7 +108,7 @@ extension LibraryStore {
             pendingTrash = PendingRows()
             if trashTimeline.patch(upserted: changed, removed: gone, links: links) {
                 trashed = trashTimeline.tiles
-                refreshUnreadMedia()
+                refreshUnreadMedia(changed: [], removed: [])
                 rows.bump()
             } else {
                 rebuildTrash()

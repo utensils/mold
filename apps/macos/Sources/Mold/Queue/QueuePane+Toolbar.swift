@@ -29,11 +29,15 @@ extension QueuePane {
     @ViewBuilder private var gateControl: some View {
         let gate = queueGate
         if gate.machines.count == 1, let machine = gate.machines.first {
-            Button(machine.title) { gate.toggle(.machine(machine.id)) }
+            Button(machine.title, systemImage: machine.isPaused ? "play" : "pause") { gate.toggle(.machine(machine.id)) }
+                .help(machine.titleNamingMachine)
         } else {
-            Menu("Queue") {
+            Menu {
                 RowActionMenu(actions: gate.items(), perform: gate.toggle)
+            } label: {
+                Label("Queue controls", systemImage: "pause.circle")
             }
+            .help("Pause or resume queues on selected machines")
         }
     }
 
@@ -52,15 +56,19 @@ extension QueuePane {
 
     @ViewBuilder private var emptyQueueControl: some View {
         if emptyQueueTargets.count == 1, let host = emptyQueueTargets.first {
-            Button("Empty Queue…") { confirmEmptyQueue(on: host) }
+            Button("Empty Queue…", systemImage: "trash") { confirmEmptyQueue(on: host) }
+                .help("Cancel queued and held jobs on \(host.name)")
         } else {
-            Menu("Empty Queue…") {
+            Menu {
                 Button(QueueEmptyConfirm.allMachinesItem) { confirmEmptyAllQueues() }
                 Divider()
                 ForEach(emptyQueueTargets) { host in
                     Button("Empty Queue on \(host.name)…") { confirmEmptyQueue(on: host) }
                 }
+            } label: {
+                Label("Empty Queue…", systemImage: "trash")
             }
+            .help("Cancel queued and held jobs on selected machines")
         }
     }
 

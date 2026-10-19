@@ -74,6 +74,7 @@ final class MoldAppDelegate: NSObject, NSApplicationDelegate {
         PerformanceDiagnostics.shared.setActive(false)
         remotePairing?.shutdown()
         if let library {
+            library.flushUnreadMedia()
             library.syncSession.cancelForQuit(in: library)
             // Each replica's debounced save, now: a relaunch resumes from the
             // newest cursor. Best effort -- the files are a cache.
