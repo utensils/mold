@@ -7,6 +7,7 @@ struct SourceMediaSection: View {
     @Environment(LibraryStore.self) private var library
     @Environment(AppRouter.self) private var router
     let entry: LibraryEntry
+    var onEmpty: () -> Void = {}
     @State private var inventory: RetainedSourceMedia.Inventory?
     @State private var detailID = UUID()
     @State private var loadedRevision = -1
@@ -17,10 +18,15 @@ struct SourceMediaSection: View {
     private var authority: SourceMediaAuthority {
         .init(owner: entry, route: hosts.host(entry.hostID), instance: hosts.instanceID(of: entry.hostID))
     }
+    private var state: SourceMediaState {
+        SourceMediaState(inventory: loadedAuthority == authority && loadedRevision == library.sourceMediaCatalog.contentRevision(for: entry.id) ? inventory : nil,
+                         failed: failure != nil, metadata: entry.print.metadata)
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if state.showsSection(hasConditioning: RetainedSourceMedia.disclosable(entry.print.metadata)) {
             Text("Source Media").font(.headline)
-            if let inventory, loadedAuthority == authority, loadedRevision == library.sourceMediaCatalog.revision, library.allowsSource(authority, detail: true) {
+            if let inventory, loadedAuthority == authority, loadedRevision == library.sourceMediaCatalog.contentRevision(for: entry.id), library.allowsSource(authority, detail: true) {
                 if inventory.availability == .available {
                     let groups = SourceMediaCatalog.group(inventory.members.map {
                         SourceMediaCatalog.Row(owner: entry, member: $0, route: hosts.host(entry.hostID), instance: hosts.instanceID(of: entry.hostID))
@@ -41,29 +47,30 @@ struct SourceMediaSection: View {
             if SourceMediaState(inventory: inventory, failed: failure != nil, metadata: entry.print.metadata).canRetry {
                 Button("Retry sources") { retry += 1 }
             }
+            }
         }
+        .onChange(of: state) { _, new in if new == .none { onEmpty() } }
         .onDisappear { library.openSourceDetails[detailID] = nil }
-        .task(id: SourceMediaInventoryKey(authority: authority, retry: retry, revision: library.sourceMediaCatalog.revision)) {
+        .task(id: SourceMediaInventoryKey(authority: authority, retry: retry, revision: library.sourceMediaCatalog.contentRevision(for: entry.id))) {
             library.openSourceDetails[detailID] = authority
             await load(force: retry > 0)
-            while !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(60)) } catch { return }
-                await load(force: true)
-            }
+            if state == .none { library.openSourceDetails[detailID] = nil }
         }
     }
     private func load(force: Bool) async {
-        inventory = nil; loadedAuthority = nil; failure = nil
+        if loadedAuthority != authority || loadedRevision != library.sourceMediaCatalog.contentRevision(for: entry.id) {
+            inventory = nil; loadedAuthority = nil
+        }
+        failure = nil
         guard library.allowsSource(authority, detail: true) else { failure = "This print is no longer available in the library."; return }
         guard let host = hosts.host(entry.hostID) else { failure = "Connect this machine to read its sources."; return }
         let captured = authority
-        let revision = library.sourceMediaCatalog.revision
+        let revision = library.sourceMediaCatalog.contentRevision(for: entry.id)
         do {
-            if force { await SourceMediaPreview.invalidate(host: entry.hostID, filename: entry.print.filename) }
             guard let result = try await SourceMediaLoading.inventory(owner: entry, authority: captured,
                 catalog: library.sourceMediaCatalog, backend: hosts.backend(for: host), refresh: force, isCurrent: {
                     captured == authority && library.allowsSource(captured, detail: true)
-                        && revision == library.sourceMediaCatalog.revision
+                        && revision == library.sourceMediaCatalog.contentRevision(for: entry.id)
                 }) else { return }
             inventory = result; loadedAuthority = captured; loadedRevision = revision
         } catch { if !Task.isCancelled { failure = error.localizedDescription } }

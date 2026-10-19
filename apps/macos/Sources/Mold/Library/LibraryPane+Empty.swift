@@ -10,9 +10,13 @@ extension LibraryPane {
         // without invalidating the grid or its tracked context menu.
         if showing.selected.count > 1 { return "\(showing.selected.count.formatted()) selected" }
         let shown = showing.visible.count
-        let baseline = navigation.scope.baselineCount(in: showing.pool,
-            machines: navigation.query.machineIDs, shelves: library.shelves,
-            hiddenIDs: library.hiddenCollectionIDs, privacyEvidence: library.trashed, privacyLinks: library.syncPrivacyLinks())
+        var baselineQuery = LibraryQuery()
+        baselineQuery.tokens = navigation.query.machineIDs.map { .machine(id: $0, name: "") }
+        baselineQuery = navigation.scope.resolve(baselineQuery, shelves: library.shelves,
+            hiddenCollectionIDs: library.hiddenCollectionIDs, privacyEvidence: library.trashed,
+            privacyLinks: library.syncPrivacyLinks())
+        let baseline = library.countCache.count(in: showing.pool, query: baselineQuery,
+            partition: navigation.scope.isTrash ? .trash : .all, revision: library.sourceAccessRevision, privacyRevision: library.sourcePrivacyRevision.receipts)
         let counted = shown == baseline ? shown : baseline
         let noun = navigation.scope.isTrash ? "in the trash" : (counted == 1 ? "print" : "prints")
         guard shown != baseline else { return "\(shown.formatted()) \(noun)" }

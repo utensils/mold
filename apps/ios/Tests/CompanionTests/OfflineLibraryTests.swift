@@ -147,6 +147,14 @@ struct OfflineLibraryTests {
         #expect(ThumbnailLoader.diskKey(entry, size: 256) == nil)
     }
 
+    @Test func unlimitedStoragePersistsWithoutOverflow() throws {
+        let defaults = try #require(UserDefaults(suiteName: "offline-limit-test-\(UUID())"))
+        defaults.set(OfflineLimit.unlimited.rawValue, forKey: Preference.offlineLimit)
+        #expect(OfflineLimit.current(defaults) == .unlimited)
+        #expect(OfflineLimit.unlimited.thumbnailBytes == Int.max)
+        #expect(OfflineLimit.unlimited.originalBytes == Int.max)
+    }
+
     // MARK: - Pinch
 
     @Test func aPinchWalksTheSizesLiveAndStopsAtTheEnds() {
@@ -325,11 +333,51 @@ struct OfflineLibraryTests {
         let loader = ThumbnailLoader(hosts: hosts, directory: temp("offline"), limit: .mb250)
         let entry = LibraryEntry(host: hosts.hosts[0], print: try print("owl.png", version: "v1"))
         await loader.disk.store(png(), for: try #require(ThumbnailLoader.diskKey(entry, size: 256)))
-        await loader.originals.store(png(), for: try #require(ThumbnailLoader.diskKey(entry, size: 0)))
+        let originalBytes = png()
+        fake.stub("mediaFile(_:trashed:)") { _ in
+            let file = FileManager.default.temporaryDirectory.appending(path: "test-original-\(UUID())")
+            try originalBytes.write(to: file)
+            return file
+        }
+        let opened = try await loader.originalFile(for: entry)
+        try FileManager.default.removeItem(at: opened)
+        fake.stub("mediaFile(_:trashed:)") { _ in throw CancellationError() }
         #expect(await loader.image(for: entry, pixels: 200) != nil)
         #expect(await loader.original(for: entry) != nil)
         #expect(fake.count("thumbnail(_:size:trashed:)") == 0)
         #expect(fake.count("media(_:trashed:)") == 0)
+        let directory = await loader.disk.directory.deletingLastPathComponent()
+        let relaunched = ThumbnailLoader(hosts: hosts, directory: directory, limit: .unlimited)
+        #expect(await relaunched.original(for: entry) != nil)
+        let actions = PrintActions(hosts: hosts, thumbnails: relaunched)
+        let exports = try #require(await actions.files(for: [entry]))
+        defer { PrintActions.removeFiles(exports) }
+        #expect(try Data(contentsOf: exports[0]) == originalBytes)
+        #expect(fake.count("mediaFile(_:trashed:)") == 1)
+    }
+
+    @Test func viewedVideoSharesItsOriginalFromAFreshLoaderOffline() async throws {
+        let fake = FakeBackend(), bytes = Data([0, 1, 2, 3])
+        fake.stub("mediaFile(_:trashed:)") { _ in
+            let file = FileManager.default.temporaryDirectory.appending(path: "test-video-\(UUID())")
+            try bytes.write(to: file)
+            return file
+        }
+        let hosts = try await hosts(fake, up: false), directory = temp("offline-video")
+        let entry = LibraryEntry(host: hosts.hosts[0], print: try print("clip.mp4", version: "v1"))
+        let loader = ThumbnailLoader(hosts: hosts, directory: directory, limit: .unlimited)
+        let opened = try await loader.originalFile(for: entry)
+        try FileManager.default.removeItem(at: opened)
+        fake.stub("mediaFile(_:trashed:)") { _ in throw CancellationError() }
+        let relaunched = ThumbnailLoader(hosts: hosts, directory: directory, limit: .unlimited)
+        let localPlayback = try await relaunched.originalFile(for: entry)
+        defer { try? FileManager.default.removeItem(at: localPlayback) }
+        let actions = PrintActions(hosts: hosts, thumbnails: relaunched)
+        let exports = try #require(await actions.files(for: [entry]))
+        defer { PrintActions.removeFiles(exports) }
+        #expect(exports[0].pathExtension == "mp4")
+        #expect(try Data(contentsOf: exports[0]) == bytes)
+        #expect(fake.count("mediaFile(_:trashed:)") == 1)
     }
 
     /// A 512 saved for offline draws a 256 tile: the smallest sizes are not

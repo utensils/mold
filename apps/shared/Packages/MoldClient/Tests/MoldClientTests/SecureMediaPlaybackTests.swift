@@ -1,4 +1,6 @@
 import AVFoundation
+import Combine
+import Synchronization
 import CoreVideo
 import CoreGraphics
 import Foundation
@@ -36,6 +38,58 @@ import Testing
         #expect(await transport.requests.isEmpty == false)
         #expect(await transport.requests.allSatisfy { $0.value(forHTTPHeaderField: "X-Api-Key") == "encrypted-api-credential" })
         #expect(await transport.requests.allSatisfy { $0.url?.query == (trashed ? "view=trash" : nil) })
+    }
+
+    @Test(arguments: [false, true])
+    func depletedStreamRecoversDecodedFramesAndRespectsPause(pauseDuringOutage: Bool) async throws {
+        let gate = MediaReadGate()
+        let transport = MediaRangeFixture(data: try Data(contentsOf: fixture), delay: .milliseconds(10), gate: gate)
+        let backend = HTTPBackend(host: .init(name: "Outage fixture", baseURL: URL(string: "https://not-fetched.invalid")!), transport: transport)
+        let media = try await backend.playableMedia(for: "movie.mp4")
+        let item = media.playerItem()
+        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
+        item.add(output)
+        let player = AVPlayer(playerItem: item)
+        let session = VideoPlaybackSession()
+        defer { session.cancel(); player.replaceCurrentItem(with: nil); item.asset.cancelLoading() }
+        try await media.prepare(player)
+        session.attach(player)
+        let stalls = Mutex(0)
+        let notifications = NotificationCenter.default.publisher(for: .AVPlayerItemPlaybackStalled, object: item)
+            .sink { _ in stalls.withLock { $0 += 1 } }
+        let rates = player.publisher(for: \.rate).receive(on: DispatchQueue.main).sink { rate in
+            MainActor.assumeIsolated { session.nativeRateChanged(rate) }
+        }
+        defer { rates.cancel(); notifications.cancel() }
+        await gate.close()
+        session.play()
+        let stallDeadline = ContinuousClock.now + .seconds(5)
+        while ContinuousClock.now < stallDeadline && stalls.withLock({ $0 }) == 0 {
+            _ = output.copyPixelBuffer(forItemTime: player.currentTime(), itemTimeForDisplay: nil)
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try #require(stalls.withLock { $0 } > 0, "The fixture must produce a real decoder-backed network stall")
+        let held = player.currentTime().seconds
+        try await Task.sleep(for: .seconds(1))
+        #expect(player.currentTime().seconds - held < 0.1, "Do not run the clock ahead while decoded media is unavailable")
+        #expect(session.intendsToPlay)
+        if pauseDuringOutage { player.pause() }
+        await gate.open()
+        if pauseDuringOutage {
+            try await Task.sleep(for: .milliseconds(500))
+            #expect(player.rate == 0 && !session.intendsToPlay)
+            session.play()
+        }
+        let deadline = ContinuousClock.now + .seconds(10)
+        var decoded = CMTime.invalid
+        while ContinuousClock.now < deadline && (!decoded.isNumeric || decoded.seconds < 2.5) {
+            if let error = item.error { throw error }
+            var displayed = CMTime.invalid
+            if output.copyPixelBuffer(forItemTime: player.currentTime(), itemTimeForDisplay: &displayed) != nil,
+               displayed.isNumeric { decoded = displayed }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(decoded.isNumeric && decoded.seconds >= 2.5, "Resume actual decoded presentation samples after the connection recovers")
     }
 
     @Test func playbackPolicyFollowsTheCurrentMediaWhenAPlayerIsReused() {
@@ -153,7 +207,8 @@ private actor MediaRangeFixture: MoldHTTPTransport {
     let data: Data
     let delay: Duration
     var requests: [URLRequest] = []
-    init(data: Data, delay: Duration = .zero) { self.data = data; self.delay = delay }
+    let gate: MediaReadGate?
+    init(data: Data, delay: Duration = .zero, gate: MediaReadGate? = nil) { self.data = data; self.delay = delay; self.gate = gate }
     func response(for request: URLRequest, body: MoldRequestBody) async throws -> (MoldResponseBytes, HTTPURLResponse) {
         requests.append(request)
         var headers = ["Content-Type": "video/mp4", "Accept-Ranges": "bytes", "Content-Length": String(data.count)]
@@ -165,17 +220,28 @@ private actor MediaRangeFixture: MoldHTTPTransport {
         guard start <= end else { throw SecureConnectionError.protocolViolation }
         let bytes = data.subdata(in: start..<(end + 1))
         headers["Content-Range"] = "bytes \(start)-\(end)/\(data.count)"; headers["Content-Length"] = String(bytes.count)
-        return (MoldResponseBytes(reader: MediaBytes(bytes, delay: delay)), HTTPURLResponse(url: request.url!, statusCode: 206, httpVersion: nil, headerFields: headers)!)
+        return (MoldResponseBytes(reader: MediaBytes(bytes, delay: delay, gate: gate)), HTTPURLResponse(url: request.url!, statusCode: 206, httpVersion: nil, headerFields: headers)!)
     }
 }
 private actor MediaBytes: MoldBodyReader {
     var data: Data
     let delay: Duration
-    init(_ data: Data, delay: Duration = .zero) { self.data = data; self.delay = delay }
+    let gate: MediaReadGate?
+    init(_ data: Data, delay: Duration = .zero, gate: MediaReadGate? = nil) { self.data = data; self.delay = delay; self.gate = gate }
     func read() async throws -> Data? {
+        try await gate?.wait()
         if delay > .zero { try await Task.sleep(for: delay) }
         guard !data.isEmpty else { return nil }
         let next = Data(data.prefix(16_384)); data.removeFirst(next.count); return next
     }
     func cancel() { data = Data() }
+}
+
+private actor MediaReadGate {
+    private var blocked = false
+    func close() { blocked = true }
+    func open() { blocked = false }
+    func wait() async throws {
+        while blocked { try await Task.sleep(for: .milliseconds(20)) }
+    }
 }

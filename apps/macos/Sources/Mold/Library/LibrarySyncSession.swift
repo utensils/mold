@@ -118,6 +118,8 @@ final class LibrarySyncSession {
         library.localSaveStopRequested = false
         library.localSaveTask = Task { [weak library] in
             guard let library else { return }
+            let interval = PerformanceDiagnostics.shared.begin(.librarySync)
+            defer { PerformanceDiagnostics.shared.end(interval) }
             if let selection { await library.copy(selection, to: destination) }
             else { await library.syncAll(to: destination, fullPlan: fullPlan, automatic: automatic) }
         }

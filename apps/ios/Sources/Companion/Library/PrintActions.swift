@@ -42,7 +42,11 @@ final class PrintActions {
 
     @ObservationIgnored var sharedFiles: [URL] = []
     @ObservationIgnored let hosts: HostStore
-    init(hosts: HostStore) { self.hosts = hosts }
+    @ObservationIgnored let thumbnails: ThumbnailLoader
+    init(hosts: HostStore, thumbnails: ThumbnailLoader? = nil) {
+        self.hosts = hosts
+        self.thumbnails = thumbnails ?? ThumbnailLoader(hosts: hosts)
+    }
 
     /// The prints' own files, fetched once and handed to the share sheet.
     func share(_ entries: [LibraryEntry]) {

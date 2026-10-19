@@ -396,7 +396,7 @@ Deleting the media currently open in a Library viewer keeps the viewer open on t
 ### Source Media
 
 Open Source Media from Library (or the iPad Shelves sidebar) to browse original
-inputs retained by visible library prints. Each print's Info also lists its
+inputs retained by all live library prints, including hidden collections. Each print's Info also lists its
 retained inputs, including ordered references and boundary frames. Image previews
 are authenticated thumbnails; Use source imports the original into a compatible
 input of the current Generate model. Audio and video show their media icons and
@@ -412,15 +412,15 @@ Library connection status is always available in the toolbar. Offline and reconn
 
 The Queue navigation badge reads every server page and totals unfinished jobs across all machines: rendering, queued, paused, held, and cancelling jobs. Finished, failed, and cancelled history is excluded; batches contribute their individual unfinished children, with runtime and durable copies counted once per machine.
 
-Source Media combines identical verified source bytes into one card while preserving every print, role and machine in **Details and roles**. Unknown content identities remain separate. Choose a copy there before **Use source** to select its exact authoring origin. The grid starts with 48 sources and offers more on demand. Fresh inventories survive navigation, reordering and display-only edits for up to 60 seconds; Refresh revalidates immediately. Private previews stay in a 32 MiB decoded-memory cache, share repeated requests, and allow at most four downloads/decodes at once. They are never written to an offline source library; visibility and machine identity continue to fence preview and reuse.
+Source Media combines identical verified source bytes into one card while preserving every print, role and machine in **Details and roles**. Unknown content identities remain separate. Choose a copy there before **Use source** to select its exact authoring origin. The lazy thumbnail grid shows all discovered sources; the Library sizing controls resize it without reloading inventories. Fresh inventories survive navigation, reordering and display-only edits for up to 60 seconds; Refresh revalidates immediately. Private previews stay in a 32 MiB decoded-memory cache, share repeated requests, and allow at most four downloads/decodes at once. They are never written to an offline source library; visibility and machine identity continue to fence preview and reuse.
 
-Source previews and inventories refresh after 60 seconds. Named gallery changes expire only the affected owner; a reconnect resync expires that machine. Closing Sources keeps the bounded warm cache, while removed routes and no-longer-visible owners are evicted across the app. Explicitly opened details keep access to their exact live or Trash publication (including a hidden collection), without adding it to the Source Media browser. Source reuse rechecks the publication and destination draft after download.
+Source previews and inventories refresh after 60 seconds. Named gallery changes expire only the affected owner; a reconnect resync expires that machine. Closing Sources keeps the bounded warm cache, while removed routes and removed owners are evicted across the app. Live owners from hidden collections appear in Source Media; Trash-only owners remain accessible through their print details. Source reuse rechecks the publication and destination draft after download.
 
 Held jobs with a server-verified missing model component (including a missing adapter) offer **Download and Retry** directly in Queue and Job Details. The original explanation and Failure Details remain available alongside Move to. Downloads use that job’s exact model and machine, retain normal license review, and retry only after every returned download ticket succeeds. Malformed or mismatched recovery hints never redirect a download; older servers retain their typed missing-model recovery.
 
 Active model downloads and repairs keep model names and IDs full width, with progress and a compact **Cancel** control underneath. The control remains labeled **Cancel Download** for VoiceOver and retains a 44-point touch target. Accessibility text sizes stack progress text and actions.
 
-Source Media offers media-type and machine filters alongside search. Open a source to inspect its original image, video or audio, file details, and every visible use (including multiple roles and keyframe positions in the same print). Choose an exact copy for reuse or open an owning print to manage retention. Native viewers stream only the selected original into a private temporary file, delete it on dismissal, and bound image decoding; originals larger than 128 MiB are not previewed. No originals are downloaded just by scrolling. Inventory discovery starts with four owners per machine, then batches up to 100 with two concurrent requests; fresh repeated visits make no new inventory requests.
+Source Media stays in its own Library section and reuses the Library machine, media-type, sort, thumbnail-size and tokenized-search controls, with a collection selector that includes hidden collections. Technical IDs, hashes and reuse actions are in source Details. Open a source to inspect its original image, video or audio, file details, and every eligible use (including multiple roles and keyframe positions in the same print). Choose an exact copy for reuse or open an owning print to manage retention. Native viewers stream only the selected original into a private temporary file, delete it on dismissal, and bound image decoding; originals larger than 128 MiB are not previewed. No originals are downloaded just by scrolling. Inventory discovery starts with four owners per machine, then batches up to 100 with two concurrent requests; fresh repeated visits make no new inventory requests.
 
 Native source details use an indexed visibility projection and owner-specific
 invalidation. Unrelated print updates do not restart the selected original.
@@ -486,3 +486,16 @@ within their current phase, rather than completed video frames. A successful
 202 cancellation response means the request is pending while the device remains
 held. The app follows authoritative queue/preview snapshots until real worker
 return, and a null diagnostic clears the stalled presentation when work resumes.
+
+Opened images and videos keep their full original files in the device's offline
+library. Video playback downloads one complete file before starting, then plays
+locally; the loading state says “Downloading for offline playback…”. Opening,
+sharing, saving the original to Photos or Files, and original-file export reuse
+that cache without a machine connection. Remote generation and format conversions
+still require their machine. Settings → Offline Storage includes Unlimited;
+finite limits evict older files, and an image or video that cannot be retained
+says “Not saved offline”. A thumbnail-only fallback instead says it is a preview.
+Clearing the cache and removing a machine fence pending downloads. Cached originals
+are versioned by the print and machine authority and excluded from device backup.
+
+Source-free prints omit the Source Media details section after one inventory check. Empty answers are reused until that owner changes; unrelated sync activity does not restart the check or blank an existing preview.

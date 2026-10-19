@@ -24,3 +24,14 @@ struct SourceMediaActionsTests {
         #expect(SourceMediaState.unavailable.canRetry)
     }
 }
+
+extension SourceMediaActionsTests {
+    @Test func emptyInventoryHasNoSectionAndUnconditionedLoadingStaysQuiet() {
+        let empty = RetainedSourceMedia.Inventory(availability: .available, members: [])
+        #expect(!SourceMediaState(inventory: empty, failed: false).showsSection(hasConditioning: false))
+        #expect(!SourceMediaState.loading.showsSection(hasConditioning: false))
+        #expect(SourceMediaState.loading.showsSection(hasConditioning: true))
+        #expect(SourceMediaState.available.showsSection(hasConditioning: false))
+        #expect(SourceMediaState.failed.showsSection(hasConditioning: false))
+    }
+}

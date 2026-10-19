@@ -16,6 +16,8 @@ enum LibraryGridKeys {
     /// AppKit sends U+007F for the physical backward-delete key, while
     /// SwiftUI's canonical `.delete` is U+0008.
     static let physicalDelete = KeyEquivalent("\u{7f}")
+    static let viewerKeys: Set<KeyEquivalent> = [.delete, .deleteForward, physicalDelete, "f"]
+
     /// Every key the grid answers, so the binding and the map cannot drift.
     static let keys: Set<KeyEquivalent> = [
         .leftArrow, .rightArrow, .upArrow, .downArrow, .return, .space, .delete, .deleteForward, physicalDelete, .escape, "f",

@@ -25,8 +25,7 @@ extension PrintActions {
                 return nil
             }
             do {
-                let downloaded = try await hosts.backend(for: host).mediaFile(entry.print.filename,
-                                                                            trashed: entry.print.trashedAt != nil)
+                let downloaded = try await thumbnails.originalFile(for: entry, trashed: entry.print.trashedAt != nil)
                 defer { try? FileManager.default.removeItem(at: downloaded) }
                 try Task.checkCancellation()
                 let directory = FileManager.default.temporaryDirectory.appending(path: "mold-print-export-\(UUID())")

@@ -14,8 +14,10 @@ import MoldClient
 @Observable
 final class LibraryStore {
     let sourceMediaCatalog = SourceMediaCatalog()
+    @ObservationIgnored let countCache = LibraryQueryCountCache()
     @ObservationIgnored let sourceAccessIndex = SourceMediaAccessIndex()
     var sourceAccessRevision = 0
+    var openSourceBrowsers: Set<UUID> = []
     var openSourceDetails: [UUID: SourceMediaAuthority] = [:]
     var unreadMedia: LibraryUnreadLedger
     let readDefaults: UserDefaults

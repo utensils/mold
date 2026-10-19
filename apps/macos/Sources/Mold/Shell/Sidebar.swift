@@ -133,9 +133,12 @@ struct Sidebar: View {
     private func count(of scope: LibraryScope) -> Int? {
         return switch scope {
         case .favorites:
-            LibraryScope.favorites.resolve(navigation.query, shelves: library.shelves,
-                hiddenCollectionIDs: library.hiddenCollectionIDs, privacyEvidence: library.trashed, privacyLinks: library.syncPrivacyLinks()).apply(to: library.items).count
-        case .trash: navigation.query.apply(to: library.trashed).count
+            library.countCache.count(in: library.items,
+                query: LibraryScope.favorites.resolve(navigation.query, shelves: library.shelves,
+                    hiddenCollectionIDs: library.hiddenCollectionIDs, privacyEvidence: library.trashed, privacyLinks: library.syncPrivacyLinks()),
+                revision: library.sourceAccessRevision, privacyRevision: library.sourcePrivacyRevision.receipts)
+        case .trash: library.countCache.count(in: library.trashed, query: navigation.query,
+            partition: .trash, revision: library.sourceAccessRevision, privacyRevision: library.sourcePrivacyRevision.receipts)
         case .all, .collection: nil
         }
     }

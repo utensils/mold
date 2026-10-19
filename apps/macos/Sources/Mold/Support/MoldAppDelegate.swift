@@ -57,6 +57,7 @@ final class MoldAppDelegate: NSObject, NSApplicationDelegate {
     /// whether a `gallery_added` frame counts and clears the badge on the
     /// transition back to `true` (decision 21).
     func applicationDidBecomeActive(_ notification: Notification) {
+        PerformanceDiagnostics.shared.setActive(true)
         landedPrints?.isActive = true
         // The same signal, one meaning: while Mold is frontmost its panes are
         // being read, so the machines that cannot stream are asked on a tick.
@@ -64,11 +65,13 @@ final class MoldAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidResignActive(_ notification: Notification) {
+        PerformanceDiagnostics.shared.setActive(false)
         landedPrints?.isActive = false
         heartbeat?.stop()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        PerformanceDiagnostics.shared.setActive(false)
         remotePairing?.shutdown()
         if let library {
             library.syncSession.cancelForQuit(in: library)

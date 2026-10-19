@@ -12,6 +12,13 @@ import Testing
 /// not sandboxed.
 @MainActor
 struct PrintMaterializerTests {
+    @Test func unlimitedAndOversizedPreferencesCannotOverflow() {
+        #expect(PrintMaterializer.bytes(forMegabytes: -1) == Int.max)
+        #expect(PrintMaterializer.bytes(forMegabytes: Int.max) == Int.max)
+        #expect(PrintMaterializer.bytes(forMegabytes: 0) == 0)
+        #expect(PrintMaterializer.bytes(forMegabytes: 8192) == 8192 * 1024 * 1024)
+    }
+
     /// What a preview panel would be holding, without opening one.
     @MainActor private final class Held {
         var urls: [URL] = []

@@ -31,6 +31,7 @@ struct ZoomableStill: View {
     @State private var image: UIImage?
     @State private var displayedID: PrintID?
     @State private var isPreview = false
+    @State private var notRetained = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -40,10 +41,11 @@ struct ZoomableStill: View {
             } else {
                 ProgressView().tint(.white)
             }
-            if isPreview {
-                // Offline and never opened before: the saved thumbnail is all
-                // there is, and it says so rather than pretending.
-                Text("Offline — showing a preview")
+            if isPreview || notRetained {
+                // A full image may display even when its original could not
+                // fit on disk. Distinguish that from a thumbnail-only preview.
+                Text(isPreview ? String(localized: "Offline — showing a preview")
+                     : String(localized: "Not saved offline — increase Offline Storage in Settings."))
                     .font(.footnote)
                     .foregroundStyle(.white)
                     .padding(.horizontal, 12).padding(.vertical, 6)
@@ -65,6 +67,7 @@ struct ZoomableStill: View {
             image = nil
             displayedID = nil
             isPreview = false
+            notRetained = false
             var loaded = loader.cachedThumbnail(for: entry)
             if loaded == nil { loaded = await loader.image(for: entry, pixels: 512, trashed: trashed) }
             guard !Task.isCancelled else { return }
@@ -72,7 +75,9 @@ struct ZoomableStill: View {
             displayedID = loaded == nil ? nil : requestID
             let original = await loader.original(for: entry, trashed: trashed)
             if let full = original {
+                let retained = await loader.isOriginalCached(entry)
                 guard !Task.isCancelled else { return }
+                notRetained = !retained
                 image = full
                 displayedID = requestID
                 isPreview = false
@@ -137,6 +142,7 @@ struct ZoomingImage: UIViewRepresentable {
 struct ClipPlayer: View {
     @Environment(LibraryStore.self) private var library
     @Environment(HostStore.self) private var hosts
+    @Environment(ThumbnailLoader.self) private var loader
     let entry: LibraryEntry
     let isSelected: Bool
     @AppStorage(VideoPlaybackPreferences.autoplayKey) private var autoplay = VideoPlaybackPreferences.defaultAutoplay
@@ -148,6 +154,7 @@ struct ClipPlayer: View {
     @State private var ready = false
     @State private var playbackID: PrintID?
     @State private var playback = VideoPlaybackSession()
+    @State private var notRetained = false
 
     var body: some View {
         ZStack {
@@ -166,7 +173,15 @@ struct ClipPlayer: View {
             } else if let problem {
                 Text(problem).foregroundStyle(.white).padding()
             } else {
-                ProgressView().tint(.white).accessibilityIdentifier("viewer-clip-loading")
+                VStack {
+                    ProgressView().tint(.white)
+                    Text("Downloading for offline playback…").foregroundStyle(.white)
+                }.accessibilityIdentifier("viewer-clip-loading")
+            }
+            if notRetained {
+                VStack { Spacer(); Text("Not saved offline — increase Offline Storage in Settings.")
+                    .font(.footnote).foregroundStyle(.white).padding()
+                    .background(.black.opacity(0.7), in: .capsule) }.padding()
             }
         }
         // Page-style TabView prepares neighbouring pages. Only the selected
@@ -216,20 +231,21 @@ struct ClipPlayer: View {
         player = nil
         releasePlaybackFile()
         problem = nil
-        await play(from: nil, reminted: false)
+        await play(from: nil, retried: false)
     }
 
-    /// Plays from a fresh ticket. A ticket that expires mid-watch fails the
-    /// item; that is re-minted ONCE, resuming where it stopped -- a second
-    /// failure is a real one and says so.
-    private func play(from time: CMTime?, reminted: Bool) async {
-        let intent = reminted ? playback.captureIntent() : nil
-        guard let host = hosts.host(entry.hostID) else { return }
+    /// Plays a complete cached original. Recreate a failed local player item
+    /// once while preserving playback intent; a second failure is surfaced.
+    private func play(from time: CMTime?, retried: Bool) async {
+        let intent = retried ? playback.captureIntent() : nil
+        guard hosts.host(entry.hostID) != nil else { return }
         let item: AVPlayerItem
         let media: PlayableMedia
         do {
             try PlaybackAudio.configure()
-            media = try await hosts.backend(for: host).playableMedia(for: entry.print.filename, trashed: entry.print.trashedAt != nil)
+            let file = try await loader.originalFile(for: entry, trashed: entry.print.trashedAt != nil)
+            media = PlayableMedia(url: file)
+            notRetained = !(await loader.isOriginalCached(entry))
             if Task.isCancelled {
                 if let url = media.localURL, url.isFileURL { try? FileManager.default.removeItem(at: url) }
                 return
@@ -269,12 +285,12 @@ struct ClipPlayer: View {
             if status == .readyToPlay { ready = true }
             guard status == .failed else { continue }
             guard !Task.isCancelled else { return }
-            guard !reminted else {
+            guard !retried else {
                 player = nil
                 problem = String(localized: "This clip stopped playing: \(item.error?.reasonSentence ?? String(localized: "the machine closed the stream."))")
                 return
             }
-            await play(from: player?.currentTime(), reminted: true)
+            await play(from: player?.currentTime(), retried: true)
             return
         }
     }

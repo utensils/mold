@@ -64,6 +64,7 @@ struct GeneralSettings: View {
                     ForEach(Self.mediaCacheChoices, id: \.self) { megabytes in
                         Text(size(megabytes)).tag(megabytes)
                     }
+                    Text("Unlimited").tag(-1)
                     Text("Off").tag(0)
                 }
                 LabeledContent("Using", value: used > 0 ? bytes(used) : "Nothing")

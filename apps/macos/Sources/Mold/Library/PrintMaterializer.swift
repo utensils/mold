@@ -65,7 +65,13 @@ final class PrintMaterializer {
 
     var capBytes: Int {
         let stored = AppStorageSuite.defaults.object(forKey: Self.capKey) as? Int
-        return max(0, stored ?? Self.defaultCapMegabytes) * 1_024 * 1_024
+        return Self.bytes(forMegabytes: stored ?? Self.defaultCapMegabytes)
+    }
+
+    nonisolated static func bytes(forMegabytes megabytes: Int) -> Int {
+        if megabytes == -1 { return .max }
+        let result = max(0, megabytes).multipliedReportingOverflow(by: 1_024 * 1_024)
+        return result.overflow ? .max : result.partialValue
     }
 
     /// A file for this print, downloading it if the cache has not got one.

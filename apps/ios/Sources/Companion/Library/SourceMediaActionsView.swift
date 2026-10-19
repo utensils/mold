@@ -23,9 +23,9 @@ struct SourceMediaActionsView<Content: View, Extra: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             content()
-            Text(identity).font(.caption).textSelection(.enabled)
+            if !gallery { Text(identity).font(.caption).textSelection(.enabled) }
             Text("On \(owner.hostName)").accessibilityIdentifier("source-media-owning-machine").font(.caption).foregroundStyle(.secondaryText)
-            if let hash = member.contentSha256 { Text("SHA-256: \(hash)").font(.caption2).textSelection(.enabled) }
+            if !gallery, let hash = member.contentSha256 { Text("SHA-256: \(hash)").font(.caption2).textSelection(.enabled) }
             Menu("Source actions") { actionItems }
                 .disabled(requested != nil)
             if requested != nil { ProgressView("Loading original…").accessibilityIdentifier("source-media-original-loading") }

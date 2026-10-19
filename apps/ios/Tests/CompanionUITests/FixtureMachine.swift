@@ -29,6 +29,8 @@ final class FixtureMachine: @unchecked Sendable {
     private let libraryMutations: Bool
     private let removePrintOnFavorite: String?
     private let retainedMediaFixture: Bool
+    private let sourceMediaLibraryFixture: Bool
+    private let eventConnections = Mutex<[NWConnection]>([])
     let retainedFrameFixture: Bool
     private let sourceFreeQueueFixture: Bool
     private let batchQueueFixture: Bool
@@ -63,7 +65,7 @@ final class FixtureMachine: @unchecked Sendable {
     private let modelMemoryFixture: Bool
     private var residentModels: Set<String> = []
 
-    init(justifiedFixture: Bool = false, landscapePlaybackFixture: Bool = false, exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, omitOrganizationCapabilities: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, retainedFrameFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil, queueDownloadFixture: Bool = false, requiresDownloadLicense: Bool = false, trashFixture: Bool = false, queueFailureFixture: Bool = false, queueSwipeFixture: Bool = false, queueDestinationFixture: Bool = false, promptExpansionFixture: Bool = false, batchQueueFixture: Bool = false, sourceFreeQueueFixture: Bool = false, playbackData: Data? = nil) throws {
+    init(justifiedFixture: Bool = false, landscapePlaybackFixture: Bool = false, exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, hiddenCollectionFixture: Bool = false, omitOrganizationCapabilities: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, retainedFrameFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil, queueDownloadFixture: Bool = false, requiresDownloadLicense: Bool = false, trashFixture: Bool = false, queueFailureFixture: Bool = false, queueSwipeFixture: Bool = false, queueDestinationFixture: Bool = false, promptExpansionFixture: Bool = false, batchQueueFixture: Bool = false, sourceFreeQueueFixture: Bool = false, sourceMediaLibraryFixture: Bool = false, playbackData: Data? = nil) throws {
         self.landscapePlaybackFixture = landscapePlaybackFixture
         self.playbackData = playbackData
         self.exportFixture = exportFixture
@@ -72,7 +74,9 @@ final class FixtureMachine: @unchecked Sendable {
         self.referenceFixture = referenceFixture
         self.removePrintOnFavorite = removePrintOnFavorite
         self.libraryMutations = libraryMutations
+        self.collectionHidden = hiddenCollectionFixture
         self.retainedMediaFixture = retainedMediaFixture
+        self.sourceMediaLibraryFixture = sourceMediaLibraryFixture
         self.retainedFrameFixture = retainedFrameFixture
         self.sourceFreeQueueFixture = sourceFreeQueueFixture
         self.batchQueueFixture = batchQueueFixture
@@ -165,7 +169,13 @@ final class FixtureMachine: @unchecked Sendable {
         }
     }
 
-    func stop() { listener.cancel() }
+    func stop() {
+        listener.cancel()
+        eventConnections.withLock { connections in
+            for connection in connections { connection.cancel() }
+            connections.removeAll()
+        }
+    }
 
     func completeQueueDownload() async {
         await withCheckedContinuation { continuation in
@@ -223,6 +233,17 @@ final class FixtureMachine: @unchecked Sendable {
             let request = headers[0].split(separator: " ")
             let path = request.count > 1 ? String(request[1]).components(separatedBy: "?")[0] : ""
             allRequests.withLock { $0.append(String(request.first ?? "") + " " + path) }
+            if sourceMediaLibraryFixture, path == "/api/events" {
+                // An idle real machine keeps SSE open. Returning the generic
+                // JSON fixture here causes artificial reconnect/resync events,
+                // invalidating sources during an otherwise unchanged UI test.
+                eventConnections.withLock { $0.append(connection) }
+                let comment = ": fixture-connected\n\n"
+                let reply = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n"
+                    + String(comment.utf8.count, radix: 16) + "\r\n" + comment + "\r\n"
+                connection.send(content: Data(reply.utf8), completion: .contentProcessed { _ in })
+                return
+            }
             if path == "/api/gallery", unavailableGallery.withLock({ $0 }) {
                 let body = Data(#"{"error":"relay gateway unavailable; reconcile mutations before retrying"}"#.utf8)
                 var reply = Data("HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
@@ -397,6 +418,10 @@ final class FixtureMachine: @unchecked Sendable {
         }
         if exportFixture, path.hasPrefix("/api/gallery/image/"), path.hasSuffix(".glb") { return Self.fixtureFile("export-object.glb") }
         if exportFixture, path.hasPrefix("/api/gallery/assets/") { return Self.exportImage(format: "png") }
+        if path.hasPrefix("/api/gallery/source-media/fixture-"), path.split(separator: "/").count == 4,
+           path != "/api/gallery/source-media/fixture-0.png" {
+            return Data(#"{"availability":"available","members":[]}"#.utf8)
+        }
         let json: String
         switch path {
         case "/api/gallery/export-options":

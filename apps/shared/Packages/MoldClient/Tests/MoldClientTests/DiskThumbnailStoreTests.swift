@@ -114,3 +114,51 @@ struct DiskThumbnailStoreTests {
         #expect(await DiskThumbnailStore(directory: directory).data(for: key("a.png")) == Data([9]))
     }
 }
+
+extension DiskThumbnailStoreTests {
+    @Test func missingBackingOriginalBecomesACacheMissAndClearsItsAccounting() async throws {
+        let cache = store(), item = key("movie.mp4")
+        let directory = await cache.directory
+        defer { try? FileManager.default.removeItem(at: directory) }
+        await cache.store(Data([1, 2, 3]), for: item)
+        try FileManager.default.removeItem(at: directory.appending(path: DiskThumbnailStore.name(for: item)))
+        let file = try await cache.file(for: item)
+        #expect(file == nil)
+        #expect(!(await cache.contains(item)))
+        #expect(await cache.totalBytes == 0)
+    }
+
+    @Test func unreadableBackingOriginalBecomesACacheMiss() async throws {
+        let cache = store(), item = key("private.mp4")
+        let directory = await cache.directory
+        defer { try? FileManager.default.removeItem(at: directory) }
+        await cache.store(Data([1, 2, 3]), for: item)
+        let backing = directory.appending(path: DiskThumbnailStore.name(for: item))
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: backing.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backing.path) }
+        #expect(!FileManager.default.isReadableFile(atPath: backing.path))
+        let file = try await cache.file(for: item)
+        #expect(file == nil)
+        #expect(!(await cache.contains(item)))
+        #expect(await cache.totalBytes == 0)
+    }
+
+    @Test func unavailableSourceDoesNotPreventOriginalRedownload() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "original-recovery-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = OriginalMediaCache(directory: directory, maxBytes: 1 << 20)
+        let item = key("movie.mp4")
+        @Sendable func download(_ byte: UInt8) throws -> URL {
+            let file = FileManager.default.temporaryDirectory.appending(path: "download-recovery-\(UUID())")
+            try Data([byte]).write(to: file)
+            return file
+        }
+        let first = try await cache.file(for: item) { try download(1) }
+        defer { try? FileManager.default.removeItem(at: first) }
+        try FileManager.default.removeItem(at: directory.appending(path: DiskThumbnailStore.name(for: item)))
+        let recovered = try await cache.file(for: item) { try download(2) }
+        defer { try? FileManager.default.removeItem(at: recovered) }
+        #expect(try Data(contentsOf: recovered) == Data([2]))
+        #expect(await cache.contains(item))
+    }
+}

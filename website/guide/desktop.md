@@ -933,3 +933,9 @@ at most 64 MiB each. A file that cannot be read or exceeds the limit produces an
 inline message; the previous attachment stays in place. Picking another file,
 clearing the attachment or changing the model/pipeline prevents an earlier read
 from replacing the current input. Video and audio bytes are preserved as selected.
+
+### Native Library media and offline use
+
+Native macOS and iOS keep Source Media in its own Library section, with all live collections included even when hidden. Library-style collection, machine, media-type, sort, tokenized search and thumbnail-size controls narrow its cached thumbnail grid. Open a tile for original details and reuse actions. Prints without sources omit the section after one cached inventory check.
+
+Native storage preferences include Unlimited. On iOS, viewed original images and complete videos are saved locally for offline viewing, original sharing and saving. The first video open downloads its complete file before playback; finite storage limits may evict older media. Remote generation and format conversion still require a connected machine. Native macOS nightly performance diagnostics record bounded timing and responsiveness events without prompts, filenames or credentials.

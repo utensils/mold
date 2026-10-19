@@ -71,8 +71,8 @@ struct LibraryViewer: View {
             await Task.yield()
             if !isEditing && !TextEditingFocus.shared.isEditing { interactionFocused = true }
         }
-        .onKeyPress(keys: [.delete, .deleteForward, "f"]) { press in
-            guard interactionFocused, !isEditing, !TextEditingFocus.shared.isEditing else { return .ignored }
+        .onKeyPress(keys: LibraryGridKeys.viewerKeys) { press in
+            guard !isEditing, !TextEditingFocus.shared.isEditing else { return .ignored }
             switch LibraryGridKeys.action(for: press.key, modifiers: press.modifiers) {
             case .trash:
                 if scope.isTrash { actions.deleteForever([entry]) } else { actions.moveToTrash([entry]) }

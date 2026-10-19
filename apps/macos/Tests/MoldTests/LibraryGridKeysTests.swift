@@ -58,6 +58,15 @@ struct LibraryGridKeysTests {
         #expect(LibraryGridKeys.action(for: physical, modifiers: .option) == nil)
     }
 
+    @Test func viewerBindsEveryDeleteVariantWithoutClaimingNavigationKeys() {
+        for key in [KeyEquivalent.delete, .deleteForward, LibraryGridKeys.physicalDelete] {
+            #expect(LibraryGridKeys.viewerKeys.contains(key))
+            #expect(LibraryGridKeys.action(for: key, modifiers: []) == .trash)
+        }
+        #expect(!LibraryGridKeys.viewerKeys.contains(.leftArrow))
+        #expect(!LibraryGridKeys.viewerKeys.contains(.escape))
+    }
+
     @Test func commandBackspaceTrashesTheSelection() {
         #expect(LibraryGridKeys.action(for: .delete, modifiers: .command) == .trash)
         #expect(LibraryGridKeys.action(for: .delete, modifiers: [.command, .shift]) == .emptyTrash)

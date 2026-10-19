@@ -14,6 +14,7 @@ struct PrintInfoSheet: View {
     let entry: LibraryEntry
     let trashed: Bool
     @State private var title = ""
+    @State private var hasSourceSection = true
     @State private var detent: PresentationDetent = .fraction(0.35)
 
     var body: some View {
@@ -42,7 +43,9 @@ struct PrintInfoSheet: View {
                             .foregroundStyle(.secondaryText)
                     }
                 }
-                Section { SourceMediaSection(entry: entry) }
+                if hasSourceSection {
+                    Section { SourceMediaSection(entry: entry, onEmpty: { hasSourceSection = false }) }
+                }
                 ForEach(PrintDetails.groups(for: entry)) { group in
                     Section {
                         ForEach(group.rows, id: \.label) { row in
@@ -57,6 +60,8 @@ struct PrintInfoSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
+        .onChange(of: library.sourceMediaCatalog.contentRevision(for: entry.id)) { _, _ in hasSourceSection = true }
+        .onChange(of: entry) { _, _ in hasSourceSection = true }
         .presentationDetents([.fraction(0.35), .large], selection: $detent)
         .presentationBackgroundInteraction(.enabled(upThrough: .fraction(0.35)))
         .onAppear {
