@@ -145,7 +145,7 @@ private struct SourceMediaContent: View {
             let force = retry != refreshed
             refreshed = retry
             if force { await SourceMediaPreview.invalidate(authorities: Set(allowed.values)) }
-            await SourceMediaPreview.retain(authorities: Set(allowed.values))
+            // The access monitor prunes by all authorized owners; filters must keep warm previews.
             await catalog.load(owners: owners, backend: { hosts.backend(for: $0) }, route: { hosts.host($0) },
                                instance: { hosts.instanceID(of: $0) }, refresh: force)
             while !Task.isCancelled {
