@@ -942,7 +942,7 @@ Deleting the media currently open in a Library viewer keeps the viewer open on t
 In the native Mac app, **Use source** is available in the print inspector and source viewer, including right-click menus. Choose a supported input role, or **Choose model…** to select an installed compatible model, recipe and machine without leaving the source. Successful reuse opens Generate; other draft settings are preserved where the selected recipe supports them.
 
 The Library sidebar's Source Media destination browses original inputs retained
-by visible prints on the selected machines. Details lists the same members for
+by all live prints on the selected machines, including hidden collections. Details lists the same members for
 each selected print, including references, boundary frames, masks, audio and
 video. Use source stages original bytes into a compatible input of the current
 Generate recipe; processed inputs are explicitly identified as new authored
@@ -951,8 +951,7 @@ Owner links return to the original print. Search scans all eligible owners in
 bounded batches and reports unavailable inventories with a retry action.
 
 This browser owns no extra pins: Trash preserves retained inputs and permanent
-print deletion releases only that print's ownership. Hidden collections protect
-their source media from general browsing. Older machines use individual
+print deletion releases only that print's ownership. Hidden collections remain available in this dedicated source browser. Older machines use individual
 inventories; individual keyframe reuse requires the newer content endpoint.
 
 Library connection status is always available in the toolbar. Offline and reconnecting updates change its icon and details without moving the gallery. Length displays the selected frame rate and reclamps when rate or recipe bounds change, while preserving the existing chain limits. Qualified models advertising duration prediction offer Automatic from prompt or an explicit clip length; the authored choice survives draft restoration and settings reuse, and parks on unsupported destinations.
@@ -961,13 +960,13 @@ The Queue navigation badge reads every server page and totals unfinished jobs ac
 
 Developer builds retain a stable signing identity when one is available. The Makefile passes it through `MOLD_APP_SIGN_IDENTITY`, consumed only by the app target, so SwiftPM resource bundles do not inherit a Developer ID requirement. Release builds remain ad hoc until the release signing step. `MOLD_DEV_SIGN_IDENTITY=-` explicitly selects ad hoc development signing.
 
-Source Media combines identical verified source bytes into one card while preserving every print, role and machine in **Details and roles**. Unknown content identities remain separate. Choose a copy there before **Use source** to select its exact authoring origin. The grid starts with 48 sources and offers more on demand. Fresh inventories survive navigation, reordering and display-only edits for up to 60 seconds; Refresh revalidates immediately. Private previews stay in a 32 MiB decoded-memory cache, share repeated requests, and allow at most four downloads/decodes at once. They are never written to an offline source library; visibility and machine identity continue to fence preview and reuse.
+Source Media combines identical verified source bytes into one card while preserving every print, role and machine in **Details and roles**. Unknown content identities remain separate. Choose a copy there before **Use source** to select its exact authoring origin. The lazy thumbnail grid shows all discovered sources; the Library sizing controls resize it without reloading inventories. Fresh inventories survive navigation, reordering and display-only edits for up to 60 seconds; Refresh revalidates immediately. Private previews stay in a 32 MiB decoded-memory cache, share repeated requests, and allow at most four downloads/decodes at once. They are never written to an offline source library; visibility and machine identity continue to fence preview and reuse.
 
-Source previews and inventories refresh after 60 seconds. Named gallery changes expire only the affected owner; a reconnect resync expires that machine. Closing Sources keeps the bounded warm cache, while removed routes and no-longer-visible owners are evicted across the app. Explicitly opened details keep access to their exact live or Trash publication (including a hidden collection), without adding it to the Source Media browser. Source reuse rechecks the publication and destination draft after download.
+Source previews and inventories refresh after 60 seconds. Named gallery changes expire only the affected owner; a reconnect resync expires that machine. Closing Sources keeps the bounded warm cache, while removed routes and removed owners are evicted across the app. Live owners from hidden collections appear in Source Media; Trash-only owners remain accessible through their print details. Source reuse rechecks the publication and destination draft after download.
 
 Held jobs with a server-verified missing model component (including a missing adapter) offer **Download and Retry** directly in Queue and Job Details. The original explanation and Failure Details remain available alongside Move to. Downloads use that job’s exact model and machine, retain normal license review, and retry only after every returned download ticket succeeds. Malformed or mismatched recovery hints never redirect a download; older servers retain their typed missing-model recovery.
 
-Source Media offers media-type and machine filters alongside search. Open a source to inspect its original image, video or audio, file details, and every visible use (including multiple roles and keyframe positions in the same print). Choose an exact copy for reuse or open an owning print to manage retention. Native viewers stream only the selected original into a private temporary file, delete it on dismissal, and bound image decoding; originals larger than 128 MiB are not previewed. No originals are downloaded just by scrolling. Inventory discovery starts with four owners per machine, then batches up to 100 with two concurrent requests; fresh repeated visits make no new inventory requests.
+Source Media stays in its own Library section and reuses the Library machine, media-type, sort, thumbnail-size and tokenized-search controls, with a collection selector that includes hidden collections. Technical IDs, hashes and reuse actions are in source Details. Open a source to inspect its original image, video or audio, file details, and every eligible use (including multiple roles and keyframe positions in the same print). Choose an exact copy for reuse or open an owning print to manage retention. Native viewers stream only the selected original into a private temporary file, delete it on dismissal, and bound image decoding; originals larger than 128 MiB are not previewed. No originals are downloaded just by scrolling. Inventory discovery starts with four owners per machine, then batches up to 100 with two concurrent requests; fresh repeated visits make no new inventory requests.
 
 Source details reuse an indexed visibility projection rather than scanning every
 print for each use. Refresh keeps unchanged authorized rows visible while reading
@@ -1046,3 +1045,18 @@ The Queue polls only executing previews while visible, including cancelling
 jobs, and follows authoritative null diagnostics when work resumes. Settings
 → Performance offers the server's 0–86400-second threshold (zero disables it);
 changing it takes effect when the next job is prepared and never frees a GPU.
+
+## Investigating native performance
+
+Nightly builds enable bounded native responsiveness logs and timing signposts.
+Stable builds can opt in with `MOLD_PERFORMANCE_DIAGNOSTICS=1` in their launch
+environment; `0` disables them. To capture an already-running slowdown without
+restarting the app, use `scripts/capture-performance.sh PID 10`. See
+[Performance diagnostics](docs/performance-diagnostics.md) for log filters,
+Instruments, privacy and interpretation.
+
+Settings → General → Media cache includes Unlimited alongside the finite sizes
+and Off. Unlimited disables size eviction for the session's materialized print
+files; Empty Now and the existing quit cleanup still apply.
+
+Source-free prints omit the Source Media details section after one inventory check. Empty answers are reused until that owner changes; unrelated sync activity does not restart the check or blank an existing preview.

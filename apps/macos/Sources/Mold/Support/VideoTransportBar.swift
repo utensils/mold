@@ -18,7 +18,7 @@ struct VideoTransportBar: View {
         VStack(spacing: 8) {
             HStack(spacing: 12) {
                 Button {
-                    if player.rate == 0 {
+                    if !(playback?.intendsToPlay ?? (player.rate != 0)) {
                         if let playback { playback.play() }
                         else {
                             if Self.shouldRestart(position: player.currentTime().seconds,
@@ -31,10 +31,10 @@ struct VideoTransportBar: View {
                         if let playback { playback.pause() } else { player.pause() }
                     }
                 } label: {
-                    Label(isPlaying ? "Pause" : "Play", systemImage: isPlaying ? "pause.fill" : "play.fill")
+                    Label(playingIntent ? "Pause" : "Play", systemImage: playingIntent ? "pause.fill" : "play.fill")
                 }
                 .labelStyle(.iconOnly)
-                .help(isPlaying ? "Pause video" : "Play video")
+                .help(playingIntent ? "Pause video" : "Play video")
                 // The binding receives mouse, keyboard and accessibility
                 // changes. Timer updates only change local state, never seek.
                 Slider(value: Binding(get: { position }, set: { value in
@@ -78,6 +78,8 @@ struct VideoTransportBar: View {
         }
         .onReceive(player.publisher(for: \.rate, options: [.initial, .new])) { isPlaying = $0 != 0 }
     }
+
+    private var playingIntent: Bool { playback?.intendsToPlay ?? isPlaying }
 
     static func timestamp(_ seconds: Double) -> String {
         let value = seconds.isFinite && seconds > 0 ? Int(seconds) : 0

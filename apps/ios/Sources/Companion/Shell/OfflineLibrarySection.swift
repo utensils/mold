@@ -78,7 +78,7 @@ struct OfflineLibrarySection: View {
     private var usage: some View {
         Group {
             AdaptiveRow {
-                Text("Images")
+                Text("Media")
             } value: {
                 Text(imageBytes.map { String(localized: "\(ByteCountFormatter.string(fromByteCount: $0, countStyle: .file)) of \(limit.title)") }
                      ?? String(localized: "Measuring…"))

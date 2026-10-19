@@ -72,6 +72,56 @@ public actor DiskThumbnailStore {
         return true
     }
 
+    /// Caller-owned copy of a cached original. Eviction cannot invalidate a viewer
+    /// or a share sheet reading the returned file. No original bytes enter RAM.
+    public func file(for key: Key) throws -> URL? {
+        let name = Self.name(for: key)
+        guard var item = loaded()[name] else { return nil }
+        let copy = files.temporaryDirectory.appending(path: "mold-media-\(UUID())")
+            .appendingPathExtension((key.filename as NSString).pathExtension)
+        let source = url(name)
+        guard readableOriginal(source) else { discardMissingOriginal(name); return nil }
+        do { try files.copyItem(at: source, to: copy) }
+        catch {
+            try? files.removeItem(at: copy)
+            // A disappeared/refused source is a miss; failure to create the
+            // caller's copy (for example, no free space) remains an error.
+            guard readableOriginal(source) else { discardMissingOriginal(name); return nil }
+            throw error
+        }
+        item.used = .now
+        index?[name] = item
+        try? files.setAttributes([.modificationDate: item.used], ofItemAtPath: url(name).path)
+        return copy
+    }
+
+    private func readableOriginal(_ source: URL) -> Bool {
+        files.isReadableFile(atPath: source.path(percentEncoded: false))
+            && (try? source.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+    }
+
+    private func discardMissingOriginal(_ name: String) {
+        bytesUsed -= index?.removeValue(forKey: name)?.bytes ?? 0
+    }
+
+    @discardableResult
+    public func storeFile(_ source: URL, for key: Key) throws -> Bool {
+        let size = try source.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        guard size <= maxItemBytes, size <= maxBytes, maxItems > 0 else { return false }
+        _ = loaded()
+        let name = Self.name(for: key)
+        try files.createDirectory(at: directory, withIntermediateDirectories: true)
+        let staging = directory.appending(path: ".incoming-\(UUID())")
+        defer { try? files.removeItem(at: staging) }
+        try files.copyItem(at: source, to: staging)
+        if files.fileExists(atPath: url(name).path) { try files.removeItem(at: url(name)) }
+        try files.moveItem(at: staging, to: url(name))
+        bytesUsed += size - (index?[name]?.bytes ?? 0)
+        index?[name] = Item(bytes: size, used: .now)
+        trim()
+        return index?[name] != nil
+    }
+
     /// Whether a thumbnail is saved, without reading it or touching its age.
     public func contains(_ key: Key) -> Bool { loaded()[Self.name(for: key)] != nil }
 

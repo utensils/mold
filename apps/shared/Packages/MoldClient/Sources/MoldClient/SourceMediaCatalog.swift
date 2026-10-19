@@ -38,6 +38,7 @@ public final class SourceMediaCatalog {
     public private(set) var total = 0
     @ObservationIgnored private var generation = UUID()
     @ObservationIgnored private var cached: [PrintID: Cached] = [:]
+    @ObservationIgnored private var detailCached: [SourceMediaAuthority: Cached] = [:]
     private struct Cached {
         let authority: SourceMediaAuthority
         let inventory: RetainedSourceMedia.Inventory
@@ -57,6 +58,7 @@ public final class SourceMediaCatalog {
 
     private func revoke(_ owner: PrintID) {
         cached[owner] = nil
+        detailCached = detailCached.filter { $0.key.owner != owner }
         contentEpoch &+= 1
         ownerContentRevisions[owner] = contentEpoch
     }
@@ -65,6 +67,7 @@ public final class SourceMediaCatalog {
         let affected: (PrintID) -> Bool = { $0.host == host && (filename == nil || $0.filename == filename) }
         generation = UUID()
         cached = cached.filter { !affected($0.key) }
+        detailCached = detailCached.filter { !affected($0.key.owner) }
         rows.removeAll { affected($0.owner.id) }
         sources = Self.group(rows)
         failures = failures.filter { !affected($0.key) }
@@ -93,7 +96,9 @@ public final class SourceMediaCatalog {
         let token = UUID(); generation = token
         let allowed = Dictionary(owners.map { ($0.id, SourceMediaAuthority(owner: $0, route: route($0.hostID), instance: instance($0.hostID))) }, uniquingKeysWith: { first, _ in first })
         activeAuthorities = Set(allowed.values)
-        cached = cached.filter { allowed[$0.key] == $0.value.authority }
+        // A collection/machine filter changes presentation, not authorization.
+        // retain(authorities:) prunes removed routes/owners independently.
+        cached = cached.filter { allowed[$0.key] == nil || allowed[$0.key] == $0.value.authority }
         failures = [:]; total = owners.count; loading = true
         defer { if generation == token { loading = false } }
         let pending = owners.filter { owner in
@@ -206,13 +211,24 @@ public final class SourceMediaCatalog {
     public func inventory(for owner: LibraryEntry, backend: any MoldBackend, route: MoldHost,
                           instance: String?, refresh: Bool = false) async throws -> RetainedSourceMedia.Inventory {
         let authority = SourceMediaAuthority(owner: owner, route: route, instance: instance)
-        if !refresh, let hit = cached[owner.id], hit.authority == authority,
-           Date().timeIntervalSince(hit.fetched) < 60, hit.inventory.availability == .available {
+        if !refresh, let hit = cached[owner.id] ?? detailCached[authority], hit.authority == authority,
+           Date().timeIntervalSince(hit.fetched) < 60 || Self.isEmpty(hit.inventory, metadata: owner.print.metadata) {
             return hit.inventory
         }
-        // The caller owns its view/route fence; do not publish a detail-only request
-        // back into the browser cache after an await without that scope authority.
-        return try await backend.retainedSourceMedia(for: owner.print.filename)
+        let revision = contentRevision(for: owner.id)
+        let result = try await backend.retainedSourceMedia(for: owner.print.filename)
+        try Task.checkCancellation()
+        // Cache detail answers without publishing them into another browser's
+        // scope. A relevant invalidation fences a late negative answer too.
+        if revision == contentRevision(for: owner.id) {
+            if detailCached.count >= 512 { detailCached.removeAll(keepingCapacity: true) }
+            detailCached[authority] = Cached(authority: authority, inventory: result, fetched: .now)
+        }
+        return result
+    }
+
+    private static func isEmpty(_ inventory: RetainedSourceMedia.Inventory, metadata: OutputMetadata) -> Bool {
+        SourceMediaState(inventory: inventory, failed: false, metadata: metadata) == .none
     }
 
     private func publish(owners: [LibraryEntry]) {

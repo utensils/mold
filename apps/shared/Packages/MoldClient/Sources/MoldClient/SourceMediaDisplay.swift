@@ -20,10 +20,17 @@ public struct SourceMediaDisplay: Identifiable, Sendable {
     }
 
     public static func filter(_ sources: [SourceMediaCatalog.Source], allowed: [PrintID: SourceMediaAuthority],
-                              kind: SourceMediaFilter, search: String, locale: Locale = .current) -> [Self] {
+                              kind: SourceMediaFilter, search: String, queryKinds: Set<PrintKind> = [], sort: LibrarySort = .newest, locale: Locale = .current) -> [Self] {
         let term = search.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: locale)
-        return sources.compactMap { source in
-            let usages = source.usages.filter { allowed[$0.owner.id] == $0.authority && kind.includes($0.member) }
+        let visible: [Self] = sources.compactMap { source in
+            let usages = source.usages.filter { row in
+                guard allowed[row.owner.id] == row.authority, kind.includes(row.member) else { return false }
+                guard !queryKinds.isEmpty else { return true }
+                let contentKind = row.member.contentKind
+                return queryKinds.contains { kind in
+                    switch kind { case .picture: contentKind == "image"; case .clip: contentKind == "video"; case .mesh: contentKind == "mesh" }
+                }
+            }
             guard !usages.isEmpty else { return nil }
             let key = usages.count == source.usages.count ? source.searchKey : usages.map {
                 "\($0.member.sourceLabel) \($0.member.displayName) \($0.owner.print.displayName) \($0.owner.hostName)"
@@ -31,5 +38,27 @@ public struct SourceMediaDisplay: Identifiable, Sendable {
             guard term.isEmpty || key.contains(term) else { return nil }
             return Self(id: source.id, usages: usages)
         }
+        // Sources have their own names and byte sizes. Dates describe their
+        // matching owning prints; derive keys once rather than per comparison.
+        return visible.map { source in
+            let times = source.usages.map { $0.owner.print.timestamp }
+            let time = sort == .oldest ? times.min() ?? 0 : times.max() ?? 0
+            let size = source.usages.map { $0.member.sizeBytes }.max() ?? 0
+            let name = source.usages.map { $0.member.displayName }.min { left, right in
+                let order = left.localizedStandardCompare(right)
+                return order == .orderedSame ? left < right : order == .orderedAscending
+            } ?? ""
+            return (source: source, time: time, size: size, name: name)
+        }.sorted { left, right in
+            switch sort {
+            case .newest where left.time != right.time: return left.time > right.time
+            case .oldest where left.time != right.time: return left.time < right.time
+            case .largest where left.size != right.size: return left.size > right.size
+            default: break
+            }
+            let names = left.name.localizedStandardCompare(right.name)
+            if names != .orderedSame { return names == .orderedAscending }
+            return left.source.id < right.source.id
+        }.map(\.source)
     }
 }

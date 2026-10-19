@@ -28,5 +28,8 @@ public enum SourceMediaState: Equatable, Sendable {
             else { self = inventory.availability == .available ? (inventory.members.isEmpty ? .none : .available) : .unavailable }
         } else { self = .loading }
     }
+    public func showsSection(hasConditioning: Bool) -> Bool {
+        self != .none && (self != .loading || hasConditioning)
+    }
     public var canRetry: Bool { self == .failed || self == .unavailable }
 }

@@ -22,20 +22,20 @@ enum Preference {
 /// prints opened in the viewer, together. The listing itself is small and
 /// always kept.
 enum OfflineLimit: Int, CaseIterable, Identifiable {
-    case mb250 = 250, mb500 = 500, gb1 = 1_000, gb2 = 2_000, gb5 = 5_000
+    case mb250 = 250, mb500 = 500, gb1 = 1_000, gb2 = 2_000, gb5 = 5_000, unlimited = -1
 
     static let standard = OfflineLimit.gb1
     var id: Int { rawValue }
-    var bytes: Int { rawValue * 1_000_000 }
+    var bytes: Int { self == .unlimited ? .max : rawValue * 1_000_000 }
 
     var title: String {
-        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+        self == .unlimited ? String(localized: "Unlimited") : ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
     }
 
     /// Thumbnails take 30% (they are what makes the grid work offline),
     /// opened prints the rest.
-    var thumbnailBytes: Int { bytes * 3 / 10 }
-    var originalBytes: Int { bytes - thumbnailBytes }
+    var thumbnailBytes: Int { self == .unlimited ? .max : bytes / 10 * 3 }
+    var originalBytes: Int { self == .unlimited ? .max : bytes - thumbnailBytes }
 
     static func current(_ defaults: UserDefaults = .standard) -> OfflineLimit {
         OfflineLimit(rawValue: defaults.integer(forKey: Preference.offlineLimit)) ?? .standard

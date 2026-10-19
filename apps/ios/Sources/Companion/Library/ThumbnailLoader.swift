@@ -1,3 +1,4 @@
+import CryptoKit
 import ImageIO
 import MoldClient
 import SwiftUI
@@ -19,7 +20,7 @@ final class ThumbnailLoader {
 
     @ObservationIgnored let hosts: HostStore
     @ObservationIgnored let disk: DiskThumbnailStore
-    @ObservationIgnored let originals: DiskThumbnailStore
+    @ObservationIgnored let mediaCache: OriginalMediaCache
     @ObservationIgnored private let memory = NSCache<NSString, UIImage>()
     @ObservationIgnored private var inflight: [String: Task<UIImage?, Never>] = [:]
     /// Keep cancelled predecessors until they finish: one may already be
@@ -44,9 +45,7 @@ final class ThumbnailLoader {
         disk = DiskThumbnailStore(directory: directory.appending(path: "thumbnails"),
                                   maxItems: Self.items(limit.thumbnailBytes, each: 20_000),
                                   maxBytes: limit.thumbnailBytes, maxItemBytes: 2 << 20)
-        originals = DiskThumbnailStore(directory: directory.appending(path: "originals"),
-                                       maxItems: Self.items(limit.originalBytes, each: 1_000_000),
-                                       maxBytes: limit.originalBytes, maxItemBytes: 60 << 20)
+        mediaCache = OriginalMediaCache(directory: directory.appending(path: "originals"), maxBytes: limit.originalBytes)
         memory.totalCostLimit = 128 << 20
         Self.excludeFromBackup(directory)
     }
@@ -137,19 +136,59 @@ final class ThumbnailLoader {
         return hosts.backend(for: host)
     }
 
-    private func loadOriginal(_ entry: LibraryEntry, trashed: Bool) async -> UIImage? {
-        let key = Self.diskKey(entry, size: 0)
-        if let key, let data = await originals.data(for: key),
-           let image = await Self.decoded(data, pixels: Self.viewerPixels) {
-            return image
+    /// Full original bytes, shared by viewing and every export action. Returned
+    /// files belong to the caller so cache eviction cannot interrupt playback.
+    func originalFile(for entry: LibraryEntry, trashed: Bool = false) async throws -> URL {
+        guard let host = hosts.host(entry.hostID) else { throw CancellationError() }
+        let authority = Self.authority(host)
+        guard let version = Self.diskVersion(entry.print) else {
+            let file = try await hosts.backend(for: host).mediaFile(entry.print.filename, trashed: trashed)
+            guard !Task.isCancelled, hosts.host(entry.hostID).map(Self.authority) == authority else {
+                try? FileManager.default.removeItem(at: file)
+                throw CancellationError()
+            }
+            return file
         }
-        guard let client = reachableBackend(for: entry),
-              let data = try? await client.media(entry.print.filename, trashed: trashed),
-              !Task.isCancelled
-        else { return nil }
-        guard !Task.isCancelled else { return nil }
-        if let key { await originals.store(data, for: key) }
-        return await Self.decoded(data, pixels: Self.viewerPixels)
+        let key = DiskThumbnailStore.Key(host: host.id.uuidString, filename: entry.print.filename,
+                                         mediaVersion: "\(authority)|\(version)", size: 0)
+        let backend = hosts.backend(for: host)
+        let file = try await mediaCache.file(for: key) {
+            try await backend.mediaFile(entry.print.filename, trashed: trashed)
+        }
+        guard !Task.isCancelled, hosts.host(entry.hostID).map(Self.authority) == authority else {
+            try? FileManager.default.removeItem(at: file)
+            throw CancellationError()
+        }
+        return file
+    }
+
+    func isOriginalCached(_ entry: LibraryEntry) async -> Bool {
+        guard let host = hosts.host(entry.hostID), let version = Self.diskVersion(entry.print) else { return false }
+        return await mediaCache.contains(.init(host: host.id.uuidString, filename: entry.print.filename,
+                                              mediaVersion: "\(Self.authority(host))|\(version)", size: 0))
+    }
+
+    private static func authority(_ host: MoldHost) -> String {
+        let origin = host.connectionOriginalURL ?? host.baseURL
+        let value = "\(origin)|\(host.connectionMode)|\(host.connectionInstanceID ?? "")|\(host.apiKey ?? "")|\(host.secure?.binding.signingKey ?? "")|\(host.secure?.binding.noiseKey ?? "")|\(host.secure?.grant.id ?? "")"
+        return SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func loadOriginal(_ entry: LibraryEntry, trashed: Bool) async -> UIImage? {
+        guard let file = try? await originalFile(for: entry, trashed: trashed) else { return nil }
+        defer { try? FileManager.default.removeItem(at: file) }
+        let pixels = Self.viewerPixels
+        return await Task.detached(priority: .userInitiated) {
+            guard let source = CGImageSourceCreateWithURL(file as CFURL, nil) else { return nil as UIImage? }
+            let options: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: pixels,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true,
+            ]
+            guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+            return UIImage(cgImage: image)
+        }.value
     }
 
     // MARK: - Offline
@@ -207,23 +246,23 @@ final class ThumbnailLoader {
 
     /// Bytes on this device, thumbnails and opened prints together.
     func diskBytes() async -> Int64 {
-        Int64(await disk.totalBytes) + Int64(await originals.totalBytes)
+        Int64(await disk.totalBytes) + Int64(await mediaCache.totalBytes)
     }
 
     func apply(_ limit: OfflineLimit) async {
+        await mediaCache.setLimit(limit.originalBytes)
         await disk.setLimits(maxItems: Self.items(limit.thumbnailBytes, each: 20_000), maxBytes: limit.thumbnailBytes)
-        await originals.setLimits(maxItems: Self.items(limit.originalBytes, each: 1_000_000),
-                                  maxBytes: limit.originalBytes)
     }
 
     /// A machine removed: its pictures go with it.
     func forget(host: MoldHost.ID) async {
         memory.removeAllObjects()
         await disk.evict(host: host.uuidString)
-        await originals.evict(host: host.uuidString)
+        await mediaCache.evict(host: host.uuidString)
     }
 
     func emptyCaches() async {
+        await mediaCache.purge()
         cancelSaving()
         let savingTasks = Array(saveTasks.values)
         let loadingTasks = Array(inflight.values)
@@ -234,13 +273,13 @@ final class ThumbnailLoader {
         waiters.removeAll()
         memory.removeAllObjects()
         await disk.purge()
-        await originals.purge()
     }
 
     // MARK: - Keys and decoding
 
     private func memoryKey(_ entry: LibraryEntry, _ size: Int) -> String {
-        "\(entry.hostID.uuidString)|\(entry.print.filename)|\(Self.version(entry.print))|\(size)"
+        let authority = hosts.host(entry.hostID).map(Self.authority) ?? "removed"
+        return "\(entry.hostID.uuidString)|\(authority)|\(entry.print.filename)|\(Self.version(entry.print))|\(size)"
     }
 
     /// `nil` when nothing could tell a re-rendered print from the old one:

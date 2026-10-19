@@ -27,7 +27,12 @@ owner resumes test gating.
 
 **Never register `mold://`.** The Tauri app owns it and iOS resolves a shared scheme arbitrarily. The companion's scheme is `moldstudio://`. The pairing webpage can hand its unchanged fragment to `moldstudio://pair#…`; accept only the exact `pair` authority with no credentials, port, path or query and reuse the universal-link payload validation. Never put invitations in a URL query. Bound the in-app paste field to three scrolling lines so long Secure codes do not hide Pair. Pairing QRs are universal links, `https://utensils.io/mold/pair#<form-encoded payload>` (the payload in the FRAGMENT, never the query, so it never reaches the web server): the app claims `applinks:utensils.io` (the `apple-app-site-association` lives in `utensils/utensils.github.io` `public/.well-known/`), an opened link lands in `PairingLinkSheet` and is claimed only when the person taps Pair, and `utensils.io/mold/pair` (`website/pair.md`) is the page for a phone without the app. Producers and parsers on both sides (`studio/api/pairing.ts`, MoldClient's `MobilePairingPayload`) are held to `studio/api/pairing.fixtures.json`; change the format there first. Only version 2 payloads are accepted. Absent `mode` means Secure; its claim signatures bind the one-use invitation to the completed Noise handshake and device keys through encrypted `POST /api/pairing/claim`. Explicit Regular payloads carry `mode: regular`, a direct HTTP(S) origin and `pairing_token`; redeem only against that approved origin through `/api/pairing/regular/claim`. Regular supports LAN, VPN and WAN, never Mold proxy. Camera-scanned Regular codes name their mode and direct address before an explicit Pair claim. Persist the selected mode in `MoldHost` and machine metadata so queued work and media retain it. Existing direct records without mode or pins remain Regular; new choices default Secure. Switching mode needs a fresh pairing or a separate Regular credential, never the previous Secure API key. Keep one physical machine row; regular requests never adopt discovered routes or fall back to proxy.
 
-**Library offline and thumbnails.** Machines serve thumbnails at `size=256` or `512` only (anything else is a 422 and an empty tile): `ThumbnailLoader.bucket` never asks for more; the viewer reads the full print (`original(for:)`), not the thumbnail route. Each machine's rows are saved by its `GalleryReplica` (`LibrarySnapshots.replicas`, beside a collections-only `LibrarySnapshot` per machine, the app's strategy-free coders) and restored before any machine is asked (`GalleryReplica.restoreSaved`); pictures live in Application Support/offline (excluded from backup), bounded by `OfflineLimit`. The grid's pinch is `PinchRecognizer` (UIKit), not `MagnifyGesture`.
+**Library offline and thumbnails.** Machines serve thumbnails at `size=256` or `512` only (anything else is a 422 and an empty tile): `ThumbnailLoader.bucket` never asks for more; the viewer reads the full print (`original(for:)`), not the thumbnail route. Each machine's rows are saved by its `GalleryReplica` (`LibrarySnapshots.replicas`, beside a collections-only `LibrarySnapshot` per machine, the app's strategy-free coders) and restored before any machine is asked (`GalleryReplica.restoreSaved`); pictures live in Application Support/offline (excluded from backup), bounded by `OfflineLimit` (including Unlimited). Opened originals use the
+file-backed `OriginalMediaCache`, shared by viewer and export actions; download
+one full video before local playback, with explicit download status. Never use
+thumbnails as original export bytes. Every caller owns a separate temporary file;
+cache eviction cannot interrupt playback or sharing. Key originals by print
+version and machine authority; purge/removal epochs fence late downloads. The grid's pinch is `PinchRecognizer` (UIKit), not `MagnifyGesture`.
 
 **Library replicas.** `LibraryStore` reads each machine through one MoldClient
 `GalleryReplica` with the Mac's contract (`macos-native.md`): kept across route
@@ -294,8 +299,7 @@ selection and the print anchor during reflow.
 Library viewer removal preserves the previous filtered order and copy identities: keep any surviving copy of the current print, otherwise advance to the next survivor, then the previous survivor at the end. Close only when the list is empty. Web updates the print URL when advancing; explicit scope/filter changes retain their existing navigation behavior. Native Mac successful trash moves do not leave a completion notice; preserve progress and uncertain/interrupted outcomes.
 
 **Source Media browser.** `SourceMediaCatalog` is a transient projection, never a
-pin owner. Apply the existing logical visibility and physical machine projection
-before enumerating every physical owner's members. Authenticated previews remain
+pin owner. The dedicated native Source Media section includes all live collections, including hidden ones; apply its selected collection and physical machine filters before enumerating every owner's members. Authenticated previews remain
 bounded and separate from original attachment content. `SourceMediaAttachment`
 offers current-recipe destinations, and card imports fence model, recipe, media
 revisions, origin route/key/instance and view lifetime. Keep Source Media in the
@@ -303,7 +307,7 @@ phone Library navigation and iPad Shelves sidebar rather than adding a phone tab
 
 Native Queue navigation badges total `QueueState.isLive` across every host listing: queued, running, paused, held and cancelling. Count merged individual entries rather than batch groups; completed, failed and cancelled history does not contribute.
 
-Source Media groups only verified reusable-byte digests and keeps every owning print/role selectable. Browser authority follows visible library scope; an explicitly opened live or Trash detail can authorize that exact owner without exposing it in the general browser. Preview caches are bounded and memory-only, expire after 60 seconds, and evict revoked owners even when the browser is closed. Named gallery events invalidate only that owner; resync invalidates the host. Reuse must recheck the captured owner, route, instance and draft after downloading.
+Source Media groups only verified reusable-byte digests and keeps every owning print/role selectable. Browser authority includes every current live owner, including hidden collections; Trash-only originals remain detail-only. Preview caches are bounded and memory-only, expire after 60 seconds, and evict revoked owners even when the browser is closed. Named gallery events invalidate only that owner; resync invalidates the host. Reuse must recheck the captured owner, route, instance and draft after downloading.
 
 Native `HTTPBackend.queue()` consumes every returned cursor before publishing a queue snapshot. Merge repeated runtime/durable IDs within each host, reject malformed or repeated cursors, and never publish a partial backlog as a complete badge total. Legacy hosts without page metadata remain supported.
 
@@ -378,3 +382,5 @@ announcements, retain phase/cancel/device-held truth and clear on authoritative
 null. Decode block/chunk counts belong to the current phase, not video-frame
 completion. HTTP 202 is accepted intent, never terminal cancellation; retain the
 live job and offer copyable diagnostics plus explicit operator recovery guidance.
+
+Source Media retains its separate Library navigation and uses the Library View Options, tokenized search, tile sizes and pinch sizing. Source-free print details stay empty after a single cached inventory check; only a relevant owner/host invalidation or explicit Retry rechecks them. Refresh retains a same-authority preview until its replacement arrives.

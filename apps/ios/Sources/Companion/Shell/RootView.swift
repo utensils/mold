@@ -12,7 +12,7 @@ struct RootView: View {
     @State private var actions: PrintActions
 
     init(stores: CompanionStores) {
-        _actions = State(initialValue: PrintActions(hosts: stores.hosts))
+        _actions = State(initialValue: PrintActions(hosts: stores.hosts, thumbnails: stores.thumbnails))
     }
     @Environment(\.horizontalSizeClass) private var width
     @Environment(QueueStore.self) private var queue

@@ -42,11 +42,25 @@ struct LibraryCell: View {
 
     @ViewBuilder private var selectionRing: some View {
         if isSelected {
-            // The lead is drawn heavier: with several selected, the arrow keys
-            // move from ONE of them and you need to see which.
+            Rectangle().fill(Color.accentColor.opacity(0.12))
             Rectangle()
-                .strokeBorder(Color.accentColor, lineWidth: isLead ? 3 : 2)
-                .opacity(isLead ? 1 : 0.6)
+                .strokeBorder(Color.accentColor, lineWidth: isLead ? 6 : 4)
+            // A contrasting inner edge stays visible on blue or busy media.
+            Rectangle().inset(by: isLead ? 6 : 4)
+                .strokeBorder(.white, lineWidth: 1)
+            VStack {
+                Spacer(minLength: 0)
+                HStack {
+                    Image(systemName: "checkmark.circle.fill")
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, Color.accentColor)
+                        .font(.title3.weight(.semibold))
+                        .background(.white, in: Circle())
+                        .padding(8)
+                    Spacer(minLength: 0)
+                }
+            }
+            .allowsHitTesting(false)
         }
     }
 

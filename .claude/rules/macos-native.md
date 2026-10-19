@@ -188,8 +188,7 @@ Show date separators is a persisted Mac-local Library Settings preference, defau
 Library viewer removal preserves the previous filtered order and copy identities: keep any surviving copy of the current print, otherwise advance to the next survivor, then the previous survivor at the end. Close only when the list is empty. Web updates the print URL when advancing; explicit scope/filter changes retain their existing navigation behavior. Native Mac successful trash moves do not leave a completion notice; preserve progress and uncertain/interrupted outcomes.
 
 **Source Media.** The sidebar destination and Details cards use the shared
-`SourceMediaCatalog` and `SourceMediaAttachment` contracts. Apply Library logical
-visibility before machine projection and enumerate physical owners independently;
+`SourceMediaCatalog` and `SourceMediaAttachment` contracts. The dedicated native Source Media section includes all live collections, including hidden ones, and applies its selected collection/machine filters before enumerating physical owners independently;
 never use a different copy's member ID. A Source Media row creates no pin.
 Authenticated thumbnails are separate from original attachment bytes. Fence
 imports by current model/recipe/media revisions, origin route/key/instance and
@@ -351,3 +350,15 @@ counts as completed current-phase work, and preserve pending cancellation after
 text rather than introducing an environment dependency in detached content.
 The curated Performance threshold mirrors 0–86400 seconds and never changes
 lease ownership. Keep copyable diagnostic facts and operator recovery guidance.
+
+**Native performance diagnostics.** Nightly versions enable the bounded
+`PerformanceDiagnostics` service; stable builds opt in with launch environment
+`MOLD_PERFORMANCE_DIAGNOSTICS=1` (`0` disables any build). Instrument whole
+operations/cache misses using the fixed `PerformanceOperation` vocabulary,
+never every row/body/cache hit or private strings. Keep heartbeat work on its
+utility queue, one outstanding main acknowledgment, lifecycle/sleep suppression
+and 30-second warning limits. Use `apps/macos/scripts/capture-performance.sh`
+against the existing PID for private local evidence; never commit raw stack
+samples. See `apps/macos/docs/performance-diagnostics.md`.
+
+Source Media is a separate Library section, not a Prints/Source toggle or interleaved collection content. Reuse Library filter labels, machine selection, sort, tokenized search and thumbnail sizing. Cache owner projections independently of scan progress and zoom. Keep empty source details invisible and one-shot; negative inventory answers expire on relevant owner/host invalidation. Keep same-authority previews visible while refreshing. Library subtitle/sidebar count caches must key on row and receipt privacy revisions, never sync progress; ordinary print hiding is unchanged.

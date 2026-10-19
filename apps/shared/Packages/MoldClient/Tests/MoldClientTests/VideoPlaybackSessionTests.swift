@@ -131,4 +131,36 @@ import Testing
         #expect(player.rate == 0)
         #expect(!session.ended)
     }
+    @Test func streamingStartupAndOrdinaryScrubDoNotDecodeTheTail() async throws {
+        let player = fixture()
+        var calls = 0
+        let session = VideoPlaybackSession(resolveFrame: { _ in
+            calls += 1
+            return CMTime(seconds: 2, preferredTimescale: 4)
+        })
+        session.attach(player)
+        session.play()
+        session.seek(to: 0.5)
+        try await settle { player.currentTime().seconds >= 0.5 }
+        #expect(calls == 0)
+        session.handleEnd(repeating: false)
+        try await settle { calls == 1 && session.ended }
+        session.cancel()
+    }
+
+    @Test func replayDoesNotWaitForABlockedTailDecode() async throws {
+        let player = fixture()
+        var blocked: CheckedContinuation<CMTime, Never>?
+        let session = VideoPlaybackSession(resolveFrame: { _ in
+            await withCheckedContinuation { blocked = $0 }
+        })
+        session.attach(player)
+        session.handleEnd(repeating: false)
+        try await settle { blocked != nil }
+        session.play()
+        try await settle { !session.ended && player.rate > 0 && player.currentTime().seconds < 1 }
+        blocked?.resume(returning: CMTime(seconds: 2, preferredTimescale: 4))
+        session.cancel()
+    }
+
 }

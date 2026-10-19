@@ -365,8 +365,7 @@ opening/ending frames, masks, control images, audio and video. **Source Media** 
 the library browses those inputs with media-type, machine and text filters. Open
 a source to view its original and every use, including multiple roles or keyframe
 positions within the same print. Choose an
-input to use it in a new creation without restoring the original recipe. Sources
-follow existing collection visibility and machine selection. This browser does
+input to use it in a new creation without restoring the original recipe. The native Mac and iOS Source Media sections include hidden collections, with the Library's collection, machine, media-type, sort, search and thumbnail-size controls. Other clients retain their existing collection visibility. This browser does
 not create independent uploads or pins: permanent deletion releases each owning
 print's retention, while other owners and Trash keep their sources. Unknown file
 types remain visible with an explanation when they cannot be attached. Identical
@@ -570,3 +569,5 @@ Provider errors remain errors; this bounded fallback is not an exhaustive search
 of either provider's index. Older servers retain their provider search behavior.
 
 Batch size applies to images and videos; choose **1** to make a single output. Native iOS exposes it in **More Options**. Cancel a whole batch from its header on native iOS/macOS, or open a queued job’s details and choose **Cancel batch** on web, desktop and Tauri mobile. The CLI equivalent is `mold queue cancel --batch <BATCH-ID>`. Completed outputs remain in the Library.
+
+Native Library reliability: macOS viewer Delete moves the displayed print to Trash, selected thumbnails have an opaque outline and checkmark, and Library counts reuse revision-keyed projections during sync. iOS opened originals are cached as complete files for offline viewing and original sharing/saving; the first video open downloads the complete file before local playback. Native Mac and iOS storage preferences include Unlimited. Native macOS nightlies include bounded performance diagnostics; see [the capture guide](apps/macos/docs/performance-diagnostics.md).

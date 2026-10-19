@@ -81,7 +81,7 @@ extension LibraryVisibilityTests {
 
 
 extension LibraryVisibilityTests {
-    @Test func receiptOnlyPrivacyRevokesCachedSourceAccessAndNotifiesObservers() async throws {
+    @Test func receiptPrivacyProtectsPrintsWhileSourceMediaIncludesAllCollections() async throws {
         let source = MoldHost(name: "Hidden source", baseURL: URL(string: "http://hidden-source")!)
         let destination = MoldHost(name: "Existing backup", baseURL: URL(string: "http://existing-backup")!)
         let hosts = HostStore(hosts: [source, destination]) { FakeBackend(host: $0) }
@@ -105,16 +105,19 @@ extension LibraryVisibilityTests {
         try await library.syncRecords.checkpoint(receipt,
             key: LocalSyncRecord.key(hostID: source.id, filename: original.build().filename), instance: library.recordScope(destination))
         #expect(changed.withLock { $0 })
-        #expect(!library.allowsSource(authority))
-        #expect(library.sourceAccessIndex.derivations == derivations + 1)
+        #expect(library.allowsSource(authority), "The dedicated Source Media section includes hidden collections")
+        #expect(library.sourceAccessIndex.derivations == derivations)
         #expect(library.syncLinks().isEmpty)
+        #expect(LibraryScope.all.resolve(LibraryQuery(), shelves: library.shelves,
+            hiddenCollectionIDs: library.hiddenCollectionIDs, privacyEvidence: library.trashed,
+            privacyLinks: library.syncPrivacyLinks()).apply(to: library.items).isEmpty)
         let privacyRevision = library.sourcePrivacyRevision
         receipt.organization = LibraryOrganizationState(observed: .init())
         try await library.syncRecords.checkpoint(receipt,
             key: LocalSyncRecord.key(hostID: source.id, filename: original.build().filename), instance: library.recordScope(destination))
         #expect(library.sourcePrivacyRevision == privacyRevision)
-        #expect(!library.allowsSource(authority))
-        #expect(library.sourceAccessIndex.derivations == derivations + 1,
+        #expect(library.allowsSource(authority))
+        #expect(library.sourceAccessIndex.derivations == derivations,
             "organization-only journal writes must not re-project all source owners")
         let protectedRevision = library.sourcePrivacyRevision
         library.collectionsPerHost = [:]

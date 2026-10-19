@@ -54,6 +54,7 @@ final class AppStores {
         // FIRST, before a single store exists and so before URLSession or
         // `HostStore`'s polling has a thread of its own (review 05-M4).
         engine = MoldEngine.bootstrapped()
+        PerformanceDiagnostics.shared.start()
         hosts = HostStore(hosts: HostStore.seededHosts())
         engine.dropsItsMachine(from: hosts)
         engine.adoptsItsMachine(into: hosts)

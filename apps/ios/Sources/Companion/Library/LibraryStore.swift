@@ -14,6 +14,7 @@ final class LibraryStore {
     let sourceMediaCatalog = SourceMediaCatalog()
     @ObservationIgnored let sourceAccessIndex = SourceMediaAccessIndex()
     var sourceAccessRevision = 0
+    var openSourceBrowsers: Set<UUID> = []
     var openSourceDetails: [UUID: SourceMediaAuthority] = [:]
     private(set) var unreadMedia: LibraryUnreadLedger
     var unreadCount: Int { unreadMedia.count }

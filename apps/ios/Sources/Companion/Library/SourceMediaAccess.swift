@@ -23,8 +23,7 @@ extension LibraryStore {
         })
         return sourceAccessIndex.snapshot(key: .init(revision: sourceAccessRevision,
             visibility: collectionVisibility.generation, hosts: hosts.hosts, instances: instances)) {
-            let visible = LibraryScope.all.resolve(LibraryQuery(), shelves: shelves,
-                hiddenCollectionIDs: hiddenCollectionIDs, privacyEvidence: trashPool).apply(to: pool)
+            let visible = pool
             return .init(visible: visible.flatMap(\.everyCopy), details: (pool + trashPool).flatMap(\.everyCopy),
                          hosts: hosts.hosts, instances: instances)
         }
@@ -40,11 +39,13 @@ struct SourceMediaAccessMonitor: ViewModifier {
     @Environment(HostStore.self) private var hosts
     @Environment(LibraryStore.self) private var library
     func body(content: Content) -> some View {
-        let access = library.sourceAccess
-        let authorities = access.authorities
-        let detailAuthorities = Set(library.openSourceDetails.values.filter { access.allows($0, detail: true) })
+        let active = !library.openSourceBrowsers.isEmpty || !library.openSourceDetails.isEmpty
+        let access = active ? library.sourceAccess : nil
+        let authorities = access?.authorities ?? []
+        let detailAuthorities = Set(library.openSourceDetails.values.filter { access?.allows($0, detail: true) == true })
         let previewAuthorities = authorities.union(detailAuthorities)
         content.task(id: previewAuthorities) {
+            guard active else { return }
             library.sourceMediaCatalog.retain(authorities: authorities)
             await SourceMediaPreview.retain(authorities: previewAuthorities)
         }

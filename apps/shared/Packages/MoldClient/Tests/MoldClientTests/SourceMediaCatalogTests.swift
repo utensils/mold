@@ -113,7 +113,7 @@ extension SourceMediaCatalogTests {
 }
 
 extension SourceMediaCatalogTests {
-    @Test func freshnessExpiresAndHiddenOwnerIsNotResurrected() async {
+    @Test func freshnessExpiresAndRevokedOwnerIsNotResurrected() async {
         let backend = FakeBackend(), host = UUID(), now = Date()
         backend.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .available, members: [
             .init(memberId: "source", role: "source_image", displayName: "photo.png", sizeBytes: 5)
@@ -124,6 +124,7 @@ extension SourceMediaCatalogTests {
         #expect(backend.count("retainedSourceMedia(for:)") == 1)
         await catalog.load(owners: [owner], backend: { _ in backend }, now: now.addingTimeInterval(61))
         #expect(backend.count("retainedSourceMedia(for:)") == 2)
+        catalog.retain(authorities: [])
         await catalog.load(owners: [], backend: { _ in backend }, now: now)
         #expect(catalog.sources.isEmpty)
         await catalog.load(owners: [owner], backend: { _ in backend }, now: now)
@@ -305,5 +306,47 @@ extension SourceMediaCatalogTests {
         await catalog.load(owners: [owner], backend: { _ in backend }, refresh: true)
         #expect(!catalog.contains(captured))
         #expect(catalog.contentRevision(for: owner.id) != revision)
+    }
+}
+
+extension SourceMediaCatalogTests {
+    @Test func noSourceDetailAnswerIsReusedUntilThatOwnerChanges() async throws {
+        let backend = FakeBackend()
+        backend.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .available, members: []))
+        let host = MoldHost(name: "Fixture", baseURL: URL(string: "http://fixture")!)
+        let owner = PrintFixtures.entry("no-input.png", host: host.id)
+        let catalog = SourceMediaCatalog()
+        for _ in 0..<10 {
+            let inventory = try await catalog.inventory(for: owner, backend: backend, route: host, instance: nil)
+            #expect(inventory.members.isEmpty)
+        }
+        #expect(backend.count("retainedSourceMedia(for:)") == 1)
+        catalog.invalidate(host: host.id, filename: "unrelated.png")
+        _ = try await catalog.inventory(for: owner, backend: backend, route: host, instance: nil)
+        #expect(backend.count("retainedSourceMedia(for:)") == 1)
+        catalog.invalidate(host: host.id, filename: owner.print.filename)
+        _ = try await catalog.inventory(for: owner, backend: backend, route: host, instance: nil)
+        #expect(backend.count("retainedSourceMedia(for:)") == 2)
+    }
+}
+
+extension SourceMediaCatalogTests {
+    @Test func changingFiltersKeepsFreshAuthorizedInventoriesWarm() async {
+        let backend = FakeBackend(), host = UUID()
+        backend.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .available, members: [
+            .init(memberId: "source", role: "source_image", displayName: "photo.png", sizeBytes: 5)
+        ]))
+        let owners = [PrintFixtures.entry("a.png", host: host), PrintFixtures.entry("b.png", host: host)]
+        let catalog = SourceMediaCatalog()
+        await catalog.load(owners: owners, backend: { _ in backend })
+        await catalog.load(owners: [], backend: { _ in backend })
+        #expect(catalog.rows.isEmpty)
+        await catalog.load(owners: [owners[0]], backend: { _ in backend })
+        await catalog.load(owners: owners, backend: { _ in backend })
+        #expect(backend.count("retainedSourceMedia(for:)") == 2)
+        #expect(catalog.rows.count == 2)
+        catalog.retain(authorities: [SourceMediaAuthority(owner: owners[0], route: nil, instance: nil)])
+        await catalog.load(owners: owners, backend: { _ in backend })
+        #expect(backend.count("retainedSourceMedia(for:)") == 3)
     }
 }
