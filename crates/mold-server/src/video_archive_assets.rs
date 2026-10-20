@@ -123,12 +123,17 @@ fn copy_checked(
     input.rewind()?;
     Ok(input)
 }
-fn checked_file(directory: &Path, name: &str, expected: &VideoArtifactFile) -> Result<File> {
+fn checked_file(
+    directory: &Path,
+    name: &str,
+    expected: &VideoArtifactFile,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<File> {
     copy_checked(
         mold_core::secure_file::open_regular_file_no_follow(&directory.join(name))?,
         None,
         expected,
-        &mut || Ok(()),
+        checkpoint,
     )
 }
 fn verify_descriptor(directory: &Path, descriptor: &VideoJobArtifacts) -> Result<()> {
@@ -166,9 +171,14 @@ pub(crate) fn prepare(
     if destination.exists() {
         let directory = directory(root, &descriptor)?;
         verify_descriptor(&directory, &descriptor)?;
-        checked_file(&directory, "provenance.jsonl", &descriptor.provenance)?;
+        checked_file(
+            &directory,
+            "provenance.jsonl",
+            &descriptor.provenance,
+            checkpoint,
+        )?;
         if let Some(pcm) = &descriptor.pcm {
-            checked_file(&directory, "final-audio.pcm", &pcm.file)?;
+            checked_file(&directory, "final-audio.pcm", &pcm.file, checkpoint)?;
         }
         return Ok(descriptor);
     }
@@ -205,9 +215,14 @@ pub(crate) fn prepare(
             }
             let directory = directory(root, &descriptor)?;
             verify_descriptor(&directory, &descriptor)?;
-            checked_file(&directory, "provenance.jsonl", &descriptor.provenance)?;
+            checked_file(
+                &directory,
+                "provenance.jsonl",
+                &descriptor.provenance,
+                checkpoint,
+            )?;
             if let Some(pcm) = &descriptor.pcm {
-                checked_file(&directory, "final-audio.pcm", &pcm.file)?;
+                checked_file(&directory, "final-audio.pcm", &pcm.file, checkpoint)?;
             }
         }
     }
@@ -238,6 +253,15 @@ pub(crate) fn open(
     descriptor: &VideoJobArtifacts,
     owner: &ArchivedChildIdentity,
 ) -> Result<OpenArtifacts> {
+    open_with_checkpoint(root, descriptor, owner, &mut || Ok(()))
+}
+
+pub(crate) fn open_with_checkpoint(
+    root: &Path,
+    descriptor: &VideoJobArtifacts,
+    owner: &ArchivedChildIdentity,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<OpenArtifacts> {
     let directory = directory(root, descriptor)?;
     verify_descriptor(&directory, descriptor)?;
     let existing: ArchivedChildIdentity = read_json(&directory.join("owner.json"))?;
@@ -246,11 +270,16 @@ pub(crate) fn open(
         "artifact owner differs from validated Gallery identity"
     );
     Ok(OpenArtifacts {
-        provenance: checked_file(&directory, "provenance.jsonl", &descriptor.provenance)?,
+        provenance: checked_file(
+            &directory,
+            "provenance.jsonl",
+            &descriptor.provenance,
+            checkpoint,
+        )?,
         pcm: descriptor
             .pcm
             .as_ref()
-            .map(|pcm| checked_file(&directory, "final-audio.pcm", &pcm.file))
+            .map(|pcm| checked_file(&directory, "final-audio.pcm", &pcm.file, checkpoint))
             .transpose()?,
     })
 }
@@ -321,6 +350,27 @@ mod tests {
         assert!(retained.provenance.metadata().unwrap().len() > 0);
         assert!(open(&root, &descriptor, &owner("movie.mp4")).is_err());
     }
+    #[test]
+    fn replay_and_exact_asset_reads_honor_cancellation() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("assets");
+        let descriptor = prepare(&root, "job", input(b"data"), None, &mut || Ok(())).unwrap();
+        seal(&root, &descriptor, &owner("movie.mp4")).unwrap();
+        assert!(
+            prepare(&root, "job", input(b"data"), None, &mut || anyhow::bail!(
+                "cancelled"
+            ))
+            .is_err()
+        );
+        assert!(open_with_checkpoint(
+            &root,
+            &descriptor,
+            &owner("movie.mp4"),
+            &mut || anyhow::bail!("cancelled")
+        )
+        .is_err());
+    }
+
     #[test]
     fn exact_pcm_is_streamed_and_retained_with_its_format() {
         let home = tempfile::tempdir().unwrap();

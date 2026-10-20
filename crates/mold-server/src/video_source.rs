@@ -29,6 +29,25 @@ pub(crate) async fn open(
     filename: &str,
     expected_identity: Option<&str>,
 ) -> Result<(File, RetainedVideoSource), ApiError> {
+    open_mode(state, filename, expected_identity, false).await
+}
+
+/// Scalar previews must never hash a growing legacy movie. Empty legacy
+/// digests are deliberately nonadmissible; full validation uses `open`.
+pub(crate) async fn open_preview(
+    state: &AppState,
+    filename: &str,
+    expected_identity: Option<&str>,
+) -> Result<(File, RetainedVideoSource), ApiError> {
+    open_mode(state, filename, expected_identity, true).await
+}
+
+async fn open_mode(
+    state: &AppState,
+    filename: &str,
+    expected_identity: Option<&str>,
+    preview: bool,
+) -> Result<(File, RetainedVideoSource), ApiError> {
     crate::routes::validate_gallery_filename(filename)?;
     let _publication = state.gallery_publication_gate.read().await;
     let config = state.config.read().await;
@@ -52,10 +71,14 @@ pub(crate) async fn open(
                 ..
             } => (identity, metadata),
             crate::batch_transaction::ValidatedRetainedMedia::Missing => {
-                let index = state.gallery_publication_gate.committed_archive_index(&output)
+                let index = state
+                    .gallery_publication_gate
+                    .committed_archive_index(&output)
                     .map_err(|_| ApiError::internal("Could not inspect Library ownership"))?;
                 if index.is_retired(&filename) || index.is_quarantined(&filename) {
-                    return Err(ApiError::not_found("The selected video is no longer in Library"));
+                    return Err(ApiError::not_found(
+                        "The selected video is no longer in Library",
+                    ));
                 }
                 let row = state
                     .metadata_db
@@ -77,13 +100,18 @@ pub(crate) async fn open(
                         .map_err(|_| {
                             ApiError::not_found("The selected video file is unavailable")
                         })?;
-                let (file, source) =
-                    snapshot_legacy(file, filename, row.metadata).map_err(|_| {
-                        ApiError::validation("Could not freeze the selected legacy video")
-                    })?;
-                if expected
-                    .as_ref()
-                    .is_some_and(|hash| hash != &source.archive_identity_sha256)
+                let capture = if preview {
+                    legacy_metadata
+                } else {
+                    snapshot_legacy
+                };
+                let (file, source) = capture(file, filename, row.metadata).map_err(|_| {
+                    ApiError::validation("Could not freeze the selected legacy video")
+                })?;
+                if !preview
+                    && expected
+                        .as_ref()
+                        .is_some_and(|hash| hash != &source.archive_identity_sha256)
                 {
                     return Err(source_changed());
                 }
@@ -149,22 +177,10 @@ fn snapshot_legacy(
     filename: String,
     metadata: mold_core::OutputMetadata,
 ) -> anyhow::Result<(File, RetainedVideoSource)> {
-    file.seek(SeekFrom::Start(0))?;
-    let mut hash = Sha256::new();
-    let mut size_bytes = 0u64;
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let count = file.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        size_bytes = size_bytes
-            .checked_add(count as u64)
-            .context("source size overflow")?;
-        hash.update(&buffer[..count]);
-    }
-    ensure!(size_bytes > 0, "source movie is empty");
-    let checksum_sha256 = format!("{:x}", hash.finalize());
+    let expected_size = file.metadata()?.len();
+    ensure!(expected_size > 0, "source movie is empty");
+    let checksum_sha256 = hash_exact(file.try_clone()?, expected_size)?;
+    let size_bytes = expected_size;
     let mut identity = Sha256::new();
     identity.update(b"mold-video-current-pixel-snapshot-v1\0");
     identity.update(serde_json::to_vec(&(
@@ -185,6 +201,50 @@ fn snapshot_legacy(
             metadata,
         },
     ))
+}
+
+fn legacy_metadata(
+    file: File,
+    filename: String,
+    metadata: mold_core::OutputMetadata,
+) -> anyhow::Result<(File, RetainedVideoSource)> {
+    let size_bytes = file.metadata()?.len();
+    ensure!(size_bytes > 0, "source movie is empty");
+    Ok((
+        file,
+        RetainedVideoSource {
+            authority_kind: mold_core::video_job::VideoSourceAuthorityKind::LegacySnapshot,
+            filename,
+            archive_identity_sha256: String::new(),
+            checksum_sha256: String::new(),
+            size_bytes,
+            metadata,
+        },
+    ))
+}
+
+fn hash_exact(mut file: File, expected: u64) -> anyhow::Result<String> {
+    file.seek(SeekFrom::Start(0))?;
+    let limit = expected.checked_add(1).context("source size overflow")?;
+    let mut input = (&mut file).take(limit);
+    let mut hash = Sha256::new();
+    let mut bytes = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = input.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        bytes = bytes
+            .checked_add(count as u64)
+            .context("source size overflow")?;
+        hash.update(&buffer[..count]);
+    }
+    ensure!(
+        bytes == expected && file.metadata()?.len() == expected,
+        "legacy video changed during snapshot"
+    );
+    Ok(format!("{:x}", hash.finalize()))
 }
 
 /// Stream the original into a private, immutable job-owned file. Never route
@@ -244,6 +304,24 @@ mod tests {
             size_bytes: bytes.len() as u64,
             metadata: mold_core::OutputMetadata::from_generate_request(&request, 1, None, "test"),
         }
+    }
+
+    #[test]
+    fn preview_has_no_admissible_pixel_proof_and_snapshot_reads_are_size_bounded() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"selected pixels").unwrap();
+        let metadata = authority(b"unused").metadata;
+        let preview = legacy_metadata(File::open(file.path()).unwrap(), "old.mp4".into(), metadata)
+            .unwrap()
+            .1;
+        assert_eq!(preview.size_bytes, 15);
+        assert!(preview.archive_identity_sha256.is_empty() && preview.checksum_sha256.is_empty());
+        assert!(hash_exact(File::open(file.path()).unwrap(), 14).is_err());
+        assert!(hash_exact(File::open(file.path()).unwrap(), 16).is_err());
+        assert_eq!(
+            hash_exact(File::open(file.path()).unwrap(), 15).unwrap(),
+            format!("{:x}", Sha256::digest(b"selected pixels"))
+        );
     }
 
     #[test]
