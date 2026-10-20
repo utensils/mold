@@ -1,4 +1,5 @@
 use super::*;
+use mold_core::{GenerationReference, GenerationReferenceProvenance, SourceImageCapability};
 use serde_json::json;
 
 fn model() -> mold_core::ModelInfoExtended {
@@ -19,8 +20,8 @@ fn limits() -> VideoLimits {
     .unwrap()
 }
 #[test]
-fn two_prompts_make_durable_audio_work_with_model_grid() {
-    let request = make_request(
+fn legacy_part_fixture_uses_the_shared_model_grid() {
+    let request = legacy_fixture_request(
         &model(),
         &limits(),
         "First",
@@ -41,9 +42,11 @@ fn two_prompts_make_durable_audio_work_with_model_grid() {
     assert_eq!(request.stages[1].prompt, "Next");
 }
 #[test]
-fn invalid_length_or_empty_prompt_cannot_take_gpu_work() {
-    assert!(make_request(&model(), &limits(), "", "Next", None, None, None, None).is_err());
-    assert!(make_request(
+fn legacy_grid_refuses_invalid_clip_lengths() {
+    assert!(
+        legacy_fixture_request(&model(), &limits(), "", "Next", None, None, None, None).is_err()
+    );
+    assert!(legacy_fixture_request(
         &model(),
         &limits(),
         "First",
@@ -54,7 +57,7 @@ fn invalid_length_or_empty_prompt_cannot_take_gpu_work() {
         None
     )
     .is_err());
-    assert!(make_request(
+    assert!(legacy_fixture_request(
         &model(),
         &limits(),
         "First",
@@ -77,10 +80,10 @@ fn operation_identity_is_stable_and_uses_the_whole_interaction_id() {
 #[test]
 fn video_commands_are_small_and_mutations_require_guild_admin() {
     let command = video();
-    for name in ["make", "continue", "status", "resume", "cancel"] {
+    for name in ["make", "extend", "continue", "status", "resume", "cancel"] {
         assert!(command.subcommands.iter().any(|sub| sub.name == name));
     }
-    for name in ["continue", "status", "resume", "cancel"] {
+    for name in ["extend", "continue", "status", "resume", "cancel"] {
         let sub = command
             .subcommands
             .iter()
@@ -96,6 +99,38 @@ fn video_commands_are_small_and_mutations_require_guild_admin() {
         .iter()
         .all(|sub| sub.parameters.len() < 10));
 }
+#[test]
+fn default_make_needs_one_prompt_and_optional_duration_and_scene() {
+    let command = video();
+    let make = command
+        .subcommands
+        .iter()
+        .find(|s| s.name == "make")
+        .unwrap();
+    let required: Vec<_> = make
+        .parameters
+        .iter()
+        .filter(|p| p.required)
+        .map(|p| p.name.as_str())
+        .collect();
+    assert_eq!(required, ["prompt"]);
+    assert!(make
+        .parameters
+        .iter()
+        .any(|p| p.name == "duration" && !p.required));
+    assert!(make
+        .parameters
+        .iter()
+        .any(|p| p.name == "next_prompt" && !p.required));
+    for name in ["status", "resume", "cancel"] {
+        let action = command.subcommands.iter().find(|s| s.name == name).unwrap();
+        assert!(action
+            .parameters
+            .iter()
+            .any(|p| p.name == "legacy_part" && !p.required));
+    }
+}
+
 fn image_bytes() -> Vec<u8> {
     let mut bytes = std::io::Cursor::new(Vec::new());
     image::DynamicImage::new_rgb8(16, 16)
@@ -122,7 +157,7 @@ fn ref2va_repeats_inline_image_and_continuation_recalls_it() {
     limits.model = model.info.name.clone();
     limits.authoring.as_mut().unwrap().motion_tail_frames = 0;
     limits.frames_per_clip_recommended = 124;
-    let request = make_request(
+    let request = legacy_fixture_request(
         &model,
         &limits,
         "First",
@@ -152,7 +187,7 @@ fn ref2va_repeats_inline_image_and_continuation_recalls_it() {
 }
 #[test]
 fn continued_recipe_uses_source_take_and_frozen_geometry_not_live_defaults() {
-    let request = make_request(
+    let request = legacy_fixture_request(
         &model(),
         &limits(),
         "First",
@@ -189,7 +224,8 @@ fn continued_recipe_uses_source_take_and_frozen_geometry_not_live_defaults() {
 #[test]
 fn scrubbed_reference_authority_is_never_dispatched() {
     let mut request =
-        make_request(&model(), &limits(), "First", "Next", None, None, None, None).unwrap();
+        legacy_fixture_request(&model(), &limits(), "First", "Next", None, None, None, None)
+            .unwrap();
     request.stages[1].generation_references = Some(vec![GenerationReference::Image {
         media: GenerationReferenceAuthority::Descriptor,
         provenance: GenerationReferenceProvenance::default(),
@@ -241,7 +277,8 @@ fn job_ids_are_opaque_bounded_identifiers_never_url_paths() {
 #[test]
 fn continued_source_fit_needs_affirmative_host_support() {
     let request =
-        make_request(&model(), &limits(), "First", "Next", None, None, None, None).unwrap();
+        legacy_fixture_request(&model(), &limits(), "First", "Next", None, None, None, None)
+            .unwrap();
     let mut source = source(&request);
     source.script.chain.source_fit = Some(json!({"mode":"contain","alignX":0.5,"alignY":0.5}));
     assert!(continue_request(&source, &model(), &limits(), "Next", None).is_err());
@@ -250,4 +287,109 @@ fn continued_source_fit_needs_affirmative_host_support() {
         "authoring":{"motion_tail_frames":1,"min_frames":107,"frame_step":17,"frame_offset":5,"source_fit_supported":true}})).unwrap();
     let next = continue_request(&source, &model(), &supported, "Next", None).unwrap();
     assert_eq!(next.source_fit, source.script.chain.source_fit);
+}
+
+fn tail_for(model: &ModelInfoExtended, limits: &VideoLimits) -> u32 {
+    limits
+        .authoring
+        .as_ref()
+        .map(|value| value.motion_tail_frames)
+        .unwrap_or_else(|| {
+            mold_core::validation::chain_motion_tail_frames_for_model(
+                &model.info.family,
+                &model.info.name,
+                model.source_image,
+                mold_core::chain::DEFAULT_MOTION_TAIL_FRAMES,
+            )
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn legacy_fixture_request(
+    model: &ModelInfoExtended,
+    limits: &VideoLimits,
+    prompt: &str,
+    next_prompt: &str,
+    length: Option<f64>,
+    width: Option<u32>,
+    height: Option<u32>,
+    image: Option<Vec<u8>>,
+) -> Result<ChainRequest> {
+    ensure!(
+        limits.supports_sequence && limits.model == model.info.name,
+        "Choose a model that supports video clips on this machine."
+    );
+    ensure!(
+        model.runtime_available != Some(false),
+        "This model is not runnable on this machine."
+    );
+    ensure!(
+        !prompt.trim().is_empty() && !next_prompt.trim().is_empty(),
+        "Write both clip prompts."
+    );
+    let fps = model.defaults.default_fps.unwrap_or(24).max(1);
+    let tail = tail_for(model, limits);
+    let frames = clip_frames(
+        model,
+        limits,
+        fps,
+        length,
+        limits.frames_per_clip_recommended,
+        tail,
+    )?;
+    let mut request: ChainRequest = serde_json::from_value(serde_json::json!({
+        "model":model.info.name,"width":width.unwrap_or(model.defaults.default_width),
+        "height":height.unwrap_or(model.defaults.default_height),"fps":fps,
+        "steps":model.defaults.default_steps,"guidance":model.defaults.default_guidance,
+        "motion_tail_frames":tail,"enable_audio":limits.supports_audio,
+        "output_format":"mp4","output_mode":"sequence",
+        "stages":[{"prompt":prompt,"frames":frames},{"prompt":next_prompt,"frames":frames}]
+    }))?;
+    let task = mold_core::minimax_h3::task_for_model(&model.info.name);
+    if task == Some(mold_core::minimax_h3::Task::Ref2va) {
+        let bytes =
+            image.context("This reference model needs an image attachment, used in both clips.")?;
+        let format = image::guess_format(&bytes)?;
+        let (width, height) = image::ImageReader::new(std::io::Cursor::new(&bytes))
+            .with_guessed_format()?
+            .into_dimensions()?;
+        ensure!(
+            matches!(format, image::ImageFormat::Png | image::ImageFormat::Jpeg),
+            "Use a PNG or JPEG reference image."
+        );
+        ensure!(
+            bytes.len() <= 16 * 1024 * 1024,
+            "The repeated image must fit within the 32 MiB part budget."
+        );
+        let reference = GenerationReference::Image {
+            media: GenerationReferenceAuthority::Inline { data: bytes },
+            provenance: GenerationReferenceProvenance::default(),
+            mime_type: if format == image::ImageFormat::Png {
+                "image/png"
+            } else {
+                "image/jpeg"
+            }
+            .into(),
+            width,
+            height,
+        };
+        for stage in &mut request.stages {
+            stage.generation_references = Some(vec![reference.clone()]);
+        }
+    } else {
+        let contract = mold_core::validation::source_image_capability_for_engine(
+            Some(&model.info.family),
+            model.source_image,
+        );
+        ensure!(
+            !(contract == Some(SourceImageCapability::Unsupported) && image.is_some()),
+            "This model does not accept an opening image."
+        );
+        ensure!(
+            !(contract == Some(SourceImageCapability::Required) && image.is_none()),
+            "This model needs an opening image."
+        );
+        request.stages[0].source_image = image;
+    }
+    Ok(request)
 }

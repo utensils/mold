@@ -1,19 +1,20 @@
 //! Compact durable video authoring. No local GPU or transient reference uploads.
 
+#[path = "video_parent.rs"]
+mod parent;
+
 use crate::checks::{self, AuthResult};
 use crate::state::Context;
 use anyhow::{ensure, Context as _, Result};
 use mold_core::chain_job::{ChainJobDetail, ChainJobState};
-use mold_core::{
-    ChainContinuation, ChainRequest, GenerationReference, GenerationReferenceAuthority,
-    GenerationReferenceProvenance, ModelInfoExtended, SourceImageCapability,
-};
+use mold_core::{ChainContinuation, ChainRequest, GenerationReferenceAuthority, ModelInfoExtended};
 use poise::serenity_prelude as serenity;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 #[derive(Deserialize)]
 struct VideoAuthoring {
+    #[cfg(test)]
     motion_tail_frames: u32,
     min_frames: u32,
     frame_step: u32,
@@ -23,10 +24,14 @@ struct VideoAuthoring {
 }
 #[derive(Deserialize)]
 struct VideoLimits {
+    #[cfg(test)]
     model: String,
+    #[cfg(test)]
     supports_sequence: bool,
     frames_per_clip_cap: u32,
+    #[cfg(test)]
     frames_per_clip_recommended: u32,
+    #[cfg(test)]
     supports_audio: bool,
     authoring: Option<VideoAuthoring>,
 }
@@ -60,21 +65,6 @@ fn validate_job_id(id: &str) -> Result<()> {
     }
     .validate()?;
     Ok(())
-}
-
-fn tail_for(model: &ModelInfoExtended, limits: &VideoLimits) -> u32 {
-    limits
-        .authoring
-        .as_ref()
-        .map(|value| value.motion_tail_frames)
-        .unwrap_or_else(|| {
-            mold_core::validation::chain_motion_tail_frames_for_model(
-                &model.info.family,
-                &model.info.name,
-                model.source_image,
-                mold_core::chain::DEFAULT_MOTION_TAIL_FRAMES,
-            )
-        })
 }
 
 fn clip_frames(
@@ -123,96 +113,6 @@ fn clip_frames(
         f64::from(limits.frames_per_clip_cap) / f64::from(fps)
     );
     Ok(snapped as u32)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn make_request(
-    model: &ModelInfoExtended,
-    limits: &VideoLimits,
-    prompt: &str,
-    next_prompt: &str,
-    length: Option<f64>,
-    width: Option<u32>,
-    height: Option<u32>,
-    image: Option<Vec<u8>>,
-) -> Result<ChainRequest> {
-    ensure!(
-        limits.supports_sequence && limits.model == model.info.name,
-        "Choose a model that supports video clips on this machine."
-    );
-    ensure!(
-        model.runtime_available != Some(false),
-        "This model is not runnable on this machine."
-    );
-    ensure!(
-        !prompt.trim().is_empty() && !next_prompt.trim().is_empty(),
-        "Write both clip prompts."
-    );
-    let fps = model.defaults.default_fps.unwrap_or(24).max(1);
-    let tail = tail_for(model, limits);
-    let frames = clip_frames(
-        model,
-        limits,
-        fps,
-        length,
-        limits.frames_per_clip_recommended,
-        tail,
-    )?;
-    let mut request: ChainRequest = serde_json::from_value(serde_json::json!({
-        "model":model.info.name,"width":width.unwrap_or(model.defaults.default_width),
-        "height":height.unwrap_or(model.defaults.default_height),"fps":fps,
-        "steps":model.defaults.default_steps,"guidance":model.defaults.default_guidance,
-        "motion_tail_frames":tail,"enable_audio":limits.supports_audio,
-        "output_format":"mp4","output_mode":"sequence",
-        "stages":[{"prompt":prompt,"frames":frames},{"prompt":next_prompt,"frames":frames}]
-    }))?;
-    let task = mold_core::minimax_h3::task_for_model(&model.info.name);
-    if task == Some(mold_core::minimax_h3::Task::Ref2va) {
-        let bytes =
-            image.context("This reference model needs an image attachment, used in both clips.")?;
-        let format = image::guess_format(&bytes)?;
-        let (width, height) = image::ImageReader::new(std::io::Cursor::new(&bytes))
-            .with_guessed_format()?
-            .into_dimensions()?;
-        ensure!(
-            matches!(format, image::ImageFormat::Png | image::ImageFormat::Jpeg),
-            "Use a PNG or JPEG reference image."
-        );
-        ensure!(
-            bytes.len() <= 16 * 1024 * 1024,
-            "The repeated image must fit within the 32 MiB part budget."
-        );
-        let reference = GenerationReference::Image {
-            media: GenerationReferenceAuthority::Inline { data: bytes },
-            provenance: GenerationReferenceProvenance::default(),
-            mime_type: if format == image::ImageFormat::Png {
-                "image/png"
-            } else {
-                "image/jpeg"
-            }
-            .into(),
-            width,
-            height,
-        };
-        for stage in &mut request.stages {
-            stage.generation_references = Some(vec![reference.clone()]);
-        }
-    } else {
-        let contract = mold_core::validation::source_image_capability_for_engine(
-            Some(&model.info.family),
-            model.source_image,
-        );
-        ensure!(
-            !(contract == Some(SourceImageCapability::Unsupported) && image.is_some()),
-            "This model does not accept an opening image."
-        );
-        ensure!(
-            !(contract == Some(SourceImageCapability::Required) && image.is_none()),
-            "This model needs an opening image."
-        );
-        request.stages[0].source_image = image;
-    }
-    Ok(request)
 }
 
 fn continue_request(
@@ -335,7 +235,7 @@ async fn live_model(ctx: Context<'_>, requested: Option<String>) -> Result<Model
     let models = ctx.data().client.list_models_extended().await?;
     let requested = requested.map(|name| mold_core::manifest::resolve_model_name(&name));
     models.into_iter().find(|model| requested.as_ref().map_or(
-        model.downloaded && model.runtime_available != Some(false) && model.supports_sequence == Some(true), |name| model.info.name == *name))
+        model.downloaded && model.runtime_available != Some(false) && model.runtime_ready != Some(false) && parent::is_video_model(model), |name| model.info.name == *name))
         .context("Choose an installed video model with the model option. Use /models to inspect this machine.")
 }
 async fn limits(ctx: Context<'_>, model: &str, fps: u32) -> Result<VideoLimits> {
@@ -357,11 +257,11 @@ async fn enqueue(
     match ctx.data().client.create_chain_job_with_operation_id(&request, &id).await {
         Ok(accepted) => {
             ensure!(accepted.job_id == id, "The host returned an unexpected video identity; reconcile {id}.");
-            let mut message = format!("Video queued: {id}\n{} clips · {:.2} seconds delivered. Saved on this machine in Mold Library when complete.\nManage Server permission is needed for /video status job_id:{id} and continuing this video.", plan.stage_count, plan.estimated_duration_ms as f64 / 1000.0);
+            let mut message = format!("Video queued: {id}\n{} clips · {:.2} seconds delivered. Saved on this machine in Mold Library when complete.\nManage Server permission is needed for /video status job_id:{id} legacy_part:true and continuing this video.", plan.stage_count, plan.estimated_duration_ms as f64 / 1000.0);
             for warning in accepted.request_warnings { message.push_str(&format!("\n{warning}")); }
             reply(ctx, message).await
         }
-        Err(error) => reply(ctx, format!("Video job ID: {id}\nCould not confirm acceptance. Check /video status job_id:{id}; do not repeat make or continue while its outcome is unknown.\n{error}")).await,
+        Err(error) => reply(ctx, format!("Video job ID: {id}\nCould not confirm acceptance. Check /video status job_id:{id} legacy_part:true; do not repeat continue while its outcome is unknown.\n{error}")).await,
     }
 }
 
@@ -370,6 +270,7 @@ async fn enqueue(
     slash_command,
     subcommands(
         "make",
+        "extend_video",
         "continue_video",
         "video_status",
         "video_resume",
@@ -380,58 +281,69 @@ pub async fn video(_ctx: Context<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Join two prompted clips into one video, saved in Mold Library.
+/// Make one finished video from a prompt and requested total duration.
 #[allow(clippy::too_many_arguments)]
 #[poise::command(slash_command)]
 pub async fn make(
     ctx: Context<'_>,
-    #[description = "What happens in the first clip"] prompt: String,
-    #[description = "What happens in the next clip"] next_prompt: String,
+    #[description = "What happens in the video"] prompt: String,
+    #[description = "Total seconds, for example 30 or 30.5; default uses the short recipe"]
+    duration: Option<String>,
+    #[description = "Optional second scene; both scenes share the total duration"]
+    next_prompt: Option<String>,
     #[description = "Installed video model"]
     #[autocomplete = "super::generate::autocomplete_model"]
     model: Option<String>,
-    #[description = "Seconds per clip, snapped to the model's frame grid"] length: Option<f64>,
     #[description = "Video width in pixels"] width: Option<u32>,
     #[description = "Video height in pixels"] height: Option<u32>,
-    #[description = "Opening image, or the reference used in every Ref2VA clip"] image: Option<
-        serenity::Attachment,
-    >,
+    #[description = "Opening image, or the typed reference for a reference-video recipe"]
+    image: Option<serenity::Attachment>,
+    #[description = "Generate audio where the selected recipe supports it"] audio: Option<bool>,
 ) -> Result<()> {
     if let AuthResult::Denied(message) = checks::check_generate_auth(&ctx).await {
         return reply(ctx, message).await;
     }
     let charge = GenerationCharge::new(ctx.data(), ctx.author().id.get());
     ctx.defer_ephemeral().await?;
-    let prepared: Result<ChainRequest> = async {
-        let model = live_model(ctx, model).await?;
-        let limits = limits(
-            ctx,
-            &model.info.name,
-            model.defaults.default_fps.unwrap_or(24),
-        )
-        .await?;
-        let image = match image {
-            Some(image) => Some(
-                super::generate::fetch_source_image(&image)
-                    .await
-                    .map_err(anyhow::Error::msg)?,
-            ),
-            None => None,
-        };
-        make_request(
-            &model,
-            &limits,
-            &prompt,
-            &next_prompt,
-            length,
-            width,
-            height,
-            image,
-        )
+    match parent::prepare_make(
+        ctx,
+        &prompt,
+        next_prompt.as_deref(),
+        duration.as_deref(),
+        model,
+        width,
+        height,
+        image,
+        audio,
+    )
+    .await
+    {
+        Ok((request, instance)) => parent::enqueue(ctx, request, instance, charge).await,
+        Err(error) => reply(ctx, error).await,
     }
-    .await;
-    match prepared {
-        Ok(request) => enqueue(ctx, request, charge).await,
+}
+
+/// Add prompted footage to an existing Library video, saving a new longer MP4.
+#[poise::command(
+    slash_command,
+    rename = "extend",
+    guild_only,
+    required_permissions = "MANAGE_GUILD"
+)]
+pub async fn extend_video(
+    ctx: Context<'_>,
+    #[description = "Exact active MP4 filename from this machine's Library"] filename: String,
+    #[description = "What happens in the newly added footage"] prompt: String,
+    #[description = "Seconds to add; default uses the original model's short recipe"]
+    duration: Option<String>,
+) -> Result<()> {
+    if let AuthResult::Denied(message) = checks::check_generate_auth(&ctx).await {
+        return reply(ctx, message).await;
+    }
+    let charge = GenerationCharge::new(ctx.data(), ctx.author().id.get());
+    ctx.defer_ephemeral().await?;
+    match parent::prepare_extension(ctx, &filename, &prompt, duration.as_deref()).await {
+        Ok((request, instance)) => parent::enqueue(ctx, request, instance, charge).await,
         Err(error) => reply(ctx, error).await,
     }
 }
@@ -489,8 +401,24 @@ pub async fn continue_video(
 )]
 pub async fn video_status(
     ctx: Context<'_>,
-    #[description = "Video job ID"] job_id: String,
+    #[description = "Whole Video ID including @installation, or an explicit legacy part ID"] job_id: String,
+    #[description = "Control an old separate authored part instead of a duration video"]
+    legacy_part: Option<bool>,
 ) -> Result<()> {
+    if let AuthResult::Denied(message) = checks::check_access_only(&ctx).await {
+        return reply(ctx, message).await;
+    }
+    if legacy_part != Some(true) {
+        ctx.defer_ephemeral().await?;
+        let result: Result<String> = async {
+            let (id, instance) = parent::receipt_owner(ctx, &job_id).await?;
+            let job = ctx.data().client.get_video_job(&id, &instance).await?;
+            Ok(parent::status_message(&job_id, &job))
+        }
+        .await;
+        return parent::reply(ctx,match result{Ok(message)=>message,Err(error)=>format!("Could not confirm video operation: {error}. Keep the whole Video ID and check status before retrying.")}).await;
+    }
+
     if let Err(error) = validate_job_id(&job_id) {
         return reply(ctx, error).await;
     }
@@ -519,8 +447,24 @@ pub async fn video_status(
 )]
 pub async fn video_resume(
     ctx: Context<'_>,
-    #[description = "Video job ID"] job_id: String,
+    #[description = "Whole Video ID including @installation, or an explicit legacy part ID"] job_id: String,
+    #[description = "Control an old separate authored part instead of a duration video"]
+    legacy_part: Option<bool>,
 ) -> Result<()> {
+    if let AuthResult::Denied(message) = checks::check_access_only(&ctx).await {
+        return reply(ctx, message).await;
+    }
+    if legacy_part != Some(true) {
+        ctx.defer_ephemeral().await?;
+        let result: Result<String> = async {
+            let (id, instance) = parent::receipt_owner(ctx, &job_id).await?;
+            let job = ctx.data().client.resume_video_job(&id, &instance).await?;
+            Ok(parent::status_message(&job_id, &job))
+        }
+        .await;
+        return parent::reply(ctx,match result{Ok(message)=>message,Err(error)=>format!("Could not confirm video operation: {error}. Keep the whole Video ID and check status before retrying.")}).await;
+    }
+
     if let Err(error) = validate_job_id(&job_id) {
         return reply(ctx, error).await;
     }
@@ -540,8 +484,26 @@ pub async fn video_resume(
 )]
 pub async fn video_cancel(
     ctx: Context<'_>,
-    #[description = "Video job ID"] job_id: String,
+    #[description = "Whole Video ID including @installation, or an explicit legacy part ID"] job_id: String,
+    #[description = "Control an old separate authored part instead of a duration video"]
+    legacy_part: Option<bool>,
 ) -> Result<()> {
+    if let AuthResult::Denied(message) = checks::check_access_only(&ctx).await {
+        return reply(ctx, message).await;
+    }
+    if legacy_part != Some(true) {
+        ctx.defer_ephemeral().await?;
+        let result: Result<String> = async {
+            let (id, instance) = parent::receipt_owner(ctx, &job_id).await?;
+            ctx.data().client.cancel_video_job(&id, &instance).await?;
+            Ok(format!(
+                "Stop requested. Keep Video ID: {job_id}. Check /video status until it settles."
+            ))
+        }
+        .await;
+        return parent::reply(ctx,match result{Ok(message)=>message,Err(error)=>format!("Could not confirm video operation: {error}. Keep the whole Video ID and check status before retrying.")}).await;
+    }
+
     if let Err(error) = validate_job_id(&job_id) {
         return reply(ctx, error).await;
     }
