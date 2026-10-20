@@ -103,7 +103,7 @@ fn retention_refuses_foreign_batch_or_more_than_one_child() {
     let child = DurableGenerationBatchChildRow {
         batch_id: "batch".into(),
         job_id: "child".into(),
-        batch_index: 0,
+        batch_index: 1,
         state: "complete".into(),
         error: None,
         error_code: None,
@@ -125,6 +125,9 @@ fn retention_refuses_foreign_batch_or_more_than_one_child() {
         children: vec![child.clone()],
     };
     assert!(require_owned_child(&detail, "batch", "owned").is_ok());
+    let mut zero_based = detail.clone();
+    zero_based.children[0].batch_index = 0;
+    assert!(require_owned_child(&zero_based, "batch", "owned").is_err());
     assert!(require_owned_child(&detail, "other", "owned").is_err());
     assert!(require_owned_child(&detail, "batch", "foreign").is_err());
     detail.children.push(child);
@@ -278,4 +281,9 @@ async fn preoccupied_client_id_requires_exact_admitted_request_before_any_reatta
         .unwrap()
         .unwrap();
     assert_eq!(after.children, before.children);
+    assert_eq!(
+        after.children[0].batch_index, 1,
+        "ordinary durable admission indexes its first child from one"
+    );
+    require_owned_child(&after, "stored-batch", &client).unwrap();
 }

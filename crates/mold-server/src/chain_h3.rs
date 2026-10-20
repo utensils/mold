@@ -61,7 +61,7 @@ fn require_owned_child(
     anyhow::ensure!(
         detail.children.len() == 1
             && detail.children[0].batch_id == batch_id
-            && detail.children[0].batch_index == 0,
+            && detail.children[0].batch_index == 1,
         "H3 stage must own exactly one child"
     );
     Ok(())
