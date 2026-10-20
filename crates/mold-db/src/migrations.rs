@@ -3294,6 +3294,7 @@ CREATE TABLE video_jobs (
  state TEXT NOT NULL CHECK(state IN ('queued','running','paused','completed','failed','interrupted','cancelled')),
  request_sha256 TEXT NOT NULL,
  manifest_json TEXT NOT NULL,
+ manifest_sha256 TEXT NOT NULL,
  job_json TEXT NOT NULL,
  revision INTEGER NOT NULL DEFAULT 0,
  cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancel_requested IN (0,1)),

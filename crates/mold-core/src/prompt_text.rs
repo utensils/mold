@@ -96,6 +96,25 @@ pub(crate) fn protect_generate_request_for_wire(
     wire
 }
 
+/// Read a server-authored literal chain snapshot. Legacy public admission still
+/// normalizes shell escapes; v3 manifests must never apply that input transform.
+pub fn chain_request_from_literal_json(json: &str) -> serde_json::Result<crate::ChainRequest> {
+    let raw: serde_json::Value = serde_json::from_str(json)?;
+    let mut request: crate::ChainRequest = serde_json::from_value(raw.clone())?;
+    if let (Some(transform), Some(value)) = (
+        request.prompt_transform.as_mut(),
+        raw.get("prompt_transform"),
+    ) {
+        transform.root_prompt = value
+            .get("root_prompt")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        // Typed deserialization above already checked the required string.
+        transform.source_prompt = value["source_prompt"].as_str().unwrap().to_owned();
+    }
+    Ok(request)
+}
+
 /// Prepare a canonical chain for the legacy-compatible HTTP prompt boundary.
 /// Serialize this result directly; clients must not normalize it a second time.
 pub fn protect_chain_request_for_wire(request: &crate::ChainRequest) -> crate::ChainRequest {

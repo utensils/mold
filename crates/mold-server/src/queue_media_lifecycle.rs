@@ -495,9 +495,19 @@ impl QueueMediaLifecycle {
         pin_id: String,
         member_index: usize,
     ) -> Result<Vec<u8>, QueueMediaError> {
+        self.gallery_member_bytes_bounded(media_set, pin_id, member_index, 512 * 1024 * 1024)
+    }
+
+    pub(crate) fn gallery_member_bytes_bounded(
+        &self,
+        media_set: MediaSetRef,
+        pin_id: String,
+        member_index: usize,
+        maximum_bytes: u64,
+    ) -> Result<Vec<u8>, QueueMediaError> {
         let pin = GalleryMediaPinRef::new(media_set, pin_id)?;
         self.runtime_store()?
-            .read_gallery_member(&pin, member_index, 512 * 1024 * 1024)
+            .read_gallery_member(&pin, member_index, maximum_bytes)
     }
 
     pub(crate) fn active_candidates(&self) -> Result<Vec<QueueMediaGcCandidate>, AdapterError> {

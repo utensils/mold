@@ -4,7 +4,7 @@ use crate::error::{MoldError, Result};
 
 /// Concrete server-resolved generation bounds; clients must not infer these
 /// from a model name. Both smooth carry and crossfade consume overlap frames.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ClipEnvelope {
     pub maximum_frames: u32,
     pub minimum_frames: u32,

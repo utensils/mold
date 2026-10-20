@@ -3258,6 +3258,14 @@ mod tests {
             pipeline: Some(crate::Ltx2PipelineMode::TwoStage),
             ..Default::default()
         });
+        request.prompt_transform = Some(crate::PromptTransformProvenance {
+            operation: crate::PromptTransformOperation::Expand,
+            root_prompt: Some(r"root\new".into()),
+            source_prompt: "source\\new\r\nline".into(),
+            source_kind: crate::RemixSourceKind::Direct,
+            task: crate::ExpandTask::TextToImage,
+            dimensions: vec![],
+        });
         let projected = request.synthetic_generate_request(OutputFormat::Mp4, 97, 24);
         assert_eq!(projected.sample_shift, Some(7.0));
         assert_eq!(projected.distill_strength_high, Some(1.5));
@@ -3265,6 +3273,10 @@ mod tests {
         let manifest =
             crate::chain_job::ChainJobManifest::new("child".into(), 1, &request).unwrap();
         assert_eq!(manifest.schema, "mold.chainjob.v3");
+        assert_eq!(
+            manifest.request().unwrap().prompt_transform,
+            request.prompt_transform
+        );
         assert_eq!(
             manifest.request().unwrap().generation_controls,
             request.generation_controls

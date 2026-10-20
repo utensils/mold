@@ -377,7 +377,12 @@ impl ChainJobManifest {
     /// compares THIS, never raw `request_json` strings (field-order
     /// changes alter bytes without altering meaning).
     pub fn request(&self) -> Result<ChainRequest> {
-        serde_json::from_str(&self.request_json)
+        let result = if self.schema == CHAIN_JOB_PARENT_SCHEMA {
+            crate::prompt_text::chain_request_from_literal_json(&self.request_json)
+        } else {
+            serde_json::from_str(&self.request_json)
+        };
+        result
             .map_err(|e| MoldError::Validation(format!("chain job request JSON parse failed: {e}")))
     }
 

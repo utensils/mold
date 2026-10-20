@@ -116,6 +116,7 @@ mod signals;
 pub mod state;
 pub mod thumbnails;
 pub mod variant_dependencies;
+pub(crate) mod video_job_manifest;
 mod video_reference_codec;
 pub(crate) mod video_source;
 pub mod video_upscale;

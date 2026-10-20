@@ -16,6 +16,7 @@ pub(crate) struct RetainedVideoSource {
     pub archive_identity_sha256: String,
     pub checksum_sha256: String,
     pub size_bytes: u64,
+    #[serde(deserialize_with = "mold_core::video_job::deserialize_literal_metadata")]
     pub metadata: mold_core::OutputMetadata,
 }
 

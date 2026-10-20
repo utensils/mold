@@ -13,6 +13,7 @@ pub struct StoredVideoJob {
     pub request_sha256: String,
     /// Server-authored, scrubbed manifest. Never contains inline media or secrets.
     pub manifest_json: String,
+    pub manifest_sha256: String,
     pub revision: u64,
     pub cancel_requested: bool,
 }
@@ -48,12 +49,13 @@ fn decode(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredVideoJob> {
         job,
         request_sha256: row.get(1)?,
         manifest_json: row.get(2)?,
+        manifest_sha256: row.get(5)?,
         revision: row.get(3)?,
         cancel_requested: row.get(4)?,
     })
 }
 pub fn get(db: &MetadataDb, id: &str) -> Result<Option<StoredVideoJob>> {
-    db.with_conn(|conn|conn.query_row("SELECT job_json,request_sha256,manifest_json,revision,cancel_requested FROM video_jobs WHERE id=?1",[id],decode).optional().map_err(Into::into))
+    db.with_conn(|conn|conn.query_row("SELECT job_json,request_sha256,manifest_json,revision,cancel_requested,manifest_sha256 FROM video_jobs WHERE id=?1",[id],decode).optional().map_err(Into::into))
 }
 
 /// Returns false only for an already accepted exact logical operation.
@@ -65,7 +67,7 @@ pub fn insert(db: &MetadataDb, value: &StoredVideoJob) -> Result<bool> {
             if old!=value.request_sha256 { bail!("video operation identity already belongs to another request"); }
             return Ok(false);
         }
-        conn.execute("INSERT INTO video_jobs(id,state,request_sha256,manifest_json,job_json,revision,cancel_requested,created_at_ms,updated_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?9,?7,?8)",params![value.job.id,state(value.job.state),value.request_sha256,value.manifest_json,serde_json::to_string(&value.job)?,value.revision,value.job.created_at_ms,value.job.updated_at_ms,value.cancel_requested])?;
+        conn.execute("INSERT INTO video_jobs(id,state,request_sha256,manifest_json,job_json,revision,cancel_requested,created_at_ms,updated_at_ms,manifest_sha256) VALUES(?1,?2,?3,?4,?5,?6,?9,?7,?8,?10)",params![value.job.id,state(value.job.state),value.request_sha256,value.manifest_json,serde_json::to_string(&value.job)?,value.revision,value.job.created_at_ms,value.job.updated_at_ms,value.cancel_requested,value.manifest_sha256])?;
         Ok(true)
     })
 }
@@ -79,7 +81,7 @@ pub fn checkpoint(
 ) -> Result<bool> {
     db.transact_immediate(|conn| {
         let next=value.revision.checked_add(1).context("video job revision exhausted")?;
-        let updated=conn.execute("UPDATE video_jobs SET state=?2,job_json=?3,revision=?4,updated_at_ms=?5 WHERE id=?1 AND revision=?6 AND request_sha256=?7",params![value.job.id,state(value.job.state),serde_json::to_string(&value.job)?,next,value.job.updated_at_ms,value.revision,value.request_sha256])?;
+        let updated=conn.execute("UPDATE video_jobs SET state=?2,job_json=?3,revision=?4,updated_at_ms=?5 WHERE id=?1 AND revision=?6 AND request_sha256=?7 AND manifest_sha256=?8",params![value.job.id,state(value.job.state),serde_json::to_string(&value.job)?,next,value.job.updated_at_ms,value.revision,value.request_sha256,value.manifest_sha256])?;
         if updated==0 { return Ok(false); }
         if let Some(part)=part {
             if part.parent_id!=value.job.id || part.clip_count==0 || part.clip_count>16 || part.keep_frames==0 { bail!("invalid bounded video child claim"); }
@@ -206,6 +208,7 @@ mod tests {
             },
             request_sha256: "request".into(),
             manifest_json: "{}".into(),
+            manifest_sha256: "sha".into(),
             revision: 0,
             cancel_requested: false,
         }
@@ -234,6 +237,20 @@ mod tests {
         assert_eq!(current.job.active_child_id.as_deref(), Some("child"));
         assert!(!current.job.can_cancel);
         assert!(!checkpoint(&db, &a, None).unwrap());
+    }
+
+    #[test]
+    fn immutable_manifest_digest_survives_checkpoint_and_reopen() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut a = stored();
+        a.manifest_sha256 = "immutable-manifest".into();
+        insert(&db, &a).unwrap();
+        a.job.state = VideoJobState::Running;
+        assert!(checkpoint(&db, &a, None).unwrap());
+        assert_eq!(
+            get(&db, "parent").unwrap().unwrap().manifest_sha256,
+            "immutable-manifest"
+        );
     }
 
     #[test]

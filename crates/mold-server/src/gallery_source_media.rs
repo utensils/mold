@@ -662,6 +662,7 @@ struct ReuseSessionMember {
     position: String,
 }
 
+#[derive(Clone)]
 struct ReuseSession {
     instance_id: String,
     credential_identity: String,
@@ -716,6 +717,41 @@ fn take_reuse_session(
     credential_identity: &str,
     request_digest: &str,
 ) -> Result<ReuseSession, ApiError> {
+    read_reuse_session(
+        token_hash,
+        now,
+        instance_id,
+        credential_identity,
+        request_digest,
+        true,
+    )
+}
+
+fn peek_reuse_session(
+    token_hash: &[u8; 32],
+    now: u64,
+    instance_id: &str,
+    credential_identity: &str,
+    request_digest: &str,
+) -> Result<ReuseSession, ApiError> {
+    read_reuse_session(
+        token_hash,
+        now,
+        instance_id,
+        credential_identity,
+        request_digest,
+        false,
+    )
+}
+
+fn read_reuse_session(
+    token_hash: &[u8; 32],
+    now: u64,
+    instance_id: &str,
+    credential_identity: &str,
+    request_digest: &str,
+    consume: bool,
+) -> Result<ReuseSession, ApiError> {
     let mut sessions = reuse_sessions()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -736,6 +772,9 @@ fn take_reuse_session(
             "RETAINED_MEDIA_REUSE_SCOPE_MISMATCH",
             StatusCode::CONFLICT,
         ));
+    }
+    if !consume {
+        return Ok(held.clone());
     }
     Ok(sessions
         .remove(token_hash)
@@ -880,6 +919,67 @@ pub(crate) async fn hydrate_reuse_session(
     headers: &HeaderMap,
     request: &mut mold_core::GenerateRequest,
 ) -> Result<(), ApiError> {
+    hydrate_reuse_session_with_mode(
+        state,
+        authenticated,
+        auth,
+        headers,
+        request,
+        MAX_SOURCE_DOWNLOAD_BYTES,
+        true,
+    )
+    .await
+}
+
+pub(crate) async fn preview_hydrate_reuse_session(
+    state: &AppState,
+    authenticated: Option<&Extension<crate::auth::ApiKeyAuthenticated>>,
+    auth: Option<&Extension<crate::auth::AuthState>>,
+    headers: &HeaderMap,
+    request: &mut mold_core::GenerateRequest,
+    maximum_bytes: u64,
+) -> Result<(), ApiError> {
+    hydrate_reuse_session_with_mode(
+        state,
+        authenticated,
+        auth,
+        headers,
+        request,
+        maximum_bytes,
+        false,
+    )
+    .await
+}
+
+pub(crate) async fn hydrate_reuse_session_bounded(
+    state: &AppState,
+    authenticated: Option<&Extension<crate::auth::ApiKeyAuthenticated>>,
+    auth: Option<&Extension<crate::auth::AuthState>>,
+    headers: &HeaderMap,
+    request: &mut mold_core::GenerateRequest,
+    maximum_bytes: u64,
+) -> Result<(), ApiError> {
+    hydrate_reuse_session_with_mode(
+        state,
+        authenticated,
+        auth,
+        headers,
+        request,
+        maximum_bytes,
+        true,
+    )
+    .await
+}
+
+async fn hydrate_reuse_session_with_mode(
+    state: &AppState,
+    authenticated: Option<&Extension<crate::auth::ApiKeyAuthenticated>>,
+    auth: Option<&Extension<crate::auth::AuthState>>,
+    headers: &HeaderMap,
+    request: &mut mold_core::GenerateRequest,
+    maximum_bytes: u64,
+    consume: bool,
+) -> Result<(), ApiError> {
     let Some(handle) = headers.get(REUSE_SESSION_HEADER) else {
         return Ok(());
     };
@@ -901,7 +1001,12 @@ pub(crate) async fn hydrate_reuse_session(
     let request_digest = request_sha256(request)?;
     let token_hash = session_token_hash(handle);
     let now = unix_timestamp();
-    let session = take_reuse_session(
+    let select = if consume {
+        take_reuse_session
+    } else {
+        peek_reuse_session
+    };
+    let session = select(
         &token_hash,
         now,
         state.instance_id.as_str(),
@@ -929,12 +1034,23 @@ pub(crate) async fn hydrate_reuse_session(
             StatusCode::CONFLICT,
         ));
     }
+    let mut selected_bytes = 0u64;
     for selected in &session.members {
         let current_member = current
             .members
             .iter()
             .find(|member| member.member.member_id == selected.member_id)
             .ok_or_else(|| ApiError::not_found("retained source-media member was removed"))?;
+        selected_bytes = selected_bytes
+            .checked_add(current_member.member.size_bytes)
+            .filter(|bytes| *bytes <= maximum_bytes)
+            .ok_or_else(|| {
+                ApiError::with_code(
+                    "Retained inputs exceed this operation's media budget",
+                    "RETAINED_SOURCE_MEDIA_TOO_LARGE",
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                )
+            })?;
         if current_member.media_set != selected.media_set
             || current_member.pin_id != selected.pin_id
             || current_member.index != selected.index
@@ -957,16 +1073,18 @@ pub(crate) async fn hydrate_reuse_session(
     })?;
     let members = session.members;
     let decrypted = tokio::task::spawn_blocking(move || {
+        let mut remaining = maximum_bytes;
         members
             .into_iter()
             .map(|member| {
-                lifecycle
-                    .gallery_member_bytes(
-                        member.media_set.clone(),
-                        member.pin_id.clone(),
-                        member.index,
-                    )
-                    .map(|bytes| (member, bytes))
+                let bytes = lifecycle.gallery_member_bytes_bounded(
+                    member.media_set.clone(),
+                    member.pin_id.clone(),
+                    member.index,
+                    remaining,
+                )?;
+                remaining -= bytes.len() as u64;
+                Ok::<_, crate::queue_media_store::QueueMediaError>((member, bytes))
             })
             .collect::<Result<Vec<_>, _>>()
     })
@@ -2056,6 +2174,16 @@ mod tests {
             );
         assert_eq!(
             take_reuse_session(&token_hash, now, "instance-b", "credential-a", "request")
+                .err()
+                .unwrap()
+                .code,
+            "RETAINED_MEDIA_REUSE_SCOPE_MISMATCH"
+        );
+        for _ in 0..2 {
+            peek_reuse_session(&token_hash, now, "instance-a", "credential-a", "request").unwrap();
+        }
+        assert_eq!(
+            peek_reuse_session(&token_hash, now, "instance-a", "other-client", "request")
                 .err()
                 .unwrap()
                 .code,

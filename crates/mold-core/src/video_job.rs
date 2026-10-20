@@ -228,7 +228,9 @@ impl VideoJobRequest {
     }
 }
 
-fn deserialize_literal_metadata<'de, D: Deserializer<'de>>(
+/// Decode saved provenance without legacy shell escape transformations.
+#[doc(hidden)]
+pub fn deserialize_literal_metadata<'de, D: Deserializer<'de>>(
     d: D,
 ) -> Result<crate::OutputMetadata, D::Error> {
     let raw = serde_json::Value::deserialize(d)?;
