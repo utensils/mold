@@ -504,3 +504,36 @@ mod tests {
         assert!(req.validate_shape().is_err());
     }
 }
+
+/// Each additive operation requires affirmative support from this installation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(default)]
+pub struct VideoJobCapabilities {
+    pub supported: bool,
+    pub literal_prompts: bool,
+    pub library_extend: bool,
+    pub source_transfer: bool,
+    pub restart: bool,
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+    #[test]
+    fn older_and_partial_capabilities_never_enable_video_operations() {
+        let old = crate::ServerCapabilities::default();
+        assert!(old.video_jobs.is_none());
+        assert!(serde_json::to_value(old)
+            .unwrap()
+            .get("video_jobs")
+            .is_none());
+        let partial: VideoJobCapabilities = serde_json::from_str(r#"{"supported":true}"#).unwrap();
+        assert!(partial.supported);
+        assert!(
+            !partial.literal_prompts
+                && !partial.library_extend
+                && !partial.source_transfer
+                && !partial.restart
+        );
+    }
+}

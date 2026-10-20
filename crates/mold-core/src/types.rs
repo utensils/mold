@@ -12287,6 +12287,10 @@ pub struct MiniMaxH3Capability {
 /// can add their own sub-structs without churning existing fields.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerCapabilities {
+    /// Arbitrary-duration parents. Absent until admission and recovery are live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_jobs: Option<crate::video_job::VideoJobCapabilities>,
+
     /// `/api/models` rows carry a complete version-1 generation profile.
     /// Absent/false identifies a legacy host whose flattened fields require
     /// the contained one-release client adapter.

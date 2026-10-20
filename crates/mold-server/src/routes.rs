@@ -8680,6 +8680,7 @@ async fn server_capabilities(
         ),
     };
     Json(mold_core::ServerCapabilities {
+        video_jobs: None,
         generation_profile_v1: true,
         licenses: true,
         gallery,
