@@ -118,6 +118,7 @@ pub mod thumbnails;
 pub mod variant_dependencies;
 pub(crate) mod video_archive_assets;
 pub(crate) mod video_job_manifest;
+pub(crate) mod video_job_restart;
 mod video_reference_codec;
 pub(crate) mod video_source;
 pub mod video_upscale;

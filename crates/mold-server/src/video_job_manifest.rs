@@ -185,11 +185,11 @@ pub(crate) fn hydrate_original_request(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
 
-    fn fixture() -> mold_db::video_jobs::StoredVideoJob {
+    pub(crate) fn fixture() -> mold_db::video_jobs::StoredVideoJob {
         let plan = serde_json::json!({"validation_revision":"proof","model":"ltx-2-19b-distilled:fp8","width":512,"height":512,"fps":24,"single_clip_max_frames":97,"overlap_frames":17,"join_mode":"continuous","clip_count":"9","part_count":"1","added_frames":"720","source_frames":"0","total_frames":"720","added_duration_ms":"30000","total_duration_ms":"30000","warnings":[]});
         let manifest = serde_json::json!({"version":1,"request":{"generation":{"model":"ltx-2-19b-distilled:fp8","prompt":"walking","width":512,"height":512,"steps":4,"seed":42},"duration_ms":"30000"},"template":{"model":"ltx-2-19b-distilled:fp8","width":512,"height":512,"steps":4,"guidance":0,"fps":24,"motion_tail_frames":17,"seed":42,"stages":[{"prompt":"walking","frames":97}]},"frozen":{"runtime_model_id":"runtime","config":mold_core::ModelConfig::default(),"model_fingerprint":"frozen"},"envelope":{"maximum_frames":97,"minimum_frames":1,"frame_step":8,"frame_offset":1,"overlap_frames":17},"retained_source":null,"plan":plan});
         let json = serde_json::to_string(&manifest).unwrap();
