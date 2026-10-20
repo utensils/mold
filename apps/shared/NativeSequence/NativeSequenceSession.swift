@@ -197,7 +197,7 @@ final class NativeSequenceSession {
                 } catch {
                     if cancelledBeforeAcceptance.contains("\(host.id.uuidString):\(id)") { return }
                     if let clientError = error as? MoldClientError, case let .http(status, _, _) = clientError,
-                       (400 ... 499).contains(status), status != 408, status != 409, status != 429 {
+                       [400, 401, 403, 404, 413, 415, 422, 451].contains(status) {
                         forget(id, host: host.id)
                         jobs.removeAll { $0.jobId == id && $0.host.id == host.id }
                         if generation == mine { message = error.localizedDescription }

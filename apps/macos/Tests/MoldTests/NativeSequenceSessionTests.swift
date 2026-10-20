@@ -176,6 +176,21 @@ struct NativeSequenceAdmissionTests {
         #expect(!relaunched.needsReferenceDecision, "An explicit discard cannot revive old references")
     }
 
+    @Test(arguments: [425, 499]) func unknownAdmissionStatusRetainsItsRecoveryRow(status: Int) async {
+        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!)
+        let backend = SequenceBackendFixture()
+        await backend.reject(status: status)
+        let session = NativeSequenceSession(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        session.begin(prompt: "A robot", frames: 107)
+        session.draft?.stages[1].prompt = "The robot waves"
+        let base = GenerateRequest(prompt: "A robot", model: "minimax-h3-fl2va:fasth3-v2-int8",
+            width: 768, height: 512, steps: 9, guidance: 0)
+        session.submit(base: base, host: host, installation: "same", backend: backend, current: { true })
+        await settle { !session.preparing }
+        #expect(!session.jobs.isEmpty, "Unknown acceptance requires recovery, never silently discard the known operation")
+        #expect(session.message?.contains("confirm acceptance") == true)
+    }
+
     @Test func changedRouteRefusesBeforeMutation() async {
         let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!)
         let backend = SequenceBackendFixture()
@@ -194,6 +209,7 @@ struct NativeSequenceAdmissionTests {
 private actor SequenceBackendFixture: MoldChainBackend {
     var creates = 0
     var shouldReject = false
+    var rejectionStatus = 422
     var createsHeld = false
     var createGate: CheckedContinuation<Void, Never>?
     var operationCancels = 0
@@ -207,7 +223,7 @@ private actor SequenceBackendFixture: MoldChainBackend {
     func releaseCreate() { createsHeld = false; createGate?.resume(); createGate = nil }
     func cancelChainOperation(id: String, operationId: String) async throws { operationCancels += 1 }
 
-    func reject() { shouldReject = true }
+    func reject(status: Int = 422) { shouldReject = true; rejectionStatus = status }
     var id = ""
     func createChainJob(_ request: AutoChainRequest, operationId: String) async throws -> CreateChainJobResponse {
         throw URLError(.unsupportedURL)
@@ -216,7 +232,7 @@ private actor SequenceBackendFixture: MoldChainBackend {
         creates += 1; id = operationId
         if createsHeld { await withCheckedContinuation { createGate = $0 } }
         if operationCancels > 0 { throw MoldClientError.http(status: 409, code: "CHAIN_MUTATION_CANCELLED", message: "Cancelled") }
-        if shouldReject { throw MoldClientError.http(status: 422, code: "REFUSED", message: "Unsupported setting") }
+        if shouldReject { throw MoldClientError.http(status: rejectionStatus, code: "REFUSED", message: "Unsupported setting") }
         throw URLError(.networkConnectionLost)
     }
     func validateChain(_ request: AuthoredChainRequest) async throws -> ChainValidationResponse {

@@ -116,6 +116,10 @@ struct NativeSequenceJobs: View {
             VStack(alignment: .leading, spacing: 8) {
                 Label("Video · \(job.host.name)", systemImage: "film.stack")
                     .font(.headline)
+                if let script = job.detail?.script, let prompt = script.stage.first?.prompt {
+                    Text(prompt).font(.subheadline).lineLimit(2)
+                    Text(script.chain.model).font(.caption).foregroundStyle(sequenceSecondary)
+                }
                 Text(job.message).fixedSize(horizontal: false, vertical: true)
                 if let detail = job.detail {
                     if let filename = detail.galleryFilename {
