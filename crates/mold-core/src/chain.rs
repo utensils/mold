@@ -221,6 +221,10 @@ pub struct ChainStage {
 /// former so downstream code only deals with `stages`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChainRequest {
+    /// Policy used by the client to prepare source pixels. Pixels are already
+    /// fitted; preserve ordinary provenance without fitting them again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_fit: Option<serde_json::Value>,
     /// Continue from one completed bounded part. Every part retains its own
     /// output and stage history; the timeline may grow through further parts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -397,6 +401,8 @@ pub struct ChainScript {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChainScriptChain {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_fit: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continue_from: Option<ChainContinuation>,
     pub model: String,
     pub width: u32,
@@ -420,6 +426,7 @@ impl From<&ChainRequest> for ChainScript {
         ChainScript {
             schema: "mold.chain.v1".into(),
             chain: ChainScriptChain {
+                source_fit: req.source_fit.clone(),
                 continue_from: req.continue_from.clone(),
                 model: req.model.clone(),
                 width: req.width,
@@ -688,8 +695,12 @@ pub struct ChainFailure {
     pub stage_error: String,
 }
 
+/// Default requested motion overlap. Model admission normalizes this to the
+/// concrete checkpoint's handoff contract (including zero for independent clips).
+pub const DEFAULT_MOTION_TAIL_FRAMES: u32 = 17;
+
 fn default_motion_tail_frames() -> u32 {
-    17
+    DEFAULT_MOTION_TAIL_FRAMES
 }
 
 fn default_fps() -> u32 {
@@ -943,7 +954,7 @@ impl ChainRequest {
             collection: self.collection.clone(),
             tags: self.tags.clone(),
             title: self.title.clone(),
-            source_fit: None,
+            source_fit: self.source_fit.clone(),
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             prompt,
@@ -1778,6 +1789,7 @@ mod tests {
     #[test]
     fn an_installed_catalog_wan_checkpoint_normalises_on_wans_grid() {
         let installed_wan = || ChainRequest {
+            source_fit: None,
             continue_from: None,
             model: "cv:2041121".into(),
             stages: vec![
@@ -1810,6 +1822,7 @@ mod tests {
 
         // Wan's grid is still enforced, just wan's and not LTX-2's.
         let off_grid = ChainRequest {
+            source_fit: None,
             continue_from: None,
             stages: vec![wan_stage("one", 50), wan_stage("two", 50)],
             ..installed_wan()
@@ -1851,6 +1864,7 @@ mod tests {
         source_image: Option<Vec<u8>>,
     ) -> ChainRequest {
         ChainRequest {
+            source_fit: None,
             continue_from: None,
             offload: None,
             collection: None,
@@ -1885,6 +1899,7 @@ mod tests {
 
     fn canonical_request(stages: Vec<ChainStage>, motion_tail_frames: u32) -> ChainRequest {
         ChainRequest {
+            source_fit: None,
             continue_from: None,
             offload: None,
             collection: None,
@@ -2508,6 +2523,7 @@ mod tests {
     #[test]
     fn chain_script_projects_from_request() {
         let req = ChainRequest {
+            source_fit: None,
             continue_from: None,
             offload: None,
             collection: None,
@@ -2557,6 +2573,42 @@ mod tests {
         assert_eq!(script.chain.seed, Some(42));
         assert_eq!(script.stages.len(), 1);
         assert_eq!(script.stages[0].prompt, "a");
+    }
+
+    #[test]
+    fn authored_chain_preserves_source_fit_through_plan_script_and_metadata() {
+        let fit = serde_json::json!({"mode":"upscale-then-fit","upscalerModel":"realesrgan-x4plus","fit":{"mode":"crop-fill","alignX":"left","alignY":"top"}});
+        let request: ChainRequest = serde_json::from_value(serde_json::json!({
+            "model":"ltx-2-19b-distilled:fp8", "width":384,"height":256,"steps":8,"guidance":1.0,
+            "source_fit":fit,
+            "stages":[{"prompt":"first","frames":33},{"prompt":"next","frames":33}]
+        }))
+        .unwrap();
+        let normalized = request.normalise_with_family(Some("ltx2")).unwrap();
+        assert_eq!(
+            serde_json::to_value(&normalized).unwrap()["source_fit"],
+            fit
+        );
+        let script = ChainScript::from(&normalized);
+        assert_eq!(
+            serde_json::to_value(&script).unwrap()["chain"]["source_fit"],
+            fit
+        );
+        let toml = crate::chain_toml::write_script(&script).unwrap();
+        let restored = crate::chain_toml::read_script(&toml).unwrap();
+        assert_eq!(restored.chain.source_fit.as_ref(), Some(&fit));
+        let generated = normalized.synthetic_generate_request(
+            OutputFormat::Mp4,
+            normalized.estimated_total_frames(),
+            normalized.fps,
+        );
+        assert_eq!(generated.source_fit.as_ref(), Some(&fit));
+        let metadata = normalized.stitched_output_metadata(
+            OutputFormat::Mp4,
+            normalized.estimated_total_frames(),
+            None,
+        );
+        assert_eq!(metadata.source_fit.as_ref(), Some(&fit));
     }
 
     #[test]
@@ -2717,6 +2769,7 @@ mod tests {
 
     fn stage_list_request(stages: Vec<(TransitionMode, u32, Option<u32>)>) -> ChainRequest {
         ChainRequest {
+            source_fit: None,
             continue_from: None,
             offload: None,
             collection: None,

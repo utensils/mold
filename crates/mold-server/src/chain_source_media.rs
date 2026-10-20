@@ -172,8 +172,7 @@ pub(crate) fn hydrate(
         ensure_hydrated(&request)?;
         return Ok(request);
     };
-    let digest = request_digest(&request)?;
-    let Some(media_set) = index.requests.get(&digest) else {
+    let Some(media_set) = media_revision(&index, &request)? else {
         if request.continue_from.is_some() && request.motion_tail_frames > 0 {
             bail!("linked part media revision is missing");
         }
@@ -336,19 +335,13 @@ pub(crate) fn handoff_current_to_gallery(
     let Some(index) = read_index(job_dir)? else {
         return Ok(());
     };
-    let digest = request_digest(&scrub(request.clone()))?;
-    // Retakes change effective prompt/seed overlays, not the canonical authored
-    // media revision. Its manifest remains the sealed input authority.
-    let canonical_digest;
-    let media_set = if let Some(media_set) = index.requests.get(&digest) {
+    // Retake overlays preserve the canonical sealed input revision.
+    let media_set = if let Some(media_set) = media_revision(&index, &scrub(request.clone()))? {
         media_set
     } else {
         let manifest = mold_core::chain_job::ChainJobManifest::read_from_dir(job_dir)
             .context("reading canonical media authority during gallery handoff")?;
-        canonical_digest = request_digest(&scrub(manifest.request()?))?;
-        index
-            .requests
-            .get(&canonical_digest)
+        media_revision(&index, &scrub(manifest.request()?))?
             .context("current chain media revision has no sealed recovery authority")?
     };
     let store = open_store(jobs_root)?;
@@ -560,6 +553,24 @@ fn take_authored_media(request: &mut ChainRequest) -> anyhow::Result<Vec<SealMed
     Ok(media)
 }
 
+/// Older creation sealed before resolving an omitted base seed. Accept only
+/// that exact historical digest: every authored byte hash, setting, prompt and
+/// predecessor binding remains identical. Never scan for a similar revision.
+fn media_revision<'a>(
+    index: &'a SourceMediaIndex,
+    request: &ChainRequest,
+) -> anyhow::Result<Option<&'a MediaSetRef>> {
+    if let Some(media) = index.requests.get(&request_digest(request)?) {
+        return Ok(Some(media));
+    }
+    if request.seed.is_some() {
+        let mut legacy = request.clone();
+        legacy.seed = None;
+        return Ok(index.requests.get(&request_digest(&legacy)?));
+    }
+    Ok(None)
+}
+
 fn request_digest(request: &ChainRequest) -> anyhow::Result<String> {
     let canonical = serde_json::to_vec(request)?;
     Ok(format!("{:x}", Sha256::digest(canonical)))
@@ -628,6 +639,35 @@ mod tests {
     use mold_core::chain::{ChainStage, TransitionMode};
     use mold_core::OutputFormat;
 
+    #[test]
+    fn legacy_random_seed_seal_recovers_only_the_identical_authored_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("jobs");
+        let job = root.join("legacy-random-seed");
+        std::fs::create_dir_all(&job).unwrap();
+        let mut original = request();
+        original.seed = None;
+        let sealed = persist_scrubbed(&root, &job, "legacy-random-seed", original.clone()).unwrap();
+        let mut persisted = sealed;
+        persisted.materialize_seed();
+        assert_eq!(
+            hydrate(&root, &job, persisted.clone()).unwrap().stages[0].source_image,
+            original.stages[0].source_image
+        );
+        let mut changed = persisted.clone();
+        changed.stages[0].prompt.push_str(" changed");
+        assert!(hydrate(&root, &job, changed).is_err());
+        let mut changed = persisted.clone();
+        changed.stages[0].authored_media_sha256 = Some("different bytes".into());
+        assert!(hydrate(&root, &job, changed).is_err());
+        let mut changed = persisted;
+        changed.continue_from = Some(mold_core::ChainContinuation {
+            job_id: "other-parent".into(),
+            finalize_take: 2,
+        });
+        assert!(hydrate(&root, &job, changed).is_err());
+    }
+
     fn request() -> ChainRequest {
         let stage = |prompt: &str, source_image| ChainStage {
             prompt: prompt.into(),
@@ -645,6 +685,7 @@ mod tests {
             authored_media_sha256: None,
         };
         ChainRequest {
+            source_fit: None,
             continue_from: None,
             offload: None,
             model: "ltx-2-19b-distilled:fp8".into(),

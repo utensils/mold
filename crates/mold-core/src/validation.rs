@@ -239,6 +239,23 @@ pub fn materialize_extend_overlap_frames(req: &mut GenerateRequest, family: Opti
 /// headers where possible, the manifest as the cold fallback. `None` is
 /// "unknown", which takes the conservative path rather than assuming a
 /// handoff. Families with a real latent window keep what the caller asked for.
+/// Concrete H3 task identity outranks the legacy source-image field: FL2VA
+/// accepts an optional first frame while Ref2VA carries reference inputs.
+pub fn chain_motion_tail_frames_for_model(
+    family: &str,
+    model: &str,
+    source_image: Option<crate::SourceImageCapability>,
+    requested: u32,
+) -> u32 {
+    if crate::minimax_h3::is_family(family) {
+        return u32::from(matches!(
+            crate::minimax_h3::task_for_model(model),
+            Some(crate::minimax_h3::Task::Fl2va)
+        ));
+    }
+    chain_motion_tail_frames_for_family(family, source_image, requested)
+}
+
 pub fn chain_motion_tail_frames_for_family(
     family: &str,
     source_image: Option<crate::SourceImageCapability>,

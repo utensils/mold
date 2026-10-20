@@ -30,6 +30,47 @@ pub struct LinkedPartLimits {
     pub max_parts: Option<u64>,
 }
 
+/// Model-derived facts for a compact clip editor. These are the same frame
+/// grid and normalized overlap enforced at admission, never a UI family list.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ChainAuthoringCapabilities {
+    /// Fitted pixels retain the ordinary crop/fit policy in saved provenance.
+    pub source_fit_supported: bool,
+    pub motion_tail_frames: u32,
+    /// `latent` carries motion, `rgb` carries one boundary frame, and
+    /// `independent` joins clips without promising motion continuity.
+    pub carry_mode: String,
+    pub min_frames: u32,
+    pub frame_step: u32,
+    pub frame_offset: u32,
+}
+
+pub(crate) fn authoring_capabilities(
+    family: &str,
+    model: &str,
+    source_image: Option<mold_core::SourceImageCapability>,
+) -> ChainAuthoringCapabilities {
+    let motion_tail_frames = mold_core::validation::chain_motion_tail_frames_for_model(
+        family,
+        model,
+        source_image,
+        mold_core::chain::DEFAULT_MOTION_TAIL_FRAMES,
+    );
+    ChainAuthoringCapabilities {
+        source_fit_supported: true,
+        motion_tail_frames,
+        carry_mode: match motion_tail_frames {
+            0 => "independent",
+            1 => "rgb",
+            _ => "latent",
+        }
+        .into(),
+        min_frames: mold_core::validation::min_frames_for_model(family, model).unwrap_or(1),
+        frame_step: mold_core::validation::frame_step_for_family(family).unwrap_or(1),
+        frame_offset: mold_core::validation::frame_offset_for_family(family).unwrap_or(0),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SequenceSupport {
     pub supported: bool,
@@ -68,6 +109,10 @@ pub struct ChainLimits {
     /// `continue_from`, which an older parser would otherwise ignore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linked_parts: Option<LinkedPartLimits>,
+    /// Additive editor guidance. Missing on older hosts; clients can still
+    /// obtain normalized overlap and delivered duration from chain validate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authoring: Option<ChainAuthoringCapabilities>,
     pub fade_frames_max: u32,
     pub transition_modes: Vec<String>,
     pub quantization_family: String,
@@ -210,6 +255,14 @@ pub fn compute_limits(
                 .any(|file| file.component == mold_core::manifest::ModelComponent::SpatialUpscaler)
         });
     let sequence = sequence_support(&canonical_model, family, has_spatial_upscaler);
+    let source_image = mold_core::validation::source_image_capability_for_engine(
+        Some(family),
+        mold_core::manifest::find_manifest(&canonical_model)
+            .and_then(|manifest| manifest.defaults.source_image),
+    );
+    let authoring = sequence
+        .supported
+        .then(|| authoring_capabilities(family, &canonical_model, source_image));
     ChainLimits {
         model: model.to_string(),
         frames_per_clip_cap: cap,
@@ -224,6 +277,7 @@ pub fn compute_limits(
             max_stages_per_part: MAX_STAGES,
             max_parts: None,
         }),
+        authoring,
         fade_frames_max: 32,
         transition_modes: vec!["smooth".into(), "cut".into(), "fade".into()],
         quantization_family: quant.to_string(),
@@ -236,6 +290,69 @@ pub fn compute_limits(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authoring_contract_uses_model_grid_and_normalized_handoff() {
+        for (model, family, tail, carry, minimum, step, offset) in [
+            ("ltx-2-19b-distilled:fp8", "ltx2", 17, "latent", 1, 8, 1),
+            ("wan22-i2v-a14b:q4", "wan", 1, "rgb", 1, 4, 1),
+            ("wan21-t2v-1.3b:turbo", "wan", 0, "independent", 1, 4, 1),
+            (
+                "ltx-video-0.9.8-2b-distilled:bf16",
+                "ltx-video",
+                0,
+                "independent",
+                1,
+                8,
+                1,
+            ),
+            (
+                "minimax-h3-fl2va:fasth3-v2-int8",
+                "minimax-h3",
+                1,
+                "rgb",
+                107,
+                17,
+                5,
+            ),
+            (
+                "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step",
+                "minimax-h3",
+                0,
+                "independent",
+                107,
+                17,
+                5,
+            ),
+        ] {
+            let limits = compute_limits(model, family, "", None, Some(24));
+            let json = serde_json::to_value(limits).unwrap();
+            assert_eq!(
+                json["authoring"],
+                serde_json::json!({
+                    "source_fit_supported": true,
+                    "motion_tail_frames": tail, "carry_mode": carry, "min_frames": minimum,
+                    "frame_step": step, "frame_offset": offset,
+                }),
+                "{model}"
+            );
+        }
+    }
+
+    #[test]
+    fn authoring_handoff_uses_resolved_checkpoint_contract_over_manifest() {
+        let limits = compute_limits("wan22-i2v-a14b:q4", "wan", "q4", None, Some(24));
+        let mut value = serde_json::to_value(limits).unwrap();
+        assert_eq!(value["authoring"]["motion_tail_frames"], 1);
+        let authoritative = authoring_capabilities(
+            "wan",
+            "wan22-i2v-a14b:q4",
+            Some(mold_core::SourceImageCapability::Unsupported),
+        );
+        value["authoring"] = serde_json::to_value(authoritative).unwrap();
+        assert_eq!(value["authoring"]["motion_tail_frames"], 0);
+        assert_eq!(value["authoring"]["carry_mode"], "independent");
+    }
 
     #[test]
     fn linked_parts_advertise_no_total_part_limit_and_keep_per_part_budget() {

@@ -712,8 +712,10 @@ pub fn spawn_runner(deps: RunnerDeps) -> ChainJobRunnerHandle {
 pub(crate) fn create_job_with_params(
     db: &MetadataDb,
     jobs_root: &Path,
-    params: CreateJobParams,
+    mut params: CreateJobParams,
 ) -> anyhow::Result<ChainJobRow> {
+    // Resolve random execution provenance before sealing its canonical media revision.
+    params.request.materialize_seed();
     std::fs::create_dir_all(jobs_root)
         .with_context(|| format!("creating chain jobs root '{}'", jobs_root.display()))?;
     let job_dir = jobs_root.join(&params.id);
@@ -5057,6 +5059,7 @@ mod tests {
 
     fn request(transitions: Vec<TransitionMode>) -> ChainRequest {
         ChainRequest {
+            source_fit: None,
             continue_from: None,
             offload: None,
             collection: None,
@@ -7162,6 +7165,7 @@ mod tests {
         for part in 0..20 {
             let manifest = ChainJobManifest::read_from_dir(&previous.job_dir).unwrap();
             let mut next_request = request.clone();
+            next_request.seed = None;
             next_request.continue_from = Some(mold_core::chain::ChainContinuation {
                 job_id: previous.id.clone(),
                 finalize_take: 1,
@@ -9670,6 +9674,7 @@ mod tests {
         let db = db();
         let mut req = request(vec![TransitionMode::Smooth, TransitionMode::Cut]);
         req.seed = None;
+        req.stages[0].source_image = Some(vec![1, 2, 3]);
         let row = create_job_with_params(
             &db,
             dir.path(),
@@ -9684,6 +9689,9 @@ mod tests {
         let manifest = ChainJobManifest::read_from_dir(&row.job_dir).unwrap();
         assert_eq!(row.request_json, manifest.request_json);
         let request: ChainRequest = serde_json::from_str(&row.request_json).unwrap();
+        let hydrated =
+            crate::chain_source_media::hydrate(dir.path(), &row.job_dir, request.clone()).unwrap();
+        assert_eq!(hydrated.stages[0].source_image, Some(vec![1, 2, 3]));
         let seed = request.seed.expect("persisted random seed");
         for (status, stage) in chain_jobs::stages_for_job(&db, &row.id)
             .unwrap()

@@ -139,6 +139,7 @@ pub(crate) async fn render(
             .status
             .id
     };
+    let mut child_activity_recorded = false;
     let outcome = async {
         let mut cancelling = false;
         loop {
@@ -158,6 +159,21 @@ pub(crate) async fn render(
                 .children
                 .first()
                 .context("H3 chain child batch is empty")?;
+            if !child_activity_recorded {
+                let db = state
+                    .metadata_db
+                    .as_ref()
+                    .as_ref()
+                    .context("H3 chain database unavailable")?;
+                let parent =
+                    mold_db::chain_jobs::get_job(db, job_id)?.context("H3 chain disappeared")?;
+                crate::routes_activity::record_stage_child_activity(
+                    &parent.job_dir,
+                    job_id,
+                    &child.job_id,
+                )?;
+                child_activity_recorded = true;
+            }
             if child.state == GenerationBatchChildState::Running {
                 if let Some(ordinal) = state
                     .job_registry

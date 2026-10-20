@@ -1200,13 +1200,52 @@ impl MoldClient {
     }
 
     pub async fn create_chain_job(&self, req: &ChainRequest) -> Result<CreateChainJobResponse> {
+        self.post_chain_job(req, None).await
+    }
+
+    /// Validate the delivered clip plan without creating work or downloading
+    /// models. Admission still rechecks current artifacts and source-part state.
+    pub async fn validate_chain_request(
+        &self,
+        req: &ChainRequest,
+    ) -> Result<crate::chain::ChainValidationResponse> {
         let wire_req = crate::prompt_text::protect_chain_request_for_wire(req);
-        let resp = self
+        let response = self
             .client
-            .post(format!("{}/api/chain-jobs", self.base_url))
+            .post(format!("{}/api/generate/chain/validate", self.base_url))
             .json(&wire_req)
             .send()
             .await?;
+        Ok(error_for_status_with_body(response)
+            .await?
+            .json::<crate::chain::ChainValidationResponse>()
+            .await?)
+    }
+
+    /// Supply a persisted operation identity before sending. After a lost
+    /// response callers reconcile this exact job, rather than creating another.
+    pub async fn create_chain_job_with_operation_id(
+        &self,
+        req: &ChainRequest,
+        operation_id: &str,
+    ) -> Result<CreateChainJobResponse> {
+        self.post_chain_job(req, Some(operation_id)).await
+    }
+
+    async fn post_chain_job(
+        &self,
+        req: &ChainRequest,
+        operation_id: Option<&str>,
+    ) -> Result<CreateChainJobResponse> {
+        let wire_req = crate::prompt_text::protect_chain_request_for_wire(req);
+        let mut builder = self
+            .client
+            .post(format!("{}/api/chain-jobs", self.base_url))
+            .json(&wire_req);
+        if let Some(operation_id) = operation_id {
+            builder = builder.header("x-mold-operation-id", operation_id);
+        }
+        let resp = builder.send().await?;
         Ok(error_for_status_with_body(resp)
             .await?
             .json::<CreateChainJobResponse>()
@@ -1869,6 +1908,20 @@ impl MoldClient {
             .json::<ServerStatus>()
             .await?;
         Ok(resp)
+    }
+
+    /// Read additive chain capabilities from the selected server without a
+    /// dependency on its implementation crate. Unknown fields remain intact.
+    pub async fn chain_limits(&self, model: &str, fps: Option<u32>) -> Result<serde_json::Value> {
+        let mut request = self
+            .client
+            .get(format!("{}/api/capabilities/chain-limits", self.base_url))
+            .query(&[("model", model)]);
+        if let Some(fps) = fps {
+            request = request.query(&[("fps", fps)]);
+        }
+        let response = request.send().await?;
+        Ok(error_for_status_with_body(response).await?.json().await?)
     }
 
     /// Detect linked-part semantics before sending `continue_from`. An older
@@ -7178,6 +7231,68 @@ mod tests {
         let response = client.amend_chain_job("job-7", &req).await.unwrap();
         assert_eq!(response.preserved_stages, 1);
         assert_eq!(response.summary.id, "job-7");
+    }
+
+    #[tokio::test]
+    async fn chain_limits_sdk_preserves_additive_contract_and_frame_rate() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let payload = serde_json::json!({"max_stages":16,"authoring":{"motion_tail_frames":1,"source_fit_supported":true},"future":{"field":7}});
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities/chain-limits"))
+            .and(query_param("model", "minimax-h3-fl2va:fasth3-v2-int8"))
+            .and(query_param("fps", "24"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&payload))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = MoldClient::new(&server.uri());
+        assert_eq!(
+            client
+                .chain_limits("minimax-h3-fl2va:fasth3-v2-int8", Some(24))
+                .await
+                .unwrap(),
+            payload
+        );
+    }
+
+    #[tokio::test]
+    async fn authored_chain_sdk_validates_then_preserves_operation_identity() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let request: crate::chain::ChainRequest = serde_json::from_value(serde_json::json!({
+            "model":"ltx-2-19b-distilled:fp8", "width":384,"height":256,"steps":8,"guidance":1.0,
+            "stages":[{"prompt":"first","frames":33},{"prompt":"next","frames":33}]
+        }))
+        .unwrap();
+        Mock::given(method("POST"))
+            .and(path("/api/generate/chain/validate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                crate::chain::ChainValidationResponse::from_normalized(&request, vec![]),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let operation = "47c19f75-4414-4971-b8f3-a9b1826bb129";
+        Mock::given(method("POST"))
+            .and(path("/api/chain-jobs"))
+            .and(header("x-mold-operation-id", operation))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "job_id":operation
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = MoldClient::new(&server.uri());
+        let plan = client.validate_chain_request(&request).await.unwrap();
+        assert_eq!(plan.estimated_total_frames, 49);
+        let accepted = client
+            .create_chain_job_with_operation_id(&request, operation)
+            .await
+            .unwrap();
+        assert_eq!(accepted.job_id, operation);
     }
 
     /// A stage prompt carrying a backslash survives the wire the way every
