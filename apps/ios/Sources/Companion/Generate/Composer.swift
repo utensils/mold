@@ -145,15 +145,19 @@ struct Composer: View {
                 .accessibilityIdentifier("prompt-history")
                 .disabled(generate.target == nil && hosts.preferredHost == nil)
             }
-            if generate.usesVideoDuration, generate.videoDuration != nil {
-                NativeDurationEditor(draft: Binding(get: { generate.videoDuration!.draft }, set: {
+            if generate.usesVideoDuration, let authoring = generate.videoDuration {
+                NativeDurationEditor(draft: Binding(get: { generate.videoDuration?.draft ?? authoring.draft }, set: {
                     generate.videoDuration?.draft = $0
                 }), planner: generate.videoPlanner, prompt: generate.draft.prompt,
                     singleClipMaxFrames: generate.recipe?.temporal?.frames.max,
                     fps: generate.draft.fps ?? 24, sourceTitle: generate.videoDuration?.sourceOwner?.title,
                     sourceMachine: generate.videoDuration?.sourceOwner.flatMap { hosts.host($0.hostId)?.name },
-                    busy: generate.durationTask != nil, retry: { generate.refreshDurationPlan() },
-                    startFresh: { generate.videoDuration?.startFresh(); generate.saveDraft() })
+                    busy: generate.durationTask != nil,
+                    originalReferencesReplaced: !generate.draft.media.generationReferences.isEmpty,
+                    originalReferences: generate.durationSource?.originalReferences,
+                    sourceNotice: generate.durationSourceError,
+                    retrySource: { Task { await generate.restoreDurationSource() } }, retry: { generate.refreshDurationPlan() },
+                    startFresh: { generate.videoDuration?.startFresh(); generate.durationSource = nil; generate.durationSourceError = nil; generate.saveDraft() })
                 if let error = generate.durationError ?? generate.videoJobs.error {
                     Text(error).font(.callout).fixedSize(horizontal: false, vertical: true)
                 }

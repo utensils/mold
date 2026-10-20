@@ -19,7 +19,7 @@ struct PictureWells: View {
             if readsSource || references != nil {
                 ScrollView(.horizontal) {
                     HStack(alignment: .top, spacing: 10) {
-                        if readsSource {
+                        if readsSource && (!generate.durationUsesSourceEnding || generate.draft.media.sourceImage != nil) {
                             Well(title: String(localized: "Start from"), image: generate.draft.media.sourceImage,
                                  original: generate.draft.media.sourceImageOriginal,
                                  side: side, accepting: PictureImport.engineReadable,

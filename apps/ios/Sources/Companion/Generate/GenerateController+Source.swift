@@ -4,7 +4,7 @@ import MoldClient
 extension GenerateController {
     /// Attach the selected print while retaining the authored model and settings.
     func useAsSource(_ entry: LibraryEntry, role: GenerationImageReferenceRole? = nil, attachment: SourceMediaAttachment? = nil) async {
-        let fence = ReferenceImportFence(model: modelName, host: target?.id, recipe: recipe, media: draft.media)
+        let fence = ReferenceImportFence(model: modelName, host: target?.id, recipe: recipe, media: draft.media, videoSource: videoDuration?.draft.source, videoSourceOwner: videoDuration?.sourceOwner)
         let source = entry.presented(onAnyOf: Set(hosts.upHosts.map(\.id))) ?? entry
         guard source.print.kind == .picture, let host = hosts.host(source.hostID) else { return }
         let sourceInstance = hosts.instanceID(of: host.id)
@@ -14,7 +14,7 @@ extension GenerateController {
         func current() -> Bool {
             !Task.isCancelled && hosts.host(host.id) == host && hosts.instanceID(of: host.id) == sourceInstance
                 && target == targetRoute && target.flatMap { hosts.instanceID(of: $0.id) } == targetInstance
-                && revisions == mediaRevisions && fence.isCurrent(model: modelName, host: target?.id, recipe: recipe, media: draft.media)
+                && revisions == mediaRevisions && fence.isCurrent(model: modelName, host: target?.id, recipe: recipe, media: draft.media, videoSource: videoDuration?.draft.source, videoSourceOwner: videoDuration?.sourceOwner)
         }
         do {
             let bytes = try await hosts.backend(for: host).media(source.print.filename, trashed: false)

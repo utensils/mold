@@ -7,6 +7,7 @@ extension DraftPersistence {
         var draft = controller.draft
         descriptor.apply(to: &draft)
         if let restoredInputs { try? restoredInputs.apply(to: &draft.media) }
+        controller.videoDuration = descriptor.videoDuration
         controller.draft = draft
         controller.modelFamily = descriptor.family ?? controller.modelFamily
         controller.recipeID = descriptor.recipeID ?? controller.recipeID

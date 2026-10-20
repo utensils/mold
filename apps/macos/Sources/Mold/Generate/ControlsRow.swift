@@ -25,7 +25,7 @@ struct ControlsRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             controls
-            if controller.sequence.draft == nil, let note = routing?.note {
+            if controller.videoDuration == nil, controller.sequence.draft == nil, let note = routing?.note {
                 Text(note).font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -41,7 +41,7 @@ struct ControlsRow: View {
         WrappingHStack(horizontalSpacing: 18, verticalSpacing: 10) {
             ControlLabel("Machine") { MachineControl() }
             shapeControl
-            if controller.sequence.draft == nil, let temporal = recipe.temporal, let routing {
+            if controller.videoDuration == nil, controller.sequence.draft == nil, let temporal = recipe.temporal, let routing {
                 ControlLabel("Length") {
                     LengthControl(temporal: temporal, bounds: routing.bounds, draft: $draft)
                 }

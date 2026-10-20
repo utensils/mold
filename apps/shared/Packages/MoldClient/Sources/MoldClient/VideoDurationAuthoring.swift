@@ -33,5 +33,14 @@ public struct VideoDurationAuthoring: Codable, Hashable, Sendable {
         }
         return try draft.request(generation: generation)
     }
+    /// Only an affirmative current plan can hide an unused opening control.
+    public func usesSourceEnding(plan: VideoJobPlan?) -> Bool {
+        draft.source != nil && plan?.joinMode == .continuous
+    }
+    public func openingConflict(plan: VideoJobPlan?, generation: GenerateRequest) -> String? {
+        guard usesSourceEnding(plan: plan), generation.sourceImage != nil
+                || generation.keyframes?.contains(where: { $0.frame == 0 }) == true else { return nil }
+        return "This video continues the original ending. Remove the attached first frame, or choose Start new video."
+    }
     public mutating func startFresh() { draft.source = nil; sourceOwner = nil }
 }

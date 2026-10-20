@@ -49,7 +49,12 @@ struct PrintMenu: View {
                     Label("Use These Settings", systemImage: "arrow.uturn.left.circle")
                 }
             }
-            if single, let entry = entries.first, entry.print.kind == .clip,
+            if single, let entry = entries.first, entry.print.isVideo,
+               generate.hosts.capabilities[entry.hostID]?.canExtendLibraryVideo == true {
+                Button { router.extendVideo(entry) } label: {
+                    Label("Extend video…", systemImage: "film.stack")
+                }
+            } else if single, let entry = entries.first, entry.print.kind == .clip,
                entry.print.metadata.chainJobId != nil {
                 Button { router.continueVideo(entry) } label: {
                     Label("Continue video…", systemImage: "film.stack")

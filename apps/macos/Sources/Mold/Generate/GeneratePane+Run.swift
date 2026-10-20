@@ -56,6 +56,11 @@ extension GeneratePane {
                 })
             return
         }
+        if controller.usesDuration(on: host, recipe: recipe) {
+            controller.submitDuration(on: host, recipe: recipe,
+                retained: reuse.take(for: controller.draft).map { RetainedMediaHydration(authority: $0, hosts: hosts) })
+            return
+        }
         let routing = recipe.flatMap {
             ClipRouting.resolve(recipe: $0, model: selectedModel, draft: controller.draft,
                                 limits: advertisedChainLimits)
@@ -120,6 +125,7 @@ extension GeneratePane {
     func cancelRun() { controller.stop() }
 
     func refreshPlacement() {
+        guard !controller.usesDuration(on: host, recipe: recipe) else { return }
         host.map(controller.refreshPlacement(on:))
     }
 }

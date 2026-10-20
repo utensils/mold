@@ -27,7 +27,7 @@ struct QueuePane: View {
 
     var body: some View {
         Group {
-            if queue.all.isEmpty, alsoRunning.isEmpty, pausedMachines.isEmpty, generate.sequence.jobs.isEmpty, generate.sequence.historyNotice == nil {
+            if queue.all.isEmpty, alsoRunning.isEmpty, pausedMachines.isEmpty, generate.sequence.jobs.isEmpty, generate.videoJobs.jobs.isEmpty, generate.videoJobs.pending.isEmpty, generate.videoJobs.error == nil, generate.sequence.historyNotice == nil {
                 ContentUnavailableView(
                     queue.isLoading ? "Checking each machine…" : "Nothing queued",
                     systemImage: "list.bullet.indent",
@@ -35,6 +35,12 @@ struct QueuePane: View {
                 )
             } else {
                 List(selection: $selection) {
+                    NativeDurationJobs(coordinator: generate.videoJobs, backend: { owner in
+                        guard generate.durationIsCurrent(owner) else { return nil }
+                        return hosts.backend(for: owner.host.id)
+                    }, current: { generate.durationIsCurrent($0) },
+                    open: { host, filename in openVideo(PrintID(host: host.id, filename: filename)) })
+                        .selectionDisabled(true)
                     NativeSequenceJobs(session: generate.sequence, backend: { job in
                         guard hosts.host(job.host.id) == job.host, hosts.instanceID(of: job.host.id) == job.installation else { return nil }
                         return hosts.backend(for: job.host.id)
@@ -74,7 +80,7 @@ struct QueuePane: View {
             QueueDetailSheet(entry: target.entry, host: target.host)
         }
         .destructionDialog($pendingDestruction)
-        .task { await load(); await generate.discoverSequences() }
+        .task { await load(); await generate.discoverSequences(); await generate.recoverDurationJobs(activity: activity.byHost, discover: true) }
         .task {
             while !Task.isCancelled {
                 await queue.pollProgress()

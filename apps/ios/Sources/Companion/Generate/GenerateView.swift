@@ -95,6 +95,12 @@ struct GenerateView: View {
         .onChange(of: generate.videoDuration) { _, _ in generate.saveDraft() }
         .task(id: estimateKey) { await refreshEstimate() }
         .task(id: sequenceCapabilityKey) { await generate.refreshSequenceLimits() }
+        .task(id: durationSourceKey) { await generate.restoreDurationSource() }
+        .onChange(of: router.pendingVideoExtension, initial: true) { _, entry in
+            guard let entry else { return }
+            router.pendingVideoExtension = nil
+            generate.extendVideo(entry)
+        }
         .onChange(of: router.pendingContinuation, initial: true) { _, entry in
             guard let entry else { return }
             router.pendingContinuation = nil
@@ -195,5 +201,21 @@ extension PrintKind {
 extension View {
     func hideKeyboard() {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
+}
+
+extension GenerateView {
+    private struct DurationSourceKey: Hashable {
+        let source: VideoJobSource?
+        let sourceOwner: VideoLibrarySourceOwner?
+        let host: MoldHost?
+        let instance: String?
+        let reachable: Bool
+    }
+    private var durationSourceKey: DurationSourceKey {
+        let host = generate.videoDuration?.sourceOwner.flatMap { hosts.host($0.hostId) }
+        return .init(source: generate.videoDuration?.draft.source, sourceOwner: generate.videoDuration?.sourceOwner,
+                     host: host, instance: host.flatMap { hosts.instanceID(of: $0.id) },
+                     reachable: host.map(hosts.isUp) ?? false)
     }
 }

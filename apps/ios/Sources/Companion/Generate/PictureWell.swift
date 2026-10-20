@@ -116,7 +116,7 @@ struct Well: View {
 
     private var currentFence: ReferenceImportFence {
         ReferenceImportFence(model: generate.modelName, host: generate.target?.id,
-            recipe: generate.recipe, media: generate.draft.media)
+            recipe: generate.recipe, media: generate.draft.media, videoSource: generate.videoDuration?.draft.source, videoSourceOwner: generate.videoDuration?.sourceOwner)
     }
     private func capture() { selectionFence = currentFence }
 
@@ -130,7 +130,7 @@ struct Well: View {
                 let picture = try await load()
                 try Task.checkCancellation()
                 guard fence.isCurrent(model: generate.modelName, host: generate.target?.id,
-                                      recipe: generate.recipe, media: generate.draft.media) else {
+                                      recipe: generate.recipe, media: generate.draft.media, videoSource: generate.videoDuration?.draft.source, videoSourceOwner: generate.videoDuration?.sourceOwner) else {
                     problem = "Attachments changed while choosing. Choose the picture again."
                     return
                 }

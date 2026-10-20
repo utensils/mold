@@ -8,6 +8,7 @@ extension LibraryPane {
     /// The model is adopted from the machine that MADE the print, because a
     /// model installed on one host is not available on another.
     func reuse(_ entry: LibraryEntry) {
+        generate.videoDuration = nil; generate.durationSource = nil
         let metadata = entry.print.metadata
         // Keep the current contract before replacing the draft. A print may
         // name no model, or name one that has since been removed; in either

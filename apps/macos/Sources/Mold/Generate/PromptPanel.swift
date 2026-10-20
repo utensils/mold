@@ -43,6 +43,10 @@ struct PromptPanel: View {
     @AppStorage("generatePromptEditorHeight", store: AppStorageSuite.defaults)
     private var preferredPromptHeight = Double(PromptEditorHeight.initial)
 
+    static func showsOrdinaryPrompt(durationActive: Bool, authoring: VideoDurationAuthoring?) -> Bool {
+        !durationActive || authoring?.draft.scenesEnabled != true || authoring?.draft.scenes.isEmpty != false
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             if let steps = controller.run.steps {
@@ -60,9 +64,27 @@ struct PromptPanel: View {
                                 frameStep: chainLimits?.authoring?.frameStep ?? temporal.frames.step, maximumClips: chainLimits?.maxStages ?? 16,
                                 carryMode: chainLimits?.authoring?.carryMode)
                         } else {
-                            prompt(recipe)
-                            promptTools(recipe)
-                            if recipe.temporal != nil, chainLimits?.supportsSequence == true {
+                            if Self.showsOrdinaryPrompt(durationActive: controller.usesDuration(on: host, recipe: recipe), authoring: controller.videoDuration) {
+                                prompt(recipe)
+                                promptTools(recipe)
+                            }
+                            if controller.usesDuration(on: host, recipe: recipe), let authoring = controller.videoDuration {
+                                NativeDurationEditor(draft: Binding(
+                                    get: { controller.videoDuration?.draft ?? authoring.draft },
+                                    set: { controller.videoDuration?.draft = $0 }),
+                                    planner: controller.videoPlanner, prompt: draft.prompt,
+                                    singleClipMaxFrames: recipe.temporal?.frames.max,
+                                    fps: recipe.temporal?.fps.resolvedRate(draft.fps) ?? 24,
+                                    sourceTitle: controller.videoDuration?.sourceOwner?.title,
+                                    sourceMachine: host?.name, busy: controller.durationSubmitting,
+                                    originalReferencesReplaced: !controller.draft.media.generationReferences.isEmpty,
+                    originalReferences: controller.durationSource?.originalReferences,
+                                    sourceNotice: controller.durationSourceError,
+                                    retrySource: { Task { await controller.restoreDurationSource() } },
+                                    retry: { controller.planDuration(on: host, recipe: recipe) },
+                                    startFresh: { controller.videoDuration?.startFresh(); controller.durationSource = nil; controller.durationSourceError = nil })
+                            }
+                            if !controller.usesDuration(on: host, recipe: recipe), recipe.temporal != nil, chainLimits?.supportsSequence == true {
                                 Button("Add another clip", systemImage: "plus") {
                                     controller.sequence.begin(prompt: draft.prompt, frames: draft.frames ?? chainLimits!.framesPerClipRecommended)
                                 }.accessibilityIdentifier("sequence-begin")
@@ -91,6 +113,9 @@ struct PromptPanel: View {
                         actionsHeight = $0
                     }
             } else {
+                if let sourceError = controller.durationSourceError {
+                    Text(sourceError).font(.callout)
+                }
                 Text("Pick a model to see its controls.")
                     .foregroundStyle(.secondary)
             }

@@ -7,6 +7,14 @@ import MoldClient
 @Observable
 final class GenerateController {
     let sequence = NativeSequenceSession(defaults: AppStorageSuite.defaults)
+    let videoJobs = VideoJobCoordinator(defaults: AppStorageSuite.defaults)
+    let videoPlanner = VideoPlanController()
+    var videoDuration: VideoDurationAuthoring?
+    var durationSubmitting = false
+    var durationSource: VideoLibraryExtensionSource?
+    var durationSourceLoading = false
+    var durationSourceError: String?
+    var durationSourceToken = UUID()
 
     /// Not `private`: `GenerateController+Run` reports a machine's cancel
     /// failure through it.

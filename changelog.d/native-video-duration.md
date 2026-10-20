@@ -1,4 +1,3 @@
 ### Added
 
-- Shared native-client contracts for server-planned video duration, optional scenes, Library source extension, and lossless duration counters.
-- Durable native restart/send receipts with exact request forwarding and installation-fenced cancellation recovery.
+- Native macOS and iOS Duration controls with optional scene prompts, authoritative clip-count previews, durable parent Queue recovery and Library Extend Video source handoff on supported machines.

@@ -16,6 +16,10 @@ final class GenerateController {
     let videoPlanner = VideoPlanController()
     let videoJobs: VideoJobCoordinator
     var durationError: String?
+    var durationSource: VideoLibraryExtensionSource?
+    var durationSourceLoading = false
+    var durationSourceError: String?
+    var durationSourceToken = UUID()
     @ObservationIgnored var durationTask: Task<Void, Never>?
 
     let retainedReuse = RetainedReuse()
@@ -116,6 +120,7 @@ final class GenerateController {
 
     var model: Model? {
         guard let modelName else { return nil }
+        if let target, let found = hosts.models[target.id]?.first(where: { $0.name == modelName }) { return found }
         for host in hosts.upHosts {
             if let found = hosts.models[host.id]?.first(where: { $0.name == modelName }) { return found }
         }
@@ -229,6 +234,7 @@ final class GenerateController {
 
     /// Why Generate cannot run right now, in words -- `nil` when it can.
     var blocker: String? {
+        if durationSourceLoading { return "Checking original video inputs…" }
         if let refusal = retainedReuse.sourcePictureRefusal(in: draft) { return refusal }
         if draft.media.generationReferences.contains(where: { $0.media.authority == "descriptor" }),
            !retainedReuse.probing, !retainedReuse.canHydrateReferences(draft.media.generationReferences) {

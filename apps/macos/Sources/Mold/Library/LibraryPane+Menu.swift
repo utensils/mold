@@ -47,6 +47,8 @@ extension LibraryPane {
             copyDestinations: actions.copyDestinations(for: entries, scope: navigation.scope),
             copyTo: { host in actions.copy(entries, to: host) }
         )
+        selection.canExtendVideo = entries.count == 1 && entries[0].print.isVideo
+            && !navigation.scope.isTrash && hosts.capabilities[entries[0].hostID]?.canExtendLibraryVideo == true
         selection.canContinueVideo = entries.count == 1 && entries[0].print.kind == .clip
             && entries[0].print.metadata.chainJobId != nil
         return selection

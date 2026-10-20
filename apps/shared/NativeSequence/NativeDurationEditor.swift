@@ -13,6 +13,10 @@ struct NativeDurationEditor: View {
     var sourceTitle: String? = nil
     var sourceMachine: String? = nil
     var busy = false
+    var originalReferencesReplaced = false
+    var originalReferences: [VideoOriginalReference]? = nil
+    var sourceNotice: String? = nil
+    var retrySource: () -> Void = {}
     let retry: () -> Void
     let startFresh: () -> Void
 
@@ -25,6 +29,30 @@ struct NativeDurationEditor: View {
                 if let sourceMachine { Text("On \(sourceMachine)").font(.caption).foregroundStyle(.secondaryText) }
                 Text("The original and new footage save together as a new video.")
                     .font(.caption).foregroundStyle(.secondaryText)
+                Text("Previous opening and closing frames are not reused for the new footage.")
+                    .font(.caption).foregroundStyle(.secondaryText)
+                if let originalReferences {
+                    if !originalReferences.isEmpty {
+                        Text(originalReferencesReplaced ? "Original references · replaced by your current references" : "Original references")
+                            .font(.caption).foregroundStyle(.secondaryText)
+                    }
+                    ForEach(originalReferences) { reference in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Label(reference.descriptor.name ?? reference.member?.displayName ?? "Reference \(reference.id + 1)",
+                                  systemImage: reference.member?.sourceSymbol ?? "doc")
+                                .font(.callout)
+                            Text(originalReferencesReplaced ? "Your current references replace this original input."
+                                 : (reference.member == nil ? "Original file unavailable. Attach a replacement reference." : "Retained original reference"))
+                                .font(.caption).foregroundStyle(.secondaryText)
+                        }
+                    }
+                } else {
+                    Text("Checking original references…").font(.caption).foregroundStyle(.secondaryText)
+                }
+                if let sourceNotice {
+                    Text(sourceNotice).font(.callout).fixedSize(horizontal: false, vertical: true)
+                    Button("Check original video", action: retrySource).frame(minHeight: 44)
+                }
                 Button("Start new video", action: startFresh).frame(minHeight: 44)
                     .accessibilityIdentifier("duration-start-fresh")
             }

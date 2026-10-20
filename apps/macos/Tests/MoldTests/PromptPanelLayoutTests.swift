@@ -9,6 +9,13 @@ import Testing
 struct PromptPanelLayoutTests {
     /// Render the actual capsule, including its flexible height frame. Checking
     /// only PromptTuck's alignment misses a panel centered inside that frame.
+    @Test func parkedScenePromptsDoNotHideTheStillComposer() {
+        let authoring = VideoDurationAuthoring(draft: .init(seconds: "5", scenes: [.init(prompt: "clip", seconds: "5")], scenesEnabled: true))
+        #expect(PromptPanel.showsOrdinaryPrompt(durationActive: false, authoring: authoring))
+        #expect(!PromptPanel.showsOrdinaryPrompt(durationActive: true, authoring: authoring))
+        #expect(PromptPanel.showsOrdinaryPrompt(durationActive: true, authoring: nil))
+    }
+
     @Test(arguments: [CGFloat(300), CGFloat(900)])
     func capsuleRendersAtBottom(height: CGFloat) throws {
         let hosts = HostStore(hosts: []) { _ in FakeBackend(host: MoldHost(name: "test", baseURL: URL(string: "http://test")!)) }

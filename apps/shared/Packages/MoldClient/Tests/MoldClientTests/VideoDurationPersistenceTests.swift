@@ -35,4 +35,20 @@ struct VideoDurationPersistenceTests {
             try authoring.request(generation: generation, owner: .init(host: moved, instanceId: "installation"))
         }
     }
+    @Test func continuousExtensionOwnsOnlyAnEmptyOpeningBoundary() throws {
+        var authoring = VideoDurationAuthoring(draft: .init(seconds: "5", source: .init(filename: "original.mp4")))
+        let plan = try MoldJSON.decoder.decode(VideoJobPlan.self, from: Data(VideoJobContractTests.plan().utf8))
+        var generation = GenerateRequest(prompt: "tail", model: "model", width: 768, height: 768, steps: 2, guidance: 1)
+        #expect(authoring.usesSourceEnding(plan: plan))
+        #expect(!authoring.usesSourceEnding(plan: nil))
+        #expect(authoring.openingConflict(plan: plan, generation: generation) == nil)
+        generation.sourceImage = "new-opening"
+        #expect(authoring.openingConflict(plan: plan, generation: generation) != nil)
+        #expect(generation.sourceImage == "new-opening")
+        let blended = try MoldJSON.decoder.decode(VideoJobPlan.self, from: Data(VideoJobContractTests.plan().replacingOccurrences(of: "continuous", with: "blended_shots").utf8))
+        #expect(authoring.openingConflict(plan: blended, generation: generation) == nil)
+        authoring.startFresh()
+        #expect(authoring.openingConflict(plan: plan, generation: generation) == nil)
+    }
+
 }

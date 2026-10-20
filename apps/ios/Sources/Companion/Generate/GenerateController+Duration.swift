@@ -22,22 +22,18 @@ extension GenerateController {
         guard videoDuration == nil, kind == .clip else { return }
         let fps = max(1, draft.fps ?? recipe?.defaults.fps ?? 24)
         let frames = max(1, draft.frames ?? recipe?.defaults.frames ?? fps)
-        let milliseconds = UInt64(frames) * 1_000 / UInt64(fps)
-        videoDuration = .init(draft: .init(seconds: VideoDurationDraft.seconds(milliseconds: max(1, milliseconds))))
+        videoDuration = .init(draft: .init(seconds: (try? VideoDurationDraft.initialSeconds(frames: frames, fps: fps)) ?? ""))
     }
 
     var durationBlocker: String? {
         guard let authoring = videoDuration else { return nil }
+        if let refusal = durationSourceRefusal { return refusal }
         guard canAuthorVideoDuration else { return "Reconnect or update this machine before making this duration-based video." }
         guard let owner = durationOwner, let modelName else { return "Reconnect this machine before making this video." }
         guard draft.batchSize >= 1, draft.batchSize <= referenceBatchLimit else {
             return "Batch exceeds this machine’s current limit. Choose a smaller batch before generating."
         }
-        if videoJobs.pending.contains(where: { receipt in
-            receipt.matches(owner) && !videoJobs.jobs.contains(where: {
-                $0.operationId == receipt.operationId && $0.owner == owner && $0.detail != nil
-            })
-        }) { return "Check the saved video attempt in Queue before making another video." }
+        if videoJobs.hasUncertainAdmission(on: owner) { return "Check the saved video attempt in Queue before making another video." }
         do {
             _ = try authoring.request(generation: RenderRequest.one(draft, model: modelName,
                 maxIdentityPhotos: hosts.capabilities[owner.host.id]?.maxIdentityPhotos ?? 0), owner: owner)
@@ -65,7 +61,7 @@ extension GenerateController {
         }
         let ordinaryBackend = hosts.backend(for: owner.host)
         let backend: any MoldBackend = if let http = ordinaryBackend as? HTTPBackend {
-            http.checkingReferenceAuthority { await MainActor.run { current() } }
+            http.checkingReferenceAuthority { await MainActor.run { current() } }.preparingLiteralVideoInputs()
         } else { ordinaryBackend }
         durationError = nil; saveDraft()
         var background = UIBackgroundTaskIdentifier.invalid
@@ -115,6 +111,8 @@ extension GenerateController {
     }
 
     func discoverDurationVideos() async {
+        videoJobs.restorePending(hosts: hosts.hosts)
+        await restoreDurationSource()
         for host in hosts.upHosts where hosts.capabilities[host.id]?.canCreateVideoJob == true {
             guard let instance = hosts.instanceID(of: host.id) else { continue }
             let owner = VideoJobOwner(host: host, instanceId: instance)

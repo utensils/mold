@@ -19,6 +19,7 @@ public struct VideoLibraryExtensionSource: Hashable, Sendable {
         draft.media = DraftMedia()
         draft.media.loras = loras; draft.media.sourceFit = fit
         draft.batchSize = 1
+        draft.seed = nil
         return draft
     }
 

@@ -13,6 +13,8 @@ extension LibraryActions {
         switch action {
         case .open:
             open?()
+        case .extendVideo:
+            if let entry = targets.first, targets.count == 1 { extendVideo?(entry) }
         case .continueVideo:
             if let entry = targets.first, targets.count == 1 { continueVideo?(entry) }
         case .reuse:

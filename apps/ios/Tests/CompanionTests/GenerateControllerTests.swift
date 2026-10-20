@@ -13,6 +13,30 @@ import UIKit
 /// switch adopting its recipe.
 @MainActor
 struct GenerateControllerTests {
+    @Test func pinnedSourceUsesItsOwnInstalledModelContract() async throws {
+        let (generate, _) = try await setUp()
+        let first = try #require(generate.hosts.hosts.first)
+        let second = MoldHost(name: "Original video machine", baseURL: URL(string: "http://10.0.0.5:7680")!)
+        let local = try model()
+        let remote = try MoldJSON.decoder.decode(Model.self, from: Data(
+            #"{"name":"flux-dev:q4","family":"flux","description":"Original machine recipe","downloaded":true}"#.utf8))
+        generate.hosts.setHosts([first, second])
+        generate.hosts.setReachability(try #require(generate.hosts.reachability[first.id]), for: second.id)
+        generate.hosts.setModels([local], for: first.id)
+        generate.hosts.setModels([remote], for: second.id)
+        generate.machine = .pinned(second.id)
+        generate.modelName = remote.name
+        #expect(generate.model?.description == "Original machine recipe")
+    }
+
+    @Test func openingAnExtensionBlocksOldComposerUntilSourceInspectionCompletes() async throws {
+        let (generate, _) = try await setUp()
+        generate.durationSourceLoading = true
+        #expect(generate.blocker == "Checking original video inputs…")
+        generate.durationSourceLoading = false
+        #expect(generate.blocker != "Checking original video inputs…")
+    }
+
     @Test func restoredAuthoredDraftKeepsClipComposerWhenOrdinaryDraftIsUnavailable() async throws {
         let (original, _) = try await setUp()
         let sequence = NativeSequenceSession(defaults: UserDefaults(suiteName: UUID().uuidString)!)
