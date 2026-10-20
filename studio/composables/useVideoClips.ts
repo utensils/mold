@@ -698,19 +698,16 @@ export function useVideoClips(
         "This video's machine selection or connection changed. Reconnect its original machine to recover it.";
     } else if (admission.value) void refresh();
   });
-  watch(
-    () => [props.source?.jobId, props.source?.filename],
-    () => {
-      revision++;
-      stopPoll();
-      active.value = false;
-      captured.value = null;
-      continuation.value = undefined;
-      admission.value = null;
-      detail.value = null;
-      emit("active", false);
-    },
-  );
+  watch([() => props.source?.jobId, () => props.source?.filename], () => {
+    revision++;
+    stopPoll();
+    active.value = false;
+    captured.value = null;
+    continuation.value = undefined;
+    admission.value = null;
+    detail.value = null;
+    emit("active", false);
+  });
   onBeforeUnmount(() => {
     disposed = true;
     revision++;

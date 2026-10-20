@@ -130,6 +130,28 @@ describe("compact video clips", () => {
     expect(api.validate.mock.calls[0]?.[1]).not.toHaveProperty("seed");
     expect(wrapper.text()).toContain("next separate video part");
   });
+  it("keeps a continuation open across equivalent Library source re-renders", async () => {
+    api.job.mockResolvedValue({
+      id: "old",
+      state: "completed",
+      finalizes: [{ gallery_filename: "old.mp4" }],
+      script: { chain: request, stage: [{ prompt: "Old", frames: 107 }] },
+    });
+    wrapper = mount(VideoClips, {
+      props: { owner, source: { jobId: "old", filename: "old.mp4" } },
+    });
+    await wrapper.get("[data-test=video-clips-open]").trigger("click");
+    await flushPromises();
+    await wrapper.get("textarea").setValue("Keep these edited words");
+    await wrapper.setProps({ source: { jobId: "old", filename: "old.mp4" } });
+    expect((wrapper.get("textarea").element as HTMLTextAreaElement).value).toBe(
+      "Keep these edited words",
+    );
+    await wrapper.setProps({
+      source: { jobId: "different", filename: "different.mp4" },
+    });
+    expect(wrapper.find("textarea").exists()).toBe(false);
+  });
   it("refuses continuation before POST on hosts missing affirmative linked support", async () => {
     api.job.mockResolvedValue({
       id: "old",
