@@ -119,6 +119,23 @@ extension GenerateControllerTests {
         #expect(requests.map(\.generation.batchCount) == [3, 3, 3])
     }
 
+    @Test func durationCannotSilentlyTruncateAnAuthoredBatchAfterHostLimitsChange() async throws {
+        let (generate, _) = try await setUp()
+        let clip = try model("ltx-2.5-22b-distilled:bf16")
+        let host = try #require(generate.hosts.hosts.first)
+        generate.hosts.setModels([clip], for: host.id)
+        generate.hosts.setReachability(.up(try MoldJSON.decoder.decode(ServerStatus.self, from: Data(
+            #"{"version":"test","busy":false,"uptime_secs":1,"instance_id":"installation"}"#.utf8))), for: host.id)
+        generate.hosts.setCapabilities(try MoldJSON.decoder.decode(Capabilities.self, from: Data(
+            #"{"video_jobs":{"supported":true,"literal_prompts":true,"library_extend":true}}"#.utf8)), for: host.id)
+        generate.setKind(.clip)
+        generate.ensureVideoDuration()
+        generate.draft.batchSize = 4
+        #expect(generate.referenceBatchLimit == 1)
+        #expect(generate.durationBlocker?.contains("Batch") == true,
+            "A changed limit must ask for an explicit batch edit instead of making fewer movies")
+    }
+
     @Test func durationCapabilityRequiresLiteralPromptsAndKeepsLegacySequenceSeparate() async throws {
         let (generate, _) = try await setUp()
         let clip = try model("ltx-2.5-22b-distilled:bf16")

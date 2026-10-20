@@ -30,6 +30,9 @@ extension GenerateController {
         guard let authoring = videoDuration else { return nil }
         guard canAuthorVideoDuration else { return "Reconnect or update this machine before making this duration-based video." }
         guard let owner = durationOwner, let modelName else { return "Reconnect this machine before making this video." }
+        guard draft.batchSize >= 1, draft.batchSize <= referenceBatchLimit else {
+            return "Batch exceeds this machine’s current limit. Choose a smaller batch before generating."
+        }
         if videoJobs.pending.contains(where: { receipt in
             receipt.matches(owner) && !videoJobs.jobs.contains(where: {
                 $0.operationId == receipt.operationId && $0.owner == owner && $0.detail != nil
@@ -54,7 +57,7 @@ extension GenerateController {
         ensureVideoDuration()
         guard let authoring = videoDuration, durationBlocker == nil else { return }
         let snapshot = draft, selectedRecipe = recipe
-        let copies = min(snapshot.batchSize, referenceBatchLimit)
+        let copies = snapshot.batchSize
         let retained = retainedReuse.snapshot()
         let current: @MainActor @Sendable () -> Bool = { [weak self] in
             self?.followingSuspended == false && self?.hosts.host(owner.host.id) == owner.host
