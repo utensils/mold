@@ -116,7 +116,7 @@ pub fn open_regular_file_no_follow(path: &Path) -> Result<File> {
         libc::openat(
             parent.as_raw_fd(),
             name.as_ptr(),
-            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
         )
     };
     if fd < 0 {
@@ -181,6 +181,18 @@ pub fn sha256_open_file(file: &File) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(unix)]
+    #[test]
+    fn regular_file_open_refuses_fifo_without_waiting_for_a_writer() {
+        use std::os::unix::ffi::OsStrExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("not-a-file");
+        let encoded = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: encoded is NUL terminated and names a private fixture.
+        assert_eq!(unsafe { libc::mkfifo(encoded.as_ptr(), 0o600) }, 0);
+        assert!(super::open_regular_file_no_follow(&path).is_err());
+    }
     use super::*;
 
     #[test]

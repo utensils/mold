@@ -2438,6 +2438,14 @@ impl QueueTicket {
             self.settled = true;
             return;
         }
+        // Failed video remains a durable, non-retryable hold. Moving it to a
+        // different machine must retain exact inputs; deleting the queue row
+        // would retire its encrypted media before a user can recover it.
+        let retain_video = self.needs_video_recovery();
+        if retain_video {
+            self.hold(message);
+            return;
+        }
         self.settled = true;
         if self.claim_token.is_some() {
             self.fail_claimed(message);
@@ -2771,6 +2779,42 @@ impl QueueTicket {
         }
     }
 
+    fn needs_video_recovery(&self) -> bool {
+        // This runs during Drop as well as explicit failure. Inspect only
+        // scalar policy fields: full GenerateRequest deserialization copies
+        // media and needs a large debug-stack frame during nested cleanup.
+        #[derive(serde::Deserialize)]
+        struct RecoveryKind {
+            frames: Option<u32>,
+            output_format: Option<mold_core::OutputFormat>,
+            pipeline: Option<mold_core::Ltx2PipelineMode>,
+        }
+        match self.journal.row(&self.id) {
+            Ok(Some(row)) => serde_json::from_str::<RecoveryKind>(&row.request_json)
+                .map(|request| {
+                    request.frames.is_some_and(|frames| frames > 1)
+                        || matches!(
+                            request.output_format,
+                            Some(
+                                mold_core::OutputFormat::Mp4
+                                    | mold_core::OutputFormat::Gif
+                                    | mold_core::OutputFormat::Apng
+                            )
+                        )
+                        || mold_core::manifest::find_manifest(&row.model).is_some_and(|manifest| {
+                            mold_core::generation_profile::generation_profile_for_manifest(manifest)
+                                .recipe_for_pipeline(request.pipeline)
+                                .is_some_and(|recipe| recipe.temporal.is_some())
+                        })
+                })
+                // A damaged original must not be destroyed merely because its
+                // presentation kind cannot currently be read.
+                .unwrap_or(true),
+            Ok(None) => false,
+            Err(_) => true,
+        }
+    }
+
     fn fail_claimed(&self, message: &str) {
         let Some(token) = self.claim_token.as_deref() else {
             return;
@@ -2812,6 +2856,17 @@ impl Drop for QueueTicket {
                 job = %self.id,
                 "retaining an interrupted generation; it will be replayed after restart"
             );
+            return;
+        }
+        if self.needs_video_recovery() {
+            if let Err(error) = self.hold_owned(
+                "generation ended before publishing an output",
+                None,
+                false,
+                now_ms(),
+            ) {
+                tracing::warn!(job = %self.id, error = %format!("{error:#}"), "could not park interrupted video; preserving its durable recovery row");
+            }
             return;
         }
         if self.claim_token.is_some() {
@@ -3299,6 +3354,126 @@ mod tests {
         assert_eq!(second.list_all().len(), 1);
         assert!(second.cancel_id("foreign-job").unwrap());
         assert!(second.list_all().is_empty());
+    }
+
+    #[test]
+    fn video_failure_retention_preserves_cancellation_and_image_settlement() {
+        for (video, cancel, expected) in [(false, false, "failed"), (true, true, "cancelled")] {
+            let journal = journal_with_db();
+            let mut request = request();
+            if video {
+                request.frames = Some(97);
+            }
+            journal
+                .record_batch(BatchJournalAdmission {
+                    id: "batch",
+                    client_batch_id: "client",
+                    request_sha256: "sha",
+                    children: &[admission("child", &request, Path::new("/gallery"))],
+                })
+                .unwrap();
+            let claim = journal.claim_next_feeder().unwrap().unwrap();
+            let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+            assert_eq!(ticket.claim_dispatch(), DispatchClaim::Granted);
+            if cancel {
+                assert!(journal.cancel_id("child").unwrap());
+            }
+            ticket.fail("generation failed");
+            assert!(journal.row("child").unwrap().is_none());
+            assert_eq!(
+                journal.generation_batch("batch").unwrap().children[0].state,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn interrupted_video_ticket_retains_recovery_inputs() {
+        let journal = journal_with_db();
+        let mut request = request();
+        request.frames = Some(97);
+        let ticket = journal
+            .record_for_test(admission(
+                "interrupted-video",
+                &request,
+                Path::new("/gallery"),
+            ))
+            .unwrap();
+        drop(ticket);
+        assert_eq!(
+            journal
+                .row("interrupted-video")
+                .unwrap()
+                .expect("interrupted video retains original inputs")
+                .state,
+            QueueRowState::Held
+        );
+    }
+
+    #[test]
+    fn default_video_without_frames_or_output_retains_its_inputs() {
+        let journal = journal_with_db();
+        let request = request_for_model("ltx-2-19b-distilled:fp8");
+        assert!(request.frames.is_none() && request.output_format.is_none());
+        let ticket = journal
+            .record_for_test(admission("default-video", &request, Path::new("/gallery")))
+            .unwrap();
+        ticket.fail("out of memory");
+        assert_eq!(
+            journal.row("default-video").unwrap().unwrap().state,
+            QueueRowState::Held
+        );
+    }
+
+    #[test]
+    fn failed_video_preserves_exact_request_as_nonretryable_hold_for_move() {
+        let journal = journal_with_db();
+        let mut request = request_for_model("ltx-2-19b-distilled:fp8");
+        request.frames = Some(97);
+        request.output_format = Some(mold_core::OutputFormat::Mp4);
+        journal
+            .record_batch(BatchJournalAdmission {
+                id: "failed-video-batch",
+                client_batch_id: "failed-video-client",
+                request_sha256: "failed-video-sha",
+                children: &[admission(
+                    "failed-video-child",
+                    &request,
+                    Path::new("/gallery"),
+                )],
+            })
+            .unwrap();
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+        assert_eq!(ticket.claim_dispatch(), DispatchClaim::Granted);
+        ticket.fail("GPU memory exhausted");
+        let row = journal
+            .row("failed-video-child")
+            .unwrap()
+            .expect("failed video must retain original inputs");
+        assert_eq!(row.state, QueueRowState::Held);
+        assert_eq!(row.held_reason.as_deref(), Some("GPU memory exhausted"));
+        assert_eq!(
+            serde_json::from_str::<mold_core::GenerateRequest>(&row.request_json)
+                .unwrap()
+                .frames,
+            Some(97)
+        );
+        let batch = journal.generation_batch("failed-video-batch").unwrap();
+        assert_eq!(batch.children[0].state, "held");
+        assert!(
+            !journal
+                .row_projection("failed-video-child")
+                .unwrap()
+                .unwrap()
+                .retryable
+        );
+        assert!(
+            journal.claim_next_feeder().unwrap().is_none(),
+            "failure must never restart automatically"
+        );
+        assert!(journal.cancel_id("failed-video-child").unwrap());
+        assert!(journal.row("failed-video-child").unwrap().is_none());
     }
 
     #[test]

@@ -805,6 +805,25 @@ Examples:
         #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
     },
+    /// Start a separate attempt using the destination's current recipe. Original remains recoverable.
+    Restart {
+        #[arg(value_name = "JOB-ID")]
+        id: String,
+        /// Saved destination host or URL; omit to restart on the original host.
+        #[arg(long)]
+        to: Option<String>,
+        /// Destination credential, independent of the source API key.
+        #[arg(
+            long,
+            env = "MOLD_DESTINATION_API_KEY",
+            hide_env_values = true,
+            requires = "to"
+        )]
+        destination_api_key: Option<String>,
+        /// Reuse this UUID after a lost response to reconcile the same attempt.
+        #[arg(long)]
+        operation_id: Option<String>,
+    },
     Retake {
         /// Sequence job id as shown by `mold jobs list`
         #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
@@ -6584,6 +6603,40 @@ mod tests {
                 _ => panic!("expected Trash empty --yes"),
             }
         }
+    }
+
+    #[test]
+    fn jobs_restart_preserves_explicit_destination_and_reconciliation_identity() {
+        match parse(&[
+            "jobs",
+            "restart",
+            "old-job",
+            "--to",
+            "plato",
+            "--operation-id",
+            "11111111-1111-4111-8111-111111111111",
+        ])
+        .command
+        {
+            Commands::Jobs {
+                action:
+                    JobsAction::Restart {
+                        id,
+                        to,
+                        operation_id,
+                        ..
+                    },
+            } => {
+                assert_eq!(id, "old-job");
+                assert_eq!(to.as_deref(), Some("plato"));
+                assert_eq!(
+                    operation_id.as_deref(),
+                    Some("11111111-1111-4111-8111-111111111111")
+                );
+            }
+            _ => panic!("expected explicit new-attempt restart"),
+        }
+        assert!(try_parse(&["jobs", "restart"]).is_err());
     }
 
     /// `mold jobs show --script` is the other half of amend: it prints the

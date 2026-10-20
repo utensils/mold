@@ -365,6 +365,8 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
                 mold_core::chain_job::ChainJobState::Queued
                     | mold_core::chain_job::ChainJobState::Running
                     | mold_core::chain_job::ChainJobState::Paused
+                    | mold_core::chain_job::ChainJobState::Failed
+                    | mold_core::chain_job::ChainJobState::Interrupted
             )
         }) {
             represented.insert(row.id.clone());
@@ -387,6 +389,10 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
                 "queued"
             } else if row.state == mold_core::chain_job::ChainJobState::Paused {
                 "paused"
+            } else if row.state == mold_core::chain_job::ChainJobState::Failed {
+                "failed"
+            } else if row.state == mold_core::chain_job::ChainJobState::Interrupted {
+                "interrupted"
             } else {
                 "running"
             };
@@ -404,7 +410,11 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
                 stage: scheduled.and_then(|activity| activity.stage.clone()),
                 preparation_progress: scheduled
                     .and_then(|activity| activity.preparation_progress.clone()),
-                can_cancel: row.state != mold_core::chain_job::ChainJobState::Paused,
+                can_cancel: matches!(
+                    row.state,
+                    mold_core::chain_job::ChainJobState::Queued
+                        | mold_core::chain_job::ChainJobState::Running
+                ),
             });
         }
     } else {
@@ -490,6 +500,52 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
 mod tests {
     use super::*;
     use mold_core::queue_progress::QueueJobProgress;
+
+    #[tokio::test]
+    async fn failed_and_interrupted_chain_parents_remain_discoverable_for_explicit_recovery() {
+        let home = tempfile::tempdir().unwrap();
+        let mut state = AppState::for_tests();
+        state.metadata_db =
+            std::sync::Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let db = state.metadata_db.as_ref().as_ref().unwrap();
+        for (id, lifecycle) in [
+            ("failed", mold_core::chain_job::ChainJobState::Failed),
+            (
+                "interrupted",
+                mold_core::chain_job::ChainJobState::Interrupted,
+            ),
+            ("completed", mold_core::chain_job::ChainJobState::Completed),
+        ] {
+            mold_db::chain_jobs::insert_job(
+                db,
+                &mold_db::chain_jobs::ChainJobRow {
+                    id: id.into(),
+                    state: lifecycle,
+                    model: "ltx-2-19b-distilled:fp8".into(),
+                    request_json: "{}".into(),
+                    job_dir: home.path().join(id),
+                    stage_count: 2,
+                    current_stage: 1,
+                    error: Some("original failure".into()),
+                    created_at_ms: 1,
+                    updated_at_ms: 2,
+                    finalized_at_ms: None,
+                },
+            )
+            .unwrap();
+        }
+        let Json(snapshot) = list_active_work(State(state)).await;
+        for id in ["failed", "interrupted"] {
+            let item = snapshot
+                .items
+                .iter()
+                .find(|item| item.id == id)
+                .expect("recovery parent must survive reload");
+            assert_eq!(item.phase, id);
+            assert!(!item.can_cancel);
+        }
+        assert!(!snapshot.items.iter().any(|item| item.id == "completed"));
+    }
 
     #[test]
     fn chain_activity_counts_parent_once_and_keeps_unrepresented_work() {

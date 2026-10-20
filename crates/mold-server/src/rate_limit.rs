@@ -204,6 +204,12 @@ pub fn classify_route(path: &str, method: &axum::http::Method) -> Option<RouteTi
         {
             Some(RouteTier::Generation)
         }
+        // Private restart exports authenticate and hydrate bounded media.
+        ("POST", path)
+            if path.starts_with("/api/chain-jobs/") && path.ends_with("/restart-export") =>
+        {
+            Some(RouteTier::Generation)
+        }
         // A retention sweep walks the held rows and unlinks encrypted media.
         // Cheap per call, but it takes DB write transactions and filesystem
         // work, so it does not belong in the read bucket.
@@ -295,6 +301,7 @@ mod tests {
         use axum::http::Method;
         for path in [
             "/api/generation-transfers/abort",
+            "/api/chain-jobs/job/restart-export",
             "/api/queue/job/transfer/reserve",
             "/api/queue/job/transfer/seal",
             "/api/queue/job/transfer/release",

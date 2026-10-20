@@ -6,6 +6,7 @@
 //! this store.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::path::Path;
 
 use anyhow::{bail, Context};
@@ -160,6 +161,18 @@ pub(crate) fn try_scrub(mut request: ChainRequest) -> anyhow::Result<ChainReques
     Ok(request)
 }
 
+fn read_authored_member(path: &Path, remaining: &mut u64) -> anyhow::Result<Vec<u8>> {
+    let file = mold_core::secure_file::open_regular_file_no_follow(path)
+        .context("opening authenticated chain source media")?;
+    let mut bytes = Vec::new();
+    file.take(*remaining + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > *remaining {
+        bail!("authenticated chain source media exceeds the per-part budget");
+    }
+    *remaining -= bytes.len() as u64;
+    Ok(bytes)
+}
+
 pub(crate) fn hydrate(
     jobs_root: &Path,
     job_dir: &Path,
@@ -185,6 +198,7 @@ pub(crate) fn hydrate(
     let mut seen = BTreeSet::new();
     let retained_tail = crate::chain_continuation::retained_frames(job_dir, &request)?;
     let mut tail_members = 0usize;
+    let mut remaining = mold_core::chain::MAX_CHAIN_INLINE_MEDIA_BYTES as u64;
     for item in &decrypted.files {
         if !seen.insert(&item.role) {
             bail!("duplicate chain source-media role");
@@ -196,7 +210,7 @@ pub(crate) fn hydrate(
             let expected = retained_tail
                 .get(index)
                 .context("unexpected sealed continuation tail member")?;
-            let bytes = std::fs::read(&item.path)?;
+            let bytes = read_authored_member(&item.path, &mut remaining)?;
             if index.to_string() != position || bytes != *expected {
                 bail!("sealed continuation tail differs from successor ownership");
             }
@@ -213,8 +227,7 @@ pub(crate) fn hydrate(
             .stages
             .get_mut(stage_idx)
             .context("source-media stage outside request")?;
-        let bytes =
-            std::fs::read(&item.path).context("reading authenticated chain source media")?;
+        let bytes = read_authored_member(&item.path, &mut remaining)?;
         match parts.as_slice() {
             ["stage_source", _] => stage.source_image = Some(bytes),
             ["stage_keyframe", _, position] => {
@@ -635,6 +648,20 @@ fn write_index(job_dir: &Path, index: &SourceMediaIndex) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn authenticated_member_reads_bound_aggregate_allocation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("member");
+        std::fs::write(&path, [1, 2, 3]).unwrap();
+        let mut remaining = 5;
+        assert_eq!(
+            super::read_authored_member(&path, &mut remaining).unwrap(),
+            [1, 2, 3]
+        );
+        assert_eq!(remaining, 2);
+        assert!(super::read_authored_member(&path, &mut remaining).is_err());
+    }
     use super::*;
     use mold_core::chain::{ChainStage, TransitionMode};
     use mold_core::OutputFormat;

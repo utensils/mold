@@ -307,12 +307,20 @@ commands talk to the selected host ([`--host`, then `MOLD_HOST`, then the defaul
 mold jobs list [--json]
 mold jobs show <id> [--json | --script]
 mold jobs resume <id>
+mold jobs restart <id> [--to HOST] [--operation-id UUID]
 mold jobs retake <id> --stage <N> [--mode cascade|splice] [--seed-offset <U64>] [--prompt <TEXT>]
 mold jobs amend <id> --script <PATH> [--fps N] [--seed N] [--steps N] [--guidance F] [--strength F] [--motion-tail N] [--audio | --no-audio] [--dry-run]
 mold jobs cancel <id>
 mold jobs delete <id> [--yes]
 mold jobs gc
 ```
+
+`restart` starts a separate attempt using the destination's current recipe and
+keeps the original failed or paused job. It exports exact retained inputs with
+installation and revision checks. Keep its printed operation UUID and reuse
+`--operation-id` after a lost response. Linked parts
+report an explicit refusal; local adapters support same-machine Restart and refuse Send.
+Resume retains the original frozen authority.
 
 `mold jobs retake` re-renders ONE stage. `mold jobs amend` replaces the whole
 stage list, which is why it is script-shaped rather than flag-shaped: the

@@ -11860,6 +11860,10 @@ pub struct QueueCapabilities {
     /// Source reservations exclude worker dispatch and survive restart.
     #[serde(default)]
     pub pre_render_transfer: bool,
+    /// Explicit new-attempt exports and destination-instance fencing for chain creation.
+    /// Older servers ignore the header, so clients must require this capability.
+    #[serde(default)]
+    pub chain_restart: bool,
     /// Opaque durable destination identity for transfer reconciliation across restarts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transfer_identity: Option<String>,
