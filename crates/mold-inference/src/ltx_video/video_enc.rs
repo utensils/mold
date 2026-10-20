@@ -781,7 +781,7 @@ impl Mp4FileEncoder {
             "MP4 sample table exhausted"
         );
         // Bounded GOPs make tail extraction independent of the movie length.
-        if self.frames > 0 && self.frames % (u64::from(self.encoder.fps) * 2) == 0 {
+        if self.frames > 0 && self.frames.is_multiple_of(u64::from(self.encoder.fps) * 2) {
             self.encoder.encoder.force_intra_frame();
         }
         let old_sps = self.encoder.sps.clone();

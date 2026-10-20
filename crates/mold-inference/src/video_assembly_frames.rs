@@ -137,13 +137,16 @@ pub fn tail(
     Ok(result)
 }
 
+type FrameConsumer<'a> =
+    dyn FnMut(u32, RgbImage, &mut dyn FnMut() -> Result<()>) -> Result<()> + 'a;
+
 fn visit(
     track: &mp4_rs::Mp4Track,
     packets: File,
     start: u32,
     end: u32,
     checkpoint: &mut dyn FnMut() -> Result<()>,
-    consume: &mut dyn FnMut(u32, RgbImage, &mut dyn FnMut() -> Result<()>) -> Result<()>,
+    consume: &mut FrameConsumer<'_>,
 ) -> Result<()> {
     use openh264::decoder::{Decoder, DecoderConfig, Flush};
     let avcc = &track
@@ -245,8 +248,8 @@ pub fn normalize(
     ensure!(
         width > 0
             && height > 0
-            && width % 2 == 0
-            && height % 2 == 0
+            && width.is_multiple_of(2)
+            && height.is_multiple_of(2)
             && u64::from(width) * u64::from(height) * 3 <= 512 * 1024 * 1024,
         "invalid normalization canvas"
     );

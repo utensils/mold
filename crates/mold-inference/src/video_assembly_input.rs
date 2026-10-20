@@ -279,7 +279,7 @@ impl<'a> PacketCursor<'a> {
             "invalid sequential video seek"
         );
         while self.sample < sample_index {
-            if self.sample % 4096 == 0 {
+            if self.sample.is_multiple_of(4096) {
                 checkpoint()?;
             }
             self.next_location(false)?
