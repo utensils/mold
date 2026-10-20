@@ -77,7 +77,9 @@ final class NativeSequenceSession {
                 stage.id = clip.id
                 return stage
             }
-            draft = restored; savedSource = saved.source
+            // The observable draft writes its journal when assigned. Restore
+            // authority first so a launch cannot erase it from the next launch.
+            savedSource = saved.source; draft = restored
         }
     }
     private func saveDraft() {

@@ -184,6 +184,8 @@ struct NativeSequenceAdmissionTests {
         #expect(!session.needsReferenceDecision)
         let relaunched = NativeSequenceSession(defaults: defaults)
         #expect(relaunched.restoringSource)
+        #expect(NativeSequenceSession(defaults: defaults).restoringSource,
+            "A second cold launch must retain the original continuation authority")
         #expect(!relaunched.needsReferenceDecision, "An explicit discard cannot revive old references")
         var restoredModel: String?
         relaunched.restoreSource = { source, _ in restoredModel = source.model }
