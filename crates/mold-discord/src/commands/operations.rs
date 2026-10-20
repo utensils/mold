@@ -8,7 +8,7 @@ use poise::serenity_prelude as serenity;
 const PAGE_ROWS: usize = 20;
 const CONTENT_MAX: usize = 1900;
 
-fn safe_text(value: &str) -> String {
+pub(crate) fn safe_text(value: &str) -> String {
     value
         .replace('@', "@\u{200b}")
         .chars()
