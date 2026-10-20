@@ -603,6 +603,7 @@ use crate::queue::clean_error_message;
         crate::job_registry::QueueListing,
         crate::chain_limits::ChainLimits,
         crate::chain_limits::LinkedPartLimits,
+        crate::chain_limits::ChainAuthoringCapabilities,
         GalleryMediaTokenRequest,
         GalleryMediaTokenResponse,
         GalleryExportRequest,
@@ -9082,7 +9083,7 @@ async fn capabilities_chain_limits(
     };
 
     let resolved = mold_core::manifest::resolve_model_name(&raw_model);
-    let (family, quant, supports_audio, default_frames, default_fps) =
+    let (family, quant, supports_audio, default_frames, default_fps, source_image) =
         if let Some(manifest) = mold_core::manifest::find_manifest(&resolved) {
             let quant = resolved
                 .split_once(':')
@@ -9090,13 +9091,18 @@ async fn capabilities_chain_limits(
                 .unwrap_or_default();
             let family = manifest.family.clone();
             let supports_audio = crate::chain_limits::family_supports_audio(&family);
-            let model_config = state.config.read().await.resolved_model_config(&resolved);
+            let config = state.config.read().await;
+            let model_config = config.resolved_model_config(&resolved);
+            let source_image = crate::routes_chain::resolved_chain_source_image_contract(
+                &config, &resolved, &family,
+            );
             (
                 family,
                 quant,
                 supports_audio,
                 model_config.effective_frames(),
                 model_config.effective_fps(),
+                source_image,
             )
         } else {
             // Installed live-catalog models retain opaque `cv:` / `hf:` ids and
@@ -9121,6 +9127,7 @@ async fn capabilities_chain_limits(
                 supports_audio,
                 entry.defaults.default_frames,
                 entry.defaults.default_fps,
+                entry.source_image,
             )
         };
 
@@ -9142,6 +9149,9 @@ async fn capabilities_chain_limits(
     let mut limits =
         crate::chain_limits::compute_limits(&raw_model, &family, &quant, default_frames, fps);
     limits.supports_audio = supports_audio;
+    limits.authoring = limits
+        .supports_sequence
+        .then(|| crate::chain_limits::authoring_capabilities(&family, &resolved, source_image));
     Json(limits).into_response()
 }
 

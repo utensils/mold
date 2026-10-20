@@ -5057,6 +5057,7 @@ mod tests {
 
     fn request(transitions: Vec<TransitionMode>) -> ChainRequest {
         ChainRequest {
+            source_fit: None,
             continue_from: None,
             offload: None,
             collection: None,
