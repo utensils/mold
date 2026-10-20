@@ -118,6 +118,7 @@ pub mod thumbnails;
 pub mod variant_dependencies;
 mod video_reference_codec;
 pub mod video_upscale;
+pub(crate) mod video_source;
 mod wan_admission;
 pub mod web_ui;
 // The arcstats parser and credit policy are pure and unit-tested on every
