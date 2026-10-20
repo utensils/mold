@@ -47,3 +47,11 @@ Keep the existing output switch and route. Do not restore the old timeline, `Sim
 - Continue only the exact original owner and latest published filename/take, with affirmative linked-parts support. Freeze model, canvas, fps, audio and tail. Hydrate retained typed references explicitly and visibly; repeat references across clips, map first endpoint to clip zero and final endpoint to the last clip. Bound copies before allocation. Persist scalar drafts and locators, never inline media or credentials.
 - Queue progress represents the parent and its clip progress. Cancel during admission must reconcile the accepted operation. Announce Library success only after a published filename exists.
 - UAT renders target Plato and its active `/storage/mold` Library. Keep receipts under `/storage/mold/uat/`; verify publication, frames, fps and audio. Native Simulator proof is distinct from physical-device proof.
+
+## Authoring contracts and recovery
+
+`chain-limits.authoring` additively reports the selected checkpoint's normalized tail, carry mode, frame minimum/grid and `source_fit_supported`. Use the same concrete source-image contract as admission, including installed Wan headers and H3 task identity. Preserve `source_fit` through request, script and stitched metadata; fitted pixels are already prepared.
+
+Materialize an omitted base seed before sealing the request's authored-media revision. Legacy jobs sealed with an omitted seed may recover only through the exact alternate digest obtained by replacing the base seed with `None`; retain every other field, authored byte hash and predecessor link, then perform ordinary authenticated hydration. Gallery handoff uses the same lookup. Never ignore seeds globally or scan for a similar request.
+
+H3's durable singleton stage is internal work beneath its chain parent. Record its actual admitted child ID in one bounded, private atomic `active-stage-child.json` file per job directory, surviving restart. Activity hides that child only while its exact chain parent is present; absent or corrupt authority keeps work visible. Titles and tags never establish ownership.
