@@ -25,6 +25,43 @@ pub struct VideoJobSource {
     pub filename: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_archive_identity_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_upload: Option<VideoSourceUploadRef>,
+}
+
+/// A destination-issued, completed upload. This never contains a path or URL.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VideoSourceUploadRef {
+    pub handle: String,
+    pub sha256: String,
+    #[serde(with = "decimal_u64")]
+    #[schema(value_type = String)]
+    pub size_bytes: u64,
+}
+
+/// Exact source provenance accompanies the stream; no paths authorize input.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VideoSourceUploadSpec {
+    pub filename: String,
+    pub archive_identity_sha256: String,
+    pub sha256: String,
+    #[serde(with = "decimal_u64")]
+    #[schema(value_type = String)]
+    pub size_bytes: u64,
+    #[serde(deserialize_with = "deserialize_literal_metadata")]
+    #[schema(value_type = Object)]
+    pub metadata: crate::OutputMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct VideoSourceUploadStatus {
+    pub handle: String,
+    #[serde(with = "decimal_u64")]
+    #[schema(value_type = String)]
+    pub offset_bytes: u64,
+    pub completed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -149,6 +186,27 @@ impl VideoJobRequest {
                 return Err("source archive identity must be a SHA-256 digest".into());
             }
         }
+        if let Some(upload) = self
+            .source
+            .as_ref()
+            .and_then(|source| source.retained_upload.as_ref())
+        {
+            if uuid::Uuid::parse_str(&upload.handle).is_err()
+                || upload.size_bytes == 0
+                || upload.sha256.len() != 64
+                || !upload.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return Err("retained_upload requires a destination-issued UUID, SHA-256 digest and positive size".into());
+            }
+            if self
+                .source
+                .as_ref()
+                .and_then(|source| source.expected_archive_identity_sha256.as_ref())
+                .is_none()
+            {
+                return Err("retained_upload requires its original archive identity".into());
+            }
+        }
         if let Some(scenes) = &self.scenes {
             if scenes.is_empty() || scenes.len() > 4096 {
                 return Err("scenes must contain 1 to 4096 entries".into());
@@ -168,6 +226,42 @@ impl VideoJobRequest {
         }
         Ok(())
     }
+}
+
+fn deserialize_literal_metadata<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<crate::OutputMetadata, D::Error> {
+    let raw = serde_json::Value::deserialize(d)?;
+    let mut metadata: crate::OutputMetadata =
+        serde_json::from_value(raw.clone()).map_err(serde::de::Error::custom)?;
+    metadata.prompt = raw
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| serde::de::Error::custom("metadata.prompt must be a string"))?
+        .into();
+    metadata.negative_prompt = raw
+        .get("negative_prompt")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    metadata.original_prompt = raw
+        .get("original_prompt")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    if let (Some(transform), Some(value)) = (
+        metadata.prompt_transform.as_mut(),
+        raw.get("prompt_transform"),
+    ) {
+        transform.root_prompt = value
+            .get("root_prompt")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+        transform.source_prompt = value
+            .get("source_prompt")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| serde::de::Error::custom("metadata source_prompt must be a string"))?
+            .into();
+    }
+    Ok(metadata)
 }
 
 // The legacy GenerateRequest reader normalizes escaped newlines. Restore only
@@ -242,6 +336,20 @@ mod tests {
     }
 
     #[test]
+    fn retained_upload_is_explicit_and_lossless() {
+        let source: VideoJobSource = serde_json::from_value(serde_json::json!({
+            "filename":"original.mp4", "retained_upload":{"handle":"c7f8554e-53e7-4bd1-a203-346b72032e31","sha256":"a".repeat(64),"size_bytes":"9007199254740993"}
+        })).unwrap();
+        assert_eq!(
+            source.retained_upload.as_ref().unwrap().size_bytes,
+            9007199254740993
+        );
+        assert_eq!(
+            serde_json::to_value(source).unwrap()["retained_upload"]["size_bytes"],
+            "9007199254740993"
+        );
+    }
+    #[test]
     fn new_protocol_preserves_literal_prompt_bytes_and_full_range_seed() {
         let value = serde_json::json!({"generation":{
             "width":512,"height":512,"steps":4,"model":"ltx-2-19b-distilled:fp8", "prompt":"one\\new\r\ntwo",
@@ -315,12 +423,14 @@ mod tests {
             req.source = Some(VideoJobSource {
                 filename: name.into(),
                 expected_archive_identity_sha256: None,
+                retained_upload: None,
             });
             assert!(req.validate_shape().is_err());
         }
         req.source = Some(VideoJobSource {
             filename: "a.mp4".into(),
             expected_archive_identity_sha256: Some("a".repeat(64)),
+            retained_upload: None,
         });
         assert!(req.validate_shape().is_ok());
         req.source
