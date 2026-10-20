@@ -303,6 +303,94 @@ pub(crate) fn complete(
     })
 }
 
+/// A same-installation restart can retain its immutable private prefix locally.
+/// The caller supplies only a server-derived job path while holding its owner.
+pub(crate) fn install_retained(
+    root: &Path,
+    instance: &str,
+    id: &str,
+    source_path: &Path,
+    source: RetainedVideoSource,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<VideoSourceUploadRef> {
+    private_directory(root)?;
+    let destination = directory(root, id)?;
+    if destination.exists() {
+        begin(root, instance, id, source)?;
+        return complete(root, instance, id, checkpoint);
+    }
+    let temporary_id = uuid::Uuid::new_v4().to_string();
+    begin(root, instance, &temporary_id, source.clone())?;
+    let staged = directory(root, &temporary_id)?;
+    let result = (|| -> Result<VideoSourceUploadRef> {
+        checkpoint()?;
+        let input = mold_core::secure_file::open_regular_file_no_follow(source_path)?;
+        ensure!(
+            input.metadata()?.len() == source.size_bytes,
+            "local prefix size changed"
+        );
+        let path = staged.join("prefix.mp4");
+        std::fs::remove_file(&path)?;
+        if std::fs::hard_link(source_path, &path).is_err() {
+            let mut output = writable(&path, true)?;
+            let mut reader = input.take(
+                source
+                    .size_bytes
+                    .checked_add(1)
+                    .context("prefix size overflow")?,
+            );
+            let mut buffer = [0u8; 64 * 1024];
+            let mut size = 0u64;
+            loop {
+                checkpoint()?;
+                let count = reader.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                size = size
+                    .checked_add(count as u64)
+                    .context("prefix size overflow")?;
+                ensure!(
+                    size <= source.size_bytes,
+                    "local prefix grew during retention"
+                );
+                output.write_all(&buffer[..count])?;
+            }
+            ensure!(
+                size == source.size_bytes,
+                "local prefix shrank during retention"
+            );
+            output.sync_all()?;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        let mut manifest = load(&staged, instance)?;
+        manifest.committed_bytes = source.size_bytes;
+        save(&staged, &manifest)?;
+        let mut reference = complete(root, instance, &temporary_id, checkpoint)?;
+        match std::fs::rename(&staged, &destination) {
+            Ok(()) => crate::dir_sync::sync_directory(root)?,
+            Err(error) => {
+                if !destination.exists() {
+                    return Err(error.into());
+                }
+                begin(root, instance, id, source)?;
+                return complete(root, instance, id, checkpoint);
+            }
+        }
+        reference.handle = id.into();
+        Ok(reference)
+    })();
+    if staged.exists() {
+        let _ = std::fs::remove_dir_all(&staged);
+        let _ = crate::dir_sync::sync_directory(root);
+    }
+    result
+}
+
 pub(crate) fn resolve(
     root: &Path,
     instance: &str,
@@ -503,6 +591,52 @@ mod tests {
         assert!(append(root.path(), "owner", &id, 10, b"overflow").is_err());
         assert!(begin(root.path(), "owner", &id, authority(b"replacement")).is_err());
         assert!(begin(root.path(), "owner", "../escape", descriptor).is_err());
+    }
+
+    #[test]
+    fn same_host_restart_retains_prefix_without_client_relay_or_original_lifetime() {
+        let frames = vec![image::RgbImage::from_pixel(32, 32, image::Rgb([60, 80, 100])); 3];
+        let bytes = mold_inference::ltx_video::video_enc::encode_mp4(&frames, 24).unwrap();
+        let original = tempfile::tempdir().unwrap();
+        let path = original.path().join("prefix.mp4");
+        std::fs::write(&path, &bytes).unwrap();
+        let root = private_test_root();
+        let id = uuid::Uuid::new_v4().to_string();
+        let source = authority(&bytes);
+        let reference = install_retained(
+            root.path(),
+            "owner",
+            &id,
+            &path,
+            source.clone(),
+            &mut || Ok(()),
+        )
+        .unwrap();
+        std::fs::remove_file(path).unwrap();
+        let (mut file, _) = resolve(
+            root.path(),
+            "owner",
+            &reference,
+            &source.filename,
+            &source.archive_identity_sha256,
+        )
+        .unwrap();
+        let mut retained = Vec::new();
+        file.read_to_end(&mut retained).unwrap();
+        assert_eq!(retained, bytes);
+        assert!(append(root.path(), "owner", &id, 0, b"mutated").is_err());
+        assert_eq!(
+            install_retained(
+                root.path(),
+                "owner",
+                &id,
+                &original.path().join("gone"),
+                source,
+                &mut || Ok(())
+            )
+            .unwrap(),
+            reference
+        );
     }
 
     #[test]

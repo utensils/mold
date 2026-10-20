@@ -106,7 +106,14 @@ fn validate_media_budget(request: &mold_core::GenerateRequest) -> Result<()> {
 fn source_ref(revision: &str, source: &crate::video_source::RetainedVideoSource) -> Result<String> {
     let mut hash = Sha256::new();
     hash.update(b"mold-video-restart-prefix-v1\0");
-    hash.update(serde_json::to_vec(&(revision, source))?);
+    hash.update(serde_json::to_vec(&(
+        revision,
+        source.authority_kind,
+        &source.filename,
+        &source.archive_identity_sha256,
+        &source.checksum_sha256,
+        source.size_bytes,
+    ))?);
     Ok(format!("{:x}", hash.finalize()))
 }
 fn prefix_file(
@@ -210,8 +217,23 @@ pub(crate) fn export_for(
         .retained_source
         .as_ref()
         .map(|source| -> Result<_> {
-            authenticate_prefix(prefix_file(state, row, source)?, source)?;
+            let retained_upload = if portable {
+                authenticate_prefix(prefix_file(state, row, source)?, source)?;
+                None
+            } else {
+                let id = uuid::Uuid::new_v4().to_string();
+                Some(crate::video_source_upload::install_retained(
+                    &crate::video_source_upload_routes::root(state)
+                        .map_err(|_| anyhow::anyhow!("durable video ingress unavailable"))?,
+                    &state.instance_id,
+                    &id,
+                    &crate::video_job_manifest::job_dir(state, &row.job.id)?.join("prefix.mp4"),
+                    source.clone(),
+                    &mut || Ok(()),
+                )?)
+            };
             Ok(VideoRestartPrefix {
+                retained_upload,
                 filename: source.filename.clone(),
                 archive_identity_sha256: source.archive_identity_sha256.clone(),
                 sha256: source.checksum_sha256.clone(),

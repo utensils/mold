@@ -30,6 +30,10 @@ pub struct VideoRestartPrefix {
     pub size_bytes: u64,
     /// An opaque, source-revision-bound locator. It is never a credential.
     pub source_ref: String,
+    /// Completed local retention, issued only when source and destination
+    /// are this same installation. Remote destinations must relay bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_upload: Option<crate::video_job::VideoSourceUploadRef>,
     /// Forward unchanged to upload begin; its metadata can contain full u64s.
     pub upload_spec_json: String,
 }
