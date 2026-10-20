@@ -116,18 +116,7 @@ fn load(directory: &Path, instance: &str) -> Result<Manifest> {
         bytes.len() as u64 <= MAX_MANIFEST_BYTES,
         "source manifest exceeded metadata budget while reading"
     );
-    let mut manifest: Manifest = serde_json::from_slice(&bytes)?;
-    // OutputMetadata is an older protocol with escaped-newline compatibility.
-    // This new envelope carries literal JSON; restore exact prompt provenance.
-    let raw: serde_json::Value = serde_json::from_slice(&bytes)?;
-    let source = &raw["source"];
-    let spec: mold_core::video_job::VideoSourceUploadSpec = serde_json::from_value(
-        serde_json::json!({
-            "filename":source["filename"], "archive_identity_sha256":source["archive_identity_sha256"],
-            "sha256":source["checksum_sha256"], "size_bytes":source["size_bytes"], "metadata":source["metadata"]
-        }),
-    )?;
-    manifest.source.metadata = spec.metadata;
+    let manifest: Manifest = serde_json::from_slice(&bytes)?;
     ensure!(
         manifest.version == 1 && manifest.instance == instance,
         "upload destination installation changed"
@@ -357,6 +346,7 @@ mod tests {
     fn authority(bytes: &[u8]) -> crate::video_source::RetainedVideoSource {
         let request = serde_json::from_value(serde_json::json!({"model":"ltx-2-19b-distilled:fp8", "prompt":"original", "width":32,"height":32,"steps":4})).unwrap();
         crate::video_source::RetainedVideoSource {
+            authority_kind: mold_core::video_job::VideoSourceAuthorityKind::PublishedArchive,
             filename: "original.mp4".into(),
             archive_identity_sha256: "a".repeat(64),
             checksum_sha256: format!("{:x}", Sha256::digest(bytes)),

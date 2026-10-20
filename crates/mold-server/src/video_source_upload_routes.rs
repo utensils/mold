@@ -101,6 +101,7 @@ pub(crate) async fn begin(
     Json(source): Json<VideoSourceUploadSpec>,
 ) -> Result<PrivateJson<VideoSourceUploadStatus>, ApiError> {
     let source = crate::video_source::RetainedVideoSource {
+        authority_kind: source.authority_kind,
         filename: source.filename,
         archive_identity_sha256: source.archive_identity_sha256,
         checksum_sha256: source.sha256,

@@ -12,6 +12,8 @@ use crate::{routes::ApiError, state::AppState};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RetainedVideoSource {
+    #[serde(default)]
+    pub authority_kind: mold_core::video_job::VideoSourceAuthorityKind,
     pub filename: String,
     pub archive_identity_sha256: String,
     pub checksum_sha256: String,
@@ -43,13 +45,55 @@ pub(crate) async fn open(
             .gallery_publication_gate
             .validated_retained_media_for_item(&output, &filename)
             .map_err(|_| ApiError::internal("Could not inspect Library video authority"))?;
-        let crate::batch_transaction::ValidatedRetainedMedia::Present {
-            identity, metadata, ..
-        } = resolved
-        else {
-            return Err(ApiError::not_found(
-                "The selected video is no longer in Library",
-            ));
+        let (identity, metadata) = match resolved {
+            crate::batch_transaction::ValidatedRetainedMedia::Present {
+                identity,
+                metadata,
+                ..
+            } => (identity, metadata),
+            crate::batch_transaction::ValidatedRetainedMedia::Missing => {
+                let index = state.gallery_publication_gate.committed_archive_index(&output)
+                    .map_err(|_| ApiError::internal("Could not inspect Library ownership"))?;
+                if index.is_retired(&filename) || index.is_quarantined(&filename) {
+                    return Err(ApiError::not_found("The selected video is no longer in Library"));
+                }
+                let row = state
+                    .metadata_db
+                    .as_ref()
+                    .as_ref()
+                    .ok_or_else(|| ApiError::not_found("Library metadata is unavailable"))?
+                    .get(&output, &filename)
+                    .map_err(|_| ApiError::internal("Could not inspect selected Library movie"))?
+                    .filter(|row| {
+                        row.format == mold_core::OutputFormat::Mp4
+                            && !row.metadata_synthetic
+                            && row.trashed_at_ms.is_none()
+                    })
+                    .ok_or_else(|| {
+                        ApiError::not_found("The selected video is no longer in Library")
+                    })?;
+                let file =
+                    mold_core::secure_file::open_regular_file_no_follow(&output.join(&filename))
+                        .map_err(|_| {
+                            ApiError::not_found("The selected video file is unavailable")
+                        })?;
+                let (file, source) =
+                    snapshot_legacy(file, filename, row.metadata).map_err(|_| {
+                        ApiError::validation("Could not freeze the selected legacy video")
+                    })?;
+                if expected
+                    .as_ref()
+                    .is_some_and(|hash| hash != &source.archive_identity_sha256)
+                {
+                    return Err(source_changed());
+                }
+                return Ok((file, source));
+            }
+            crate::batch_transaction::ValidatedRetainedMedia::Invalid => {
+                return Err(ApiError::validation(
+                    "The selected video differs from its published authority",
+                ));
+            }
         };
         let archive_identity_sha256 =
             crate::gallery_source_media::archive_identity_sha256(&identity)?;
@@ -78,6 +122,7 @@ pub(crate) async fn open(
         Ok((
             file,
             RetainedVideoSource {
+                authority_kind: mold_core::video_job::VideoSourceAuthorityKind::PublishedArchive,
                 filename,
                 archive_identity_sha256,
                 checksum_sha256: identity.checksum_sha256,
@@ -88,6 +133,58 @@ pub(crate) async fn open(
     })
     .await
     .map_err(|_| ApiError::internal("Library video inspection failed"))?
+}
+
+fn source_changed() -> ApiError {
+    ApiError::with_code(
+        "The selected video changed. Refresh Library before extending it.",
+        "VIDEO_SOURCE_CHANGED",
+        axum::http::StatusCode::CONFLICT,
+    )
+}
+
+/// A new current-pixel admission, never a promotion to historical archive authority.
+fn snapshot_legacy(
+    mut file: File,
+    filename: String,
+    metadata: mold_core::OutputMetadata,
+) -> anyhow::Result<(File, RetainedVideoSource)> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut hash = Sha256::new();
+    let mut size_bytes = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        size_bytes = size_bytes
+            .checked_add(count as u64)
+            .context("source size overflow")?;
+        hash.update(&buffer[..count]);
+    }
+    ensure!(size_bytes > 0, "source movie is empty");
+    let checksum_sha256 = format!("{:x}", hash.finalize());
+    let mut identity = Sha256::new();
+    identity.update(b"mold-video-current-pixel-snapshot-v1\0");
+    identity.update(serde_json::to_vec(&(
+        &filename,
+        &checksum_sha256,
+        size_bytes,
+        &metadata,
+    ))?);
+    file.seek(SeekFrom::Start(0))?;
+    Ok((
+        file,
+        RetainedVideoSource {
+            authority_kind: mold_core::video_job::VideoSourceAuthorityKind::LegacySnapshot,
+            filename,
+            archive_identity_sha256: format!("{:x}", identity.finalize()),
+            checksum_sha256,
+            size_bytes,
+            metadata,
+        },
+    ))
 }
 
 /// Stream the original into a private, immutable job-owned file. Never route
@@ -140,12 +237,49 @@ mod tests {
             "prompt":"original", "width":32, "height":32, "steps":4}))
         .unwrap();
         RetainedVideoSource {
+            authority_kind: mold_core::video_job::VideoSourceAuthorityKind::PublishedArchive,
             filename: "original.mp4".into(),
             archive_identity_sha256: "archive".into(),
             checksum_sha256: format!("{:x}", Sha256::digest(bytes)),
             size_bytes: bytes.len() as u64,
             metadata: mold_core::OutputMetadata::from_generate_request(&request, 1, None, "test"),
         }
+    }
+
+    #[test]
+    fn legacy_snapshot_binds_current_pixels_name_and_metadata_without_claiming_history() {
+        let input = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(input.path(), b"current selected movie").unwrap();
+        let meta = authority(b"unused").metadata;
+        let capture = |filename: &str, metadata| {
+            snapshot_legacy(File::open(input.path()).unwrap(), filename.into(), metadata)
+                .unwrap()
+                .1
+        };
+        let first = capture("old.mp4", meta.clone());
+        assert_eq!(
+            first.authority_kind,
+            mold_core::video_job::VideoSourceAuthorityKind::LegacySnapshot
+        );
+        assert_eq!(
+            first.archive_identity_sha256,
+            capture("old.mp4", meta.clone()).archive_identity_sha256
+        );
+        assert_ne!(
+            first.archive_identity_sha256,
+            capture("other.mp4", meta.clone()).archive_identity_sha256
+        );
+        let mut changed = meta.clone();
+        changed.prompt.push_str(" edited");
+        assert_ne!(
+            first.archive_identity_sha256,
+            capture("old.mp4", changed).archive_identity_sha256
+        );
+        std::fs::write(input.path(), b"replacement movie").unwrap();
+        assert_ne!(
+            first.archive_identity_sha256,
+            capture("old.mp4", meta).archive_identity_sha256
+        );
     }
 
     #[test]

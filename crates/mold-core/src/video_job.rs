@@ -40,10 +40,22 @@ pub struct VideoSourceUploadRef {
     pub size_bytes: u64,
 }
 
+/// Published archive history and an explicitly selected current-pixel legacy
+/// snapshot are distinct authorities. A snapshot never proves original inputs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoSourceAuthorityKind {
+    #[default]
+    PublishedArchive,
+    LegacySnapshot,
+}
+
 /// Exact source provenance accompanies the stream; no paths authorize input.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VideoSourceUploadSpec {
+    #[serde(default)]
+    pub authority_kind: VideoSourceAuthorityKind,
     pub filename: String,
     pub archive_identity_sha256: String,
     pub sha256: String,
@@ -263,6 +275,19 @@ pub fn deserialize_literal_metadata<'de, D: Deserializer<'de>>(
             .ok_or_else(|| serde::de::Error::custom("metadata source_prompt must be a string"))?
             .into();
     }
+    if let (Some(chain), Some(stages)) = (
+        metadata.chain.as_mut(),
+        raw.pointer("/chain/stages")
+            .and_then(|value| value.as_array()),
+    ) {
+        for (stage, value) in chain.stages.iter_mut().zip(stages) {
+            stage.prompt = value
+                .get("prompt")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| serde::de::Error::custom("metadata scene prompt must be a string"))?
+                .into();
+        }
+    }
     Ok(metadata)
 }
 
@@ -335,6 +360,43 @@ mod tests {
             "generation": {"width":512,"height":512,"steps":4,"model":"ltx-2-19b-distilled:fp8", "prompt":r"a sign \new"},
             "duration_ms":duration
         })).unwrap()
+    }
+
+    #[test]
+    fn transferred_metadata_preserves_literal_scene_prompt_and_full_seed() {
+        let metadata = crate::OutputMetadata::from_generate_request(
+            &request(1000.into()).generation,
+            u64::MAX,
+            None,
+            "test",
+        );
+        let mut raw = serde_json::to_value(metadata).unwrap();
+        raw["chain"] = serde_json::json!({"stage_count":1,"motion_tail_frames":1,
+            "stages":[{"prompt":r"a sign \new", "frames":9,"transition":"smooth"}]});
+        let spec: VideoSourceUploadSpec = serde_json::from_value(serde_json::json!({
+            "filename":"movie.mp4","archive_identity_sha256":"a".repeat(64),"sha256":"b".repeat(64),"size_bytes":"42","metadata":raw})).unwrap();
+        assert_eq!(
+            spec.metadata.chain.unwrap().stages[0].prompt,
+            r"a sign \new"
+        );
+        assert_eq!(spec.metadata.seed, u64::MAX);
+    }
+
+    #[test]
+    fn legacy_video_snapshot_authority_survives_source_transfer() {
+        let metadata = crate::OutputMetadata::from_generate_request(
+            &request(1000.into()).generation,
+            u64::MAX,
+            None,
+            "test",
+        );
+        let raw = serde_json::json!({"filename":"old.mp4", "authority_kind":"legacy_snapshot",
+            "archive_identity_sha256":"a".repeat(64),"sha256":"b".repeat(64),"size_bytes":"42","metadata":metadata});
+        let source: VideoSourceUploadSpec = serde_json::from_value(raw).unwrap();
+        assert_eq!(
+            serde_json::to_value(source).unwrap()["authority_kind"],
+            "legacy_snapshot"
+        );
     }
 
     #[test]
