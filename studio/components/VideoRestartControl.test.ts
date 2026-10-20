@@ -7,12 +7,16 @@ const api = vi.hoisted(() => ({
   admit: vi.fn(),
   owner: vi.fn(),
   get: vi.fn(),
+  discard: vi.fn(),
+  cancel: vi.fn(),
 }));
 vi.mock("../api/chainRestart", () => ({
   assertChainRestartDestination: api.owner,
   chainRestartOptions: api.options,
   exportChainRestart: api.export,
   admitChainRestart: api.admit,
+  discardChainRecovery: api.discard,
+  cancelChainRestart: api.cancel,
 }));
 vi.mock("../api/chainJobs", async (original) => ({
   ...(await original<typeof import("../api/chainJobs")>()),
@@ -50,6 +54,7 @@ beforeEach(() => {
     source_revision: "revision",
     restart: { supported: true },
     send: { supported: true },
+    discard: { supported: true },
   });
   api.export.mockResolvedValue({
     source_instance_id: "source",
@@ -59,6 +64,36 @@ beforeEach(() => {
   });
   api.owner.mockResolvedValue(undefined);
   api.get.mockResolvedValue(null);
+});
+
+it("requires a separate destructive confirmation to discard recovery data", async () => {
+  const wrapper = mount(VideoRestartControl, {
+    props: {
+      hostId: "plato",
+      jobId: "failed-parent",
+      state: "failed",
+      chain: true,
+    },
+    global: { stubs: { Teleport: true } },
+    attachTo: document.body,
+  });
+  await wrapper.get('[data-test="video-restart-open"]').trigger("click");
+  await flushPromises();
+  await wrapper.get('[data-test="video-discard-open"]').trigger("click");
+  expect(wrapper.text()).toContain("Saved videos in Library stay available");
+  expect(api.discard).not.toHaveBeenCalled();
+  await wrapper.get('[data-test="video-discard-confirm"]').trigger("click");
+  await flushPromises();
+  expect(api.discard).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ hostId: "plato", instanceId: "source" }),
+    "failed-parent",
+    expect.objectContaining({ source_revision: "revision" }),
+    expect.any(Function),
+  );
+  expect(api.admit).not.toHaveBeenCalled();
+  expect(api.export).not.toHaveBeenCalled();
+  expect(wrapper.text()).toContain("Recovery data deleted");
+  wrapper.unmount();
 });
 it("opens a reviewable destination choice without generating and requires explicit confirmation", async () => {
   const wrapper = mount(VideoRestartControl, {

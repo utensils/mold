@@ -4,13 +4,14 @@ import {
   admitChainRestart,
   assertChainRestartDestination,
   chainRestartOptions,
+  cancelChainRestart,
+  discardChainRecovery,
   exportChainRestart,
   type ChainRestartAdmission,
   type ChainRestartOptions,
 } from "../api/chainRestart";
 import {
   assertChainOwner,
-  cancelChainOperation,
   definiteChainRefusal,
   getChainJob,
   sameChainOwner,
@@ -47,9 +48,14 @@ export function createVideoRestart(
   const options = ref<ChainRestartOptions | null>(null),
     selected = ref("");
   const cancelledBeforeAdmission = ref(false);
+  const discarded = ref(false);
   const admission = ref<ChainRestartAdmission | null>(null),
     detail = ref<ChainJobDetail | null>(null);
   let epoch = 0;
+  let cancellation: {
+    id: string;
+    promise: Promise<ChainRestartAdmission>;
+  } | null = null;
   const destinations = computed(() =>
     hosts.value.filter(
       (host) =>
@@ -67,7 +73,9 @@ export function createVideoRestart(
     () =>
       cancelledBeforeAdmission.value ||
       (!!detail.value &&
-        ["completed", "cancelled", "failed"].includes(detail.value.state)),
+        ["completed", "cancelled", "failed", "interrupted"].includes(
+          detail.value.state,
+        )),
   );
   const status = computed(() => {
     if (cancelledBeforeAdmission.value) return "Cancelled before queueing";
@@ -148,6 +156,37 @@ export function createVideoRestart(
       );
     return owner(host);
   }
+  async function reconcileCancellation(
+    known: ChainRestartAdmission,
+    destination: ChainOwner,
+    attempt: number,
+  ): Promise<ChainRestartAdmission> {
+    if (cancellation?.id === known.operationId) return cancellation.promise;
+    const promise = (async () => {
+      await cancelChainRestart(
+        destination,
+        known.operationId,
+        () => attempt === epoch && currentOwner(destination),
+      );
+      const acknowledged = {
+        ...known,
+        cancelRequested: true,
+        cancelAcknowledged: true,
+      };
+      persist(acknowledged, attempt === epoch);
+      return acknowledged;
+    })();
+    cancellation = { id: known.operationId, promise };
+    cancelling.value = true;
+    try {
+      return await promise;
+    } finally {
+      if (cancellation?.promise === promise) {
+        cancellation = null;
+        cancelling.value = false;
+      }
+    }
+  }
   async function refresh() {
     const known = admission.value,
       attempt = epoch;
@@ -156,10 +195,19 @@ export function createVideoRestart(
       const destination = destinationFor(known);
       await assertChainOwner(destination);
       if (attempt !== epoch || !currentOwner(destination)) return;
+      const reconciled =
+        known.cancelRequested && !known.cancelAcknowledged
+          ? await reconcileCancellation(known, destination, attempt)
+          : known;
+      if (attempt !== epoch || !currentOwner(destination)) return;
       const result = await getChainJob(destination, known.operationId);
       if (attempt !== epoch || !currentOwner(destination)) return;
+      if (result && result.id !== known.operationId)
+        throw new Error(
+          "This machine returned a different job. The original attempt remains recoverable.",
+        );
       detail.value = result;
-      if (!result && known.cancelAcknowledged) {
+      if (!result && reconciled.cancelAcknowledged) {
         cancelledBeforeAdmission.value = true;
         forget(known.operationId);
       }
@@ -172,6 +220,7 @@ export function createVideoRestart(
   async function open(hostId: string, jobId: string) {
     const attempt = ++epoch;
     active.value = true;
+    discarded.value = false;
     cancelledBeforeAdmission.value = false;
     loading.value = true;
     error.value = "";
@@ -306,22 +355,51 @@ export function createVideoRestart(
     if (!known || cancelling.value || settled.value) return;
     cancelling.value = true;
     try {
-      const destination = destinationFor(known);
+      destinationFor(known);
       persist({ ...known, cancelRequested: true });
-      await cancelChainOperation(
-        destination,
-        known.operationId,
-        () => attempt === epoch && currentOwner(destination),
-      );
-      persist(
-        { ...known, cancelRequested: true, cancelAcknowledged: true },
-        attempt === epoch,
-      );
       if (attempt === epoch) await refresh();
     } catch (cause) {
       if (attempt === epoch) error.value = message(cause);
     } finally {
       cancelling.value = false;
+    }
+  }
+  async function discard() {
+    const frozenSource = source.value,
+      frozenOptions = options.value,
+      jobId = sourceJobId.value,
+      attempt = epoch;
+    if (
+      !frozenSource ||
+      !frozenOptions ||
+      frozenOptions.discard?.supported !== true ||
+      admission.value ||
+      busy.value ||
+      fleetBusy.value
+    )
+      return;
+    busy.value = true;
+    fleetBusy.value = true;
+    error.value = "";
+    try {
+      await discardChainRecovery(
+        frozenSource,
+        jobId,
+        frozenOptions,
+        () =>
+          attempt === epoch &&
+          active.value &&
+          !admission.value &&
+          currentOwner(frozenSource),
+      );
+      if (attempt !== epoch) return;
+      discarded.value = true;
+      options.value = null;
+    } catch (cause) {
+      if (attempt === epoch) error.value = message(cause);
+    } finally {
+      busy.value = false;
+      fleetBusy.value = false;
     }
   }
   function close() {
@@ -332,6 +410,7 @@ export function createVideoRestart(
   }
   return {
     active,
+    discarded,
     loading,
     busy,
     cancelling,
@@ -349,6 +428,7 @@ export function createVideoRestart(
     start,
     refresh,
     cancel,
+    discard,
     close,
   };
 }

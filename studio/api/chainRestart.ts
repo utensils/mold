@@ -1,4 +1,4 @@
-import { apiJsonTo } from "./client";
+import { apiFetchTo, apiJsonTo } from "./client";
 import {
   assertChainOwner,
   type ChainAdmission,
@@ -10,6 +10,7 @@ export interface ChainRestartOptions {
   source_revision: string;
   restart: { supported: boolean; reason?: string };
   send: { supported: boolean; reason?: string };
+  discard?: { supported: boolean; reason?: string };
 }
 export interface ChainRestartExport {
   destination_instance_id: string;
@@ -148,4 +149,66 @@ export async function admitChainRestart(options: {
     body: options.requestJson,
   });
   return admission;
+}
+
+/** This new route cannot degrade to a legacy DELETE that ignores revisions. */
+export async function discardChainRecovery(
+  source: ChainOwner,
+  jobId: string,
+  options: ChainRestartOptions,
+  isCurrent: () => boolean = () => true,
+): Promise<void> {
+  if (options.discard?.supported !== true)
+    throw new Error(
+      options.discard?.reason ??
+        "Update this machine before deleting video recovery data.",
+    );
+  if (!source.instanceId || source.instanceId !== options.source_instance_id)
+    throw new Error(
+      "The source machine installation changed. Reopen this video.",
+    );
+  await assertChainOwner(source);
+  if (!isCurrent())
+    throw new Error(
+      "The video or machine changed before deleting recovery data.",
+    );
+  await apiFetchTo(
+    source.target,
+    `/api/chain-jobs/${encodeURIComponent(jobId)}/discard`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        source_instance_id: options.source_instance_id,
+        source_revision: options.source_revision,
+      }),
+    },
+  );
+}
+
+/** New-attempt cancellation must never fall back to a legacy host that ignores
+ * the installation header. The exact operation remains recoverable on refusal. */
+export async function cancelChainRestart(
+  destination: ChainOwner,
+  operationId: string,
+  isCurrent: () => boolean = () => true,
+): Promise<void> {
+  await assertChainOwner(destination);
+  const capabilities = await apiJsonTo<{
+    queue?: { chain_restart_controls?: boolean };
+  }>(destination.target, "/api/capabilities");
+  if (capabilities.queue?.chain_restart_controls !== true)
+    throw new Error(
+      "Update this machine before stopping a restarted video safely.",
+    );
+  if (!isCurrent())
+    throw new Error("The video or machine changed before cancellation.");
+  await apiFetchTo(
+    destination.target,
+    `/api/chain-jobs/${encodeURIComponent(operationId)}/operations/${encodeURIComponent(operationId)}/cancel`,
+    {
+      method: "POST",
+      headers: { "x-mold-destination-instance": destination.instanceId! },
+    },
+  );
 }

@@ -1,10 +1,17 @@
 import { beforeEach, expect, it, vi } from "vitest";
 const json = vi.hoisted(() => vi.fn());
+const fetch = vi.hoisted(() => vi.fn());
 vi.mock("./client", async (original) => ({
   ...(await original<typeof import("./client")>()),
   apiJsonTo: json,
+  apiFetchTo: fetch,
 }));
-import { exportChainRestart, admitChainRestart } from "./chainRestart";
+import {
+  exportChainRestart,
+  admitChainRestart,
+  discardChainRecovery,
+  cancelChainRestart,
+} from "./chainRestart";
 
 const source = {
   hostId: "plato",
@@ -29,6 +36,35 @@ const requestJson =
   '{"model":"opaque","seed":18446744073709551615,"stages":[{"prompt":"literal\\\\n","seed_offset":18446744073709551614,"frames":107}]}';
 beforeEach(() => {
   json.mockReset();
+  fetch.mockReset();
+});
+
+it("discards only explicitly advertised recovery data with the captured owner and revision", async () => {
+  json.mockResolvedValue({ instance_id: "source-install" });
+  fetch.mockResolvedValue(new Response(null, { status: 204 }));
+  const authority = { ...options, discard: { supported: true } };
+  await discardChainRecovery(source, "job/id", authority);
+  expect(fetch).toHaveBeenCalledExactlyOnceWith(
+    source.target,
+    "/api/chain-jobs/job%2Fid/discard",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        source_instance_id: "source-install",
+        source_revision: "frozen-revision",
+      }),
+    },
+  );
+  fetch.mockClear();
+  await expect(discardChainRecovery(source, "job", options)).rejects.toThrow(
+    "Update",
+  );
+  expect(fetch).not.toHaveBeenCalled();
+  await expect(
+    discardChainRecovery(source, "job", authority, () => false),
+  ).rejects.toThrow("changed");
+  expect(fetch).not.toHaveBeenCalled();
 });
 
 it("exports only the captured source revision without changing the original", async () => {
@@ -184,4 +220,35 @@ it("requires affirmative destination header enforcement before sending a new att
   expect(json.mock.calls.some(([, path]) => path === "/api/chain-jobs")).toBe(
     false,
   );
+});
+
+it("requires affirmative safe cancellation and sends the captured destination installation", async () => {
+  json.mockImplementation(async (_, path) =>
+    path === "/api/status"
+      ? { instance_id: "destination-install" }
+      : { queue: { chain_restart: true } },
+  );
+  await expect(
+    cancelChainRestart(destination, "known-operation"),
+  ).rejects.toThrow("Update");
+  expect(fetch).not.toHaveBeenCalled();
+  json.mockImplementation(async (_, path) =>
+    path === "/api/status"
+      ? { instance_id: "destination-install" }
+      : { queue: { chain_restart_controls: true } },
+  );
+  await cancelChainRestart(destination, "known-operation");
+  expect(fetch).toHaveBeenCalledExactlyOnceWith(
+    destination.target,
+    "/api/chain-jobs/known-operation/operations/known-operation/cancel",
+    {
+      method: "POST",
+      headers: { "x-mold-destination-instance": "destination-install" },
+    },
+  );
+  fetch.mockClear();
+  await expect(
+    cancelChainRestart(destination, "known-operation", () => false),
+  ).rejects.toThrow("changed");
+  expect(fetch).not.toHaveBeenCalled();
 });

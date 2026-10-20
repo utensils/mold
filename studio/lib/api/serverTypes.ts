@@ -304,6 +304,7 @@ export interface ServerCapabilities {
     pre_render_transfer?: boolean;
     /** Explicit chain restart export and enforced destination installation header. */
     chain_restart?: boolean;
+    chain_restart_controls?: boolean;
     transfer_identity?: string;
     can_cancel_all?: boolean;
     can_reorder?: boolean;

@@ -16,6 +16,7 @@ const state = createVideoRestart(
 );
 const {
   active,
+  discarded,
   loading,
   busy,
   cancelling,
@@ -33,11 +34,16 @@ const {
 const eligible = computed(
   () =>
     transfer &&
+    !discarded.value &&
     props.chain &&
     props.hostId &&
     props.jobId &&
     ["failed", "error", "paused", "interrupted"].includes(props.state),
 );
+const discardArmed = ref(false);
+watch(active, () => {
+  discardArmed.value = false;
+});
 const sameMachine = computed(
   () =>
     destinations.value.find((host) => host.id === selected.value)
@@ -81,6 +87,9 @@ onBeforeUnmount(() => {
         Create a new attempt with the same prompts, seed, settings, and saved
         inputs. The original stays on its machine.
       </p>
+      <p v-if="discarded" role="status">
+        Recovery data deleted. Saved videos in Library stay available.
+      </p>
       <p v-if="loading" role="status">Checking this video’s saved inputs…</p>
       <template v-else-if="!admission && options">
         <label v-if="destinations.length"
@@ -114,9 +123,40 @@ onBeforeUnmount(() => {
         Job {{ admission.operationId }}
       </p>
       <p v-if="error" role="alert" class="video-restart__error">{{ error }}</p>
-      <div class="video-restart__actions">
+      <div
+        v-if="discardArmed && !discarded"
+        class="video-restart__confirm"
+        role="group"
+        aria-label="Delete recovery data confirmation"
+      >
+        <p>
+          Delete this job and its retained inputs? Saved videos in Library stay
+          available. This cannot be undone.
+        </p>
+        <button type="button" :disabled="busy" @click="discardArmed = false">
+          Keep job
+        </button>
+        <button
+          type="button"
+          :disabled="busy"
+          data-test="video-discard-confirm"
+          @click="state.discard"
+        >
+          {{ busy ? "Deleting…" : "Delete recovery data" }}
+        </button>
+      </div>
+      <div v-else class="video-restart__actions">
         <button type="button" @click="state.close">
-          {{ admission ? "Done" : "Cancel" }}
+          {{ admission || discarded ? "Done" : "Cancel" }}
+        </button>
+        <button
+          v-if="!admission && options?.discard?.supported"
+          type="button"
+          :disabled="busy"
+          data-test="video-discard-open"
+          @click="discardArmed = true"
+        >
+          Delete recovery data…
         </button>
         <button
           v-if="admission && !settled"
@@ -182,6 +222,17 @@ onBeforeUnmount(() => {
     16px,
     var(--mold-fs-md)
   ); /* literal: prevent mobile input zoom */
+}
+.video-restart__confirm {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.video-restart__confirm p {
+  flex-basis: 100%;
+}
+.video-restart__confirm [data-test="video-discard-confirm"] {
+  color: var(--mold-error);
 }
 .video-restart__actions {
   display: flex;

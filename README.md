@@ -329,6 +329,7 @@ Failed video generations retain their inputs in the durable queue for safe
 movement to another machine. `mold jobs restart ID --to HOST` starts a separate
 attempt of an unlinked failed sequence using the destination's current recipe,
 while keeping the original job recoverable. Exact Resume preserves its frozen recipe.
+Web and Tauri Queue expose the same choice as **Start again…**. Updated machines also offer **Delete recovery data…** for failed/interrupted jobs, with a separate confirmation that preserves saved Library videos.
 
 ```bash
 mold chain validate shot.toml

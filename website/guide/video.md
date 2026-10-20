@@ -480,3 +480,5 @@ subtitles, chapters, multiple audio tracks, and incompatible audio codecs.
 ### Start a stopped video again
 
 In the web, desktop and mobile Queue, choose **Start again…** on a failed, interrupted or paused multi-clip video. Keep the original machine or choose another connected machine, then confirm **Start again** or **Send video**. This creates a new attempt with its saved prompts, seed, settings and retained inputs; the original stays unchanged. A machine-local adapter requires the original machine. Unsupported or unavailable inputs explain why the action cannot proceed. After a dropped reply, **Check queue** recovers the known attempt instead of creating another one. **Stop new attempt** targets that destination only.
+
+On updated machines, **Delete recovery data…** is available for a failed or interrupted multi-clip job. Its separate confirmation deletes that job and retained inputs; saved Library videos remain available. The original installation and job revision must still match. **Stop new attempt** requires the updated installation-fenced control; an interrupted cancellation reply keeps its intent for reconciliation with the same job ID.

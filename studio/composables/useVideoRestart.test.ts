@@ -7,10 +7,13 @@ const api = vi.hoisted(() => ({
   owner: vi.fn(),
   get: vi.fn(),
   cancel: vi.fn(),
+  discard: vi.fn(),
 }));
 vi.mock("../api/chainRestart", () => ({
   assertChainRestartDestination: api.owner,
   chainRestartOptions: api.options,
+  discardChainRecovery: api.discard,
+  cancelChainRestart: api.cancel,
   exportChainRestart: api.export,
   admitChainRestart: api.admit,
 }));
@@ -18,7 +21,6 @@ vi.mock("../api/chainJobs", async (original) => ({
   ...(await original<typeof import("../api/chainJobs")>()),
   assertChainOwner: api.owner,
   getChainJob: api.get,
-  cancelChainOperation: api.cancel,
 }));
 import { createVideoRestart, VIDEO_RESTART_KEY } from "./useVideoRestart";
 import { ApiError } from "../api/client";
@@ -247,4 +249,104 @@ it("clears a typed destination refusal but keeps an ambiguous conflict recoverab
     await state.start();
     expect(state.admission.value !== null).toBe(retained);
   }
+});
+
+it("replays only a persisted cancellation intent on its exact destination after a lost reply", async () => {
+  const known = {
+    operationId: "known",
+    hostId: "hal",
+    instanceId: "target",
+    baseUrl: "http://hal",
+    createdAt: 1,
+    sourceJobId: "old-job",
+    sourceHostId: "plato",
+    sourceInstanceId: "source",
+    sourceRevision: "revision",
+    destinationInstanceId: "target",
+    cancelRequested: true,
+  };
+  localStorage.setItem(VIDEO_RESTART_KEY, JSON.stringify([known]));
+  api.cancel
+    .mockRejectedValueOnce(new Error("lost cancel reply"))
+    .mockResolvedValue(undefined);
+  api.get.mockResolvedValue({ id: "known", state: "cancelled", finalizes: [] });
+  const state = createVideoRestart(
+    computed(() => [source, target]),
+    ref(false),
+  );
+  await state.open("plato", "old-job");
+  expect(api.cancel).toHaveBeenCalledTimes(1);
+  expect(state.error.value).toContain("lost cancel reply");
+  expect(state.admission.value?.cancelRequested).toBe(true);
+  state.close();
+  await state.open("plato", "old-job");
+  expect(api.cancel).toHaveBeenCalledTimes(2);
+  expect(
+    api.cancel.mock.calls.every(
+      ([owner, id]) => owner.instanceId === "target" && id === "known",
+    ),
+  ).toBe(true);
+  expect(state.detail.value?.state).toBe("cancelled");
+  expect(api.admit).not.toHaveBeenCalled();
+});
+
+it("retains an interrupted attempt without offering a stop mutation", async () => {
+  const known = {
+    operationId: "known",
+    hostId: "hal",
+    instanceId: "target",
+    baseUrl: "http://hal",
+    createdAt: 1,
+    sourceJobId: "old-job",
+    sourceHostId: "plato",
+    sourceInstanceId: "source",
+    sourceRevision: "revision",
+    destinationInstanceId: "target",
+  };
+  localStorage.setItem(VIDEO_RESTART_KEY, JSON.stringify([known]));
+  api.get.mockResolvedValue({
+    id: "known",
+    state: "interrupted",
+    finalizes: [],
+  });
+  const state = createVideoRestart(
+    computed(() => [source, target]),
+    ref(false),
+  );
+  await state.open("plato", "old-job");
+  expect(state.settled.value).toBe(true);
+  expect(state.status.value).toContain("Interrupted");
+  await state.cancel();
+  expect(api.cancel).not.toHaveBeenCalled();
+  expect(JSON.parse(localStorage.getItem(VIDEO_RESTART_KEY)!)).toEqual([known]);
+});
+
+it("refuses another job's terminal response without clearing the known operation", async () => {
+  const known = {
+    operationId: "known",
+    hostId: "hal",
+    instanceId: "target",
+    baseUrl: "http://hal",
+    createdAt: 1,
+    sourceJobId: "old-job",
+    sourceHostId: "plato",
+    sourceInstanceId: "source",
+    sourceRevision: "revision",
+    destinationInstanceId: "target",
+  };
+  localStorage.setItem(VIDEO_RESTART_KEY, JSON.stringify([known]));
+  api.get.mockResolvedValue({
+    id: "different-job",
+    state: "completed",
+    finalizes: [{ gallery_filename: "other.mp4" }],
+  });
+  const state = createVideoRestart(
+    computed(() => [source, target]),
+    ref(false),
+  );
+  await state.open("plato", "old-job");
+  expect(state.detail.value).toBeNull();
+  expect(state.filename.value).toBeNull();
+  expect(state.error.value).toContain("different job");
+  expect(JSON.parse(localStorage.getItem(VIDEO_RESTART_KEY)!)).toEqual([known]);
 });
