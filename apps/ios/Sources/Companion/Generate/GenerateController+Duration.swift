@@ -138,7 +138,7 @@ extension GenerateController {
             maxIdentityPhotos: hosts.capabilities[owner.host.id]?.maxIdentityPhotos ?? 0), owner: owner) else {
             videoPlanner.clear(); return
         }
-        videoPlanner.update(request, backend: hosts.backend(for: owner.host), current: { [weak self] in
+        videoPlanner.update(request, backend: hosts.backend(for: owner.host), destinationInstanceId: owner.instanceId, current: { [weak self] in
             guard let self else { return false }
             return self.hosts.host(owner.host.id) == owner.host && self.durationOwner == owner
                 && self.videoDuration == authoring && self.draft == snapshot && self.modelName == modelName

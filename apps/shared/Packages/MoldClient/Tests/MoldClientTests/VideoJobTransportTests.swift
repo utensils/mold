@@ -55,9 +55,29 @@ private final class VideoParentTransport: StubTransport {
         .init(generation: .init(prompt: #"C:\new\render"#, model: "model", width: 768, height: 768,
                                 steps: 2, guidance: 1, seed: UInt64.max), durationMs: 30_000)
     }
+    @Test func capturedDestinationFencesEveryParentReadAndValidationWithoutLeakingToOrdinaryRoutes() async throws {
+        VideoParentTransport.sent = []
+        let backend = VideoParentTransport.backend().pinningVideoDestination("captured-installation")
+        _ = try await backend.validateVideoJob(draft())
+        _ = try await backend.planVideoJob(draft())
+        _ = try await backend.videoJob(id: "operation")
+        _ = try await backend.listVideoJobs(limit: 50, cursor: nil)
+        #expect(VideoParentTransport.sent.count == 4)
+        #expect(VideoParentTransport.sent.allSatisfy { $0.value(forHTTPHeaderField: "x-mold-destination-instance") == "captured-installation" })
+        #expect(backend.request("/api/status").value(forHTTPHeaderField: "x-mold-destination-instance") == nil)
+    }
+
+    @Test func unboundReadsAndConflictingMutationTargetsAreRefusedBeforeNetwork() async throws {
+        VideoParentTransport.sent = []
+        await #expect(throws: (any Error).self) { try await VideoParentTransport.backend().videoJob(id: "operation") }
+        let pinned = VideoParentTransport.backend().pinningVideoDestination("captured")
+        await #expect(throws: (any Error).self) { try await pinned.cancelVideoJob(id: "operation", destinationInstanceId: "replacement") }
+        #expect(VideoParentTransport.sent.isEmpty)
+    }
+
     @Test func checkLengthIsTheReadOnlyValidationRouteAndPreservesLiteralPrompt() async throws {
         VideoParentTransport.sent = []; VideoParentTransport.bodies = []
-        let backend: any MoldBackend = VideoParentTransport.backend()
+        let backend: any MoldBackend = VideoParentTransport.backend().pinningVideoDestination("target")
         let plan = try await backend.validateVideoJob(draft())
         #expect(plan.clipCount == 4)
         #expect(VideoParentTransport.sent.map { $0.url!.path } == ["/api/video-jobs/validate"])
@@ -68,7 +88,7 @@ private final class VideoParentTransport: StubTransport {
     }
     @Test func createRequiresValidationAndCapturesOperationAndDestination() async throws {
         VideoParentTransport.sent = []; VideoParentTransport.bodies = []
-        let backend: any MoldBackend = VideoParentTransport.backend()
+        let backend: any MoldBackend = VideoParentTransport.backend().pinningVideoDestination("target")
         await #expect(throws: (any Error).self) {
             try await backend.createVideoJob(draft(), operationId: "operation", destinationInstanceId: "target")
         }
@@ -85,13 +105,13 @@ private final class VideoParentTransport: StubTransport {
     }
     @Test func statusEscapesExactParentIdInsteadOfUsingChildQueue() async throws {
         VideoParentTransport.sent = []
-        let backend: any MoldBackend = VideoParentTransport.backend()
+        let backend: any MoldBackend = VideoParentTransport.backend().pinningVideoDestination("target")
         _ = try await backend.videoJob(id: "a/b")
         #expect(VideoParentTransport.sent[0].url?.absoluteString.contains("/api/video-jobs/a%2Fb") == true)
     }
     @Test func automaticPreviewSendsOnlyScalarsAndCannotReturnAnAdmissionProof() async throws {
         VideoParentTransport.sent = []; VideoParentTransport.bodies = []
-        let backend: any MoldBackend = VideoParentTransport.backend()
+        let backend: any MoldBackend = VideoParentTransport.backend().pinningVideoDestination("target")
         var request = draft()
         request.generation.sourceImage = "PRIVATE_IMAGE_BYTES"
         request.generation.audioFile = "PRIVATE_AUDIO_BYTES"
@@ -114,7 +134,7 @@ private final class VideoParentTransport: StubTransport {
 
     @Test func queueFilteringPrecedesLimitAndOpaqueCursorIsNotAnOffset() async throws {
         VideoParentTransport.sent = []
-        let backend: any MoldBackend = VideoParentTransport.backend()
+        let backend: any MoldBackend = VideoParentTransport.backend().pinningVideoDestination("target")
         let cursor = "opaque+/=&position"
         let listing = try await backend.listVideoJobs(limit: 50, cursor: cursor)
         #expect(listing.jobs.map(\.id) == ["older-failed"])
@@ -128,7 +148,7 @@ private final class VideoParentTransport: StubTransport {
 
     @Test func retainedInputSessionRemainsHeaderOnlyForValidationAndCreate() async throws {
         VideoParentTransport.sent = []; VideoParentTransport.bodies = []
-        let backend: any MoldBackend = VideoParentTransport.backend()
+        let backend: any MoldBackend = VideoParentTransport.backend().pinningVideoDestination("target")
         var request = draft(); request.retainedMediaSession = "private-session"
         _ = try await backend.validateVideoJob(request)
         request.validationRevision = "revision"
@@ -140,7 +160,7 @@ private final class VideoParentTransport: StubTransport {
 
     @Test func literalParentReuseSessionProtectsItsNestedLegacyWireOnly() async throws {
         VideoParentTransport.sent = []; VideoParentTransport.bodies = []
-        let backend = VideoParentTransport.backend().preparingLiteralVideoInputs()
+        let backend = VideoParentTransport.backend().pinningVideoDestination("target").preparingLiteralVideoInputs()
         var generation = draft().generation
         generation.prompt = "literal\\new\r\nnext"
         generation.negativePrompt = "avoid\\render\r\nnext"
@@ -165,7 +185,7 @@ private final class VideoParentTransport: StubTransport {
     @Test func stopRequiresExplicitAcceptanceBeforeItsReceiptCanBeAcknowledged() async throws {
         VideoParentTransport.sent = []; VideoParentTransport.cancelAccepted = false
         defer { VideoParentTransport.cancelAccepted = true }
-        let backend = VideoParentTransport.backend()
+        let backend = VideoParentTransport.backend().pinningVideoDestination("target")
         await #expect(throws: (any Error).self) {
             try await backend.cancelVideoJob(id: "operation", destinationInstanceId: "installation")
         }

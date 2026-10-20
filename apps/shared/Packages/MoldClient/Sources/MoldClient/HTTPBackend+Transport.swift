@@ -29,7 +29,13 @@ extension HTTPBackend {
 
     /// A request for a path, which may carry a query string. The path is taken
     /// as ALREADY PERCENT-ENCODED -- see `RouteRequest`, which owns the rule.
-    func request(_ path: String) -> URLRequest { RouteRequest.build(path, for: host) }
+    func request(_ path: String) -> URLRequest {
+        var result = RouteRequest.build(path, for: host)
+        if path == "/api/video-jobs" || path.hasPrefix("/api/video-jobs/") || path.hasPrefix("/api/video-jobs?") {
+            result.setValue(videoDestinationInstance, forHTTPHeaderField: "x-mold-destination-instance")
+        }
+        return result
+    }
 
     func bytes(for request: URLRequest) async throws -> Data {
         let (data, http) = try await send(request)

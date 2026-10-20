@@ -13,6 +13,7 @@ extension VideoJobCoordinator {
     /// limit. Opaque keyset cursors survive earlier rows completing/deleting.
     func loadPage(owner: VideoJobOwner, cursor: String?, backend: any MoldBackend,
                   current: @escaping @MainActor () -> Bool) async {
+        let backend = scoped(backend, owner: owner)
         guard current(), !Task.isCancelled else { return }
         let token = UUID(); pageTokens[owner.host.id] = token
         let previous = pagination[owner.host.id].flatMap { $0.owner == owner ? $0 : nil }

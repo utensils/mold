@@ -22,6 +22,7 @@ public extension VideoJobCoordinator {
     func submit(_ request: VideoJobRequest, owner: VideoJobOwner, backend: any MoldBackend,
                 current: @escaping @MainActor () -> Bool, unchanged: @escaping @MainActor () -> Bool,
                 prepare: (@MainActor () async throws -> VideoJobRequest)? = nil) async {
+        let backend = scoped(backend, owner: owner)
         guard !isSubmitting, journalError == nil else { return }
         guard !hasUncertainAdmission(on: owner) else {
             error = "Check the saved video attempt in Queue before starting another video on this machine."

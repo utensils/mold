@@ -38,7 +38,7 @@ extension GenerateController {
               let backend = hosts.backend(for: owner.host.id) else { videoPlanner.clear(); return }
         do {
             let request = try durationRequest(on: host, planning: true)
-            videoPlanner.update(request, backend: backend, current: { [weak self] in
+            videoPlanner.update(request, backend: backend, destinationInstanceId: owner.instanceId, current: { [weak self] in
                 self?.durationIsCurrent(owner) == true && (try? self?.durationRequest(on: host, planning: true)) == request
             })
         } catch { videoPlanner.clear() }

@@ -3,6 +3,7 @@ import Foundation
 public extension VideoJobCoordinator {
     func refresh(_ id: String, owner: VideoJobOwner, backend: any MoldBackend,
                  current: @escaping @MainActor () -> Bool) async {
+        let backend = scoped(backend, owner: owner)
         let key = identity(id, owner: owner)
         guard !mutating.contains(key), current(), !Task.isCancelled else { return }
         let token = UUID(); readTokens[key] = token

@@ -1,13 +1,26 @@
 import Foundation
 
 public extension HTTPBackend {
+    /// Bind every parent read/preview to the captured installation. Never derive
+    /// this from a fresh status response after a saved operation is selected.
+    func pinningVideoDestination(_ instance: String) -> Self {
+        var result = self; result.videoDestinationInstance = instance; return result
+    }
+    private func requireVideoDestination() throws {
+        guard videoDestinationInstance?.isEmpty == false else {
+            throw SequenceDraftError.invalid("Reconnect to verify this video's machine before checking it.")
+        }
+    }
+
     func planVideoJob(_ request: VideoJobRequest) async throws -> VideoJobPlan {
+        try requireVideoDestination()
         let plan: VideoJobPlan = try await post("/api/video-jobs/validate?planning_only=true", body: request.planningProjection)
         guard plan.validationRevision.isEmpty else { throw MoldClientError.malformedResponse }
         return plan
     }
 
     func validateVideoJob(_ request: VideoJobRequest) async throws -> VideoJobPlan {
+        try requireVideoDestination()
         let route = "/api/video-jobs/validate"
         var http = try body(route, method: "POST", request)
         http.setValue(request.retainedMediaSession, forHTTPHeaderField: "x-mold-retained-media-session")
@@ -27,9 +40,13 @@ public extension HTTPBackend {
         return try decoded(VideoJob.self, from: try await bytes(for: http), route: route)
     }
 
-    func videoJob(id: String) async throws -> VideoJob { try await get("/api/video-jobs/\(escaped(id))") }
+    func videoJob(id: String) async throws -> VideoJob {
+        try requireVideoDestination()
+        return try await get("/api/video-jobs/\(escaped(id))")
+    }
 
     func listVideoJobs(limit: Int, cursor: String?) async throws -> VideoJobListing {
+        try requireVideoDestination()
         guard (1...256).contains(limit) else {
             throw SequenceDraftError.invalid("A video list requires a limit from 1 to 256.")
         }
@@ -63,6 +80,7 @@ public extension HTTPBackend {
         AsyncThrowingStream(bufferingPolicy: .bufferingNewest(StreamBuffering.latestOnly)) { continuation in
             let task = Task {
                 do {
+                    try requireVideoDestination()
                     for try await frame in stream("/api/video-jobs/\(escaped(id))/events", timeout: 3_600) {
                         guard frame.name == "snapshot", let data = frame.data.data(using: .utf8) else { continue }
                         let value = try MoldJSON.decoder.decode(VideoJob.self, from: data)
@@ -85,7 +103,9 @@ public extension HTTPBackend {
     }
 
     private func videoDestination(_ instance: String, request: inout URLRequest) throws {
-        guard !instance.isEmpty else { throw SequenceDraftError.invalid("Reconnect to verify this machine before changing a video job.") }
+        guard !instance.isEmpty, videoDestinationInstance == nil || videoDestinationInstance == instance else {
+            throw SequenceDraftError.invalid("Reconnect to verify this machine before changing a video job.")
+        }
         request.setValue(instance, forHTTPHeaderField: "x-mold-destination-instance")
     }
 }

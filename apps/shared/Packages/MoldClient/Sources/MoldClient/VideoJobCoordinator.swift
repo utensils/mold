@@ -57,6 +57,11 @@ public final class VideoJobCoordinator {
         pending = next
     }
 
+    func scoped(_ backend: any MoldBackend, owner: VideoJobOwner) -> any MoldBackend {
+        if let http = backend as? HTTPBackend { return http.pinningVideoDestination(owner.instanceId) }
+        return backend
+    }
+
     func verify(_ owner: VideoJobOwner, backend: any MoldBackend, current: @MainActor () -> Bool) async throws {
         guard !Task.isCancelled, current(), backend.host == owner.host, !owner.instanceId.isEmpty else { throw changed() }
         let status = try await backend.status()

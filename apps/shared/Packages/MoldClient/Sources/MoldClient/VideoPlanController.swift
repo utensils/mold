@@ -17,7 +17,10 @@ public final class VideoPlanController {
 
     @discardableResult
     public func update(_ request: VideoJobRequest, backend: any MoldVideoBackend,
-                       current: @escaping @MainActor () -> Bool) -> Task<Void, Never> {
+                       destinationInstanceId: String? = nil, current: @escaping @MainActor () -> Bool) -> Task<Void, Never> {
+        let backend: any MoldVideoBackend = if let http = backend as? HTTPBackend, let destinationInstanceId {
+            http.pinningVideoDestination(destinationInstanceId)
+        } else { backend }
         clear()
         isCalculating = true
         let mine = token, delay = debounceNanoseconds, scalars = request.planningProjection

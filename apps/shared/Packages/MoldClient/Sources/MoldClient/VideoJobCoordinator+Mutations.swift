@@ -3,6 +3,7 @@ import Foundation
 public extension VideoJobCoordinator {
     func cancel(_ job: ObservedVideoJob, backend: any MoldBackend,
                 current: @escaping @MainActor () -> Bool) async {
+        let backend = scoped(backend, owner: job.owner)
         guard !job.cancelledBeforeAdmission, job.detail?.canCancel ?? true,
               !mutating.contains(job.id), current() else { return }
         mutating.insert(job.id); readTokens[job.id] = UUID()
@@ -23,6 +24,7 @@ public extension VideoJobCoordinator {
 
     func resume(_ job: ObservedVideoJob, backend: any MoldBackend,
                 current: @escaping @MainActor () -> Bool) async {
+        let backend = scoped(backend, owner: job.owner)
         guard job.detail?.canResume == true, !mutating.contains(job.id) else { return }
         mutating.insert(job.id); readTokens[job.id] = UUID()
         defer { mutating.remove(job.id) }
@@ -42,6 +44,7 @@ public extension VideoJobCoordinator {
     /// The app confirms deleting recovery data; saved Library outputs remain.
     func delete(_ job: ObservedVideoJob, backend: any MoldBackend,
                 current: @escaping @MainActor () -> Bool) async {
+        let backend = scoped(backend, owner: job.owner)
         guard job.detail?.canDelete == true, !mutating.contains(job.id) else { return }
         mutating.insert(job.id); readTokens[job.id] = UUID()
         defer { mutating.remove(job.id) }
