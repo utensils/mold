@@ -28,7 +28,7 @@ pub fn extension_generation(
     // never sends source/new prompts through the legacy escape decoder again.
     request.prompt = prompt.to_owned();
     request.negative_prompt = metadata.negative_prompt.clone();
-    request.scheduler = metadata.scheduler.clone();
+    request.scheduler = metadata.scheduler;
     request.cfg_plus = metadata.cfg_plus;
     request.strength = metadata.strength.unwrap_or(request.strength);
     request.reference_weight = metadata.reference_weight;
