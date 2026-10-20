@@ -18,11 +18,20 @@ fn private<T>(value: T) -> PrivateJson<T> {
     ([(header::CACHE_CONTROL, "private, no-store")], Json(value))
 }
 
-pub(crate) fn root() -> Result<PathBuf, ApiError> {
-    mold_core::Config::mold_dir()
-        .map(|home| home.join("video-source-uploads"))
-        .ok_or_else(|| ApiError::internal("MOLD_HOME is unavailable"))
+pub(crate) fn root(state: &AppState) -> Result<PathBuf, ApiError> {
+    let db = state
+        .metadata_db
+        .as_ref()
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("Durable video storage is unavailable"))?;
+    let parent = db
+        .path()
+        .parent()
+        .filter(|parent| parent.is_absolute())
+        .ok_or_else(|| ApiError::internal("Durable video storage has no captured home"))?;
+    Ok(parent.join("video-source-uploads"))
 }
+
 fn destination(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
     if headers
         .get("x-mold-destination-instance")
@@ -73,7 +82,7 @@ async fn locked<R: Send + 'static>(
         .clone()
         .lock_owned()
         .await;
-    let root = root()?;
+    let root = root(&state)?;
     let instance = state.instance_id.to_string();
     tokio::task::spawn_blocking(move || {
         let _guard = guard;
@@ -162,6 +171,18 @@ pub(crate) async fn remove(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn upload_namespace_uses_the_captured_database_home() {
+        let home = tempfile::tempdir().unwrap();
+        let mut state = AppState::for_tests();
+        state.metadata_db = Arc::new(Some(
+            mold_db::MetadataDb::open(&home.path().join("mold.db")).unwrap(),
+        ));
+        assert_eq!(
+            root(&state).unwrap(),
+            home.path().join("video-source-uploads")
+        );
+    }
     #[tokio::test]
     async fn replaced_destination_is_refused_before_any_filesystem_or_operation() {
         let state = AppState::for_tests();

@@ -46,6 +46,10 @@ fn private_directory(path: &Path) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
         Err(error) => return Err(error.into()),
     }
+    verify_private_directory(path)
+}
+
+fn verify_private_directory(path: &Path) -> Result<()> {
     let metadata = std::fs::symlink_metadata(path)?;
     ensure!(
         metadata.is_dir() && !metadata.file_type().is_symlink(),
@@ -98,27 +102,20 @@ fn save(directory: &Path, manifest: &Manifest) -> Result<()> {
 }
 
 fn load(directory: &Path, instance: &str) -> Result<Manifest> {
-    let directory_metadata = std::fs::symlink_metadata(directory)?;
-    ensure!(
-        directory_metadata.is_dir() && !directory_metadata.file_type().is_symlink(),
-        "upload directory changed"
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        ensure!(
-            directory_metadata.permissions().mode() & 0o077 == 0,
-            "upload directory is not private"
-        );
-    }
-    let mut input =
+    verify_private_directory(directory.parent().context("upload has no storage root")?)?;
+    verify_private_directory(directory)?;
+    let input =
         mold_core::secure_file::open_regular_file_no_follow(&directory.join("manifest.json"))?;
     ensure!(
         input.metadata()?.len() <= MAX_MANIFEST_BYTES,
         "source manifest exceeds metadata budget"
     );
     let mut bytes = Vec::new();
-    input.read_to_end(&mut bytes)?;
+    input.take(MAX_MANIFEST_BYTES + 1).read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() as u64 <= MAX_MANIFEST_BYTES,
+        "source manifest exceeded metadata budget while reading"
+    );
     let mut manifest: Manifest = serde_json::from_slice(&bytes)?;
     // OutputMetadata is an older protocol with escaped-newline compatibility.
     // This new envelope carries literal JSON; restore exact prompt provenance.
@@ -271,7 +268,13 @@ pub(crate) fn complete(
         "upload length changed"
     );
     let mut hash = Sha256::new();
-    let mut input = file.try_clone()?;
+    let limit = manifest
+        .source
+        .size_bytes
+        .checked_add(1)
+        .context("upload length cannot be represented")?;
+    let mut input = file.try_clone()?.take(limit);
+    let mut seen = 0u64;
     let mut buffer = [0; 64 * 1024];
     loop {
         checkpoint()?;
@@ -279,22 +282,29 @@ pub(crate) fn complete(
         if count == 0 {
             break;
         }
+        seen = seen
+            .checked_add(count as u64)
+            .context("upload size overflow")?;
+        ensure!(
+            seen <= manifest.source.size_bytes,
+            "upload grew during verification"
+        );
         hash.update(&buffer[..count]);
     }
+    ensure!(
+        seen == manifest.source.size_bytes,
+        "upload shrank during verification"
+    );
     ensure!(
         format!("{:x}", hash.finalize()) == manifest.source.checksum_sha256,
         "upload checksum does not match its original source"
     );
     let facts = mold_inference::video_assembly_frames::inspect(file, checkpoint)?;
-    ensure!(
-        facts.fps_denominator == 1,
-        "source requires a supported constant integer frame rate"
-    );
     // Pixel facts, not caller metadata, govern planning and carry windows.
     manifest.source.metadata.width = facts.width;
     manifest.source.metadata.height = facts.height;
     manifest.source.metadata.frames = Some(facts.frames);
-    manifest.source.metadata.fps = Some(facts.fps_numerator);
+    manifest.source.metadata.fps = (facts.fps_denominator == 1).then_some(facts.fps_numerator);
     manifest.completed = true;
     save(&directory, &manifest)?;
     Ok(VideoSourceUploadRef {
@@ -353,6 +363,76 @@ mod tests {
             size_bytes: bytes.len() as u64,
             metadata: mold_core::OutputMetadata::from_generate_request(&request, 1, None, "test"),
         }
+    }
+
+    #[test]
+    fn fractional_cfr_prefixes_are_sealed_without_rounding_their_clock() {
+        use mp4_rs::{
+            AvcConfig, MediaConfig, Mp4Config, Mp4Sample, Mp4Writer, TrackConfig, TrackType,
+        };
+        let pictures = vec![image::RgbImage::from_pixel(32, 32, image::Rgb([40, 80, 100])); 3];
+        let original = mold_inference::ltx_video::video_enc::encode_mp4(&pictures, 30).unwrap();
+        let mut input =
+            mp4_rs::Mp4Reader::read_header(std::io::Cursor::new(&original), original.len() as u64)
+                .unwrap();
+        let track = &input.tracks()[&1];
+        let config = Mp4Config {
+            major_brand: "isom".parse().unwrap(),
+            minor_version: 0,
+            compatible_brands: vec!["isom".parse().unwrap()],
+            timescale: 30_000,
+        };
+        let mut writer = Mp4Writer::write_start(std::io::Cursor::new(Vec::new()), &config).unwrap();
+        writer
+            .add_track(&TrackConfig {
+                track_type: TrackType::Video,
+                timescale: 30_000,
+                language: "und".into(),
+                media_conf: MediaConfig::AvcConfig(AvcConfig {
+                    width: 32,
+                    height: 32,
+                    seq_param_set: track.sequence_parameter_set().unwrap().to_vec(),
+                    pic_param_set: track.picture_parameter_set().unwrap().to_vec(),
+                }),
+            })
+            .unwrap();
+        for index in 0..3 {
+            let packet = input.read_sample(1, index + 1).unwrap().unwrap();
+            writer
+                .write_sample(
+                    1,
+                    &Mp4Sample {
+                        start_time: u64::from(index) * 1001,
+                        duration: 1001,
+                        rendering_offset: 0,
+                        is_sync: packet.is_sync,
+                        bytes: packet.bytes,
+                    },
+                )
+                .unwrap();
+        }
+        writer.write_end().unwrap();
+        let bytes = writer.into_writer().into_inner();
+        let root = private_test_root();
+        let id = uuid::Uuid::new_v4().to_string();
+        let descriptor = authority(&bytes);
+        begin(root.path(), "owner", &id, descriptor.clone()).unwrap();
+        append(root.path(), "owner", &id, 0, &bytes).unwrap();
+        let reference = complete(root.path(), "owner", &id, &mut || Ok(())).unwrap();
+        let (file, source) = resolve(
+            root.path(),
+            "owner",
+            &reference,
+            &descriptor.filename,
+            &descriptor.archive_identity_sha256,
+        )
+        .unwrap();
+        assert_eq!(source.metadata.fps, None);
+        let facts = mold_inference::video_assembly_frames::inspect(file, &mut || Ok(())).unwrap();
+        assert_eq!(
+            (facts.frames, facts.fps_numerator, facts.fps_denominator),
+            (3, 30_000, 1001)
+        );
     }
 
     #[test]
@@ -513,7 +593,7 @@ pub(crate) async fn open(
     reference: &VideoSourceUploadRef,
     source: &mold_core::video_job::VideoJobSource,
 ) -> std::result::Result<(File, RetainedVideoSource), crate::routes::ApiError> {
-    let root = crate::video_source_upload_routes::root()?;
+    let root = crate::video_source_upload_routes::root(state)?;
     let instance = state.instance_id.to_string();
     let reference = reference.clone();
     let source = source.clone();
