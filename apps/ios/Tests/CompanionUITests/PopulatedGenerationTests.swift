@@ -8,6 +8,94 @@ final class PopulatedGenerationTests: XCTestCase {
         acceptCompanionPermissions()
     }
 
+    @MainActor func testKeyboardDoneDismissesScrolledClipPromptWithoutLosingEdits() async throws {
+        continueAfterFailure = false
+        let machine = try FixtureMachine(keyboardSequenceFixture: true)
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        defer { app.terminate(); machine.stop() }
+        cleanUpFixture(machine, port: port, app: app)
+        app.launchArguments = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
+        app.launch()
+        if app.sheets["Save Password?"].exists { app.sheets["Save Password?"].buttons["Not Now"].tap() }
+        addQueueDownloadMachine(app, port: port, apiKey: "keyboard-fixture")
+        XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
+        if app.buttons["sequence-start-fresh"].exists {
+            reveal(app.buttons["sequence-start-fresh"], in: app)
+            app.buttons["sequence-start-fresh"].tap()
+        }
+        let machineMenu = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Machine,'")).firstMatch
+        reveal(machineMenu, in: app); machineMenu.tap()
+        app.buttons["Queue Download Fixture \(port)"].firstMatch.tap()
+        let kind = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Still picture' OR label == 'Short clip'")).firstMatch
+        reveal(kind, in: app)
+        if kind.label == "Still picture" {
+            kind.buttons.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            app.buttons["Short clip"].firstMatch.tap()
+        }
+        let chooser = app.buttons["choose-model"]
+        reveal(chooser, in: app); chooser.tap()
+        let search = app.searchFields["Find a model"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5)); search.tap(); search.typeText("ltx-2.5-22b-distilled")
+        let model = app.buttons["model-ltx-2.5-22b-distilled:bf16"]
+        XCTAssertTrue(model.waitForExistence(timeout: 10)); model.tap()
+        let begin = app.buttons["sequence-begin"]
+        XCTAssertTrue(begin.waitForExistence(timeout: 10)); reveal(begin, in: app); begin.tap()
+        for _ in 0..<2 {
+            let add = app.buttons["sequence-add-clip"]
+            reveal(add, in: app); add.tap()
+        }
+        let prompt = app.textFields["sequence-prompt-2"]
+        reveal(prompt, in: app)
+        prompt.tap(); prompt.typeText("Keep this third clip prompt")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        let done = app.buttons["keyboard-done"]
+        XCTAssertTrue(done.waitForExistence(timeout: 5)); XCTAssertTrue(done.isHittable)
+        attach(app)
+        done.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5), "Done must dismiss the keyboard belonging to the focused clip, even after scrolling")
+        XCTAssertFalse(done.exists, "The keyboard toolbar must disappear with its keyboard")
+        XCTAssertEqual(prompt.value as? String, "Keep this third clip prompt")
+
+        let fresh = app.buttons["sequence-start-fresh"]
+        reveal(fresh, in: app); fresh.tap()
+        let ordinary = app.textFields["generation-prompt"]
+        reveal(ordinary, in: app); ordinary.tap(); ordinary.typeText(" Ordinary keyboard edit")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        app.buttons["keyboard-done"].tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["keyboard-done"].exists)
+        XCTAssertTrue((ordinary.value as? String)?.contains("Ordinary keyboard edit") == true)
+
+        let expand = app.buttons["prompt-editor-open"]
+        reveal(expand, in: app); expand.tap()
+        let editor = app.textViews["prompt-editor-text"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5)); editor.tap(); editor.typeText(" Expanded keyboard edit")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["keyboard-done"].exists, "The expanded editor must own its single Done action")
+        app.buttons["prompt-editor-done"].tap()
+        XCTAssertTrue(editor.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
+        XCTAssertTrue((ordinary.value as? String)?.contains("Expanded keyboard edit") == true)
+
+        // Modal title and tag inputs have their own first responder. Closing
+        // Options must remove their keyboard and not resurrect the composer toolbar.
+        for placeholder in ["Title (optional)", "Add a tag"] {
+            let options = app.buttons["Options"].firstMatch
+            reveal(options, in: app); options.tap()
+            let field = app.textFields[placeholder]
+            for _ in 0..<15 where !field.isHittable { app.swipeUp() }
+            XCTAssertTrue(field.isHittable); field.tap(); field.typeText("Keyboard retained edit")
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+            app.navigationBars["More Options"].buttons["Done"].tap()
+            XCTAssertTrue(app.navigationBars["More Options"].waitForNonExistence(timeout: 5))
+            XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
+            XCTAssertFalse(app.buttons["keyboard-done"].exists)
+        }
+        XCTAssertTrue(machine.generationRequests.isEmpty, "Keyboard interaction must never submit a render")
+        attach(app)
+    }
+
     @MainActor func testSourceFreeQueueKeepsANeutralPlaceholderBesideRealPreviews() async throws {
         continueAfterFailure = false
         let machine = try FixtureMachine(queueFixture: true, queueControls: true, sourceFreeQueueFixture: true)
@@ -939,7 +1027,7 @@ extension PopulatedGenerationTests {
         XCTAssertTrue(download.isEnabled)
     }
 
-    @MainActor private func addQueueDownloadMachine(_ app: XCUIApplication, port: UInt16) {
+    @MainActor private func addQueueDownloadMachine(_ app: XCUIApplication, port: UInt16, apiKey: String? = nil) {
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
         app.buttons["Add a Machine"].firstMatch.tap()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
@@ -949,7 +1037,14 @@ extension PopulatedGenerationTests {
         XCTAssertTrue(name.waitForExistence(timeout: 5)); name.tap(); name.typeText("Queue Download Fixture \(port)")
         let address = app.textFields["machine-address"]
         address.tap(); address.typeText("127.0.0.1:\(port)")
+        if let apiKey {
+            let key = app.secureTextFields["API key (optional)"]
+            key.tap(); key.typeText(apiKey)
+        }
         app.buttons["Add"].firstMatch.tap()
+        if apiKey != nil, app.sheets["Save Password?"].waitForExistence(timeout: 2) {
+            app.sheets["Save Password?"].buttons["Not Now"].tap()
+        }
     }
     @MainActor private func waitForQueueDownloadText(_ element: XCUIElement, containing text: String) -> Bool {
         let expected = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS[c] %@", text), object: element)

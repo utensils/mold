@@ -52,7 +52,13 @@ struct Composer: View {
             ToolbarItemGroup(placement: .keyboard) {
                 if !showsPromptEditor {
                     Spacer()
-                    Button("Done") { editing = false }
+                    Button("Done") {
+                        editing = false
+                        // Clip rows own their text input outside this FocusState.
+                        // End the active responder as well as ordinary prompt focus.
+                        hideKeyboard()
+                    }
+                    .accessibilityIdentifier("keyboard-done")
                 }
             }
         }

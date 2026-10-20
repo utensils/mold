@@ -20,6 +20,7 @@ final class FixtureMachine: @unchecked Sendable {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "iphone-ui-fixture")
     private let models: Data
+    private let keyboardSequenceFixture: Bool
     private let aspectFixture: Bool
     private let referenceFixture: Bool
     private let capturedGenerations = Mutex<[Data]>([])
@@ -67,7 +68,8 @@ final class FixtureMachine: @unchecked Sendable {
     private let modelMemoryFixture: Bool
     private var residentModels: Set<String> = []
 
-    init(justifiedFixture: Bool = false, landscapePlaybackFixture: Bool = false, exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, hiddenCollectionFixture: Bool = false, omitOrganizationCapabilities: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, retainedFrameFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil, queueDownloadFixture: Bool = false, requiresDownloadLicense: Bool = false, trashFixture: Bool = false, queueFailureFixture: Bool = false, queueSwipeFixture: Bool = false, queueDestinationFixture: Bool = false, promptExpansionFixture: Bool = false, batchQueueFixture: Bool = false, sourceFreeQueueFixture: Bool = false, sourceMediaLibraryFixture: Bool = false, sourceAspectFixture: Bool = false, failFirstSourceThumbnail: Bool = false, playbackData: Data? = nil) throws {
+    init(justifiedFixture: Bool = false, landscapePlaybackFixture: Bool = false, exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, hiddenCollectionFixture: Bool = false, omitOrganizationCapabilities: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, retainedFrameFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil, queueDownloadFixture: Bool = false, requiresDownloadLicense: Bool = false, trashFixture: Bool = false, queueFailureFixture: Bool = false, queueSwipeFixture: Bool = false, queueDestinationFixture: Bool = false, promptExpansionFixture: Bool = false, batchQueueFixture: Bool = false, sourceFreeQueueFixture: Bool = false, sourceMediaLibraryFixture: Bool = false, sourceAspectFixture: Bool = false, failFirstSourceThumbnail: Bool = false, playbackData: Data? = nil, keyboardSequenceFixture: Bool = false) throws {
+        self.keyboardSequenceFixture = keyboardSequenceFixture
         self.landscapePlaybackFixture = landscapePlaybackFixture
         self.playbackData = playbackData
         self.exportFixture = exportFixture
@@ -511,7 +513,10 @@ final class FixtureMachine: @unchecked Sendable {
                 row["is_loaded"] = residentModels.contains(row["name"] as! String)
                 return row
             })
+        case "/api/capabilities/chain-limits" where keyboardSequenceFixture:
+            json = #"{"model":"ltx-2.5-22b-distilled:bf16","fps":24,"frames_per_clip_cap":257,"frames_per_clip_recommended":121,"max_stages":16,"max_total_frames":4096,"supports_sequence":true,"supports_audio":true,"authoring":{"motion_tail_frames":17,"carry_mode":"latent","min_frames":25,"frame_step":8,"frame_offset":1}}"#
         case "/api/status":
+            if keyboardSequenceFixture { return Data(#"{"version":"0.36.0","busy":false,"uptime_secs":1,"instance_id":"00000000-0000-4000-8000-00000000c001"}"#.utf8) }
             if queueDestinationFixture { return Data(#"{"version":"0.32.0","busy":false,"uptime_secs":1,"instance_id":"queue-destination"}"#.utf8) }
             json = queueControls ? #"{"version":"0.32.0","busy":false,"uptime_secs":1,"instance_id":"queue-fixture"}"# : #"{"version":"0.32.0","busy":false,"uptime_secs":1}"#
         case "/api/expand":
