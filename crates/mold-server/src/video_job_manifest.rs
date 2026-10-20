@@ -22,6 +22,8 @@ pub(crate) struct VideoJobManifest {
     #[serde(deserialize_with = "literal_template")]
     pub template: ChainRequest,
     pub frozen: FrozenChainModel,
+    #[serde(default)]
+    pub frozen_loras: Vec<crate::video_job_loras::FrozenVideoLora>,
     pub envelope: ClipEnvelope,
     pub retained_source: Option<crate::video_source::RetainedVideoSource>,
     pub plan: VideoJobPlan,
@@ -69,6 +71,9 @@ pub(crate) fn read_manifest(row: &StoredVideoJob) -> Result<VideoJobManifest> {
             && manifest.template.fps == manifest.plan.fps,
         "parent template recipe differs from its plan"
     );
+    for lora in &manifest.frozen_loras {
+        lora.validate()?;
+    }
     let request = &manifest.request.generation;
     ensure!(
         [

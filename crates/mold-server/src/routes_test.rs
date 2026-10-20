@@ -440,6 +440,28 @@ mod tests {
     }
 
     #[test]
+    fn parent_camera_materialization_keeps_scalar_control_adapters() {
+        let mut chain: mold_core::ChainRequest = serde_json::from_value(serde_json::json!({
+            "model":"ltx-2-19b-distilled:fp8","width":512,"height":512,"steps":4,"guidance":1,
+            "stages":[{"prompt":"walk","frames":97}]}))
+        .unwrap();
+        let mut controls = mold_core::chain::ChainGenerationControls::default();
+        controls.loras = vec![mold_core::LoraWeight {
+            path: "camera-control:pan-left".into(),
+            scale: 0.5,
+            expert: None,
+        }];
+        chain.generation_controls = Some(controls);
+        assert_eq!(
+            crate::routes::chain_camera_control_request(&chain)
+                .loras
+                .unwrap()[0]
+                .path,
+            "camera-control:pan-left"
+        );
+    }
+
+    #[test]
     fn generation_fixture_ignores_process_output_override() {
         let _env = env_lock();
         let previous = std::env::var_os("MOLD_OUTPUT_DIR");

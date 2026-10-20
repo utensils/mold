@@ -2121,26 +2121,35 @@ pub(crate) async fn materialize_chain_camera_controls(
     config: &mold_core::Config,
     request: &mold_core::ChainRequest,
 ) -> Result<(), ApiError> {
+    let generate = chain_camera_control_request(request);
+    let planned = plan_builtin_ltx2_camera_controls_in_config(config, &generate)?;
+    materialize_builtin_ltx2_camera_controls(state, &planned).await
+}
+
+pub(crate) fn chain_camera_control_request(
+    request: &mold_core::ChainRequest,
+) -> mold_core::GenerateRequest {
     let mut generate = request.synthetic_generate_request(
         mold_core::OutputFormat::Mp4,
         request.estimated_total_frames(),
         request.fps,
     );
-    generate.loras = Some(
-        request
-            .stages
-            .iter()
-            .flat_map(|stage| stage.loras.iter())
-            .map(|lora| mold_core::LoraWeight {
-                path: lora.path.clone(),
-                scale: lora.scale,
+    if request.generation_controls.is_none() {
+        generate.loras = Some(
+            request
+                .stages
+                .iter()
+                .flat_map(|stage| stage.loras.iter())
+                .map(|lora| mold_core::LoraWeight {
+                    path: lora.path.clone(),
+                    scale: lora.scale,
 
-                expert: None,
-            })
-            .collect(),
-    );
-    let planned = plan_builtin_ltx2_camera_controls_in_config(config, &generate)?;
-    materialize_builtin_ltx2_camera_controls(state, &planned).await
+                    expert: None,
+                })
+                .collect(),
+        );
+    }
+    generate
 }
 
 async fn materialize_builtin_ltx2_camera_controls(

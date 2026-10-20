@@ -117,6 +117,7 @@ pub mod state;
 pub mod thumbnails;
 pub mod variant_dependencies;
 pub(crate) mod video_archive_assets;
+pub(crate) mod video_job_loras;
 pub(crate) mod video_job_manifest;
 pub(crate) mod video_job_restart;
 mod video_reference_codec;

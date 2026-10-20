@@ -3303,7 +3303,7 @@ fn effective_lora_requests(
         .unwrap_or_default()
 }
 
-fn effective_loras(
+pub(crate) fn effective_loras(
     config: &Config,
     request: &GenerateRequest,
     projection: Option<&crate::queue_media_store::QueueMediaProjection>,
