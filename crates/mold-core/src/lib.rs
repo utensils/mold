@@ -167,6 +167,7 @@ pub use expand_prompts::{
 
 pub mod job_restart;
 pub mod queue_transfer;
+pub mod video_extension;
 pub mod video_job;
 
 pub mod video_job_schedule;
