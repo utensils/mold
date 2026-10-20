@@ -1,0 +1,1 @@
+- **Restart stopped videos across machines.** Web and Tauri Queue offer a reviewed new attempt for recoverable multi-clip videos, preserve saved inputs and full-range seeds, and recover interrupted admission without changing the original.

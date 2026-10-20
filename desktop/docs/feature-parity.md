@@ -591,3 +591,7 @@ Provider errors remain errors; this bounded fallback is not an exhaustive search
 of either provider's index. Older servers retain their provider search behavior.
 
 Queue job details offer **Cancel batch** for multi-output durable batches with confirmation and fresh machine/batch verification. Batch size remains editable for images and videos; choosing **1** produces a single output.
+
+### Starting a stopped video again
+
+In Queue, a failed, interrupted or paused multi-clip video offers **Start again…**. Review the destination, then choose **Start again** on its original machine or **Send video** on another connected machine. Saved prompts, seed, settings and inputs stay together; the original remains unchanged. Machine-local adapters can restart only on their original machine. Unsupported retained inputs explain the refusal before admission. A lost reply keeps the known job for **Check queue**, and **Stop new attempt** cancels that destination operation without changing the original.

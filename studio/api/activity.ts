@@ -46,6 +46,11 @@ export function activeWorkPhaseLabel(row: ActiveWorkItem): string {
   return stage;
 }
 
+/** Recovery rows remain visible, but are no longer active GPU work. */
+export function isSettledActivityPhase(phase: string): boolean {
+  return ["failed", "interrupted", "completed", "cancelled"].includes(phase);
+}
+
 export interface ActiveWorkSnapshot {
   instance_id: string;
   observed_at_unix_ms: number;

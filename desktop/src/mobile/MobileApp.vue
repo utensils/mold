@@ -46,6 +46,7 @@ import { registerRegularConnection } from "@studio/api/directConnection";
 import type { ConnectionMode } from "@studio/api/connectionMode";
 import { forgetSecureHostForMachine } from "@studio/api/secureStore";
 import HeldQueueTransferDialog from "@studio/components/HeldQueueTransferDialog.vue";
+import VideoRestartControl from "@studio/components/VideoRestartControl.vue";
 import QueueMoveToControl from "@studio/components/QueueMoveToControl.vue";
 import { provideHeldQueueTransfer } from "@studio/composables/useHeldQueueTransfer";
 
@@ -14797,6 +14798,12 @@ function setClipsActive(value: boolean) {
               </h3>
               <template v-for="entry in group.rows" :key="entry.key">
                 <div v-if="entry.kind === 'local'" class="mobile-generation-row">
+                  <VideoRestartControl
+                    :host-id="activityRowHostId(entry.local)"
+                    :job-id="activityRowJobId(entry.local)"
+                    :state="entry.local.print.status"
+                    :chain="entry.local.print.chainStageCount != null"
+                  />
                   <QueueMoveToControl
                     :host-id="activityRowHostId(entry.local)"
                     :job-id="activityRowJobId(entry.local)"
@@ -14855,6 +14862,12 @@ function setClipsActive(value: boolean) {
                      meter, which made the fleet's work read as a lesser kind
                      of job on the one screen that exists to compare them. -->
                 <div v-else class="mobile-generation-row">
+                  <VideoRestartControl
+                    :host-id="entry.shared.hostId"
+                    :job-id="entry.shared.id"
+                    :state="entry.shared.phase"
+                    :chain="entry.shared.kind === 'sequence' || entry.shared.execution === 'chain'"
+                  />
                   <QueueMoveToControl
                     v-if="entry.shared.kind === 'generation' && entry.shared.execution !== 'chain'"
                     :host-id="entry.shared.hostId"
@@ -14930,19 +14943,25 @@ function setClipsActive(value: boolean) {
               <img :src="job.resultUrl ?? ''" alt="" decoding="async" />
             </button>
           </div>
-          <button
-            v-for="job in finishedQueueJobs"
-            :key="job.clientId"
-            type="button"
-            class="mobile-finished-job"
-            @click="inspectQueueEntry(`finished:${job.clientId}`)"
-          >
-            <strong>{{ queuePrintTitle(job) || modelLabel(job.model) }}</strong>
-            <span
-              >{{ job.hostLabel }} ·
-              {{ job.status === "complete" ? "Complete" : "Stopped with an error" }}</span
+          <template v-for="job in finishedQueueJobs" :key="job.clientId">
+            <VideoRestartControl
+              :host-id="job.hostId ?? selectedHostId"
+              :job-id="job.recoveredJobId ?? job.id"
+              :state="job.status"
+              :chain="job.chainStageCount != null"
+            />
+            <button
+              type="button"
+              class="mobile-finished-job"
+              @click="inspectQueueEntry(`finished:${job.clientId}`)"
             >
-          </button>
+              <strong>{{ queuePrintTitle(job) || modelLabel(job.model) }}</strong>
+              <span
+                >{{ job.hostLabel }} ·
+                {{ job.status === "complete" ? "Complete" : "Stopped with an error" }}</span
+              >
+            </button>
+          </template>
         </section>
         <div
           v-if="!mobileActivityRows.length && !finishedQueueJobs.length"

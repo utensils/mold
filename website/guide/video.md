@@ -476,3 +476,7 @@ stitching checkpoints of two sizes.
 
 The MVP rejects rather than discards VFR timing, HDR/high-bit-depth video,
 subtitles, chapters, multiple audio tracks, and incompatible audio codecs.
+
+### Start a stopped video again
+
+In the web, desktop and mobile Queue, choose **Start again…** on a failed, interrupted or paused multi-clip video. Keep the original machine or choose another connected machine, then confirm **Start again** or **Send video**. This creates a new attempt with its saved prompts, seed, settings and retained inputs; the original stays unchanged. A machine-local adapter requires the original machine. Unsupported or unavailable inputs explain why the action cannot proceed. After a dropped reply, **Check queue** recovers the known attempt instead of creating another one. **Stop new attempt** targets that destination only.

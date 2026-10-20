@@ -1,5 +1,5 @@
 import { computed, type ComputedRef } from "vue";
-import type { FleetActiveWork } from "@studio/api/activity";
+import { isSettledActivityPhase, type FleetActiveWork } from "@studio/api/activity";
 import { compareNewestSubmitted } from "@studio/lib/activityOrder";
 import {
   GENERATION_HISTORY_LIMIT,
@@ -109,7 +109,14 @@ export function useQueueActivity(): QueueActivity {
 
   const running = computed(() => rows.value.filter(rowRunning));
   const active = computed(() => running.value[0] ?? null);
-  const waiting = computed(() => rows.value.filter((row) => !rowRunning(row) && !rowSettled(row)));
+  const waiting = computed(() =>
+    rows.value.filter(
+      (row) =>
+        !rowRunning(row) &&
+        !rowSettled(row) &&
+        !(row.kind === "shared" && isSettledActivityPhase(row.shared.phase)),
+    ),
+  );
 
   return {
     rows,

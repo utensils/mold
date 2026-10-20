@@ -1,15 +1,30 @@
 <script setup lang="ts">
 /* The ⋯ at the end of a queue row: opens the row's actions as the app's own
  * context menu, anchored to the button. */
+import VideoRestartControl from "@studio/components/VideoRestartControl.vue";
+import { useHostsStore } from "../../stores/hosts";
 import Icon from "@ui/components/Icon.vue";
 import { useQueueCommands } from "../../composables/useQueueCommands";
 import type { QueueRow } from "../../composables/useQueueActivity";
 
 defineProps<{ row: QueueRow }>();
 const commands = useQueueCommands();
+const hosts = useHostsStore();
 </script>
 
 <template>
+  <VideoRestartControl
+    :host-id="
+      row.kind === 'shared' ? row.shared.hostId : (row.print.hostId ?? hosts.primaryHost?.id)
+    "
+    :job-id="row.kind === 'shared' ? row.shared.id : (row.print.recoveredJobId ?? row.print.id)"
+    :state="row.kind === 'shared' ? row.shared.phase : row.print.status"
+    :chain="
+      row.kind === 'shared'
+        ? row.shared.kind === 'sequence' || row.shared.execution === 'chain'
+        : row.print.chainStageCount != null
+    "
+  />
   <button
     type="button"
     data-test="queue-row-menu"

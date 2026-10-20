@@ -8,6 +8,7 @@
  * recently. The per-GPU lane view lives in host detail.
  */
 import { computed } from "vue";
+import VideoRestartControl from "@studio/components/VideoRestartControl.vue";
 import QueueMoveToControl from "@studio/components/QueueMoveToControl.vue";
 import QueueDownloadControl from "@studio/components/QueueDownloadControl.vue";
 import QueueSourceThumbnail from "@studio/components/QueueSourceThumbnail.vue";
@@ -266,6 +267,14 @@ const active = computed(
 
     <template v-for="row in activeRows" :key="row.key">
       <div v-if="row.kind === 'shared'" class="activity__shared">
+        <VideoRestartControl
+          :host-id="row.shared.hostId"
+          :job-id="row.shared.id"
+          :state="row.shared.phase"
+          :chain="
+            row.shared.kind === 'sequence' || row.shared.execution === 'chain'
+          "
+        />
         <QueueMoveToControl
           v-if="
             row.shared.kind === 'generation' && row.shared.execution !== 'chain'
@@ -541,6 +550,12 @@ const active = computed(
       role="alert"
       :data-test="`activity-error-${job.id}`"
     >
+      <VideoRestartControl
+        :host-id="job.hostId ?? ORIGIN_HOST_ID"
+        :job-id="job.serverId"
+        :state="job.state"
+        :chain="!!job.chain"
+      />
       <button
         type="button"
         class="activity__error-body"
