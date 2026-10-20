@@ -32,6 +32,8 @@ public struct DraftDescriptor: Codable, Hashable, Sendable {
     public var model: String?
     public var family: String?
     public var recipeID: String?
+    /// Additive scalar duration/scenes and exact Library source ownership.
+    public var videoDuration: VideoDurationAuthoring? = nil
 
     public var prompt: String
     public var negativePrompt: String
@@ -80,7 +82,7 @@ public struct DraftDescriptor: Codable, Hashable, Sendable {
     public var skipStep: Int?
 
     enum CodingKeys: String, CodingKey {
-        case version, localInputsSHA256, model, family, recipeID, prompt, negativePrompt, width, height
+        case version, localInputsSHA256, model, family, recipeID, videoDuration, prompt, negativePrompt, width, height
         case steps, guidance, batchSize, seed, locksSeed, frames, fps, pipeline, prefersAutomaticDuration
         case enableAudio, preferredAudio, hasAudioPreference, videoOnly, strength, title, tags,
              collectionName, autoTagTitle

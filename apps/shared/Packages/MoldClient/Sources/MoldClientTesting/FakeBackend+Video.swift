@@ -13,8 +13,8 @@ public extension FakeBackend {
         try await respond("createVideoJob(_:operationId:destinationInstanceId:)", [request, operationId, destinationInstanceId])
     }
     func videoJob(id: String) async throws -> VideoJob { try await respond("videoJob(id:)", [id]) }
-    func listVideoJobs(limit: Int, offset: Int) async throws -> VideoJobListing {
-        try await respond("listVideoJobs(limit:offset:)", [limit, offset])
+    func listVideoJobs(limit: Int, cursor: String?) async throws -> VideoJobListing {
+        try await respond("listVideoJobs(limit:cursor:)", [limit, cursor])
     }
     func cancelVideoJob(id: String, destinationInstanceId: String) async throws {
         let _: Void = try await respond("cancelVideoJob(id:destinationInstanceId:)", [id, destinationInstanceId])

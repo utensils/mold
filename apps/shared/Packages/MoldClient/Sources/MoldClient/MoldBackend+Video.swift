@@ -6,7 +6,7 @@ public protocol MoldVideoBackend: Sendable {
     func validateVideoJob(_ request: VideoJobRequest) async throws -> VideoJobPlan
     func createVideoJob(_ request: VideoJobRequest, operationId: String, destinationInstanceId: String) async throws -> VideoJob
     func videoJob(id: String) async throws -> VideoJob
-    func listVideoJobs(limit: Int, offset: Int) async throws -> VideoJobListing
+    func listVideoJobs(limit: Int, cursor: String?) async throws -> VideoJobListing
     func cancelVideoJob(id: String, destinationInstanceId: String) async throws
     func resumeVideoJob(id: String, destinationInstanceId: String) async throws -> VideoJob
     func deleteVideoJob(id: String, destinationInstanceId: String) async throws
@@ -20,7 +20,7 @@ public extension MoldVideoBackend {
         throw unsupportedVideoJob()
     }
     func videoJob(id: String) async throws -> VideoJob { throw unsupportedVideoJob() }
-    func listVideoJobs(limit: Int, offset: Int) async throws -> VideoJobListing { throw unsupportedVideoJob() }
+    func listVideoJobs(limit: Int, cursor: String?) async throws -> VideoJobListing { throw unsupportedVideoJob() }
     func cancelVideoJob(id: String, destinationInstanceId: String) async throws { throw unsupportedVideoJob() }
     func resumeVideoJob(id: String, destinationInstanceId: String) async throws -> VideoJob { throw unsupportedVideoJob() }
     func deleteVideoJob(id: String, destinationInstanceId: String) async throws { throw unsupportedVideoJob() }
@@ -32,4 +32,18 @@ public extension MoldVideoBackend {
     }
 }
 
-public struct VideoJobListing: Codable, Hashable, Sendable { public let jobs: [VideoJob] }
+public struct VideoJobListing: Decodable, Hashable, Sendable {
+    public let jobs: [VideoJob]
+    public let hasMore: Bool
+    public let nextCursor: String?
+    private enum CodingKeys: String, CodingKey { case jobs, hasMore, nextCursor }
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        jobs = try values.decode([VideoJob].self, forKey: .jobs)
+        hasMore = try values.decode(Bool.self, forKey: .hasMore)
+        nextCursor = try values.decodeIfPresent(String.self, forKey: .nextCursor)
+        guard !hasMore || nextCursor?.isEmpty == false else {
+            throw DecodingError.dataCorruptedError(forKey: .nextCursor, in: values, debugDescription: "More video jobs require a continuation cursor")
+        }
+    }
+}

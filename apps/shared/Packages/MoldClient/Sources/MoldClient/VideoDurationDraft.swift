@@ -13,10 +13,11 @@ public struct VideoDurationDraft: Codable, Hashable, Sendable {
     }
     public var seconds: String
     public var scenes: [Scene]
+    public var scenesEnabled: Bool
     public var source: VideoJobSource?
 
-    public init(seconds: String = "30", scenes: [Scene] = [], source: VideoJobSource? = nil) {
-        self.seconds = seconds; self.scenes = scenes; self.source = source
+    public init(seconds: String, scenes: [Scene] = [], source: VideoJobSource? = nil, scenesEnabled: Bool = true) {
+        self.seconds = seconds; self.scenes = scenes; self.source = source; self.scenesEnabled = scenesEnabled
     }
 
     /// Decimal arithmetic never rounds long requested durations through Double.
@@ -39,6 +40,7 @@ public struct VideoDurationDraft: Codable, Hashable, Sendable {
 
     public func request(generation: GenerateRequest) throws -> VideoJobRequest {
         let duration = try Self.milliseconds(seconds)
+        let scenes = scenesEnabled ? scenes : []
         guard scenes.count <= 4_096 else { throw SequenceDraftError.invalid("Use at most 4,096 scenes in one video.") }
         var inputs: [VideoJobScene] = [], sum: UInt64 = 0
         for scene in scenes {
@@ -55,6 +57,29 @@ public struct VideoDurationDraft: Codable, Hashable, Sendable {
             throw SequenceDraftError.invalid("Scene durations must add up to the video's requested duration.")
         }
         return .init(generation: generation, durationMs: duration, source: source, scenes: inputs.isEmpty ? nil : inputs)
+    }
+
+    public static func seconds(milliseconds: UInt64) -> String {
+        let whole = milliseconds / 1_000, fraction = milliseconds % 1_000
+        guard fraction != 0 else { return String(whole) }
+        var digits = String(1_000 + fraction).dropFirst()
+        while digits.last == "0" { digits = digits.dropLast() }
+        return "\(whole).\(digits)"
+    }
+
+    /// Scene mode displays its summed total. Invalid in-progress input leaves
+    /// the prior total intact until the scene duration can be represented.
+    @discardableResult public mutating func updateDurationFromScenes() -> Bool {
+        guard scenesEnabled, !scenes.isEmpty else { return false }
+        var total: UInt64 = 0
+        for scene in scenes {
+            guard let value = try? Self.milliseconds(scene.seconds) else { return false }
+            let (next, overflow) = total.addingReportingOverflow(value)
+            guard !overflow else { return false }
+            total = next
+        }
+        seconds = Self.seconds(milliseconds: total)
+        return true
     }
 
     private static func invalidDuration() -> SequenceDraftError {

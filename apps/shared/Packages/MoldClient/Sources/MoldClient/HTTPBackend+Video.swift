@@ -13,7 +13,7 @@ public extension HTTPBackend {
 
     func createVideoJob(_ request: VideoJobRequest, operationId: String, destinationInstanceId: String) async throws -> VideoJob {
         guard request.validationRevision?.isEmpty == false else {
-            throw SequenceDraftError.invalid("Check this video's length before generating it.")
+            throw SequenceDraftError.invalid("This video needs fresh validation. Try Generate again.")
         }
         let route = "/api/video-jobs"
         var http = try body(route, method: "POST", request)
@@ -25,11 +25,13 @@ public extension HTTPBackend {
 
     func videoJob(id: String) async throws -> VideoJob { try await get("/api/video-jobs/\(escaped(id))") }
 
-    func listVideoJobs(limit: Int, offset: Int) async throws -> VideoJobListing {
-        guard (1...256).contains(limit), offset >= 0 else {
-            throw SequenceDraftError.invalid("A video list requires a limit from 1 to 256 and a nonnegative offset.")
+    func listVideoJobs(limit: Int, cursor: String?) async throws -> VideoJobListing {
+        guard (1...256).contains(limit) else {
+            throw SequenceDraftError.invalid("A video list requires a limit from 1 to 256.")
         }
-        return try await get("/api/video-jobs?limit=\(RouteEscaping.escapedQueryValue(String(limit)))&offset=\(RouteEscaping.escapedQueryValue(String(offset)))")
+        var route = "/api/video-jobs?recoverable_only=true&limit=\(RouteEscaping.escapedQueryValue(String(limit)))"
+        if let cursor { route += "&cursor=" + RouteEscaping.escapedQueryValue(cursor) }
+        return try await get(route)
     }
 
     /// Also fences a known operation whose admission reply was lost. A 410 on
@@ -55,6 +57,7 @@ public extension HTTPBackend {
                     for try await frame in stream("/api/video-jobs/\(escaped(id))/events", timeout: 3_600) {
                         guard frame.name == "snapshot", let data = frame.data.data(using: .utf8) else { continue }
                         let value = try MoldJSON.decoder.decode(VideoJob.self, from: data)
+                        guard value.id == id else { throw MoldClientError.malformedResponse }
                         continuation.yield(value)
                         if value.isSettled { break }
                     }

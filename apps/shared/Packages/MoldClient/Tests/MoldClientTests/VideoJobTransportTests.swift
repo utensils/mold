@@ -11,11 +11,20 @@ private final class VideoParentTransport: StubTransport {
             let plan = requestPlan()
             return (200, Data(plan.utf8))
         }
-        return (200, Data("""
+        let job = """
         {"id":"operation","state":"queued","plan":\(VideoJobContractTests.plan()),"completed_clips":"0",
          "active_child_id":null,"output_filename":null,"error":null,"error_detail":null,
          "created_at_ms":1,"updated_at_ms":2,"can_cancel":true,"can_resume":false,"can_delete":false}
-        """.utf8))
+        """
+        if path == "/api/video-jobs", sent.last?.httpMethod == "GET" {
+            let query = URLComponents(url: sent.last!.url!, resolvingAgainstBaseURL: false)?.queryItems
+            let filtered = query?.first { $0.name == "recoverable_only" }?.value == "true"
+            let older = job.replacingOccurrences(of: "operation", with: "older-failed").replacingOccurrences(of: "queued", with: "failed")
+            let completed = (0..<50).map { job.replacingOccurrences(of: "operation", with: "completed-\($0)").replacingOccurrences(of: "queued", with: "completed") }
+            let jobs = filtered ? [older] : completed
+            return (200, Data(("{\"jobs\":[" + jobs.joined(separator: ",") + "],\"has_more\":false,\"next_cursor\":null}").utf8))
+        }
+        return (200, Data(job.utf8))
     }
     class func requestPlan() -> String {
         let plan = VideoJobContractTests.plan()
@@ -99,6 +108,20 @@ private final class VideoParentTransport: StubTransport {
         #expect((object["source"] as? [String: Any])?["filename"] as? String == "original.mp4")
         #expect(plan.validationRevision.isEmpty)
         #expect(request.generation.sourceImage == "PRIVATE_IMAGE_BYTES")
+    }
+
+    @Test func queueFilteringPrecedesLimitAndOpaqueCursorIsNotAnOffset() async throws {
+        VideoParentTransport.sent = []
+        let backend: any MoldBackend = VideoParentTransport.backend()
+        let cursor = "opaque+/=&position"
+        let listing = try await backend.listVideoJobs(limit: 50, cursor: cursor)
+        #expect(listing.jobs.map(\.id) == ["older-failed"])
+        #expect(!listing.hasMore && listing.nextCursor == nil)
+        let url = try #require(VideoParentTransport.sent[0].url)
+        let query = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
+        #expect(query.first { $0.name == "recoverable_only" }?.value == "true")
+        #expect(query.first { $0.name == "cursor" }?.value == cursor)
+        #expect(query.allSatisfy { $0.name != "offset" })
     }
 
 }
