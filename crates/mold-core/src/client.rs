@@ -1910,8 +1910,6 @@ impl MoldClient {
         Ok(resp)
     }
 
-    /// Detect linked-part semantics before sending `continue_from`. An older
-    /// server would otherwise ignore the additive request field.
     /// Read additive chain capabilities from the selected server without a
     /// dependency on its implementation crate. Unknown fields remain intact.
     pub async fn chain_limits(&self, model: &str, fps: Option<u32>) -> Result<serde_json::Value> {
@@ -1926,6 +1924,8 @@ impl MoldClient {
         Ok(error_for_status_with_body(response).await?.json().await?)
     }
 
+    /// Detect linked-part semantics before sending `continue_from`. An older
+    /// server would otherwise ignore the additive request field.
     pub async fn linked_chain_parts_supported(&self, model: &str) -> Result<Option<bool>> {
         #[derive(serde::Deserialize)]
         struct LinkedParts {
