@@ -80,7 +80,11 @@ impl MoldClient {
             .header("x-mold-destination-instance", instance)
             .send()
             .await?;
-        error_for_status_with_body(response).await?;
+        let receipt: serde_json::Value = error_for_status_with_body(response).await?.json().await?;
+        anyhow::ensure!(
+            receipt.get("accepted").and_then(serde_json::Value::as_bool) == Some(true),
+            "Server did not acknowledge video cancellation"
+        );
         Ok(())
     }
 
@@ -195,6 +199,22 @@ mod tests {
     fn response(id: &str) -> serde_json::Value {
         serde_json::json!({"id":id,"state":"queued","plan":{"validation_revision":"proof","model":"h3-pdmd2:bf16","width":768,"height":768,"fps":24,"single_clip_max_frames":107,"overlap_frames":1,"join_mode":"continuous","clip_count":"14","part_count":"1","added_frames":"1440","source_frames":"0","total_frames":"1440","added_duration_ms":"60000","total_duration_ms":"60000","warnings":[]},"completed_clips":"0","active_child_id":null,"output_filename":null,"error":null,"error_detail":null,"created_at_ms":1,"updated_at_ms":1,"can_cancel":true,"can_resume":false,"can_delete":false})
     }
+    #[tokio::test]
+    async fn cancellation_requires_an_explicit_accepted_receipt() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/video-jobs/operation/cancel"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"accepted":false})),
+            )
+            .mount(&server)
+            .await;
+        assert!(MoldClient::new(&server.uri())
+            .cancel_video_job("operation", "captured")
+            .await
+            .is_err());
+    }
+
     #[tokio::test]
     async fn admission_preserves_literals_and_lossless_numbers_on_the_captured_installation() {
         let server = MockServer::start().await;
