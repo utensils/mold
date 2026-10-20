@@ -58,6 +58,7 @@ public enum ChainJobState: String, OpenWireEnum {
     case queued
     case running
     case paused
+    case interrupted
     case completed
     case failed
     case cancelled
@@ -72,11 +73,11 @@ public enum ChainJobState: String, OpenWireEnum {
 /// What `POST /api/chain-jobs` answers with.
 public struct CreateChainJobResponse: Decodable, Hashable, Sendable {
     public let jobId: String
+    public let requestWarnings: [String]?
 }
 
-/// The job itself, as a `snapshot` frame carries it. Only the fields this app
-/// reads -- the rest of `ChainJobDetail` is authored-sequence machinery no
-/// GUI touches any more.
+/// Full durable detail. Ordinary reads omit authored bytes; explicitly request
+/// source media only for editing/export and never persist it in an activity cache.
 public struct ChainJobDetail: Decodable, Hashable, Sendable {
     public let id: String
     public let state: ChainJobState
@@ -85,14 +86,58 @@ public struct ChainJobDetail: Decodable, Hashable, Sendable {
     public let currentStage: Int
     public let error: String?
     public let finalizes: [ChainJobFinalize]?
-
-    /// The gallery file the LAST finalize named -- what a client attaching
-    /// after settlement fetches (`chainTypes.ts:189-192`).
-    public var galleryFilename: String? {
-        finalizes?.last(where: { $0.galleryFilename != nil })?.galleryFilename
+    public let stages: [ChainJobStageDetail]?
+    public let script: ChainScript?
+    public let retakes: [ChainRetakeRecord]?
+    public let amends: [ChainAmendRecord]?
+    public let ephemeral: Bool?
+    public let executionPhase: String?
+    public let cancelling: Bool?
+    public let createdAtUnixMs: UInt64?
+    public let updatedAtUnixMs: UInt64?
+    public var latestFinalize: ChainJobFinalize? {
+        guard var latest = finalizes?.last else { return nil }
+        // Rust FinalizeRecord has no take field. The append-only array's
+        // one-based index is the continuation take authority.
+        latest.take = finalizes?.count
+        return latest
     }
+    public var galleryFilename: String? { latestFinalize?.galleryFilename }
 }
 
 public struct ChainJobFinalize: Decodable, Hashable, Sendable {
+    public let output: String?
     public let galleryFilename: String?
+    public let atUnixMs: UInt64?
+    public var take: Int?
+    public let stageSeeds: [String]?
+}
+public struct ChainJobStageDetail: Decodable, Hashable, Sendable {
+    public let idx: Int
+    public let state: String
+    public let seed: UInt64?
+    public let framesEmitted: Int?
+    public let generationTimeMs: UInt64?
+    public let hasPreview: Bool?
+    public let hasMedia: Bool?
+    public let cacheReady: Bool?
+    public let error: String?
+}
+public struct ChainJobListing: Decodable, Hashable, Sendable {
+    public let jobs: [ChainJobDetail]
+}
+
+public struct ChainRetakeRecord: Decodable, Hashable, Sendable {
+    public let stageIdx: Int
+    public let mode: String
+    public let oldSeed: String
+    public let newSeed: String
+    public let oldPrompt: String?
+    public let newPrompt: String?
+    public let atUnixMs: UInt64
+}
+public struct ChainAmendRecord: Decodable, Hashable, Sendable {
+    public let atUnixMs: UInt64
+    public let previousRequestJson: String
+    public let preservedStages: Int
 }

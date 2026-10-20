@@ -16,8 +16,32 @@ public extension HTTPBackend {
                            from: try await bytes(for: http), route: "/api/chain-jobs")
     }
 
+    func createChainJob(_ request: AuthoredChainRequest, operationId: String) async throws -> CreateChainJobResponse {
+        var http = try body("/api/chain-jobs", method: "POST", request)
+        http.setValue(operationId, forHTTPHeaderField: "x-mold-operation-id")
+        return try decoded(CreateChainJobResponse.self, from: try await bytes(for: http), route: "/api/chain-jobs")
+    }
+
+    func validateChain(_ request: AuthoredChainRequest) async throws -> ChainValidationResponse {
+        let route = "/api/generate/chain/validate"
+        return try decoded(ChainValidationResponse.self,
+                           from: try await bytes(for: body(route, method: "POST", request)), route: route)
+    }
+
+    func listChainJobs() async throws -> ChainJobListing { try await get("/api/chain-jobs") }
+
+    func chainJob(id: String, includeSourceMedia: Bool) async throws -> ChainJobDetail {
+        let path = "/api/chain-jobs/\(escaped(id))"
+        return try await get(path + (includeSourceMedia ? "?include_source_media=true" : ""))
+    }
+
     func chainJob(id: String) async throws -> ChainJobDetail {
         try await get("/api/chain-jobs/\(escaped(id))")
+    }
+
+    func cancelChainOperation(id: String, operationId: String) async throws {
+        try await send("/api/chain-jobs/\(escaped(id))/operations/\(escaped(operationId))/cancel",
+                       method: "POST", body: EmptyBody())
     }
 
     func cancelChainJob(id: String) async throws {

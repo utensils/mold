@@ -20,6 +20,12 @@ public struct ChainLimits: Decodable, Hashable, Sendable {
     public let maxTotalFrames: Int
     public let supportsSequence: Bool
     public let sequenceUnsupportedReason: String?
+    public let supportsAudio: Bool?
+    public let transitionModes: [String]?
+    public let fadeFramesMax: Int?
+    public let linkedParts: LinkedPartLimits?
+    public let authoring: ChainAuthoringLimits?
+
 }
 
 public extension ChainRouting {
