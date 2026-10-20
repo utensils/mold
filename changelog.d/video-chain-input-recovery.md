@@ -1,0 +1,1 @@
+- **Reliable random-seed video chains.** Resolve random seeds before sealing retained inputs and recover existing affected jobs without changing authored-media authority. Preserve source-fitting provenance, advertise model-specific clip authoring limits, and count H3 chain stages under their durable parent across restarts.
