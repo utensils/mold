@@ -925,6 +925,7 @@ pub(crate) fn publish_video_path_to_dir_named(
         db,
         events,
         gallery_gate,
+        &mut || Ok(()),
     )
     .map(|identity| identity.final_name)
 }
@@ -968,6 +969,7 @@ pub(crate) fn publish_video_file_to_dir_named(
         db,
         events,
         gallery_gate,
+        checkpoint,
     )
 }
 
@@ -982,6 +984,7 @@ pub(crate) fn publish_video_path_to_dir_named_with_identity(
     db: Option<&MetadataDb>,
     events: Option<&crate::events::EventBroadcaster>,
     gallery_gate: &crate::batch_transaction::GalleryPublicationGate,
+    checkpoint: &mut dyn FnMut() -> anyhow::Result<()>,
 ) -> anyhow::Result<crate::batch_transaction::ArchivedChildIdentity> {
     let filename_path = std::path::Path::new(filename);
     anyhow::ensure!(
@@ -995,18 +998,23 @@ pub(crate) fn publish_video_path_to_dir_named_with_identity(
     std::fs::create_dir_all(dir)?;
     let authority = crate::batch_transaction::acquire_gallery_bookkeeping_lock(dir)?;
     let path = dir.join(filename);
+    checkpoint()?;
     let created = match std::fs::hard_link(staged, &path) {
         Ok(()) => {
             crate::batch_transaction::sync_ordinary_gallery_directory(dir)?;
             true
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            fn digest(path: &std::path::Path) -> anyhow::Result<[u8; 32]> {
+            fn digest(
+                path: &std::path::Path,
+                checkpoint: &mut dyn FnMut() -> anyhow::Result<()>,
+            ) -> anyhow::Result<[u8; 32]> {
                 use std::io::Read as _;
                 let mut file = mold_core::secure_file::open_regular_file_no_follow(path)?;
                 let mut hash = Sha256::new();
                 let mut buffer = [0u8; 64 * 1024];
                 loop {
+                    checkpoint()?;
                     let read = file.read(&mut buffer)?;
                     if read == 0 {
                         break;
@@ -1016,7 +1024,7 @@ pub(crate) fn publish_video_path_to_dir_named_with_identity(
                 Ok(hash.finalize().into())
             }
             anyhow::ensure!(
-                digest(&path)? == digest(staged)?,
+                digest(&path, checkpoint)? == digest(staged, checkpoint)?,
                 "gallery replay target '{}' exists with different bytes",
                 path.display()
             );
@@ -7137,6 +7145,23 @@ mod tests {
         let first = publish().unwrap();
         assert_eq!(first.final_name, "full-video.mp4");
         assert_eq!(first, publish().unwrap());
+        let mut checkpoints = 0;
+        let stopped = publish_video_file_to_dir_named(
+            tmp.path(),
+            "full-video.mp4",
+            std::fs::File::open(&staged).unwrap(),
+            &meta,
+            None,
+            Some(&db),
+            None,
+            &gate,
+            &mut || {
+                checkpoints += 1;
+                anyhow::ensure!(checkpoints < 6, "cancelled during replay digest");
+                Ok(())
+            },
+        );
+        assert!(stopped.is_err(), "replay hashing must check cancellation");
         std::fs::write(&staged, b"different movie data").unwrap();
         assert!(publish().is_err());
         assert_eq!(
