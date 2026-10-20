@@ -1216,6 +1216,45 @@ mod mp4_mux {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn file_encoder_keeps_long_movie_boundaries_in_short_independent_gops() {
+        let output = tempfile::NamedTempFile::new().unwrap();
+        let mut encoder = Mp4FileEncoder::new(output.reopen().unwrap(), 32, 32, 24).unwrap();
+        for index in 0..180 {
+            encoder
+                .push(&RgbImage::from_pixel(
+                    32,
+                    32,
+                    image::Rgb([(index % 200) as u8, 80, 40]),
+                ))
+                .unwrap();
+        }
+        assert_eq!(encoder.finish().unwrap(), 180);
+        let reader =
+            crate::video_assembly_input::checked_reader(output.reopen().unwrap(), &mut || Ok(()))
+                .unwrap();
+        let keyframes = &reader.tracks()[&1]
+            .trak
+            .mdia
+            .minf
+            .stbl
+            .stss
+            .as_ref()
+            .unwrap()
+            .entries;
+        assert_eq!(keyframes, &[1, 49, 97, 145]);
+        let (_, oracle) = crate::ltx2::media::decode_video_frames_from_path(output.path()).unwrap();
+        let boundary = crate::video_assembly_frames::tail(
+            output.reopen().unwrap(),
+            153,
+            3,
+            32,
+            32,
+            &mut || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(boundary, oracle[150..153]);
+    }
+    #[test]
     fn file_encoder_preserves_existing_picture_packets_and_presentation() {
         use super::*;
         let frames: Vec<_> = (0..12)
