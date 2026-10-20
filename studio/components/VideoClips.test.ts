@@ -11,6 +11,7 @@ const api = vi.hoisted(() => ({
   owner: vi.fn(),
   cancel: vi.fn(),
   capture: vi.fn(),
+  mutate: vi.fn(),
 }));
 vi.mock("../api/chainJobs", async (original) => ({
   ...(await original<typeof import("../api/chainJobs")>()),
@@ -21,6 +22,7 @@ vi.mock("../api/chainJobs", async (original) => ({
   assertChainOwner: api.owner,
   cancelChainOperation: api.cancel,
   captureChainOwner: api.capture,
+  mutateChain: api.mutate,
 }));
 const owner = {
   hostId: "plato",
@@ -275,6 +277,57 @@ describe("compact video clips", () => {
     expect(
       JSON.parse(localStorage.getItem(CHAIN_ADMISSION_KEY)!)[0],
     ).toMatchObject({ cancelRequested: true, cancelAcknowledged: true });
+  });
+  it("offers explicit same-job resume after cancellation without automatically resuming", async () => {
+    localStorage.setItem(
+      CHAIN_ADMISSION_KEY,
+      JSON.stringify([
+        {
+          operationId: "cancelled",
+          hostId: "plato",
+          instanceId: "original",
+          baseUrl: "http://plato",
+          createdAt: 1,
+          cancelRequested: true,
+          cancelAcknowledged: true,
+        },
+      ]),
+    );
+    api.job.mockResolvedValue({
+      id: "cancelled",
+      state: "cancelled",
+      stage_count: 2,
+      stages: [],
+    });
+    wrapper = mount(VideoClips, {
+      props: {
+        enabled: true,
+        request,
+        owner: { ...owner, instanceId: undefined },
+      },
+    });
+    await flushPromises();
+    expect(api.mutate).not.toHaveBeenCalled();
+    const resume = wrapper
+      .findAll("button")
+      .find((button) => button.text() === "Resume video");
+    expect(resume).toBeDefined();
+    api.job.mockResolvedValue({
+      id: "cancelled",
+      state: "running",
+      stage_count: 2,
+      stages: [],
+    });
+    await resume!.trigger("click");
+    await flushPromises();
+    expect(api.mutate.mock.calls[0]?.slice(0, 3)).toEqual([
+      owner,
+      "cancelled",
+      "resume",
+    ]);
+    expect(
+      JSON.parse(localStorage.getItem(CHAIN_ADMISSION_KEY)!)[0].cancelRequested,
+    ).toBeUndefined();
   });
   it("keeps failed jobs reachable after closing and reopening", async () => {
     localStorage.setItem(

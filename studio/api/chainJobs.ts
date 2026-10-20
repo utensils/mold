@@ -54,15 +54,23 @@ export function definiteChainRefusal(error: unknown): boolean {
     [400, 401, 403, 404, 413, 415, 422, 451].includes(error.status)
   );
 }
-export function sameChainOwner(
+export function sameChainRoute(
   admission: ChainAdmission,
   owner: ChainOwner,
 ): boolean {
   return (
     admission.hostId === owner.hostId &&
-    admission.instanceId === owner.instanceId &&
     admission.baseUrl === owner.target.baseUrl &&
     admission.connectionMode === owner.target.connectionMode
+  );
+}
+export function sameChainOwner(
+  admission: ChainAdmission,
+  owner: ChainOwner,
+): boolean {
+  return (
+    sameChainRoute(admission, owner) &&
+    admission.instanceId === owner.instanceId
   );
 }
 export async function assertChainOwner(owner: ChainOwner): Promise<void> {

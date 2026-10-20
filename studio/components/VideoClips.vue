@@ -213,7 +213,10 @@ defineExpose({ submit });
         </button>
         <button
           v-if="
-            detail && ['paused', 'interrupted', 'failed'].includes(detail.state)
+            detail &&
+            ['paused', 'interrupted', 'failed', 'cancelled'].includes(
+              detail.state,
+            )
           "
           type="button"
           :disabled="busy || !!ownerChanged"

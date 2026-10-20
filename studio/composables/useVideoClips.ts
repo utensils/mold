@@ -15,6 +15,7 @@ import {
   cancelChainOperation,
   definiteChainRefusal,
   sameChainOwner,
+  sameChainRoute,
   validateClips,
   type ChainAdmission,
   type ChainLimitsWire,
@@ -332,6 +333,15 @@ export function useVideoClips(
       ) as ClipsBaseRequest,
     };
     try {
+      // A local shell may know its route before its status UUID is hydrated.
+      // Recovery uses the journal's original installation as the expected
+      // authority, then verifies the live server before reading or mutating it.
+      if (recoverOnly && !captured.value.owner.instanceId) {
+        const pending = readJournal().find((row) =>
+          sameChainRoute(row, captured.value!.owner),
+        );
+        if (pending) captured.value.owner.instanceId = pending.instanceId;
+      }
       const before = captured.value.owner;
       const owner = before.instanceId
         ? before
@@ -667,7 +677,13 @@ export function useVideoClips(
       )
         return;
       try {
-        if (readJournal().some((row) => sameChainOwner(row, props.owner!)))
+        if (
+          readJournal().some(
+            (row) =>
+              sameChainRoute(row, props.owner!) &&
+              (!props.owner!.instanceId || sameChainOwner(row, props.owner!)),
+          )
+        )
           void open(true);
       } catch {
         /* An explicit open names a corrupt/blocked journal without changing ordinary Create. */

@@ -290,7 +290,7 @@ async function plaintextRequestAt(
   return new Request(url, {
     method: request.method,
     headers,
-    body,
+    ...(body ? { body } : {}),
     signal: request.signal,
     credentials: request.credentials,
     redirect: request.redirect,
