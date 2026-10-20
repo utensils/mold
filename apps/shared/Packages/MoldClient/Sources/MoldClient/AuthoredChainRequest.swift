@@ -55,19 +55,25 @@ public struct AuthoredChainRequest: Codable, Hashable, Sendable {
     public var tags: [String]?
     public var collection: CollectionRef?
     public var originalPrompt: String?
+    public var promptTransform: PromptTransformProvenance?
+    public var batchId: String?
+    public var batchIndex: Int?
+    public var batchCount: Int?
 
     public init(_ request: GenerateRequest, stages: [ChainStageInput], limits: ChainLimits,
                 continueFrom: ChainContinuation? = nil, motionTailFrames: Int? = nil, repeatReferences: Bool = false) throws {
-        try Self.requireRepresentable(request)
+        let prepared = try request.authoredChainInputs()
+        try Self.requireRepresentable(prepared)
         self.continueFrom = continueFrom
-        model = request.model; self.stages = stages
-        try Self.applyComposerInputs(request, to: &self.stages, repeatReferences: repeatReferences)
+        model = prepared.model; self.stages = stages
+        try Self.applyComposerInputs(prepared, to: &self.stages, repeatReferences: repeatReferences)
         self.motionTailFrames = motionTailFrames ?? limits.authoring?.motionTailFrames ?? 17
-        width = request.width; height = request.height; fps = request.fps ?? limits.fps ?? 24
-        seed = request.seed; steps = request.steps; guidance = request.guidance
-        strength = request.strength ?? 1; enableAudio = request.enableAudio
-        title = request.title; tags = request.tags; collection = request.collection
-        originalPrompt = request.originalPrompt
+        width = prepared.width; height = prepared.height; fps = prepared.fps ?? limits.fps ?? 24
+        seed = prepared.seed; steps = prepared.steps; guidance = prepared.guidance
+        strength = prepared.strength ?? 1; enableAudio = prepared.enableAudio
+        title = prepared.title; tags = prepared.tags; collection = prepared.collection
+        originalPrompt = prepared.originalPrompt; promptTransform = prepared.promptTransform?.wireSafe
+        batchId = prepared.batchId; batchIndex = prepared.batchIndex; batchCount = prepared.batchCount
         try validateSubmission(limits: limits)
     }
 
@@ -126,6 +132,10 @@ public struct AuthoredChainRequest: Codable, Hashable, Sendable {
             if let image = stage.sourceImage { payloads.append(image); members += 1 }
             for keyframe in stage.keyframes ?? [] { payloads.append(keyframe.image); members += 1 }
             for reference in stage.generationReferences ?? [] {
+                guard reference.media.authority == "inline", reference.media.data?.isEmpty == false,
+                      reference.media.handle == nil, reference.media.path == nil else {
+                    throw SequenceDraftError.invalid("Joined clips require original inline reference media. Reattach the reference before generating.")
+                }
                 members += 1
                 if let data = reference.media.data { payloads.append(data) }
             }
@@ -180,6 +190,7 @@ public struct AuthoredChainRequest: Codable, Hashable, Sendable {
         if request.audioFile != nil { unsupported.append("conditioning audio") }
         if request.sourceVideo != nil { unsupported.append("source video") }
         if request.extendVideo != nil || request.extendOverlapFrames != nil { unsupported.append("video extension") }
+        if request.sourceFit != nil { unsupported.append("source crop settings") }
         if request.pipeline != nil { unsupported.append("pipeline override") }
         if request.guidanceOverrides != nil { unsupported.append("guidance overrides") }
         if request.maskImage != nil { unsupported.append("mask") }

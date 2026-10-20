@@ -13,6 +13,9 @@ public struct ChainContinuationSource: Hashable, Sendable {
     public var settings: ChainScriptSettings { script.chain }
 
     public init(hostId: UUID, instanceId: String?, detail: ChainJobDetail, limits: ChainLimits) throws {
+        guard let instanceId, !instanceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw SequenceDraftError.invalid("Reconnect to the original machine before continuing this video.")
+        }
         guard limits.linkedParts?.supported == true else {
             throw SequenceDraftError.invalid("Update this machine before continuing a video.")
         }
@@ -33,7 +36,8 @@ public struct ChainContinuationSource: Hashable, Sendable {
             width: settings.width, height: settings.height, steps: settings.steps,
             guidance: settings.guidance, seed: seed)
         base.fps = settings.fps; base.strength = settings.strength; base.enableAudio = settings.enableAudio
-        if let composer {
+        if let originalComposer = composer {
+            let composer = try originalComposer.authoredChainInputs()
             try AuthoredChainRequest.requireRepresentable(composer)
             base.seed = seed ?? composer.seed
             base.steps = composer.steps; base.guidance = composer.guidance; base.strength = composer.strength
@@ -41,7 +45,8 @@ public struct ChainContinuationSource: Hashable, Sendable {
             base.references = composer.references; base.frames = composer.frames
             base.negativePrompt = composer.negativePrompt; base.loras = composer.loras
             base.title = composer.title; base.tags = composer.tags; base.collection = composer.collection
-            base.originalPrompt = composer.originalPrompt
+            base.originalPrompt = composer.originalPrompt; base.promptTransform = composer.promptTransform
+            base.batchId = composer.batchId; base.batchIndex = composer.batchIndex; base.batchCount = composer.batchCount
         }
         var request = try AuthoredChainRequest(base, stages: stages, limits: limits,
             continueFrom: .init(jobId: jobId, finalizeTake: take), motionTailFrames: settings.motionTailFrames, repeatReferences: true)
@@ -51,7 +56,8 @@ public struct ChainContinuationSource: Hashable, Sendable {
     }
 
     public func requireOwner(hostId: UUID, instanceId: String?) throws {
-        guard self.hostId == hostId, self.instanceId == instanceId else {
+        guard let instanceId, !instanceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              self.hostId == hostId, self.instanceId == instanceId else {
             throw SequenceDraftError.invalid("Continue this video on its original machine.")
         }
     }

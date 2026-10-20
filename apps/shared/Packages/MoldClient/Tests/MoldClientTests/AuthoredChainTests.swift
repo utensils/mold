@@ -69,6 +69,9 @@ struct AuthoredChainTests {
         "motion_tail_frames":1,"output_format":"mp4","enable_audio":true},
         "stage":[{"prompt":"Original","frames":209,"transition":"smooth"}]}}
         """.utf8))
+        #expect(throws: SequenceDraftError.self) { try ChainContinuationSource(hostId: UUID(), instanceId: nil, detail: detail, limits: limits()) }
+        #expect(throws: SequenceDraftError.self) { try ChainContinuationSource(hostId: UUID(), instanceId: "", detail: detail, limits: limits()) }
+        #expect(throws: SequenceDraftError.self) { try ChainContinuationSource(hostId: UUID(), instanceId: "  ", detail: detail, limits: limits()) }
         let host = UUID()
         let source = try ChainContinuationSource(hostId: host, instanceId: "one", detail: detail, limits: limits())
         let request = try source.request(stages: [.init(prompt: "Next", frames: 209)])
@@ -139,6 +142,19 @@ struct AuthoredChainTests {
         #expect(request.stages[0].keyframes?.map(\.frame) == [0])
         #expect(request.stages[1].keyframes?.map(\.frame) == [191])
         #expect(request.stages[1].keyframes?.first?.image == "bGFzdA==")
+    }
+
+    @Test func chainInputsUseOriginalInlineReferenceInsteadOfTransientUpload() throws {
+        var base = base()
+        let reference = GenerationReference(kind: "image", media: .init(authority: "inline", data: "aW1hZ2U="), mimeType: "image/png")
+        base.pendingReferenceInputs = [.canonical(reference)]
+        let request = try AuthoredChainRequest(base, stages: [.init(prompt: "One", frames: 209)], limits: limits())
+        #expect(request.stages[0].generationReferences == [reference])
+        base.pendingReferenceInputs = nil
+        base.references = [.init(kind: "image", media: .init(authority: "upload", handle: "secret"), mimeType: "image/png")]
+        #expect(throws: SequenceDraftError.self) {
+            try AuthoredChainRequest(base, stages: [.init(prompt: "One", frames: 209)], limits: limits())
+        }
     }
 
 }
