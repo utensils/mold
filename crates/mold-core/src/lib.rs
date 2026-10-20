@@ -172,3 +172,5 @@ pub mod video_job;
 pub mod video_job_schedule;
 
 pub mod video_restart;
+
+pub mod video_artifacts;
