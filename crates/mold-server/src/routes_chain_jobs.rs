@@ -180,6 +180,8 @@ pub async fn create_chain_job(
             }),
         ));
     }
+    // Refuse unsupported build features before inspecting concrete model files.
+    crate::routes_chain::validate_chain_build_features(&req)?;
     // The successor has no row. Before waiting for its source lock, prove that
     // source already exists. Otherwise concurrent A -> B / B -> A creation
     // could each hold one new target's lock and wait forever for the other.
@@ -229,7 +231,6 @@ pub async fn create_chain_job(
         Some(&authority.paths),
         predecessor.as_ref().map(|(_, _, frozen)| frozen),
     )?;
-    crate::routes_chain::validate_chain_build_features(&req)?;
     crate::routes_chain::validate_and_normalize_chain_family(&authority.config, &mut req)?;
     let family = crate::routes_chain::resolve_chain_family(&authority.config, &req.model);
     let mut req = req
