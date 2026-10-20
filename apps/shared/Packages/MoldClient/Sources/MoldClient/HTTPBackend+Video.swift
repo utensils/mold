@@ -8,7 +8,10 @@ public extension HTTPBackend {
     }
 
     func validateVideoJob(_ request: VideoJobRequest) async throws -> VideoJobPlan {
-        try await post("/api/video-jobs/validate", body: request)
+        let route = "/api/video-jobs/validate"
+        var http = try body(route, method: "POST", request)
+        http.setValue(request.retainedMediaSession, forHTTPHeaderField: "x-mold-retained-media-session")
+        return try decoded(VideoJobPlan.self, from: try await bytes(for: http), route: route)
     }
 
     func createVideoJob(_ request: VideoJobRequest, operationId: String, destinationInstanceId: String) async throws -> VideoJob {
@@ -17,6 +20,7 @@ public extension HTTPBackend {
         }
         let route = "/api/video-jobs"
         var http = try body(route, method: "POST", request)
+        http.setValue(request.retainedMediaSession, forHTTPHeaderField: "x-mold-retained-media-session")
         try videoDestination(destinationInstanceId, request: &http)
         guard !operationId.isEmpty else { throw SequenceDraftError.invalid("A video operation identifier is required.") }
         http.setValue(operationId, forHTTPHeaderField: "x-mold-operation-id")

@@ -7,6 +7,7 @@ public extension VideoJobRequest {
     var planningProjection: Self {
         var result = self
         result.validationRevision = nil
+        result.retainedMediaSession = nil
         result.generation.pendingReferenceInputs = nil
         result.generation.sourceImage = nil; result.generation.sourceImageName = nil
         result.generation.editImages = nil; result.generation.references = nil

@@ -124,4 +124,16 @@ private final class VideoParentTransport: StubTransport {
         #expect(query.allSatisfy { $0.name != "offset" })
     }
 
+    @Test func retainedInputSessionRemainsHeaderOnlyForValidationAndCreate() async throws {
+        VideoParentTransport.sent = []; VideoParentTransport.bodies = []
+        let backend: any MoldBackend = VideoParentTransport.backend()
+        var request = draft(); request.retainedMediaSession = "private-session"
+        _ = try await backend.validateVideoJob(request)
+        request.validationRevision = "revision"
+        _ = try await backend.createVideoJob(request, operationId: "operation", destinationInstanceId: "target")
+        #expect(VideoParentTransport.sent.allSatisfy { $0.value(forHTTPHeaderField: "x-mold-retained-media-session") == "private-session" })
+        #expect(VideoParentTransport.bodies.allSatisfy { !String(decoding: $0, as: UTF8.self).contains("private-session") })
+        #expect(request.planningProjection.retainedMediaSession == nil)
+    }
+
 }

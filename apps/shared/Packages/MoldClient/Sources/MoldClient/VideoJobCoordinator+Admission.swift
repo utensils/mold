@@ -11,11 +11,15 @@ public extension VideoJobCoordinator {
         let fresh = { @MainActor in !Task.isCancelled && token == self.submissionToken && current() && unchanged() }
         isSubmitting = true; error = nil
         var saved: VideoJobAdmission?
+        var transport: PreparedVideoJob?
         defer { if token == submissionToken { isSubmitting = false } }
         do {
             try await verify(owner, backend: backend, current: fresh)
-            var prepared = try await prepare?() ?? request
+            let inputs = try await prepare?() ?? request
             guard fresh() else { throw changed() }
+            transport = try await backend.prepareVideoJob(inputs)
+            guard fresh(), let staged = transport else { throw changed() }
+            var prepared = staged.request
             let plan = try await backend.validateVideoJob(prepared)
             guard fresh(), !plan.validationRevision.isEmpty else { throw changed() }
             prepared.validationRevision = plan.validationRevision
@@ -25,11 +29,13 @@ public extension VideoJobCoordinator {
             try save(record); saved = record
             ensure(record.operationId, owner: owner)
             let accepted = try await backend.createVideoJob(prepared, operationId: record.operationId, destinationInstanceId: owner.instanceId)
+            await transport?.cancel(); transport = nil
             guard accepted.id == record.operationId else { throw MoldClientError.malformedResponse }
             guard current() else { return }
             publish(accepted, owner: owner)
             follow(record, owner: owner, backend: backend, current: current)
         } catch {
+            await transport?.cancel(); transport = nil
             if let saved, VideoRestartController.definitive(error) {
                 do {
                     try forget(saved.operationId, owner: owner)

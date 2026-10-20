@@ -2,6 +2,7 @@ import Foundation
 
 /// Duration parents own clip planning, one final Library print and recovery.
 public protocol MoldVideoBackend: Sendable {
+    func prepareVideoJob(_ request: VideoJobRequest) async throws -> PreparedVideoJob
     func planVideoJob(_ request: VideoJobRequest) async throws -> VideoJobPlan
     func validateVideoJob(_ request: VideoJobRequest) async throws -> VideoJobPlan
     func createVideoJob(_ request: VideoJobRequest, operationId: String, destinationInstanceId: String) async throws -> VideoJob
@@ -14,6 +15,10 @@ public protocol MoldVideoBackend: Sendable {
 }
 
 public extension MoldVideoBackend {
+    func prepareVideoJob(_ request: VideoJobRequest) async throws -> PreparedVideoJob {
+        guard request.generation.pendingReferenceInputs == nil else { throw unsupportedVideoJob() }
+        return .init(request: request)
+    }
     func planVideoJob(_ request: VideoJobRequest) async throws -> VideoJobPlan { throw unsupportedVideoJob() }
     func validateVideoJob(_ request: VideoJobRequest) async throws -> VideoJobPlan { throw unsupportedVideoJob() }
     func createVideoJob(_ request: VideoJobRequest, operationId: String, destinationInstanceId: String) async throws -> VideoJob {

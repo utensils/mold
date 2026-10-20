@@ -8,11 +8,17 @@ public struct VideoJobRequest: Codable, Hashable, Sendable {
     public var source: VideoJobSource?
     public var scenes: [VideoJobScene]?
     public var validationRevision: String?
+    /// Ephemeral header authority; excluded from JSON and persisted drafts.
+    public var retainedMediaSession: String?
+    private enum CodingKeys: String, CodingKey {
+        case generation, durationMs, source, scenes, validationRevision
+    }
 
     public init(generation: GenerateRequest, durationMs: UInt64, source: VideoJobSource? = nil,
-                scenes: [VideoJobScene]? = nil, validationRevision: String? = nil) {
+                scenes: [VideoJobScene]? = nil, validationRevision: String? = nil, retainedMediaSession: String? = nil) {
         self.generation = generation; self.durationMs = durationMs
         self.source = source; self.scenes = scenes; self.validationRevision = validationRevision
+        self.retainedMediaSession = retainedMediaSession
     }
 }
 

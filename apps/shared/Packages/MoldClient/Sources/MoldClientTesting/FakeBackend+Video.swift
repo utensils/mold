@@ -2,6 +2,9 @@ import Foundation
 import MoldClient
 
 public extension FakeBackend {
+    func prepareVideoJob(_ request: VideoJobRequest) async throws -> PreparedVideoJob {
+        try await respond("prepareVideoJob(_:)", [request])
+    }
     func planVideoJob(_ request: VideoJobRequest) async throws -> VideoJobPlan {
         try await respond("planVideoJob(_:)", [request])
     }

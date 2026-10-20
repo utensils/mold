@@ -10,6 +10,9 @@ import MoldClientTesting
             from: Data(#"{"version":"test","busy":false,"uptime_secs":1,"instance_id":"installation"}"#.utf8)))
         backend.stub("capabilities()", returning: try MoldJSON.decoder.decode(Capabilities.self,
             from: Data(#"{"video_jobs":{"supported":true,"literal_prompts":true,"library_extend":true}}"#.utf8)))
+        backend.stub("prepareVideoJob(_:)") { args in
+            PreparedVideoJob(request: args[0] as! VideoJobRequest)
+        }
         backend.stub("validateVideoJob(_:)", returning: try MoldJSON.decoder.decode(VideoJobPlan.self, from: Data(VideoJobContractTests.plan().utf8)))
         return (backend, .init(host: backend.host, instanceId: "installation"), UserDefaults(suiteName: "video-parent-\(UUID())")!)
     }
@@ -84,6 +87,26 @@ import MoldClientTesting
         #expect(coordinator.pending.isEmpty)
         #expect(coordinator.jobs.isEmpty)
         #expect(coordinator.error != nil)
+    }
+
+    @Test func transportPreparationLivesAcrossValidationAndIsReleasedAfterRejection() async throws {
+        let (backend, owner, saved) = try setup()
+        actor Release { var count = 0; func done() { count += 1 } }
+        let release = Release()
+        backend.stub("prepareVideoJob(_:)") { args in
+            var value = args[0] as! VideoJobRequest
+            value.retainedMediaSession = "ephemeral-session"
+            return PreparedVideoJob(request: value, release: { await release.done() })
+        }
+        backend.stub("validateVideoJob(_:)") { args in
+            #expect((args[0] as? VideoJobRequest)?.retainedMediaSession == "ephemeral-session")
+            throw MoldClientError.http(status: 422, code: "INVALID_VIDEO", message: "Refused")
+        }
+        let coordinator = VideoJobCoordinator(defaults: saved)
+        await coordinator.submit(request(), owner: owner, backend: backend, current: { true }, unchanged: { true })
+        #expect(backend.count("prepareVideoJob(_:)") == 1)
+        #expect(await release.count == 1)
+        #expect(coordinator.pending.isEmpty)
     }
 
 }
