@@ -133,6 +133,7 @@ fn prefix_file(
 fn authenticate_prefix(
     mut file: File,
     source: &crate::video_source::RetainedVideoSource,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
 ) -> Result<()> {
     let mut hash = Sha256::new();
     let mut input = (&mut file).take(
@@ -144,6 +145,7 @@ fn authenticate_prefix(
     let mut count = 0u64;
     let mut buffer = [0u8; 64 * 1024];
     loop {
+        checkpoint()?;
         let length = input.read(&mut buffer)?;
         if length == 0 {
             break;
@@ -168,6 +170,17 @@ pub(crate) fn export_for(
     manifest: &VideoJobManifest,
     authority: &RestartExportRequest,
 ) -> Result<VideoRestartExport> {
+    export_for_with_checkpoint(state, row, manifest, authority, &mut || Ok(()))
+}
+
+pub(crate) fn export_for_with_checkpoint(
+    state: &AppState,
+    row: &StoredVideoJob,
+    manifest: &VideoJobManifest,
+    authority: &RestartExportRequest,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<VideoRestartExport> {
+    checkpoint()?;
     let options = options_for(&state.instance_id, row)?;
     ensure!(
         authority.source_instance_id == options.source_instance_id
@@ -218,7 +231,7 @@ pub(crate) fn export_for(
         .as_ref()
         .map(|source| -> Result<_> {
             let retained_upload = if portable {
-                authenticate_prefix(prefix_file(state, row, source)?, source)?;
+                authenticate_prefix(prefix_file(state, row, source)?, source, checkpoint)?;
                 None
             } else {
                 let id = uuid::Uuid::new_v4().to_string();
@@ -229,7 +242,7 @@ pub(crate) fn export_for(
                     &id,
                     &crate::video_job_manifest::job_dir(state, &row.job.id)?.join("prefix.mp4"),
                     source.clone(),
-                    &mut || Ok(()),
+                    checkpoint,
                 )?)
             };
             Ok(VideoRestartPrefix {
@@ -332,6 +345,24 @@ mod tests {
         request.audio_file = Some(vec![1]);
         assert!(validate_media_budget(&request).is_err());
     }
+    #[test]
+    fn original_prefix_export_can_be_cancelled_during_verification() {
+        use std::io::Write;
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"pixels").unwrap();
+        let row = crate::video_job_manifest::tests::fixture();
+        let request = read_manifest(&row).unwrap().request.generation;
+        let source = crate::video_source::RetainedVideoSource {
+            authority_kind: mold_core::video_job::VideoSourceAuthorityKind::PublishedArchive,
+            filename: "source.mp4".into(),
+            archive_identity_sha256: "a".repeat(64),
+            checksum_sha256: format!("{:x}", Sha256::digest(b"pixels")),
+            size_bytes: 6,
+            metadata: mold_core::OutputMetadata::from_generate_request(&request, 1, None, "test"),
+        };
+        assert!(authenticate_prefix(file, &source, &mut || anyhow::bail!("cancelled")).is_err());
+    }
+
     #[test]
     fn source_chunks_are_bounded_and_never_read_past_committed_size() {
         use std::io::Write;
