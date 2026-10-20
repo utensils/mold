@@ -44,6 +44,7 @@ fn load_daily_quota() -> Option<u32> {
 pub fn slash_commands() -> Vec<poise::Command<state::BotState, anyhow::Error>> {
     vec![
         commands::generate::generate(),
+        commands::video::video(),
         commands::identity::identity(),
         commands::transparent::transparent(),
         commands::mesh::mesh(),

@@ -39,7 +39,7 @@ struct MoreOptionsSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Reset") { generate.resetOptions() }
+                    Button("Reset") { generate.resetOptions() }.disabled(generate.sequence.continuation != nil)
                 }
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
             }
@@ -92,6 +92,7 @@ private struct ClipSection: View {
             Section {
                 Toggle("Sound", isOn: Binding(get: { generate.draft.enableAudio },
                                               set: { generate.draft.preferredAudio = $0 }))
+                    .disabled(generate.sequence.continuation != nil)
             } header: { SectionHeader(String(localized: "Clip")) }
         }
     }

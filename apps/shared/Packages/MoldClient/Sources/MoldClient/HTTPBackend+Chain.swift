@@ -16,8 +16,32 @@ public extension HTTPBackend {
                            from: try await bytes(for: http), route: "/api/chain-jobs")
     }
 
+    func createChainJob(_ request: AuthoredChainRequest, operationId: String) async throws -> CreateChainJobResponse {
+        var http = try body("/api/chain-jobs", method: "POST", request.protectedForChainWire)
+        http.setValue(operationId, forHTTPHeaderField: "x-mold-operation-id")
+        return try decoded(CreateChainJobResponse.self, from: try await bytes(for: http), route: "/api/chain-jobs")
+    }
+
+    func validateChain(_ request: AuthoredChainRequest) async throws -> ChainValidationResponse {
+        let route = "/api/generate/chain/validate"
+        return try decoded(ChainValidationResponse.self,
+                           from: try await bytes(for: body(route, method: "POST", request.protectedForChainWire)), route: route)
+    }
+
+    func listChainJobs() async throws -> ChainJobListing { try await get("/api/chain-jobs") }
+
+    func chainJob(id: String, includeSourceMedia: Bool) async throws -> ChainJobDetail {
+        let path = "/api/chain-jobs/\(escaped(id))"
+        return try await get(path + (includeSourceMedia ? "?include_source_media=true" : ""))
+    }
+
     func chainJob(id: String) async throws -> ChainJobDetail {
         try await get("/api/chain-jobs/\(escaped(id))")
+    }
+
+    func cancelChainOperation(id: String, operationId: String) async throws {
+        try await send("/api/chain-jobs/\(escaped(id))/operations/\(escaped(operationId))/cancel",
+                       method: "POST", body: EmptyBody())
     }
 
     func cancelChainJob(id: String) async throws {
@@ -58,5 +82,25 @@ public extension HTTPBackend {
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+}
+
+private extension AuthoredChainRequest {
+    /// Server prompt normalization accepts shell-style escaped newlines. Double
+    /// literal backslashes once, matching the Rust SDK, without editing the draft.
+    var protectedForChainWire: Self {
+        var copy = self
+        for index in copy.stages.indices {
+            copy.stages[index].prompt = copy.stages[index].prompt.replacingOccurrences(of: "\\", with: "\\\\")
+            copy.stages[index].negativePrompt = copy.stages[index].negativePrompt?.replacingOccurrences(of: "\\", with: "\\\\")
+        }
+        copy.originalPrompt = copy.originalPrompt?.replacingOccurrences(of: "\\", with: "\\\\")
+        if let transform = copy.promptTransform {
+            copy.promptTransform = .init(operation: transform.operation,
+                rootPrompt: transform.rootPrompt?.replacingOccurrences(of: "\\", with: "\\\\"),
+                sourcePrompt: transform.sourcePrompt.replacingOccurrences(of: "\\", with: "\\\\"),
+                sourceKind: transform.sourceKind, task: transform.task, dimensions: transform.dimensions)
+        }
+        return copy
     }
 }

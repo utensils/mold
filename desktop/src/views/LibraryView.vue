@@ -2896,6 +2896,17 @@ onUnmounted(() => {
     gallery.query = searchInput.value;
   }
 });
+async function openContinuedVideo(value: {
+  filename: string;
+  owner: import("@studio/api/chainJobs").ChainOwner;
+}) {
+  lightboxOpen.value = false;
+  await gallery.refreshHost(value.owner.hostId);
+  await router.push({
+    path: "/library",
+    query: { print: value.filename, printHost: value.owner.hostId },
+  });
+}
 </script>
 
 <template>
@@ -3314,6 +3325,7 @@ onUnmounted(() => {
       @use-endpoint="useAsEndpoint(selectedEntry!, $event)"
       @use-retained-source="useRetainedSource($event, true)"
       @reuse="reuseSettings(selectedEntry!)"
+      @continue-published="openContinuedVideo"
       @rename="(title) => renamePrint(selectedEntry!, title)"
       @favorite="(value) => setFavorite([selectedEntry!], value)"
       @tags="(change) => applyTags([selectedEntry!], change)"

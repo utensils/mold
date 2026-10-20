@@ -319,7 +319,7 @@ black borders, `lanczos-resize` stretches.
 mold run flux-dev:q4 "a lighthouse at dusk" --image wide.png --fit crop-fill --width 1024 --height 1024
 ```
 
-A sequence of several clips is scripted through the CLI/API. LTX-2 uses a
+For several clips, use **Add clip** in the apps or a CLI/API script. Library **Continue video** makes the next separate linked part on the original machine. LTX-2 uses a
 latent motion tail; image-conditioned Wan and H3 FL2VA can continue from the
 last frame. Text-only Wan, legacy LTX-Video and H3 Ref2VA join independent
 clips. H3 sequences require an H3-enabled server. A complete script and job

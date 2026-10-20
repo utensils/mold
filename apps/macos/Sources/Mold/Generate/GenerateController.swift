@@ -6,6 +6,8 @@ import MoldClient
 @MainActor
 @Observable
 final class GenerateController {
+    let sequence = NativeSequenceSession(defaults: AppStorageSuite.defaults)
+
     /// Not `private`: `GenerateController+Run` reports a machine's cancel
     /// failure through it.
     let hosts: HostStore
@@ -16,6 +18,7 @@ final class GenerateController {
     private(set) var mediaRevisions: [RetainedSourceMedia.Field: Int] = [:]
     var draft = RenderDraft() {
         didSet {
+            sequence.hasVisibleReferences = !draft.media.generationReferences.isEmpty
             for field in RetainedSourceMedia.changedDraftFields(from: oldValue.media, to: draft.media) {
                 mediaRevisions[field, default: 0] += 1
             }
@@ -85,6 +88,12 @@ final class GenerateController {
         self.handoff = handoff
         self.probe = probe
         self.chain = chain
+        sequence.restoreSource = { [weak self] source, host in
+            self?.restoreSequenceRecipe(source, host: host)
+        }
+        sequence.restoreReferences = { [weak self] refs in
+            self?.draft.media.generationReferences = refs.map(AuthoringReference.canonical)
+        }
     }
 
     /// Adopts a model while KEEPING the draft that was just restored.
@@ -95,6 +104,7 @@ final class GenerateController {
     /// to this host (M8 decision 2): the model was adopted THERE, so "Use
     /// These Settings" must not leave the run pointed at Auto.
     func adopt(model: Model, on host: MoldHost.ID, keepingDraft: Bool, selectedRecipe: GenerationRecipe? = nil) {
+        if !model.makes.contains(.clip) { sequence.startFresh() }
         modelName = model.name
         modelFamily = model.family
         modelSupportsAudio = model.supportsAudio
@@ -161,6 +171,6 @@ final class GenerateController {
 
     /// Asks the host where this would run -- see `PlacementProbe`.
     func refreshPlacement(on host: MoldHost) {
-        probe.refresh(draft: draft, model: modelName, on: host, hosts: hosts)
+        probe.refresh(draft: sequence.probeDraft(draft), model: modelName, on: host, hosts: hosts)
     }
 }

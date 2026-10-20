@@ -10,17 +10,20 @@ struct OptionsControls: View {
     var body: some View {
         ShapeChip(resolution: recipe.resolution, short: false)
             .accessibilityIdentifier("options-shape")
+            .disabled(generate.sequence.continuation != nil)
         if recipe.steps.mode != .fixed {
             StepperChip(title: String(localized: "Steps"), value: generate.draft.steps,
                         range: recipe.steps.min ... recipe.steps.max) { generate.draft.steps = $0 }
                 .accessibilityIdentifier("options-steps")
         }
+        if generate.sequence.draft == nil {
         StepperChip(title: String(localized: "Batch"), value: generate.draft.batchSize,
                     range: 1 ... generate.referenceBatchLimit) {
             generate.draft.batchSize = $0
         }
         .accessibilityIdentifier("options-batch")
-        if let temporal = recipe.temporal {
+        } else { Text("1 joined video") }
+        if generate.sequence.draft == nil, let temporal = recipe.temporal {
             LengthChip(temporal: temporal)
                 .accessibilityIdentifier("options-length")
         }

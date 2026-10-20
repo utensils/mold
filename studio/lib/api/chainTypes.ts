@@ -1,3 +1,8 @@
+import type {
+  GenerationReference,
+  GenerationReferenceMetadata,
+} from "../generationReferences";
+import type { KeyframeConditionWire, KeyframeMetadata } from "./serverTypes";
 import type { OutputFormat } from "../generated/generationProfileV1";
 /**
  * Canonical chain / sequence wire types shared by every surface.
@@ -10,19 +15,23 @@ import type { OutputFormat } from "../generated/generationProfileV1";
  */
 
 /**
- * How one clip joins the next on the wire. Scene-by-scene authoring is retired
- * from every app, so nothing in a client picks between these any more — an
- * auto-chained long video is uniformly `smooth`. The union stays complete
- * because a scripted sequence (`mold run --script`, `POST /api/chain-jobs`)
- * still uses all three, and this module mirrors the Rust wire exactly.
+ * How one clip joins the next on the wire. The compact editor defaults to
+ * smooth; the API and CLI additionally expose explicit cuts and fades.
  */
 export type ChainTransition = "smooth" | "cut" | "fade";
+
+export interface ChainContinuation {
+  job_id: string;
+  finalize_take: number;
+}
 
 export interface ChainStageWire {
   prompt: string;
   frames: number;
-  /** Base64 PNG/JPEG for this clip's opening frame; stage 0 only today. */
+  /** Base64 PNG/JPEG for this clip's authored opening frame. */
   source_image?: string | null;
+  generation_references?: GenerationReference[] | null;
+  keyframes?: KeyframeConditionWire[] | null;
   negative_prompt?: string | null;
   seed_offset?: number | null;
   transition?: ChainTransition;
@@ -32,8 +41,19 @@ export interface ChainStageWire {
 
 export interface ChainRequestWire {
   model: string;
-  stages: ChainStageWire[];
+  stages?: ChainStageWire[];
+  continue_from?: ChainContinuation;
+  ephemeral?: boolean;
+  title?: string | null;
+  tags?: string[];
+  collection?: { id?: string; name?: string };
+  prompt?: string;
+  total_frames?: number;
+  clip_frames?: number;
+  source_image?: string | null;
+  placement?: import("./serverTypes").DevicePlacement | null;
   motion_tail_frames?: number;
+  source_fit?: import("../sourceFit").SourceFitPolicy | null;
   width: number;
   height: number;
   fps?: number;
@@ -42,9 +62,17 @@ export interface ChainRequestWire {
   guidance: number;
   strength?: number;
   /** Durable chain jobs currently accept only MP4. */
-  output_format?: "mp4";
+  output_format?: OutputFormat;
   enable_audio?: boolean | null;
   original_prompt?: string | null;
+  prompt_transform?: {
+    operation: "expand" | "remix";
+    root_prompt?: string;
+    source_prompt: string;
+    source_kind: import("./serverTypes").RemixSourceKind;
+    task: import("../expandTask").ExpandTask;
+    dimensions?: import("./serverTypes").RemixDimension[];
+  };
   batch_id?: string | null;
   batch_index?: number | null;
   batch_count?: number | null;
@@ -59,6 +87,8 @@ export interface ChainRequestWire {
  * seed as a decimal string (full-range u64), not the request's offset.
  */
 export interface ChainStageMetadata {
+  generation_references?: GenerationReferenceMetadata[];
+  keyframes?: KeyframeMetadata[];
   prompt: string;
   frames: number;
   transition: ChainTransition;
@@ -71,6 +101,7 @@ export interface ChainStageMetadata {
  * present for authored sequences and auto-chained One shots). The additive
  * `output_mode` field is authoritative for restoring the authoring surface. */
 export interface ChainOutputMetadata {
+  continue_from?: ChainContinuation;
   stage_count: number;
   motion_tail_frames: number;
   stages: ChainStageMetadata[];
@@ -78,15 +109,17 @@ export interface ChainOutputMetadata {
 
 /** `mold.chain.v1` TOML projection echoed by the server (`ChainJobDetail.script`). */
 export interface ChainScriptChain {
+  continue_from?: ChainContinuation;
   model: string;
   width: number;
   height: number;
   fps: number;
-  seed?: number | null;
+  seed?: number | string | null;
   steps: number;
   guidance: number;
   strength: number;
   motion_tail_frames: number;
+  source_fit?: import("../sourceFit").SourceFitPolicy | null;
   output_format: OutputFormat;
   enable_audio?: boolean | null;
 }

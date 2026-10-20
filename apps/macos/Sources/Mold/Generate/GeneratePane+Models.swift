@@ -23,6 +23,7 @@ extension GeneratePane {
     /// is gone from this machine simply does not match, and the first ready
     /// one is adopted instead.
     func adoptFirstReadyModel() {
+        guard !controller.sequence.restoringSource else { return }
         guard controller.modelName == nil, let host else { return }
         let ready = models.ready(on: host.id)
         if let restored = drafts.restoredModel ?? reuse.savedRecipe?.model,

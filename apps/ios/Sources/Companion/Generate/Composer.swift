@@ -84,18 +84,25 @@ struct Composer: View {
             if inline {
                 if size >= .xxLarge {
                     VStack(alignment: .leading, spacing: 12) {
-                        KindMenu()
-                        MachineMenu()
+                        KindMenu().disabled(generate.sequence.continuation != nil || generate.sequence.preparing)
+                        MachineMenu().disabled(generate.sequence.continuation != nil || generate.sequence.preparing)
                     }
                 } else {
                     HStack {
-                        KindMenu()
+                        KindMenu().disabled(generate.sequence.continuation != nil || generate.sequence.preparing)
                         Spacer(minLength: 8)
-                        MachineMenu()
+                        MachineMenu().disabled(generate.sequence.continuation != nil || generate.sequence.preparing)
                     }
                 }
             }
-            if generate.recipe?.capabilities.promptRequirement != .ignored {
+            if generate.sequence.draft != nil {
+                let temporal = generate.recipe?.temporal
+                let retainedFrames = generate.sequence.draft?.stages.first?.frames ?? 1
+                NativeSequenceEditor(session: generate.sequence, fps: generate.draft.fps ?? 24,
+                    frameRange: (generate.sequenceLimits?.authoring?.minFrames ?? temporal?.frames.min ?? retainedFrames) ... max(generate.sequenceLimits?.authoring?.minFrames ?? temporal?.frames.min ?? retainedFrames, min(temporal?.frames.max ?? retainedFrames, generate.sequenceLimits?.framesPerClipCap ?? temporal?.frames.max ?? retainedFrames)),
+                    frameStep: generate.sequenceLimits?.authoring?.frameStep ?? temporal?.frames.step ?? 1, maximumClips: generate.sequenceLimits?.maxStages ?? 16,
+                    carryMode: generate.sequenceLimits?.authoring?.carryMode)
+            } else if generate.recipe?.capabilities.promptRequirement != .ignored {
                 HStack(alignment: .top, spacing: 8) {
                     TextField("Prompt", text: $generate.draft.prompt,
                               prompt: Text(generate.kind == .clip ? "Describe a clip…" : "Describe a picture…")
@@ -121,6 +128,7 @@ struct Composer: View {
                 Text("This model works from a picture, not a description.")
                     .foregroundStyle(.secondaryText)
             }
+            if generate.sequence.draft == nil {
             Button {
                 historyHost = generate.target ?? hosts.preferredHost
             } label: {
@@ -130,10 +138,24 @@ struct Composer: View {
             }
                 .accessibilityIdentifier("prompt-history")
                 .disabled(generate.target == nil && hosts.preferredHost == nil)
-            ModelMenu()
-            PictureWells()
-            TypedReferenceWells()
-            BoundaryFrameWells()
+            }
+            if generate.kind == .clip, generate.sequence.draft == nil, generate.sequenceLimits?.supportsSequence == true {
+                Button("Add another clip", systemImage: "plus") {
+                    generate.sequence.begin(prompt: generate.draft.prompt,
+                        frames: generate.draft.frames ?? generate.sequenceLimits!.framesPerClipRecommended)
+                }.frame(minHeight: 44).accessibilityIdentifier("sequence-begin")
+            }
+            ModelMenu().disabled(generate.sequence.continuation != nil || generate.sequence.preparing)
+            if let notice = generate.sequence.message, generate.sequence.draft == nil {
+                Text(notice).font(.callout).fixedSize(horizontal: false, vertical: true)
+            }
+            if generate.sequence.draft != nil {
+                Text("Reference media applies to every clip. The opening image starts the video; the closing image ends it.")
+                    .font(.caption).foregroundStyle(.secondaryText)
+            }
+            PictureWells().disabled(generate.sequence.preparing || generate.sequence.continuation != nil)
+            TypedReferenceWells().disabled(generate.sequence.preparing)
+            BoundaryFrameWells().disabled(generate.sequence.preparing)
             if let notice = generate.retainedReuse.notice {
                 Label(notice, systemImage: "photo.on.rectangle")
                     .font(.subheadline)
@@ -193,17 +215,17 @@ struct GenerateRow: View {
         let layout = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
                              : AnyLayout(HStackLayout(spacing: 12))
         layout {
-            Text(estimate ?? " ").monospacedDigit().foregroundStyle(.secondaryText)
-                .accessibilityHidden(estimate == nil)
+            Text(generate.sequence.draft == nil ? (estimate ?? " ") : " ").monospacedDigit().foregroundStyle(.secondaryText)
+                .accessibilityHidden(estimate == nil || generate.sequence.draft != nil)
             if !stacked { Spacer(minLength: 0) }
             Button { if !promptEditorPresented { generate.generate() } } label: {
-                Label("Generate", systemImage: "wand.and.sparkles")
+                Label(generate.sequence.draft == nil ? "Generate" : "Generate video", systemImage: "wand.and.sparkles")
                     .frame(maxWidth: stacked ? .infinity : nil)
             }
             .prominentAction()
             .controlSize(.large)
             .keyboardShortcut(.return, modifiers: .command)
-            .disabled(generate.blocker != nil || promptEditorPresented)
+            .disabled(generate.blocker != nil || promptEditorPresented || generate.sequence.preparing)
             .accessibilityIdentifier("submit-generation")
             .accessibilityShowsLargeContentViewer()
             .sensoryFeedback(.impact(weight: .light), trigger: generate.queued.count + (generate.run.isBusy ? 1 : 0))
@@ -222,6 +244,7 @@ struct ChipRow: View {
         HStack(spacing: 8) {
             if let recipe = generate.recipe {
                 ShapeChip(resolution: recipe.resolution, short: style == .short)
+                    .disabled(generate.sequence.continuation != nil)
                 if recipe.steps.mode != .fixed {
                     StepperChip(title: String(localized: "Steps"), value: generate.draft.steps,
                                 range: recipe.steps.min ... recipe.steps.max) { generate.draft.steps = $0 }
@@ -232,7 +255,7 @@ struct ChipRow: View {
                         generate.draft.batchSize = $0
                     }
                 }
-                if let temporal = recipe.temporal {
+                if generate.sequence.draft == nil, let temporal = recipe.temporal {
                     LengthChip(temporal: temporal)
                 }
             }

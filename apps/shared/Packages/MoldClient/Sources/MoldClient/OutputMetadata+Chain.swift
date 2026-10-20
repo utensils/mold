@@ -8,10 +8,10 @@ import Foundation
 
 /// How a stitched clip was split (`chain.rs:66-70`).
 ///
-/// **A print made by a sequence is provenance, not a door back**: this is
-/// what makes the first stage's prompt findable, and it is never an
-/// authoring surface.
+/// Reuse restores the first prompt as an ordinary render. Explicit Continue
+/// separately verifies its durable source job and latest take on the holding host.
 public struct ChainProvenance: Codable, Hashable, Sendable {
+    public let continueFrom: ChainContinuation?
     public let stageCount: Int?
     public let motionTailFrames: Int?
     public let stages: [ChainStageProvenance]?
@@ -25,6 +25,10 @@ public struct ChainStageProvenance: Codable, Hashable, Sendable {
     public let frames: Int?
     public let transition: String?
     public let seed: String?
+    public let fadeFrames: Int?
+    public let loras: [ChainLora]?
+    public let generationReferences: [ReferenceProvenance]?
+    public let keyframes: [KeyframeProvenance]?
 }
 
 /// One ordered reference, redacted: display-safe labels, digests and probed

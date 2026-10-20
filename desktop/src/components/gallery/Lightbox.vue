@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import VideoClips from "@studio/components/VideoClips.vue";
+import { currentTarget } from "../../lib/api/client";
 import {
   SOURCE_ATTACHMENT_CHOICES,
   type SourceAttachmentIntent,
@@ -151,6 +153,9 @@ const props = withDefaults(
   },
 );
 const emit = defineEmits<{
+  "continue-published": [
+    value: { filename: string; owner: import("@studio/api/chainJobs").ChainOwner },
+  ];
   viewed: [];
   close: [];
   prev: [];
@@ -655,6 +660,18 @@ async function performVideoExport(options: VideoExportOptions) {
     exportBusy.value = false;
   }
 }
+const clipsOwner = computed(() => {
+  try {
+    return {
+      hostId: props.cacheKey ?? "local",
+      label: props.hostLabel ?? "This device",
+      instanceId: props.instanceId,
+      target: props.target ?? currentTarget(),
+    };
+  } catch {
+    return null;
+  }
+});
 </script>
 
 <template>
@@ -719,6 +736,12 @@ async function performVideoExport(options: VideoExportOptions) {
         <Icon name="reuse" :size="13" />
         Use these settings
       </button>
+      <VideoClips
+        v-if="video && !fromTrash && item.metadata.chain_job_id"
+        :source="{ jobId: item.metadata.chain_job_id, filename: item.filename }"
+        :owner="clipsOwner"
+        @published="emit('continue-published', $event)"
+      />
       <VideoSoundToggle v-if="video" />
       <button
         ref="closeBtn"

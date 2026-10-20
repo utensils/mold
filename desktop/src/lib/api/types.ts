@@ -693,88 +693,22 @@ export interface ConfigProfiles {
 
 // ── Chains (mold.chain.v1 + durable chain jobs) ────────────────────────────
 
-/** Boundary style between the previous stage and this one. */
-export type TransitionMode = "smooth" | "cut" | "fade";
-
-/** One rendered clip in a chain (mirrors mold-core `ChainStage`). */
-export interface ChainStage {
-  prompt: string;
-  frames: number;
-  /** Starting image, base64 (no data-URI prefix); v1 only honors it on stage 0. */
-  source_image?: string | null;
-  negative_prompt?: string | null;
-  seed_offset?: number | null;
-  transition?: TransitionMode;
-  /** Crossfade length when `transition === "fade"`. */
-  fade_frames?: number | null;
-}
-
-/**
- * Canonical chain request posted to `POST /api/chain-jobs` (mirrors mold-core
- * `ChainRequest`, canonical form only — note the key is `stages`).
- */
-export interface ChainRequest {
-  model: string;
-  stages: ChainStage[];
-  motion_tail_frames?: number;
-  width: number;
-  height: number;
-  fps?: number;
-  seed?: number | null;
-  steps: number;
-  guidance: number;
-  strength?: number;
-  output_format?: OutputFormat;
-  enable_audio?: boolean | null;
-  original_prompt?: string | null;
-  batch_id?: string | null;
-  batch_index?: number | null;
-  batch_count?: number | null;
-  output_mode?: "one-shot" | "sequence" | null;
-  placement?: DevicePlacement | null;
-  /** Title for the STITCHED print (mold-core `ChainRequest.title`). An
-   * intermediate clip is a working artifact inside the job dir and never
-   * reaches the gallery, so filing applies to the finished timeline only. */
-  title?: string;
-  /** Creation-time tags for the stitched print. */
-  tags?: string[];
-  /** Creation-time collection for the stitched print, by name. */
-  collection?: { id?: string; name?: string };
-}
-
-/**
- * Auto-expand request accepted by `POST /api/generate/chain/stream`. The
- * server expands one prompt into the canonical `stages` array using the
- * requested total/clip frame budgets.
- */
-export interface AutoChainRequest {
-  model: string;
+export type {
+  ChainTransition as TransitionMode,
+  ChainStageWire as ChainStage,
+} from "@studio/lib/api/chainTypes";
+export type ChainRequest = import("@studio/lib/api/chainTypes").ChainRequestWire & {
+  stages: import("@studio/lib/api/chainTypes").ChainStageWire[];
+};
+export type AutoChainRequest = Omit<
+  import("@studio/lib/api/chainTypes").ChainRequestWire,
+  "stages"
+> & {
   prompt: string;
   total_frames: number;
   clip_frames: number;
   motion_tail_frames: number;
-  width: number;
-  height: number;
-  fps?: number;
-  seed?: number | null;
-  steps: number;
-  guidance: number;
-  strength?: number;
-  output_format?: OutputFormat;
-  /** Starting image for the first generated clip, base64 without a data URI. */
-  source_image?: string | null;
-  enable_audio?: boolean | null;
-  original_prompt?: string | null;
-  batch_id?: string | null;
-  batch_index?: number | null;
-  batch_count?: number | null;
-  output_mode?: "one-shot" | "sequence" | null;
-  /** A stitched long video is still ONE print, so it carries the same title
-   * and creation-time filing an unstitched one-shot would. */
-  title?: string;
-  tags?: string[];
-  collection?: { id?: string; name?: string };
-}
+};
 
 export type {
   ChainJobDetail,

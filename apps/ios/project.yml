@@ -47,6 +47,7 @@ targets:
     platform: iOS
     sources:
       - path: Sources/Companion
+      - path: ../shared/NativeSequence
       - path: Sources/Shared
     dependencies:
       - package: MoldClient

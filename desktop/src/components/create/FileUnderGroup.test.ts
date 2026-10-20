@@ -29,7 +29,7 @@ function mountGroup(
     model: string;
     extension: string;
     batchSize: number;
-    outputKind: "print" | "sequence";
+    showFilenamePreview: boolean;
   }> = {},
 ) {
   return mount(FileUnderGroup, {
@@ -332,6 +332,10 @@ describe("FileUnderGroup — collection", () => {
 });
 
 describe("FileUnderGroup — filename preview", () => {
+  it("omits the ordinary filename prediction for joined clips", () => {
+    const wrapper = mountGroup({ showFilenamePreview: false });
+    expect(wrapper.find("[data-test='file-under-filename']").exists()).toBe(false);
+  });
   it("previews the gallery grammar with the title slug", () => {
     const wrapper = mountGroup();
     const line = wrapper.get("[data-test='file-under-filename']").text();

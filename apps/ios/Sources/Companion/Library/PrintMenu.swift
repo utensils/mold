@@ -49,6 +49,12 @@ struct PrintMenu: View {
                     Label("Use These Settings", systemImage: "arrow.uturn.left.circle")
                 }
             }
+            if single, let entry = entries.first, entry.print.kind == .clip,
+               entry.print.metadata.chainJobId != nil {
+                Button { router.continueVideo(entry) } label: {
+                    Label("Continue video…", systemImage: "film.stack")
+                }
+            }
             if canOrganize {
                 Button { library.apply(.favorite(!allFavourite), to: entries) } label: {
                     Label(allFavourite ? "Unfavourite" : "Favourite", systemImage: allFavourite ? "star.slash" : "star")

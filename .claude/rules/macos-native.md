@@ -163,8 +163,7 @@ membership. Read-only Job Details and failure diagnostics remain accessible.
 Displayed ephemeral generation chains use the chain endpoints, their own
 `can_cancel` authority and paused Resume, independently of singleton cooperative
 cancellation. Re-read status and activity before dispatch and refresh refusals
-before releasing the exact host/kind/job reservation. Durable authored sequences
-remain unsupported here. Existing framewise upscale controls require a connected
+before releasing the exact host/kind/job reservation. Durable authored videos use the shared NativeSequence session for Add clip, parent progress, admission recovery and original-owner Library Continue video. Existing framewise upscale controls require a connected
 host, known applicable state and current rendered job identity; reserve the exact
 print/job key until the authoritative transition response reconciles its state.
 
@@ -371,3 +370,5 @@ there is no hidden privacy graph; a merge/visibility/host change uses a full
 projection. During Library Sync, bound full unread projection to one leading
 one-second update, with immediate view/visit, sync completion and quit flushes.
 Never mark hidden, unvisited or later-arriving prints read through this batching.
+
+**Multi-clip video.** In Short clip, choose **Add another clip** to enter ordered prompts and lengths, then **Generate video**. The app validates the draft automatically before submitting it. Move or remove rows without opening a separate editor. Library **Continue video** makes the next separate linked MP4 from the latest completed authored take on its original machine. Ordinary one-prompt generation and Reuse settings remain available. Shared wire/draft authority lives in MoldClient; SwiftUI session/editor composition lives in `apps/shared/NativeSequence`. Retained reference bytes stay in memory. Recovered drafts with missing references require explicit restoration or removal before publishing. Follow `chain-sequences.md` for owner, latest-take and operation recovery fences.

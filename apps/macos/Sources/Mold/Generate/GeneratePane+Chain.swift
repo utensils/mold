@@ -10,12 +10,21 @@ extension GeneratePane {
         let host: MoldHost.ID?
         let model: String?
         let fps: Int?
+        let route: MoldHost?
+        let instance: String?
+        let revision: String?
+        let reachable: Bool
+        let restoringSource: Bool
     }
 
     var chainLimitsKey: ChainLimitsKey {
         ChainLimitsKey(host: host?.id,
                        model: recipe?.temporal == nil ? nil : selectedModel?.name,
-                       fps: controller.draft.fps)
+                       fps: controller.draft.fps, route: host,
+                       instance: host.flatMap { hosts.instanceID(of: $0.id) },
+                       revision: host.flatMap { if case let .up(status) = hosts.reachability[$0.id] { status.gitSha } else { nil } },
+                       reachable: host.map(hosts.isUp) ?? false,
+                       restoringSource: controller.sequence.restoringSource)
     }
 
     /// This machine's answer for the chosen model. `nil` while it is in the
@@ -29,6 +38,7 @@ extension GeneratePane {
     func refreshChainLimits() {
         guard let host, let model = chainLimitsKey.model,
               let backend = hosts.backend(for: host.id) else { return }
+        chainLimits.invalidate(host: host.id)
         chainLimits.refresh(host: host.id, model: model,
                             fps: controller.draft.fps, backend: backend)
     }

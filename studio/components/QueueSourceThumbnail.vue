@@ -16,8 +16,9 @@ const props = withDefaults(
     jobId: string;
     online?: boolean | undefined;
     detailed?: boolean | undefined;
+    eligible?: boolean | undefined;
   }>(),
-  { online: true },
+  { online: true, eligible: true },
 );
 const failed = ref(false);
 const retry = ref(0);
@@ -50,13 +51,15 @@ watch(
     () => props.instanceId,
     () => props.jobId,
     () => props.online,
+    () => props.eligible,
     () => props.detailed,
     () => retry.value,
   ],
   async (_, __, onCleanup) => {
     release();
     const target = props.target;
-    if (!target || !props.jobId || props.online === false) return;
+    if (!target || !props.jobId || props.online === false || !props.eligible)
+      return;
     const request = new AbortController();
     controller = request;
     onCleanup(() => request.abort());

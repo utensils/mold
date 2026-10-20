@@ -277,6 +277,9 @@ const active = computed(
           "
         />
         <QueueSourceThumbnail
+          :eligible="
+            row.shared.kind === 'generation' && row.shared.execution !== 'chain'
+          "
           :target="sourceTarget(row.shared.hostId)"
           :job-id="row.shared.id"
           :instance-id="row.shared.instanceId"
@@ -340,6 +343,7 @@ const active = computed(
           @keydown.space.self.prevent="emit('open', row.print)"
         >
           <QueueSourceThumbnail
+            :eligible="!row.print.chain"
             :target="sourceTarget(row.print.hostId ?? ORIGIN_HOST_ID)"
             :job-id="row.print.serverId ?? ''"
             :instance-id="
@@ -422,6 +426,7 @@ const active = computed(
 
       <div v-else class="activity__queued">
         <QueueSourceThumbnail
+          :eligible="!row.print.chain"
           :target="sourceTarget(row.print.hostId ?? ORIGIN_HOST_ID)"
           :job-id="row.print.serverId ?? ''"
           :instance-id="

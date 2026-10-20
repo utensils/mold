@@ -47,6 +47,131 @@ fn apply_carry(request: &mut GenerateRequest, carry: Option<&ChainTail>) -> anyh
     Ok(())
 }
 
+/// Only the one durable child admitted for this exact stage attempt may be
+/// hidden after retention. Titles and tags never confer ownership.
+fn require_owned_child(
+    detail: &mold_db::generation_batches::DurableGenerationBatchDetail,
+    batch_id: &str,
+    client_id: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        detail.batch.id == batch_id && detail.batch.client_batch_id == client_id,
+        "H3 child batch differs from the owned stage attempt"
+    );
+    anyhow::ensure!(
+        detail.children.len() == 1
+            && detail.children[0].batch_id == batch_id
+            && detail.children[0].batch_index == 1,
+        "H3 stage must own exactly one child"
+    );
+    Ok(())
+}
+
+/// Caller holds the gallery publication writer for the entire copy-to-Trash
+/// handoff. Fail closed before Trash; a Trash failure only leaves a live copy.
+fn retain_and_trash_child(
+    output: &std::path::Path,
+    filename: &str,
+    artifact: &std::path::Path,
+    db: &mold_db::MetadataDb,
+    gate: &crate::batch_transaction::GalleryPublicationGate,
+    events: &crate::events::EventBroadcaster,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !filename.is_empty()
+            && filename != "."
+            && filename != ".."
+            && !filename.contains('/')
+            && !filename.contains('\\'),
+        "invalid H3 child gallery filename"
+    );
+    match std::fs::symlink_metadata(artifact) {
+        Ok(_) => {
+            let existing = crate::batch_transaction::open_regular_file_no_follow(artifact)?;
+            anyhow::ensure!(
+                existing.metadata()?.len() > 0,
+                "empty retained H3 child artifact"
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = artifact
+                .parent()
+                .context("H3 artifact has no parent directory")?;
+            std::fs::create_dir_all(parent)?;
+            // Persist the new retention-directory entry before hiding its source.
+            if let Some(ancestor) = parent.parent() {
+                crate::dir_sync::sync_directory(ancestor)?;
+            }
+            let source = crate::gallery_trash::resolve_gallery_media_source(output, filename);
+            let mut source = crate::batch_transaction::open_regular_file_no_follow(&source)?;
+            let temporary = parent.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
+            let retained = (|| -> anyhow::Result<()> {
+                let mut options = std::fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+                let mut staged = options.open(&temporary)?;
+                anyhow::ensure!(
+                    std::io::copy(&mut source, &mut staged)? > 0,
+                    "empty H3 child output"
+                );
+                staged.sync_all()?;
+                std::fs::rename(&temporary, artifact)?;
+                crate::dir_sync::sync_directory(parent)?;
+                Ok(())
+            })();
+            let _ = std::fs::remove_file(&temporary);
+            retained?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    crate::gallery_trash::trash_published_outputs_blocking(
+        output,
+        &crate::queue::SavedOutputNames {
+            output: Some(filename.into()),
+            original: None,
+        },
+        Some(db),
+        gate,
+        Some(events),
+    );
+    Ok(())
+}
+
+/// Existing client IDs are public and may be preoccupied. Always pass the
+/// canonical request through ordinary admission's authenticated receipt check
+/// before reattaching, cancelling, or hiding an existing child.
+async fn verify_or_admit_child(
+    state: &AppState,
+    client_id: &str,
+    request: &GenerateRequest,
+) -> anyhow::Result<String> {
+    Ok(state
+        .queue_journal
+        .queue_media_admission()
+        .context("H3 chain requires durable generation admission")?
+        .admit_batch(
+            state,
+            None,
+            Some(crate::reference_uploads::ReferenceIdentity::AuthDisabled {
+                instance_id: state.instance_id.to_string(),
+            }),
+            GenerationBatchAdmissionRequest {
+                client_batch_id: client_id.into(),
+                requests: vec![request.clone()],
+            },
+            None,
+            SseCompletionPayload::MetadataOnly,
+        )
+        .await
+        .map_err(|error| anyhow!(error.error))?
+        .status
+        .id)
+}
+
 /// Reattach completed children after a crash. An authored retake/amend has a
 /// different key; failed/cancelled children get a new retry only on a later
 /// parent invocation, never an automatic retry in this polling loop.
@@ -91,6 +216,21 @@ pub(crate) async fn render(
             .queue_journal
             .durable_generation_batch_by_client(&client_id)
             .map_err(anyhow::Error::msg)?;
+        let existing = if existing.is_some() {
+            // Admission verifies the expected request's owner-bound receipt.
+            // If GC raced the lookup, the returned batch is a newly admitted,
+            // owned child and must be followed rather than orphaned.
+            let verified = verify_or_admit_child(&state, &client_id, &request).await?;
+            let detail = state
+                .queue_journal
+                .durable_generation_batch(&verified)
+                .map_err(anyhow::Error::msg)?
+                .context("verified H3 child batch disappeared")?;
+            require_owned_child(&detail, &verified, &client_id)?;
+            Some(detail)
+        } else {
+            None
+        };
         match existing {
             Some(detail)
                 if detail.children.first().is_some_and(|child| {
@@ -114,30 +254,11 @@ pub(crate) async fn render(
             device_ordinal: None,
         });
     }
+    let expected_client_id = existing.0.clone();
     let batch_id = if let Some(detail) = existing.1 {
         detail.batch.id
     } else {
-        state
-            .queue_journal
-            .queue_media_admission()
-            .context("H3 chain requires durable generation admission")?
-            .admit_batch(
-                &state,
-                None,
-                Some(crate::reference_uploads::ReferenceIdentity::AuthDisabled {
-                    instance_id: state.instance_id.to_string(),
-                }),
-                GenerationBatchAdmissionRequest {
-                    client_batch_id: existing.0,
-                    requests: vec![request.clone()],
-                },
-                None,
-                SseCompletionPayload::MetadataOnly,
-            )
-            .await
-            .map_err(|error| anyhow!(error.error))?
-            .status
-            .id
+        verify_or_admit_child(&state, &expected_client_id, &request).await?
     };
     let mut child_activity_recorded = false;
     let outcome = async {
@@ -154,6 +275,7 @@ pub(crate) async fn render(
                 .durable_generation_batch(&batch_id)
                 .map_err(anyhow::Error::msg)?
                 .context("H3 chain child batch disappeared")?;
+            require_owned_child(&detail, &batch_id, &expected_client_id)?;
             let status = crate::routes::generation_batch_status(&state.instance_id, detail);
             let child = status
                 .children
@@ -238,35 +360,17 @@ pub(crate) async fn render(
                     let job = mold_db::chain_jobs::get_job(db, job_id)?
                         .context("H3 chain disappeared")?;
                     let retained_dir = job.job_dir.join("h3-children");
-                    std::fs::create_dir_all(&retained_dir)?;
                     let artifact = retained_dir.join(format!("{batch_id}.mp4"));
-                    if !artifact.exists() {
-                        // Preserve the delivered child before decoding or allowing
-                        // its gallery print to be trashed. A crash may then safely
-                        // reattach without rerendering the completed child.
-                        let _reader = state.gallery_publication_gate.read().await;
-                        let bytes = crate::batch_transaction::read_regular_file_no_follow(
-                            &output.join(filename),
+                    {
+                        let _writer = state.gallery_publication_gate.write().await;
+                        retain_and_trash_child(
+                            &output,
+                            filename,
+                            &artifact,
+                            db,
+                            &state.gallery_publication_gate,
+                            &state.events,
                         )?;
-                        let temporary = retained_dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
-                        let retained = (|| -> anyhow::Result<()> {
-                            use std::io::Write;
-                            let mut options = std::fs::OpenOptions::new();
-                            options.write(true).create_new(true);
-                            #[cfg(unix)]
-                            {
-                                use std::os::unix::fs::OpenOptionsExt;
-                                options.mode(0o600);
-                            }
-                            let mut staged = options.open(&temporary)?;
-                            staged.write_all(&bytes)?;
-                            staged.sync_all()?;
-                            std::fs::rename(&temporary, &artifact)?;
-                            crate::dir_sync::sync_directory(&retained_dir)?;
-                            Ok(())
-                        })();
-                        let _ = std::fs::remove_file(&temporary);
-                        retained?;
                     }
                     let (probe, frames) =
                         mold_inference::ltx2::media::decode_video_frames_from_path(&artifact)?;
@@ -417,3 +521,7 @@ mod tests {
         assert!(apply_carry(&mut request, Some(&carry)).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "chain_h3_retention_tests.rs"]
+mod retention_tests;

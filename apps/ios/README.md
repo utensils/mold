@@ -456,7 +456,6 @@ of either provider's index. Older servers retain their provider search behavior.
 
 **Batch** in More Options applies to pictures and clips. Switching kind preserves the count; choose **1** to disable batching. A grouped Queue row exposes **Cancel Batch** even while collapsed. It cancels each eligible live child on its owning machine, preserves completed outputs, and respects older machines that cannot stop a running job.
 
-
 Library print/selection/viewer menus offer **Copy File Name** (one filename per line for
 selections), and Info file values are selectable. Source cards/details show the owning machine,
 selectable `source:<print>#<member>` and optional SHA-256. **Source actions** offers Copy Source ID,
@@ -471,7 +470,6 @@ Print menus offer explicit first/last frame reuse for supported recipes. LTX int
 keeps interior anchors and carries an existing first-frame source into keyframe 0 when a last
 frame is added. Before an older machine supplies a recipe, **Use as source image** remains
 available; an explicit unsupported recipe still controls which actions are offered.
-
 
 Fresh MiniMax H3 typed video references can also use MOV/HEVC, M4V, WebM and Matroska when the keyed host advertises video normalization. The file picker preserves the bounded original bytes; **Preparing video on <machine>** probes or converts them on that machine before pricing and admission. Auto chooses an eligible connected host; an explicit machine choice stays fixed. Exact canonical facts and receipts must finalize before generating. Changing the host route, key, pairing or server instance cancels preparation and releases its session. Drafts keep original files, never spent upload handles. Older/keyless hosts retain the existing H.264 MP4 path and explain unsupported files. A malformed advertised normalization V1 contract surfaces a specific error when importing or submitting fresh video while preserving the host’s other capabilities. Absent, unversioned or unsupported future protocols follow the compatible canonical path. This does not add normalization for scalar source/continuation-video inputs or archived replay.
 
@@ -501,3 +499,9 @@ are versioned by the print and machine authority and excluded from device backup
 Source-free prints omit the Source Media details section after one inventory check. Empty answers are reused until that owner changes; unrelated sync activity does not restart the check or blank an existing preview.
 
 Source Media uses the Library’s justified, aspect-preserving rows and two-point seams. Badges stay inside the image. Source ratios are learned from oriented thumbnails in short batches and retained separately from decoded pixels. A synchronous warm-preview cache prevents placeholder flashes when resizing moves a tile between rows. Display-only sync edits do not cancel source scans; legitimate revalidation keeps same-authority pixels visible. Transient preview misses retry a bounded three times without requiring a scroll.
+
+## Multi-clip video
+
+In Short clip, choose **Add another clip** to enter ordered prompts and lengths, then **Generate video**. The app validates the draft automatically before submitting it. Move or remove rows without opening a separate editor. Library **Continue video** makes the next separate linked MP4 from the latest completed authored take on its original machine. Ordinary one-prompt generation and Reuse settings remain available.
+
+The editor uses the selected host’s frame grid and validates delivered duration before admission. Reconnect recovers the same operation; Queue shows parent progress and supports applicable resume/cancel actions. Reference restoration is explicit after relaunch; drafts do not persist input bytes or credentials.

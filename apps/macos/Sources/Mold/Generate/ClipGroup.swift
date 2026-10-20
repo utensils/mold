@@ -9,12 +9,13 @@ import SwiftUI
 /// `extend`, say -- still has something to show, which is why `isShown`
 /// below reads every row rather than just `supportsAudio`.
 struct ClipGroup: View {
+    @Environment(GenerateController.self) private var controller
     let recipe: GenerationRecipe?
     @Binding var draft: RenderDraft
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            soundSection
+            soundSection.disabled(controller.sequence.continuation != nil)
             keyframesSection
             extendSection
             audioFileSection

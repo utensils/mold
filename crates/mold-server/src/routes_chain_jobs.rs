@@ -180,6 +180,14 @@ pub async fn create_chain_job(
             }),
         ));
     }
+    // Audio-only build refusals need no installed weights, but executable
+    // artifact policy must retain priority over the feature diagnostic.
+    #[cfg(not(feature = "mp4"))]
+    if req.enable_audio == Some(true) {
+        let config = state.config.read().await;
+        crate::routes_chain::require_chain_artifact_activation(&config, &req, None, None)?;
+        crate::routes_chain::validate_chain_build_features(&req)?;
+    }
     // The successor has no row. Before waiting for its source lock, prove that
     // source already exists. Otherwise concurrent A -> B / B -> A creation
     // could each hold one new target's lock and wait forever for the other.

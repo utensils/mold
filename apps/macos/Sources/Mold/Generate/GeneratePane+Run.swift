@@ -37,6 +37,25 @@ extension GeneratePane {
         // queued, the way the web does (`licenseRequirements`); accepting
         // runs this press again (`GeneratePane+Licence.swift`).
         if !licenceSettled, holdsForLicence(on: host, accepted: accepted) { return }
+        if controller.sequence.draft != nil {
+            // The licence probe belongs to this press. Authored jobs have their
+            // own preparation/status, so release the ordinary button's spinner.
+            controller.submissionFeedback.dismiss()
+            guard let model = controller.modelName else { return }
+            let captured = host
+            let capturedInstallation = hosts.instanceID(of: host.id)
+            let snapshot = controller.draft
+            let capturedRecipe = recipe
+            let base = NativeSequenceSession.baseRequest(snapshot, model: model,
+                maxIdentityPhotos: hosts.capabilities[host.id]?.maxIdentityPhotos ?? 0)
+            controller.sequence.submit(base: base, host: host, installation: capturedInstallation,
+                backend: hosts.backend(for: host), current: { hosts.host(captured.id) == captured && hosts.instanceID(of: captured.id) == capturedInstallation }, prepare: {
+                    let fitted = try await snapshot.fittingSource(recipe: capturedRecipe)
+                    return NativeSequenceSession.baseRequest(fitted, model: model,
+                        maxIdentityPhotos: hosts.capabilities[host.id]?.maxIdentityPhotos ?? 0)
+                })
+            return
+        }
         let routing = recipe.flatMap {
             ClipRouting.resolve(recipe: $0, model: selectedModel, draft: controller.draft,
                                 limits: advertisedChainLimits)

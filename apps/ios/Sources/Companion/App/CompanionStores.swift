@@ -82,6 +82,7 @@ final class CompanionStores {
         guard isForeground else { return }
         hosts.startWatching()
         generate.resumeFollowing()
+        generate.recoverSequences()
         async let library: Void = library.reload()
         async let queue: Void = queue.reload()
         async let models: Void = models.resume()
@@ -132,6 +133,7 @@ final class CompanionStores {
     }
 
     private func pauseStreams() {
+        generate.sequence.suspend()
         hosts.stopWatching()
         models.stop()
         generate.suspendFollowing()

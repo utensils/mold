@@ -11,6 +11,7 @@ import SwiftUI
 /// what each control may be and this renders that answer -- which is why a
 /// model added to mold tomorrow gets correct controls with no change here.
 struct ControlsRow: View {
+    @Environment(GenerateController.self) private var controller
     let recipe: GenerationRecipe
     /// Only the clip-length ceiling reads it: a wan tier's single-clip size is
     /// a question about the CHECKPOINT, not about the recipe (`ClipLengthBounds`).
@@ -24,7 +25,7 @@ struct ControlsRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             controls
-            if let note = routing?.note {
+            if controller.sequence.draft == nil, let note = routing?.note {
                 Text(note).font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -40,7 +41,7 @@ struct ControlsRow: View {
         WrappingHStack(horizontalSpacing: 18, verticalSpacing: 10) {
             ControlLabel("Machine") { MachineControl() }
             shapeControl
-            if let temporal = recipe.temporal, let routing {
+            if controller.sequence.draft == nil, let temporal = recipe.temporal, let routing {
                 ControlLabel("Length") {
                     LengthControl(temporal: temporal, bounds: routing.bounds, draft: $draft)
                 }
@@ -73,7 +74,9 @@ struct ControlsRow: View {
                 }
             }
             ControlLabel("Seed", allowsMultipleRows: true) { SeedControl(draft: $draft) }
-            ControlLabel("Batch") { BatchControl(maximum: maxBatch, draft: $draft) }
+            if controller.sequence.draft == nil {
+                ControlLabel("Batch") { BatchControl(maximum: maxBatch, draft: $draft) }
+            } else { Text("1 joined video").font(.caption).foregroundStyle(.secondary) }
         }
     }
 

@@ -14,6 +14,19 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 describe("retained source thumbnail lifetime", () => {
+  it("does not probe ordinary queue inputs for a known chain parent", async () => {
+    mocks.inputs.mockClear();
+    const view = mount(QueueSourceThumbnail, {
+      props: {
+        target: { baseUrl: "http://machine", apiKey: null },
+        jobId: "chain",
+        eligible: false,
+      },
+    });
+    await flushPromises();
+    expect(mocks.inputs).not.toHaveBeenCalled();
+    view.unmount();
+  });
   it("keeps the image and pending request across equivalent polling targets", async () => {
     mocks.fetch.mockClear();
     let finish!: (blob: Blob) => void;

@@ -15,7 +15,7 @@ extension LibraryPane {
         // and Trash act on the picture in the window (`LibraryShowing.inspected`).
         let entries = showing.inspected(viewing: viewing)
         let actions = self.actions
-        return LibrarySelection(
+        var selection = LibrarySelection(
             targets: entries.map(\.id),
             count: entries.count,
             allFavorite: !entries.isEmpty && entries.allSatisfy(\.isFavorite),
@@ -47,6 +47,9 @@ extension LibraryPane {
             copyDestinations: actions.copyDestinations(for: entries, scope: navigation.scope),
             copyTo: { host in actions.copy(entries, to: host) }
         )
+        selection.canContinueVideo = entries.count == 1 && entries[0].print.kind == .clip
+            && entries[0].print.metadata.chainJobId != nil
+        return selection
     }
 
     /// The machines a file could be imported into, and the door to do it.

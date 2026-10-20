@@ -175,10 +175,8 @@ only past the trained 2048px span; `off` past that span is refused. See
 
 Direct a video scene by scene with a TOML script. Each prompt becomes a stage; each boundary has a `transition` (`smooth`, `cut`, or `fade`).
 
-::: tip Scripts are the only way to direct scenes
-Scene-by-scene authoring lives in the CLI and the HTTP API. The apps (web,
-desktop, iPhone) make one clip at a time from one prompt: set the length you
-want and the host chains and stitches the clips for you.
+::: tip Add clips in the apps
+In browser and Tauri apps, choose **Add clip** in Short clip, enter ordered prompts and lengths, then **Check length** and **Make video**. Native macOS and iOS use **Add another clip** and **Generate video**, with validation performed automatically before submission. Move or remove rows without opening a separate editor. Library **Continue video** makes the next separate linked MP4 from the latest completed authored take on its original machine. Ordinary one-prompt generation and Reuse settings remain available.
 :::
 
 ### Canonical form
@@ -318,14 +316,9 @@ mold run --script ref-chain.toml --host HOST --output ref-chain.mp4
 
 ### Longer clips in the apps
 
-Web, desktop, and iPhone have no scene composer. Create makes one clip from one
-prompt, and the only length control is the clip's own duration. Ask for more
-frames than the checkpoint renders in a single pass and the host splits the work
-into clips on its own, carries the motion tail across each seam, and stitches
-the result — you get one video and one Library entry, and the progress readout
-names the clip it is on. Text-only Wan refuses automatic splitting, and legacy
-LTX-Video remains one render up to its own ceiling. H3 scripted sequences are
-CLI/API-only; GUI authoring is unchanged.
+In browser and Tauri apps, choose **Add clip** in Short clip, enter ordered prompts and lengths, then **Check length** and **Make video**. Native macOS and iOS use **Add another clip** and **Generate video**, with validation performed automatically before submission. Move or remove rows without opening a separate editor. Library **Continue video** makes the next separate linked MP4 from the latest completed authored take on its original machine. Ordinary one-prompt generation and Reuse settings remain available.
+
+Smooth is the default join. The selected model determines whether it carries motion or makes independent clips. Each part has bounded clips and memory; continue completed parts without a lifetime part limit. A continued part is a separate video. Unsupported source combinations are explained before submission.
 
 Clips made by an older build's sequence composer are still in your library with
 their per-scene provenance intact. **Use these settings again** on one of them

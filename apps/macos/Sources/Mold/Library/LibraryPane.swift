@@ -69,6 +69,11 @@ struct LibraryPane: View {
         LibraryActions(hosts: hosts, library: library,
                        lifecycleHostIDs: selectedMachines.isEmpty ? nil : selectedMachines,
                        reuse: reuse,
+                       continueVideo: { entry in
+                           reuseStore.clear()
+                           generate.continueVideo(entry)
+                           destination = .generate
+                       },
                        useAsSource: attachmentOffer.canUseAsSource
                            ? { attach($0, as: .source) } : nil,
                        addAsReference: attachmentOffer.canAddReference

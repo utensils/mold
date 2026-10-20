@@ -47,6 +47,8 @@ struct LibraryMenu {
                 ? actions.meshExports(for: targets[0]) : nil,
             canOpen: open != nil,
             canReuse: actions.reuse != nil && !scope.isTrash,
+            canContinueVideo: actions.continueVideo != nil && !scope.isTrash && targets.count == 1
+                && targets[0].print.kind == .clip && targets[0].print.metadata.chainJobId != nil,
             canUseAsSource: canAttach(using: actions.useAsSource),
             canAddReference: canAttach(using: actions.addAsReference),
             canUseEndpoints: canAttach(using: actions.useAsFirstFrame) && canAttach(using: actions.useAsLastFrame),

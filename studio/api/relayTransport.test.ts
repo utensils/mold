@@ -22,11 +22,13 @@ vi.mock("./secureChannel", () => ({
 import {
   clearRelayInfoCache,
   configureSecureRequestAdapter,
+  configureSecureOrigin,
   relayFetch,
 } from "./relayTransport";
 
 beforeEach(() => {
   configureSecureRequestAdapter(undefined);
+  configureSecureOrigin(undefined);
   clearRelayInfoCache();
   vi.clearAllMocks();
   mocks.current.mockImplementation(() => {});
@@ -108,6 +110,62 @@ describe("E2EE-only remote requests", () => {
     ).toBe("local");
     expect(mocks.lookup).toHaveBeenCalledWith("http://127.0.0.1:7680", true);
   });
+  it.each([false, true])(
+    "preserves buffered HTTP/1 POST bodies when retargeted=%s",
+    async (retargeted) => {
+      const NativeRequest = Request;
+      class Http1BrowserRequest extends NativeRequest {
+        constructor(input: RequestInfo | URL, init?: RequestInit) {
+          // Chromium URL + Request-as-init loses buffered-body source identity,
+          // then requires HTTP/2 for its streaming upload. Model that boundary.
+          if (
+            !(input instanceof NativeRequest) &&
+            init instanceof NativeRequest &&
+            init.body
+          )
+            throw new TypeError(
+              "HTTP/1 browser cannot upload a streaming body",
+            );
+          super(input, init);
+        }
+      }
+      vi.stubGlobal("Request", Http1BrowserRequest);
+      try {
+        const controller = new AbortController();
+        const fetch = vi.fn(async (request: Request) => {
+          expect(request.url).toBe(
+            "http://127.0.0.1:7680/api/generate/chain/validate",
+          );
+          expect(await request.text()).toBe('{"prompt":"garden"}');
+          expect(request.headers.get("x-api-key")).toBe("key");
+          expect(request.headers.has("x-mold-connection-mode")).toBe(false);
+          expect(request.credentials).toBe("omit");
+          expect(request.redirect).toBe("error");
+          controller.abort();
+          expect(request.signal.aborted).toBe(true);
+          return new Response("ok");
+        });
+        vi.stubGlobal("fetch", fetch);
+        if (retargeted) configureSecureOrigin(() => "http://127.0.0.1:7680");
+        const url = retargeted
+          ? new URL("/api/generate/chain/validate", location.href).href
+          : "http://127.0.0.1:7680/api/generate/chain/validate";
+        const request = new Request(url, {
+          method: "POST",
+          credentials: "omit",
+          redirect: "error",
+          signal: controller.signal,
+          headers: { "Content-Type": "application/json", "x-api-key": "key" },
+          body: '{"prompt":"garden"}',
+        });
+        await relayFetch(request);
+        expect(fetch).toHaveBeenCalledOnce();
+      } finally {
+        vi.stubGlobal("Request", NativeRequest);
+        configureSecureOrigin(undefined);
+      }
+    },
+  );
   it("keeps an explicitly paired loopback host on Noise", async () => {
     const fetch = vi.fn();
     vi.stubGlobal("fetch", fetch);

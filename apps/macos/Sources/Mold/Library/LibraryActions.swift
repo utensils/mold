@@ -14,6 +14,7 @@ struct LibraryActions {
     /// Set by the pane so a print can seed a new render. Absent in contexts
     /// that have no Generate pane to send it to.
     var reuse: ((LibraryEntry) -> Void)?
+    var continueVideo: ((LibraryEntry) -> Void)? = nil
     /// Attach one live raster print to the draft already open in Generate.
     var useAsSource: ((LibraryEntry) -> Void)?
     var addAsReference: ((LibraryEntry) -> Void)?

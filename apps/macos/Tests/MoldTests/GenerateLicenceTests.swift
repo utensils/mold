@@ -89,4 +89,16 @@ struct GenerateLicenceTests {
         #expect(GeneratePane.resumes(pressed, now: otherMachine) == false)
         #expect(GeneratePane.resumes(pressed, now: nil) == false)
     }
+    @Test func editedAuthoredClipsCannotResumeAnEarlierGeneratePress() {
+        let host = UUID()
+        var clips = SequenceDraft(prompt: "A robot", frames: 107)
+        let pressed = GeneratePane.LicenceSubmission(draft: RenderDraft(), model: "h3", host: host, sequence: clips)
+        clips.stages[0].prompt = "A different scene"
+        let editedPrompt = GeneratePane.LicenceSubmission(draft: RenderDraft(), model: "h3", host: host, sequence: clips)
+        #expect(!GeneratePane.resumes(pressed, now: editedPrompt))
+        clips.stages[0].frames = 124
+        let editedLength = GeneratePane.LicenceSubmission(draft: RenderDraft(), model: "h3", host: host, sequence: clips)
+        #expect(!GeneratePane.resumes(pressed, now: editedLength))
+    }
+
 }

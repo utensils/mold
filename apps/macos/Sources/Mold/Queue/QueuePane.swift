@@ -7,6 +7,8 @@ struct QueuePane: View {
     // `LibraryPane.swift`'s `hosts`/`library` aren't private either.
     @Environment(HostStore.self) var hosts
     @Environment(QueueStore.self) var queue
+    @Environment(GenerateController.self) var generate
+    @Environment(\.sourceMediaOwner) private var openVideo
     @Environment(TransferStore.self) var transfers
     /// What the machines are doing that never becomes a queue row, and the
     /// clip upscales this app started -- both drawn under Also Running.
@@ -25,7 +27,7 @@ struct QueuePane: View {
 
     var body: some View {
         Group {
-            if queue.all.isEmpty, alsoRunning.isEmpty, pausedMachines.isEmpty {
+            if queue.all.isEmpty, alsoRunning.isEmpty, pausedMachines.isEmpty, generate.sequence.jobs.isEmpty, generate.sequence.historyNotice == nil {
                 ContentUnavailableView(
                     queue.isLoading ? "Checking each machine…" : "Nothing queued",
                     systemImage: "list.bullet.indent",
@@ -33,6 +35,11 @@ struct QueuePane: View {
                 )
             } else {
                 List(selection: $selection) {
+                    NativeSequenceJobs(session: generate.sequence, backend: { job in
+                        guard hosts.host(job.host.id) == job.host, hosts.instanceID(of: job.host.id) == job.installation else { return nil }
+                        return hosts.backend(for: job.host.id)
+                    }, open: { host, filename in openVideo(PrintID(host: host.id, filename: filename)) })
+                        .selectionDisabled(true)
                     // A paused machine says so whether or not it has rows:
                     // an empty queue behind a closed gate looks exactly like
                     // an idle machine, and it is not one.
@@ -67,7 +74,7 @@ struct QueuePane: View {
             QueueDetailSheet(entry: target.entry, host: target.host)
         }
         .destructionDialog($pendingDestruction)
-        .task { await load() }
+        .task { await load(); await generate.discoverSequences() }
         .task {
             while !Task.isCancelled {
                 await queue.pollProgress()

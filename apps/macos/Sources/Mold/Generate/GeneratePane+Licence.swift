@@ -46,10 +46,12 @@ extension GeneratePane {
         case .unknown:
             let feedbackID = controller.submissionFeedback.begin("Checking model requirements on \(host.name)…")
             let pressed = LicenceSubmission(
-                draft: controller.draft, model: controller.modelName, host: host.id)
+                draft: controller.draft, model: controller.modelName, host: host.id,
+                sequence: controller.sequence.draft)
+            let probeDraft = controller.sequence.probeDraft(pressed.draft)
             Task {
                 let answered = await probe.settle(
-                    draft: pressed.draft, model: pressed.model, on: host, hosts: hosts)
+                    draft: probeDraft, model: pressed.model, on: host, hosts: hosts)
                 // The press resumes only if nothing moved while the machine
                 // answered; otherwise the new selection waits for its own press
                 // and its own gate.
@@ -74,10 +76,12 @@ extension GeneratePane {
         let draft: RenderDraft
         let model: String?
         let host: MoldHost.ID
+        var sequence: SequenceDraft? = nil
     }
 
     private var currentSubmission: LicenceSubmission? {
-        host.map { LicenceSubmission(draft: controller.draft, model: controller.modelName, host: $0.id) }
+        host.map { LicenceSubmission(draft: controller.draft, model: controller.modelName,
+            host: $0.id, sequence: controller.sequence.draft) }
     }
 
     /// Whether the continuation may run the press it was started for.

@@ -21,6 +21,11 @@ extension FakeBackend {
     // MARK: MoldChainBackend
 
     public func createChainJob(_ request: AutoChainRequest, operationId: String) async throws -> CreateChainJobResponse { try await respond("createChainJob(_:operationId:)", [request, operationId]) }
+    public func createChainJob(_ request: AuthoredChainRequest, operationId: String) async throws -> CreateChainJobResponse { try await respond("createAuthoredChainJob(_:operationId:)", [request, operationId]) }
+    public func validateChain(_ request: AuthoredChainRequest) async throws -> ChainValidationResponse { try await respond("validateChain(_:)", [request]) }
+    public func listChainJobs() async throws -> ChainJobListing { try await respond("listChainJobs()", []) }
+    public func chainJob(id: String, includeSourceMedia: Bool) async throws -> ChainJobDetail { try await respond("chainJob(id:includeSourceMedia:)", [id, includeSourceMedia]) }
+    public func cancelChainOperation(id: String, operationId: String) async throws { let _: Void = try await respond("cancelChainOperation(id:operationId:)", [id, operationId]) }
     public func chainJobEvents(id: String) -> AsyncThrowingStream<ChainJobEvent, Error> { stream("chainJobEvents(id:)", [id]) }
     public func chainJob(id: String) async throws -> ChainJobDetail { try await respond("chainJob(id:)", [id]) }
     public func cancelChainJob(id: String) async throws { let _: Void = try await respond("cancelChainJob(id:)", [id]) }

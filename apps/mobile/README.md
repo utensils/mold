@@ -672,8 +672,7 @@ never answers produces no verdict: the row stays flagged as an interruption so
 a later resume can try again, and only a host that answers "no such job, no
 such print" settles it as a failure.
 
-There is no Output mode pair and no clip bench: scene-by-scene authoring is
-retired from every app, so Create makes one print at a time. The model picker
+Create keeps one output switch. **Add clip** expands ordered prompt/length rows with one Make video action; Library **Continue video** starts a separate linked part on its original machine. The model picker
 lists every installed video checkpoint without narrowing, and the prompt, size,
 frame rate, steps, guidance, and seed fields are the only ones a clip needs.
 

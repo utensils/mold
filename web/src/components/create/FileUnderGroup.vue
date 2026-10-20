@@ -61,12 +61,15 @@ const props = withDefaults(
     ext: string;
     /** Creation stamp for the preview. Frozen so the line does not tick. */
     timestamp?: number;
+    /** Joined clips receive their filename from the completed job. */
+    showFilenamePreview?: boolean;
   }>(),
   {
     title: null,
     suggestions: () => [],
     collections: () => [],
     timestamp: () => Date.now(),
+    showFilenamePreview: true,
   },
 );
 
@@ -427,7 +430,11 @@ const preview = computed(() =>
       </button>
     </div>
 
-    <p class="fu__preview" data-test="file-under-preview">
+    <p
+      v-if="showFilenamePreview"
+      class="fu__preview"
+      data-test="file-under-preview"
+    >
       <span class="fu__preview-k">files as</span> {{ preview }}
     </p>
   </div>

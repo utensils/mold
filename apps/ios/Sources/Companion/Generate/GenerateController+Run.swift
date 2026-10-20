@@ -61,6 +61,21 @@ struct PendingAdmission {
 extension GenerateController {
     func generate() {
         guard blocker == nil, let host = target, let modelName else { return }
+        if sequence.draft != nil {
+            let captured = host
+            let capturedInstallation = hosts.instanceID(of: host.id)
+            let snapshot = draft
+            let capturedRecipe = recipe
+            let base = NativeSequenceSession.baseRequest(snapshot, model: modelName,
+                maxIdentityPhotos: hosts.capabilities[host.id]?.maxIdentityPhotos ?? 0)
+            sequence.submit(base: base, host: host, installation: capturedInstallation,
+                backend: hosts.backend(for: host), current: { self.hosts.host(captured.id) == captured && self.hosts.instanceID(of: captured.id) == capturedInstallation }, prepare: {
+                    let fitted = try await snapshot.fittingSource(recipe: capturedRecipe)
+                    return NativeSequenceSession.baseRequest(fitted, model: modelName,
+                        maxIdentityPhotos: self.hosts.capabilities[host.id]?.maxIdentityPhotos ?? 0)
+                })
+            return
+        }
         let capturedInstance = hosts.instanceID(of: host.id)
         let ordinaryBackend = hosts.backend(for: host)
         let backend: any MoldBackend = if let http = ordinaryBackend as? HTTPBackend {

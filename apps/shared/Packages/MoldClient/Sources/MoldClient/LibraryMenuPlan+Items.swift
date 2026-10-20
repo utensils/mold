@@ -32,6 +32,9 @@ public extension LibraryMenuPlan {
         if canReuse, count == 1 {
             items += [.separator, Item(kind: .reuse, title: Self.reuseTitle)]
         }
+        if canContinueVideo, count == 1 {
+            items.append(Item(kind: .continueVideo, title: "Continue Video…"))
+        }
         if count == 1, canUseAsSource || canAddReference {
             items.append(.separator)
         }

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import VideoClips from "@studio/components/VideoClips.vue";
 import { missingModelReferenceRetry } from "../lib/missingModelReferenceRetry";
 import { jobStallLabel } from "@studio/lib/jobStall";
 import { hasActiveFreshVideoReferences } from "@studio/lib/minimaxH3Authoring";
@@ -711,6 +712,9 @@ async function pullMissingModel() {
 // back — this view unmounts on every route change.
 const formStore = useGenerateFormStore();
 const form = formStore.form;
+const clipsActive = ref(false);
+const clipsPinned = ref<{ hostId: string; model: string } | null>(null);
+const videoClipsRef = ref<InstanceType<typeof VideoClips> | null>(null);
 
 const composerRef = ref<InstanceType<typeof ComposerCard> | null>(null);
 const inspectorTab = ref<InspectorTab>("settings");
@@ -1013,7 +1017,11 @@ const showStarterCards = computed(() =>
 
 /** The request the estimate badge previews — null until a model is chosen. */
 const estimateRequest = computed(() => {
-  if (!form.model || hasActiveFreshVideoReferences(form.h3Authoring, caps.value.sourceImageMode))
+  if (
+    clipsActive.value ||
+    !form.model ||
+    hasActiveFreshVideoReferences(form.h3Authoring, caps.value.sourceImageMode)
+  )
     return null;
   return buildGenerationEstimateRequest(buildRequest(form), form.family, selectedEntry.value);
 });
@@ -3455,6 +3463,10 @@ const emptyCanvasGuidance = computed(() =>
 /** `batchOverride` submits a one-off count — Make 4 variations — without
  *  touching the batch size the form keeps for every later Generate. */
 async function generate(batchOverride: number | null = null) {
+  if (clipsActive.value) {
+    await videoClipsRef.value?.submit();
+    return;
+  }
   if (generationInputBlockerReason.value || preparedSubmitting.value || submissionPlanning.value)
     return;
   clearSelectedQueueRender();
@@ -4725,6 +4737,36 @@ onBeforeUnmount(() => {
   nativeImageDropUnmounted = true;
   stopNativeImageDrop?.();
 });
+const clipsInput = computed(() => {
+  try {
+    return { request: buildRequest(form), error: null };
+  } catch (error) {
+    return {
+      request: {
+        model: form.model,
+        prompt: form.prompt,
+        width: form.width,
+        height: form.height,
+        frames: form.frames,
+        fps: form.fps,
+        steps: form.steps,
+        guidance: form.guidance,
+      },
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+});
+const clipsOwner = computed(() =>
+  clipsPinned.value
+    ? hosts.resolveRoute(clipsPinned.value.hostId, clipsPinned.value.model)
+    : generationRoute.value,
+);
+function setClipsActive(value: boolean) {
+  if (value && !clipsPinned.value && generationRoute.value)
+    clipsPinned.value = { hostId: generationRoute.value.hostId, model: form.model };
+  clipsActive.value = value;
+  if (!value) clipsPinned.value = null;
+}
 </script>
 
 <template>
@@ -5101,57 +5143,89 @@ onBeforeUnmount(() => {
         />
 
         <!-- The one composer: it always carries the form's own words. -->
-        <ComposerCard
-          ref="composerRef"
-          data-test="generate-composer"
-          class="shrink-0"
-          :form="form"
-          :effective-batch-size="effectiveBatchSize"
-          :expansion-running="expansionRunning"
-          :expansion-host-label="expansionHostLabel"
-          :can-undo="quickExpansionOriginal !== null"
-          :prepared-blocked="!!preparedBatch && effectiveBatchSize === 1"
-          :disabled="composerLocked"
-          :disabled-reason="composerRefusal"
-          :warning-reason="composerWarningReason"
-          :submitting="composerSubmitting"
-          :button-label="buttonLabel"
-          :queued-note="queuedNote"
-          :estimate-request="estimateRequest"
-          :estimate-target="estimateTarget"
-          :preprocessing-status="submissionStatus"
-          :history="promptHistory"
-          :remix-source="remixSource"
-          :batch-locked="batchLocked"
-          :placeholder="composerPlaceholder"
-          :length-frames="form.frames"
-          :length-fps="form.fps"
-          :length-contract="composerLengthContract"
-          @prompt-authored="onPromptAuthored"
-          @update:length-frames="form.frames = $event"
-          @generate="composerGenerate"
-          @cancel="composerCancel"
-          @expand="expandForCurrentBatch()"
-          @remix="remixForCurrentPrompt()"
-          @update:remix-source="remixSource = $event"
-          @restore="restoreQuickExpansion"
-        >
-          <!-- The one style selector in the app. -->
-          <template #style>
-            <StylePicker :form="form" @pull-missing-model="offerPullForSelectedModel" />
-          </template>
-          <!-- The composer's canvas control. It reads and writes the SAME
+        <div v-show="!clipsActive" data-test="generate-composer" class="shrink-0">
+          <ComposerCard
+            ref="composerRef"
+            :form="form"
+            :effective-batch-size="effectiveBatchSize"
+            :expansion-running="expansionRunning"
+            :expansion-host-label="expansionHostLabel"
+            :can-undo="quickExpansionOriginal !== null"
+            :prepared-blocked="!!preparedBatch && effectiveBatchSize === 1"
+            :disabled="composerLocked"
+            :disabled-reason="composerRefusal"
+            :warning-reason="composerWarningReason"
+            :submitting="composerSubmitting"
+            :button-label="buttonLabel"
+            :queued-note="queuedNote"
+            :estimate-request="estimateRequest"
+            :estimate-target="estimateTarget"
+            :preprocessing-status="submissionStatus"
+            :history="promptHistory"
+            :remix-source="remixSource"
+            :batch-locked="batchLocked"
+            :placeholder="composerPlaceholder"
+            :length-frames="form.frames"
+            :length-fps="form.fps"
+            :length-contract="composerLengthContract"
+            @prompt-authored="onPromptAuthored"
+            @update:length-frames="form.frames = $event"
+            @generate="composerGenerate"
+            @cancel="composerCancel"
+            @expand="expandForCurrentBatch()"
+            @remix="remixForCurrentPrompt()"
+            @update:remix-source="remixSource = $event"
+            @restore="restoreQuickExpansion"
+          >
+            <!-- The one style selector in the app. -->
+            <template #style>
+              <StylePicker :form="form" @pull-missing-model="offerPullForSelectedModel" />
+            </template>
+            <!-- The composer's canvas control. It reads and writes the SAME
                output-shape resolver the inspector's Shape and Resolution
                fields do, so the two cannot disagree or fall out of step. -->
-          <template #shape>
-            <ShapeChip
-              :form="form"
-              :contract-model="contractEntry"
-              :canvas-intent="canvasIntent"
-              @canvas-intent="setCanvasIntent"
-            />
-          </template>
-        </ComposerCard>
+            <template #shape>
+              <ShapeChip
+                :form="form"
+                :contract-model="contractEntry"
+                :canvas-intent="canvasIntent"
+                @canvas-intent="setCanvasIntent"
+              />
+            </template>
+          </ComposerCard>
+        </div>
+        <VideoClips
+          ref="videoClipsRef"
+          :enabled="isClip && !composerSubmitting && !preparedBatch"
+          :request="clipsInput.request"
+          :reference-authoring="
+            caps.sourceImageMode === 'ordered-references' ? form.h3Authoring : null
+          "
+          :upscale="
+            (image, model, owner, signal) =>
+              upscaleImage({ image, model, target: owner.target, signal })
+          "
+          :owner="clipsOwner"
+          :owner-selection="appPrefs.settings?.generateTargetHost ?? 'local'"
+          :frame-contract="composerLengthContract"
+          :blocked-reason="
+            clipsInput.error ??
+            (hasActiveFreshVideoReferences(form.h3Authoring, caps.sourceImageMode)
+              ? 'Normalize fresh video references with a single clip first, or use the CLI for this sequence.'
+              : null)
+          "
+          @active="setClipsActive"
+          @single="
+            onPromptAuthored($event.prompt);
+            form.frames = $event.frames;
+          "
+          @published="
+            router.push({
+              path: '/library',
+              query: { print: $event.filename, printHost: $event.owner.hostId },
+            })
+          "
+        />
       </div>
     </div>
 
@@ -5162,6 +5236,7 @@ onBeforeUnmount(() => {
       :recent="recentPrints"
       :last-seed="generation.lastSeedUsed"
       :canvas-intent="canvasIntent"
+      :clips-active="clipsActive"
       @append-word="appendPromptWord"
       @canvas-intent="setCanvasIntent"
       @reset-settings="invalidateRetainedRestore"

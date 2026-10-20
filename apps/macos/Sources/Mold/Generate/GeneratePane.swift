@@ -56,7 +56,16 @@ struct GeneratePane: View {
         .reuseNotice(reuse, draft: controller.draft)
         .persistingDraft(controller, in: drafts)
         // Once per machine, model and rate -- never from `body`.
-        .task(id: chainLimitsKey) { refreshChainLimits() }
+        .task(id: chainLimitsKey) {
+            controller.recoverSequences()
+            refreshChainLimits()
+        }
+        .onChange(of: advertisedChainLimits) { _, limits in
+            guard !controller.sequence.restoringSource, let limits, let temporal = recipe?.temporal else { return }
+            controller.sequence.fitLengths(minimum: limits.authoring?.minFrames ?? temporal.frames.min,
+                maximum: min(limits.framesPerClipCap, temporal.frames.max),
+                step: limits.authoring?.frameStep ?? temporal.frames.step)
+        }
         .navigationTitle("Generate")
         .navigationSubtitle(subtitle)
         // Before the pane's own `.toolbar`, so the column's switch is the
@@ -65,6 +74,7 @@ struct GeneratePane: View {
         .trailingColumn(isShowing: $showsInspector, resizable: true) {
             GenerateInspector(recipe: recipe, model: selectedModel, host: host,
                               draft: $controller.draft, destination: $destination)
+                .disabled(controller.sequence.preparing)
         }
         .toolbar { toolbar }
         // Escape brings the capsule back, the way it dismisses any other
@@ -82,7 +92,7 @@ struct GeneratePane: View {
             MaskEditorSheet(draft: $controller.draft)
         }
         .task { await loadModels() }
-        .task { await controller.recoverPending() }
+        .task { await controller.recoverPending(); controller.recoverSequences() }
         .task { seedSourceImageIfRequested() }
         .onChange(of: hosts.reachability) { _, _ in adoptFirstReadyModel() }
         .onChange(of: controller.draft) { _, _ in

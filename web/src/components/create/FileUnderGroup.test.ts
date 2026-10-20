@@ -228,6 +228,12 @@ describe("FileUnderGroup collection row", () => {
 });
 
 describe("FileUnderGroup filename preview", () => {
+  it("omits the ordinary filename prediction for joined clips", () => {
+    const wrapper = mountGroup({ showFilenamePreview: false });
+    expect(wrapper.find("[data-test='file-under-preview']").exists()).toBe(
+      false,
+    );
+  });
   it("previews the creation-time name with the title slug", () => {
     const wrapper = mountGroup();
     expect(wrapper.get("[data-test='file-under-preview']").text()).toContain(

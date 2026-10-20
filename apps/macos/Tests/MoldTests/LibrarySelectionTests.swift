@@ -34,6 +34,18 @@ struct LibrarySelectionTests {
         var actions: [LibraryAction] = []
     }
 
+    @Test func authoredClipContextMenuOffersContinueAlongsideMenuBar() throws {
+        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://fixture.invalid")!)
+        let hosts = HostStore(hosts: [host]) { _ in FakeBackend(host: host) }
+        var actions = LibraryActions(hosts: hosts, library: LibraryStore(hosts: hosts))
+        actions.continueVideo = { _ in }
+        let print = try MoldJSON.decoder.decode(GalleryPrint.self, from: Data(#"{"filename":"authored.mp4","format":"mp4","metadata":{"chain_job_id":"source"},"timestamp":1000}"#.utf8))
+        let entry = LibraryEntry(host: host, print: print)
+        let menu = LibraryMenu(targets: [entry], scope: .all, actions: actions,
+            shelves: [], enclosingShelf: nil, trashCount: 0, open: {})
+        #expect(menu.items.compactMap(\.kind).contains(.continueVideo))
+    }
+
     @Test func quickLookIsOfferedForASelectionWithNoCaretInTheWindow() {
         #expect(selection(count: 2, editing: false).canQuickLook)
     }

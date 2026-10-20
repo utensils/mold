@@ -1,12 +1,9 @@
 import Foundation
 
-/// The durable chain job an over-long clip becomes.
-///
-/// Three verbs and nothing else: this app AUTHORS no sequences, so it never
-/// lists, resumes, retakes or amends one. It creates the ephemeral job a
-/// length past the checkpoint's clip size requires, follows it, and cancels
-/// it -- through the job's OWN route, never the queue, because a chain id is
-/// not a batch id.
+/// Durable authored sequences and automatic long-video jobs share the same
+/// lifecycle. Authored submission preserves history; AutoChainRequest keeps
+/// the existing hidden one-shot behavior. Job ids always use these routes,
+/// never the ordinary batch queue.
 public protocol MoldChainBackend: Sendable {
     /// `POST /api/chain-jobs` with `ephemeral: true`.
     ///
@@ -16,8 +13,14 @@ public protocol MoldChainBackend: Sendable {
     /// submitting again and rendering twice.
     func createChainJob(_ request: AutoChainRequest, operationId: String) async throws
         -> CreateChainJobResponse
+    func createChainJob(_ request: AuthoredChainRequest, operationId: String) async throws
+        -> CreateChainJobResponse
+    func validateChain(_ request: AuthoredChainRequest) async throws -> ChainValidationResponse
+    func listChainJobs() async throws -> ChainJobListing
+    func chainJob(id: String, includeSourceMedia: Bool) async throws -> ChainJobDetail
     func chainJobEvents(id: String) -> AsyncThrowingStream<ChainJobEvent, Error>
     func chainJob(id: String) async throws -> ChainJobDetail
+    func cancelChainOperation(id: String, operationId: String) async throws
     func cancelChainJob(id: String) async throws
     /// Restarts a job a host restart PARKED. An ephemeral chain keeps its
     /// manifest, its source media, its finished clips and its tail cache
@@ -27,4 +30,26 @@ public protocol MoldChainBackend: Sendable {
     /// What this machine will chain for one model -- the HOST's own limits,
     /// which outrank every constant this app carries.
     func chainLimits(model: String, fps: Int?) async throws -> ChainLimits
+}
+
+/// Older/fake backends fail closed instead of silently submitting ephemeral work.
+public extension MoldChainBackend {
+    func cancelChainOperation(id: String, operationId: String) async throws {
+        throw SequenceDraftError.invalid("This connection cannot cancel a pending video request.")
+    }
+    func createChainJob(_ request: AuthoredChainRequest, operationId: String) async throws -> CreateChainJobResponse {
+        throw SequenceDraftError.invalid("This connection does not support authored clips.")
+    }
+    func validateChain(_ request: AuthoredChainRequest) async throws -> ChainValidationResponse {
+        throw SequenceDraftError.invalid("This connection does not support authored clips.")
+    }
+    func listChainJobs() async throws -> ChainJobListing {
+        throw SequenceDraftError.invalid("This connection does not support video history.")
+    }
+    func chainJob(id: String, includeSourceMedia: Bool) async throws -> ChainJobDetail {
+        guard !includeSourceMedia else {
+            throw SequenceDraftError.invalid("This connection cannot restore video inputs.")
+        }
+        return try await chainJob(id: id)
+    }
 }

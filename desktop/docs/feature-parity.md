@@ -331,7 +331,7 @@ The desktop **Choose from gallery…** square grid follows the Library's perform
 **Authoring paths:**
 
 - `mold run --script shot.toml` (canonical TOML) or `mold chain validate shot.toml` / `--dry-run`.
-- **No GUI validates a plan.** `POST /api/generate/chain/validate` survives and still returns normalized stages, warnings, and optional VRAM against the exact authenticated rendering host without queue/download/inference side effects, but scene-by-scene authoring is retired from web, desktop, and iPhone Create, so `mold chain validate` / `mold run --script --dry-run` is its only caller.
+- **Add clip** on web, desktop and mobile validates against `POST /api/generate/chain/validate` on the captured rendering host, displays its normalized delivered duration, then publishes a durable job with a persisted operation UUID. Native macOS/iOS use the same contracts. Library **Continue video** checks original owner and latest published take before making a separate linked part.
 - Sugar: `mold run <model> --prompt "..." --prompt "..." --frames-per-clip 97` (uniform smooth chain).
 - Auto-chain: LTX-2 distilled with `--frames > clip cap (97)` auto-splits.
 
@@ -341,15 +341,12 @@ The desktop **Choose from gallery…** square grid follows the Library's perform
 
 `ChainRequest.output_mode` records additive authoring provenance (`one-shot` or
 `sequence`) independently of execution routing, and the same value is retained
-in `OutputMetadata`. Scene-by-scene authoring is retired from every app, so a
-GUI only ever creates the `one-shot` (ephemeral) kind; a `sequence` row is
-scripted work and its print restores as a plain one-shot built from the first
-stage's prompt. A durable chain row with no recorded `output_mode` is resolved
+in `OutputMetadata`. Ordinary long one-shots remain ephemeral; Add clip creates authored durable work. Reuse settings restores the first stage as a one-shot; the separate Continue video action creates a linked successor. A durable chain row with no recorded `output_mode` is resolved
 through `chain_job_id`.
 
 - `jobs list [--json]`, `jobs show <id>`, `jobs resume <id>`, `jobs cancel <id>`, `jobs delete <id> [--yes]`, `jobs gc`.
 - `jobs retake <id> --stage N --mode cascade|splice --seed-offset --prompt`: regenerate one stage (cascade re-renders downstream, splice replaces in place).
-- Clients: the apps keep only `createChainJob`, the SSE events URL, and `cancelChainJob`, used for the automatically chained long one-shot. Listing, retake, amend, resume, delete, gc, and the per-stage preview URLs are CLI/API surface (`mold jobs`). There is no clip rail and no Sequences history lens.
+- Clients: compact Add clip editors validate and create authored jobs, reconcile known admission IDs, recover progress, and offer applicable resume/cancel actions. Library Continue video verifies the original owner and latest take before publishing a separate part. Retake, amend, delete and GC remain CLI/API operations (`mold jobs`).
 - Chain limits: `GET /api/capabilities/chain-limits?model=` (also accepts `?fps=`, and echoes the fps it used) per model; VRAM preflight estimate (worst_case_bytes, fits).
 - Desktop parity: the Create panel mirrors the web Composer's auto-chain routing cue via `desktop/src/lib/chainRouting.ts` (a port of `web/src/lib/chainRouting.ts` / Rust `decide_chain_routing`, clip cap 97 / motion-tail 17): frames past one clip on a chain-capable model show "Will render as N chained clips of C frames (motion-tail M)" under the Frames input, and an over-budget frame count on a model without chain support renders the reject reason and disables Generate.
 - Desktop layout parity: the Create settings inspector is left-edge resizable from 280–480 px with pointer or keyboard controls. A committed width persists through app settings, double-click resets it, and the default is the shell anatomy's own `--mold-shell-inspector-w` (300 px, from `desktop/src/lib/panelResize.ts`). Its simplified essentials are the default; the Advanced toggle extends capability-gated, always-open icon sections below them in the same scrolling inspector without an overlay or canvas dimming. Web uses the same section headers and icons.
@@ -445,7 +442,7 @@ mobile templates use `mold.mobile.generation.templates.v1`.
 
 ## 12. Discord bot (feature subset to mirror where cloud-shared)
 
-Slash commands (`poise`): `/generate` (prompt, model[autocomplete], source_image attachment, video_format, frames, fps, width, height, steps, guidance, seed, strength, audio, pipeline, negative_prompt), `/identity`, `/expand`, `/models`, `/status`, `/quota`, admin commands (MANAGE_GUILD gated: allow/block users, etc.). Access control: block list, allowed roles (`MOLD_DISCORD_ALLOWED_ROLES`), cooldown (`MOLD_DISCORD_COOLDOWN`), daily quota (`MOLD_DISCORD_DAILY_QUOTA`) with atomic slot consume + refund on failure. HTTP-only dep on mold-core (talks to `MOLD_HOST`).
+Slash commands (`poise`): `/video make` (two prompts and length, durable Library output), `/video continue|status|resume|cancel` (host-global, guild Manage Server), `/generate` (prompt, model[autocomplete], source_image attachment, video_format, frames, fps, width, height, steps, guidance, seed, strength, audio, pipeline, negative_prompt), `/identity`, `/expand`, `/models`, `/status`, `/quota`, admin commands (MANAGE_GUILD gated: allow/block users, etc.). Access control: block list, allowed roles (`MOLD_DISCORD_ALLOWED_ROLES`), cooldown (`MOLD_DISCORD_COOLDOWN`), daily quota (`MOLD_DISCORD_DAILY_QUOTA`) with atomic slot consume + refund on failure. HTTP-only dep on mold-core (talks to `MOLD_HOST`).
 
 ---
 

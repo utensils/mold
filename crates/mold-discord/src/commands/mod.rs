@@ -10,3 +10,4 @@ pub mod remix;
 pub mod status;
 pub mod transparent;
 pub mod upscale;
+pub mod video;
