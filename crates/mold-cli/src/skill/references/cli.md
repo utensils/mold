@@ -305,9 +305,16 @@ mold ps --host workstation
 mold list --json --host workstation
 ```
 
+`--host` selects a saved secure pairing. If running the CLI on the server
+itself with its configured `MOLD_HOST`, omit `--host` throughout; an empty
+`host list` does not prevent using that current server.
+
 Save this complete example as `shot.toml`. Replace the model and recipe values
 with ones supported by that host; each stage must fit its frame grid and cap.
 Copy the entire `[chain]` block: `strength` and `motion_tail_frames` are required.
+For H3 FL2VA use `motion_tail_frames = 1`; H3 Ref2VA uses `0`.
+Set `enable_audio = true` in `[chain]` when sound is required (AV models only),
+or `false` for silence. Omitting it uses the host recipe's audio default.
 
 ```toml
 schema = "mold.chain.v1"
@@ -431,6 +438,8 @@ Transition behavior depends on the model:
   source images or keyframes. For file inputs use the path example below. The API accepts canonical typed
   generation references. Local H3 chains are refused;
   submit them to an H3-enabled server. H3 outputs retain generated audio.
+  H3 stage intermediates move to recoverable Trash after private retention;
+  the joined part is the active Library result.
 
 A long one-shot is auto-chained only when the model supports continuation;
 text-only Wan refuses this and legacy LTX-Video stays a single render.

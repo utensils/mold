@@ -26,6 +26,8 @@ Capture host, credentials, persistent installation identity and draft revision b
 
 Retain failed or paused jobs for recovery. Show completed publication only after a latest gallery filename is available. Display parent clip progress instead of multiplying child jobs. Persist scalar unsent drafts and continuation locators, without media bytes or credentials. When retained references are missing after relaunch, require explicit restoration or removal.
 
+H3's durable stage renders are intermediate artifacts. Authenticate an existing child against its canonical admission request before reattaching or cancelling it. Retain its exact video privately with a durable streaming copy, then move its Library print to recoverable Trash. Publish the joined part as the ordinary Library result; recovery can use the private copy even after public Trash is purged.
+
 Authored references must be inline retained media, not ordinary short-lived upload handles. Repeat typed references across clips; map a first endpoint to clip zero and a last endpoint to the final clip's own last frame. Check aggregate bytes and member counts before copying. Carry source-fit provenance through request, script and output metadata only when the server advertises support.
 
 ## Review and acceptance
