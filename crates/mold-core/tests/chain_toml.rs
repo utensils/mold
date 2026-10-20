@@ -33,6 +33,9 @@ fn script_under_test() -> ChainScript {
                 model: None,
                 loras: vec![],
                 references: vec![],
+                generation_references: None,
+                keyframes: None,
+                authored_media_sha256: None,
             },
             ChainStage {
                 prompt: "the forest opens to a clearing".into(),
@@ -45,6 +48,9 @@ fn script_under_test() -> ChainScript {
                 model: None,
                 loras: vec![],
                 references: vec![],
+                generation_references: None,
+                keyframes: None,
+                authored_media_sha256: None,
             },
             ChainStage {
                 prompt: "a spaceship lands".into(),
@@ -57,6 +63,9 @@ fn script_under_test() -> ChainScript {
                 model: None,
                 loras: vec![],
                 references: vec![],
+                generation_references: None,
+                keyframes: None,
+                authored_media_sha256: None,
             },
             ChainStage {
                 prompt: "the cat looks up in wonder".into(),
@@ -69,6 +78,9 @@ fn script_under_test() -> ChainScript {
                 model: None,
                 loras: vec![],
                 references: vec![],
+                generation_references: None,
+                keyframes: None,
+                authored_media_sha256: None,
             },
         ],
     }

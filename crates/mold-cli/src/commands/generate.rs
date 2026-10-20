@@ -2703,7 +2703,7 @@ async fn bind_remote_reference_uploads(
 /// Read only the already-opened, no-follow files and bind their exact content.
 /// Checking length before allocation and capping each read also covers files
 /// that grow after preparation. No partially converted request escapes on error.
-fn inline_reference_files(
+pub(crate) fn inline_reference_files(
     mut references: Vec<GenerationReference>,
     uploads: Vec<ReferenceUpload>,
     batch: u32,

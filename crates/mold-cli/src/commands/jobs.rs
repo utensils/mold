@@ -96,7 +96,11 @@ async fn jobs_list(client: &MoldClient, json: bool) -> Result<()> {
 }
 
 async fn jobs_show(client: &MoldClient, id: &str, json: bool, script: bool) -> Result<()> {
-    let detail = client.get_chain_job(id).await?;
+    let detail = if script {
+        client.get_chain_job_with_media(id).await?
+    } else {
+        client.get_chain_job(id).await?
+    };
     if script {
         // The document `mold jobs amend --script` reads, so the pair is a
         // round trip: `--json` prints a ChainJobDetail, which amend cannot
@@ -170,7 +174,7 @@ async fn jobs_amend(client: &MoldClient, id: &str, args: AmendArgs) -> Result<()
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty())
         .unwrap_or_else(|| std::path::Path::new("."));
-    let edited = mold_core::chain_toml::read_script_resolving_paths(&text, script_dir)
+    let edited = super::chain::read_script_with_media_paths(&text, script_dir)
         .map_err(|error| anyhow::anyhow!("{}: {error}", args.script.display()))?;
     let detail = client
         .get_chain_job(id)
@@ -457,6 +461,9 @@ mod tests {
             model: None,
             loras: Vec::new(),
             references: Vec::new(),
+            generation_references: None,
+            keyframes: None,
+            authored_media_sha256: None,
         }
     }
 

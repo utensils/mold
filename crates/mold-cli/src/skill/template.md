@@ -72,6 +72,11 @@ auto` to preserve useful alpha and remove opaque backgrounds, `on` to
   manifest title and retain task/version/precision; never rename weight files.
   This skill intentionally does not duplicate changing model
   IDs, defaults, dimensions, frame grids, or runtime availability.
+- For multi-scene video or a clip longer than one render, read
+  [Scripted sequences]({{reference_prefix}}/cli.md#scripted-sequences). Use
+  `mold run --script` and `mold jobs`; authoring is CLI/API-only. MiniMax H3
+  sequences require a server. Discover the selected model before choosing frames
+  or conditioning; a smooth seam depends on its advertised capabilities.
 - For ordinary CLI, queue, server, library, and remote-host workflows, read
   [`{{reference_prefix}}/cli.md`]({{reference_prefix}}/cli.md).
 - To hand the user a print's file, list it and download the original:

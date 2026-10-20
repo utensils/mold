@@ -107,7 +107,6 @@ never triggers an inline retry. The server owns model availability and license
 acceptance: a license already accepted there needs no matching record on this
 client. H3 has no separate acceptance gate.
 
-
 ### Fresh H3 video attachments
 
 Fresh H3 Ref2VA video attachments negotiate
@@ -294,56 +293,163 @@ approved secret store at execution time.
 
 ## Scripted sequences
 
-A sequence — several clips rendered as one continuous video — is authored as a
-`mold.chain.v1` TOML script and submitted with `mold run --script`. It is a
-CLI and API shape only: no app composes one. Each `[[stage]]` carries its own
-`prompt`, `frames` and `transition` (`smooth`, the default motion-tail morph;
-`cut`, a fresh latent; `fade`, a cut plus an RGB crossfade), and a stage may
-name a `source_image_path` relative to the script file.
+Use `mold run --script` for several video clips stitched into one output.
+Authoring is CLI/API-only. Start with the selected host and model:
+
+```bash
+mold host list
+mold ps --host workstation
+mold info ltx-2-19b-distilled:fp8 --host workstation
+```
+
+Save this complete example as `shot.toml`. Replace the model and recipe values
+with ones supported by that host; each stage must fit its frame grid and cap.
+
+```toml
+schema = "mold.chain.v1"
+
+[chain]
+model = "ltx-2-19b-distilled:fp8"
+width = 512
+height = 512
+fps = 24
+seed = 42
+steps = 8
+guidance = 3.0
+strength = 1.0
+motion_tail_frames = 17
+output_format = "mp4"
+
+[[stage]]
+prompt = "a cat wakes on a windowsill, soft morning light"
+frames = 49
+
+[[stage]]
+prompt = "the cat lands on a rug, morning light"
+frames = 49
+transition = "cut"
+```
+
+Validate, then submit to the same host. Validation and dry-run are local
+planning; they do not prove that the host can load or run the model.
 
 ```bash
 mold chain validate shot.toml
-mold run --script shot.toml --dry-run
-mold run --script shot.toml --output walk.mp4
+mold run --script shot.toml --dry-run --host workstation
+mold run --script shot.toml --host workstation --output walk.mp4
 ```
 
-Repeating `--prompt` is the sugar for the uniform case — same length, smooth
-transitions throughout. Anything heterogeneous belongs in a script.
+`--output` writes on the CLI machine. To save under a remote machine's
+`MOLD_HOME`, run the CLI on that machine and give an explicit path there.
+The server also retains the stitched print in its gallery. Verify the actual
+MP4, frame count, duration and audio before reporting successful generation.
+
+Keep the printed **Sequence job** ID. A disconnected command leaves accepted
+work running; inspect that same ID before submitting again. `show --json`
+reports state. When `state` is `completed`, read `finalizes[-1].gallery_filename` for
+the published filename and download it. If absent, inspect the job before claiming an output.
+Avoid `--latest` when other renders may finish concurrently.
 
 ```bash
-mold run ltx-2-19b-distilled:fp8 --prompt "a cat wakes on a windowsill" --prompt "it stretches and jumps down" --frames-per-clip 97
+mold jobs list --host workstation
+mold jobs show job-abc123 --json --host workstation
+mold library download PRINT.mp4 --host workstation --output ./
+mold jobs show job-abc123 --script --host workstation
+mold jobs resume job-abc123 --host workstation
 ```
 
-A remote `--script` run is a DURABLE chain job: it survives a dropped
-connection, `mold jobs list` finds it afterwards, and the stitched print is
-hydrated from the host's gallery rather than returned inline. A long one-shot
-(`mold run --frames 200`) is auto-chained by the host when the model cannot
-render that length in one pass; that job is not an authored sequence and does
-not appear in `mold jobs list`.
+Resume a paused job; a running job needs no resume. Repeating `--prompt` is
+shorter for uniform smooth clips with no per-stage inputs:
 
 ```bash
-mold jobs list
-mold jobs show job-abc123 --json
-mold jobs show job-abc123 --script
-mold jobs resume job-abc123
-mold jobs retake job-abc123 --stage 2 --mode splice --prompt "it lands on the rug"
-mold jobs cancel job-abc123
-mold jobs gc
+mold run ltx-2-19b-distilled:fp8 --prompt "a cat wakes on a windowsill" --prompt "it stretches" --frames-per-clip 49 --host workstation --output cat.mp4
 ```
 
-`mold jobs retake` re-renders ONE stage. To change the shape of the sequence,
-export its effective script with `mold jobs show <ID> --script` (`--json`
-prints a different document, the job detail), edit it, and hand the whole list
-back — amend replaces every stage, and the host keeps the cached
-clips of the leading stages that did not change. The model, size and container
-are not amendable; those need a new sequence. `--dry-run` prints what would be
-sent without touching the job.
+Transition behavior depends on the model:
+
+- `smooth` carries latent motion on LTX-2, the last RGB frame on Wan I2V/TI2V
+  and H3 FL2VA, and joins independent clips on text-only Wan, legacy LTX-Video
+  and H3 Ref2VA. Independent clips do not preserve motion across a seam.
+- `cut` renders a fresh clip. `fade` renders a fresh clip and crossfades it;
+  `fade_frames` controls the blend. Consult
+  `/api/capabilities/chain-limits?model=MODEL` for current limits.
+- A stage may use `source_image_path` relative to the script. MiniMax H3
+  FL2VA also accepts `first_frame_path` and `last_frame_path`; a smooth
+  continuation supplies its own first frame, so use a cut for an explicit new
+  first frame. H3 Ref2VA uses ordered typed `generation_references`, not
+  source images or keyframes. For file inputs use the path example below. The API accepts canonical typed
+  generation references. Local H3 chains are refused;
+  submit them to an H3-enabled server. H3 outputs retain generated audio.
+
+A long one-shot is auto-chained only when the model supports continuation;
+text-only Wan refuses this and legacy LTX-Video stays a single render.
+Auto-chained one-shots do not appear in authored `mold jobs list` history.
+
+### H3 Ref2VA with a local image
+
+Save this as `ref-chain.toml` beside an existing `hero.png`. Inspect the exact
+model on the target host first; this example uses its reviewed compact Turbo
+recipe. Paths resolve relative to the script and are probed before submission.
+The CLI inlines at most 32 MiB of reference media across the whole chain.
+
+```toml
+schema = "mold.chain.v1"
+
+[chain]
+model = "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step"
+width = 1344
+height = 768
+fps = 24
+seed = 42
+steps = 5
+guidance = 0.0
+strength = 1.0
+motion_tail_frames = 0
+output_format = "mp4"
+
+[[stage]]
+prompt = "integrated_multimodal_description: [Shot 1] <Subject 1> in a garden, slow camera push. overall_soundscape: Wind in leaves. non_diegetic_music: None."
+frames = 124
+[[stage.generation_references]]
+kind = "image"
+path = "hero.png"
+
+[[stage]]
+prompt = "integrated_multimodal_description: [Shot 1] <Subject 1> in the garden, a wide view. overall_soundscape: Wind in leaves. non_diegetic_music: None."
+frames = 124
+transition = "cut"
+[[stage.generation_references]]
+kind = "image"
+path = "hero.png"
+```
+
+Use `kind = "video"` or `"audio"` for those media. Follow the H3 Ref2VA
+prompting guide for ordered subject references and exact prompt structure.
+Each stage is an independent clip; repeated references guide identity without
+claiming motion continuation.
 
 ```bash
-mold jobs show job-abc123 --script > edited.toml
-mold jobs amend job-abc123 --script edited.toml --dry-run
-mold jobs amend job-abc123 --script edited.toml --fps 30 --no-audio
-mold jobs delete job-abc123 --yes
+mold info minimax-h3-ref2va:comfy-pruned-int8-turbo-4step --host workstation
+mold chain validate ref-chain.toml
+mold run --script ref-chain.toml --dry-run --host workstation
+mold run --script ref-chain.toml --host workstation --output ref-chain.mp4
+```
+
+`retake` changes one stage. To change the stage list, export the effective
+script, edit it, and amend with the complete replacement list. The host keeps
+unchanged leading clips. Stage indices start at zero: stage 1 is the second
+clip. Model, dimensions and container require a new job. `show --script`
+explicitly exports retained input bytes, so the edited script stays portable.
+H3 also publishes its individual clips, tagged with the parent chain ID.
+
+```bash
+mold jobs retake job-abc123 --stage 1 --mode splice --prompt "it lands on the rug" --host workstation
+mold jobs show job-abc123 --script --host workstation > edited.toml
+mold jobs amend job-abc123 --script edited.toml --dry-run --host workstation
+mold jobs amend job-abc123 --script edited.toml --host workstation
+mold jobs cancel job-abc123 --host workstation
+mold jobs gc --host workstation
+mold jobs delete job-abc123 --yes --host workstation
 ```
 
 ## Durable 3-D workflows
@@ -978,7 +1084,6 @@ configures operator authority; runtime per-app grants are issued by pairing
 without a Nix rebuild or disabling authentication.
 
 Video batching uses the same batch count as images; `--batch 1` makes a single output. Native iOS exposes Batch in More Options for clips as well as pictures. Native queue batch headers (iOS/macOS) and web/desktop/Tauri mobile job details offer whole-batch cancellation; the CLI uses `mold queue cancel --batch <BATCH-ID>`. Completed outputs are preserved.
-
 
 ### Stalled work and cancellation
 

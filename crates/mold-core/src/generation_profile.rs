@@ -1851,7 +1851,7 @@ pub fn generation_profile_for_manifest_with_defaults(
         default_fps: defaults.fps,
         default_negative_prompt: defaults.negative_prompt,
         source_image: manifest.defaults.source_image,
-        supports_sequence: crate::catalog::chain_capable_family(family),
+        supports_sequence: crate::chain::model_supports_sequence(&manifest.name, family),
         supports_extend: crate::catalog::extend_capable_model(
             family,
             manifest.defaults.source_image,

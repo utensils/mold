@@ -58,6 +58,10 @@ pub struct ChainStageMetadata {
     /// sequence clips may intentionally use different adapters.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loras: Vec<LoraSpec>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generation_references: Vec<crate::GenerationReferenceMetadata>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keyframes: Vec<crate::KeyframeMetadata>,
 }
 
 /// Structured multi-clip provenance block on [`crate::OutputMetadata`]
@@ -163,6 +167,20 @@ pub struct ChainStage {
     /// **Reserved for sub-project B.** Non-empty values produce 422.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub references: Vec<NamedRef>,
+
+    /// Ordered heterogeneous inputs for an H3 Ref2VA stage. Durable jobs
+    /// seal their payloads separately and retain only descriptors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_references: Option<Vec<crate::GenerationReference>>,
+
+    /// Explicit boundary frames for H3 FL2VA. Frame indices are local to the stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keyframes: Option<Vec<crate::KeyframeCondition>>,
+
+    /// Server-computed content identity of encrypted authored media. Keeps
+    /// media-only amendments transactional with their manifest revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authored_media_sha256: Option<String>,
 }
 
 /// Chained generation request. Server accepts either the canonical form
@@ -677,6 +695,19 @@ pub const LTX2_DEFAULT_CLIP_FRAMES: u32 = 97;
 /// `mold-server`'s `chain_limits`.
 pub const LTX_VIDEO_DEFAULT_CLIP_FRAMES: u32 = 97;
 
+/// Authored sequence support for one model identity. Runtime/build availability
+/// remains the separate activation contract; download-only H3 layouts never
+/// advertise a renderer merely because another tier shares their family.
+pub fn model_supports_sequence(model: &str, family: &str) -> bool {
+    match family {
+        "ltx2" | "ltx-video" | "wan" => true,
+        family if crate::minimax_h3::is_family(family) => {
+            crate::minimax_h3::is_reviewed_compact_model(model)
+        }
+        _ => false,
+    }
+}
+
 /// Per-clip frame count a wan render chain uses for one clip, in pixel frames.
 ///
 /// The two-expert A14B pair measures near the 24 GB envelope well before
@@ -992,6 +1023,28 @@ impl ChainRequest {
                         .and_then(|seeds| seeds.get(idx))
                         .map(u64::to_string),
                     loras: stage.loras.clone(),
+                    generation_references: stage
+                        .generation_references
+                        .as_ref()
+                        .map(|refs| {
+                            refs.iter()
+                                .enumerate()
+                                .filter_map(|(index, reference)| reference.redacted_metadata(index))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    keyframes: {
+                        let mut request = synth.clone();
+                        request.keyframes = stage.keyframes.clone();
+                        OutputMetadata::from_generate_request(
+                            &request,
+                            self.seed.unwrap_or(0),
+                            None,
+                            crate::build_info::version_string(),
+                        )
+                        .keyframes
+                        .unwrap_or_default()
+                    },
                 })
                 .collect(),
         });
@@ -1116,10 +1169,15 @@ impl ChainRequest {
                 .as_deref()
                 .and_then(crate::validation::frame_step_for_family)
                 .unwrap_or(8);
-            if clip_frames % step != 1 {
-                let examples: Vec<String> = (1..5).map(|k| (k * step + 1).to_string()).collect();
+            let offset = family
+                .as_deref()
+                .and_then(crate::validation::frame_offset_for_family)
+                .unwrap_or(1);
+            if clip_frames % step != offset % step {
+                let examples: Vec<String> =
+                    (1..5).map(|k| (k * step + offset).to_string()).collect();
                 return Err(MoldError::Validation(format!(
-                    "chain clip_frames ({clip_frames}) must be {step}k+1 ({}, …)",
+                    "chain clip_frames ({clip_frames}) must be {step}k+{offset} ({}, …)",
                     examples.join(", "),
                 )));
             }
@@ -1165,13 +1223,17 @@ impl ChainRequest {
                 self.motion_tail_frames,
             )));
         }
+        let grid_offset = family
+            .as_deref()
+            .and_then(crate::validation::frame_offset_for_family)
+            .unwrap_or(1);
         for (idx, stage) in self.stages.iter().enumerate() {
             if stage.frames == 0 {
                 return Err(MoldError::Validation(format!("stage {idx} has 0 frames",)));
             }
-            if stage.frames % grid_step != 1 {
+            if stage.frames % grid_step != grid_offset % grid_step {
                 return Err(MoldError::Validation(format!(
-                    "stage {idx} has {} frames; this family requires {grid_step}k+1",
+                    "stage {idx} has {} frames; this family requires {grid_step}k+{grid_offset}",
                     stage.frames,
                 )));
             }
@@ -1371,7 +1433,10 @@ fn build_auto_expand_stages(
         let step = family
             .and_then(crate::validation::frame_step_for_family)
             .unwrap_or(8);
-        let last = needed + (step + 1 - needed % step) % step;
+        let offset = family
+            .and_then(crate::validation::frame_offset_for_family)
+            .unwrap_or(1);
+        let last = needed + (step + offset - needed % step) % step;
         // Floor at the smallest non-degenerate grid clip. A zero tail with
         // `total == clip + 1` snaps to a 1-frame last stage — on-grid and
         // above the tail, but a single pixel frame is one latent frame,
@@ -1380,7 +1445,10 @@ fn build_auto_expand_stages(
         // own grid rule and already implies `needed > step + 1`, so the
         // floor engages for tail 0 alone; the `clip_frames` cap keeps a
         // degenerate 1-frame-clip request inside its own envelope.
-        let last = last.max((step + 1).min(clip_frames));
+        let minimum = family
+            .and_then(crate::validation::min_frames_for_family)
+            .unwrap_or(step + offset);
+        let last = last.max(minimum.min(clip_frames));
         (count, last)
     };
 
@@ -1405,7 +1473,10 @@ fn build_auto_expand_stages(
         // stage's tail. Repeating the opening still therefore restarted every
         // auto-expanded Wan continuation from the same frame instead of
         // producing the promised seamless handoff.
-        let stage_source = if family == Some("wan") && idx > 0 {
+        let stage_source = if family
+            .is_some_and(|family| family == "wan" || crate::minimax_h3::is_family(family))
+            && idx > 0
+        {
             None
         } else {
             source_image.clone()
@@ -1426,6 +1497,9 @@ fn build_auto_expand_stages(
             model: None,
             loras: vec![],
             references: vec![],
+            generation_references: None,
+            keyframes: None,
+            authored_media_sha256: None,
         });
     }
     Ok(stages)
@@ -1433,6 +1507,39 @@ fn build_auto_expand_stages(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sequence_discovery_uses_every_reviewed_h3_identity_and_excludes_download_only_tiers() {
+        for model in crate::minimax_h3::REVIEWED_COMPACT_MODELS {
+            assert!(
+                super::model_supports_sequence(model, crate::minimax_h3::FAMILY),
+                "{model}"
+            );
+            let manifest = crate::manifest::find_manifest(model).unwrap();
+            let profile = crate::generation_profile_for_manifest(manifest);
+            assert!(
+                profile
+                    .default_recipe()
+                    .unwrap()
+                    .capabilities
+                    .supports_sequence,
+                "{model}"
+            );
+        }
+        for model in [
+            crate::minimax_h3::FL2VA_COMFY_NVFP4,
+            crate::minimax_h3::REF2VA_COMFY_NVFP4,
+            "minimax-h3-fl2va:official-bf16",
+            "minimax-h3-ref2va:official-bf16",
+            "minimax-h3",
+        ] {
+            assert!(
+                !super::model_supports_sequence(model, crate::minimax_h3::FAMILY),
+                "{model}"
+            );
+        }
+        assert!(super::model_supports_sequence("catalog:unknown", "wan"));
+        assert!(!super::model_supports_sequence("flux", "flux"));
+    }
     use super::*;
 
     /// The per-model routing clip size is the size ONE generation renders when
@@ -1569,6 +1676,9 @@ mod tests {
             model: None,
             loras: Vec::new(),
             references: Vec::new(),
+            generation_references: None,
+            keyframes: None,
+            authored_media_sha256: None,
         }
     }
 
@@ -1659,6 +1769,9 @@ mod tests {
             model: None,
             loras: vec![],
             references: vec![],
+            generation_references: None,
+            keyframes: None,
+            authored_media_sha256: None,
         }
     }
 
@@ -2251,6 +2364,9 @@ mod tests {
                 model: None,
                 loras: vec![],
                 references: vec![],
+                generation_references: None,
+                keyframes: None,
+                authored_media_sha256: None,
             }],
             motion_tail_frames: 25,
             width: 1216,
@@ -2295,6 +2411,9 @@ mod tests {
             model: None,
             loras: vec![],
             references: vec![],
+            generation_references: None,
+            keyframes: None,
+            authored_media_sha256: None,
         };
         let json = serde_json::to_string(&stage).unwrap();
         let back: ChainStage = serde_json::from_str(&json).unwrap();
@@ -2318,6 +2437,9 @@ mod tests {
                 model: None,
                 loras: vec![],
                 references: vec![],
+                generation_references: None,
+                keyframes: None,
+                authored_media_sha256: None,
             },
             ChainStage {
                 prompt: "scene 1".into(),
@@ -2330,6 +2452,9 @@ mod tests {
                 model: None,
                 loras: vec![],
                 references: vec![],
+                generation_references: None,
+                keyframes: None,
+                authored_media_sha256: None,
             },
         ];
         let normalised = req.normalise().unwrap();
@@ -2351,6 +2476,9 @@ mod tests {
             model: Some("flux-dev:q4".into()),
             loras: vec![],
             references: vec![],
+            generation_references: None,
+            keyframes: None,
+            authored_media_sha256: None,
         }];
         let err = req.normalise().unwrap_err().to_string();
         assert!(err.contains("reserved for sub-project C"), "got: {err}");
@@ -2374,6 +2502,9 @@ mod tests {
                 name: None,
             }],
             references: vec![],
+            generation_references: None,
+            keyframes: None,
+            authored_media_sha256: None,
         }];
         let normalised = req.normalise().unwrap();
         assert_eq!(normalised.stages[0].loras[0].path, "x.safetensors");
@@ -2443,6 +2574,9 @@ mod tests {
                     model: None,
                     loras: vec![],
                     references: vec![],
+                    generation_references: None,
+                    keyframes: None,
+                    authored_media_sha256: None,
                 })
                 .collect(),
             motion_tail_frames: 25,
@@ -2569,6 +2703,9 @@ mod tests {
                 model: None,
                 loras: vec![],
                 references: vec![],
+                generation_references: None,
+                keyframes: None,
+                authored_media_sha256: None,
             },
             ChainStage {
                 prompt: "stage one prompt".into(),
@@ -2581,6 +2718,9 @@ mod tests {
                 model: None,
                 loras: vec![],
                 references: vec![],
+                generation_references: None,
+                keyframes: None,
+                authored_media_sha256: None,
             },
         ];
         req.prompt = None;
@@ -2736,6 +2876,37 @@ mod tests {
     /// whole video under clip 1's prompt alone — the gallery row joins
     /// every clip prompt (one line per clip) so search matches any of them.
     /// Uniform prompts (auto-expanded chains) keep the single prompt.
+    #[test]
+    fn stitched_stage_metadata_retains_typed_media_provenance_without_payloads() {
+        let mut request = auto_expand_request("walk", 190, 97, 17, None)
+            .normalise()
+            .unwrap();
+        request.stages[0].keyframes = Some(vec![crate::KeyframeCondition {
+            frame: 96,
+            image: b"private endpoint".to_vec(),
+            name: Some("end.png".into()),
+        }]);
+        request.stages[1].generation_references = Some(vec![crate::GenerationReference::Image {
+            media: crate::GenerationReferenceAuthority::Inline {
+                data: b"private reference".to_vec(),
+            },
+            provenance: Default::default(),
+            mime_type: "image/png".into(),
+            width: 32,
+            height: 32,
+        }]);
+        let metadata = request.stitched_output_metadata(OutputFormat::Mp4, 190, None);
+        let chain = metadata.chain.as_ref().unwrap();
+        assert_eq!(chain.stages[0].keyframes[0].frame, 96);
+        assert_eq!(
+            chain.stages[1].generation_references[0].kind,
+            crate::GenerationReferenceKind::Image
+        );
+        let encoded = serde_json::to_string(&metadata).unwrap();
+        assert!(!encoded.contains("private endpoint") && !encoded.contains("private reference"));
+        assert!(!encoded.contains("cHJpdmF0Z"));
+    }
+
     #[test]
     fn synthetic_generate_request_joins_distinct_stage_prompts() {
         let uniform = auto_expand_request("one prompt", 190, 97, 17, None)

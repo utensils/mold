@@ -3,7 +3,7 @@
 //! When `mold run --frames N` exceeds the per-clip cap of the selected model,
 //! this module takes over from [`super::generate::run`]: it assembles a
 //! [`ChainRequest`] from the user's CLI args and either submits it to a
-//! running server via [`MoldClient::generate_chain_stream`] or, in `--local`
+//! running server via durable chain jobs or, in `--local`
 //! mode, drives an in-process [`mold_inference::chain::ChainOrchestrator`].
 //!
 //! Both paths funnel through [`encode_and_save`] so stdout piping, gallery
@@ -581,14 +581,35 @@ async fn run_chain_remote(client: &MoldClient, req: &ChainRequest) -> Result<Vid
         .await
         .with_context(|| format!("could not read metadata for {filename}"))?
         .with_context(|| format!("stitched print {filename} is missing from the gallery index"))?;
-    let metadata = item.metadata;
+    remote_chain_video(
+        bytes,
+        item.format.unwrap_or(OutputFormat::Mp4),
+        item.metadata,
+    )
+}
 
+fn remote_chain_video(
+    bytes: Vec<u8>,
+    format: OutputFormat,
+    metadata: mold_core::OutputMetadata,
+) -> Result<VideoData> {
+    // Gallery metadata intentionally stores generation settings rather than
+    // soundtrack facts. Read the downloaded container itself, including when
+    // this CPU-only client submits to an audio-capable remote host.
+    let facts = if format == OutputFormat::Mp4 {
+        Some(
+            mold_inference::ltx2::media::probe_video_bytes(&bytes)
+                .context("could not inspect downloaded stitched MP4")?,
+        )
+    } else {
+        None
+    };
     Ok(VideoData {
         video_only: None,
         attention_path: None,
         int8_arm: None,
         data: bytes,
-        format: item.format.unwrap_or(OutputFormat::Mp4),
+        format,
         width: metadata.width,
         height: metadata.height,
         frames: metadata.frames.unwrap_or(0),
@@ -601,10 +622,10 @@ async fn run_chain_remote(client: &MoldClient, req: &ChainRequest) -> Result<Vid
         // `--script` run writes locally.
         thumbnail: Vec::new(),
         gif_preview: Vec::new(),
-        has_audio: false,
-        duration_ms: None,
-        audio_sample_rate: None,
-        audio_channels: None,
+        has_audio: facts.as_ref().is_some_and(|facts| facts.has_audio),
+        duration_ms: facts.as_ref().and_then(|facts| facts.duration_ms),
+        audio_sample_rate: facts.as_ref().and_then(|facts| facts.audio_sample_rate),
+        audio_channels: facts.as_ref().and_then(|facts| facts.audio_channels),
     })
 }
 
@@ -1115,6 +1136,71 @@ async fn render_chain_progress(
     parent.finish_and_clear();
 }
 
+/// Resolve file-backed typed references before the core TOML parser. The server
+/// only receives canonical, content-probed inline bytes, never client paths.
+pub(crate) fn read_script_with_media_paths(
+    text: &str,
+    script_dir: &std::path::Path,
+) -> anyhow::Result<mold_core::chain::ChainScript> {
+    let mut doc: toml::Value = toml::from_str(text)?;
+    let mut total_reference_bytes = 0usize;
+    if let Some(stages) = doc.get_mut("stage").and_then(toml::Value::as_array_mut) {
+        for (stage_idx, stage) in stages.iter_mut().enumerate() {
+            if let Some(references) = stage
+                .get_mut("generation_references")
+                .and_then(toml::Value::as_array_mut)
+            {
+                let mut inputs = Vec::new();
+                let file_backed = references
+                    .iter()
+                    .any(|reference| reference.get("path").is_some());
+                if !file_backed {
+                    continue;
+                }
+                for reference in references.iter() {
+                    let table = reference.as_table().context("reference must be a table")?;
+                    anyhow::ensure!(table.len() == 2 && table.contains_key("kind") && table.contains_key("path"),
+                        "stage {stage_idx}: path references require exactly kind and path; do not mix canonical references with path references");
+                    let kind = table["kind"]
+                        .as_str()
+                        .context("reference kind must be a string")?;
+                    let path = table["path"]
+                        .as_str()
+                        .context("reference path must be a string")?;
+                    let mut input: super::h3::ReferenceArg = format!("{kind}={path}")
+                        .parse()
+                        .map_err(anyhow::Error::msg)?;
+                    if input.path.is_relative() {
+                        input.path = script_dir.join(input.path);
+                    }
+                    inputs.push(input);
+                }
+                let (descriptors, uploads) = super::h3::prepare_references(&inputs)
+                    .with_context(|| format!("stage {stage_idx}: could not prepare references"))?;
+                let canonical = super::generate::inline_reference_files(descriptors, uploads, 1)?;
+                for reference in &canonical {
+                    if let mold_core::GenerationReferenceAuthority::Inline { data } =
+                        reference.media()
+                    {
+                        total_reference_bytes = total_reference_bytes
+                            .checked_add(data.len())
+                            .context("chain reference size overflow")?;
+                    }
+                }
+                anyhow::ensure!(total_reference_bytes <= mold_core::minimax_h3::MAX_INLINE_REFERENCE_BYTES,
+                    "chain inline references must total at most 32 MiB; use smaller files or fewer stages");
+                *references = canonical
+                    .iter()
+                    .map(toml::Value::try_from)
+                    .collect::<Result<Vec<_>, _>>()?;
+            }
+        }
+    }
+    let canonical = toml::to_string(&doc)?;
+    mold_core::chain_toml::read_script_resolving_paths(&canonical, script_dir)
+        .map_err(anyhow::Error::new)
+}
+
 /// Load a TOML script file, normalise it, and either submit or print a
 /// dry-run summary. Called from the `Commands::Run` early-return when
 /// `--script` is set.
@@ -1138,7 +1224,7 @@ pub async fn run_from_script(
     let toml_src = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("failed to read script {}: {e}", path.display()))?;
     let script_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let script = mold_core::chain_toml::read_script_resolving_paths(&toml_src, script_dir)
+    let script = read_script_with_media_paths(&toml_src, script_dir)
         .map_err(|e| anyhow::anyhow!("invalid chain TOML in {}: {e}", path.display()))?;
 
     // Before `normalise()`: a stage shorter than the requested tail would
@@ -1212,7 +1298,7 @@ pub(crate) struct SugarRecipe {
 
 /// Resolve the multi-prompt sugar recipe from the model's own configuration.
 ///
-/// This path accepts any known model — `main.rs` gates only MiniMax H3 — but
+/// This path accepts any known video model, and previously
 /// used to hardcode LTX-2's 1216x704, 24 fps, 8 steps, guidance 3.0, a
 /// 97-frame clip default, and a cap resolved against a literal `"ltx2"`. Those
 /// values reach the engine unchanged through the orchestrator's
@@ -1418,7 +1504,15 @@ pub(crate) fn resolve_chain_model_authority(
     // Wan's contract is a property of the weights, so read the headers of the
     // artifacts that will actually load; path overrides can point one manifest
     // name at a different checkpoint.
-    let source_image = if family == "wan" {
+    let source_image = if mold_core::minimax_h3::is_family(&family) {
+        // H3's task contract, rather than the optional legacy manifest hint,
+        // owns its endpoints. Reviewed FL2VA accepts an optional first frame;
+        // Ref2VA consumes its typed reference set instead.
+        mold_core::minimax_h3::task_for_model(&resolved).map(|task| match task {
+            mold_core::minimax_h3::Task::Fl2va => mold_core::SourceImageCapability::Optional,
+            mold_core::minimax_h3::Task::Ref2va => mold_core::SourceImageCapability::Unsupported,
+        })
+    } else if family == "wan" {
         let probed = mold_core::ModelPaths::resolve(model, config).and_then(|paths| {
             mold_inference::wan_source_image_capability(&paths.transformer, &paths.vae)
         });
@@ -1565,6 +1659,9 @@ pub async fn run_from_sugar(
             model: None,
             loras: vec![],
             references: vec![],
+            generation_references: None,
+            keyframes: None,
+            authored_media_sha256: None,
         })
         .collect();
 
@@ -1668,6 +1765,79 @@ fn print_dry_run_summary(req: &ChainRequest) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn h3_cli_seam_uses_task_contract_even_without_manifest_source_default() {
+        let config = mold_core::Config::default();
+        for model in mold_core::minimax_h3::REVIEWED_COMPACT_MODELS {
+            let authority = resolve_chain_model_authority(model, &config);
+            let mut request = empty_chain_request();
+            request.model = (*model).into();
+            request.motion_tail_frames = 17;
+            normalize_script_motion_tail(&mut request, &authority);
+            let expected = if mold_core::minimax_h3::task_for_model(model)
+                == Some(mold_core::minimax_h3::Task::Fl2va)
+            {
+                1
+            } else {
+                0
+            };
+            assert_eq!(request.motion_tail_frames, expected, "{model}");
+        }
+    }
+
+    #[test]
+    fn remote_chain_download_reads_encoded_audio_facts() {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(include_str!("../../tests/fixtures/chain-tone.mp4.b64").trim())
+            .unwrap();
+        let mut req = empty_chain_request();
+        req.stages.push(stage_with_frames("tone", 97));
+        let metadata = req.stitched_output_metadata(OutputFormat::Mp4, 97, None);
+        let video = remote_chain_video(bytes, OutputFormat::Mp4, metadata).unwrap();
+        assert!(video.has_audio);
+        assert!(video.duration_ms.is_some_and(|duration| duration > 0));
+        assert!(video.audio_sample_rate.is_some_and(|rate| rate > 0));
+        assert!(video.audio_channels.is_some_and(|channels| channels > 0));
+    }
+
+    #[test]
+    fn chain_reference_paths_are_probed_relative_to_the_script() {
+        let dir = tempfile::tempdir().unwrap();
+        image::RgbImage::new(32, 32)
+            .save(dir.path().join("hero.png"))
+            .unwrap();
+        let text = r#"schema = "mold.chain.v1"
+[chain]
+model = "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step"
+width = 1344
+height = 768
+fps = 24
+steps = 5
+guidance = 0.0
+strength = 1.0
+motion_tail_frames = 0
+output_format = "mp4"
+[[stage]]
+prompt = "<Picture 1> turns toward the camera."
+frames = 124
+[[stage.generation_references]]
+kind = "image"
+path = "hero.png"
+"#;
+        let script = read_script_with_media_paths(text, dir.path()).unwrap();
+        let references = script.stages[0].generation_references.as_ref().unwrap();
+        assert!(
+            matches!(references[0].media(), mold_core::GenerationReferenceAuthority::Inline { data } if !data.is_empty())
+        );
+        assert!(references[0].provenance().sha256.is_some());
+        // A file-backed reference can never silently become a descriptor.
+        assert!(
+            read_script_with_media_paths(&text.replace("hero.png", "missing.png"), dir.path())
+                .is_err()
+        );
+    }
 
     /// A script-authored wan chain renders with the checkpoint's seam, not
     /// the caller's (#783).
@@ -1959,6 +2129,9 @@ mod tests {
             model: None,
             loras: vec![],
             references: vec![],
+            generation_references: None,
+            keyframes: None,
+            authored_media_sha256: None,
         }
     }
 
@@ -2717,6 +2890,9 @@ mod tests {
             model: None,
             loras: vec![],
             references: vec![],
+            generation_references: None,
+            keyframes: None,
+            authored_media_sha256: None,
         };
         let label = super::StageLabel::from_stage(&stage);
         assert_eq!(label.transition_tag, "fade");
@@ -2739,6 +2915,9 @@ mod tests {
                 model: None,
                 loras: vec![],
                 references: vec![],
+                generation_references: None,
+                keyframes: None,
+                authored_media_sha256: None,
             })
         };
         assert_eq!(make(TransitionMode::Smooth).transition_tag, "smooth");
@@ -2781,6 +2960,9 @@ mod tests {
                     model: None,
                     loras: vec![],
                     references: vec![],
+                    generation_references: None,
+                    keyframes: None,
+                    authored_media_sha256: None,
                 },
                 ChainStage {
                     prompt: "cat on rooftop".into(),
@@ -2793,6 +2975,9 @@ mod tests {
                     model: None,
                     loras: vec![],
                     references: vec![],
+                    generation_references: None,
+                    keyframes: None,
+                    authored_media_sha256: None,
                 },
                 ChainStage {
                     prompt: "cat on moon".into(),
@@ -2805,6 +2990,9 @@ mod tests {
                     model: None,
                     loras: vec![],
                     references: vec![],
+                    generation_references: None,
+                    keyframes: None,
+                    authored_media_sha256: None,
                 },
             ],
         };

@@ -1501,6 +1501,74 @@ mod tests {
     }
 
     #[test]
+    fn every_profile_routes_to_executable_video_sequence_instructions() {
+        for profile in RenderProfile::ALL {
+            let bundle = render_bundle(profile).unwrap();
+            assert!(bundle.files["SKILL.md"].contains("For multi-scene video"));
+            let reference = &bundle.files["references/cli.md"];
+            let section = reference
+                .split("## Scripted sequences")
+                .nth(1)
+                .unwrap()
+                .split("\n## ")
+                .next()
+                .unwrap();
+            let toml = section
+                .split("```toml\n")
+                .nth(1)
+                .expect("sequence instructions need a complete script")
+                .split("```")
+                .next()
+                .unwrap();
+            let script = mold_core::chain_toml::read_script(toml).unwrap();
+            let request = crate::commands::chain::build_request_from_script(&script)
+                .unwrap()
+                .normalise_with_family(Some("ltx2"))
+                .unwrap();
+            assert_eq!(request.stages.len(), 2);
+            assert_eq!(
+                request.stages[1].transition,
+                mold_core::chain::TransitionMode::Cut
+            );
+            assert!(section.contains("mold jobs show job-abc123 --json --host workstation"));
+            assert!(section.contains("mold library download PRINT.mp4 --host workstation"));
+            assert!(section.contains("MiniMax H3"));
+            assert!(section.contains("CLI machine"));
+            assert!(section.contains("finalizes[-1].gallery_filename"));
+            assert!(section.contains("--stage 1 --mode splice"));
+            assert!(
+                !section.contains("--fps 30 --no-audio"),
+                "generic amend must preserve H3 timing and audio"
+            );
+        }
+    }
+
+    #[test]
+    fn documented_chain_api_request_deserializes_and_normalizes() {
+        let guide = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../website/guide/video.md"
+        ));
+        let json = guide
+            .split("### HTTP API")
+            .nth(1)
+            .unwrap()
+            .split("```json\n")
+            .nth(1)
+            .unwrap()
+            .split("```")
+            .next()
+            .unwrap();
+        let request: mold_core::chain::ChainRequest = serde_json::from_str(json).unwrap();
+        let request = request.normalise_with_family(Some("ltx2")).unwrap();
+        assert_eq!(request.stages.len(), 2);
+        assert_eq!(
+            request.stages[1].transition,
+            mold_core::chain::TransitionMode::Cut
+        );
+    }
+
+    #[test]
     fn shared_paths_use_portable_intersection_profile() {
         let scope = Scope::Project(PathBuf::from("/project"));
         let targets = dedupe_targets(&scope, &[Agent::Codex, Agent::Cursor, Agent::Gemini]);

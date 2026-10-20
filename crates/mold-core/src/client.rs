@@ -1234,6 +1234,20 @@ impl MoldClient {
     }
 
     pub async fn get_chain_job(&self, id: &str) -> Result<ChainJobDetail> {
+        self.get_chain_job_detail(id, false).await
+    }
+
+    /// Explicit portable script export, including the job's authored media.
+    /// Ordinary status reads intentionally remain payload-free.
+    pub async fn get_chain_job_with_media(&self, id: &str) -> Result<ChainJobDetail> {
+        self.get_chain_job_detail(id, true).await
+    }
+
+    async fn get_chain_job_detail(
+        &self,
+        id: &str,
+        include_source_media: bool,
+    ) -> Result<ChainJobDetail> {
         let resp = self
             .client
             .get(format!(
@@ -1241,6 +1255,7 @@ impl MoldClient {
                 self.base_url,
                 encode_path_segment(id)
             ))
+            .query(&[("include_source_media", include_source_media)])
             .send()
             .await?;
         Ok(error_for_status_with_body(resp)
@@ -7053,6 +7068,9 @@ mod tests {
             model: None,
             loras: Vec::new(),
             references: Vec::new(),
+            generation_references: None,
+            keyframes: None,
+            authored_media_sha256: None,
         }
     }
 

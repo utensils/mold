@@ -87,6 +87,7 @@ pub fn read_script_resolving_paths(toml_str: &str, script_dir: &Path) -> Result<
         .and_then(|v| v.as_array_mut())
     {
         for (idx, stage) in stages.iter_mut().enumerate() {
+            resolve_stage_boundary_frames(stage, idx, script_dir)?;
             resolve_stage_source_image(stage, idx, script_dir)?;
         }
     }
@@ -98,6 +99,66 @@ pub fn read_script_resolving_paths(toml_str: &str, script_dir: &Path) -> Result<
     })?;
 
     read_script(&rewritten)
+}
+
+/// Resolve FL2VA boundary sugar without accepting ambiguous endpoint authority.
+fn resolve_stage_boundary_frames(stage: &mut toml::Value, idx: usize, dir: &Path) -> Result<()> {
+    let Some(table) = stage.as_table_mut() else {
+        return Ok(());
+    };
+    let first = table.remove("first_frame_path");
+    let last = table.remove("last_frame_path");
+    if first.is_none() && last.is_none() {
+        return Ok(());
+    }
+    if [
+        "keyframes",
+        "source_image",
+        "source_image_path",
+        "source_image_b64",
+    ]
+    .iter()
+    .any(|key| table.contains_key(*key))
+    {
+        return Err(MoldError::Validation(format!("stage {idx}: cannot combine first_frame_path/last_frame_path with keyframes or source_image")));
+    }
+    let frames = table
+        .get("frames")
+        .and_then(toml::Value::as_integer)
+        .filter(|n| *n > 0)
+        .ok_or_else(|| {
+            MoldError::Validation(format!(
+                "stage {idx}: boundary paths require positive frames"
+            ))
+        })?;
+    let mut keyframes = Vec::new();
+    for (role, frame, path) in [("first", 0, first), ("last", frames - 1, last)] {
+        let Some(path) = path else {
+            continue;
+        };
+        let rel = path.as_str().ok_or_else(|| {
+            MoldError::Validation(format!("stage {idx}: {role}_frame_path must be a string"))
+        })?;
+        let path = dir.join(rel);
+        let bytes = std::fs::read(&path).map_err(|error| {
+            MoldError::Validation(format!(
+                "stage {idx}: failed to read {role}_frame_path '{}': {error}",
+                path.display()
+            ))
+        })?;
+        let mut endpoint = toml::map::Map::new();
+        endpoint.insert("frame".into(), toml::Value::Integer(frame));
+        endpoint.insert(
+            "image".into(),
+            toml::Value::String(base64::engine::general_purpose::STANDARD.encode(bytes)),
+        );
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            endpoint.insert("name".into(), toml::Value::String(name.into()));
+        }
+        keyframes.push(toml::Value::Table(endpoint));
+    }
+    table.insert("keyframes".into(), toml::Value::Array(keyframes));
+    Ok(())
 }
 
 /// In-place: move `source_image_path` / `source_image_b64` into the
@@ -190,6 +251,67 @@ mod tests {
     use crate::chain::{ChainScript, ChainScriptChain, ChainStage, TransitionMode};
     use crate::types::OutputFormat;
 
+    #[test]
+    fn resolves_h3_boundary_paths_and_preserves_typed_stage_media() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("first.png"), b"first").unwrap();
+        std::fs::write(dir.path().join("last.png"), b"last").unwrap();
+        let script = read_script_resolving_paths(
+            r#"
+            [chain]
+            model = "minimax-h3-fl2va:comfy-pruned-int8"
+            width = 256
+            height = 256
+            fps = 24
+            steps = 21
+            guidance = 0.0
+            strength = 1.0
+            motion_tail_frames = 1
+            output_format = "mp4"
+            [[stage]]
+            prompt = "walk"
+            frames = 107
+            first_frame_path = "first.png"
+            last_frame_path = "last.png"
+        "#,
+            dir.path(),
+        )
+        .unwrap();
+        let wire = serde_json::to_value(&script.stages[0]).unwrap();
+        assert_eq!(wire["keyframes"][0]["frame"], 0);
+        assert_eq!(wire["keyframes"][1]["frame"], 106);
+        assert_eq!(
+            serde_json::to_value(read_script(&write_script(&script).unwrap()).unwrap()).unwrap(),
+            serde_json::to_value(&script).unwrap()
+        );
+    }
+
+    #[test]
+    fn boundary_paths_cannot_silently_replace_existing_source() {
+        let err = read_script_resolving_paths(
+            r#"
+            [chain]
+            model = "minimax-h3-fl2va:comfy-pruned-int8"
+            width = 256
+            height = 256
+            fps = 24
+            steps = 21
+            guidance = 0.0
+            strength = 1.0
+            motion_tail_frames = 1
+            output_format = "mp4"
+            [[stage]]
+            prompt = "walk"
+            frames = 107
+            source_image = "YQ=="
+            first_frame_path = "missing.png"
+        "#,
+            Path::new("."),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("cannot combine"), "{err}");
+    }
+
     fn sample_script() -> ChainScript {
         ChainScript {
             schema: "mold.chain.v1".into(),
@@ -217,6 +339,9 @@ mod tests {
                 model: None,
                 loras: vec![],
                 references: vec![],
+                generation_references: None,
+                keyframes: None,
+                authored_media_sha256: None,
             }],
         }
     }

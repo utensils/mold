@@ -134,7 +134,7 @@ pub fn extend_capable_model(
 }
 
 pub fn chain_capable_family(family: &str) -> bool {
-    matches!(family, "ltx2" | "ltx-video" | "wan")
+    crate::chain::model_supports_sequence("", family)
 }
 
 /// Whether a concrete model renders an audio track, when that is settled
@@ -247,7 +247,8 @@ pub fn build_model_catalog(
                 .map(str::to_string);
         let supports_extend =
             extend_capable_model(&manifest.family, manifest.defaults.source_image);
-        let supports_sequence = chain_capable_family(&manifest.family);
+        let supports_sequence =
+            crate::chain::model_supports_sequence(&manifest.name, &manifest.family);
         let generation_profile = crate::generation_profile_for_manifest_with_defaults(
             manifest,
             crate::GenerationDefaultsProfile {
@@ -427,7 +428,7 @@ pub fn build_model_catalog(
             .clone()
             .unwrap_or_else(|| "custom".to_string());
         let has_profile_identity = model_cfg.family.is_some();
-        let sequence_capable = chain_capable_family(&family);
+        let sequence_capable = crate::chain::model_supports_sequence(name, &family);
         // Config-only models have local weights but no manifest task
         // structure, so checkpoint-dependent conditioning stays unknown for
         // the server's header probe. Legacy LTX-Video is the exception: the

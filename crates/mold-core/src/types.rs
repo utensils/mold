@@ -886,7 +886,7 @@ pub struct UpscaleResponse {
 /// roots; upload handles are resolved only inside the authenticated request
 /// that owns them. `Descriptor` is a payload-free placement-preview projection
 /// and is rejected by ordinary generation validation.
-#[derive(Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "authority", rename_all = "snake_case")]
 pub enum GenerationReferenceAuthority {
     Inline {
@@ -1012,7 +1012,7 @@ impl GenerationReferenceCrop {
 /// can reason about row counts without decoding or logging media. The server
 /// later content-sniffs and probes the resolved payload and rejects any drift
 /// before freezing admission.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GenerationReference {
     Image {
@@ -2390,7 +2390,7 @@ pub fn family_output_defaults_to_mp4(family: &str) -> bool {
     )
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KeyframeCondition {
     #[schema(example = 0)]
     pub frame: u32,
@@ -3141,7 +3141,7 @@ pub struct ImageData {
 
 /// Byte-free provenance for a keyframe conditioning input. Additive on
 /// `OutputMetadata`; legacy rows omit the field entirely.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 pub struct KeyframeMetadata {
     pub frame: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]

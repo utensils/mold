@@ -72,7 +72,7 @@ prompt expansion for that run.
 | `--transparent`                                                                              | Transparent background (models advertising `capabilities.transparency`, today Qwen Image 2.1): the subject is rendered as a cut-out with an alpha channel. PNG or WebP only; `--format jpeg` is refused before anything loads                       |
 | `--width <N>`, `--height <N>`                                                                | Output dimensions                                                                                                                                                                                                                                   |
 | `--steps <N>`, `--guidance <N>`, `--seed <N>`, `--batch <N>`                                 | Core generation controls                                                                                                                                                                                                                            |
-| `--prompt <TEXT>`                                                                            | Repeat for multi-stage video chain sugar (LTX-2, LTX-Video, Wan)                                                                                                                                                                                    |
+| `--prompt <TEXT>`                                                                            | Repeat for multi-stage video chain sugar (LTX-2, LTX-Video, Wan, H3 server)                                                                                                                                                                         |
 | `--frames-per-clip <N>`                                                                      | Per-stage frame count for repeated `--prompt`                                                                                                                                                                                                       |
 | `--script <PATH>`                                                                            | Submit a `mold.chain.v1` TOML chain script                                                                                                                                                                                                          |
 | `--dry-run`                                                                                  | Parse/normalise repeated prompts or scripts without generating                                                                                                                                                                                      |
@@ -277,7 +277,11 @@ requests.
 
 ## `mold chain validate`
 
-Validate and normalise a `mold.chain.v1` TOML script.
+Validate and normalise a `mold.chain.v1` TOML script locally. This checks the
+script shape; it does not run remote admission or load a model. See
+[Video sequences](/guide/video#multi-prompt-scripts) for a complete script.
+H3 sequences require an H3-enabled server; FL2VA supports first/last frame
+paths, while Ref2VA stages carry ordered typed generation references.
 
 ```bash
 mold chain validate shot.toml

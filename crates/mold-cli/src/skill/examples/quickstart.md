@@ -23,3 +23,17 @@ mold skill show codex references/prompting/families/flux2.md
 For a remote host, pick a saved one from `mold host list` and pass
 `--host NAME`; its saved credential is used, so nothing secret goes on the
 command line. Run `mold <command> --help` for anything not covered here.
+
+For video sequences, copy the complete `shot.toml` from
+[Scripted sequences](../references/cli.md#scripted-sequences), inspect the
+selected model, then validate and run it:
+
+```bash
+mold info ltx-2-19b-distilled:fp8 --host workstation
+mold chain validate shot.toml
+mold run --script shot.toml --dry-run --host workstation
+mold run --script shot.toml --host workstation --output walk.mp4
+mold jobs show job-abc123 --json --host workstation
+```
+
+Keep the printed job ID; inspect it before retrying a disconnected render.

@@ -373,8 +373,12 @@ mold run minimax-h3-ref2va:comfy-pruned-int8 \
   --reference audio=score.wav
 ```
 
-H3 clips are single-shot: sequence, extend, retake, arbitrary LoRA, negative
-prompt, and generic scheduler controls are unavailable. Generation requires an
+H3 supports durable CLI/API sequences through an H3-enabled server. FL2VA
+smooth seams use the previous clip’s last frame; Ref2VA stages render
+independent clips with ordered references. Use `mold run --script` and
+`mold jobs` for inspection, resume and retake. Local H3 chains remain refused.
+Standalone extend, arbitrary LoRA, negative prompt, and generic scheduler
+controls are unavailable. Generation requires an
 H3-enabled SM89 CUDA or Apple Silicon Metal build; Metal admits each request
 against live unified-memory headroom, and CPU is unsupported. See
 [MiniMax H3](/models/minimax-h3) before its 34–44 GB downloads.

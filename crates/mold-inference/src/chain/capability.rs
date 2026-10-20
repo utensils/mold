@@ -86,7 +86,7 @@ pub fn capability_for_model(
     source_image: Option<mold_core::SourceImageCapability>,
 ) -> Option<ChainCapability> {
     let base = capability_for_family(family)?;
-    if family != "wan" {
+    if family != "wan" && !mold_core::minimax_h3::is_family(family) {
         return Some(base);
     }
     Some(ChainCapability {
@@ -119,6 +119,12 @@ pub fn capability_for_family(family: &str) -> Option<ChainCapability> {
             carryover: CarryoverKind::TemporalHandoff,
             supports_audio: mold_core::generation_profile::family_emits_audio("ltx2"),
             runtime_seconds_cap: mold_core::validation::max_runtime_seconds_for_family("ltx2"),
+        }),
+        "minimax-h3" => Some(ChainCapability {
+            frames_per_clip_cap: mold_core::minimax_h3::MAX_FRAMES,
+            carryover: CarryoverKind::IndependentClips,
+            supports_audio: mold_core::generation_profile::family_emits_audio("minimax-h3"),
+            runtime_seconds_cap: None,
         }),
         "ltx-video" => Some(ChainCapability {
             frames_per_clip_cap: LTX_VIDEO_FRAMES_PER_CLIP_CAP,
@@ -273,6 +279,34 @@ mod tests {
             );
         }
         assert_eq!(frames_per_clip_cap_at_fps("flux", 24), None);
+    }
+
+    #[test]
+    fn h3_sequences_cover_both_task_partitions_with_honest_carryover() {
+        use mold_core::SourceImageCapability::{Optional, Unsupported};
+        let family = capability_for_family("minimax-h3").expect("H3 chains");
+        assert_eq!(
+            family.frames_per_clip_cap,
+            mold_core::minimax_h3::MAX_FRAMES
+        );
+        assert!(family.supports_audio);
+        assert_eq!(family.carryover, CarryoverKind::IndependentClips);
+        assert_eq!(
+            capability_for_model("minimax-h3", Some(Optional))
+                .unwrap()
+                .carryover,
+            CarryoverKind::TemporalHandoff
+        );
+        assert_eq!(
+            capability_for_model("minimax-h3", Some(Unsupported))
+                .unwrap()
+                .carryover,
+            CarryoverKind::IndependentClips
+        );
+        assert_eq!(
+            frames_per_clip_cap_at_fps("minimax-h3", 25),
+            Some(mold_core::minimax_h3::MAX_FRAMES)
+        );
     }
 
     #[test]

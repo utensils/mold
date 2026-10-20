@@ -107,6 +107,16 @@ pub fn sequence_support(model: &str, family: &str, has_spatial_upscaler: bool) -
             reason: Some(format!("{family} models do not render video sequences")),
         };
     }
+    if mold_core::minimax_h3::is_family(family)
+        && !mold_core::chain::model_supports_sequence(model, family)
+    {
+        return SequenceSupport {
+            supported: false,
+            reason: Some(format!(
+                "model '{model}' has no runnable MiniMax H3 sequence runtime"
+            )),
+        };
+    }
     // Every pipeline `select_pipeline` can choose for an LTX-2 checkpoint now
     // renders sequence clips, two-stage included, so the only thing that
     // decides support is whether the family chains at all. `model` and
@@ -478,6 +488,41 @@ mod tests {
         let video = compute_limits("ltx-video-0.9.6:bf16", "ltx-video", "bf16", None, Some(30));
         assert_eq!(video.frames_per_clip_runtime_seconds, None);
         assert_eq!(video.frames_per_clip_cap, 97);
+    }
+
+    #[test]
+    fn download_only_h3_models_never_advertise_sequence_execution() {
+        for model in [
+            mold_core::minimax_h3::FL2VA_COMFY_NVFP4,
+            mold_core::minimax_h3::REF2VA_COMFY_NVFP4,
+            "minimax-h3-fl2va:official-bf16",
+            "minimax-h3",
+        ] {
+            assert!(
+                !sequence_support(model, "minimax-h3", false).supported,
+                "{model}"
+            );
+        }
+    }
+
+    #[test]
+    fn h3_runnable_sequences_have_audio_and_model_frame_grid() {
+        for model in [
+            "minimax-h3-fl2va:comfy-pruned-int8",
+            "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step",
+            "minimax-h3-fl2va:fasth3-v2-int8",
+        ] {
+            let limits = compute_limits(model, "minimax-h3", "int8", Some(129), Some(24));
+            assert!(limits.supports_sequence, "{model}");
+            assert!(limits.supports_audio);
+            assert_eq!(
+                limits.frames_per_clip_cap,
+                mold_core::minimax_h3::MAX_FRAMES
+            );
+            assert!(mold_core::minimax_h3::valid_frame_count(
+                limits.frames_per_clip_recommended
+            ));
+        }
     }
 
     #[test]

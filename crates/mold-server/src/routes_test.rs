@@ -644,6 +644,9 @@ mod tests {
             model: None,
             loras: vec![],
             references: vec![],
+            generation_references: None,
+            keyframes: None,
+            authored_media_sha256: None,
         }
     }
 

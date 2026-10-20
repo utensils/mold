@@ -1,0 +1,1 @@
+- **Video sequences through CLI and API.** Restore durable chaining across supported video models, including MiniMax H3 server stages with retained conditioning and audio. Add complete validated skill examples, model-specific seam guidance and job recovery instructions; GUI scene authoring remains unchanged.

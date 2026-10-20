@@ -245,7 +245,7 @@ pub fn chain_motion_tail_frames_for_family(
     requested: u32,
 ) -> u32 {
     match family {
-        "wan" => {
+        "wan" | "minimax-h3" | "minimax_h3" | "minimaxh3" => {
             let carries_context = source_image.is_some_and(|capability| {
                 matches!(
                     capability,

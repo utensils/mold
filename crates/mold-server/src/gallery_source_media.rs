@@ -411,6 +411,37 @@ fn present_member(member: &mut ResolvedMember, metadata: &mold_core::OutputMetad
                     .unwrap_or_else(|| "Keyframe".into()),
             }
         }
+        role if role.starts_with("stage_keyframe:") || role.starts_with("stage_reference:") => {
+            let parts = role.split(':').collect::<Vec<_>>();
+            let stage_index = parts.get(1).and_then(|value| value.parse::<usize>().ok());
+            let item_index = parts.get(2).and_then(|value| value.parse::<usize>().ok());
+            let stage = stage_index.and_then(|index| metadata.chain.as_ref()?.stages.get(index));
+            if role.starts_with("stage_reference:") {
+                kind = match stage
+                    .and_then(|stage| stage.generation_references.get(item_index?))
+                    .map(|reference| reference.kind)
+                {
+                    Some(mold_core::GenerationReferenceKind::Image) => "image",
+                    Some(mold_core::GenerationReferenceKind::Video) => "video",
+                    Some(mold_core::GenerationReferenceKind::Audio) => "audio",
+                    _ => "unknown",
+                };
+            } else {
+                frame_index = stage
+                    .and_then(|stage| stage.keyframes.get(item_index?))
+                    .map(|frame| frame.frame);
+            }
+            format!(
+                "Stage {} {} {}",
+                stage_index.map_or(0, |index| index + 1),
+                if role.starts_with("stage_keyframe:") {
+                    "boundary"
+                } else {
+                    "reference"
+                },
+                item_index.map_or(0, |index| index + 1)
+            )
+        }
         role if role.starts_with("stage_source:") => match role
             .strip_prefix("stage_source:")
             .and_then(|v| v.parse::<u32>().ok())

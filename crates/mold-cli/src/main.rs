@@ -809,6 +809,7 @@ Examples:
         /// Sequence job id as shown by `mold jobs list`
         #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
+        /// Zero-based stage index (0 is the first clip)
         #[arg(long)]
         stage: u32,
         #[arg(long, value_enum, default_value = "cascade")]
@@ -3704,17 +3705,13 @@ async fn run(
             }
 
             if prompt.len() > 1
-                && (model_or_prompt
-                    .as_deref()
-                    .and_then(mold_core::minimax_h3::resolve_model_name)
-                    .is_some()
-                    || duration.is_some()
+                && (duration.is_some()
                     || first_frame.is_some()
                     || last_frame.is_some()
                     || !reference.is_empty())
             {
                 anyhow::bail!(
-                    "MiniMax H3 endpoint/reference authoring is single-clip; use one prompt"
+                    "repeated --prompt does not carry duration, endpoints or references; put per-stage media and frame counts in --script"
                 );
             }
             if prompt.len() > 1 {

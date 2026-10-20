@@ -308,19 +308,32 @@ pub async fn list_chain_jobs(
     Ok(Json(ChainJobListing { jobs }))
 }
 
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct ChainJobQuery {
+    /// Explicit script export includes authored media from encrypted storage.
+    #[serde(default)]
+    pub include_source_media: bool,
+}
+
 /// 404 unknown.
 #[utoipa::path(
     get,
     path = "/api/chain-jobs/{id}",
     tag = "chain-jobs",
-    params(("id" = String, Path, description = "Chain job id")),
+    params(("id" = String, Path, description = "Chain job id"), ("include_source_media" = Option<bool>, Query, description = "Embed authored input bytes in the exported script")),
     responses((status = 200, description = "Chain job detail", body = mold_core::chain_job::ChainJobDetail))
 )]
 pub async fn get_chain_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<ChainJobDetail>, ApiError> {
+    Query(query): Query<ChainJobQuery>,
+) -> Result<(HeaderMap, Json<ChainJobDetail>), ApiError> {
     let handle = chain_jobs_handle(&state)?;
+    let _export_guard = if query.include_source_media {
+        Some(handle.lock_job(&id).await)
+    } else {
+        None
+    };
     let db = metadata_db(&state)?;
     let root = jobs_root()?;
     let mut detail = job_detail_for(db, &root, &id)
@@ -328,7 +341,28 @@ pub async fn get_chain_job(
         .ok_or_else(|| not_found(&id))?;
     detail.summary.cancelling =
         detail.summary.state == ChainJobState::Running && handle.is_cancelling(&id);
-    Ok(Json(detail))
+    if query.include_source_media {
+        let row = chain_jobs::get_job(db, &id)
+            .map_err(|error| {
+                ApiError::internal(format!("failed to load script export: {error:#}"))
+            })?
+            .ok_or_else(|| not_found(&id))?;
+        let manifest = ChainJobManifest::read_from_dir(&row.job_dir).map_err(|error| {
+            ApiError::internal(format!("failed to read script export: {error:#}"))
+        })?;
+        let effective =
+            crate::chain_job_runner::effective_request_with_media(&manifest, &row.job_dir)
+                .map_err(|error| {
+                    ApiError::internal(format!("failed to restore script inputs: {error:#}"))
+                })?;
+        detail.script = ChainScript::from(&effective);
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    Ok((headers, Json(detail)))
 }
 
 /// subscribe() FIRST, then synthesize Snapshot from DB+manifest, then live.
@@ -1266,6 +1300,9 @@ mod tests {
                 model: None,
                 loras: vec![],
                 references: vec![],
+                generation_references: None,
+                keyframes: None,
+                authored_media_sha256: None,
             }],
             motion_tail_frames: 1,
             width: 64,
@@ -1739,6 +1776,9 @@ mod tests {
             model: None,
             loras: vec![],
             references: vec![],
+            generation_references: None,
+            keyframes: None,
+            authored_media_sha256: None,
         });
 
         // `with_mold_home` takes the same process-wide env lock the hermetic
@@ -1878,7 +1918,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_chain_job_rejects_non_mp4_public_jobs() {
+    async fn create_chain_job_rejects_still_image_output() {
         let home = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
         let state = state_with(
@@ -1890,7 +1930,7 @@ mod tests {
             futures::executor::block_on(create_chain_job(
                 State(state),
                 HeaderMap::new(),
-                Json(req(OutputFormat::Apng)),
+                Json(req(OutputFormat::Png)),
             ))
         })
         .unwrap_err();
@@ -1995,6 +2035,76 @@ mod tests {
         let mut request = req(OutputFormat::Mp4);
         request.model = "route-chain-amend-test".into();
         request
+    }
+
+    #[tokio::test]
+    async fn explicit_script_export_restores_source_media_and_amends_portably() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let state = state_with(
+            db,
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+        let mut request = freezable_amend_request(&state, home.path()).await;
+        request.stages[0].source_image = Some(b"private authored input".to_vec());
+        with_mold_home(home.path(), || {
+            futures::executor::block_on(async {
+                let (_, _, Json(created)) =
+                    create_chain_job(State(state.clone()), HeaderMap::new(), Json(request))
+                        .await
+                        .unwrap();
+                let (_, Json(detail)) = get_chain_job(
+                    State(state.clone()),
+                    Path(created.job_id.clone()),
+                    Query(ChainJobQuery::default()),
+                )
+                .await
+                .unwrap();
+                assert!(detail.script.stages[0].source_image.is_none());
+                let (headers, Json(mut exported)) = get_chain_job(
+                    State(state.clone()),
+                    Path(created.job_id.clone()),
+                    Query(ChainJobQuery {
+                        include_source_media: true,
+                    }),
+                )
+                .await
+                .unwrap();
+                assert_eq!(headers[header::CACHE_CONTROL], "private, no-store");
+                assert_eq!(
+                    exported.script.stages[0].source_image.as_deref(),
+                    Some(b"private authored input".as_slice())
+                );
+                let portable = mold_core::chain_toml::read_script(
+                    &mold_core::chain_toml::write_script(&exported.script).unwrap(),
+                )
+                .unwrap();
+                exported.script = portable;
+                exported.script.stages[0].prompt = "an edited scene".into();
+                let _ = amend_chain_job(
+                    State(state.clone()),
+                    Path(created.job_id.clone()),
+                    HeaderMap::new(),
+                    Json(amend_body(exported.script.stages)),
+                )
+                .await
+                .unwrap();
+                let (_, Json(updated)) = get_chain_job(
+                    State(state),
+                    Path(created.job_id),
+                    Query(ChainJobQuery {
+                        include_source_media: true,
+                    }),
+                )
+                .await
+                .unwrap();
+                assert_eq!(updated.script.stages[0].prompt, "an edited scene");
+                assert_eq!(
+                    updated.script.stages[0].source_image.as_deref(),
+                    Some(b"private authored input".as_slice())
+                );
+            })
+        });
     }
 
     #[tokio::test]
@@ -2200,6 +2310,9 @@ mod tests {
             model: None,
             loras: vec![],
             references: vec![],
+            generation_references: None,
+            keyframes: None,
+            authored_media_sha256: None,
         });
         let (status, Json(body)) = with_mold_home(home.path(), || {
             futures::executor::block_on(amend_chain_job(

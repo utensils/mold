@@ -1912,7 +1912,7 @@ fn execute_stage(
     preferred_ordinal: Option<usize>,
     actor_authority: Option<Arc<Mutex<ChainExecutionAuthority>>>,
 ) -> anyhow::Result<StageExecution> {
-    let effective = effective_request(manifest)?;
+    let effective = effective_request_with_media(manifest, &job.job_dir)?;
     let stage = effective
         .stages
         .get(stage_idx as usize)
@@ -1949,14 +1949,23 @@ fn execute_stage(
     let cancelled: Arc<dyn Fn() -> bool + Send + Sync> =
         Arc::new(move || cancel.is_cancelled(&job_id));
     let cancellation = deps.cancel.token(&stage_job_id);
-    let work_id = actor_authority.as_ref().map(|authority| {
-        authority
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .identity
-            .work_id
-            .clone()
-    });
+    let work_id = if mold_core::minimax_h3::task_for_model(&model).is_some() {
+        // Scheduler recovery increments its attempt counter, while authored
+        // history remains stable. Child generation recovery must use the latter.
+        Some(format!(
+            "h3-take:{}",
+            ((manifest.amends.len() as u64) << 32) | manifest.retakes.len() as u64
+        ))
+    } else {
+        actor_authority.as_ref().map(|authority| {
+            authority
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .identity
+                .work_id
+                .clone()
+        })
+    };
     let authority_job_dir = job.job_dir.clone();
     let lease_db = deps.db.clone();
     let lease_events = deps.events.clone();
@@ -2361,7 +2370,7 @@ fn finalize_job(
                 &audio_samples,
                 sample_rate,
                 channels,
-                mold_inference::av_media::AacMuxOptions::legacy_compatible(),
+                chain_mux_options(&effective.model),
                 &cancelled,
             ) {
                 Ok(output) => output.bytes,
@@ -2834,6 +2843,8 @@ pub(crate) fn preserved_stage_prefix(old: &ChainRequest, new: &ChainRequest) -> 
             || old_stage.frames != new_stage.frames
             || old_stage.negative_prompt != new_stage.negative_prompt
             || old_stage.source_image != new_stage.source_image
+            || old_stage.generation_references != new_stage.generation_references
+            || old_stage.keyframes != new_stage.keyframes
             || !same_lora_stack(old_stage, new_stage)
             || effective_stage_seed(old_base, old_stage.seed_offset)
                 != effective_stage_seed(new_base, new_stage.seed_offset)
@@ -3103,6 +3114,7 @@ pub struct ProductionStageExecutor {
     config: Arc<tokio::sync::RwLock<mold_core::Config>>,
     scheduled_work: crate::scheduler::ScheduledWorkHandle,
     dispatch_mode: crate::dispatch_mode::DispatchMode,
+    h3_state: Option<crate::state::AppState>,
     #[cfg(test)]
     before_scheduled_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
@@ -3119,9 +3131,15 @@ impl ProductionStageExecutor {
             config,
             scheduled_work,
             dispatch_mode,
+            h3_state: None,
             #[cfg(test)]
             before_scheduled_submit: Mutex::new(None),
         }
+    }
+
+    pub(crate) fn with_h3_state(mut self, state: crate::state::AppState) -> Self {
+        self.h3_state = Some(state);
+        self
     }
 
     #[cfg(test)]
@@ -3308,6 +3326,29 @@ impl StageExecutor for ProductionStageExecutor {
         progress: Arc<dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync>,
         cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> anyhow::Result<StageExecution> {
+        if mold_core::minimax_h3::task_for_model(model).is_some() {
+            let state = self
+                .h3_state
+                .as_ref()
+                .context("H3 chain admission is unavailable")?;
+            let authored_take = work_id
+                .and_then(|id| id.strip_prefix("h3-take:"))
+                .context("H3 chain is missing its authored take authority")?
+                .parse::<u64>()?;
+            return tokio::runtime::Handle::current().block_on(crate::chain_h3::render(
+                state,
+                job_id,
+                stage_idx,
+                authored_take,
+                stage_req,
+                carry,
+                motion_tail_frames,
+                frozen_model,
+                on_leased,
+                progress,
+                cancelled,
+            ));
+        }
         if !self.dispatch_mode.owns_v2_workers() {
             let mut config = self.fresh_config();
             let cache_key = if let Some(frozen) = frozen_model {
@@ -3745,7 +3786,10 @@ fn manifest_index_state(
 }
 
 pub(crate) fn effective_request(manifest: &ChainJobManifest) -> anyhow::Result<ChainRequest> {
-    let mut request = manifest.request()?;
+    Ok(apply_retake_overlays(manifest.request()?, manifest))
+}
+
+fn apply_retake_overlays(mut request: ChainRequest, manifest: &ChainJobManifest) -> ChainRequest {
     for retake in &manifest.retakes {
         if let Some(stage) = request.stages.get_mut(retake.stage_idx as usize) {
             if let Some(prompt) = retake.new_prompt.as_ref() {
@@ -3755,17 +3799,20 @@ pub(crate) fn effective_request(manifest: &ChainJobManifest) -> anyhow::Result<C
             stage.seed_offset = Some(base_seed ^ retake.new_seed);
         }
     }
-    Ok(request)
+    request
 }
 
-fn effective_request_with_media(
+pub(crate) fn effective_request_with_media(
     manifest: &ChainJobManifest,
     job_dir: &Path,
 ) -> anyhow::Result<ChainRequest> {
     let jobs_root = job_dir
         .parent()
         .context("chain job directory has no jobs root")?;
-    crate::chain_source_media::hydrate(jobs_root, job_dir, effective_request(manifest)?)
+    // The media index names the canonical authored request, before retake
+    // overlays alter its digest. Hydrate that authority, then overlay text/seed.
+    let request = crate::chain_source_media::hydrate(jobs_root, job_dir, manifest.request()?)?;
+    Ok(apply_retake_overlays(request, manifest))
 }
 
 /// Exposed to `routes_chain` so the advisory VRAM estimate prices exactly
@@ -3809,7 +3856,7 @@ pub(crate) fn build_stage_generate_request(
         source_image_name: None,
         edit_images: None,
         reference_weight: None,
-        references: None,
+        references: stage.generation_references.clone(),
         strength: if idx == 0 { chain.strength } else { 1.0 },
         mask_image: None,
         control_image: None,
@@ -3835,7 +3882,7 @@ pub(crate) fn build_stage_generate_request(
         extend_video: None,
         extend_video_path: None,
         extend_overlap_frames: None,
-        keyframes: None,
+        keyframes: stage.keyframes.clone(),
         pipeline: None,
         ic_lora_control: None,
         loras: (!stage.loras.is_empty()).then(|| {
@@ -4108,6 +4155,18 @@ fn legacy_fade_boundary_out(
     Ok((frames, audio))
 }
 
+#[cfg(feature = "mp4")]
+fn chain_mux_options(model: &str) -> mold_inference::av_media::AacMuxOptions {
+    if mold_core::minimax_h3::task_for_model(model).is_some() {
+        // H3's 32 kHz / 24 fps clock is fractional. Align once against the
+        // final video timeline, including accumulated seam rounding and AAC
+        // packet padding, as the ordinary H3 mux does.
+        mold_inference::av_media::AacMuxOptions::match_video()
+    } else {
+        mold_inference::av_media::AacMuxOptions::legacy_compatible()
+    }
+}
+
 fn samples_for_frames(track: &NativeAudioTrack, frames: u32, fps: u32) -> usize {
     if fps == 0 {
         return 0;
@@ -4299,6 +4358,31 @@ mod tests {
     use super::*;
     use image::{Rgb, RgbImage};
     use mold_core::chain::{ChainStage, LoraSpec, TransitionMode};
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn h3_chain_mux_aligns_fractional_samples_to_the_complete_video() {
+        let frames = vec![image::RgbImage::new(32, 32); 213];
+        let video = video_enc::encode_mp4(&frames, 24).unwrap();
+        // Each 107-frame clip was decoded to floor(107 * 32000 / 24).
+        // Smooth removes floor(1 * 32000 / 24), leaving one sample short.
+        let samples = vec![0.0; 283_999 * 2];
+        let muxed = mold_inference::av_media::mux_aac_track_to_mp4_bytes(
+            &video,
+            &samples,
+            32_000,
+            2,
+            chain_mux_options(mold_core::minimax_h3::FL2VA_COMFY_PDMD_2STEP),
+            &|_| false,
+        )
+        .unwrap();
+        assert_eq!(muxed.report.output_samples_per_channel, 284_000);
+        assert_eq!(muxed.report.padded_samples_per_channel, 1);
+        assert_eq!(
+            chain_mux_options("ltx-2-19b-distilled:fp8"),
+            mold_inference::av_media::AacMuxOptions::legacy_compatible()
+        );
+    }
     use mold_core::types::OutputFormat;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -4558,6 +4642,9 @@ mod tests {
             model: None,
             loras: vec![],
             references: vec![],
+            generation_references: None,
+            keyframes: None,
+            authored_media_sha256: None,
         }
     }
 
@@ -6749,12 +6836,77 @@ mod tests {
     }
 
     #[test]
+    fn retake_hydrates_original_media_before_changing_prompt_and_seed() {
+        let dir = tempfile::tempdir().unwrap();
+        let job_dir = dir.path().join("retake-media");
+        std::fs::create_dir_all(&job_dir).unwrap();
+        let mut request = request(vec![TransitionMode::Cut]);
+        request.stages[0].keyframes = Some(vec![mold_core::KeyframeCondition {
+            frame: 0,
+            image: vec![1, 2, 3],
+            name: None,
+        }]);
+        request.stages[0].generation_references =
+            Some(vec![mold_core::GenerationReference::Image {
+                media: mold_core::GenerationReferenceAuthority::Inline {
+                    data: vec![4, 5, 6],
+                },
+                provenance: Default::default(),
+                mime_type: "image/png".into(),
+                width: 32,
+                height: 32,
+            }]);
+        let scrubbed = crate::chain_source_media::persist_scrubbed(
+            dir.path(),
+            &job_dir,
+            "retake-media",
+            request,
+        )
+        .unwrap();
+        let mut manifest = ChainJobManifest::new("retake-media".into(), 1, &scrubbed).unwrap();
+        manifest.retakes.push(RetakeAmendment {
+            stage_idx: 0,
+            mode: RetakeMode::Cascade,
+            old_seed: 42,
+            new_seed: 99,
+            old_prompt: None,
+            new_prompt: Some("new prompt".into()),
+            at_unix_ms: 2,
+        });
+        let hydrated = effective_request_with_media(&manifest, &job_dir).unwrap();
+        let projected = build_stage_generate_request(&hydrated.stages[0], &hydrated, 99, 0);
+        assert_eq!(projected.prompt, "new prompt");
+        assert_eq!(projected.seed, Some(99));
+        assert_eq!(
+            projected.keyframes.as_ref().unwrap()[0].image,
+            vec![1, 2, 3]
+        );
+        assert!(
+            matches!(projected.references.as_ref().unwrap()[0].media(), mold_core::GenerationReferenceAuthority::Inline { data } if data == &[4, 5, 6])
+        );
+    }
+
+    #[test]
     fn preserved_stage_prefix_matrix() {
         let base = request(vec![
             TransitionMode::Smooth,
             TransitionMode::Smooth,
             TransitionMode::Cut,
         ]);
+
+        let mut media_edit = base.clone();
+        media_edit.stages[1].keyframes = Some(vec![mold_core::KeyframeCondition {
+            frame: 0,
+            image: vec![1, 2, 3],
+            name: Some("replacement".into()),
+        }]);
+        assert_eq!(
+            preserved_stage_prefix(&base, &media_edit),
+            1,
+            "keyframe edit"
+        );
+        let projected = build_stage_generate_request(&media_edit.stages[1], &media_edit, 42, 1);
+        assert_eq!(projected.keyframes, media_edit.stages[1].keyframes);
 
         // Prompt edit at stage k invalidates from k.
         let mut new = base.clone();
