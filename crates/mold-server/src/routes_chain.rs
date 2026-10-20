@@ -179,7 +179,24 @@ fn require_chain_model_artifact_activation(
         let frozen_family = frozen.config.family.as_deref().or(family);
         mold_core::require_model_activation(model, frozen_family)
             .map_err(ApiError::model_activation)?;
-        if !frozen.runtime_model_id.is_empty() {
+        if frozen.runtime_model_id.starts_with("mold-frozen-chain:") {
+            // This is an internal path-set alias, never another user-selected
+            // model identity. In particular, H3 policy admits the reviewed
+            // original model above, not an opaque alias carrying its family.
+            let actual = crate::execution_plan::frozen_model_fingerprint(model, &frozen.config)
+                .map_err(|error| {
+                    ApiError::validation(format!(
+                        "cannot verify frozen chain model identity: {error}"
+                    ))
+                })?;
+            if actual != frozen.model_fingerprint
+                || frozen.runtime_model_id != format!("mold-frozen-chain:{actual}")
+            {
+                return Err(ApiError::validation(
+                    "frozen chain runtime alias differs from its concrete model authority",
+                ));
+            }
+        } else if !frozen.runtime_model_id.is_empty() {
             mold_core::require_model_activation(&frozen.runtime_model_id, frozen_family)
                 .map_err(ApiError::model_activation)?;
         }
@@ -271,6 +288,98 @@ pub(crate) fn resolve_chain_family(config: &mold_core::Config, model: &str) -> S
         .unwrap_or_default()
 }
 
+/// H3 stages retain ordinary per-request contracts; only their boundary inputs
+/// differ. Executable attempts are admitted afresh by the H3 stage executor.
+fn validate_h3_chain(req: &mut ChainRequest, family: &str) -> Result<(), ApiError> {
+    use mold_core::minimax_h3::{self, Task};
+    let task = minimax_h3::task_for_model(&req.model).ok_or_else(|| {
+        ApiError::validation("H3 chains require a reviewed runnable model identity")
+    })?;
+    if req.output_format != mold_core::OutputFormat::Mp4 {
+        return Err(ApiError::validation(
+            "MiniMax H3 chains require MP4 output to preserve generated audio",
+        ));
+    }
+    if req.enable_audio == Some(false) {
+        return Err(ApiError::validation(
+            "MiniMax H3 chain stages always generate audio; remove enable_audio=false",
+        ));
+    }
+    if req.fps != minimax_h3::FIXED_FPS {
+        return Err(ApiError::validation(format!(
+            "MiniMax H3 chains require fps={}",
+            minimax_h3::FIXED_FPS
+        )));
+    }
+    req.enable_audio = Some(true);
+    req.motion_tail_frames = if task == Task::Fl2va { 1 } else { 0 };
+    let normalized = req
+        .clone()
+        .normalise_with_family(Some(family))
+        .map_err(|error| ApiError::validation(error.to_string()))?;
+    if task == Task::Ref2va && req.ephemeral && normalized.stages.len() > 1 {
+        return Err(ApiError::validation("MiniMax H3 Ref2VA cannot continue motion across clip boundaries; author an explicit sequence with independent clips or use FL2VA"));
+    }
+    for (index, stage) in normalized.stages.iter().enumerate() {
+        if !stage.loras.is_empty() {
+            return Err(ApiError::validation(format!("stage {index}: H3 chains use the selected tier's adapter; per-stage LoRAs are unsupported")));
+        }
+        if stage.generation_references.as_ref().is_some_and(|refs| {
+            refs.iter().any(|reference| {
+                !matches!(
+                    reference.media(),
+                    mold_core::GenerationReferenceAuthority::Inline { .. }
+                )
+            })
+        }) {
+            return Err(ApiError::validation(format!("stage {index}: chain references require inline media; transient upload handles and server paths are unsupported")));
+        }
+        let mut generate = normalized.synthetic_generate_request(
+            mold_core::OutputFormat::Mp4,
+            stage.frames,
+            normalized.fps,
+        );
+        generate.prompt = stage.prompt.clone();
+        generate.negative_prompt = stage.negative_prompt.clone();
+        generate.source_image = stage.source_image.clone();
+        generate.keyframes = stage.keyframes.clone();
+        generate.references = stage.generation_references.clone();
+        generate.frames = Some(stage.frames);
+        if task == Task::Fl2va
+            && (index > 0 || req.continue_from.is_some())
+            && stage.transition == TransitionMode::Smooth
+        {
+            if stage.source_image.is_some()
+                || stage
+                    .keyframes
+                    .as_ref()
+                    .is_some_and(|frames| frames.iter().any(|frame| frame.frame == 0))
+            {
+                return Err(ApiError::validation(format!("stage {index}: a smooth continuation receives the previous final frame; use cut or fade to supply a first frame")));
+            }
+            // Validate the effective endpoint mode without generating pixels.
+            // The executor replaces this marker with the authenticated RGB tail.
+            let mut endpoints = generate.keyframes.take().unwrap_or_default();
+            endpoints.insert(
+                0,
+                mold_core::KeyframeCondition {
+                    frame: 0,
+                    image: vec![1],
+                    name: None,
+                },
+            );
+            generate.keyframes = Some(endpoints);
+        }
+        minimax_h3::validate_request_contract(&generate, task).map_err(|error| {
+            ApiError::validation(format!("stage {index}: {}: {}", error.code, error.message))
+        })?;
+        minimax_h3::validate_reviewed_canvas(&generate).map_err(|error| {
+            ApiError::validation(format!("stage {index}: {}: {}", error.code, error.message))
+        })?;
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_and_normalize_chain_family(
     config: &mold_core::Config,
     req: &mut ChainRequest,
@@ -286,10 +395,14 @@ pub(crate) fn validate_and_normalize_chain_family(
     )
     .map_err(ApiError::model_activation)?;
     if mold_core::minimax_h3::is_family(&family) {
-        return Err(ApiError::with_code(
-            "MiniMax H3 chains remain disabled until reference media have durable recovery authority",
-            "MINIMAX_H3_CHAIN_RECOVERY_UNSUPPORTED",
-            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+        validate_h3_chain(req, &family)?;
+    } else if req
+        .stages
+        .iter()
+        .any(|stage| stage.keyframes.is_some() || stage.generation_references.is_some())
+    {
+        return Err(ApiError::validation(
+            "stage keyframes and generation_references are supported only by MiniMax H3 chains",
         ));
     }
     validate_chain_build_features(req)?;
@@ -428,7 +541,10 @@ pub(crate) fn validate_and_normalize_chain_family(
     let family_hint = (!family.is_empty()).then_some(family.as_str());
     let has_source = match contract {
         Some(mold_core::SourceImageCapability::Unsupported) => any_image,
-        _ => opening_image,
+        Some(mold_core::SourceImageCapability::Required) => {
+            opening_image || req.continue_from.is_some()
+        }
+        _ => opening_image || (req.continue_from.is_some() && req.motion_tail_frames > 0),
     };
     if let Some(message) = mold_core::validation::source_image_contract_violation(
         family_hint,
@@ -725,6 +841,7 @@ mod tests {
 
     fn req(format: OutputFormat) -> ChainRequest {
         ChainRequest {
+            continue_from: None,
             offload: None,
             collection: None,
             tags: None,
@@ -742,6 +859,9 @@ mod tests {
                     model: None,
                     loras: vec![],
                     references: vec![],
+                    generation_references: None,
+                    keyframes: None,
+                    authored_media_sha256: None,
                 },
                 ChainStage {
                     prompt: "stage one".into(),
@@ -754,6 +874,9 @@ mod tests {
                     model: None,
                     loras: vec![],
                     references: vec![],
+                    generation_references: None,
+                    keyframes: None,
+                    authored_media_sha256: None,
                 },
             ],
             motion_tail_frames: 0,
@@ -779,6 +902,91 @@ mod tests {
             enable_audio: None,
             ephemeral: false,
         }
+    }
+
+    fn h3_request(task: &str) -> ChainRequest {
+        let mut request = req(OutputFormat::Mp4);
+        request.model = format!("minimax-h3-{task}:comfy-pruned-int8");
+        request.width = 256;
+        request.height = 256;
+        request.fps = mold_core::minimax_h3::FIXED_FPS;
+        request.steps = mold_core::minimax_h3::COMFY_DEFAULT_STEPS;
+        request.guidance = 0.0;
+        request.stages.iter_mut().for_each(|stage| {
+            stage.frames = 124;
+            stage.transition = TransitionMode::Smooth;
+        });
+        request
+    }
+
+    #[test]
+    fn h3_fl2va_chain_validates_real_grid_and_last_frame_handoff() {
+        let mut request = h3_request("fl2va");
+        request.stages[1].keyframes = Some(vec![mold_core::KeyframeCondition {
+            frame: 123,
+            image: vec![2],
+            name: None,
+        }]);
+        validate_h3_chain(&mut request, "minimax-h3").unwrap();
+        assert_eq!(request.motion_tail_frames, 1);
+        assert_eq!(request.enable_audio, Some(true));
+        assert_eq!(request.normalise().unwrap().estimated_total_frames(), 247);
+    }
+
+    #[test]
+    fn h3_smooth_continuation_refuses_explicit_first_frame_collision() {
+        let mut request = h3_request("fl2va");
+        request.stages[1].source_image = Some(vec![1]);
+        assert!(validate_h3_chain(&mut request, "minimax-h3")
+            .unwrap_err()
+            .error
+            .contains("use cut or fade"));
+        request.stages[1].transition = TransitionMode::Cut;
+        validate_h3_chain(&mut request, "minimax-h3").unwrap();
+    }
+
+    #[test]
+    fn linked_h3_first_stage_uses_incoming_endpoint_and_refuses_authored_collision() {
+        let mut request = h3_request("fl2va");
+        request.continue_from = Some(mold_core::chain::ChainContinuation {
+            job_id: "previous".into(),
+            finalize_take: 1,
+        });
+        request.stages.truncate(1);
+        request.stages[0].source_image = Some(vec![1]);
+        assert!(validate_h3_chain(&mut request, "minimax-h3").is_err());
+        request.stages[0].source_image = None;
+        request.stages[0].keyframes = Some(vec![mold_core::KeyframeCondition {
+            frame: 123,
+            image: vec![1],
+            name: None,
+        }]);
+        validate_h3_chain(&mut request, "minimax-h3").unwrap();
+    }
+
+    #[test]
+    fn linked_wan_i2v_first_stage_is_seeded_by_owned_incoming_tail() {
+        let mut request = req(OutputFormat::Mp4);
+        request.model = "wan22-i2v-a14b:q5".into();
+        request.width = 832;
+        request.height = 480;
+        request.continue_from = Some(mold_core::chain::ChainContinuation {
+            job_id: "previous".into(),
+            finalize_take: 1,
+        });
+        validate_and_normalize_chain_family(&mold_core::Config::default(), &mut request).unwrap();
+        assert_eq!(request.motion_tail_frames, 1);
+    }
+
+    #[test]
+    fn h3_ref2va_refuses_fake_automatic_continuation() {
+        let mut request = h3_request("ref2va");
+        request.ephemeral = true;
+        assert!(validate_h3_chain(&mut request, "minimax-h3")
+            .unwrap_err()
+            .error
+            .contains("independent clips"));
+        assert_eq!(request.motion_tail_frames, 0);
     }
 
     /// Peak is the max over stages, never their sum: stages run one at a
@@ -935,6 +1143,69 @@ mod tests {
             },
         );
         config
+    }
+
+    #[test]
+    fn chain_artifact_gate_rejects_a_forged_internal_frozen_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let transformer = dir.path().join("transformer.safetensors");
+        std::fs::write(&transformer, b"fixture").unwrap();
+        let model = "ltx-2-19b-distilled:fp8";
+        let mut frozen = mold_core::chain_job::FrozenChainModel {
+            runtime_model_id: "mold-frozen-chain:forged".into(),
+            model_fingerprint: "forged".into(),
+            config: mold_core::ModelConfig {
+                family: Some("ltx2".into()),
+                transformer: Some(transformer.display().to_string()),
+                ..Default::default()
+            },
+        };
+        assert!(require_chain_model_artifact_activation(
+            &mold_core::Config::default(),
+            model,
+            None,
+            Some(&frozen)
+        )
+        .is_err());
+        let actual =
+            crate::execution_plan::frozen_model_fingerprint(model, &frozen.config).unwrap();
+        frozen.runtime_model_id = format!("mold-frozen-chain:{actual}");
+        frozen.model_fingerprint = actual;
+        require_chain_model_artifact_activation(
+            &mold_core::Config::default(),
+            model,
+            None,
+            Some(&frozen),
+        )
+        .unwrap();
+    }
+
+    #[cfg(feature = "h3")]
+    #[test]
+    fn chain_artifact_gate_accepts_a_verified_frozen_reviewed_h3_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let transformer = dir.path().join("transformer.safetensors");
+        std::fs::write(&transformer, b"fixture").unwrap();
+        let model = "minimax-h3-fl2va:comfy-pruned-int8-pdmd-2step";
+        let frozen_config = mold_core::ModelConfig {
+            family: Some("minimax-h3".into()),
+            transformer: Some(transformer.display().to_string()),
+            ..Default::default()
+        };
+        let fingerprint =
+            crate::execution_plan::frozen_model_fingerprint(model, &frozen_config).unwrap();
+        let frozen = mold_core::chain_job::FrozenChainModel {
+            runtime_model_id: format!("mold-frozen-chain:{fingerprint}"),
+            model_fingerprint: fingerprint,
+            config: frozen_config,
+        };
+        require_chain_model_artifact_activation(
+            &mold_core::Config::default(),
+            model,
+            None,
+            Some(&frozen),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1298,6 +1569,9 @@ mod tests {
                 model: None,
                 loras: vec![],
                 references: vec![],
+                generation_references: None,
+                keyframes: None,
+                authored_media_sha256: None,
             },
             ChainStage {
                 prompt: "a village at dusk".into(),
@@ -1310,6 +1584,9 @@ mod tests {
                 model: None,
                 loras: vec![],
                 references: vec![],
+                generation_references: None,
+                keyframes: None,
+                authored_media_sha256: None,
             },
         ];
         assert!(
@@ -1403,6 +1680,9 @@ mod tests {
                 model: None,
                 loras: vec![],
                 references: vec![],
+                generation_references: None,
+                keyframes: None,
+                authored_media_sha256: None,
             })
             .collect();
         let error = validate_and_normalize_chain_family(&config, &mut staged)

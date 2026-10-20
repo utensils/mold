@@ -2,7 +2,9 @@ pub mod auth;
 pub mod batch_transaction;
 pub mod catalog_api;
 pub mod catalog_credentials;
+mod chain_continuation;
 pub(crate) mod chain_execution;
+mod chain_h3;
 pub mod chain_job_runner;
 pub mod chain_limits;
 mod chain_source_media;
@@ -1032,12 +1034,15 @@ async fn run_server_inner(
             let deps = chain_job_runner::RunnerDeps {
                 db: state.metadata_db.clone(),
                 jobs_root,
-                executor: std::sync::Arc::new(chain_job_runner::ProductionStageExecutor::new(
-                    state.gpu_pool.clone(),
-                    state.config.clone(),
-                    state.scheduled_work.clone(),
-                    dispatch_mode,
-                )),
+                executor: std::sync::Arc::new(
+                    chain_job_runner::ProductionStageExecutor::new(
+                        state.gpu_pool.clone(),
+                        state.config.clone(),
+                        state.scheduled_work.clone(),
+                        dispatch_mode,
+                    )
+                    .with_h3_state(state.clone()),
+                ),
                 queue_probe: std::sync::Arc::new(chain_job_runner::ProductionQueueProbe::new(
                     state.queue.clone(),
                     state.gpu_pool.clone(),

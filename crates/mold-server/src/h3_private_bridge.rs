@@ -938,7 +938,10 @@ fn reviewed_h3_private_generation_profile_for(
         default_fps: Some(fps),
         default_negative_prompt: None,
         source_image: Some(reviewed_h3_fl2va_source_image()),
-        supports_sequence: false,
+        supports_sequence: mold_core::chain::model_supports_sequence(
+            model,
+            mold_core::minimax_h3::FAMILY,
+        ),
         supports_extend: false,
         // Same single authority as the row: H3 declares synchronized audio.
         supports_audio: mold_core::catalog::declared_audio_capability(
@@ -1416,7 +1419,10 @@ fn h3_model_row(
         supports_identity: Some(false),
         supports_extend: Some(false),
         extend_default_overlap_frames: None,
-        supports_sequence: Some(false),
+        supports_sequence: Some(mold_core::chain::model_supports_sequence(
+            model,
+            mold_core::minimax_h3::FAMILY,
+        )),
         guidance_capabilities: Some(mold_core::GuidanceCapabilities {
             adjustable: false,
             supports_negative_prompt: false,
@@ -2632,7 +2638,10 @@ mod presentation_tests {
             default_fps: Some(mold_core::minimax_h3::FIXED_FPS),
             default_negative_prompt: None,
             source_image: Some(super::reviewed_h3_fl2va_source_image()),
-            supports_sequence: false,
+            supports_sequence: mold_core::chain::model_supports_sequence(
+                mold_core::minimax_h3::FL2VA_COMFY,
+                mold_core::minimax_h3::FAMILY,
+            ),
             supports_extend: false,
             supports_audio: mold_core::catalog::declared_audio_capability(
                 mold_core::minimax_h3::FAMILY,

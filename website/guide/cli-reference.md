@@ -72,9 +72,10 @@ prompt expansion for that run.
 | `--transparent`                                                                              | Transparent background (models advertising `capabilities.transparency`, today Qwen Image 2.1): the subject is rendered as a cut-out with an alpha channel. PNG or WebP only; `--format jpeg` is refused before anything loads                       |
 | `--width <N>`, `--height <N>`                                                                | Output dimensions                                                                                                                                                                                                                                   |
 | `--steps <N>`, `--guidance <N>`, `--seed <N>`, `--batch <N>`                                 | Core generation controls                                                                                                                                                                                                                            |
-| `--prompt <TEXT>`                                                                            | Repeat for multi-stage video chain sugar (LTX-2, LTX-Video, Wan)                                                                                                                                                                                    |
+| `--prompt <TEXT>`                                                                            | Repeat for multi-stage video chain sugar (LTX-2, LTX-Video, Wan, H3 server)                                                                                                                                                                         |
 | `--frames-per-clip <N>`                                                                      | Per-stage frame count for repeated `--prompt`                                                                                                                                                                                                       |
 | `--script <PATH>`                                                                            | Submit a `mold.chain.v1` TOML chain script                                                                                                                                                                                                          |
+| `--continue-from <JOB_ID>`                                                                   | With `--script`, create a new durable part using the completed predecessor's owned tail on the same server; requires linked-part support and refuses `--local`.                                                                                     |
 | `--dry-run`                                                                                  | Parse/normalise repeated prompts or scripts without generating                                                                                                                                                                                      |
 | `--frames <N>`, `--fps <N>`                                                                  | Video frame count and output FPS                                                                                                                                                                                                                    |
 | `--duration <SECONDS>`                                                                       | MiniMax H3 duration from 4–15 seconds; resolves to its exact `17n+5` frame grid at 24 fps                                                                                                                                                           |
@@ -277,12 +278,25 @@ requests.
 
 ## `mold chain validate`
 
-Validate and normalise a `mold.chain.v1` TOML script.
+Validate and normalise a `mold.chain.v1` TOML script locally. This checks the
+script shape; it does not run remote admission or load a model. See
+[Video sequences](/guide/video#multi-prompt-scripts) for a complete script.
+H3 sequences require an H3-enabled server; FL2VA supports first/last frame
+paths, while Ref2VA stages carry ordered typed generation references.
 
 ```bash
 mold chain validate shot.toml
 mold run --script shot.toml --dry-run
 ```
+
+Each durable part contains at most 16 stages. Continue for any number of parts
+with `mold run --script next.toml --continue-from PART1_JOB_ID --host HOST`.
+The predecessor must have a completed latest take on that server; the new
+part owns its copied tail and renders only its new clips. Parts remain separate
+viewable videos, with no total duration ceiling. The CLI checks server support
+before submission, and local execution is refused. See
+[open-ended continuation](/guide/video#continue-beyond-16-stages) for the script
+and model-specific carry rules.
 
 ## `mold jobs`
 

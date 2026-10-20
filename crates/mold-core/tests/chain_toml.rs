@@ -9,6 +9,7 @@ fn script_under_test() -> ChainScript {
     ChainScript {
         schema: "mold.chain.v1".into(),
         chain: ChainScriptChain {
+            continue_from: None,
             model: "ltx-2-19b-distilled:fp8".into(),
             width: 1216,
             height: 704,
@@ -33,6 +34,9 @@ fn script_under_test() -> ChainScript {
                 model: None,
                 loras: vec![],
                 references: vec![],
+                generation_references: None,
+                keyframes: None,
+                authored_media_sha256: None,
             },
             ChainStage {
                 prompt: "the forest opens to a clearing".into(),
@@ -45,6 +49,9 @@ fn script_under_test() -> ChainScript {
                 model: None,
                 loras: vec![],
                 references: vec![],
+                generation_references: None,
+                keyframes: None,
+                authored_media_sha256: None,
             },
             ChainStage {
                 prompt: "a spaceship lands".into(),
@@ -57,6 +64,9 @@ fn script_under_test() -> ChainScript {
                 model: None,
                 loras: vec![],
                 references: vec![],
+                generation_references: None,
+                keyframes: None,
+                authored_media_sha256: None,
             },
             ChainStage {
                 prompt: "the cat looks up in wonder".into(),
@@ -69,6 +79,9 @@ fn script_under_test() -> ChainScript {
                 model: None,
                 loras: vec![],
                 references: vec![],
+                generation_references: None,
+                keyframes: None,
+                authored_media_sha256: None,
             },
         ],
     }
@@ -95,6 +108,7 @@ fn write_then_read_is_identity() {
 fn normalised_request_survives_round_trip() {
     // Build a ChainRequest → normalise → project to ChainScript → TOML → back → compare.
     let req = ChainRequest {
+        continue_from: None,
         offload: None,
         collection: None,
         tags: None,

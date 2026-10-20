@@ -75,9 +75,9 @@ mod test_support;
 
 pub use catalog::{build_model_catalog, qualify_catalog_generation_delivery};
 pub use chain::{
-    ChainFailure, ChainProgressEvent, ChainRequest, ChainResponse, ChainScript, ChainScriptChain,
-    ChainStage, ChainValidationResponse, ChainValidationStage, LoraSpec, NamedRef,
-    SseChainCompleteEvent, TransitionMode, VramEstimate, MAX_CHAIN_STAGES,
+    ChainContinuation, ChainFailure, ChainProgressEvent, ChainRequest, ChainResponse, ChainScript,
+    ChainScriptChain, ChainStage, ChainValidationResponse, ChainValidationStage, LoraSpec,
+    NamedRef, SseChainCompleteEvent, TransitionMode, VramEstimate, MAX_CHAIN_STAGES,
 };
 pub use client::MoldClient;
 pub use config::{

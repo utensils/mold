@@ -65,7 +65,49 @@ pub(crate) fn persist_scrubbed(
     job_id: &str,
     mut request: ChainRequest,
 ) -> anyhow::Result<ChainRequest> {
-    let media = take_authored_media(&mut request);
+    // Client-provided identities never authorize bytes or survive an input removal.
+    for stage in &mut request.stages {
+        stage.authored_media_sha256 = None;
+    }
+    stamp_authored_media_identity(&mut request)?;
+    let retained_tail = crate::chain_continuation::retained_frames(job_dir, &request)?;
+    let mut total_bytes = retained_tail
+        .iter()
+        .map(|bytes| bytes.len() as u64)
+        .sum::<u64>();
+    for stage in &request.stages {
+        total_bytes = total_bytes
+            .checked_add(
+                stage
+                    .source_image
+                    .as_ref()
+                    .map_or(0, |bytes| bytes.len() as u64),
+            )
+            .context("chain media size overflow")?;
+        for keyframe in stage.keyframes.iter().flatten() {
+            total_bytes = total_bytes
+                .checked_add(keyframe.image.len() as u64)
+                .context("chain media size overflow")?;
+        }
+        for reference in stage.generation_references.iter().flatten() {
+            if let mold_core::GenerationReferenceAuthority::Inline { data } = reference.media() {
+                total_bytes = total_bytes
+                    .checked_add(data.len() as u64)
+                    .context("chain media size overflow")?;
+            }
+        }
+    }
+    let mut media = take_authored_media(&mut request)?;
+    for (index, bytes) in retained_tail.into_iter().enumerate() {
+        media.push(SealMedia::bytes(
+            format!("chain_continuation_tail:{index}"),
+            "continuation-tail",
+            bytes,
+        ));
+    }
+    if request.continue_from.is_some() && (media.len() > 64 || total_bytes > 512 * 1024 * 1024) {
+        bail!("linked part retained conditioning exceeds 64 members or 512 MiB");
+    }
     if media.is_empty() {
         return Ok(request);
     }
@@ -94,11 +136,28 @@ pub(crate) fn persist_scrubbed(
     Ok(request)
 }
 
-pub(crate) fn scrub(mut request: ChainRequest) -> ChainRequest {
+pub(crate) fn scrub(request: ChainRequest) -> ChainRequest {
+    // Only authenticated hydrated requests enter this infallible projection.
+    try_scrub(request).expect("chain media identity serialization")
+}
+
+pub(crate) fn try_scrub(mut request: ChainRequest) -> anyhow::Result<ChainRequest> {
+    stamp_authored_media_identity(&mut request)?;
     for stage in &mut request.stages {
         stage.source_image = None;
+        if let Some(keyframes) = &mut stage.keyframes {
+            for keyframe in keyframes {
+                keyframe.image.clear();
+            }
+        }
+        if let Some(references) = &mut stage.generation_references {
+            for reference in references {
+                *reference_media_mut(reference) =
+                    mold_core::GenerationReferenceAuthority::Descriptor;
+            }
+        }
     }
-    request
+    Ok(request)
 }
 
 pub(crate) fn hydrate(
@@ -107,34 +166,88 @@ pub(crate) fn hydrate(
     mut request: ChainRequest,
 ) -> anyhow::Result<ChainRequest> {
     let Some(index) = read_index(job_dir)? else {
+        if request.continue_from.is_some() && request.motion_tail_frames > 0 {
+            bail!("linked part has no sealed continuation recovery authority");
+        }
+        ensure_hydrated(&request)?;
         return Ok(request);
     };
     let digest = request_digest(&request)?;
     let Some(media_set) = index.requests.get(&digest) else {
+        if request.continue_from.is_some() && request.motion_tail_frames > 0 {
+            bail!("linked part media revision is missing");
+        }
+        ensure_hydrated(&request)?;
         return Ok(request);
     };
     let decrypted = open_store(jobs_root)?
         .decrypt_to_private_staging(media_set)
         .context("hydrating chain authored source media")?;
+    let mut seen = BTreeSet::new();
+    let retained_tail = crate::chain_continuation::retained_frames(job_dir, &request)?;
+    let mut tail_members = 0usize;
     for item in &decrypted.files {
-        let Some(stage_idx) = item.role.strip_prefix("stage_source:") else {
-            bail!(
-                "unexpected chain source-media role '{}'; refusing hydration",
-                item.role
-            );
-        };
-        let stage_idx: usize = stage_idx
+        if !seen.insert(&item.role) {
+            bail!("duplicate chain source-media role");
+        }
+        if let Some(position) = item.role.strip_prefix("chain_continuation_tail:") {
+            let index: usize = position
+                .parse()
+                .context("invalid continuation tail index")?;
+            let expected = retained_tail
+                .get(index)
+                .context("unexpected sealed continuation tail member")?;
+            let bytes = std::fs::read(&item.path)?;
+            if index.to_string() != position || bytes != *expected {
+                bail!("sealed continuation tail differs from successor ownership");
+            }
+            tail_members += 1;
+            continue;
+        }
+        let parts = item.role.split(':').collect::<Vec<_>>();
+        let stage_idx: usize = parts
+            .get(1)
+            .context("missing source-media stage")?
             .parse()
-            .context("invalid chain source-media stage role")?;
+            .context("invalid source-media stage")?;
         let stage = request
             .stages
             .get_mut(stage_idx)
-            .context("chain source-media stage is outside the persisted request")?;
-        stage.source_image = Some(
-            std::fs::read(&item.path)
-                .context("reading authenticated chain source media from private staging")?,
-        );
+            .context("source-media stage outside request")?;
+        let bytes =
+            std::fs::read(&item.path).context("reading authenticated chain source media")?;
+        match parts.as_slice() {
+            ["stage_source", _] => stage.source_image = Some(bytes),
+            ["stage_keyframe", _, position] => {
+                let position: usize = position.parse().context("invalid keyframe position")?;
+                let keyframe = stage
+                    .keyframes
+                    .as_mut()
+                    .and_then(|frames| frames.get_mut(position))
+                    .context("sealed keyframe outside persisted request")?;
+                keyframe.image = bytes;
+            }
+            ["stage_reference", _, position] => {
+                let position: usize = position.parse().context("invalid reference position")?;
+                let reference = stage
+                    .generation_references
+                    .as_mut()
+                    .and_then(|refs| refs.get_mut(position))
+                    .context("sealed reference outside persisted request")?;
+                let digest = format!("{:x}", Sha256::digest(&bytes));
+                if reference.content_sha256().as_deref() != Some(digest.as_str()) {
+                    bail!("sealed reference differs from persisted digest");
+                }
+                *reference_media_mut(reference) =
+                    mold_core::GenerationReferenceAuthority::Inline { data: bytes };
+            }
+            _ => bail!("unexpected chain source-media role; refusing hydration"),
+        }
     }
+    if tail_members != retained_tail.len() {
+        bail!("continuation conditioning is missing from sealed recovery authority");
+    }
+    ensure_hydrated(&request)?;
     Ok(request)
 }
 
@@ -210,12 +323,33 @@ pub(crate) fn handoff_current_to_gallery(
     request: &ChainRequest,
     gate: &crate::batch_transaction::GalleryPublicationGate,
 ) -> anyhow::Result<()> {
+    if !(request.continue_from.is_some() && request.motion_tail_frames > 0)
+        && request.stages.iter().all(|stage| {
+            stage.source_image.is_none()
+                && stage.keyframes.is_none()
+                && stage.generation_references.is_none()
+                && stage.authored_media_sha256.is_none()
+        })
+    {
+        return Ok(());
+    }
     let Some(index) = read_index(job_dir)? else {
         return Ok(());
     };
     let digest = request_digest(&scrub(request.clone()))?;
-    let Some(media_set) = index.requests.get(&digest) else {
-        return Ok(());
+    // Retakes change effective prompt/seed overlays, not the canonical authored
+    // media revision. Its manifest remains the sealed input authority.
+    let canonical_digest;
+    let media_set = if let Some(media_set) = index.requests.get(&digest) {
+        media_set
+    } else {
+        let manifest = mold_core::chain_job::ChainJobManifest::read_from_dir(job_dir)
+            .context("reading canonical media authority during gallery handoff")?;
+        canonical_digest = request_digest(&scrub(manifest.request()?))?;
+        index
+            .requests
+            .get(&canonical_digest)
+            .context("current chain media revision has no sealed recovery authority")?
     };
     let store = open_store(jobs_root)?;
     let bindings =
@@ -252,17 +386,178 @@ pub(crate) fn handoff_current_to_gallery(
     Ok(())
 }
 
-fn take_authored_media(request: &mut ChainRequest) -> Vec<SealMedia> {
-    request
-        .stages
-        .iter_mut()
-        .enumerate()
-        .filter_map(|(idx, stage)| {
-            stage.source_image.take().map(|bytes| {
-                SealMedia::bytes(format!("stage_source:{idx}"), "authored-source", bytes)
+fn stage_has_payload(stage: &mold_core::chain::ChainStage) -> bool {
+    stage.source_image.is_some()
+        || stage
+            .keyframes
+            .as_ref()
+            .is_some_and(|frames| frames.iter().any(|frame| !frame.image.is_empty()))
+        || stage.generation_references.as_ref().is_some_and(|refs| {
+            refs.iter().any(|reference| {
+                matches!(
+                    reference.media(),
+                    mold_core::GenerationReferenceAuthority::Inline { .. }
+                )
             })
         })
-        .collect()
+}
+
+/// Content identity is computed before any payload is removed. The previous
+/// set remains addressable if publishing the next manifest fails or crashes.
+fn stamp_authored_media_identity(request: &mut ChainRequest) -> anyhow::Result<()> {
+    for stage in &mut request.stages {
+        let has_payload = stage_has_payload(stage);
+        if !has_payload {
+            continue;
+        }
+        if let Some(references) = &mut stage.generation_references {
+            for reference in references {
+                if let mold_core::GenerationReferenceAuthority::Inline { data } = reference.media()
+                {
+                    let digest = format!("{:x}", Sha256::digest(data));
+                    if reference
+                        .provenance()
+                        .sha256
+                        .as_ref()
+                        .is_some_and(|expected| !expected.eq_ignore_ascii_case(&digest))
+                    {
+                        bail!("chain reference payload differs from supplied digest");
+                    }
+                    reference_provenance_mut(reference).sha256 = Some(digest);
+                }
+            }
+        }
+        let mut hash = Sha256::new();
+        hash.update(b"mold.chain.authored-media.v1\0");
+        for (label, bytes) in [
+            ("source", serde_json::to_vec(&stage.source_image)?),
+            ("keyframes", serde_json::to_vec(&stage.keyframes)?),
+            (
+                "references",
+                serde_json::to_vec(&stage.generation_references)?,
+            ),
+        ] {
+            hash.update((label.len() as u64).to_le_bytes());
+            hash.update(label.as_bytes());
+            hash.update((bytes.len() as u64).to_le_bytes());
+            hash.update(bytes);
+        }
+        stage.authored_media_sha256 = Some(format!("{:x}", hash.finalize()));
+    }
+    Ok(())
+}
+
+fn reference_media_mut(
+    reference: &mut mold_core::GenerationReference,
+) -> &mut mold_core::GenerationReferenceAuthority {
+    use mold_core::GenerationReference::*;
+    match reference {
+        Image { media, .. }
+        | NamedImage { media, .. }
+        | Video { media, .. }
+        | Audio { media, .. }
+        | Mesh { media, .. } => media,
+    }
+}
+
+fn reference_provenance_mut(
+    reference: &mut mold_core::GenerationReference,
+) -> &mut mold_core::GenerationReferenceProvenance {
+    use mold_core::GenerationReference::*;
+    match reference {
+        Image { provenance, .. }
+        | NamedImage { provenance, .. }
+        | Video { provenance, .. }
+        | Audio { provenance, .. }
+        | Mesh { provenance, .. } => provenance,
+    }
+}
+
+fn ensure_hydrated(request: &ChainRequest) -> anyhow::Result<()> {
+    let mut observed = request.clone();
+    stamp_authored_media_identity(&mut observed)?;
+    for (stage, restored) in request.stages.iter().zip(&observed.stages) {
+        if stage.authored_media_sha256.is_some()
+            && stage.authored_media_sha256 != restored.authored_media_sha256
+        {
+            bail!("chain source media differs from its persisted content authority");
+        }
+    }
+    for stage in &request.stages {
+        if stage.authored_media_sha256.is_some() && !stage_has_payload(stage) {
+            bail!("chain source media is missing its durable recovery authority");
+        }
+        if stage
+            .keyframes
+            .as_ref()
+            .is_some_and(|frames| frames.iter().any(|frame| frame.image.is_empty()))
+        {
+            bail!("chain boundary media is missing its durable recovery authority");
+        }
+        if stage.generation_references.as_ref().is_some_and(|refs| {
+            refs.iter().any(|r| {
+                !matches!(
+                    r.media(),
+                    mold_core::GenerationReferenceAuthority::Inline { .. }
+                )
+            })
+        }) {
+            bail!("chain reference media is missing its durable recovery authority");
+        }
+    }
+    Ok(())
+}
+
+fn take_authored_media(request: &mut ChainRequest) -> anyhow::Result<Vec<SealMedia>> {
+    let mut media = Vec::new();
+    for (idx, stage) in request.stages.iter_mut().enumerate() {
+        if let Some(bytes) = stage.source_image.take() {
+            media.push(SealMedia::bytes(
+                format!("stage_source:{idx}"),
+                "authored-source",
+                bytes,
+            ));
+        }
+        if let Some(keyframes) = &mut stage.keyframes {
+            for (position, keyframe) in keyframes.iter_mut().enumerate() {
+                if keyframe.image.is_empty() {
+                    bail!("cannot seal empty chain keyframe");
+                }
+                media.push(SealMedia::bytes(
+                    format!("stage_keyframe:{idx}:{position}"),
+                    "authored-keyframe",
+                    std::mem::take(&mut keyframe.image),
+                ));
+            }
+        }
+        if let Some(references) = &mut stage.generation_references {
+            for (position, reference) in references.iter_mut().enumerate() {
+                let authority = std::mem::replace(
+                    reference_media_mut(reference),
+                    mold_core::GenerationReferenceAuthority::Descriptor,
+                );
+                let mold_core::GenerationReferenceAuthority::Inline { data } = authority else {
+                    bail!("chain references require inline media before durable sealing");
+                };
+                let digest = format!("{:x}", Sha256::digest(&data));
+                if reference
+                    .provenance()
+                    .sha256
+                    .as_ref()
+                    .is_some_and(|expected| !expected.eq_ignore_ascii_case(&digest))
+                {
+                    bail!("chain reference payload differs from supplied digest");
+                }
+                reference_provenance_mut(reference).sha256 = Some(digest);
+                media.push(SealMedia::bytes(
+                    format!("stage_reference:{idx}:{position}"),
+                    "authored-reference",
+                    data,
+                ));
+            }
+        }
+    }
+    Ok(media)
 }
 
 fn request_digest(request: &ChainRequest) -> anyhow::Result<String> {
@@ -345,8 +640,12 @@ mod tests {
             model: None,
             loras: vec![],
             references: vec![],
+            generation_references: None,
+            keyframes: None,
+            authored_media_sha256: None,
         };
         ChainRequest {
+            continue_from: None,
             offload: None,
             model: "ltx-2-19b-distilled:fp8".into(),
             stages: vec![
@@ -379,6 +678,92 @@ mod tests {
             source_image: None,
             enable_audio: None,
         }
+    }
+
+    #[test]
+    fn retry_scrubbing_refuses_mismatched_reference_digest_without_panicking() {
+        let mut request = request();
+        let mut reference = mold_core::GenerationReference::Image {
+            media: mold_core::GenerationReferenceAuthority::Inline {
+                data: vec![1, 2, 3],
+            },
+            provenance: Default::default(),
+            mime_type: "image/png".into(),
+            width: 16,
+            height: 16,
+        };
+        reference_provenance_mut(&mut reference).sha256 = Some("0".repeat(64));
+        request.stages[0].generation_references = Some(vec![reference]);
+        assert!(try_scrub(request).is_err());
+    }
+
+    #[test]
+    fn keyframes_and_ordered_references_are_sealed_and_recover_without_upload_authority() {
+        let home = tempfile::tempdir().unwrap();
+        let jobs = home.path().join("jobs");
+        let job = jobs.join("job-media");
+        std::fs::create_dir_all(&job).unwrap();
+        let mut request = request();
+        request.stages[0].keyframes = Some(vec![mold_core::KeyframeCondition {
+            frame: 8,
+            image: b"secret endpoint".to_vec(),
+            name: Some("end.png".into()),
+        }]);
+        request.stages[1].generation_references =
+            Some(vec![mold_core::GenerationReference::Image {
+                media: mold_core::GenerationReferenceAuthority::Inline {
+                    data: b"secret reference".to_vec(),
+                },
+                provenance: Default::default(),
+                mime_type: "image/png".into(),
+                width: 16,
+                height: 16,
+            }]);
+        let scrubbed = persist_scrubbed(&jobs, &job, "job-media", request).unwrap();
+        let json = serde_json::to_string(&scrubbed).unwrap();
+        assert!(!json.contains("secret"));
+        assert!(scrubbed.stages[0].keyframes.as_ref().unwrap()[0]
+            .image
+            .is_empty());
+        assert!(matches!(
+            scrubbed.stages[1].generation_references.as_ref().unwrap()[0].media(),
+            mold_core::GenerationReferenceAuthority::Descriptor
+        ));
+        let restored = hydrate(&jobs, &job, scrubbed.clone()).unwrap();
+        assert_eq!(
+            restored.stages[0].keyframes.as_ref().unwrap()[0].image,
+            b"secret endpoint"
+        );
+        assert!(
+            matches!(restored.stages[1].generation_references.as_ref().unwrap()[0].media(), mold_core::GenerationReferenceAuthority::Inline { data } if data == b"secret reference")
+        );
+        // Candidate sealing precedes manifest publication. If publication
+        // crashes, the old request must still hydrate its old endpoint bytes.
+        let mut edited = restored.clone();
+        edited.stages[0].keyframes.as_mut().unwrap()[0].image = b"replacement endpoint".to_vec();
+        let new_revision = persist_scrubbed(&jobs, &job, "job-media", edited).unwrap();
+        assert_ne!(
+            new_revision.stages[0].authored_media_sha256,
+            scrubbed.stages[0].authored_media_sha256
+        );
+        assert_eq!(
+            hydrate(&jobs, &job, scrubbed.clone()).unwrap().stages[0]
+                .keyframes
+                .as_ref()
+                .unwrap()[0]
+                .image,
+            b"secret endpoint"
+        );
+        assert_eq!(
+            hydrate(&jobs, &job, new_revision).unwrap().stages[0]
+                .keyframes
+                .as_ref()
+                .unwrap()[0]
+                .image,
+            b"replacement endpoint"
+        );
+        std::fs::remove_file(job.join(INDEX_FILE)).unwrap();
+        assert!(hydrate(&jobs, &job, scrubbed).is_err());
     }
 
     #[test]
@@ -441,9 +826,7 @@ mod tests {
             let _rollback = CreateRollback::new(&jobs, &job);
         }
         assert!(!job.join(INDEX_FILE).exists());
-        assert!(hydrate(&jobs, &job, scrubbed).unwrap().stages[0]
-            .source_image
-            .is_none());
+        assert!(hydrate(&jobs, &job, scrubbed).is_err());
     }
 
     #[test]
@@ -467,38 +850,43 @@ mod tests {
     }
 
     #[test]
-    fn startup_reconciliation_retries_failed_replacement_cleanup_without_deleting_live_set() {
+    fn media_only_revisions_keep_old_authority_until_job_gc() {
         let home = tempfile::tempdir().unwrap();
         let jobs = home.path().join("jobs");
         let job = jobs.join("job-1");
         std::fs::create_dir_all(&job).unwrap();
-        let _ = persist_scrubbed(&jobs, &job, "job-1", request()).unwrap();
+        let old = persist_scrubbed(&jobs, &job, "job-1", request()).unwrap();
         let mut replacement = request();
         replacement.stages[0].source_image = Some(vec![9, 9, 9]);
-        FAIL_NEXT_DELETE.with(|flag| flag.set(true));
-        let scrubbed = persist_scrubbed(&jobs, &job, "job-1", replacement).unwrap();
+        replacement.stages[0].authored_media_sha256 = Some("caller-forged".into());
+        let new = persist_scrubbed(&jobs, &job, "job-1", replacement).unwrap();
+        assert_ne!(
+            old.stages[0].authored_media_sha256,
+            new.stages[0].authored_media_sha256
+        );
         assert_eq!(
             open_store(&jobs).unwrap().inspect_owner(OWNER).active.len(),
             2
         );
-
-        FAIL_NEXT_DELETE.with(|flag| flag.set(true));
-        assert!(reconcile_orphans(&jobs).is_err());
+        assert_eq!(reconcile_orphans(&jobs).unwrap(), 0);
         assert_eq!(
-            open_store(&jobs).unwrap().inspect_owner(OWNER).active.len(),
-            2
-        );
-        assert_eq!(reconcile_orphans(&jobs).unwrap(), 1);
-        assert_eq!(
-            open_store(&jobs).unwrap().inspect_owner(OWNER).active.len(),
-            1
+            hydrate(&jobs, &job, old).unwrap().stages[0]
+                .source_image
+                .as_deref(),
+            Some(&[1, 2, 3][..])
         );
         assert_eq!(
-            hydrate(&jobs, &job, scrubbed).unwrap().stages[0]
+            hydrate(&jobs, &job, new).unwrap().stages[0]
                 .source_image
                 .as_deref(),
             Some(&[9, 9, 9][..])
         );
+        release_all(&jobs, &job).unwrap();
+        assert!(open_store(&jobs)
+            .unwrap()
+            .inspect_owner(OWNER)
+            .active
+            .is_empty());
     }
 
     #[test]

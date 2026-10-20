@@ -1060,12 +1060,9 @@ impl MoldClient {
     ) -> Result<ChainJobOutcome> {
         use crate::chain_job::{ChainJobEvent, ChainJobState};
 
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(24 * 3600);
+        // Durable work may outlive a day. Follow until settlement or the
+        // caller stops; transient transport failures retain the same job.
         loop {
-            anyhow::ensure!(
-                tokio::time::Instant::now() < deadline,
-                "chain stream still pending after 24 hours; inspect durable job"
-            );
             let response = async {
                 let response = self
                     .client
@@ -1234,6 +1231,20 @@ impl MoldClient {
     }
 
     pub async fn get_chain_job(&self, id: &str) -> Result<ChainJobDetail> {
+        self.get_chain_job_detail(id, false).await
+    }
+
+    /// Explicit portable script export, including the job's authored media.
+    /// Ordinary status reads intentionally remain payload-free.
+    pub async fn get_chain_job_with_media(&self, id: &str) -> Result<ChainJobDetail> {
+        self.get_chain_job_detail(id, true).await
+    }
+
+    async fn get_chain_job_detail(
+        &self,
+        id: &str,
+        include_source_media: bool,
+    ) -> Result<ChainJobDetail> {
         let resp = self
             .client
             .get(format!(
@@ -1241,6 +1252,7 @@ impl MoldClient {
                 self.base_url,
                 encode_path_segment(id)
             ))
+            .query(&[("include_source_media", include_source_media)])
             .send()
             .await?;
         Ok(error_for_status_with_body(resp)
@@ -1857,6 +1869,30 @@ impl MoldClient {
             .json::<ServerStatus>()
             .await?;
         Ok(resp)
+    }
+
+    /// Detect linked-part semantics before sending `continue_from`. An older
+    /// server would otherwise ignore the additive request field.
+    pub async fn linked_chain_parts_supported(&self, model: &str) -> Result<Option<bool>> {
+        #[derive(serde::Deserialize)]
+        struct LinkedParts {
+            supported: bool,
+        }
+        #[derive(serde::Deserialize)]
+        struct Limits {
+            linked_parts: Option<LinkedParts>,
+        }
+        let response = self
+            .client
+            .get(format!("{}/api/capabilities/chain-limits", self.base_url))
+            .query(&[("model", model)])
+            .send()
+            .await?;
+        let limits = error_for_status_with_body(response)
+            .await?
+            .json::<Limits>()
+            .await?;
+        Ok(limits.linked_parts.map(|parts| parts.supported))
     }
 
     /// Feature-detect optional server contracts before rendering controls.
@@ -4070,6 +4106,38 @@ impl std::error::Error for ModelNotFoundError {}
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn linked_parts_discovery_distinguishes_older_and_supported_servers() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for (payload, expected) in [
+            (serde_json::json!({"max_stages":16}), None),
+            (
+                serde_json::json!({"linked_parts":{"supported":false}}),
+                Some(false),
+            ),
+            (
+                serde_json::json!({"linked_parts":{"supported":true}}),
+                Some(true),
+            ),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/capabilities/chain-limits"))
+                .and(query_param("model", "minimax-h3-fl2va:fasth3-v2-int8"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(payload))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let supported = super::MoldClient::new(&server.uri())
+                .linked_chain_parts_supported("minimax-h3-fl2va:fasth3-v2-int8")
+                .await
+                .unwrap();
+            assert_eq!(supported, expected);
+        }
+    }
+
     #[test]
     fn mesh_bounds_survive_the_wire_and_degrade_to_the_origin() {
         assert_eq!(parse_bounds(Some("-1.5, 0, 2.25")), [-1.5, 0.0, 2.25]);
@@ -7053,6 +7121,9 @@ mod tests {
             model: None,
             loras: Vec::new(),
             references: Vec::new(),
+            generation_references: None,
+            keyframes: None,
+            authored_media_sha256: None,
         }
     }
 

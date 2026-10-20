@@ -644,11 +644,15 @@ mod tests {
             model: None,
             loras: vec![],
             references: vec![],
+            generation_references: None,
+            keyframes: None,
+            authored_media_sha256: None,
         }
     }
 
     fn route_chain_request() -> ChainRequest {
         ChainRequest {
+            continue_from: None,
             offload: None,
             collection: None,
             tags: None,
@@ -678,6 +682,30 @@ mod tests {
             enable_audio: None,
             ephemeral: false,
         }
+    }
+
+    #[tokio::test]
+    async fn chain_validation_accepts_authored_media_above_the_default_json_body_limit() {
+        let _lock = env_lock();
+        let models_dir = test_models_dir("chain-large-inline-media");
+        populate_manifest_files(&models_dir, "ltx-2-19b-distilled:fp8");
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+        let (app, _) = app_with_test_gpu_resources(48_000_000_000, 8_000_000_000);
+        let mut request = route_chain_request();
+        request.stages[0].source_image = Some(vec![11; 3 * 1024 * 1024]);
+        let body = serde_json::to_vec(&request).unwrap();
+        assert!(body.len() > 2 * 1024 * 1024);
+        let response = app
+            .oneshot(
+                Request::post("/api/generate/chain/validate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["stage_count"], 1);
     }
 
     #[tokio::test]

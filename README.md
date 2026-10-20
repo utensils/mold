@@ -319,13 +319,25 @@ black borders, `lanczos-resize` stretches.
 mold run flux-dev:q4 "a lighthouse at dusk" --image wide.png --fit crop-fill --width 1024 --height 1024
 ```
 
-A sequence of several clips is scripted, not composed in an app:
+A sequence of several clips is scripted through the CLI/API. LTX-2 uses a
+latent motion tail; image-conditioned Wan and H3 FL2VA can continue from the
+last frame. Text-only Wan, legacy LTX-Video and H3 Ref2VA join independent
+clips. H3 sequences require an H3-enabled server. A complete script and job
+recovery workflow are in the [video guide](https://utensils.io/mold/guide/video#multi-prompt-scripts):
 
 ```bash
 mold chain validate shot.toml
 mold run --script shot.toml --output walk.mp4
 mold jobs list
+# After the previous part completes, keep its model recipe/canvas/fps:
+mold run --script next.toml --continue-from PART1_JOB_ID --host plato --output part2.mp4
 ```
+
+Each part accepts up to 16 stages. Linked parts can continue without an overall
+part-count or duration limit, each as a separate Library MP4. The new part
+snapshots its predecessor's tail and renders only new clips; it never rerenders
+or reencodes prior clips. Its first stage must be smooth with no authored first
+source conflict. Independent-clip families remain independent at the boundary.
 
 A 3-D render can be one shot or a durable workflow. A workflow keeps every
 stage — the picture it starts from, its matted and delighted copies, the

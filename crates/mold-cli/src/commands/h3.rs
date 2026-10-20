@@ -571,8 +571,7 @@ fn h3_image_decode_limits() -> image::Limits {
     limits
 }
 
-#[cfg(test)]
-fn prepare_references(
+pub(crate) fn prepare_references(
     inputs: &[ReferenceArg],
 ) -> Result<(Vec<GenerationReference>, Vec<ReferenceUpload>)> {
     prepare_references_candidates(inputs, &std::collections::HashSet::new())

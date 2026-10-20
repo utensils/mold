@@ -1429,7 +1429,7 @@ fn list(args: &SkillListArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use clap::{CommandFactory, FromArgMatches};
     use std::collections::BTreeSet;
 
     #[derive(Deserialize)]
@@ -1498,6 +1498,74 @@ mod tests {
         let copilot = render_bundle(RenderProfile::Copilot).unwrap();
         let copilot_frontmatter = copilot.files["SKILL.md"].split("\n---\n").next().unwrap();
         assert!(!copilot_frontmatter.contains("allowed-tools:"));
+    }
+
+    #[test]
+    fn every_profile_routes_to_executable_video_sequence_instructions() {
+        for profile in RenderProfile::ALL {
+            let bundle = render_bundle(profile).unwrap();
+            assert!(bundle.files["SKILL.md"].contains("For multi-scene video"));
+            let reference = &bundle.files["references/cli.md"];
+            let section = reference
+                .split("## Scripted sequences")
+                .nth(1)
+                .unwrap()
+                .split("\n## ")
+                .next()
+                .unwrap();
+            let toml = section
+                .split("```toml\n")
+                .nth(1)
+                .expect("sequence instructions need a complete script")
+                .split("```")
+                .next()
+                .unwrap();
+            let script = mold_core::chain_toml::read_script(toml).unwrap();
+            let request = crate::commands::chain::build_request_from_script(&script)
+                .unwrap()
+                .normalise_with_family(Some("ltx2"))
+                .unwrap();
+            assert_eq!(request.stages.len(), 2);
+            assert_eq!(
+                request.stages[1].transition,
+                mold_core::chain::TransitionMode::Cut
+            );
+            assert!(section.contains("mold jobs show job-abc123 --json --host workstation"));
+            assert!(section.contains("mold library download PRINT.mp4 --host workstation"));
+            assert!(section.contains("MiniMax H3"));
+            assert!(section.contains("CLI machine"));
+            assert!(section.contains("finalizes[-1].gallery_filename"));
+            assert!(section.contains("--stage 1 --mode splice"));
+            assert!(
+                !section.contains("--fps 30 --no-audio"),
+                "generic amend must preserve H3 timing and audio"
+            );
+        }
+    }
+
+    #[test]
+    fn documented_chain_api_request_deserializes_and_normalizes() {
+        let guide = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../website/guide/video.md"
+        ));
+        let json = guide
+            .split("### HTTP API")
+            .nth(1)
+            .unwrap()
+            .split("```json\n")
+            .nth(1)
+            .unwrap()
+            .split("```")
+            .next()
+            .unwrap();
+        let request: mold_core::chain::ChainRequest = serde_json::from_str(json).unwrap();
+        let request = request.normalise_with_family(Some("ltx2")).unwrap();
+        assert_eq!(request.stages.len(), 2);
+        assert_eq!(
+            request.stages[1].transition,
+            mold_core::chain::TransitionMode::Cut
+        );
     }
 
     #[test]
@@ -1587,6 +1655,9 @@ mod tests {
                     continue;
                 }
                 let relative = target.strip_prefix("{baseDir}/").unwrap_or(target);
+                // Markdown fragments name sections inside the bundled file.
+                // The sequence-guide contract separately checks its heading.
+                let relative = relative.split('#').next().unwrap();
                 assert!(
                     bundle.files.contains_key(relative),
                     "{} has broken link {target}",
@@ -1837,8 +1908,16 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(64 << 20)
             .spawn(move || {
-                match crate::Cli::try_parse_from(std::iter::once("mold".to_string()).chain(argv)) {
-                    Ok(_) => Ok(()),
+                match crate::Cli::command()
+                    .try_get_matches_from(std::iter::once("mold".to_string()).chain(argv))
+                {
+                    Ok(matches) => {
+                        let typed_host = crate::host_given_on_command_line(&matches);
+                        let cli = crate::Cli::from_arg_matches(&matches)
+                            .map_err(|error| error.to_string())?;
+                        crate::reject_misplaced_host(&cli.command, typed_host)
+                            .map_err(|error| error.to_string())
+                    }
                     // `mold --help` and `mold <cmd> --help` are documented on
                     // purpose; clap reports them as errors that print help.
                     Err(error)
@@ -1966,6 +2045,7 @@ mod tests {
     fn every_documented_bash_command_in_the_corpus_parses_with_the_cli() {
         let bundle = render_bundle(RenderProfile::Portable).unwrap();
         let mut seen = 0usize;
+        let mut invalid = Vec::new();
         for (path, contents) in &bundle.files {
             if !path.ends_with(".md") {
                 continue;
@@ -1978,10 +2058,12 @@ mod tests {
                     "{path}: {command}"
                 );
                 seen += 1;
-                parse_on_large_stack(argv[1..].to_vec())
-                    .unwrap_or_else(|error| panic!("{path}: invalid example `{command}`: {error}"));
+                if let Err(error) = parse_on_large_stack(argv[1..].to_vec()) {
+                    invalid.push(format!("{path}: invalid example `{command}`: {error}"));
+                }
             }
         }
+        assert!(invalid.is_empty(), "{}", invalid.join("\n"));
         assert!(
             seen >= 20,
             "expected the corpus to document CLI examples, found {seen}"

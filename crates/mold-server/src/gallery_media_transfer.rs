@@ -71,6 +71,25 @@ fn chain_stage_source(role: &str) -> bool {
 }
 fn permitted_role(role: &str) -> bool {
     chain_stage_source(role)
+        || role
+            .strip_prefix("chain_continuation_tail:")
+            .is_some_and(|index| {
+                index
+                    .parse::<u32>()
+                    .is_ok_and(|value| value.to_string() == index)
+            })
+        || ["stage_keyframe:", "stage_reference:"]
+            .iter()
+            .any(|prefix| {
+                role.strip_prefix(prefix).is_some_and(|suffix| {
+                    let parts = suffix.split(':').collect::<Vec<_>>();
+                    parts.len() == 2
+                        && parts.iter().all(|part| {
+                            part.parse::<u32>()
+                                .is_ok_and(|value| value.to_string() == *part)
+                        })
+                })
+            })
         || matches!(
             role,
             "source_image"
@@ -109,6 +128,11 @@ fn validate_members(members: &[TransferMember]) -> Result<(), String> {
                 "front" | "left" | "back" | "right"
             ),
             role if chain_stage_source(role) => member.position == "authored-source",
+            role if role.starts_with("chain_continuation_tail:") => {
+                member.position == "continuation-tail"
+            }
+            role if role.starts_with("stage_keyframe:") => member.position == "authored-keyframe",
+            role if role.starts_with("stage_reference:") => member.position == "authored-reference",
             _ => member.position == "scalar",
         };
         if !permitted_role(&member.role) || !slot {
@@ -706,6 +730,47 @@ mod tests {
         value.role = "stage_source:0".into();
         value.position = "scalar".into();
         assert!(validate_members(&[value]).is_err());
+    }
+
+    #[test]
+    fn continuation_tail_transfer_requires_canonical_owned_slots() {
+        let mut value = member();
+        value.role = "chain_continuation_tail:0".into();
+        value.position = "continuation-tail".into();
+        assert!(validate_members(&[value.clone()]).is_ok());
+        for role in [
+            "chain_continuation_tail:01",
+            "chain_continuation_tail:-1",
+            "chain_continuation_tail:../0",
+        ] {
+            value.role = role.into();
+            assert!(validate_members(&[value.clone()]).is_err());
+        }
+        value.role = "chain_continuation_tail:0".into();
+        value.position = "authored-source".into();
+        assert!(validate_members(&[value]).is_err());
+    }
+
+    #[test]
+    fn chain_typed_media_transfer_validates_roles_and_positions() {
+        for (role, position) in [
+            ("stage_keyframe:0:1", "authored-keyframe"),
+            ("stage_reference:2:0", "authored-reference"),
+        ] {
+            let mut value = member();
+            value.role = role.into();
+            value.position = position.into();
+            assert!(validate_members(&[value.clone()]).is_ok());
+            value.position = "scalar".into();
+            assert!(validate_members(&[value]).is_err());
+        }
+        for role in [
+            "stage_reference:01:2",
+            "stage_keyframe:-1:0",
+            "stage_reference:1:2:3",
+        ] {
+            assert!(!permitted_role(role));
+        }
     }
 
     #[test]

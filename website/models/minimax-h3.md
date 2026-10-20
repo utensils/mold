@@ -20,6 +20,26 @@ for the field syntax and
 [MiniMax H3 Ref2VA](/guide/prompting#minimax-h3-ref2va) for the
 reference-conditioned variant.
 
+## Scripted sequences
+
+Use `mold run --script shot.toml --host HOST` for durable H3 sequences on an
+H3-enabled server; local chains remain refused. Each stage retains its own
+prompt, seed and conditioning. FL2VA smooth continuation conditions on the
+previous clip’s final RGB frame; cuts and fades start fresh. Ref2VA stages
+use ordered typed `generation_references` and join independent clips, including
+when the transition is named smooth. Generated audio is stitched with video.
+
+TOML Ref2VA references use `[[stage.generation_references]]` with `kind`
+(`image`, `video`, or `audio`) and `path` relative to the script. The CLI
+probes and inlines at most 32 MiB across the complete chain.
+
+TOML FL2VA stages can name `first_frame_path` and `last_frame_path`, resolved
+relative to the script. A smooth continuation supplies the first frame, so use
+a cut or fade when authoring a new first frame. See
+[Video sequences](/guide/video#multi-prompt-scripts) for the complete script
+and lifecycle workflow. Inspect `mold list --json --host HOST` and
+`/api/capabilities/chain-limits?model=MODEL` for the selected tier’s limits.
+
 ## Generated Examples
 
 Every clip contains synchronized audio generated with the video. Press play to

@@ -21,6 +21,15 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct LinkedPartLimits {
+    pub supported: bool,
+    pub max_stages_per_part: u32,
+    /// No product limit on successor parts. Each part owns bounded media and
+    /// its own immutable continuation tail instead of an ever-growing file.
+    pub max_parts: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SequenceSupport {
     pub supported: bool,
@@ -51,8 +60,14 @@ pub struct ChainLimits {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frames_per_clip_runtime_seconds: Option<u32>,
     pub frames_per_clip_recommended: u32,
+    /// Budget of one independently durable part, not the linked film.
     pub max_stages: u32,
+    /// Budget of one independently durable part, not the linked film.
     pub max_total_frames: u32,
+    /// Missing on older servers. Clients must check this before submitting
+    /// `continue_from`, which an older parser would otherwise ignore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_parts: Option<LinkedPartLimits>,
     pub fade_frames_max: u32,
     pub transition_modes: Vec<String>,
     pub quantization_family: String,
@@ -105,6 +120,16 @@ pub fn sequence_support(model: &str, family: &str, has_spatial_upscaler: bool) -
         return SequenceSupport {
             supported: false,
             reason: Some(format!("{family} models do not render video sequences")),
+        };
+    }
+    if mold_core::minimax_h3::is_family(family)
+        && !mold_core::chain::model_supports_sequence(model, family)
+    {
+        return SequenceSupport {
+            supported: false,
+            reason: Some(format!(
+                "model '{model}' has no runnable MiniMax H3 sequence runtime"
+            )),
         };
     }
     // Every pipeline `select_pipeline` can choose for an LTX-2 checkpoint now
@@ -175,7 +200,7 @@ pub fn compute_limits(
         .max(floor)
         .min(cap);
 
-    const MAX_STAGES: u32 = 16;
+    const MAX_STAGES: u32 = mold_core::chain::MAX_CHAIN_STAGES as u32;
     let canonical_model = mold_core::manifest::resolve_model_name(model);
     let has_spatial_upscaler =
         mold_core::manifest::find_manifest(&canonical_model).is_some_and(|manifest| {
@@ -194,6 +219,11 @@ pub fn compute_limits(
         frames_per_clip_recommended: recommended,
         max_stages: MAX_STAGES,
         max_total_frames: cap * MAX_STAGES,
+        linked_parts: Some(LinkedPartLimits {
+            supported: sequence.supported,
+            max_stages_per_part: MAX_STAGES,
+            max_parts: None,
+        }),
         fade_frames_max: 32,
         transition_modes: vec!["smooth".into(), "cut".into(), "fade".into()],
         quantization_family: quant.to_string(),
@@ -206,6 +236,18 @@ pub fn compute_limits(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linked_parts_advertise_no_total_part_limit_and_keep_per_part_budget() {
+        let limits = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", None, Some(24));
+        let value = serde_json::to_value(&limits).unwrap();
+        assert_eq!(value["linked_parts"]["supported"], true);
+        assert_eq!(value["linked_parts"]["max_stages_per_part"], 16);
+        assert!(value["linked_parts"].get("max_parts").is_some());
+        assert!(value["linked_parts"]["max_parts"].is_null());
+        assert_eq!(limits.max_stages, 16);
+        assert_eq!(limits.max_total_frames, 1552);
+    }
 
     /// An LTX-2 clip is denoised as one generation, so its cap is the family's
     /// single-request ceiling — a 20s duration, not the old flat 97.
@@ -478,6 +520,41 @@ mod tests {
         let video = compute_limits("ltx-video-0.9.6:bf16", "ltx-video", "bf16", None, Some(30));
         assert_eq!(video.frames_per_clip_runtime_seconds, None);
         assert_eq!(video.frames_per_clip_cap, 97);
+    }
+
+    #[test]
+    fn download_only_h3_models_never_advertise_sequence_execution() {
+        for model in [
+            mold_core::minimax_h3::FL2VA_COMFY_NVFP4,
+            mold_core::minimax_h3::REF2VA_COMFY_NVFP4,
+            "minimax-h3-fl2va:official-bf16",
+            "minimax-h3",
+        ] {
+            assert!(
+                !sequence_support(model, "minimax-h3", false).supported,
+                "{model}"
+            );
+        }
+    }
+
+    #[test]
+    fn h3_runnable_sequences_have_audio_and_model_frame_grid() {
+        for model in [
+            "minimax-h3-fl2va:comfy-pruned-int8",
+            "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step",
+            "minimax-h3-fl2va:fasth3-v2-int8",
+        ] {
+            let limits = compute_limits(model, "minimax-h3", "int8", Some(129), Some(24));
+            assert!(limits.supports_sequence, "{model}");
+            assert!(limits.supports_audio);
+            assert_eq!(
+                limits.frames_per_clip_cap,
+                mold_core::minimax_h3::MAX_FRAMES
+            );
+            assert!(mold_core::minimax_h3::valid_frame_count(
+                limits.frames_per_clip_recommended
+            ));
+        }
     }
 
     #[test]

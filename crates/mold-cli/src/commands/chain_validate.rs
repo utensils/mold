@@ -10,7 +10,7 @@ pub async fn run(path: &Path) -> Result<()> {
     let toml_src = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("failed to read script {}: {e}", path.display()))?;
     let script_dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let script = mold_core::chain_toml::read_script_resolving_paths(&toml_src, script_dir)
+    let script = super::chain::read_script_with_media_paths(&toml_src, script_dir)
         .map_err(|e| anyhow::anyhow!("invalid chain TOML in {}: {e}", path.display()))?;
     // The seam a family can honour is resolved before `normalise()`, so this
     // reports the chain that will actually render rather than the one the

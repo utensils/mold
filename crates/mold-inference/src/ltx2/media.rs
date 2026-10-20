@@ -39,6 +39,38 @@ pub struct DecodedAudioProbe {
     pub samples_per_channel: u64,
 }
 
+/// Decode a delivered MP4 soundtrack to the shared interleaved PCM shape.
+/// Durable chain stages use this when a model owns its complete AV pipeline.
+pub fn decode_native_audio_from_mp4_file(
+    path: &Path,
+) -> Result<Option<crate::audio::NativeAudioTrack>> {
+    let Some(decoded) = super::model::DecodedAudio::from_mp4_file(path, None)? else {
+        return Ok(None);
+    };
+    let channels = u16::try_from(decoded.channel_count())?;
+    let sample_rate = u32::try_from(decoded.sample_rate)?;
+    let count = decoded.sample_count();
+    if channels == 0
+        || decoded
+            .channels
+            .iter()
+            .any(|channel| channel.len() != count)
+    {
+        bail!("decoded MP4 audio has inconsistent channels");
+    }
+    let mut interleaved_samples = Vec::with_capacity(count * usize::from(channels));
+    for idx in 0..count {
+        for channel in &decoded.channels {
+            interleaved_samples.push(channel[idx]);
+        }
+    }
+    Ok(Some(crate::audio::NativeAudioTrack {
+        interleaved_samples,
+        sample_rate,
+        channels,
+    }))
+}
+
 /// Decode a staged MP4 soundtrack and report the exact PCM authority used by
 /// Ref2VA preprocessing. Container duration alone is deliberately not enough:
 /// codec delay and packet boundaries can change the decoded sample count.

@@ -5,10 +5,11 @@ title: Video Generation
 # Video Generation
 
 Mold supports generating video clips using LTX Video (including LTX-2.5), Wan
-2.1/2.2, and MiniMax H3. Every LTX-2 and Wan
-checkpoint can chain multiple clips together for longer videos — the apps do
-this for you whenever the length you ask for exceeds one pass, and the CLI can
-also direct a chain scene by scene from a script; H3 is single-clip only. A dev checkpoint
+2.1/2.2, and MiniMax H3. The CLI and API can stitch authored clips into a
+durable sequence. LTX-2, image-conditioned Wan and H3 FL2VA can carry context
+across smooth seams; text-only Wan, legacy LTX-Video and H3 Ref2VA compose
+independent clips. Automatic long one-shots are limited to models with a
+continuation path. A dev checkpoint
 renders its clips through the two-stage pipeline, so expect roughly twice the
 wall time per clip as a distilled one; stage 1 runs classifier-free guidance
 as two sequential forward passes.
@@ -128,8 +129,11 @@ mold run minimax-h3-fl2va:comfy-pruned-int8 \
 
 Generation is available on H3-enabled SM89 CUDA builds and the shipped Apple
 Metal build. Metal streams the compact stack and applies exact per-request
-unified-memory admission; CPU is unsupported. H3 does not participate in the
-sequence workflow below. See [MiniMax H3](/models/minimax-h3) for Ref2VA
+unified-memory admission; CPU is unsupported. H3 participates in the
+sequence workflow below through an H3-enabled server. FL2VA uses the previous
+clip’s final RGB frame for smooth continuation; Ref2VA renders independent
+clips with each stage’s ordered references. Local H3 chains remain refused.
+See [MiniMax H3](/models/minimax-h3) for Ref2VA
 uploads, Turbo tags, download-only layouts, and exact request limits.
 
 ## Resolution and spatial tiling
@@ -167,9 +171,9 @@ See [LTX-2 → Resolution](/models/ltx2#resolution) for the measured configurati
 only past the trained 2048px span; `off` past that span is refused. See
 [LTX-2 → Spatial tiling](/models/ltx2#spatial-tiling-spatial-tile).
 
-## Multi-prompt scripts (v2)
+## Multi-prompt scripts
 
-Direct any-length video scene by scene with a TOML script. Each prompt becomes a stage; each boundary has a `transition` (`smooth`, `cut`, or `fade`).
+Direct a video scene by scene with a TOML script. Each prompt becomes a stage; each boundary has a `transition` (`smooth`, `cut`, or `fade`).
 
 ::: tip Scripts are the only way to direct scenes
 Scene-by-scene authoring lives in the CLI and the HTTP API. The apps (web,
@@ -185,6 +189,13 @@ mold run --script shot.toml --dry-run   # print stage summary, don't submit
 mold chain validate shot.toml            # parse without submitting
 ```
 
+Validation and `--dry-run` plan locally; they do not exercise remote model
+admission. A remote run prints its durable **Sequence job** ID. Retain that ID
+and inspect `mold jobs show ID --json --host HOST` after a disconnected stream
+before submitting again. `--output` writes on the CLI machine; the host also
+keeps the stitched print in its gallery. Download its exact output filename
+with `mold library download NAME --host HOST`.
+
 ### Sugar form (uniform smooth chains)
 
 ```bash
@@ -199,11 +210,11 @@ Per-stage transitions or per-stage frames require `--script`.
 
 ### Transitions
 
-| Mode                 | Behavior                                                                                          |
-| -------------------- | ------------------------------------------------------------------------------------------------- |
-| `smooth` _(default)_ | Motion-tail carryover; prompt change produces a visual morph between scenes.                      |
-| `cut`                | Fresh latent, no carryover. If the stage has `source_image`, it's used as an image-to-video seed. |
-| `fade`               | Cut + post-stitch alpha blend of `fade_frames` (default 8) on each side of the boundary.          |
+| Mode                 | Behavior                                                                                                                                  |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `smooth` _(default)_ | Model-specific carryover: LTX-2 latent tail, Wan I2V/TI2V or H3 FL2VA final frame; text-only models and H3 Ref2VA join independent clips. |
+| `cut`                | Fresh latent, no carryover. If the stage has `source_image`, it's used as an image-to-video seed.                                         |
+| `fade`               | Cut + post-stitch alpha blend of `fade_frames` (default 8) on each side of the boundary.                                                  |
 
 ### Example `shot.toml`
 
@@ -242,6 +253,69 @@ transition = "fade"
 fade_frames = 12
 ```
 
+### H3 stage inputs
+
+FL2VA stages accept `first_frame_path` and `last_frame_path`, relative to the
+script file. These become typed boundary keyframes; do not mix them with
+`source_image` or `keyframes`. A smooth continuation supplies the incoming
+first frame itself, so an authored first frame requires a cut or fade. Ref2VA
+stages accept ordered typed `generation_references`, using the same reference
+wire schema as ordinary generation, and reject source images or keyframes.
+For CLI files use `[[stage.generation_references]]` with `kind` and `path`
+as in the example below.
+The API stage fields are `keyframes` and `generation_references`. Generated
+audio is retained through stitching.
+
+### H3 Ref2VA with a local image
+
+Save this as `ref-chain.toml` beside an existing `hero.png`. Inspect the exact
+model on the target host first; this example uses its reviewed compact Turbo
+recipe. Paths resolve relative to the script and are probed before submission.
+The CLI inlines at most 32 MiB of authored media per part (source images, keyframes and references combined).
+
+```toml
+schema = "mold.chain.v1"
+
+[chain]
+model = "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step"
+width = 1344
+height = 768
+fps = 24
+seed = 42
+steps = 5
+guidance = 0.0
+strength = 1.0
+motion_tail_frames = 0
+output_format = "mp4"
+
+[[stage]]
+prompt = "integrated_multimodal_description: [Shot 1] <Subject 1> in a garden, slow camera push. overall_soundscape: Wind in leaves. non_diegetic_music: None."
+frames = 124
+[[stage.generation_references]]
+kind = "image"
+path = "hero.png"
+
+[[stage]]
+prompt = "integrated_multimodal_description: [Shot 1] <Subject 1> in the garden, a wide view. overall_soundscape: Wind in leaves. non_diegetic_music: None."
+frames = 124
+transition = "cut"
+[[stage.generation_references]]
+kind = "image"
+path = "hero.png"
+```
+
+Use `kind = "video"` or `"audio"` for those media. Follow the H3 Ref2VA
+prompting guide for ordered subject references and exact prompt structure.
+Each stage is an independent clip; repeated references guide identity without
+claiming motion continuation.
+
+```bash
+mold list --json --host HOST
+mold chain validate ref-chain.toml
+mold run --script ref-chain.toml --dry-run --host HOST
+mold run --script ref-chain.toml --host HOST --output ref-chain.mp4
+```
+
 ### Longer clips in the apps
 
 Web, desktop, and iPhone have no scene composer. Create makes one clip from one
@@ -249,11 +323,97 @@ prompt, and the only length control is the clip's own duration. Ask for more
 frames than the checkpoint renders in a single pass and the host splits the work
 into clips on its own, carries the motion tail across each seam, and stitches
 the result — you get one video and one Library entry, and the progress readout
-names the clip it is on.
+names the clip it is on. Text-only Wan refuses automatic splitting, and legacy
+LTX-Video remains one render up to its own ceiling. H3 scripted sequences are
+CLI/API-only; GUI authoring is unchanged.
 
 Clips made by an older build's sequence composer are still in your library with
 their per-scene provenance intact. **Use these settings again** on one of them
 restores a plain one-shot clip built from the first scene's prompt.
+
+### Continue beyond 16 stages
+
+A part accepts at most 16 stages. Continue with separately viewable linked MP4
+parts; there is no overall part-count or duration limit, and no unbounded single
+MP4. Wait for the previous job to complete, then author new clips in `next.toml`
+with the same model identity, canvas, fps, carry and audio settings. The first
+stage must be `smooth`. For models that carry context, omit authored first
+source images and frame-0 keyframes that conflict with the incoming tail.
+Independent-clip models may use their ordinary authored inputs.
+
+```bash
+mold jobs show PART1_JOB_ID --json --host plato
+mold run --script next.toml --continue-from PART1_JOB_ID --dry-run --host plato
+mold run --script next.toml --continue-from PART1_JOB_ID --host plato --output /storage/mold/uat/part2.mp4
+```
+
+The output path belongs to the CLI machine; run on Plato for that Plato path.
+The server also publishes every part in its normal `MOLD_HOME` Library.
+The flag requires `--script`, refuses `--local`, and binds the latest completed
+take. A stale predecessor revision is refused. Older servers without linked-part
+capability are refused before submission; update the server first. To pin the latest completed take explicitly
+in TOML, omit the flag and add `[chain.continue_from]` with `job_id` and
+`finalize_take = 1` (use the actual latest take number). Place this table after
+the chain settings and before `[[stage]]`. Retaking or amending the predecessor
+invalidates that authority until a new latest take is completed. JSON/API
+requests use the same `continue_from` object.
+When reusing an exported script, remove its old `[chain.continue_from]` table
+before selecting a new predecessor with the flag. Conflicting flag and TOML
+authority is refused. A continuation job link remains
+host-bound in exported scripts; its predecessor must exist on the same host.
+
+The new job privately snapshots the last tail before creation, surviving prior
+job garbage collection. Earlier clips are never rerendered or reencoded; the new
+MP4 contains new clips only. LTX-2 carries latent motion, H3 FL2VA and
+image-conditioned Wan carry the last RGB frame. H3 Ref2VA, text-only Wan and
+legacy LTX-Video continue as independent clips. Duration estimates subtract the
+initial carried boundary when the model actually carries context.
+
+### HTTP API
+
+Submit a canonical JSON `ChainRequest` to `POST /api/chain-jobs` using the
+host’s normal authentication. Unlike TOML, JSON uses `stages` and has no
+`schema` or `[chain]` wrapper:
+
+```json
+{
+  "model": "ltx-2-19b-distilled:fp8",
+  "width": 512,
+  "height": 512,
+  "fps": 24,
+  "seed": 42,
+  "steps": 8,
+  "guidance": 3.0,
+  "strength": 1.0,
+  "motion_tail_frames": 17,
+  "output_format": "mp4",
+  "stages": [
+    { "prompt": "a cat wakes on a windowsill", "frames": 49 },
+    { "prompt": "the cat lands on a rug", "frames": 49, "transition": "cut" }
+  ]
+}
+```
+
+Keep the returned `job_id`. Read `GET /api/chain-jobs/{id}` or follow
+`GET /api/chain-jobs/{id}/events`; once `state` is `completed`,
+`finalizes[-1].gallery_filename` names the stitched print. `mold jobs show ID --script`
+uses authenticated `GET /api/chain-jobs/{id}?include_source_media=true` to
+export a portable script with its retained input bytes. Ordinary detail and
+event snapshots omit payloads; exports return `Cache-Control: private, no-store`.
+TOML seeds and stage seed offsets accept integers or decimal strings; exports
+quote values above the signed 64-bit TOML limit without changing their value.
+H3 also publishes individual stage clips tagged `chain:<id>` and
+`chain-stage:<index>`; its final stitched print remains the chain result.
+Use `POST /api/generate/chain/validate` for read-only server validation.
+The deleted `/api/generate/chain` and `/api/generate/chain/stream` render
+routes are unavailable. Resume, retake and amend use the durable job routes.
+
+H3 API stages use `keyframes: [{"frame": 0, "image": "BASE64"}]` for
+FL2VA, or `generation_references` for Ref2VA. An image reference has
+`kind: "image"`, `media: {"authority": "inline", "data": "BASE64"}`,
+`mime_type`, `width` and `height`; video/audio references require their exact
+probed timing fields as defined in `/api/docs`. Client filesystem paths are
+CLI sugar and are never API media authority.
 
 ### Capabilities endpoint
 

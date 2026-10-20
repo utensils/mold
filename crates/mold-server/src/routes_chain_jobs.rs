@@ -109,36 +109,6 @@ pub async fn create_chain_job(
     crate::routes::ensure_generation_available(&state)?;
     let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
-    {
-        let config = state.config.read().await;
-        crate::routes_chain::require_chain_artifact_activation(&config, &req, None, None)?;
-    }
-    crate::routes_chain::validate_chain_build_features(&req)?;
-    let authority = crate::routes_chain::resolve_chain_model_authority(&state, &req.model).await?;
-    crate::routes_chain::validate_and_normalize_chain_family(&authority.config, &mut req)?;
-    // The sidecar-derived family, so an installed `cv:` / `hf:` wan
-    // checkpoint normalises on wan's `4k+1` grid rather than the LTX
-    // fallback a manifest-only lookup leaves behind (#783).
-    let family = crate::routes_chain::resolve_chain_family(&authority.config, &req.model);
-    let mut req = req
-        .normalise_with_family(Some(&family))
-        .map_err(|e| ApiError::validation(e.to_string()))?;
-    // Resolve the stitched print's collection before the job is frozen: the
-    // manifest keeps this request verbatim, so an unresolved id would still
-    // be unresolved on a resume days later.
-    let filing_warnings = crate::routes::resolve_collection_reference(db, &mut req.collection);
-    if !req.output_format.is_video() {
-        return Err(ApiError::validation(format!(
-            "{:?} is not a video output format; a chain job stitches MP4 and publishes \
-             the requested mp4, gif, webp, or apng print",
-            req.output_format
-        )));
-    }
-    // An ephemeral job is one print's implementation detail rather than a
-    // sequence the user authored: absent from the listing, swept after
-    // finalization, resume refused, and its print carries no `chain_job_id`.
-    let ephemeral = req.ephemeral;
-    crate::routes::materialize_chain_camera_controls(&state, &authority.config, &req).await?;
     let operation_id = mutation_id(&headers)?;
     let job_id = operation_id
         .clone()
@@ -154,21 +124,150 @@ pub async fn create_chain_job(
         ));
     }
     let jobs_root = jobs_root()?;
+    // Resolve retries before looking up a predecessor. Once admitted, this
+    // successor owns its copy even if the predecessor has since been deleted.
+    if let Some(existing) =
+        chain_jobs::get_job(db, &job_id).map_err(|error| ApiError::internal(error.to_string()))?
+    {
+        let manifest = ChainJobManifest::read_from_dir(&existing.job_dir)
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        require_persisted_chain_model_activation(&state, &existing, &manifest).await?;
+        let persisted = manifest
+            .request()
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        let mut config = state.config.read().await.clone();
+        if let Some(frozen) = &manifest.frozen_model {
+            config.install_frozen_model_config(&persisted.model, frozen.config.clone());
+        }
+        crate::routes_chain::validate_and_normalize_chain_family(&config, &mut req)?;
+        let family = crate::routes_chain::resolve_chain_family(&config, &req.model);
+        let mut retry = req
+            .normalise_with_family(Some(&family))
+            .map_err(|error| ApiError::validation(error.to_string()))?;
+        let warnings = crate::routes::resolve_collection_reference(db, &mut retry.collection);
+        if retry.seed.is_none() {
+            retry.seed = persisted.seed;
+        }
+        if crate::chain_source_media::try_scrub(retry)
+            .map_err(|error| ApiError::validation(error.to_string()))?
+            != persisted
+        {
+            return Err(conflict(
+                "CHAIN_CREATION_ID_CONFLICT",
+                "operation id already belongs to another chain request",
+            ));
+        }
+        crate::chain_job_runner::effective_request_with_media(&manifest, &existing.job_dir)
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        if persisted.continue_from.is_some() {
+            crate::chain_continuation::load(
+                &existing.job_dir,
+                &persisted,
+                manifest
+                    .frozen_model
+                    .as_ref()
+                    .ok_or_else(|| ApiError::validation("linked part has no frozen model"))?,
+            )
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        }
+        handle.kick();
+        return Ok((
+            StatusCode::ACCEPTED,
+            crate::routes::request_warning_headers(&warnings),
+            Json(CreateChainJobResponse {
+                job_id,
+                request_warnings: warnings,
+            }),
+        ));
+    }
+    // The successor has no row. Before waiting for its source lock, prove that
+    // source already exists. Otherwise concurrent A -> B / B -> A creation
+    // could each hold one new target's lock and wait forever for the other.
+    // Re-read under the source lock before trusting state or snapshot bytes.
+    let (_source_guard, predecessor) = if let Some(source) = &req.continue_from {
+        source
+            .validate()
+            .map_err(|error| ApiError::validation(error.to_string()))?;
+        if source.job_id == job_id {
+            return Err(ApiError::validation(
+                "a continuation cannot reference its own successor id",
+            ));
+        }
+        let existing_source = chain_jobs::get_job(db, &source.job_id)
+            .map_err(|error| ApiError::internal(error.to_string()))?
+            .ok_or_else(|| not_found(&source.job_id))?;
+        if existing_source.state != ChainJobState::Completed {
+            return Err(ApiError::validation(
+                "continuation requires an already completed predecessor",
+            ));
+        }
+        let guard = handle.lock_job(&source.job_id).await;
+        let row = chain_jobs::get_job(db, &source.job_id)
+            .map_err(|error| ApiError::internal(error.to_string()))?
+            .ok_or_else(|| not_found(&source.job_id))?;
+        let manifest = ChainJobManifest::read_from_dir(&row.job_dir)
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        require_persisted_chain_model_activation(&state, &row, &manifest).await?;
+        let frozen = crate::chain_continuation::inherit_frozen(&manifest, &req.model)
+            .map_err(|error| ApiError::validation(error.to_string()))?;
+        (Some(guard), Some((row, manifest, frozen)))
+    } else {
+        (None, None)
+    };
+    let authority = if let Some((_, _, frozen)) = &predecessor {
+        let mut config = state.config.read().await.clone();
+        config.install_frozen_model_config(&req.model, frozen.config.clone());
+        let paths = mold_core::ModelPaths::resolve_from_model_config_exact(&frozen.config)
+            .ok_or_else(|| ApiError::validation("predecessor frozen artifacts are unavailable"))?;
+        crate::model_manager::ExistingModelAuthority { config, paths }
+    } else {
+        crate::routes_chain::resolve_chain_model_authority(&state, &req.model).await?
+    };
+    crate::routes_chain::require_chain_artifact_activation(
+        &authority.config,
+        &req,
+        Some(&authority.paths),
+        predecessor.as_ref().map(|(_, _, frozen)| frozen),
+    )?;
+    crate::routes_chain::validate_chain_build_features(&req)?;
+    crate::routes_chain::validate_and_normalize_chain_family(&authority.config, &mut req)?;
+    let family = crate::routes_chain::resolve_chain_family(&authority.config, &req.model);
+    let mut req = req
+        .normalise_with_family(Some(&family))
+        .map_err(|error| ApiError::validation(error.to_string()))?;
+    let filing_warnings = crate::routes::resolve_collection_reference(db, &mut req.collection);
+    if !req.output_format.is_video() {
+        return Err(ApiError::validation(
+            "a chain part requires a video output format",
+        ));
+    }
+    let ephemeral = req.ephemeral;
+    crate::routes::materialize_chain_camera_controls(&state, &authority.config, &req).await?;
+    let (frozen, continuation) = if let Some((row, manifest, frozen)) = predecessor {
+        let prepared = crate::chain_continuation::prepare(&row, &manifest, &req, &frozen)
+            .map_err(|error| ApiError::validation(error.to_string()))?;
+        (frozen, Some(prepared))
+    } else {
+        (
+            crate::routes_chain::freeze_chain_model(authority, &req.model)?,
+            None,
+        )
+    };
     let model = req.model.clone();
     let stage_count = req.stages.len() as u32;
-    crate::chain_job_runner::create_job_with_params(
-        db,
-        &jobs_root,
-        crate::chain_job_runner::CreateJobParams {
-            id: job_id.clone(),
-            ephemeral,
-            frozen_model: Some(crate::routes_chain::freeze_chain_model(
-                authority, &req.model,
-            )?),
-            request: req,
-        },
-    )
-    .map_err(|e| ApiError::internal(format!("failed to create chain job: {e:#}")))?;
+    let params = crate::chain_job_runner::CreateJobParams {
+        id: job_id.clone(),
+        ephemeral,
+        frozen_model: Some(frozen),
+        request: req,
+    };
+    match continuation.as_ref() {
+        Some(prepared) => crate::chain_job_runner::create_job_with_prepared_continuation(
+            db, &jobs_root, params, prepared,
+        ),
+        None => crate::chain_job_runner::create_job_with_params(db, &jobs_root, params),
+    }
+    .map_err(|error| ApiError::internal(format!("failed to create chain job: {error:#}")))?;
 
     handle.kick();
     // The lifecycle broadcast drives History ▸ Sequences and "Now developing".
@@ -308,19 +407,32 @@ pub async fn list_chain_jobs(
     Ok(Json(ChainJobListing { jobs }))
 }
 
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct ChainJobQuery {
+    /// Explicit script export includes authored media from encrypted storage.
+    #[serde(default)]
+    pub include_source_media: bool,
+}
+
 /// 404 unknown.
 #[utoipa::path(
     get,
     path = "/api/chain-jobs/{id}",
     tag = "chain-jobs",
-    params(("id" = String, Path, description = "Chain job id")),
+    params(("id" = String, Path, description = "Chain job id"), ("include_source_media" = Option<bool>, Query, description = "Embed authored input bytes in the exported script")),
     responses((status = 200, description = "Chain job detail", body = mold_core::chain_job::ChainJobDetail))
 )]
 pub async fn get_chain_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<ChainJobDetail>, ApiError> {
+    Query(query): Query<ChainJobQuery>,
+) -> Result<(HeaderMap, Json<ChainJobDetail>), ApiError> {
     let handle = chain_jobs_handle(&state)?;
+    let _export_guard = if query.include_source_media {
+        Some(handle.lock_job(&id).await)
+    } else {
+        None
+    };
     let db = metadata_db(&state)?;
     let root = jobs_root()?;
     let mut detail = job_detail_for(db, &root, &id)
@@ -328,7 +440,28 @@ pub async fn get_chain_job(
         .ok_or_else(|| not_found(&id))?;
     detail.summary.cancelling =
         detail.summary.state == ChainJobState::Running && handle.is_cancelling(&id);
-    Ok(Json(detail))
+    if query.include_source_media {
+        let row = chain_jobs::get_job(db, &id)
+            .map_err(|error| {
+                ApiError::internal(format!("failed to load script export: {error:#}"))
+            })?
+            .ok_or_else(|| not_found(&id))?;
+        let manifest = ChainJobManifest::read_from_dir(&row.job_dir).map_err(|error| {
+            ApiError::internal(format!("failed to read script export: {error:#}"))
+        })?;
+        let effective =
+            crate::chain_job_runner::effective_request_with_media(&manifest, &row.job_dir)
+                .map_err(|error| {
+                    ApiError::internal(format!("failed to restore script inputs: {error:#}"))
+                })?;
+        detail.script = ChainScript::from(&effective);
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    Ok((headers, Json(detail)))
 }
 
 /// subscribe() FIRST, then synthesize Snapshot from DB+manifest, then live.
@@ -1250,6 +1383,7 @@ mod tests {
 
     fn req(format: OutputFormat) -> ChainRequest {
         ChainRequest {
+            continue_from: None,
             offload: None,
             collection: None,
             tags: None,
@@ -1266,6 +1400,9 @@ mod tests {
                 model: None,
                 loras: vec![],
                 references: vec![],
+                generation_references: None,
+                keyframes: None,
+                authored_media_sha256: None,
             }],
             motion_tail_frames: 1,
             width: 64,
@@ -1739,6 +1876,9 @@ mod tests {
             model: None,
             loras: vec![],
             references: vec![],
+            generation_references: None,
+            keyframes: None,
+            authored_media_sha256: None,
         });
 
         // `with_mold_home` takes the same process-wide env lock the hermetic
@@ -1878,7 +2018,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_chain_job_rejects_non_mp4_public_jobs() {
+    async fn create_chain_job_rejects_still_image_output() {
         let home = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
         let state = state_with(
@@ -1890,7 +2030,7 @@ mod tests {
             futures::executor::block_on(create_chain_job(
                 State(state),
                 HeaderMap::new(),
-                Json(req(OutputFormat::Apng)),
+                Json(req(OutputFormat::Png)),
             ))
         })
         .unwrap_err();
@@ -1995,6 +2135,106 @@ mod tests {
         let mut request = req(OutputFormat::Mp4);
         request.model = "route-chain-amend-test".into();
         request
+    }
+
+    #[tokio::test]
+    async fn explicit_script_export_restores_source_media_and_amends_portably() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let state = state_with(
+            db,
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+        let mut request = freezable_amend_request(&state, home.path()).await;
+        request.stages[0].source_image = Some(b"private authored input".to_vec());
+        with_mold_home(home.path(), || {
+            futures::executor::block_on(async {
+                let (_, _, Json(created)) =
+                    create_chain_job(State(state.clone()), HeaderMap::new(), Json(request))
+                        .await
+                        .unwrap();
+                let (_, Json(detail)) = get_chain_job(
+                    State(state.clone()),
+                    Path(created.job_id.clone()),
+                    Query(ChainJobQuery::default()),
+                )
+                .await
+                .unwrap();
+                assert!(detail.script.stages[0].source_image.is_none());
+                let (headers, Json(mut exported)) = get_chain_job(
+                    State(state.clone()),
+                    Path(created.job_id.clone()),
+                    Query(ChainJobQuery {
+                        include_source_media: true,
+                    }),
+                )
+                .await
+                .unwrap();
+                assert_eq!(headers[header::CACHE_CONTROL], "private, no-store");
+                assert_eq!(
+                    exported.script.stages[0].source_image.as_deref(),
+                    Some(b"private authored input".as_slice())
+                );
+                let portable = mold_core::chain_toml::read_script(
+                    &mold_core::chain_toml::write_script(&exported.script).unwrap(),
+                )
+                .unwrap();
+                exported.script = portable;
+                exported.script.stages[0].prompt = "an edited scene".into();
+                let _ = amend_chain_job(
+                    State(state.clone()),
+                    Path(created.job_id.clone()),
+                    HeaderMap::new(),
+                    Json(amend_body(exported.script.stages)),
+                )
+                .await
+                .unwrap();
+                let (_, Json(updated)) = get_chain_job(
+                    State(state),
+                    Path(created.job_id),
+                    Query(ChainJobQuery {
+                        include_source_media: true,
+                    }),
+                )
+                .await
+                .unwrap();
+                assert_eq!(updated.script.stages[0].prompt, "an edited scene");
+                assert_eq!(
+                    updated.script.stages[0].source_image.as_deref(),
+                    Some(b"private authored input".as_slice())
+                );
+            })
+        });
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn linked_create_rejects_absent_source_without_waiting_on_its_creation_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let handle = crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests();
+        let state = state_with(db, handle);
+        let handle = state.chain_jobs.as_ref().unwrap().clone();
+        let source_id = uuid::Uuid::new_v4().to_string();
+        let mut request = req(OutputFormat::Mp4);
+        request.continue_from = Some(mold_core::chain::ChainContinuation {
+            job_id: source_id.clone(),
+            finalize_take: 1,
+        });
+        with_mold_home(home.path(), || {
+            futures::executor::block_on(async {
+                // Model one half of A -> B / B -> A concurrent creation. B
+                // owns its target lock but cannot be a completed predecessor.
+                let _source_creation = handle.lock_job(&source_id).await;
+                let response = tokio::time::timeout(
+                    std::time::Duration::from_millis(200),
+                    create_chain_job(State(state), HeaderMap::new(), Json(request)),
+                )
+                .await
+                .expect("an absent predecessor must be refused before waiting for its lock")
+                .unwrap_err();
+                assert_eq!(response.code, CHAIN_JOB_NOT_FOUND);
+            });
+        });
     }
 
     #[tokio::test]
@@ -2200,6 +2440,9 @@ mod tests {
             model: None,
             loras: vec![],
             references: vec![],
+            generation_references: None,
+            keyframes: None,
+            authored_media_sha256: None,
         });
         let (status, Json(body)) = with_mold_home(home.path(), || {
             futures::executor::block_on(amend_chain_job(
@@ -2551,6 +2794,8 @@ mod tests {
     #[tokio::test]
     async fn resume_rejects_nested_persisted_h3_artifacts_without_mutation() {
         let home = tempfile::tempdir().unwrap();
+        let transformer = home.path().join("neutral-transformer.safetensors");
+        std::fs::write(&transformer, b"frozen chain fixture").unwrap();
         let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
         let state = state_with(
             db.clone(),
@@ -2569,6 +2814,7 @@ mod tests {
             request.model = model.clone();
             let mut frozen_config = mold_core::ModelConfig {
                 family: Some("ltx2".into()),
+                transformer: Some(transformer.display().to_string()),
                 ..mold_core::ModelConfig::default()
             };
             match case {
@@ -2601,10 +2847,15 @@ mod tests {
             {
                 None
             } else {
+                // A real internal identity must pass the fingerprint fence so
+                // this regression reaches the nested artifact policy check.
+                let fingerprint =
+                    crate::execution_plan::frozen_model_fingerprint(&model, &frozen_config)
+                        .unwrap();
                 Some(mold_core::chain_job::FrozenChainModel {
-                    runtime_model_id: format!("mold-frozen-chain:{model}"),
+                    runtime_model_id: format!("mold-frozen-chain:{fingerprint}"),
                     config: frozen_config,
-                    model_fingerprint: format!("fixture-{case}"),
+                    model_fingerprint: fingerprint,
                 })
             };
             let row = with_mold_home(home.path(), || {

@@ -582,6 +582,7 @@ use crate::queue::clean_error_message;
         mold_core::chain_job::GcOutcome,
         mold_core::chain::ChainStageMetadata,
         mold_core::chain::ChainOutputMetadata,
+        mold_core::chain::ChainContinuation,
         ModelInfoExtended,
         LoadModelBody,
         UnloadRequest,
@@ -601,6 +602,7 @@ use crate::queue::clean_error_message;
         crate::job_registry::JobEntry,
         crate::job_registry::QueueListing,
         crate::chain_limits::ChainLimits,
+        crate::chain_limits::LinkedPartLimits,
         GalleryMediaTokenRequest,
         GalleryMediaTokenResponse,
         GalleryExportRequest,
@@ -652,6 +654,11 @@ use crate::queue::clean_error_message;
     )
 )]
 pub struct ApiDoc;
+
+// The shared decoded-media budget needs base64 room plus bounded recipe JSON.
+// Keep this scoped to chain parts rather than raising every API route's limit.
+const CHAIN_PART_REQUEST_BODY_BYTES: usize =
+    mold_core::chain::MAX_CHAIN_INLINE_MEDIA_BYTES.div_ceil(3) * 4 + 2 * 1024 * 1024;
 
 pub fn create_router(state: AppState) -> Router {
     // Stateful routes (need AppState) are added first, then .with_state() converts
@@ -744,16 +751,19 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/api/generate/chain/validate",
-            post(crate::routes_chain::validate_chain),
+            post(crate::routes_chain::validate_chain)
+                .layer(DefaultBodyLimit::max(CHAIN_PART_REQUEST_BODY_BYTES)),
         )
         .route(
             "/api/chain-jobs",
             post(crate::routes_chain_jobs::create_chain_job)
-                .get(crate::routes_chain_jobs::list_chain_jobs),
+                .get(crate::routes_chain_jobs::list_chain_jobs)
+                .layer(DefaultBodyLimit::max(CHAIN_PART_REQUEST_BODY_BYTES)),
         )
         .route(
             "/api/chain-jobs/placement-preview",
-            post(crate::routes_chain_jobs::preview_chain_job_placement),
+            post(crate::routes_chain_jobs::preview_chain_job_placement)
+                .layer(DefaultBodyLimit::max(CHAIN_PART_REQUEST_BODY_BYTES)),
         )
         .route(
             "/api/chain-jobs/:id",
@@ -774,7 +784,8 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/api/chain-jobs/:id/amend",
-            post(crate::routes_chain_jobs::amend_chain_job),
+            post(crate::routes_chain_jobs::amend_chain_job)
+                .layer(DefaultBodyLimit::max(CHAIN_PART_REQUEST_BODY_BYTES)),
         )
         .route(
             "/api/chain-jobs/:id/cancel",

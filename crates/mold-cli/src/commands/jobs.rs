@@ -96,7 +96,11 @@ async fn jobs_list(client: &MoldClient, json: bool) -> Result<()> {
 }
 
 async fn jobs_show(client: &MoldClient, id: &str, json: bool, script: bool) -> Result<()> {
-    let detail = client.get_chain_job(id).await?;
+    let detail = if script {
+        client.get_chain_job_with_media(id).await?
+    } else {
+        client.get_chain_job(id).await?
+    };
     if script {
         // The document `mold jobs amend --script` reads, so the pair is a
         // round trip: `--json` prints a ChainJobDetail, which amend cannot
@@ -170,7 +174,7 @@ async fn jobs_amend(client: &MoldClient, id: &str, args: AmendArgs) -> Result<()
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty())
         .unwrap_or_else(|| std::path::Path::new("."));
-    let edited = mold_core::chain_toml::read_script_resolving_paths(&text, script_dir)
+    let edited = super::chain::read_script_with_media_paths(&text, script_dir)
         .map_err(|error| anyhow::anyhow!("{}: {error}", args.script.display()))?;
     let detail = client
         .get_chain_job(id)
@@ -231,6 +235,9 @@ fn refuse_unamendable_edits(
     edited: &mold_core::chain::ChainScript,
 ) -> Result<()> {
     let mut changed = Vec::new();
+    if current.chain.continue_from != edited.chain.continue_from {
+        changed.push("continue_from (continuation predecessor and take are immutable)".to_string());
+    }
     if current.chain.model != edited.chain.model {
         changed.push(format!(
             "model ({} -> {})",
@@ -457,6 +464,9 @@ mod tests {
             model: None,
             loras: Vec::new(),
             references: Vec::new(),
+            generation_references: None,
+            keyframes: None,
+            authored_media_sha256: None,
         }
     }
 
@@ -464,6 +474,7 @@ mod tests {
         ChainScript {
             schema: "mold.chain.v1".into(),
             chain: ChainScriptChain {
+                continue_from: None,
                 model: "ltx-2-19b-distilled:fp8".into(),
                 width: 1216,
                 height: 704,
@@ -497,6 +508,30 @@ mod tests {
     /// Amend replaces the WHOLE stage list, so the script's stages reach the
     /// request in the order they were authored — there is no stage index on
     /// the wire to put them back with.
+    #[test]
+    fn amend_refuses_changed_or_removed_continuation_authority() {
+        let mut current = script(vec![stage("one", 97)]);
+        current.chain.continue_from = Some(mold_core::chain::ChainContinuation {
+            job_id: "previous".into(),
+            finalize_take: 2,
+        });
+        refuse_unamendable_edits(&current, &current).unwrap();
+        let mut edited = current.clone();
+        edited.chain.continue_from = None;
+        assert!(refuse_unamendable_edits(&current, &edited)
+            .unwrap_err()
+            .to_string()
+            .contains("continue_from"));
+        edited.chain.continue_from = Some(mold_core::chain::ChainContinuation {
+            job_id: "different".into(),
+            finalize_take: 1,
+        });
+        assert!(refuse_unamendable_edits(&current, &edited)
+            .unwrap_err()
+            .to_string()
+            .contains("continue_from"));
+    }
+
     #[test]
     fn the_script_s_stages_reach_the_request_in_canonical_order() {
         let edited = script(vec![stage("one", 97), stage("two", 49), stage("three", 25)]);
