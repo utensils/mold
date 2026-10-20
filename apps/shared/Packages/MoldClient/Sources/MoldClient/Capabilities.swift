@@ -20,6 +20,7 @@ public struct Capabilities: Codable, Hashable, Sendable {
     /// Advertised ONLY when the identity runtime is available, which is what
     /// makes its absence a definitive no rather than an older host.
     public let identity: IdentityCapabilities?
+    public let videoJobs: VideoJobCapabilities?
     public let videoUpscale: VideoUpscaleCapabilities?
     public let durableMedia: DurableMediaCapabilities?
     public let retainedMediaTransfer: RetainedMediaTransferCapabilities?
@@ -51,6 +52,8 @@ public struct TrashCapabilities: Codable, Hashable, Sendable {
 }
 
 public struct QueueCapabilities: Codable, Hashable, Sendable {
+    public let chainRestart: Bool?
+    public let chainRestartControls: Bool?
     public let canPause: Bool?
     public let canPauseJob: Bool?
     public let preRenderTransfer: Bool?

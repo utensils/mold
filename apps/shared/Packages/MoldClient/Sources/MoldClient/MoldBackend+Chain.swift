@@ -5,6 +5,11 @@ import Foundation
 /// the existing hidden one-shot behavior. Job ids always use these routes,
 /// never the ordinary batch queue.
 public protocol MoldChainBackend: Sendable {
+    func chainRestartOptions(id: String) async throws -> ChainRestartOptions
+    func cancelChainOperation(id: String, operationId: String, destinationInstanceId: String) async throws
+    func exportChainRestart(id: String, request: ChainRestartExportRequest) async throws -> ChainRestartExport
+    func createChainJob(requestJSON: String, operationId: String, destinationInstanceId: String) async throws -> CreateChainJobResponse
+    func discardChainJob(id: String, request: ChainDiscardRequest) async throws
     /// `POST /api/chain-jobs` with `ephemeral: true`.
     ///
     /// `operationId` is the idempotency fence, exactly as `clientBatchId` is
@@ -34,6 +39,21 @@ public protocol MoldChainBackend: Sendable {
 
 /// Older/fake backends fail closed instead of silently submitting ephemeral work.
 public extension MoldChainBackend {
+    func cancelChainOperation(id: String, operationId: String, destinationInstanceId: String) async throws {
+        throw SequenceDraftError.invalid("Update the destination machine before stopping this video attempt.")
+    }
+    func chainRestartOptions(id: String) async throws -> ChainRestartOptions {
+        throw SequenceDraftError.invalid("Update this machine before restarting a saved video job.")
+    }
+    func exportChainRestart(id: String, request: ChainRestartExportRequest) async throws -> ChainRestartExport {
+        throw SequenceDraftError.invalid("Update this machine before exporting a saved video job.")
+    }
+    func createChainJob(requestJSON: String, operationId: String, destinationInstanceId: String) async throws -> CreateChainJobResponse {
+        throw SequenceDraftError.invalid("Update the destination machine before restarting this video.")
+    }
+    func discardChainJob(id: String, request: ChainDiscardRequest) async throws {
+        throw SequenceDraftError.invalid("Update this machine before deleting a stopped video job.")
+    }
     func cancelChainOperation(id: String, operationId: String) async throws {
         throw SequenceDraftError.invalid("This connection cannot cancel a pending video request.")
     }
