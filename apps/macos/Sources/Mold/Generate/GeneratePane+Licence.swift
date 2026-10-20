@@ -49,7 +49,7 @@ extension GeneratePane {
                 draft: controller.draft, model: controller.modelName, host: host.id)
             Task {
                 let answered = await probe.settle(
-                    draft: pressed.draft, model: pressed.model, on: host, hosts: hosts)
+                    draft: controller.sequence.probeDraft(pressed.draft), model: pressed.model, on: host, hosts: hosts)
                 // The press resumes only if nothing moved while the machine
                 // answered; otherwise the new selection waits for its own press
                 // and its own gate.

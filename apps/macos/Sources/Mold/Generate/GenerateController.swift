@@ -168,6 +168,6 @@ final class GenerateController {
 
     /// Asks the host where this would run -- see `PlacementProbe`.
     func refreshPlacement(on host: MoldHost) {
-        probe.refresh(draft: draft, model: modelName, on: host, hosts: hosts)
+        probe.refresh(draft: sequence.probeDraft(draft), model: modelName, on: host, hosts: hosts)
     }
 }

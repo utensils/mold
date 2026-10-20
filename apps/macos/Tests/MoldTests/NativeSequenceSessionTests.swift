@@ -42,6 +42,17 @@ struct NativeSequenceSessionTests {
         #expect(session.message?.contains("adjusted") == true)
     }
 
+    @Test func placementPreviewUsesOneNewClipInsteadOfReusedJoinedLength() {
+        let session = NativeSequenceSession(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        session.begin(prompt: "Continue", frames: 107)
+        var draft = RenderDraft()
+        draft.frames = 213; draft.prefersAutomaticDuration = true; draft.supportsDurationPrediction = true
+        let preview = session.probeDraft(draft)
+        #expect(preview.frames == 107)
+        #expect(!preview.usesAutomaticDuration)
+        #expect(draft.frames == 213, "Preview must not alter authored endpoint placement")
+    }
+
     @Test func scalarClipDraftSurvivesRelaunch() {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let session = NativeSequenceSession(defaults: defaults)

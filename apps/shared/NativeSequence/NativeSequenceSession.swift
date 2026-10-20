@@ -127,6 +127,16 @@ final class NativeSequenceSession {
         if changed { draft = next; message = "Clip lengths adjusted to this model’s supported lengths." }
     }
 
+    /// Placement and model-licence probes describe a single new generation,
+    /// never the joined length stored in the source video's metadata.
+    func probeDraft(_ base: RenderDraft) -> RenderDraft {
+        guard let frames = draft?.stages.first?.frames else { return base }
+        var probe = base
+        probe.frames = frames
+        probe.prefersAutomaticDuration = false
+        return probe
+    }
+
     static func baseRequest(_ draft: RenderDraft, model: String, maxIdentityPhotos: Int = 0) -> GenerateRequest {
         var request = RenderRequest.one(draft, model: model, maxIdentityPhotos: maxIdentityPhotos)
         // Authored clips have explicit lengths. Preserve the ordinary draft's

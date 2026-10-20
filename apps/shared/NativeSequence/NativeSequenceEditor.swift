@@ -71,7 +71,7 @@ struct NativeSequenceEditor: View {
                         .accessibilityIdentifier("sequence-start-fresh")
                 }
                 .frame(minHeight: 44)
-                Text("\(draft.stages.count) clips · one video per part")
+                Text(draft.stages.count == 1 ? "1 clip · one video per part" : "\(draft.stages.count) clips · one video per part")
                     .font(.caption).foregroundStyle(sequenceSecondary)
                 if let plan = session.validatedPlan {
                     Text("Joined length: \(Double(plan.estimatedDurationMs) / 1000, format: .number.precision(.fractionLength(1 ... 2))) seconds")

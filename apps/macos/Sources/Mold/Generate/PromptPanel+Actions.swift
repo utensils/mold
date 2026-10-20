@@ -68,11 +68,13 @@ extension PromptPanel {
                 // hundreds of characters: flexible and truncating, so it takes
                 // whatever the buttons leave and never widens the capsule (the
                 // buttons are `fixedSize`, so they are never the ones squeezed).
+                if controller.sequence.draft == nil {
                 PlacementHint(placement: controller.probe.placementHost == host?.id ? controller.probe.placement : nil,
                               error: controller.probe.errorHost == host?.id ? controller.probe.error : nil, hostName: host?.name)
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 Spacer(minLength: 0)
                 if controller.queuedCount > 0 {
                     Text("\(controller.queuedCount) more queued")

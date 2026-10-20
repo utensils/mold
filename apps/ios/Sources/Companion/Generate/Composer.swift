@@ -215,8 +215,8 @@ struct GenerateRow: View {
         let layout = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
                              : AnyLayout(HStackLayout(spacing: 12))
         layout {
-            Text(estimate ?? " ").monospacedDigit().foregroundStyle(.secondaryText)
-                .accessibilityHidden(estimate == nil)
+            Text(generate.sequence.draft == nil ? (estimate ?? " ") : " ").monospacedDigit().foregroundStyle(.secondaryText)
+                .accessibilityHidden(estimate == nil || generate.sequence.draft != nil)
             if !stacked { Spacer(minLength: 0) }
             Button { if !promptEditorPresented { generate.generate() } } label: {
                 Label(generate.sequence.draft == nil ? "Generate" : "Generate video", systemImage: "wand.and.sparkles")
