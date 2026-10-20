@@ -65,6 +65,7 @@ pub mod types;
 pub mod user_error;
 pub mod validation;
 pub mod video_normalization;
+pub mod video_plan;
 pub mod video_upscale;
 pub mod wan_expert_marker;
 
