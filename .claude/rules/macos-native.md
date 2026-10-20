@@ -372,3 +372,15 @@ one-second update, with immediate view/visit, sync completion and quit flushes.
 Never mark hidden, unvisited or later-arriving prints read through this batching.
 
 **Multi-clip video.** In Short clip, choose **Add another clip** to enter ordered prompts and lengths, then **Generate video**. The app validates the draft automatically before submitting it. Move or remove rows without opening a separate editor. Library **Continue video** makes the next separate linked MP4 from the latest completed authored take on its original machine. Ordinary one-prompt generation and Reuse settings remain available. Shared wire/draft authority lives in MoldClient; SwiftUI session/editor composition lives in `apps/shared/NativeSequence`. Retained reference bytes stay in memory. Recovered drafts with missing references require explicit restoration or removal before publishing. Follow `chain-sequences.md` for owner, latest-take and operation recovery fences.
+
+**Pre-store startup.** The first window contains only startup state. A single
+owned worker resolves the existing Mold home/private operator key and completes
+the one-shot FFI preamble before AppStores, HostStore, app-owned networking or
+Sparkle activation. Never retry credential IO from engine Start after stores
+exist, substitute another home/key, or create a timeout task group that waits on
+an uncancellable filesystem syscall. Cancellation revokes late bootstrap/store
+publication; preparation failures require relaunch. Startup remains responsive
+and Quit remains available while storage is blocked. Access recovery uses
+NSOpenPanel for the exact canonical existing home, never a replacement home;
+retain granted access for the process and fence late panel answers. Opening or
+cancelling this panel must not start another bootstrap worker.

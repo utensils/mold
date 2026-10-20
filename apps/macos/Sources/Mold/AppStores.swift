@@ -50,10 +50,11 @@ final class AppStores {
 
     /// `HostStore` first, since every other store is built by asking it which
     /// machines exist.
-    init() {
-        // FIRST, before a single store exists and so before URLSession or
-        // `HostStore`'s polling has a thread of its own (review 05-M4).
-        engine = MoldEngine.bootstrapped()
+    init(preparedLaunch: EngineLaunch?) {
+        // The startup worker has already completed private storage and the FFI
+        // preamble. Construct no store graph until that result is available.
+        engine = MoldEngine()
+        if let preparedLaunch { engine.record(preparedLaunch) }
         PerformanceDiagnostics.shared.start()
         hosts = HostStore(hosts: HostStore.seededHosts())
         engine.dropsItsMachine(from: hosts)

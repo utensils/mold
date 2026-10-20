@@ -9,27 +9,39 @@ import SwiftUI
 /// this file past the 150-line rule every other file in the app keeps to.
 @main
 struct MoldApp: App {
-    @State private var stores = AppStores()
+    @State private var startup = NativeAppStartup()
     @State private var destination = Destination.launch
     @NSApplicationDelegateAdaptor(MoldAppDelegate.self) private var delegate
 
     var body: some Scene {
         Window("Mold Studio", id: "main") {
-            RootView(destination: $destination)
-                .modifier(NotificationWindowRouting(
-                    responses: delegate.notificationResponses, destination: $destination,
-                    navigation: stores.libraryNavigation))
-                .modifier(HandoffRouting(destination: $destination, hosts: stores.hosts,
-                                         navigation: stores.libraryNavigation))
-                .task { ClickModifiers.startObserving() }
-                // Whether a caret owns the keyboard, asked once for the whole
-                // app -- what stands the Library's bare-space shortcut down.
-                .task { TextEditingFocus.shared.startObserving() }
-                .task { handOverToTheDelegate() }
-                .moldEnvironment(stores)
-                // Allow 220 for the sidebar, 336 for the inspector and
-                // 524 for the canvas, toolbar and split dividers.
-                .frame(minWidth: 1_080, minHeight: 560)
+            Group {
+                if let stores = startup.stores {
+                    RootView(destination: $destination)
+                        .modifier(NotificationWindowRouting(
+                            responses: delegate.notificationResponses, destination: $destination,
+                            navigation: stores.libraryNavigation))
+                        .modifier(HandoffRouting(destination: $destination, hosts: stores.hosts,
+                                                 navigation: stores.libraryNavigation))
+                        .task { ClickModifiers.startObserving() }
+                        // Whether a caret owns the keyboard, asked once for the whole
+                        // app -- what stands the Library's bare-space shortcut down.
+                        .task { TextEditingFocus.shared.startObserving() }
+                        .task { handOverToTheDelegate() }
+                        .moldEnvironment(stores)
+                        // Allow 220 for the sidebar, 336 for the inspector and
+                        // 524 for the canvas, toolbar and split dividers.
+                        .frame(minWidth: 1_080, minHeight: 560)
+                } else {
+                    StartupView(failure: startup.preparation.failure, homeAccess: startup.homeAccess,
+                                resolvedHome: startup.resolvedHome)
+                        .frame(minWidth: 1_080, minHeight: 560)
+                        .task {
+                            delegate.cancelStartup = { startup.cancel() }
+                            startup.preparation.start()
+                        }
+                }
+            }
         }
         .defaultSize(width: 1_280, height: 860)
         .windowResizability(.contentMinSize)
@@ -37,18 +49,24 @@ struct MoldApp: App {
         .commands {
             // SwiftUI's own View ▸ Hide/Show Sidebar (⌃⌘S). Nothing bespoke:
             // the shortcut every Mac app uses belongs to the framework.
-            SidebarCommands()
-            MoldCommands(destination: $destination)
-            LibraryCommands()
-            ModelCommands()
-            QueueCommands(destination: $destination)
-            MachineCommands()
-            UpdateCommands()
+            if startup.stores != nil {
+                SidebarCommands()
+                MoldCommands(destination: $destination)
+                LibraryCommands()
+                ModelCommands()
+                QueueCommands(destination: $destination)
+                MachineCommands()
+                UpdateCommands()
+            }
         }
 
         Settings {
-            SettingsView()
-                .moldSettingsEnvironment(stores)
+            if let stores = startup.stores {
+                SettingsView().moldSettingsEnvironment(stores)
+            } else {
+                StartupView(failure: startup.preparation.failure, homeAccess: startup.homeAccess,
+                                resolvedHome: startup.resolvedHome)
+            }
         }
         .windowResizability(.contentMinSize)
     }
@@ -56,6 +74,8 @@ struct MoldApp: App {
     /// The delegate owns quitting, and quitting has to reach the engine and
     /// the cache. It is made by SwiftUI, so this is where the two meet.
     private func handOverToTheDelegate() {
+        guard let stores = startup.stores else { return }
+        delegate.activatePreparedServices()
         delegate.engine = stores.engine
         delegate.remotePairing = stores.remotePairing
         stores.remotePairing.followEngine(stores.engine)

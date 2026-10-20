@@ -123,9 +123,21 @@ stamps the commit it built from beside the library, and `make build` warns
 once the engine answers, so `kill` and `pkill` quit Mold through the same
 drain the menu uses.
 
-Its preamble runs from `MoldApp.init`, before any store exists, because it
-writes `MOLD_HOME`, `MOLD_API_KEY` and `MOLD_CORS_ORIGIN` with `setenv` and
-that is not safe beside a concurrent `getenv`. It runs on every launch of an
+Mold first opens a lightweight **Starting Mold** window. A dedicated startup
+worker resolves the existing home and private operator key, then completes the
+engine preamble before any store, polling client or updater starts. Slow external
+storage cannot block the window or Quit. A failed preparation shows its refusal
+and requires relaunch; it never substitutes another home or key. If macOS is
+waiting for folder access, **Allow access to Mold folder…** opens the native
+folder panel for that exact existing home. Selecting another folder is refused;
+the control never moves the library or changes credentials. Allow access, then
+quit and reopen if preparation still waits.
+
+The preamble writes `MOLD_HOME`, `MOLD_API_KEY` and `MOLD_CORS_ORIGIN` with `setenv`,
+so app-owned networking waits until the worker finishes. AppKit and the Swift
+runtime already own system threads; passing engine configuration explicitly
+instead of through process environment remains the way to remove that final
+process-wide limitation. It runs on every launch of an
 engine-linked build, whether or not you start the engine — so merely opening
 the app does the same preamble every `mold` `main()` does, including the
 one-shot `config.toml` → DB migration on a home that has never had one (it
