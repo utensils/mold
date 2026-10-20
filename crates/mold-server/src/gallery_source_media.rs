@@ -1547,7 +1547,10 @@ mod tests {
         member.member.role = "chain_continuation_tail:0".into();
         member.position = "continuation-tail".into();
         present_member(&mut member, &metadata);
-        assert_eq!(member.member.label.as_deref(), Some("Incoming continuation frame 1"));
+        assert_eq!(
+            member.member.label.as_deref(),
+            Some("Incoming continuation frame 1")
+        );
         assert!(!reusable_role(&member.member.role));
     }
     /// Opt-in authentic, encrypted fixture for browser/native visual acceptance.

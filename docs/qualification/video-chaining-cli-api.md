@@ -78,3 +78,27 @@ The final authoring-only blind test used the clarified complete-block guidance.
 Both fresh Luna scripts (LTX-2 and H3 Ref2VA) passed their first CLI validation;
 no repair or additional generation was needed. Its remote script is
 `luna-final-authoring.toml` under the same Mold-home UAT directory.
+
+## Linked bounded parts
+
+Each part remains limited to sixteen stages; there is no lifetime part count or
+chain-follow wall-clock deadline. Successors emit separate MP4s and own their
+incoming tail before acceptance, preserving frozen model artifacts and the
+canvas/fps/audio contract. A 20-successor execution regression deletes every
+predecessor before dispatch, checks that only the new stage renders, and checks
+that final gallery tail bytes remain readable after successor GC.
+
+The final server chain suite passes 267 tests. Independent review also found
+and corrected missing-source lock ordering, malformed retry-media panics and
+pre-index creation recovery. Interruption regressions cover an empty creation
+directory, a creation marker, a completed tail snapshot, a sealed-media manifest,
+and partial snapshot cleanup. Changed request markers, nonempty markers and
+symlinked ancestors fail closed. Ownership markers are removed last so another
+interruption remains recoverable. Continued manifests use v2 to prevent older
+servers from ignoring their incoming-tail authority during rollback.
+
+A part limits decoded inline authored inputs to 32 MiB and retained media to 64
+members, including incoming carry. Projected auto-expanded copies are checked
+before allocation, and scoped HTTP body limits account for base64 expansion.
+The SDK and CLI require an affirmative linked-part capability before submission;
+older servers cannot silently accept a context-free replacement.
