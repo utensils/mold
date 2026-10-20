@@ -23,6 +23,8 @@ struct Manifest {
     source: RetainedVideoSource,
     committed_bytes: u64,
     completed: bool,
+    #[serde(default)]
+    updated_at_ms: i64,
 }
 
 fn directory(root: &Path, id: &str) -> Result<PathBuf> {
@@ -101,7 +103,7 @@ fn save(directory: &Path, manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
-fn load(directory: &Path, instance: &str) -> Result<Manifest> {
+fn load_any(directory: &Path) -> Result<Manifest> {
     verify_private_directory(directory.parent().context("upload has no storage root")?)?;
     verify_private_directory(directory)?;
     let input =
@@ -118,7 +120,7 @@ fn load(directory: &Path, instance: &str) -> Result<Manifest> {
     );
     let manifest: Manifest = serde_json::from_slice(&bytes)?;
     ensure!(
-        manifest.version == 1 && manifest.instance == instance,
+        manifest.version == 1,
         "upload destination installation changed"
     );
     ensure!(
@@ -126,6 +128,34 @@ fn load(directory: &Path, instance: &str) -> Result<Manifest> {
         "invalid committed upload length"
     );
     Ok(manifest)
+}
+
+fn load(directory: &Path, instance: &str) -> Result<Manifest> {
+    let manifest = load_any(directory)?;
+    ensure!(
+        manifest.instance == instance,
+        "upload destination installation changed"
+    );
+    Ok(manifest)
+}
+
+pub(crate) fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().try_into().unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
+/// Caller holds the same upload stripe as ordinary ingress mutation.
+pub(crate) fn expire(root: &Path, id: &str, inactive_before_ms: i64) -> Result<bool> {
+    let directory = directory(root, id)?;
+    let manifest = load_any(&directory)?;
+    if manifest.updated_at_ms >= inactive_before_ms {
+        return Ok(false);
+    }
+    std::fs::remove_dir_all(directory)?;
+    crate::dir_sync::sync_directory(root)?;
+    Ok(true)
 }
 
 /// Caller holds the per-upload actor lock for begin/append/complete/remove.
@@ -170,6 +200,7 @@ pub(crate) fn begin(
         source,
         committed_bytes: 0,
         completed: false,
+        updated_at_ms: now_ms(),
     };
     writable(&staged.path().join("prefix.mp4"), true)?.sync_all()?;
     save(staged.path(), &manifest)?;
@@ -235,6 +266,7 @@ pub(crate) fn append(
     file.write_all(bytes)?;
     file.sync_all()?;
     manifest.committed_bytes = end;
+    manifest.updated_at_ms = now_ms();
     save(&directory, &manifest)?;
     Ok(status(id, &manifest))
 }
@@ -295,6 +327,7 @@ pub(crate) fn complete(
     manifest.source.metadata.frames = Some(facts.frames);
     manifest.source.metadata.fps = (facts.fps_denominator == 1).then_some(facts.fps_numerator);
     manifest.completed = true;
+    manifest.updated_at_ms = now_ms();
     save(&directory, &manifest)?;
     Ok(VideoSourceUploadRef {
         handle: id.into(),
@@ -591,6 +624,25 @@ mod tests {
         assert!(append(root.path(), "owner", &id, 10, b"overflow").is_err());
         assert!(begin(root.path(), "owner", &id, authority(b"replacement")).is_err());
         assert!(begin(root.path(), "owner", "../escape", descriptor).is_err());
+    }
+
+    #[test]
+    fn source_ingress_expires_only_after_inactivity_and_never_follows_unknown_storage() {
+        let root = private_test_root();
+        let id = uuid::Uuid::new_v4().to_string();
+        begin(root.path(), "owner", &id, authority(b"pixels")).unwrap();
+        assert!(!expire(root.path(), &id, 0).unwrap());
+        let dir = directory(root.path(), &id).unwrap();
+        let mut manifest = load(&dir, "owner").unwrap();
+        manifest.updated_at_ms = 1;
+        save(&dir, &manifest).unwrap();
+        assert!(expire(root.path(), &id, 2).unwrap());
+        assert!(!dir.exists());
+        assert!(expire(root.path(), "../unrelated", i64::MAX).is_err());
+        let other = root.path().join("unrelated");
+        std::fs::create_dir(&other).unwrap();
+        assert!(expire(root.path(), "unrelated", i64::MAX).is_err());
+        assert!(other.exists());
     }
 
     #[test]

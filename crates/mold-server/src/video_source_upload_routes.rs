@@ -60,14 +60,8 @@ pub(crate) fn upload_error(error: anyhow::Error) -> ApiError {
         StatusCode::CONFLICT,
     )
 }
-async fn locked<R: Send + 'static>(
-    state: AppState,
-    headers: HeaderMap,
-    id: String,
-    work: impl FnOnce(PathBuf, String, String) -> anyhow::Result<R> + Send + 'static,
-) -> Result<R, ApiError> {
-    destination(&state, &headers)?;
-    let uuid = uuid::Uuid::parse_str(&id)
+fn upload_lock(id: &str) -> Result<Arc<tokio::sync::Mutex<()>>, ApiError> {
+    let uuid = uuid::Uuid::parse_str(id)
         .map_err(|_| ApiError::validation("Upload handle must be a UUID"))?;
     if uuid.to_string() != id {
         return Err(ApiError::validation(
@@ -78,10 +72,17 @@ async fn locked<R: Send + 'static>(
     static LOCKS: OnceLock<[Arc<tokio::sync::Mutex<()>>; 32]> = OnceLock::new();
     let locks =
         LOCKS.get_or_init(|| std::array::from_fn(|_| Arc::new(tokio::sync::Mutex::new(()))));
-    let guard = locks[usize::from(uuid.as_bytes()[0]) % locks.len()]
-        .clone()
-        .lock_owned()
-        .await;
+    Ok(locks[usize::from(uuid.as_bytes()[0]) % locks.len()].clone())
+}
+
+async fn locked<R: Send + 'static>(
+    state: AppState,
+    headers: HeaderMap,
+    id: String,
+    work: impl FnOnce(PathBuf, String, String) -> anyhow::Result<R> + Send + 'static,
+) -> Result<R, ApiError> {
+    destination(&state, &headers)?;
+    let guard = upload_lock(&id)?.lock_owned().await;
     let root = root(&state)?;
     let instance = state.instance_id.to_string();
     tokio::task::spawn_blocking(move || {
@@ -197,4 +198,54 @@ mod tests {
         .await;
         assert_eq!(result.unwrap_err().code, "VIDEO_DESTINATION_CHANGED");
     }
+}
+
+/// Abandoned transport expires after 24 hours without byte progress. Accepted
+/// parents own independent private copies and remove ingress earlier.
+pub(crate) fn spawn_sweeper(
+    state: AppState,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let Ok(root) = root(&state) else {
+            return;
+        };
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! { _ = shutdown.cancelled() => return, _ = interval.tick() => {} }
+            let mut entries = match tokio::fs::read_dir(&root).await {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    tracing::warn!(%error,"could not inspect abandoned video ingress");
+                    continue;
+                }
+            };
+            let cutoff = crate::video_source_upload::now_ms().saturating_sub(24 * 60 * 60 * 1000);
+            loop {
+                let entry = tokio::select! { _ = shutdown.cancelled() => return, entry = entries.next_entry() => entry };
+                let entry = match entry {
+                    Ok(Some(entry)) => entry,
+                    _ => break,
+                };
+                let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                let Ok(lock) = upload_lock(&id) else {
+                    continue;
+                };
+                let guard = tokio::select! { _ = shutdown.cancelled() => return, guard = lock.lock_owned() => guard };
+                let root = root.clone();
+                let work = tokio::task::spawn_blocking(move || {
+                    let _guard = guard;
+                    crate::video_source_upload::expire(&root, &id, cutoff)
+                })
+                .await;
+                if let Ok(Err(error)) = work {
+                    tracing::debug!(%error,"video ingress expiration skipped an unavailable or unknown entry");
+                }
+            }
+        }
+    })
 }
