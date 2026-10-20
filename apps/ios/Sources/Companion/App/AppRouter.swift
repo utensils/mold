@@ -34,6 +34,12 @@ final class AppRouter {
 
     /// A print whose recipe Generate should load next ("Use These Settings").
     var pendingReuse: LibraryEntry?
+    var pendingContinuation: LibraryEntry?
+
+    func continueVideo(_ entry: LibraryEntry) {
+        pendingContinuation = entry
+        selection = .go(.generate)
+    }
     var pendingSource: LibraryEntry?
     var pendingSourceAttachment: SourceMediaAttachment?
     var pendingSourceRequest = UUID()

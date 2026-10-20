@@ -108,6 +108,7 @@ struct GenerateInspector: View {
             }
             InspectorSection("Output", isExpanded: $showsOutput) {
                 OutputGroup(output: recipe?.capabilities.output, models: hostModels, draft: $draft)
+
             }
             if FileUnderGroup.isShown(capabilities: capabilities) {
                 InspectorSection("File under", isExpanded: $showsFileUnder) {

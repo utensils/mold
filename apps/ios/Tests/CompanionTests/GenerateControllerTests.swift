@@ -13,6 +13,17 @@ import UIKit
 /// switch adopting its recipe.
 @MainActor
 struct GenerateControllerTests {
+    @Test func restoredAuthoredDraftKeepsClipComposerWhenOrdinaryDraftIsUnavailable() async throws {
+        let (original, _) = try await setUp()
+        let sequence = NativeSequenceSession(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        sequence.begin(prompt: "A robot", frames: 107)
+        let restored = GenerateController(hosts: original.hosts, ledger: original.ledger,
+            drafts: original.drafts, initialMachine: .auto, sequence: sequence)
+        restored.settleChoice()
+        #expect(restored.kind == .clip)
+        #expect(restored.sequence.draft?.stages.count == 2)
+    }
+
     @Test func nextBatchStatusFailureCanRecoverInTheForeground() async throws {
         let (generate, fake) = try await setUp()
         let active = ActiveBatch(id: "next", clientBatchId: "c-next", host: generate.hosts.hosts[0].id,
@@ -263,7 +274,8 @@ struct GenerateControllerTests {
         await hosts.refreshAll()
         let ledger = PendingLedger(url: FileManager.default.temporaryDirectory.appending(path: "p-\(UUID()).json"))
         let drafts = DraftStore(directory: FileManager.default.temporaryDirectory.appending(path: "d-\(UUID())"))
-        let generate = GenerateController(hosts: hosts, ledger: ledger, drafts: drafts, initialMachine: .auto)
+        let generate = GenerateController(hosts: hosts, ledger: ledger, drafts: drafts, initialMachine: .auto,
+            sequence: NativeSequenceSession(defaults: UserDefaults(suiteName: UUID().uuidString)!))
         generate.settleChoice()
         generate.draft.prompt = "a lighthouse at dusk"
         return (generate, fake)
@@ -613,7 +625,8 @@ struct GenerateControllerTests {
         // The composition root restores the draft before any machine answers.
         original.hosts.setModels(nil, for: host.id)
         original.hosts.setReachability(nil, for: host.id)
-        let restored = GenerateController(hosts: original.hosts, ledger: original.ledger, drafts: original.drafts, initialMachine: .auto)
+        let restored = GenerateController(hosts: original.hosts, ledger: original.ledger, drafts: original.drafts, initialMachine: .auto,
+            sequence: NativeSequenceSession(defaults: UserDefaults(suiteName: UUID().uuidString)!))
         restored.settleChoice()
         original.hosts.setModels([savedModel], for: host.id)
         original.hosts.setReachability(.up(try MoldJSON.decoder.decode(ServerStatus.self, from: Data(
@@ -644,7 +657,8 @@ struct GenerateControllerTests {
         original.hosts.setReachability(.checking, for: slow.id)
         original.hosts.setModels(nil, for: slow.id)
 
-        let restored = GenerateController(hosts: original.hosts, ledger: original.ledger, drafts: original.drafts, initialMachine: .auto)
+        let restored = GenerateController(hosts: original.hosts, ledger: original.ledger, drafts: original.drafts, initialMachine: .auto,
+            sequence: NativeSequenceSession(defaults: UserDefaults(suiteName: UUID().uuidString)!))
         restored.settleChoice()
         #expect(restored.modelName == clip.name, "the fast picture machine must not replace the saved clip")
         original.hosts.setModels([clip], for: slow.id)

@@ -54,11 +54,31 @@ struct PromptPanel: View {
             if let recipe {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
-                        prompt(recipe)
-                        promptTools(recipe)
+                        if controller.sequence.draft != nil, let temporal = recipe.temporal {
+                            NativeSequenceEditor(session: controller.sequence, fps: draft.fps ?? 24,
+                                frameRange: (chainLimits?.authoring?.minFrames ?? temporal.frames.min) ... max(chainLimits?.authoring?.minFrames ?? temporal.frames.min, min(temporal.frames.max, chainLimits?.framesPerClipCap ?? temporal.frames.max)),
+                                frameStep: chainLimits?.authoring?.frameStep ?? temporal.frames.step, maximumClips: chainLimits?.maxStages ?? 16,
+                                carryMode: chainLimits?.authoring?.carryMode)
+                        } else {
+                            prompt(recipe)
+                            promptTools(recipe)
+                            if recipe.temporal != nil, chainLimits?.supportsSequence == true {
+                                Button("Add another clip", systemImage: "plus") {
+                                    controller.sequence.begin(prompt: draft.prompt, frames: draft.frames ?? chainLimits!.framesPerClipRecommended)
+                                }.accessibilityIdentifier("sequence-begin")
+                            }
+                        }
+                        if let notice = controller.sequence.message, controller.sequence.draft == nil {
+                            Text(notice).font(.callout).fixedSize(horizontal: false, vertical: true)
+                        }
+                        if controller.sequence.draft != nil {
+                            Text("Reference media applies to every clip. The opening image starts the video; the closing image ends it.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                         Divider()
                         ControlsRow(recipe: recipe, model: model, maxBatch: maxBatch,
                                     chainLimits: chainLimits, draft: $draft)
+                            .disabled(controller.sequence.continuation != nil || controller.sequence.preparing)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {

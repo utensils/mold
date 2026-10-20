@@ -65,6 +65,7 @@ struct GeneratePane: View {
         .trailingColumn(isShowing: $showsInspector, resizable: true) {
             GenerateInspector(recipe: recipe, model: selectedModel, host: host,
                               draft: $controller.draft, destination: $destination)
+                .disabled(controller.sequence.preparing)
         }
         .toolbar { toolbar }
         // Escape brings the capsule back, the way it dismisses any other
@@ -82,7 +83,7 @@ struct GeneratePane: View {
             MaskEditorSheet(draft: $controller.draft)
         }
         .task { await loadModels() }
-        .task { await controller.recoverPending() }
+        .task { await controller.recoverPending(); controller.recoverSequences() }
         .task { seedSourceImageIfRequested() }
         .onChange(of: hosts.reachability) { _, _ in adoptFirstReadyModel() }
         .onChange(of: controller.draft) { _, _ in

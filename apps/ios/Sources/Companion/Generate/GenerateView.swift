@@ -84,6 +84,28 @@ struct GenerateView: View {
         .onChange(of: hosts.models, initial: true) { _, _ in generate.settleChoice() }
         .onChange(of: hosts.upHosts.map(\.id)) { _, _ in generate.settleChoice() }
         .task(id: estimateKey) { await refreshEstimate() }
+        .task(id: sequenceCapabilityKey) { await generate.refreshSequenceLimits() }
+        .onChange(of: router.pendingContinuation, initial: true) { _, entry in
+            guard let entry else { return }
+            router.pendingContinuation = nil
+            generate.continueVideo(entry)
+        }
+    }
+
+    private struct SequenceCapabilityKey: Equatable {
+        let host: MoldHost?
+        let instance: String?
+        let model: String?
+        let fps: Int?
+        let revision: String?
+    }
+    private var sequenceCapabilityKey: SequenceCapabilityKey {
+        SequenceCapabilityKey(host: generate.target,
+            instance: generate.target.flatMap { hosts.instanceID(of: $0.id) },
+            model: generate.modelName, fps: generate.draft.fps,
+            revision: generate.target.flatMap { host in
+                if case let .up(status) = hosts.reachability(of: host) { status.gitSha } else { nil }
+            })
     }
 
     private var estimateKey: String {

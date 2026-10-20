@@ -81,6 +81,7 @@ targets:
     platform: macOS
     sources:
       - path: Sources/Mold
+      - path: ../shared/NativeSequence
     dependencies:
       - package: MoldClient
       - package: MoldStyle

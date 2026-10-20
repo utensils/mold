@@ -10,11 +10,15 @@ import MoldClient
 /// Stop: a press while a render runs queues another batch.
 @Observable
 final class GenerateController {
+    let sequence: NativeSequenceSession
+    var sequenceLimits: ChainLimits?
+
     let retainedReuse = RetainedReuse()
     private(set) var sourceMediaRevision = 0
     private(set) var mediaRevisions: [RetainedSourceMedia.Field: Int] = [:]
     var draft = RenderDraft() {
         didSet {
+            sequence.hasVisibleReferences = !draft.media.generationReferences.isEmpty
             if oldValue.fps != draft.fps, let recipe, let temporal = recipe.temporal {
                 let length = temporal.lengthSelection(fps: draft.fps, frames: draft.frames,
                     family: model?.family, model: modelName, sourceImage: recipe.capabilities.sourceImage)
@@ -63,12 +67,17 @@ final class GenerateController {
 
     init(hosts: HostStore, ledger: PendingLedger = .shared,
          drafts: DraftStore = DraftStore(directory: URL.applicationSupportDirectory.appending(path: "io.utensils.mold.companion")),
-         initialMachine: MachineChoice? = nil) {
+         initialMachine: MachineChoice? = nil, sequence: NativeSequenceSession = NativeSequenceSession()) {
+        self.sequence = sequence
         self.hosts = hosts
         self.ledger = ledger
         self.drafts = drafts
         machine = initialMachine ?? MachineChoice.load()
         restoreDraft()
+        if sequence.draft != nil { kind = .clip }
+        sequence.restoreReferences = { [weak self] refs in
+            self?.draft.media.generationReferences = refs.map(AuthoringReference.canonical)
+        }
         hosts.listen { [weak self] id, event in
             guard let self, !self.followingSuspended, self.activeBatch?.host == id else { return }
             if case .resyncRequired = event { self.resumeFollowing() }
@@ -157,6 +166,7 @@ final class GenerateController {
 
     func setKind(_ new: PrintKind) {
         guard new != kind || restoringChoice else { return }
+        if new != .clip { sequence.startFresh() }
         retainedReuse.clear()
         if !restoringChoice, let modelName { lastModel[kind] = modelName }
         restoringChoice = false
@@ -192,7 +202,7 @@ final class GenerateController {
                 ?? profile.recipe(named: profile.defaultRecipeId)
                 ?? profile.recipes.first
             if let restoredRecipe {
-                kind = restoredRecipe.makes
+                kind = sequence.draft != nil ? .clip : restoredRecipe.makes
                 lastModel[kind] = model.name
                 draft = draft.adopting(restoredRecipe, isNewModel: false, for: model)
             }
@@ -222,8 +232,12 @@ final class GenerateController {
         }
         guard model != nil else { return String(localized: "Install a model that makes this under Models.") }
         guard target != nil else { return String(localized: "No machine that has this model is answering.") }
+        if sequence.draft != nil, let modelName, let host = target {
+            return sequence.refusal(base: NativeSequenceSession.baseRequest(draft, model: modelName,
+                maxIdentityPhotos: hosts.capabilities[host.id]?.maxIdentityPhotos ?? 0), limits: sequenceLimits)
+        }
         // The draft's own refusal (MoldClient), the Mac's words exactly.
-        if let recipe, let refusal = draft.refusal(for: recipe, retainedFields: retainedReferenceFields) { return refusal }
+        if sequence.continuation == nil, let recipe, let refusal = draft.refusal(for: recipe, retainedFields: retainedReferenceFields) { return refusal }
         return nil
     }
 }

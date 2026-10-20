@@ -97,14 +97,14 @@ extension PromptPanel {
                         if controller.submissionFeedback.isPending {
                             ProgressView().controlSize(.small)
                         }
-                        Text(controller.submissionFeedback.isPreparing ? "Preparing…" : "Generate")
+                        Text(controller.submissionFeedback.isPreparing ? "Preparing…" : (controller.sequence.draft == nil ? "Generate" : "Generate video"))
                         Text("⌘↩").foregroundStyle(.secondary)
                     }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .keyboardShortcut(.return, modifiers: .command)
-                .disabled(isEditingPrompt || submitRefusal != nil || controller.submissionFeedback.isPreparing)
+                .disabled(isEditingPrompt || submitRefusal != nil || controller.submissionFeedback.isPreparing || controller.sequence.preparing)
                 .help(controller.run.isBusy
                       ? "Add another generation to the machine’s queue"
                       : (submitRefusal ?? "Send this prompt and settings to the selected machine"))
@@ -120,11 +120,16 @@ extension PromptPanel {
     private var submitRefusal: String? {
         if let refusal = drafts.recoveryRefusal { return refusal }
         if let refusal = reuse.referenceRefusal(for: draft) { return refusal }
+        if controller.sequence.draft != nil, let model {
+            return controller.sequence.refusal(base: NativeSequenceSession.baseRequest(draft, model: model.name,
+                maxIdentityPhotos: host.flatMap { controller.hosts.capabilities[$0.id]?.maxIdentityPhotos } ?? 0), limits: chainLimits)
+        }
         guard let recipe else { return nil }
         let retainedFields = model.map {
             reuse.availableFields(for: draft, request: RenderRequest.one(draft, model: $0.name))
         } ?? []
         if let refusal = draft.refusal(for: recipe, retainedFields: retainedFields) { return refusal }
+        if controller.sequence.draft != nil { return nil }
         return ClipRouting.resolve(recipe: recipe, model: model, draft: draft,
                                    limits: chainLimits)?.refusal
     }
