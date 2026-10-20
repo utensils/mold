@@ -14,6 +14,7 @@ public extension HTTPBackend {
     /// The ordinary reference preparation path, kept alive across read-only
     /// validation and one create. Validation must not spend its upload handles.
     func prepareVideoJob(_ original: VideoJobRequest) async throws -> PreparedVideoJob {
+        let scoped = preparingLiteralVideoInputs()
         let input = original.generation
         guard input.references?.contains(where: { $0.media.authority == "upload" }) != true else {
             throw ReferenceUploadPolicy.refusal("REFERENCE_UPLOAD_REQUEST_INVALID", "Prepare this video again from its original references.")
@@ -30,11 +31,11 @@ public extension HTTPBackend {
                 throw ReferenceUploadPolicy.refusal("REFERENCE_NORMALIZATION_UNAVAILABLE", "Fresh video references need a compatible keyed host.")
             }
             let instance = try await videoReferenceInstance()
-            lease = try await prepareNormalizedReferences(input, capabilities: caps, expectedInstanceId: instance)
+            lease = try await scoped.prepareNormalizedReferences(input, capabilities: caps, expectedInstanceId: instance)
         } else if let caps = advertised, ReferenceUploadPolicy.shouldUpload(input, apiKey: host.apiKey, capabilities: caps) {
             try ReferenceUploadPolicy.validate(caps)
             let instance = try await videoReferenceInstance()
-            lease = try await prepareReferenceUploads(input, capabilities: caps, expectedInstanceId: instance)
+            lease = try await scoped.prepareReferenceUploads(input, capabilities: caps, expectedInstanceId: instance)
         } else {
             try ReferenceUploadPolicy.validateInlineReferences(input.references ?? [])
             let count = (input.references ?? []).filter { $0.media.authority == "inline" }.reduce(0) {

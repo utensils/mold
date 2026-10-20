@@ -41,7 +41,12 @@ public extension HTTPBackend {
     /// Also fences a known operation whose admission reply was lost. A 410 on
     /// subsequent GET confirms it was cancelled before a parent existed.
     func cancelVideoJob(id: String, destinationInstanceId: String) async throws {
-        _ = try await videoMutation(id: id, action: "/cancel", method: "POST", instance: destinationInstanceId)
+        struct Acknowledgement: Decodable { let accepted: Bool }
+        let route = "/api/video-jobs/\(escaped(id))/cancel"
+        let data = try await videoMutation(id: id, action: "/cancel", method: "POST", instance: destinationInstanceId)
+        guard try decoded(Acknowledgement.self, from: data, route: route).accepted else {
+            throw MoldClientError.malformedResponse
+        }
     }
 
     func resumeVideoJob(id: String, destinationInstanceId: String) async throws -> VideoJob {

@@ -51,3 +51,24 @@ struct VideoNormalizationCaptureTests {
     #expect((reference["media"] as? [String: Any])?["path"] as? String == "/private/reference.png")
     #expect(candidate["upload"] as? Bool == false)
 }
+
+@Test func literalVideoPreparationFingerprintsTheExactProtectedCandidateBody() throws {
+    var (request, caps) = try VideoNormalizationCaptureTests().fixture()
+    request.prompt = "literal\\new\r\nnext"
+    request.negativePrompt = "avoid\\render\r\nnext"
+    request.originalPrompt = "original\\root\r\nnext"
+    request.promptTransform = .init(operation: .expand, rootPrompt: "root\\name\r\nnext",
+        sourcePrompt: "source\\name\r\nnext", task: .textToVideo)
+    let captured = try VideoNormalizationCapture.capture(request, capabilities: caps, apiKey: "key", literalPrompts: true)
+    let body = try #require(JSONSerialization.jsonObject(with: captured.body) as? [String: Any])
+    let scoped = try #require(body["request"] as? [String: Any])
+    #expect(scoped["prompt"] as? String == request.prompt.replacingOccurrences(of: "\\", with: "\\\\"))
+    #expect(scoped["negative_prompt"] as? String == request.negativePrompt?.replacingOccurrences(of: "\\", with: "\\\\"))
+    #expect(scoped["original_prompt"] as? String == request.originalPrompt?.replacingOccurrences(of: "\\", with: "\\\\"))
+    let transform = try #require(scoped["prompt_transform"] as? [String: Any])
+    #expect(transform["root_prompt"] as? String == request.promptTransform?.rootPrompt?.replacingOccurrences(of: "\\", with: "\\\\"))
+    #expect(transform["source_prompt"] as? String == request.promptTransform?.sourcePrompt.replacingOccurrences(of: "\\", with: "\\\\"))
+    var domain = Data("mold-reference-normalization-candidate-v1\0".utf8); domain.append(captured.body)
+    #expect(captured.fingerprint == TransportDigest.sha256(domain))
+    #expect(request.prompt == "literal\\new\r\nnext")
+}

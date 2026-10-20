@@ -10,7 +10,7 @@ public extension HTTPBackend {
     func prepareNormalizedReferences(_ original: GenerateRequest, capabilities uploads: ReferenceUploadCapabilities,
                                      expectedInstanceId: String) async throws -> ReferenceUploadLease {
         try await requireReferenceAuthority()
-        let captured = try VideoNormalizationCapture.capture(original, capabilities: uploads, apiKey: host.apiKey)
+        let captured = try VideoNormalizationCapture.capture(original, capabilities: uploads, apiKey: host.apiKey, literalPrompts: literalReferencePrompts)
         let caps = uploads.videoNormalization!
         let mismatch = ReferenceUploadPolicy.refusal("REFERENCE_NORMALIZATION_RESPONSE_MISMATCH", "The host returned mismatched normalization authority.")
         guard !expectedInstanceId.isEmpty else { throw mismatch }

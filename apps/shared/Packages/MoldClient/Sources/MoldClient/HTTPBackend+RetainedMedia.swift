@@ -117,7 +117,7 @@ public extension HTTPBackend {
         for filename: String, members memberIds: [String], target: GenerateRequest
     ) async throws -> RetainedSourceMedia.ReuseSession {
         try await post(retainedSourceMediaPath(filename) + "/reuse-sessions",
-                       body: ReuseSessionBody(targetRequest: target, memberIds: memberIds))
+                       body: ReuseSessionBody(targetRequest: literalReferencePrompts ? target.protectedForLegacyPromptWire : target, memberIds: memberIds))
     }
 }
 

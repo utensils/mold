@@ -49,8 +49,8 @@ public extension VideoJobCoordinator {
             try save(record); saved = record
             ensure(record.operationId, owner: owner)
             let accepted = try await backend.createVideoJob(prepared, operationId: record.operationId, destinationInstanceId: owner.instanceId)
-            await transport?.cancel(); transport = nil
             guard accepted.id == record.operationId else { throw MoldClientError.malformedResponse }
+            await transport?.cancel(); transport = nil
             guard current() else { return }
             publish(accepted, owner: owner)
             follow(record, owner: owner, backend: backend, current: current)

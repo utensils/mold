@@ -141,4 +141,22 @@ import MoldClientTesting
         #expect(await release.count == 1)
     }
 
+    @Test func wrongAcceptedIdIsAmbiguousAndCannotReleaseItsInputLease() async throws {
+        let (backend, owner, saved) = try setup()
+        actor Release { var count = 0; func done() { count += 1 } }
+        let release = Release()
+        backend.stub("prepareVideoJob(_:)") { args in
+            PreparedVideoJob(request: args[0] as! VideoJobRequest, release: { await release.done() })
+        }
+        backend.stub("createVideoJob(_:operationId:destinationInstanceId:)", returning: try detail("another-id"))
+        let coordinator = VideoJobCoordinator(defaults: saved)
+        await coordinator.submit(request(), owner: owner, backend: backend, current: { true }, unchanged: { true })
+        #expect(await release.count == 0)
+        #expect(coordinator.jobs.first?.detail == nil)
+        let id = try #require(coordinator.pending.first?.operationId)
+        backend.stub("videoJob(id:)", returning: try detail(id, state: "paused", resume: true))
+        await coordinator.refresh(id, owner: owner, backend: backend, current: { true })
+        #expect(await release.count == 1)
+    }
+
 }

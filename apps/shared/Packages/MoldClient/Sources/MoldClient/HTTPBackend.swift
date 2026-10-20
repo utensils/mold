@@ -9,6 +9,7 @@ public struct HTTPBackend: MoldBackend {
     let session: URLSession
     let injectedTransport: (any MoldHTTPTransport)?
     var referenceUploadClock: @Sendable () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }
+    var literalReferencePrompts = false
     var referenceAuthority: (@Sendable () async -> Bool)? = nil
 
     public init(host: MoldHost, session: URLSession = APISession.api) {

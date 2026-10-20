@@ -4,9 +4,11 @@ import Testing
 
 private final class VideoParentTransport: StubTransport {
     nonisolated(unsafe) static var sent: [URLRequest] = []
+    nonisolated(unsafe) static var cancelAccepted = true
     nonisolated(unsafe) static var bodies: [Data] = []
     override class var contentType: String { "application/json" }
     override class func response(for path: String) -> (status: Int, body: Data)? {
+        if path.hasSuffix("/cancel") { return (202, Data("{\"accepted\":\(cancelAccepted)}".utf8)) }
         if path.hasSuffix("validate") {
             let plan = requestPlan()
             return (200, Data(plan.utf8))
@@ -134,6 +136,39 @@ private final class VideoParentTransport: StubTransport {
         #expect(VideoParentTransport.sent.allSatisfy { $0.value(forHTTPHeaderField: "x-mold-retained-media-session") == "private-session" })
         #expect(VideoParentTransport.bodies.allSatisfy { !String(decoding: $0, as: UTF8.self).contains("private-session") })
         #expect(request.planningProjection.retainedMediaSession == nil)
+    }
+
+    @Test func literalParentReuseSessionProtectsItsNestedLegacyWireOnly() async throws {
+        VideoParentTransport.sent = []; VideoParentTransport.bodies = []
+        let backend = VideoParentTransport.backend().preparingLiteralVideoInputs()
+        var generation = draft().generation
+        generation.prompt = "literal\\new\r\nnext"
+        generation.negativePrompt = "avoid\\render\r\nnext"
+        generation.originalPrompt = "original\\root"
+        generation.promptTransform = .init(operation: .expand, rootPrompt: "root\\name", sourcePrompt: "source\\name", task: .textToVideo)
+        // This transport deliberately has no reuse-session response; capture
+        // the outbound boundary rather than minting a fictitious credential.
+        await #expect(throws: (any Error).self) {
+            try await backend.retainedMediaReuseSession(for: "movie.mp4", members: ["member"], target: generation)
+        }
+        let body = try #require(JSONSerialization.jsonObject(with: VideoParentTransport.bodies[0]) as? [String: Any])
+        let scoped = try #require(body["target_request"] as? [String: Any])
+        #expect(scoped["prompt"] as? String == generation.protectedForLegacyPromptWire.prompt)
+        #expect(scoped["negative_prompt"] as? String == generation.protectedForLegacyPromptWire.negativePrompt)
+        #expect(scoped["original_prompt"] as? String == generation.protectedForLegacyPromptWire.originalPrompt)
+        let transform = try #require(scoped["prompt_transform"] as? [String: Any])
+        #expect(transform["root_prompt"] as? String == generation.protectedForLegacyPromptWire.promptTransform?.rootPrompt)
+        #expect(transform["source_prompt"] as? String == generation.protectedForLegacyPromptWire.promptTransform?.sourcePrompt)
+        #expect(generation.prompt == "literal\\new\r\nnext")
+    }
+
+    @Test func stopRequiresExplicitAcceptanceBeforeItsReceiptCanBeAcknowledged() async throws {
+        VideoParentTransport.sent = []; VideoParentTransport.cancelAccepted = false
+        defer { VideoParentTransport.cancelAccepted = true }
+        let backend = VideoParentTransport.backend()
+        await #expect(throws: (any Error).self) {
+            try await backend.cancelVideoJob(id: "operation", destinationInstanceId: "installation")
+        }
     }
 
 }
