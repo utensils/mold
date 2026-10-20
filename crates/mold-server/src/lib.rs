@@ -2,6 +2,7 @@ pub mod auth;
 pub mod batch_transaction;
 pub mod catalog_api;
 pub mod catalog_credentials;
+mod chain_continuation;
 pub(crate) mod chain_execution;
 mod chain_h3;
 pub mod chain_job_runner;

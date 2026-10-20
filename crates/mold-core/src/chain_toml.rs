@@ -26,8 +26,124 @@ use std::path::Path;
 
 use base64::Engine as _;
 
-use crate::chain::ChainScript;
+use crate::chain::{ChainScript, ChainScriptChain, ChainStage};
 use crate::error::{MoldError, Result};
+
+// TOML integers are signed i64; JSON generation requests keep their existing
+// u64 contract. These private wrappers change only the two seed fields.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+enum TomlSeed {
+    Integer(u64),
+    Decimal(String),
+}
+
+impl From<u64> for TomlSeed {
+    fn from(value: u64) -> Self {
+        if value <= i64::MAX as u64 {
+            Self::Integer(value)
+        } else {
+            Self::Decimal(value.to_string())
+        }
+    }
+}
+
+impl TomlSeed {
+    fn into_u64(self, field: &str) -> Result<u64> {
+        match self {
+            Self::Integer(value) => Ok(value),
+            Self::Decimal(value)
+                if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) =>
+            {
+                value.parse().map_err(|_| {
+                    MoldError::Validation(format!(
+                        "{field} must be a decimal u64 in range 0..={}",
+                        u64::MAX
+                    ))
+                })
+            }
+            Self::Decimal(_) => Err(MoldError::Validation(format!(
+                "{field} must be an unsigned integer or decimal string"
+            ))),
+        }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TomlChain {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    seed: Option<TomlSeed>,
+    #[serde(flatten)]
+    fields: ChainScriptChain,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TomlStage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    seed_offset: Option<TomlSeed>,
+    #[serde(flatten)]
+    fields: ChainStage,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TomlScript {
+    schema: String,
+    chain: TomlChain,
+    #[serde(rename = "stage")]
+    stages: Vec<TomlStage>,
+}
+
+impl From<&ChainScript> for TomlScript {
+    fn from(script: &ChainScript) -> Self {
+        let mut fields = script.chain.clone();
+        let seed = fields.seed.take().map(TomlSeed::from);
+        Self {
+            schema: script.schema.clone(),
+            chain: TomlChain { seed, fields },
+            stages: script
+                .stages
+                .iter()
+                .map(|stage| {
+                    let mut fields = stage.clone();
+                    let seed_offset = fields.seed_offset.take().map(TomlSeed::from);
+                    TomlStage {
+                        seed_offset,
+                        fields,
+                    }
+                })
+                .collect(),
+        }
+    }
+}
+
+impl TomlScript {
+    fn into_script(self) -> Result<ChainScript> {
+        let mut chain = self.chain.fields;
+        chain.seed = self
+            .chain
+            .seed
+            .map(|seed| seed.into_u64("chain.seed"))
+            .transpose()?;
+        let stages = self
+            .stages
+            .into_iter()
+            .enumerate()
+            .map(|(index, stage)| {
+                let mut fields = stage.fields;
+                fields.seed_offset = stage
+                    .seed_offset
+                    .map(|seed| seed.into_u64(&format!("stage {index} seed_offset")))
+                    .transpose()?;
+                Ok(fields)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(ChainScript {
+            schema: self.schema,
+            chain,
+            stages,
+        })
+    }
+}
 
 /// Deserialise a TOML string into a [`ChainScript`]. Rejects unknown
 /// schema versions with a clear error pointing at the current mold
@@ -56,8 +172,9 @@ pub fn read_script(toml_str: &str) -> Result<ChainScript> {
     } else {
         toml_str
     };
-    toml::from_str(parse_target)
-        .map_err(|e| MoldError::Validation(format!("chain TOML parse failed: {e}")))
+    toml::from_str::<TomlScript>(parse_target)
+        .map_err(|e| MoldError::Validation(format!("chain TOML parse failed: {e}")))?
+        .into_script()
 }
 
 /// Like [`read_script`], but additionally accepts two TOML-only per-stage
@@ -231,7 +348,7 @@ fn resolve_stage_source_image(
 
 /// Serialise a [`ChainScript`] to a TOML string.
 pub fn write_script(script: &ChainScript) -> Result<String> {
-    let body = toml::to_string_pretty(script)
+    let body = toml::to_string_pretty(&TomlScript::from(script))
         .map_err(|e| MoldError::Other(anyhow::anyhow!("chain TOML serialise failed: {e}")))?;
     // toml-rs sorts table keys alphabetically; force schema header up top.
     if body.starts_with("schema") {
@@ -250,6 +367,67 @@ mod tests {
     use super::*;
     use crate::chain::{ChainScript, ChainScriptChain, ChainStage, TransitionMode};
     use crate::types::OutputFormat;
+
+    #[test]
+    fn canonical_toml_round_trips_linked_part_authority() {
+        let mut script = sample_script();
+        script.chain.continue_from = Some(crate::chain::ChainContinuation {
+            job_id: "previous-part".into(),
+            finalize_take: 3,
+        });
+        script.chain.seed = Some(u64::MAX);
+        let text = write_script(&script).unwrap();
+        let restored = read_script(&text).unwrap();
+        assert_eq!(restored.chain.continue_from, script.chain.continue_from);
+        assert_eq!(restored.chain.seed, Some(u64::MAX));
+        let with_paths = read_script_resolving_paths(&text, Path::new(".")).unwrap();
+        assert_eq!(with_paths.chain.continue_from, script.chain.continue_from);
+    }
+
+    #[test]
+    fn canonical_toml_round_trips_full_range_seeds_and_stage_offsets() {
+        for seed in [
+            0,
+            i64::MAX as u64,
+            i64::MAX as u64 + 1,
+            17_309_142_824_083_333_797,
+            u64::MAX,
+        ] {
+            let mut script = sample_script();
+            script.chain.seed = Some(seed);
+            script.stages[0].seed_offset = Some(seed);
+            let text =
+                write_script(&script).expect("every materialized u64 seed must export to TOML");
+            let restored = read_script(&text).unwrap();
+            assert_eq!(restored.chain.seed, Some(seed));
+            assert_eq!(restored.stages[0].seed_offset, Some(seed));
+            let with_paths = read_script_resolving_paths(&text, Path::new(".")).unwrap();
+            assert_eq!(with_paths.chain.seed, Some(seed));
+            assert_eq!(with_paths.stages[0].seed_offset, Some(seed));
+            if seed > i64::MAX as u64 {
+                assert!(text.contains(&format!("seed = \"{seed}\"")));
+                assert!(text.contains(&format!("seed_offset = \"{seed}\"")));
+            }
+            // The JSON/API shape keeps the existing numeric seed contract.
+            let json = serde_json::to_value(&restored).unwrap();
+            assert_eq!(json["chain"]["seed"].as_u64(), Some(seed));
+            assert_eq!(json["stage"][0]["seed_offset"].as_u64(), Some(seed));
+        }
+    }
+
+    #[test]
+    fn toml_seed_strings_accept_decimal_only_and_reject_overflow() {
+        let text = write_script(&sample_script()).unwrap();
+        let quoted = text.replace("seed = 42", "seed = \"42\"");
+        assert_eq!(read_script(&quoted).unwrap().chain.seed, Some(42));
+        for invalid in ["-1", "+1", " 42", "1.5", "18446744073709551616", ""] {
+            let invalid = text.replace("seed = 42", &format!("seed = \"{invalid}\""));
+            assert!(
+                read_script(&invalid).is_err(),
+                "accepted invalid seed: {invalid}"
+            );
+        }
+    }
 
     #[test]
     fn resolves_h3_boundary_paths_and_preserves_typed_stage_media() {
@@ -316,6 +494,7 @@ mod tests {
         ChainScript {
             schema: "mold.chain.v1".into(),
             chain: ChainScriptChain {
+                continue_from: None,
                 model: "ltx-2-19b-distilled:fp8".into(),
                 width: 1216,
                 height: 704,

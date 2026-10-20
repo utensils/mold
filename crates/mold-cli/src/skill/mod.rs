@@ -1655,6 +1655,9 @@ mod tests {
                     continue;
                 }
                 let relative = target.strip_prefix("{baseDir}/").unwrap_or(target);
+                // Markdown fragments name sections inside the bundled file.
+                // The sequence-guide contract separately checks its heading.
+                let relative = relative.split('#').next().unwrap();
                 assert!(
                     bundle.files.contains_key(relative),
                     "{} has broken link {target}",

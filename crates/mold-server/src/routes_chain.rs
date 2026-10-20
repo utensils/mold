@@ -345,7 +345,10 @@ fn validate_h3_chain(req: &mut ChainRequest, family: &str) -> Result<(), ApiErro
         generate.keyframes = stage.keyframes.clone();
         generate.references = stage.generation_references.clone();
         generate.frames = Some(stage.frames);
-        if task == Task::Fl2va && index > 0 && stage.transition == TransitionMode::Smooth {
+        if task == Task::Fl2va
+            && (index > 0 || req.continue_from.is_some())
+            && stage.transition == TransitionMode::Smooth
+        {
             if stage.source_image.is_some()
                 || stage
                     .keyframes
@@ -538,7 +541,10 @@ pub(crate) fn validate_and_normalize_chain_family(
     let family_hint = (!family.is_empty()).then_some(family.as_str());
     let has_source = match contract {
         Some(mold_core::SourceImageCapability::Unsupported) => any_image,
-        _ => opening_image,
+        Some(mold_core::SourceImageCapability::Required) => {
+            opening_image || req.continue_from.is_some()
+        }
+        _ => opening_image || (req.continue_from.is_some() && req.motion_tail_frames > 0),
     };
     if let Some(message) = mold_core::validation::source_image_contract_violation(
         family_hint,
@@ -835,6 +841,7 @@ mod tests {
 
     fn req(format: OutputFormat) -> ChainRequest {
         ChainRequest {
+            continue_from: None,
             offload: None,
             collection: None,
             tags: None,
@@ -936,6 +943,39 @@ mod tests {
             .contains("use cut or fade"));
         request.stages[1].transition = TransitionMode::Cut;
         validate_h3_chain(&mut request, "minimax-h3").unwrap();
+    }
+
+    #[test]
+    fn linked_h3_first_stage_uses_incoming_endpoint_and_refuses_authored_collision() {
+        let mut request = h3_request("fl2va");
+        request.continue_from = Some(mold_core::chain::ChainContinuation {
+            job_id: "previous".into(),
+            finalize_take: 1,
+        });
+        request.stages.truncate(1);
+        request.stages[0].source_image = Some(vec![1]);
+        assert!(validate_h3_chain(&mut request, "minimax-h3").is_err());
+        request.stages[0].source_image = None;
+        request.stages[0].keyframes = Some(vec![mold_core::KeyframeCondition {
+            frame: 123,
+            image: vec![1],
+            name: None,
+        }]);
+        validate_h3_chain(&mut request, "minimax-h3").unwrap();
+    }
+
+    #[test]
+    fn linked_wan_i2v_first_stage_is_seeded_by_owned_incoming_tail() {
+        let mut request = req(OutputFormat::Mp4);
+        request.model = "wan22-i2v-a14b:q5".into();
+        request.width = 832;
+        request.height = 480;
+        request.continue_from = Some(mold_core::chain::ChainContinuation {
+            job_id: "previous".into(),
+            finalize_take: 1,
+        });
+        validate_and_normalize_chain_family(&mold_core::Config::default(), &mut request).unwrap();
+        assert_eq!(request.motion_tail_frames, 1);
     }
 
     #[test]

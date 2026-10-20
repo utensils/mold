@@ -9,6 +9,7 @@ fn script_under_test() -> ChainScript {
     ChainScript {
         schema: "mold.chain.v1".into(),
         chain: ChainScriptChain {
+            continue_from: None,
             model: "ltx-2-19b-distilled:fp8".into(),
             width: 1216,
             height: 704,
@@ -107,6 +108,7 @@ fn write_then_read_is_identity() {
 fn normalised_request_survives_round_trip() {
     // Build a ChainRequest → normalise → project to ChainScript → TOML → back → compare.
     let req = ChainRequest {
+        continue_from: None,
         offload: None,
         collection: None,
         tags: None,

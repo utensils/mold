@@ -70,7 +70,44 @@ pub(crate) fn persist_scrubbed(
         stage.authored_media_sha256 = None;
     }
     stamp_authored_media_identity(&mut request)?;
-    let media = take_authored_media(&mut request)?;
+    let retained_tail = crate::chain_continuation::retained_frames(job_dir, &request)?;
+    let mut total_bytes = retained_tail
+        .iter()
+        .map(|bytes| bytes.len() as u64)
+        .sum::<u64>();
+    for stage in &request.stages {
+        total_bytes = total_bytes
+            .checked_add(
+                stage
+                    .source_image
+                    .as_ref()
+                    .map_or(0, |bytes| bytes.len() as u64),
+            )
+            .context("chain media size overflow")?;
+        for keyframe in stage.keyframes.iter().flatten() {
+            total_bytes = total_bytes
+                .checked_add(keyframe.image.len() as u64)
+                .context("chain media size overflow")?;
+        }
+        for reference in stage.generation_references.iter().flatten() {
+            if let mold_core::GenerationReferenceAuthority::Inline { data } = reference.media() {
+                total_bytes = total_bytes
+                    .checked_add(data.len() as u64)
+                    .context("chain media size overflow")?;
+            }
+        }
+    }
+    let mut media = take_authored_media(&mut request)?;
+    for (index, bytes) in retained_tail.into_iter().enumerate() {
+        media.push(SealMedia::bytes(
+            format!("chain_continuation_tail:{index}"),
+            "continuation-tail",
+            bytes,
+        ));
+    }
+    if request.continue_from.is_some() && (media.len() > 64 || total_bytes > 512 * 1024 * 1024) {
+        bail!("linked part retained conditioning exceeds 64 members or 512 MiB");
+    }
     if media.is_empty() {
         return Ok(request);
     }
@@ -99,9 +136,13 @@ pub(crate) fn persist_scrubbed(
     Ok(request)
 }
 
-pub(crate) fn scrub(mut request: ChainRequest) -> ChainRequest {
-    // Hydrated requests always carry valid serializable media fields.
-    stamp_authored_media_identity(&mut request).expect("chain media identity serialization");
+pub(crate) fn scrub(request: ChainRequest) -> ChainRequest {
+    // Only authenticated hydrated requests enter this infallible projection.
+    try_scrub(request).expect("chain media identity serialization")
+}
+
+pub(crate) fn try_scrub(mut request: ChainRequest) -> anyhow::Result<ChainRequest> {
+    stamp_authored_media_identity(&mut request)?;
     for stage in &mut request.stages {
         stage.source_image = None;
         if let Some(keyframes) = &mut stage.keyframes {
@@ -116,7 +157,7 @@ pub(crate) fn scrub(mut request: ChainRequest) -> ChainRequest {
             }
         }
     }
-    request
+    Ok(request)
 }
 
 pub(crate) fn hydrate(
@@ -125,11 +166,17 @@ pub(crate) fn hydrate(
     mut request: ChainRequest,
 ) -> anyhow::Result<ChainRequest> {
     let Some(index) = read_index(job_dir)? else {
+        if request.continue_from.is_some() && request.motion_tail_frames > 0 {
+            bail!("linked part has no sealed continuation recovery authority");
+        }
         ensure_hydrated(&request)?;
         return Ok(request);
     };
     let digest = request_digest(&request)?;
     let Some(media_set) = index.requests.get(&digest) else {
+        if request.continue_from.is_some() && request.motion_tail_frames > 0 {
+            bail!("linked part media revision is missing");
+        }
         ensure_hydrated(&request)?;
         return Ok(request);
     };
@@ -137,9 +184,25 @@ pub(crate) fn hydrate(
         .decrypt_to_private_staging(media_set)
         .context("hydrating chain authored source media")?;
     let mut seen = BTreeSet::new();
+    let retained_tail = crate::chain_continuation::retained_frames(job_dir, &request)?;
+    let mut tail_members = 0usize;
     for item in &decrypted.files {
         if !seen.insert(&item.role) {
             bail!("duplicate chain source-media role");
+        }
+        if let Some(position) = item.role.strip_prefix("chain_continuation_tail:") {
+            let index: usize = position
+                .parse()
+                .context("invalid continuation tail index")?;
+            let expected = retained_tail
+                .get(index)
+                .context("unexpected sealed continuation tail member")?;
+            let bytes = std::fs::read(&item.path)?;
+            if index.to_string() != position || bytes != *expected {
+                bail!("sealed continuation tail differs from successor ownership");
+            }
+            tail_members += 1;
+            continue;
         }
         let parts = item.role.split(':').collect::<Vec<_>>();
         let stage_idx: usize = parts
@@ -180,6 +243,9 @@ pub(crate) fn hydrate(
             }
             _ => bail!("unexpected chain source-media role; refusing hydration"),
         }
+    }
+    if tail_members != retained_tail.len() {
+        bail!("continuation conditioning is missing from sealed recovery authority");
     }
     ensure_hydrated(&request)?;
     Ok(request)
@@ -257,12 +323,14 @@ pub(crate) fn handoff_current_to_gallery(
     request: &ChainRequest,
     gate: &crate::batch_transaction::GalleryPublicationGate,
 ) -> anyhow::Result<()> {
-    if request.stages.iter().all(|stage| {
-        stage.source_image.is_none()
-            && stage.keyframes.is_none()
-            && stage.generation_references.is_none()
-            && stage.authored_media_sha256.is_none()
-    }) {
+    if !(request.continue_from.is_some() && request.motion_tail_frames > 0)
+        && request.stages.iter().all(|stage| {
+            stage.source_image.is_none()
+                && stage.keyframes.is_none()
+                && stage.generation_references.is_none()
+                && stage.authored_media_sha256.is_none()
+        })
+    {
         return Ok(());
     }
     let Some(index) = read_index(job_dir)? else {
@@ -577,6 +645,7 @@ mod tests {
             authored_media_sha256: None,
         };
         ChainRequest {
+            continue_from: None,
             offload: None,
             model: "ltx-2-19b-distilled:fp8".into(),
             stages: vec![
@@ -609,6 +678,23 @@ mod tests {
             source_image: None,
             enable_audio: None,
         }
+    }
+
+    #[test]
+    fn retry_scrubbing_refuses_mismatched_reference_digest_without_panicking() {
+        let mut request = request();
+        let mut reference = mold_core::GenerationReference::Image {
+            media: mold_core::GenerationReferenceAuthority::Inline {
+                data: vec![1, 2, 3],
+            },
+            provenance: Default::default(),
+            mime_type: "image/png".into(),
+            width: 16,
+            height: 16,
+        };
+        reference_provenance_mut(&mut reference).sha256 = Some("0".repeat(64));
+        request.stages[0].generation_references = Some(vec![reference]);
+        assert!(try_scrub(request).is_err());
     }
 
     #[test]

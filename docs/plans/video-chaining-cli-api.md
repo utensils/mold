@@ -31,6 +31,13 @@ some models' continuity. Downloaded remote chain audio facts are discarded.
 5. Update the canonical generated skill with a complete minimal script and
    discovery, validation, submission, job recovery, and exact-output retrieval.
    Sync affected README, website and owning rules. Preserve remote audio facts.
+6. Support open-ended duration through linked bounded parts. A new part pins
+   a completed predecessor revision, inherits its frozen model authority and
+   owns an authenticated copy of its incoming tail. It renders only new clips;
+   prior manifests, media and MP4s stay finite. The 16-stage budget applies to
+   one part, with no total part-count limit. Persist linked parts with a new
+   manifest schema so older runtimes refuse them rather than ignore the carry.
+   Require positive server capability discovery before CLI submission.
 
 ## Verification and delivery
 
@@ -48,6 +55,16 @@ some models' continuity. Downloaded remote chain audio facts are discarded.
 - Open a conventional-commit PR, verify required checks on its exact final head,
   merge to main, then deploy that main revision to HAL9000 and Plato. Verify
   live revision, service health, GPU inventory and retained queue/media state.
+- After the merged main nightly artifacts are published, install the nightly
+  CLI on James's system through the documented curl installer. Reinstall all
+  supported agent skill bundles and verify the installed chain guide and CLI
+  revision match the delivered fixes.
+- Finish with a real 60-second FastH3 V2 chain on deployed Plato and a real
+  chained run on HAL9000's verified 24 GB RTX 4090. Use live admission for
+  opening and conditioned-stage shapes, record peak GPU memory, and qualify
+  the actual tested recipe rather than claiming every resolution fits 24 GB.
+  Keep all remote outputs beneath that host's `MOLD_HOME`; the production
+  server publishes viewable prints in its active `output` directory.
 
 ## H3 continuation reference and durable children
 
@@ -70,3 +87,48 @@ retake/amend history rather than the scheduler attempt counter: recovering a
 crashed scheduler attempt reattaches a completed child instead of rerendering.
 Cancelling a parent cancels and settles its active child before releasing the
 parent's ownership.
+
+## Native chain audio alignment qualification
+
+The first real LTX-2 19B CLI UAT exposed a delivery gap. Re-probing Plato's
+`/storage/mold/uat/video-chaining-20261019/ltx2-19b.mp4` with FFprobe showed
+49 video frames at 24 fps (`49000/24000` seconds), while the stereo 24 kHz AAC
+track ended at `47104/24000` seconds: 1,896 samples, or 79 ms, short. Padding
+only the final mux would restore duration while still allowing a short first
+stage to start the second stage's audio early.
+
+The durable writer now preserves the native PCM prefix and trims or zero-pads
+only its tail to the raw stage's video duration. Cached sidecars receive the
+same conformance in memory before smooth/fade boundary operations, allowing a
+saved chain to be refinalized without another inference pass. Each emitted
+stage is then fitted between rounded cumulative sample boundaries on the final
+video clock. For H3's fractional 32 kHz / 24 fps ratio, this keeps each seam
+within half a sample of its rational position instead of accumulating a
+per-stage rounding error. Every chain uses the existing `MatchVideo` AAC mux
+policy, including exact final-packet duration. No resampling or sampler change
+is involved. An explicitly audio-enabled stage missing its PCM sidecar fails
+before publication; legacy silent chains remain valid.
+
+Focused regressions (`tmp/chain-all-audio-green.log`) pass: unchanged native
+sample prefixes with tail-only trim/padding; sixteen H3 stage boundaries with
+no cumulative drift; missing expected audio versus legacy silent delivery;
+and real encoded 49-frame / 24 kHz and 213-frame / 32 kHz final MP4s whose AAC
+track durations equal the complete video timeline. The encoded-output test
+also replaces the saved sidecars with short pre-fix data before refinalizing,
+proving recovery repairs existing cached stages without inference.
+
+## Bounded parts with no lifetime duration cap
+
+A part keeps at most sixteen stages; `continue_from` references the newest
+completed finalize take and snapshots the required tail at admission. Successors
+inherit the exact frozen model artifact identity, canvas, fps, carry and audio
+contract. Each part emits a separate MP4. There is no maximum successor count
+and no hard chain-follow deadline; memory, manifest size and finalization work
+remain bounded by the current part. No historical inference is repeated.
+
+Part media is limited to 32 MiB decoded inline payload and 64 retained members,
+including incoming tail frames. Admission checks projected auto-expanded input
+copies before allocation. Linked manifests use `mold.chainjob.v2`, preventing
+older binaries from silently ignoring the carry link during rollback. Ordinary
+manifests stay v1. Creation retries must survive interruption before indexing,
+reject changed operation payloads, and avoid holding a nonexistent source lock.

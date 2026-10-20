@@ -20,8 +20,10 @@ use serde::{Deserialize, Serialize};
 use crate::chain::ChainRequest;
 use crate::error::{MoldError, Result};
 
-/// Manifest schema identifier. `from_toml` rejects anything else.
+/// Legacy-independent part schema, still readable by existing runtimes.
 pub const CHAIN_JOB_SCHEMA: &str = "mold.chainjob.v1";
+/// Linked parts require incoming-tail semantics older runtimes must refuse.
+pub const CHAIN_JOB_LINKED_SCHEMA: &str = "mold.chainjob.v2";
 
 // ── Job-dir layout: fixed relative names (spec §3.2) ──────────────────
 
@@ -328,7 +330,11 @@ impl ChainJobManifest {
             .collect();
 
         Ok(Self {
-            schema: CHAIN_JOB_SCHEMA.into(),
+            schema: if request.continue_from.is_some() {
+                CHAIN_JOB_LINKED_SCHEMA.into()
+            } else {
+                CHAIN_JOB_SCHEMA.into()
+            },
             job_id,
             created_at_unix_ms,
             ephemeral: false,
@@ -371,8 +377,8 @@ impl ChainJobManifest {
             .map_err(|e| MoldError::Validation(format!("chain job request JSON parse failed: {e}")))
     }
 
-    /// Parse a manifest, rejecting `schema != mold.chainjob.v1` with a
-    /// clear error naming the supported schema (chain_toml.rs precedent).
+    /// Parse either ordinary or linked parts. The distinct linked schema
+    /// prevents old runtimes from silently dropping incoming-tail semantics.
     pub fn from_toml(s: &str) -> Result<Self> {
         #[derive(Deserialize)]
         struct SchemaPeek {
@@ -383,16 +389,28 @@ impl ChainJobManifest {
             MoldError::Validation(format!("chain job manifest TOML parse failed: {e}"))
         })?;
         let schema = peek.schema.as_deref().unwrap_or("<missing>");
-        if schema != CHAIN_JOB_SCHEMA {
+        if schema != CHAIN_JOB_SCHEMA && schema != CHAIN_JOB_LINKED_SCHEMA {
             return Err(MoldError::Validation(format!(
                 "chain job manifest schema '{schema}' is not supported by this mold version \
-                 (supported: '{CHAIN_JOB_SCHEMA}')"
+                 (supported: '{CHAIN_JOB_SCHEMA}', '{CHAIN_JOB_LINKED_SCHEMA}')"
             )));
         }
 
         let manifest: Self = toml::from_str(s).map_err(|e| {
             MoldError::Validation(format!("chain job manifest TOML parse failed: {e}"))
         })?;
+        let linked = serde_json::from_str::<serde_json::Value>(&manifest.request_json)
+            .ok()
+            .is_some_and(|request| {
+                request
+                    .get("continue_from")
+                    .is_some_and(|link| !link.is_null())
+            });
+        if linked != (schema == CHAIN_JOB_LINKED_SCHEMA) {
+            return Err(MoldError::Validation(
+                "linked chain parts require the mold.chainjob.v2 manifest schema".into(),
+            ));
+        }
         manifest.validate_artifact_paths()?;
         Ok(manifest)
     }
@@ -882,6 +900,7 @@ mod tests {
 
     fn sample_request() -> ChainRequest {
         ChainRequest {
+            continue_from: None,
             offload: None,
             collection: None,
             tags: None,
@@ -1264,15 +1283,17 @@ tail_frames = 17
     fn from_toml_rejects_wrong_schema() {
         let err = ChainJobManifest::from_toml(
             r#"
-schema = "mold.chainjob.v2"
+schema = "mold.chainjob.v99"
 job_id = "01JBR55TEST"
 created_at_unix_ms = 1
 request_json = "{}"
 "#,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("mold.chainjob.v2"));
-        assert!(err.to_string().contains("supported: 'mold.chainjob.v1'"));
+        assert!(err.to_string().contains("mold.chainjob.v99"));
+        assert!(err
+            .to_string()
+            .contains("supported: 'mold.chainjob.v1', 'mold.chainjob.v2'"));
     }
 
     #[test]
@@ -1339,6 +1360,24 @@ request_json = "{}"
         let parsed = ChainJobManifest::from_toml(&manifest.to_toml().unwrap()).unwrap();
 
         assert_eq!(parsed, manifest);
+    }
+
+    #[test]
+    fn linked_manifests_require_a_schema_older_runtimes_refuse() {
+        let mut request = sample_request();
+        request.continue_from = Some(crate::chain::ChainContinuation {
+            job_id: "previous-part".into(),
+            finalize_take: 1,
+        });
+        let manifest = ChainJobManifest::new("next-part".into(), 1, &request).unwrap();
+        assert_eq!(manifest.schema, "mold.chainjob.v2");
+        let text = manifest.to_toml().unwrap();
+        assert_eq!(ChainJobManifest::from_toml(&text).unwrap(), manifest);
+        let downgraded = text.replacen("mold.chainjob.v2", CHAIN_JOB_SCHEMA, 1);
+        assert!(ChainJobManifest::from_toml(&downgraded).is_err());
+        let mut unrelated = manifest;
+        unrelated.request_json = serde_json::to_string(&sample_request()).unwrap();
+        assert!(ChainJobManifest::from_toml(&unrelated.to_toml().unwrap()).is_err());
     }
 
     #[test]
@@ -1443,6 +1482,7 @@ request_json = "{}"
 
     fn event_detail_fixture() -> ChainJobDetail {
         let request = crate::chain::ChainRequest {
+            continue_from: None,
             offload: None,
             collection: None,
             tags: None,

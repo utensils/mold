@@ -29,8 +29,8 @@ use crate::types::{DevicePlacement, GenerateRequest, OutputFormat, OutputMetadat
 ///   the last `fade_frames` of the prior clip with the first `fade_frames`
 ///   of this clip.
 ///
-/// Stage 0's transition is meaningless (nothing to transition from) and is
-/// coerced to `Smooth` during `ChainRequest::normalise`.
+/// Without a predecessor, stage 0 is coerced to `Smooth` during normalisation.
+/// A linked part requires `Smooth` so its first boundary has explicit carry semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TransitionMode {
@@ -64,10 +64,42 @@ pub struct ChainStageMetadata {
     pub keyframes: Vec<crate::KeyframeMetadata>,
 }
 
+/// Stable completed source part selected by an authored continuation. The
+/// server snapshots its carry so a new part never depends on mutable history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ChainContinuation {
+    pub job_id: String,
+    pub finalize_take: u32,
+}
+
+impl ChainContinuation {
+    pub fn validate(&self) -> Result<()> {
+        if self.job_id.is_empty()
+            || !self
+                .job_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(MoldError::Validation(
+                "continue_from.job_id must be a nonempty opaque job identifier, never a path"
+                    .into(),
+            ));
+        }
+        if self.finalize_take == 0 {
+            return Err(MoldError::Validation(
+                "continue_from.finalize_take must be greater than zero".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Structured multi-clip provenance block on [`crate::OutputMetadata`]
 /// (additive; absent for single generations and legacy rows).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChainOutputMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continue_from: Option<ChainContinuation>,
     pub stage_count: u32,
     pub motion_tail_frames: u32,
     pub stages: Vec<ChainStageMetadata>,
@@ -144,7 +176,7 @@ pub struct ChainStage {
 
     // NEW in multi-prompt v2 ───────────────────────────────────────────
     /// Boundary style between the previous stage and this stage.
-    /// Stage 0's value is coerced to `Smooth` in `normalise`.
+    /// Stage 0 is coerced to `Smooth` for standalone parts; linked parts require it.
     #[serde(default)]
     pub transition: TransitionMode,
 
@@ -189,6 +221,10 @@ pub struct ChainStage {
 /// former so downstream code only deals with `stages`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChainRequest {
+    /// Continue from one completed bounded part. Every part retains its own
+    /// output and stage history; the timeline may grow through further parts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continue_from: Option<ChainContinuation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offload: Option<bool>,
     #[schema(example = "ltx-2-19b-distilled:fp8")]
@@ -360,6 +396,8 @@ pub struct ChainScript {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChainScriptChain {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continue_from: Option<ChainContinuation>,
     pub model: String,
     pub width: u32,
     pub height: u32,
@@ -382,6 +420,7 @@ impl From<&ChainRequest> for ChainScript {
         ChainScript {
             schema: "mold.chain.v1".into(),
             chain: ChainScriptChain {
+                continue_from: req.continue_from.clone(),
                 model: req.model.clone(),
                 width: req.width,
                 height: req.height,
@@ -469,27 +508,19 @@ impl ChainValidationResponse {
                 .stages
                 .iter()
                 .enumerate()
-                .map(|(idx, stage)| {
-                    let next = req.stages.get(idx + 1);
-                    ChainValidationStage {
-                        prompt: stage.prompt.clone(),
-                        frames: stage.frames,
-                        output_frames: stage_contributed_frames(
-                            idx,
-                            stage.frames,
-                            stage.transition,
-                            next.map(|candidate| candidate.transition),
-                            next.and_then(|candidate| candidate.fade_frames),
-                            req.motion_tail_frames,
-                        ),
-                        transition: stage.transition,
-                        fade_frames: stage.fade_frames,
-                        has_source_image: stage.source_image.is_some(),
-                        has_negative_prompt: stage
-                            .negative_prompt
-                            .as_deref()
-                            .is_some_and(|value| !value.trim().is_empty()),
-                    }
+                .map(|(idx, stage)| ChainValidationStage {
+                    prompt: stage.prompt.clone(),
+                    frames: stage.frames,
+                    output_frames: req
+                        .stage_contributed_frames(idx)
+                        .expect("enumerated stage exists"),
+                    transition: stage.transition,
+                    fade_frames: stage.fade_frames,
+                    has_source_image: stage.source_image.is_some(),
+                    has_negative_prompt: stage
+                        .negative_prompt
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty()),
                 })
                 .collect(),
             warnings,
@@ -673,10 +704,13 @@ fn default_output_format() -> OutputFormat {
     OutputFormat::Mp4
 }
 
-/// Maximum number of stages the v1 orchestrator will accept in a single
-/// chain. 16 × 97-frame clips ≈ 1552 frames ≈ 64 s at 24 fps — comfortably
-/// past the 400-frame target without risking runaway jobs.
+/// Maximum stages in one bounded part. Completed parts can be linked without
+/// a total part limit; each part has its own manifest, carry snapshot and print.
 pub const MAX_CHAIN_STAGES: usize = 16;
+/// Aggregate decoded authored input bytes permitted in one bounded part.
+pub const MAX_CHAIN_INLINE_MEDIA_BYTES: usize = 32 * 1024 * 1024;
+/// Existing encrypted bundle member budget, including the owned incoming tail.
+pub const MAX_CHAIN_RETAINED_MEDIA_MEMBERS: usize = 64;
 
 /// Per-clip frame count an LTX-2 render chain uses for one clip.
 ///
@@ -1008,6 +1042,7 @@ impl ChainRequest {
         );
         let stage_seeds = provenance.and_then(|p| p.stage_seeds);
         metadata.chain = Some(ChainOutputMetadata {
+            continue_from: self.continue_from.clone(),
             stage_count: self.stages.len() as u32,
             motion_tail_frames: self.motion_tail_frames,
             stages: self
@@ -1029,7 +1064,10 @@ impl ChainRequest {
                         .map(|refs| {
                             refs.iter()
                                 .enumerate()
-                                .filter_map(|(index, reference)| reference.redacted_metadata(index))
+                                .map(|(index, reference)| {
+                                    reference
+                                        .redacted_metadata_lossless_for_target(index, stage.frames)
+                                })
                                 .collect()
                         })
                         .unwrap_or_default(),
@@ -1064,6 +1102,48 @@ impl ChainRequest {
         self.normalise_with_family(None)
     }
 
+    /// Shared CLI/server authority for the aggregate authored media budget.
+    pub fn validate_inline_media_budget(&self) -> Result<()> {
+        let mut total = self.source_image.as_ref().map_or(0, Vec::len);
+        for stage in &self.stages {
+            let lengths = stage
+                .source_image
+                .iter()
+                .map(Vec::len)
+                .chain(
+                    stage
+                        .keyframes
+                        .iter()
+                        .flatten()
+                        .map(|frame| frame.image.len()),
+                )
+                .chain(
+                    stage
+                        .generation_references
+                        .iter()
+                        .flatten()
+                        .filter_map(|reference| match reference.media() {
+                            crate::GenerationReferenceAuthority::Inline { data } => {
+                                Some(data.len())
+                            }
+                            _ => None,
+                        }),
+                );
+            for length in lengths {
+                total = total.checked_add(length).ok_or_else(|| {
+                    MoldError::Validation("authored media byte total overflow".into())
+                })?;
+            }
+        }
+        if total > MAX_CHAIN_INLINE_MEDIA_BYTES {
+            return Err(MoldError::Validation(format!(
+                "authored media per part exceeds the {} byte aggregate budget",
+                MAX_CHAIN_INLINE_MEDIA_BYTES
+            )));
+        }
+        Ok(())
+    }
+
     /// [`normalise`](Self::normalise) with the family already resolved.
     ///
     /// The manifest cannot classify an installed `cv:` / `hf:` id, so a
@@ -1073,6 +1153,21 @@ impl ChainRequest {
     /// Callers holding a resolved family pass it; `None` keeps the historical
     /// manifest-only behaviour for callers that do not.
     pub fn normalise_with_family(mut self, family_hint: Option<&str>) -> Result<Self> {
+        self.validate_inline_media_budget()?;
+        if let Some(source) = &self.continue_from {
+            source.validate()?;
+            if self.stages.is_empty()
+                || self.prompt.is_some()
+                || self.total_frames.is_some()
+                || self.clip_frames.is_some()
+                || self.source_image.is_some()
+            {
+                return Err(MoldError::Validation("continue_from requires explicit stages and cannot combine with auto-expand fields".into()));
+            }
+            if self.stages[0].transition != TransitionMode::Smooth {
+                return Err(MoldError::Validation("a linked part must begin with a smooth transition; models without carry compose independent parts with a zero motion tail".into()));
+            }
+        }
         // Resolve the family from the manifest rather than passing `None`.
         // With a family-aware ceiling and grid, a `None` check is not merely
         // loose — it is a different answer: it would reject a 1920x1088 LTX-2
@@ -1293,14 +1388,68 @@ impl ChainRequest {
             }
         }
 
+        let total = (0..self.stages.len()).try_fold(0u32, |total, idx| {
+            total.checked_add(
+                self.stage_contributed_frames(idx)
+                    .expect("enumerated stage exists"),
+            )
+        });
+        if total.is_none() {
+            return Err(MoldError::Validation(
+                "part frame total exceeds the u32 timeline representation".into(),
+            ));
+        }
+
+        // Every gallery transfer uses the same member budget. Linked parts
+        // additionally own their incoming tail independently of sequence age.
+        let authored = self.stages.iter().try_fold(0usize, |count, stage| {
+            count
+                .checked_add(usize::from(stage.source_image.is_some()))?
+                .checked_add(stage.keyframes.as_ref().map_or(0, Vec::len))?
+                .checked_add(stage.generation_references.as_ref().map_or(0, Vec::len))
+        });
+        let incoming = if self.continue_from.is_some() {
+            self.motion_tail_frames as usize
+        } else {
+            0
+        };
+        if authored
+            .and_then(|count| count.checked_add(incoming))
+            .is_none_or(|count| count > MAX_CHAIN_RETAINED_MEDIA_MEMBERS)
+        {
+            return Err(MoldError::Validation(format!(
+                "part retained media exceeds the {} member bundle budget",
+                MAX_CHAIN_RETAINED_MEDIA_MEMBERS
+            )));
+        }
+
         // Canonicalise: clear auto-expand fields so downstream code only
         // ever reads from `stages`.
         self.prompt = None;
         self.total_frames = None;
         self.clip_frames = None;
         self.source_image = None;
+        self.validate_inline_media_budget()?;
 
         Ok(self)
+    }
+
+    /// Delivered frames from one stage, including the incoming external tail.
+    pub fn stage_contributed_frames(&self, idx: usize) -> Option<u32> {
+        let stage = self.stages.get(idx)?;
+        let next = self.stages.get(idx + 1);
+        Some(stage_contributed_frames(
+            if idx == 0 && self.continue_from.is_some() {
+                1
+            } else {
+                idx
+            },
+            stage.frames,
+            stage.transition,
+            next.map(|next| next.transition),
+            next.and_then(|next| next.fade_frames),
+            self.motion_tail_frames,
+        ))
     }
 
     /// Predicted stitched frame count — this IS the delivered length; no
@@ -1317,21 +1466,9 @@ impl ChainRequest {
     /// exists in exactly one place (the chain-job runner persists the same
     /// values as `frames_emitted`).
     pub fn estimated_total_frames(&self) -> u32 {
-        self.stages
-            .iter()
-            .enumerate()
-            .map(|(idx, stage)| {
-                let next = self.stages.get(idx + 1);
-                stage_contributed_frames(
-                    idx,
-                    stage.frames,
-                    stage.transition,
-                    next.map(|next| next.transition),
-                    next.and_then(|next| next.fade_frames),
-                    self.motion_tail_frames,
-                )
-            })
-            .sum()
+        (0..self.stages.len())
+            .filter_map(|idx| self.stage_contributed_frames(idx))
+            .fold(0, u32::saturating_add)
     }
 }
 
@@ -1460,6 +1597,28 @@ fn build_auto_expand_stages(
         )));
     }
 
+    let source_only_first_stage =
+        family.is_some_and(|family| family == "wan" || crate::minimax_h3::is_family(family));
+    let source_copies = if source_only_first_stage {
+        1
+    } else {
+        count_usize
+    };
+    // Check the canonical request's actual byte cost before allocating or
+    // cloning stages. A small auto form must not cause a large transient host
+    // allocation merely to be refused after expansion.
+    if source_image
+        .as_ref()
+        .map_or(0, Vec::len)
+        .checked_mul(source_copies)
+        .is_none_or(|bytes| bytes > MAX_CHAIN_INLINE_MEDIA_BYTES)
+    {
+        return Err(MoldError::Validation(format!(
+            "auto-expanded authored media per part exceeds the {} byte aggregate budget",
+            MAX_CHAIN_INLINE_MEDIA_BYTES
+        )));
+    }
+
     let mut stages = Vec::with_capacity(count_usize);
     for idx in 0..stage_count {
         // LTX-2 / LTX-2.3 consume the repeated starting image as a soft
@@ -1473,10 +1632,7 @@ fn build_auto_expand_stages(
         // stage's tail. Repeating the opening still therefore restarted every
         // auto-expanded Wan continuation from the same frame instead of
         // producing the promised seamless handoff.
-        let stage_source = if family
-            .is_some_and(|family| family == "wan" || crate::minimax_h3::is_family(family))
-            && idx > 0
-        {
+        let stage_source = if source_only_first_stage && idx > 0 {
             None
         } else {
             source_image.clone()
@@ -1622,6 +1778,7 @@ mod tests {
     #[test]
     fn an_installed_catalog_wan_checkpoint_normalises_on_wans_grid() {
         let installed_wan = || ChainRequest {
+            continue_from: None,
             model: "cv:2041121".into(),
             stages: vec![
                 wan_stage("a paper boat drifting down a rain gutter", 53),
@@ -1653,6 +1810,7 @@ mod tests {
 
         // Wan's grid is still enforced, just wan's and not LTX-2's.
         let off_grid = ChainRequest {
+            continue_from: None,
             stages: vec![wan_stage("one", 50), wan_stage("two", 50)],
             ..installed_wan()
         };
@@ -1693,6 +1851,7 @@ mod tests {
         source_image: Option<Vec<u8>>,
     ) -> ChainRequest {
         ChainRequest {
+            continue_from: None,
             offload: None,
             collection: None,
             tags: None,
@@ -1726,6 +1885,7 @@ mod tests {
 
     fn canonical_request(stages: Vec<ChainStage>, motion_tail_frames: u32) -> ChainRequest {
         ChainRequest {
+            continue_from: None,
             offload: None,
             collection: None,
             tags: None,
@@ -2348,6 +2508,7 @@ mod tests {
     #[test]
     fn chain_script_projects_from_request() {
         let req = ChainRequest {
+            continue_from: None,
             offload: None,
             collection: None,
             tags: None,
@@ -2556,6 +2717,7 @@ mod tests {
 
     fn stage_list_request(stages: Vec<(TransitionMode, u32, Option<u32>)>) -> ChainRequest {
         ChainRequest {
+            continue_from: None,
             offload: None,
             collection: None,
             tags: None,
@@ -2872,10 +3034,203 @@ mod tests {
         assert_eq!(bare.collection, None);
     }
 
-    /// A sequence whose clips carry distinct prompts must not record the
-    /// whole video under clip 1's prompt alone — the gallery row joins
-    /// every clip prompt (one line per clip) so search matches any of them.
-    /// Uniform prompts (auto-expanded chains) keep the single prompt.
+    #[test]
+    fn authored_media_budget_counts_sources_endpoints_and_typed_references_together() {
+        let mut request = canonical_request(vec![make_stage(97)], 17);
+        request.stages[0].source_image = Some(vec![0; 16 * 1024 * 1024]);
+        request.stages[0].keyframes = Some(vec![crate::KeyframeCondition {
+            frame: 96,
+            image: vec![1; 16 * 1024 * 1024],
+            name: None,
+        }]);
+        assert!(
+            request.normalise().is_ok(),
+            "exact aggregate budget is allowed"
+        );
+        let mut request = canonical_request(vec![make_stage(97)], 17);
+        request.stages[0].source_image = Some(vec![0; 32 * 1024 * 1024]);
+        request.stages[0].generation_references = Some(vec![crate::GenerationReference::Audio {
+            media: crate::GenerationReferenceAuthority::Inline { data: vec![1] },
+            provenance: Default::default(),
+            mime_type: "audio/wav".into(),
+            sample_rate: 24000,
+            channels: 1,
+            duration_ms: 1000,
+            sample_count: Some(24000),
+        }]);
+        assert!(
+            request.normalise().is_err(),
+            "all authored input kinds share one bounded part budget"
+        );
+    }
+
+    #[test]
+    fn linked_part_counts_its_external_carry_and_keeps_a_provenance_link() {
+        let request = canonical_request(vec![make_stage(97), make_stage(97)], 17)
+            .normalise()
+            .unwrap();
+        let mut wire = serde_json::to_value(&request).unwrap();
+        wire["continue_from"] =
+            serde_json::json!({ "job_id": "previous-part", "finalize_take": 2 });
+        let linked: ChainRequest = serde_json::from_value(wire).unwrap();
+        let linked = linked.normalise().unwrap();
+        assert_eq!(linked.estimated_total_frames(), 160);
+        let plan = ChainValidationResponse::from_normalized(&linked, vec![]);
+        assert_eq!(plan.stages[0].output_frames, 80);
+        assert_eq!(plan.estimated_total_frames, 160);
+        let metadata =
+            serde_json::to_value(linked.stitched_output_metadata(OutputFormat::Mp4, 160, None))
+                .unwrap();
+        assert_eq!(
+            metadata["chain"]["continue_from"]["job_id"],
+            "previous-part"
+        );
+        assert_eq!(metadata["chain"]["continue_from"]["finalize_take"], 2);
+    }
+
+    #[test]
+    fn linked_part_without_model_carry_keeps_all_frames() {
+        let mut request = canonical_request(vec![make_stage(97), make_stage(97)], 0);
+        request.continue_from = Some(ChainContinuation {
+            job_id: "previous".into(),
+            finalize_take: 1,
+        });
+        let linked = request.normalise().unwrap();
+        assert_eq!(linked.estimated_total_frames(), 194);
+        assert_eq!(linked.stage_contributed_frames(0), Some(97));
+        assert_eq!(linked.stage_contributed_frames(2), None);
+        assert_eq!(
+            ChainScript::from(&linked).chain.continue_from,
+            linked.continue_from
+        );
+    }
+
+    #[test]
+    fn standalone_part_retained_member_budget_matches_gallery_transfer() {
+        let mut request = canonical_request(vec![make_stage(97)], 17);
+        let endpoint = crate::KeyframeCondition {
+            frame: 96,
+            image: vec![1],
+            name: None,
+        };
+        request.stages[0].keyframes =
+            Some(vec![endpoint.clone(); MAX_CHAIN_RETAINED_MEDIA_MEMBERS]);
+        assert!(request.clone().normalise().is_ok());
+        request.stages[0].keyframes.as_mut().unwrap().push(endpoint);
+        assert!(
+            request.normalise().is_err(),
+            "standalone parts must remain transferable too"
+        );
+    }
+
+    #[test]
+    fn auto_expanded_source_budget_is_checked_before_replication() {
+        let per_stage = MAX_CHAIN_INLINE_MEDIA_BYTES / MAX_CHAIN_STAGES;
+        assert!(build_auto_expand_stages(
+            "walk",
+            1297,
+            97,
+            17,
+            Some(vec![0; per_stage]),
+            Some("ltx2")
+        )
+        .is_ok());
+        assert!(
+            build_auto_expand_stages(
+                "walk",
+                1297,
+                97,
+                17,
+                Some(vec![0; per_stage + 1]),
+                Some("ltx2")
+            )
+            .is_err(),
+            "reject projected repeated authority before cloning it into every stage"
+        );
+        for family in ["wan", "minimax-h3"] {
+            let stages = build_auto_expand_stages(
+                "walk",
+                1297,
+                97,
+                17,
+                Some(vec![0; MAX_CHAIN_INLINE_MEDIA_BYTES]),
+                Some(family),
+            )
+            .unwrap();
+            assert!(stages[0].source_image.is_some());
+            assert!(stages
+                .iter()
+                .skip(1)
+                .all(|stage| stage.source_image.is_none()));
+        }
+    }
+
+    #[test]
+    fn linked_part_retained_member_budget_includes_its_owned_tail() {
+        let mut request = canonical_request(vec![make_stage(97)], 17);
+        request.continue_from = Some(ChainContinuation {
+            job_id: "previous".into(),
+            finalize_take: 1,
+        });
+        let keyframe = crate::KeyframeCondition {
+            frame: 96,
+            image: vec![1],
+            name: None,
+        };
+        request.stages[0].keyframes = Some(vec![keyframe.clone(); 47]);
+        assert!(
+            request.clone().normalise().is_ok(),
+            "47 authored members plus 17 tail frames fits the bundle"
+        );
+        request.stages[0].keyframes.as_mut().unwrap().push(keyframe);
+        assert!(
+            request.normalise().is_err(),
+            "derived tail must count toward the existing 64-member bundle limit"
+        );
+    }
+
+    #[test]
+    fn linked_parts_reject_ambiguous_or_unsafe_source_contracts() {
+        let request = canonical_request(vec![make_stage(97), make_stage(97)], 17)
+            .normalise()
+            .unwrap();
+        for (job_id, take) in [
+            ("", 1),
+            ("../previous", 1),
+            ("previous/child", 1),
+            ("previous\\child", 1),
+            ("previous", 0),
+            (" previous", 1),
+        ] {
+            let mut wire = serde_json::to_value(&request).unwrap();
+            wire["continue_from"] = serde_json::json!({"job_id":job_id,"finalize_take":take});
+            let linked: ChainRequest = serde_json::from_value(wire).unwrap();
+            assert!(
+                linked.normalise().is_err(),
+                "accepted link {job_id:?} take {take}"
+            );
+        }
+        for key in ["prompt", "total_frames", "clip_frames", "source_image"] {
+            let mut wire = serde_json::to_value(&request).unwrap();
+            wire["continue_from"] = serde_json::json!({"job_id":"previous","finalize_take":1});
+            wire[key] = match key {
+                "prompt" => serde_json::json!("ambiguous"),
+                "source_image" => serde_json::json!("YQ=="),
+                _ => serde_json::json!(190),
+            };
+            let linked: ChainRequest = serde_json::from_value(wire).unwrap();
+            assert!(
+                linked.normalise().is_err(),
+                "accepted linked auto field {key}"
+            );
+        }
+        let mut wire = serde_json::to_value(&request).unwrap();
+        wire["continue_from"] = serde_json::json!({"job_id":"previous","finalize_take":1});
+        wire["stages"][0]["transition"] = serde_json::json!("cut");
+        let linked: ChainRequest = serde_json::from_value(wire).unwrap();
+        assert!(linked.normalise().is_err());
+    }
+
     #[test]
     fn stitched_stage_metadata_retains_typed_media_provenance_without_payloads() {
         let mut request = auto_expand_request("walk", 190, 97, 17, None)
@@ -2905,6 +3260,33 @@ mod tests {
         let encoded = serde_json::to_string(&metadata).unwrap();
         assert!(!encoded.contains("private endpoint") && !encoded.contains("private reference"));
         assert!(!encoded.contains("cHJpdmF0Z"));
+    }
+
+    #[test]
+    fn stitched_stage_reference_metadata_uses_that_stages_target_duration() {
+        let mut request = stage_list_request(vec![(TransitionMode::Cut, 107, None)]);
+        request.stages[0].generation_references = Some(vec![crate::GenerationReference::Audio {
+            media: crate::GenerationReferenceAuthority::Inline {
+                data: b"retained audio".to_vec(),
+            },
+            provenance: Default::default(),
+            mime_type: "audio/wav".into(),
+            duration_ms: 15_000,
+            sample_rate: 32_000,
+            channels: 2,
+            sample_count: Some(480_000),
+        }]);
+        let metadata = request.stitched_output_metadata(OutputFormat::Mp4, 107, None);
+        let reference = &metadata.chain.unwrap().stages[0].generation_references[0];
+        assert_eq!(
+            reference
+                .prepared_shape
+                .as_ref()
+                .unwrap()
+                .audio_samples_per_channel,
+            Some(142_666),
+            "reference provenance must describe the 107-frame stage, not the maximum H3 clip"
+        );
     }
 
     #[test]

@@ -116,6 +116,9 @@ fn downloadable_role(role: &str) -> bool {
 }
 
 fn reusable_role(role: &str) -> bool {
+    if role.starts_with("chain_continuation_tail:") {
+        return false;
+    }
     if role.starts_with("stage_source:") {
         return role == "stage_source:0";
     }
@@ -442,6 +445,15 @@ fn present_member(member: &mut ResolvedMember, metadata: &mold_core::OutputMetad
                 item_index.map_or(0, |index| index + 1)
             )
         }
+        role if role.starts_with("chain_continuation_tail:") => {
+            image_role = Some("continuation_frame".into());
+            format!(
+                "Incoming continuation frame {}",
+                role.strip_prefix("chain_continuation_tail:")
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .map_or(0, |value| u64::from(value) + 1)
+            )
+        }
         role if role.starts_with("stage_source:") => match role
             .strip_prefix("stage_source:")
             .and_then(|v| v.parse::<u32>().ok())
@@ -457,7 +469,7 @@ fn present_member(member: &mut ResolvedMember, metadata: &mold_core::OutputMetad
             "Source media".into()
         }
     };
-    if role != "keyframes" {
+    if role != "keyframes" && !role.starts_with("chain_continuation_tail:") {
         if let Some(index) = position {
             label.push_str(&format!(" {}", u64::from(index) + 1));
         }
@@ -1525,6 +1537,18 @@ mod tests {
             present_member(&mut member, &metadata);
             assert_eq!(member.member.media_kind.as_deref(), Some(kind));
         }
+        member.member.role = "chain_continuation_tail:4294967295".into();
+        present_member(&mut member, &metadata);
+        assert_eq!(
+            member.member.label.as_deref(),
+            Some("Incoming continuation frame 4294967296")
+        );
+        assert!(!reusable_role(&member.member.role));
+        member.member.role = "chain_continuation_tail:0".into();
+        member.position = "continuation-tail".into();
+        present_member(&mut member, &metadata);
+        assert_eq!(member.member.label.as_deref(), Some("Incoming continuation frame 1"));
+        assert!(!reusable_role(&member.member.role));
     }
     /// Opt-in authentic, encrypted fixture for browser/native visual acceptance.
     /// MOLD_SOURCE_MEDIA_UAT_HOME must name a new absolute directory under /tmp.

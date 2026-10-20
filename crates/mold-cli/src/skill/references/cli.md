@@ -304,6 +304,7 @@ mold info ltx-2-19b-distilled:fp8 --host workstation
 
 Save this complete example as `shot.toml`. Replace the model and recipe values
 with ones supported by that host; each stage must fit its frame grid and cap.
+Copy the entire `[chain]` block: `strength` and `motion_tail_frames` are required.
 
 ```toml
 schema = "mold.chain.v1"
@@ -330,8 +331,9 @@ frames = 49
 transition = "cut"
 ```
 
-Validate, then submit to the same host. Validation and dry-run are local
-planning; they do not prove that the host can load or run the model.
+Validate, then submit to the same host. Validation and ordinary dry-run inspect
+the script locally. `--continue-from` also reads the predecessor on that host;
+none of these checks prove that the host can load or run the model.
 
 ```bash
 mold chain validate shot.toml
@@ -358,12 +360,58 @@ mold jobs show job-abc123 --script --host workstation
 mold jobs resume job-abc123 --host workstation
 ```
 
+Exported scripts quote seeds above TOML's signed-integer limit. Keep those
+quotes when editing so the full seed survives.
+
 Resume a paused job; a running job needs no resume. Repeating `--prompt` is
 shorter for uniform smooth clips with no per-stage inputs:
 
 ```bash
 mold run ltx-2-19b-distilled:fp8 --prompt "a cat wakes on a windowsill" --prompt "it stretches" --frames-per-clip 49 --host workstation --output cat.mp4
 ```
+
+Each part accepts at most 16 stages. For longer work, publish separate linked
+parts; there is no overall part-count or duration ceiling. Each part is its own
+MP4, so memory and container size stay bounded. This is not one infinite MP4.
+Wait for part 1 to be `completed`, then write `next.toml` with the **same model identity,
+canvas, fps, carry and audio settings**, new prompts, and a first `smooth` stage.
+When the model carries context, omit authored first source images and frame-0
+keyframes that would conflict with the incoming tail. Independent-clip models
+may use their ordinary authored inputs. Continue on the same host:
+
+```bash
+mold jobs show PART1_JOB_ID --json --host plato
+mold run --script next.toml --continue-from PART1_JOB_ID --dry-run --host plato
+mold run --script next.toml --continue-from PART1_JOB_ID --host plato --output /storage/mold/uat/part2.mp4
+```
+
+Run that command on Plato if the CLI copy must be in Plato's `/storage/mold/uat`.
+The server publishes each part in its normal `MOLD_HOME` Library automatically.
+`--continue-from` requires `--script` and a reachable server, including dry-run;
+it pins the latest completed take. A changed predecessor revision is refused. Older servers without linked-part
+capability are refused before submission; update the server first.
+To pin the latest completed take explicitly, omit the flag and add this table
+after the chain settings and before `[[stage]]` (replace `1` with the latest take):
+
+```toml
+[chain.continue_from]
+job_id = "PART1_JOB_ID"
+finalize_take = 1
+```
+
+A continuation job link is host-bound: exported scripts still require that
+predecessor on the same host. A retake or amend invalidates that authority until
+a new latest take completes.
+When reusing an exported script, remove its old `[chain.continue_from]` table
+before selecting a new predecessor with the flag. Do not combine the flag with
+a different TOML job or take. The server privately
+copies the last tail before accepting the new part, so previous-job garbage
+collection cannot remove the new part's source. Prior clips are not rerendered
+or reencoded. Only new clips are in part 2. Smooth continuation carries LTX-2
+latent motion, or the last RGB frame on H3 FL2VA and image-conditioned Wan;
+it joins independent clips for H3 Ref2VA, text-only Wan and legacy LTX-Video.
+Independent clips do not gain temporal continuity from linking. Dry-run counts
+the first carried boundary trim; each model's frame grid still applies.
 
 Transition behavior depends on the model:
 
@@ -390,7 +438,8 @@ Auto-chained one-shots do not appear in authored `mold jobs list` history.
 Save this as `ref-chain.toml` beside an existing `hero.png`. Inspect the exact
 model on the target host first; this example uses its reviewed compact Turbo
 recipe. Paths resolve relative to the script and are probed before submission.
-The CLI inlines at most 32 MiB of reference media across the whole chain.
+The CLI inlines at most 32 MiB of authored media per part (source images, keyframes and references combined).
+Keep the complete `[chain]` block and use the selected `--host` on every remote command.
 
 ```toml
 schema = "mold.chain.v1"
@@ -438,7 +487,9 @@ mold run --script ref-chain.toml --host workstation --output ref-chain.mp4
 `retake` changes one stage. To change the stage list, export the effective
 script, edit it, and amend with the complete replacement list. The host keeps
 unchanged leading clips. Stage indices start at zero: stage 1 is the second
-clip. Model, dimensions and container require a new job. `show --script`
+clip. Model, dimensions, container and continuation authority require a new job.
+A linked part also keeps its fps, carry and audio settings fixed when amended.
+`show --script`
 explicitly exports retained input bytes, so the edited script stays portable.
 H3 also publishes its individual clips, tagged with the parent chain ID.
 

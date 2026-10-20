@@ -1824,22 +1824,26 @@ impl QueueMediaStore {
         let mut reader = BufReader::new(file);
         let mut magic = [0; V2_MAGIC.len()];
         reader.read_exact(&mut magic).map_err(map_truncation)?;
-        if &magic != V2_MAGIC {
-            return Err(QueueMediaError::ProjectionUnavailable(
-                QueueMediaProjectionFailure::LegacyV1,
-            ));
-        }
         let index = u32::try_from(index).map_err(|_| QueueMediaError::NotFound)?;
         #[cfg(test)]
         self.gallery_member_reads.fetch_add(1, Ordering::SeqCst);
-        let mut decoded = self.decode_v2_from_reader(
-            &pin.media_set,
-            reader,
-            None,
-            true,
-            Some((index, max_bytes)),
-            true,
-        )?;
+        let mut decoded = if &magic == V2_MAGIC {
+            self.decode_v2_from_reader(
+                &pin.media_set,
+                reader,
+                None,
+                true,
+                Some((index, max_bytes)),
+                true,
+            )?
+        } else if &magic == MAGIC {
+            // Gallery reads need authenticated ownership, not a scheduling
+            // projection. Legacy chain sets remain readable without upgrading
+            // their format or granting them runtime admission authority.
+            self.decode_v1_from_reader(&pin.media_set, reader, None, Some((index, max_bytes)))?
+        } else {
+            return Err(QueueMediaError::Corrupt("unknown bundle format".into()));
+        };
         if decoded.manifest != manifest || self.gallery_pin_version(pin)? != version {
             return Err(QueueMediaError::Authentication);
         }
@@ -2852,6 +2856,20 @@ impl QueueMediaStore {
         if &magic != MAGIC {
             return Err(QueueMediaError::Corrupt("unknown bundle format".into()));
         }
+        self.decode_v1_from_reader(media_set, reader, output, None)
+    }
+
+    /// Decode the complete legacy stream, optionally retaining one bounded
+    /// gallery member in memory. No selected bytes escape before the final
+    /// record and complete manifest have authenticated every sibling.
+    fn decode_v1_from_reader(
+        &self,
+        media_set: &MediaSetRef,
+        mut reader: BufReader<File>,
+        output: Option<&Path>,
+        selected_index: Option<(u32, u64)>,
+    ) -> Result<DecodedBundle, QueueMediaError> {
+        let mut selected_payload = selected_index.map(|_| SensitiveBytes(Vec::new()));
         let mut nonce_bytes = [0_u8; NONCE_PREFIX_BYTES];
         reader
             .read_exact(&mut nonce_bytes)
@@ -2905,7 +2923,24 @@ impl QueueMediaStore {
             }
             match plaintext.first().copied() {
                 Some(b'D') if !manifest_started => {
-                    consume_data_record(&plaintext, output, &mut current, &mut observations)?
+                    consume_data_record(&plaintext, output, &mut current, &mut observations)?;
+                    if let Some((selected, limit)) = selected_index {
+                        let file = current
+                            .as_ref()
+                            .expect("data record initialized observation");
+                        if file.index == selected {
+                            if file.size_bytes > limit {
+                                return Err(QueueMediaError::Corrupt(
+                                    "selected media exceeds its bounded reader".into(),
+                                ));
+                            }
+                            selected_payload
+                                .as_mut()
+                                .expect("selected payload initialized")
+                                .0
+                                .extend_from_slice(&plaintext[DATA_HEADER_BYTES..]);
+                        }
+                    }
                 }
                 Some(b'M') => {
                     manifest_started = true;
@@ -2926,10 +2961,16 @@ impl QueueMediaStore {
         let wire: WireManifest = serde_json::from_slice(&manifest_bytes)?;
         let manifest = validate_manifest(media_set, wire, &observations, output)?;
         manifest_bytes.zeroize();
-        Ok(DecodedBundle {
-            manifest,
-            memory: BTreeMap::new(),
-        })
+        let mut memory = BTreeMap::new();
+        if let Some((selected, _)) = selected_index {
+            if manifest.entries.get(selected as usize).is_some() {
+                memory.insert(
+                    selected,
+                    selected_payload.expect("selected payload initialized"),
+                );
+            }
+        }
+        Ok(DecodedBundle { manifest, memory })
     }
 
     fn decode_v2_from_path(
@@ -5116,6 +5157,104 @@ mod tests {
             before
         );
         assert!(store.read_gallery_member(&pin, 1, 1).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_gallery_selected_member_reads_survive_queue_deletion_without_staging_siblings() {
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let selected = media_bytes(CHUNK_BYTES + 17);
+        let reference = store
+            .seal(
+                "owner",
+                "legacy-selected",
+                vec![
+                    SealMedia::bytes(
+                        "stage_source:0",
+                        "authored-source",
+                        vec![7; CHUNK_BYTES * 2],
+                    ),
+                    SealMedia::bytes("stage_source:1", "authored-source", selected.clone()),
+                    SealMedia::bytes("empty", "scalar", Vec::new()),
+                ],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.open_projection_from_reader(
+                &reference,
+                &mut std::io::Cursor::new(bundle_bytes(&store, &reference))
+            ),
+            Err(QueueMediaError::ProjectionUnavailable(
+                QueueMediaProjectionFailure::LegacyV1
+            ))
+        ));
+        let pin = store
+            .pin_for_gallery_item(&reference, &gallery_pin_id(b"legacy-selected"))
+            .unwrap();
+        store.delete(&reference).unwrap();
+        let staging_before = fs::read_dir(&store.runtime_staging.root).unwrap().count();
+        assert_eq!(
+            store
+                .read_gallery_member(&pin, 1, selected.len() as u64)
+                .unwrap(),
+            selected
+        );
+        assert!(store
+            .read_gallery_member(&pin, 1, selected.len() as u64 - 1)
+            .is_err());
+        assert!(store.read_gallery_member(&pin, 3, u64::MAX).is_err());
+        assert_eq!(
+            store.read_gallery_member(&pin, 2, 0).unwrap(),
+            Vec::<u8>::new()
+        );
+        assert_eq!(
+            fs::read_dir(&store.runtime_staging.root).unwrap().count(),
+            staging_before
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_gallery_selected_reads_authenticate_siblings_final_record_and_owner() {
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let reference = store
+            .seal(
+                "owner",
+                "legacy-auth",
+                vec![
+                    SealMedia::bytes("source_image", "scalar", b"selected secret".to_vec()),
+                    SealMedia::bytes("source_video", "scalar", media_bytes(CHUNK_BYTES + 17)),
+                ],
+            )
+            .unwrap();
+        let pin = store
+            .pin_for_gallery_item(&reference, &gallery_pin_id(b"legacy-auth"))
+            .unwrap();
+        assert_eq!(
+            store.read_gallery_member(&pin, 0, 1024).unwrap(),
+            b"selected secret"
+        );
+        let mut wrong_owner = pin.clone();
+        wrong_owner.media_set.owner_id = "other-owner".into();
+        assert!(store.read_gallery_member(&wrong_owner, 0, 1024).is_err());
+        let pin_path = store.gallery_pin_path(&pin);
+        let original = fs::read(&pin_path).unwrap();
+        for offset in [
+            MAGIC.len() + NONCE_PREFIX_BYTES + CHUNK_BYTES / 2,
+            original.len() - 1,
+        ] {
+            let mut corrupted = original.clone();
+            corrupted[offset] ^= 1;
+            fs::write(&pin_path, &corrupted).unwrap();
+            assert!(store.read_gallery_member(&pin, 0, 1024).is_err());
+        }
+        fs::write(&pin_path, &original).unwrap();
+        assert_eq!(
+            store.read_gallery_member(&pin, 0, 1024).unwrap(),
+            b"selected secret"
+        );
     }
 
     #[test]

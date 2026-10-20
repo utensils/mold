@@ -5421,16 +5421,13 @@ fn run_real_distilled_stage(
         let update_start = Instant::now();
         // Keep the hot denoise loop fully device-side unless step-level debug
         // inspection is explicitly enabled.
-        if should_inspect_step_velocity(debug_stage) {
-            let stage =
-                debug_stage.expect("debug stage should be present when inspection is enabled");
-            let video_velocity = video_velocity
-                .as_ref()
-                .context("video velocity missing for debug inspection")?;
-            let video_velocity = video_velocity.to_dtype(DType::F32)?;
-            log_tensor_stats("video_velocity", &video_velocity)?;
-            eprintln!("[ltx2-debug] {stage} step={step_idx} sigma={sigma:.6}");
-        }
+        inspect_stage_step_output(
+            debug_stage,
+            step_idx,
+            sigma,
+            video_velocity.as_ref(),
+            &video_denoised,
+        )?;
         if uses_video_freeze_mask {
             video_denoised = blend_conditioned_denoised(
                 &video_denoised,
@@ -6032,6 +6029,28 @@ fn mix_clean_latents_with_noise(
         .affine(clean_scale, 0.0)?
         .broadcast_add(&noise.affine(noise_scale, 0.0)?)
         .map_err(Into::into)
+}
+
+fn inspect_stage_step_output(
+    debug_stage: Option<&str>,
+    step_idx: usize,
+    sigma: f32,
+    video_velocity: Option<&Tensor>,
+    video_denoised: &Tensor,
+) -> Result<()> {
+    if should_inspect_step_velocity(debug_stage) {
+        let stage = debug_stage.expect("debug stage present when inspection is enabled");
+        // Upstream LTX-2 e98f6d9, ltx_pipelines/utils/denoisers.py:202-210,
+        // returns guided denoised predictions directly. That branch has no
+        // single raw velocity; diagnostics must inspect the output it owns.
+        let (label, output) = match video_velocity {
+            Some(velocity) => ("video_velocity", velocity),
+            None => ("video_denoised", video_denoised),
+        };
+        log_tensor_stats(label, &output.to_dtype(DType::F32)?)?;
+        eprintln!("[ltx2-debug] {stage} step={step_idx} sigma={sigma:.6}");
+    }
+    Ok(())
 }
 
 fn should_inspect_step_velocity(debug_stage: Option<&str>) -> bool {
@@ -8786,8 +8805,8 @@ mod tests {
         build_static_multimodal_guidance_batch, build_video_conditioning_self_attention_mask,
         clean_latents_for_conditioning, convert_velocity_to_x0, convert_x0_to_velocity,
         decoded_video_to_frames, effective_native_guidance_scale, emit_denoise_progress,
-        guided_velocity_from_cfg, initialize_video_stage_latents, keyframe_only_conditioning,
-        ltx2_video_transformer_config, plan_stage2_tiles_with_policy,
+        guided_velocity_from_cfg, initialize_video_stage_latents, inspect_stage_step_output,
+        keyframe_only_conditioning, ltx2_video_transformer_config, plan_stage2_tiles_with_policy,
         reapply_stage_video_conditioning, resize_tail_frames_to_pixel_shape,
         should_inspect_step_velocity, source_image_only_conditioning, stage2_carried_audio,
         strip_appended_video_conditioning, timestep_from_sigma_and_mask,
@@ -10490,6 +10509,18 @@ mod tests {
         let values = restored.flatten_all().unwrap().to_vec1::<f32>().unwrap();
         assert!((values[0] - 2.0).abs() < 1e-3);
         assert!((values[1] + 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn multimodal_guidance_debug_inspection_accepts_denoised_output() {
+        let denoised = Tensor::new(&[1.0_f32, 2.0], &Device::Cpu).unwrap();
+        inspect_stage_step_output(Some("stage1"), 0, 1.0, None, &denoised)
+            .expect("multimodal guidance returns denoised output without one raw velocity");
+        inspect_stage_step_output(None, 0, 1.0, None, &denoised).unwrap();
+        let velocity = Tensor::new(&[3.0_f32, 4.0], &Device::Cpu).unwrap();
+        inspect_stage_step_output(Some("stage2"), 0, 1.0, Some(&velocity), &denoised).unwrap();
+        assert_eq!(denoised.to_vec1::<f32>().unwrap(), vec![1.0, 2.0]);
+        assert_eq!(velocity.to_vec1::<f32>().unwrap(), vec![3.0, 4.0]);
     }
 
     #[test]

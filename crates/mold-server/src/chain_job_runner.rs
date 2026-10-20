@@ -720,6 +720,14 @@ pub(crate) fn create_job_with_params(
     let layout = JobDirLayout::new(job_dir.clone());
     layout.ensure_root()?;
 
+    if params.request.continue_from.is_some() {
+        let frozen = params
+            .frozen_model
+            .as_ref()
+            .context("linked part requires a frozen model")?;
+        crate::chain_continuation::load(&job_dir, &params.request, frozen)?;
+    }
+
     let request = crate::chain_source_media::persist_scrubbed(
         jobs_root,
         &job_dir,
@@ -771,6 +779,124 @@ pub(crate) fn create_job_with_params(
     }
     source_media_rollback.commit();
     Ok(row)
+}
+
+pub(crate) fn create_job_with_prepared_continuation(
+    db: &MetadataDb,
+    jobs_root: &Path,
+    params: CreateJobParams,
+    prepared: &crate::chain_continuation::PreparedContinuation,
+) -> anyhow::Result<ChainJobRow> {
+    if chain_jobs::get_job(db, &params.id)?.is_some() {
+        bail!("continuation successor already exists");
+    }
+    std::fs::create_dir_all(jobs_root)?;
+    let job_dir = jobs_root.join(&params.id);
+    let marker = prepare_continuation_creation_directory(jobs_root, &job_dir, &params, prepared)?;
+    let result = (|| {
+        crate::chain_continuation::persist(&job_dir, prepared)?;
+        create_job_with_params(db, jobs_root, params)
+    })();
+    if result.is_err() {
+        let released = crate::chain_source_media::release_all(jobs_root, &job_dir).is_ok();
+        let unindexed = job_dir
+            .file_name()
+            .and_then(|id| id.to_str())
+            .is_some_and(|id| chain_jobs::delete_job_not_running(db, id).is_ok());
+        if released && unindexed {
+            let _ = remove_unindexed_continuation_directory(jobs_root, &job_dir, &marker);
+        }
+    }
+    result
+}
+
+/// Called only while the successor mutation lock is held and no DB row exists.
+/// An atomic empty-directory marker binds all uncommitted disk state to this
+/// exact request and prepared carry. It survives process death before indexing.
+fn prepare_continuation_creation_directory(
+    jobs_root: &Path,
+    job_dir: &Path,
+    params: &CreateJobParams,
+    prepared: &crate::chain_continuation::PreparedContinuation,
+) -> anyhow::Result<String> {
+    let identity = serde_json::to_vec(&(
+        &params.id,
+        params.ephemeral,
+        &params.request,
+        &params.frozen_model,
+        prepared.binding_sha256()?,
+    ))?;
+    let marker = format!(".creating-{:x}", Sha256::digest(&identity));
+    match std::fs::symlink_metadata(job_dir) {
+        Ok(metadata) => {
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                bail!("unindexed continuation path is not an owned directory");
+            }
+            crate::batch_transaction::verify_directory_no_follow(job_dir)?;
+            let entries = std::fs::read_dir(job_dir)?.collect::<Result<Vec<_>, _>>()?;
+            if !entries.is_empty() {
+                let expected = job_dir.join(&marker);
+                let metadata = std::fs::symlink_metadata(&expected).context(
+                    "unindexed continuation directory belongs to another or unknown request",
+                )?;
+                if !metadata.is_dir()
+                    || metadata.file_type().is_symlink()
+                    || std::fs::read_dir(&expected)?.next().is_some()
+                    || entries.iter().any(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".creating-")
+                            && entry.file_name() != marker.as_str()
+                    })
+                {
+                    bail!("unindexed continuation creation marker is invalid or mismatched");
+                }
+                crate::chain_source_media::release_all(jobs_root, job_dir)?;
+            }
+            // An empty root is the one interruption window before marker mkdir.
+            // No indexed job can be deleted here; callers hold its mutation lock.
+            remove_unindexed_continuation_directory(jobs_root, job_dir, &marker)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    crate::batch_transaction::create_private_directory_no_follow(job_dir)?;
+    crate::batch_transaction::create_private_directory_no_follow(&job_dir.join(&marker))?;
+    crate::dir_sync::sync_directory(job_dir)?;
+    crate::dir_sync::sync_directory(jobs_root)?;
+    Ok(marker)
+}
+
+fn remove_unindexed_continuation_directory(
+    jobs_root: &Path,
+    job_dir: &Path,
+    marker: &str,
+) -> anyhow::Result<()> {
+    crate::batch_transaction::verify_directory_no_follow(job_dir)?;
+    // Keep ownership discoverable through interrupted recursive deletion. Once
+    // the marker is removed the root is empty, which creation also recognizes.
+    for entry in std::fs::read_dir(job_dir)? {
+        let entry = entry?;
+        if entry.file_name() == marker {
+            continue;
+        }
+        let kind = entry.file_type()?;
+        if kind.is_dir() && !kind.is_symlink() {
+            std::fs::remove_dir_all(entry.path())?;
+        } else {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    crate::dir_sync::sync_directory(job_dir)?;
+    match std::fs::remove_dir(job_dir.join(marker)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    std::fs::remove_dir(job_dir)?;
+    crate::dir_sync::sync_directory(jobs_root)?;
+    Ok(())
 }
 
 /// Park all pre-existing queued/running jobs, then repair rows from manifests
@@ -2014,7 +2140,8 @@ fn execute_stage(
 ///
 /// - `segment.mp4` holds every frame the engine emitted — no leading Smooth
 ///   trim, no incoming Fade blend, no trailing fade reservation.
-/// - The audio sidecar is the FULL untrimmed track.
+/// - The audio sidecar is the full stage timeline, with native PCM trimmed or
+///   zero-padded at the end to match the raw video's duration.
 /// - The trailing motion-tail PNGs are ALWAYS written to `tail/` when the
 ///   engine produced a tail — even when the next transition isn't Smooth and
 ///   even for the last stage. They are the bit-exact carry source for
@@ -2054,18 +2181,33 @@ fn write_stage_artifacts(
     if frames.is_empty() {
         bail!("stage {stage_idx} produced no frames");
     }
+    let mut audio = outcome.audio.clone();
+    if let Some(track) = audio.as_mut() {
+        conform_audio_to_video_window(
+            track,
+            0,
+            u32::try_from(frames.len()).context("chain stage frame count overflowed")?,
+            effective.fps,
+        )
+        .with_context(|| format!("conforming chain stage {stage_idx} native audio"))?;
+    }
 
     let segment_bytes = video_enc::encode_mp4(frames, effective.fps)
         .with_context(|| format!("encoding chain stage {stage_idx} segment"))?;
     #[cfg(feature = "mp4")]
-    let segment_bytes = match outcome.audio.as_ref() {
-        Some(track) => mold_inference::av_media::attach_aac_track_to_mp4_bytes(
-            &segment_bytes,
-            &track.interleaved_samples,
-            track.sample_rate,
-            track.channels,
-        )
-        .with_context(|| format!("muxing chain stage {stage_idx} audio"))?,
+    let segment_bytes = match audio.as_ref() {
+        Some(track) => {
+            mold_inference::av_media::mux_aac_track_to_mp4_bytes(
+                &segment_bytes,
+                &track.interleaved_samples,
+                track.sample_rate,
+                track.channels,
+                chain_mux_options(&effective.model),
+                &|_| false,
+            )
+            .with_context(|| format!("muxing chain stage {stage_idx} audio"))?
+            .bytes
+        }
         None => segment_bytes,
     };
     write_file(&layout.segment_path(stage_idx), &segment_bytes)?;
@@ -2077,7 +2219,7 @@ fn write_stage_artifacts(
         0
     };
 
-    let audio_rel = if let Some(track) = outcome.audio.as_ref() {
+    let audio_rel = if let Some(track) = audio.as_ref() {
         write_audio_sidecar(&layout.audio_path(stage_idx), track)?;
         Some(layout.audio_rel(stage_idx))
     } else {
@@ -2087,7 +2229,11 @@ fn write_stage_artifacts(
     write_preview_jpeg(&layout.preview_path(stage_idx), frames.last().unwrap())?;
 
     let contributed = stage_contributed_frames(
-        stage_idx as usize,
+        if stage_idx == 0 && effective.continue_from.is_some() {
+            1
+        } else {
+            stage_idx as usize
+        },
         frames.len() as u32,
         stage.transition,
         next.map(|next| next.transition),
@@ -2122,7 +2268,19 @@ fn resume_carry_from_disk(
     stage_idx: u32,
 ) -> anyhow::Result<Option<ChainTail>> {
     if stage_idx == 0 {
-        return Ok(None);
+        let request = effective_request(manifest)?;
+        return if request.continue_from.is_some() {
+            crate::chain_continuation::load(
+                job_dir,
+                &request,
+                manifest
+                    .frozen_model
+                    .as_ref()
+                    .context("linked part has no frozen model")?,
+            )
+        } else {
+            Ok(None)
+        };
     }
     let effective = effective_request(manifest)?;
     let Some(stage) = effective.stages.get(stage_idx as usize) else {
@@ -2192,8 +2350,21 @@ fn finalize_job(
         .as_ref()
         .as_ref()
         .ok_or_else(|| anyhow!("chain job finalizer invoked without metadata DB"))?;
-    let effective = effective_request(manifest)?;
+    // Endpoint provenance hashes the authenticated input bytes, never the
+    // scrubbed manifest placeholders. Hydrate before taking gallery ownership;
+    // retake prompt/seed overlays retain the canonical media revision.
+    let effective = effective_request_with_media(manifest, &job.job_dir)?;
     let layout = JobDirLayout::new(job.job_dir.clone());
+    if effective.continue_from.is_some() {
+        crate::chain_continuation::load(
+            &job.job_dir,
+            &effective,
+            manifest
+                .frozen_model
+                .as_ref()
+                .context("linked part has no frozen model")?,
+        )?;
+    }
     let want_audio = effective.enable_audio == Some(true);
     let total_frames: u32 = manifest
         .stage_status
@@ -2238,7 +2409,16 @@ fn finalize_job(
         if want_audio {
             if let Some(audio_rel) = stage_status.audio.as_ref() {
                 let audio_path = safe_join_manifest_rel(layout.root(), audio_rel)?;
-                let track = read_audio_sidecar(&audio_path)?;
+                let mut track = read_audio_sidecar(&audio_path)?;
+                // Existing cached stages may predate native PCM alignment.
+                // Repair their timeline before any boundary trim or fade.
+                conform_audio_to_video_window(
+                    &mut track,
+                    0,
+                    u32::try_from(frames.len()).context("chain stage frame count overflowed")?,
+                    effective.fps,
+                )
+                .with_context(|| format!("conforming cached chain stage {idx} audio"))?;
                 match audio_format {
                     None => audio_format = Some((track.sample_rate, track.channels)),
                     Some((sample_rate, channels))
@@ -2255,13 +2435,15 @@ fn finalize_job(
                     }
                 }
                 audio = Some(track);
+            } else {
+                bail!("audio-enabled chain stage {idx} has no audio sidecar");
             }
         }
 
         let incoming_fade_tail = pending_fade_tail.take();
 
         if stage_status.raw_segment {
-            if idx > 0 {
+            if idx > 0 || effective.continue_from.is_some() {
                 match stage.transition {
                     TransitionMode::Smooth => {
                         let drop = effective.motion_tail_frames as usize;
@@ -2335,6 +2517,16 @@ fn finalize_job(
         // successor is deliberately dropped — the blend was baked into that
         // successor's segment by `maybe_reencode_next_after_fade`.
 
+        if let Some(track) = audio.as_mut() {
+            // Use cumulative rational boundaries so fractional samples per
+            // frame cannot shift later clips after repeated seams.
+            conform_audio_to_video_window(
+                track,
+                frame_count,
+                u32::try_from(frames.len()).context("chain emitted frame count overflowed")?,
+                effective.fps,
+            )?;
+        }
         if encoder.is_none() {
             encoder = Some(video_enc::Mp4StreamEncoder::new(
                 metadata.width,
@@ -2948,6 +3140,17 @@ pub fn apply_amend(
     let candidate = amend_candidate_request(&old_effective, req)
         .normalise()
         .map_err(|e| anyhow!("{CHAIN_JOB_AMEND_INVALID}: {e}"))?;
+    if candidate.continue_from.is_some() {
+        crate::chain_continuation::load(
+            &job_dir,
+            &candidate,
+            manifest
+                .frozen_model
+                .as_ref()
+                .context("linked part has no frozen model")?,
+        )
+        .map_err(|error| anyhow!("{CHAIN_JOB_AMEND_INVALID}: {error}"))?;
+    }
     if !candidate.output_format.is_video() {
         bail!(
             "{CHAIN_JOB_AMEND_INVALID}: {:?} is not a video output format",
@@ -3047,18 +3250,9 @@ pub fn apply_amend(
     // stages keep their stored values — the compatibility check above
     // guarantees their baked boundaries still match the plan.
     for idx in 0..preserved as usize {
-        let recomputed = {
-            let stage = &candidate.stages[idx];
-            let next = candidate.stages.get(idx + 1);
-            stage_contributed_frames(
-                idx,
-                stage.frames,
-                stage.transition,
-                next.map(|next| next.transition),
-                next.and_then(|next| next.fade_frames),
-                candidate.motion_tail_frames,
-            )
-        };
+        let recomputed = candidate
+            .stage_contributed_frames(idx)
+            .context("missing preserved stage")?;
         let status = &mut manifest.stage_status[idx];
         if status.raw_segment && status.frames_emitted.is_some() {
             status.frames_emitted = Some(recomputed);
@@ -4156,15 +4350,43 @@ fn legacy_fade_boundary_out(
 }
 
 #[cfg(feature = "mp4")]
-fn chain_mux_options(model: &str) -> mold_inference::av_media::AacMuxOptions {
-    if mold_core::minimax_h3::task_for_model(model).is_some() {
-        // H3's 32 kHz / 24 fps clock is fractional. Align once against the
-        // final video timeline, including accumulated seam rounding and AAC
-        // packet padding, as the ordinary H3 mux does.
-        mold_inference::av_media::AacMuxOptions::match_video()
-    } else {
-        mold_inference::av_media::AacMuxOptions::legacy_compatible()
+fn chain_mux_options(_model: &str) -> mold_inference::av_media::AacMuxOptions {
+    // Every chain owns one complete video timeline. Native clip lengths and
+    // AAC packet padding must not shorten or extend that delivery timeline.
+    mold_inference::av_media::AacMuxOptions::match_video()
+}
+
+/// Fit a stage to its exact position on one shared video clock. The preserved
+/// prefix remains byte-for-byte identical; only trailing samples are removed
+/// or zero-filled. Rounding cumulative boundaries prevents per-stage drift.
+fn conform_audio_to_video_window(
+    track: &mut NativeAudioTrack,
+    first_frame: u32,
+    frames: u32,
+    fps: u32,
+) -> anyhow::Result<()> {
+    if track.channels == 0 || track.sample_rate == 0 || fps == 0 {
+        bail!("chain audio requires nonzero sample rate, channels and fps");
     }
+    let channels = usize::from(track.channels);
+    if !track.interleaved_samples.len().is_multiple_of(channels) {
+        bail!("chain audio has an incomplete interleaved sample frame");
+    }
+    let boundary = |frame: u64| {
+        if frame == 0 {
+            Ok(0)
+        } else {
+            mold_inference::av_media::aligned_sample_count(frame, fps, track.sample_rate)
+        }
+    };
+    let end_frame = u64::from(first_frame) + u64::from(frames);
+    let samples_per_channel = boundary(end_frame)? - boundary(u64::from(first_frame))?;
+    let wanted = usize::try_from(samples_per_channel)
+        .ok()
+        .and_then(|samples| samples.checked_mul(channels))
+        .context("chain audio timeline sample count overflowed")?;
+    track.interleaved_samples.resize(wanted, 0.0);
+    Ok(())
 }
 
 fn samples_for_frames(track: &NativeAudioTrack, frames: u32, fps: u32) -> usize {
@@ -4380,8 +4602,193 @@ mod tests {
         assert_eq!(muxed.report.padded_samples_per_channel, 1);
         assert_eq!(
             chain_mux_options("ltx-2-19b-distilled:fp8"),
-            mold_inference::av_media::AacMuxOptions::legacy_compatible()
+            mold_inference::av_media::AacMuxOptions::match_video()
         );
+    }
+
+    #[test]
+    fn chain_audio_conform_preserves_samples_and_only_trims_or_pads_the_tail() {
+        let mut short = NativeAudioTrack {
+            interleaved_samples: vec![0.25; 23_000 * 2],
+            sample_rate: 24_000,
+            channels: 2,
+        };
+        conform_audio_to_video_window(&mut short, 0, 25, 24).unwrap();
+        assert_eq!(short.interleaved_samples.len(), 25_000 * 2);
+        assert!(short.interleaved_samples[..23_000 * 2]
+            .iter()
+            .all(|sample| *sample == 0.25));
+        assert!(short.interleaved_samples[23_000 * 2..]
+            .iter()
+            .all(|sample| *sample == 0.0));
+        let mut long = NativeAudioTrack {
+            interleaved_samples: vec![0.75; 26_000 * 2],
+            sample_rate: 24_000,
+            channels: 2,
+        };
+        conform_audio_to_video_window(&mut long, 0, 25, 24).unwrap();
+        assert_eq!(long.interleaved_samples, vec![0.75; 25_000 * 2]);
+    }
+
+    #[test]
+    fn chain_audio_conform_rounds_global_boundaries_without_fractional_seam_drift() {
+        let mut timeline = Vec::new();
+        let mut frame_start = 0;
+        for index in 0..16 {
+            let frame_count = if index == 0 { 107 } else { 106 };
+            let mut track = NativeAudioTrack {
+                interleaved_samples: vec![index as f32 + 1.0; 143_000 * 2],
+                sample_rate: 32_000,
+                channels: 2,
+            };
+            conform_audio_to_video_window(&mut track, frame_start, frame_count, 24).unwrap();
+            let wanted_start = if frame_start == 0 {
+                0
+            } else {
+                mold_inference::av_media::aligned_sample_count(u64::from(frame_start), 24, 32_000)
+                    .unwrap() as usize
+                    * 2
+            };
+            assert_eq!(timeline.len(), wanted_start);
+            assert_eq!(track.interleaved_samples[0], index as f32 + 1.0);
+            timeline.extend(track.interleaved_samples);
+            frame_start += frame_count;
+            assert_eq!(
+                timeline.len() as u64,
+                mold_inference::av_media::aligned_sample_count(u64::from(frame_start), 24, 32_000)
+                    .unwrap()
+                    * 2
+            );
+        }
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn chain_audio_missing_expected_sidecar_fails_but_legacy_silent_chain_remains_valid() {
+        for expected in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = db();
+            let mut request = request(vec![TransitionMode::Smooth]);
+            request.enable_audio = expected.then_some(true);
+            let job_dir = dir.path().join("job");
+            let row = persist_job(
+                &db,
+                &job_dir,
+                "audio-presence",
+                &request,
+                ChainJobState::Running,
+            );
+            let layout = JobDirLayout::new(job_dir.clone());
+            let mut manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+            write_stage_artifacts(&layout, &mut manifest, 0, &outcome(20), &request).unwrap();
+            let deps = deps(
+                db,
+                dir.path().join("jobs"),
+                Arc::new(FakeExecutor {
+                    calls: AtomicUsize::new(0),
+                    cancel_on_progress: AtomicBool::new(false),
+                }),
+                Arc::new(FakeProbe(AtomicUsize::new(0))),
+            );
+            let result = finalize_job(&deps, &row, &mut manifest);
+            if expected {
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("has no audio sidecar"));
+            } else {
+                result.unwrap().unwrap();
+                assert!(
+                    !mold_inference::ltx2::media::probe_video(&job_dir.join("final/output-1.mp4"))
+                        .unwrap()
+                        .has_audio
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn chain_audio_short_native_tracks_align_stage_sidecars_and_cached_final_av_timeline() {
+        for (sample_rate, frames_per_stage) in [(24_000u32, 25u32), (32_000, 107)] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = db();
+            let mut request = request(vec![TransitionMode::Smooth, TransitionMode::Smooth]);
+            request.fps = 24;
+            request.enable_audio = Some(true);
+            request
+                .stages
+                .iter_mut()
+                .for_each(|stage| stage.frames = frames_per_stage);
+            let job_dir = dir.path().join("job");
+            let row = persist_job(
+                &db,
+                &job_dir,
+                "audio-clock",
+                &request,
+                ChainJobState::Running,
+            );
+            let layout = JobDirLayout::new(job_dir.clone());
+            let mut manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+            let required = mold_inference::av_media::aligned_sample_count(
+                u64::from(frames_per_stage),
+                24,
+                sample_rate,
+            )
+            .unwrap() as usize;
+            for index in 0..2 {
+                let mut output = outcome(20);
+                output.frames = vec![frame(20); frames_per_stage as usize];
+                output.audio = Some(NativeAudioTrack {
+                    interleaved_samples: vec![0.25; (required - 2_000) * 2],
+                    sample_rate,
+                    channels: 2,
+                });
+                write_stage_artifacts(&layout, &mut manifest, index, &output, &request).unwrap();
+                let persisted = read_audio_sidecar(&layout.audio_path(index)).unwrap();
+                assert_eq!(persisted.interleaved_samples.len(), required * 2);
+                assert!(persisted.interleaved_samples[(required - 2_000) * 2..]
+                    .iter()
+                    .all(|sample| *sample == 0.0));
+                // Simulate a pre-fix cached sidecar: refinalization must repair
+                // its timing in memory without rendering either stage again.
+                write_audio_sidecar(&layout.audio_path(index), output.audio.as_ref().unwrap())
+                    .unwrap();
+            }
+            let deps = deps(
+                db,
+                dir.path().join("jobs"),
+                Arc::new(FakeExecutor {
+                    calls: AtomicUsize::new(0),
+                    cancel_on_progress: AtomicBool::new(false),
+                }),
+                Arc::new(FakeProbe(AtomicUsize::new(0))),
+            );
+            finalize_job(&deps, &row, &mut manifest).unwrap().unwrap();
+            let bytes = std::fs::read(job_dir.join("final/output-1.mp4")).unwrap();
+            let reader =
+                mp4_rs::Mp4Reader::read_header(Cursor::new(&bytes), bytes.len() as u64).unwrap();
+            let audio = reader
+                .tracks()
+                .values()
+                .find(|track| matches!(track.track_type(), Ok(mp4_rs::TrackType::Audio)))
+                .unwrap();
+            let video = reader
+                .tracks()
+                .values()
+                .find(|track| matches!(track.track_type(), Ok(mp4_rs::TrackType::Video)))
+                .unwrap();
+            let expected_frames = 2 * frames_per_stage - 1;
+            assert_eq!(video.sample_count(), expected_frames);
+            let expected_samples = mold_inference::av_media::aligned_sample_count(
+                video.trak.mdia.mdhd.duration,
+                video.timescale(),
+                sample_rate,
+            )
+            .unwrap();
+            assert_eq!(audio.trak.mdia.mdhd.duration, expected_samples);
+            assert_eq!(audio.timescale(), sample_rate);
+        }
     }
     use mold_core::types::OutputFormat;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -4650,6 +5057,7 @@ mod tests {
 
     fn request(transitions: Vec<TransitionMode>) -> ChainRequest {
         ChainRequest {
+            continue_from: None,
             offload: None,
             collection: None,
             tags: None,
@@ -6676,6 +7084,332 @@ mod tests {
             chain.stages[1].seed.as_deref(),
             Some(manifest.stage_status[1].seed.to_string().as_str()),
         );
+    }
+
+    #[test]
+    fn linked_continuation_parts_retain_own_carry_without_rerendering_or_parent_cache() {
+        struct PartExecutor {
+            calls: AtomicUsize,
+        }
+        impl StageExecutor for PartExecutor {
+            fn freeze_model(
+                &self,
+                model: &str,
+            ) -> anyhow::Result<mold_core::chain_job::FrozenChainModel> {
+                Ok(test_frozen_model(model))
+            }
+            fn render_stage(
+                &self,
+                _model: &str,
+                request: &GenerateRequest,
+                carry: Option<&ChainTail>,
+                _tail: u32,
+                _progress: &(dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync),
+                _cancelled: &(dyn Fn() -> bool + Send + Sync),
+            ) -> anyhow::Result<StageRenderOutcome> {
+                let part = self.calls.fetch_add(1, Ordering::SeqCst);
+                if part > 0 {
+                    assert!(
+                        carry.is_some(),
+                        "a linked stage must receive its owned incoming tail"
+                    );
+                }
+                let frame =
+                    RgbImage::from_pixel(request.width, request.height, Rgb([part as u8, 1, 2]));
+                Ok(StageRenderOutcome::Done(StageOutcome {
+                    frames: vec![frame.clone(); 9],
+                    tail: ChainTail {
+                        frames: 1,
+                        tail_rgb_frames: vec![frame],
+                    },
+                    audio: None,
+                    hdr_frames_written: None,
+                    generation_time_ms: 1,
+                    attention_path: None,
+                    int8_arm: None,
+                }))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let jobs_root = dir.path().join("jobs");
+        let db = db();
+        let request = request(vec![TransitionMode::Smooth]);
+        let executor = Arc::new(PartExecutor {
+            calls: AtomicUsize::new(0),
+        });
+        let mut deps = deps(
+            db,
+            jobs_root.clone(),
+            executor.clone(),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        let output_dir = dir.path().join("gallery");
+        deps.output_dir = Some(output_dir.clone());
+        let db = deps.db.as_ref().as_ref().unwrap();
+        let mut previous = create_job_with_params(
+            db,
+            &jobs_root,
+            CreateJobParams {
+                id: "first-part".into(),
+                ephemeral: false,
+                request: request.clone(),
+                frozen_model: Some(test_frozen_model(&request.model)),
+            },
+        )
+        .unwrap();
+        execute_job(&deps, &previous, 0).unwrap();
+        previous = chain_jobs::get_job(db, &previous.id).unwrap().unwrap();
+        for part in 0..20 {
+            let manifest = ChainJobManifest::read_from_dir(&previous.job_dir).unwrap();
+            let mut next_request = request.clone();
+            next_request.continue_from = Some(mold_core::chain::ChainContinuation {
+                job_id: previous.id.clone(),
+                finalize_take: 1,
+            });
+            let frozen = manifest.frozen_model.clone().unwrap();
+            let prepared =
+                crate::chain_continuation::prepare(&previous, &manifest, &next_request, &frozen)
+                    .unwrap();
+            let interrupted_dir = jobs_root.join(format!("next-part-{part}"));
+            let interrupted_params = CreateJobParams {
+                id: format!("next-part-{part}"),
+                ephemeral: false,
+                request: next_request.clone(),
+                frozen_model: Some(frozen.clone()),
+            };
+            if part == 0 {
+                // A process can die after mkdir but before writing any state.
+                std::fs::create_dir(&interrupted_dir).unwrap();
+            } else if part <= 4 {
+                prepare_continuation_creation_directory(
+                    &jobs_root,
+                    &interrupted_dir,
+                    &interrupted_params,
+                    &prepared,
+                )
+                .unwrap();
+                if part >= 2 {
+                    crate::chain_continuation::persist(&interrupted_dir, &prepared).unwrap();
+                }
+                if part == 4 {
+                    // Cleanup can die partway through deleting snapshot files.
+                    std::fs::remove_file(interrupted_dir.join("continuation/000.png")).unwrap();
+                }
+                if part == 3 {
+                    let scrubbed = crate::chain_source_media::persist_scrubbed(
+                        &jobs_root,
+                        &interrupted_dir,
+                        &interrupted_params.id,
+                        next_request.clone(),
+                    )
+                    .unwrap();
+                    ChainJobManifest::new(interrupted_params.id.clone(), 1, &scrubbed)
+                        .unwrap()
+                        .write_atomic(&interrupted_dir)
+                        .unwrap();
+                    let mut changed = CreateJobParams {
+                        id: interrupted_params.id.clone(),
+                        ephemeral: false,
+                        request: next_request.clone(),
+                        frozen_model: Some(frozen.clone()),
+                    };
+                    changed.request.stages[0].prompt.push_str(" changed");
+                    assert!(prepare_continuation_creation_directory(
+                        &jobs_root,
+                        &interrupted_dir,
+                        &changed,
+                        &prepared,
+                    )
+                    .is_err());
+                    assert!(interrupted_dir.join("continuation/tail.json").is_file());
+                    let marker = std::fs::read_dir(&interrupted_dir)
+                        .unwrap()
+                        .map(Result::unwrap)
+                        .find(|entry| {
+                            entry
+                                .file_name()
+                                .to_string_lossy()
+                                .starts_with(".creating-")
+                        })
+                        .unwrap()
+                        .path();
+                    std::fs::write(marker.join("unexpected"), b"invalid").unwrap();
+                    assert!(prepare_continuation_creation_directory(
+                        &jobs_root,
+                        &interrupted_dir,
+                        &interrupted_params,
+                        &prepared,
+                    )
+                    .is_err());
+                    std::fs::remove_file(marker.join("unexpected")).unwrap();
+                    #[cfg(unix)]
+                    {
+                        let alias = dir.path().join("symlinked-jobs");
+                        std::os::unix::fs::symlink(&jobs_root, &alias).unwrap();
+                        assert!(prepare_continuation_creation_directory(
+                            &alias,
+                            &alias.join(&interrupted_params.id),
+                            &interrupted_params,
+                            &prepared,
+                        )
+                        .is_err());
+                        assert!(interrupted_dir.join("continuation/tail.json").is_file());
+                    }
+                }
+            }
+            let next = create_job_with_prepared_continuation(
+                db,
+                &jobs_root,
+                CreateJobParams {
+                    id: format!("next-part-{part}"),
+                    ephemeral: false,
+                    request: next_request,
+                    frozen_model: Some(frozen),
+                },
+                &prepared,
+            )
+            .unwrap();
+            // Deleting the predecessor between admission and dispatch must not
+            // break this part, nor may dispatch render any historical stage.
+            crate::chain_source_media::release_all(&jobs_root, &previous.job_dir).unwrap();
+            std::fs::remove_dir_all(&previous.job_dir).unwrap();
+            chain_jobs::delete_job_not_running(db, &previous.id).unwrap();
+            execute_job(&deps, &next, 0).unwrap();
+            previous = chain_jobs::get_job(db, &next.id).unwrap().unwrap();
+            assert_eq!(
+                previous.state,
+                ChainJobState::Completed,
+                "{:?}",
+                previous.error
+            );
+            assert_eq!(executor.calls.load(Ordering::SeqCst), part + 2);
+            let current = ChainJobManifest::read_from_dir(&next.job_dir).unwrap();
+            assert_eq!(current.stage_status.len(), 1);
+            assert_eq!(current.stage_status[0].frames_emitted, Some(8));
+            assert_eq!(
+                decoded_frame_count(&next.job_dir.join("final/output-1.mp4")),
+                8
+            );
+            assert!(current.amends.is_empty());
+        }
+        let manifest = ChainJobManifest::read_from_dir(&previous.job_dir).unwrap();
+        let expected = crate::chain_continuation::retained_frames(
+            &previous.job_dir,
+            &manifest.request().unwrap(),
+        )
+        .unwrap()
+        .remove(0);
+        let filename = manifest
+            .finalizes
+            .last()
+            .unwrap()
+            .gallery_filename
+            .as_ref()
+            .unwrap();
+        crate::chain_source_media::release_all(&jobs_root, &previous.job_dir).unwrap();
+        std::fs::remove_dir_all(&previous.job_dir).unwrap();
+        chain_jobs::delete_job_not_running(db, &previous.id).unwrap();
+        let (_, pins) = deps
+            .gallery_publication_gate
+            .retained_media_for_item(&output_dir, filename)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pins.len(), 1);
+        let store = crate::queue_media_store::QueueMediaStore::open_existing(dir.path()).unwrap();
+        let pin = crate::queue_media_store::GalleryMediaPinRef::new(
+            pins[0].media_set.clone(),
+            pins[0].pin_id.clone(),
+        )
+        .unwrap();
+        let retained = store.load_from_gallery_pin(&pin).unwrap();
+        let position = retained
+            .entries
+            .iter()
+            .position(|entry| entry.role == "chain_continuation_tail:0")
+            .unwrap();
+        assert_eq!(
+            store
+                .read_gallery_member(&pin, position, expected.len() as u64)
+                .unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn finalize_records_authenticated_endpoint_digests_after_retake() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let jobs_root = dir.path().join("jobs");
+        let job_dir = jobs_root.join("endpoint-provenance");
+        std::fs::create_dir_all(&job_dir).unwrap();
+        let mut request = request(vec![TransitionMode::Cut]);
+        let endpoint = b"authenticated authored endpoint".to_vec();
+        let expected_digest = format!("{:x}", Sha256::digest(&endpoint));
+        request.stages[0].keyframes = Some(vec![mold_core::KeyframeCondition {
+            frame: 0,
+            image: endpoint,
+            name: Some("opening.png".into()),
+        }]);
+        let request = crate::chain_source_media::persist_scrubbed(
+            &jobs_root,
+            &job_dir,
+            "endpoint-provenance",
+            request,
+        )
+        .unwrap();
+        assert!(request.stages[0].keyframes.as_ref().unwrap()[0]
+            .image
+            .is_empty());
+        let row = persist_job(
+            &db,
+            &job_dir,
+            "endpoint-provenance",
+            &request,
+            ChainJobState::Queued,
+        );
+        let mut deps = deps(
+            db,
+            jobs_root.clone(),
+            Arc::new(FakeExecutor {
+                calls: AtomicUsize::new(0),
+                cancel_on_progress: AtomicBool::new(false),
+            }),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        deps.output_dir = Some(dir.path().join("gallery"));
+        execute_job(&deps, &row, 0).unwrap();
+        let db = deps.db.as_ref().as_ref().unwrap();
+        let rows = db.list(None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].metadata.chain.as_ref().unwrap().stages[0].keyframes[0].sha256,
+            expected_digest,
+        );
+
+        let retaken = apply_retake(
+            db,
+            &jobs_root,
+            &row.id,
+            &RetakeRequest {
+                stage_idx: 0,
+                mode: RetakeMode::Cascade,
+                seed_offset: Some(9),
+                prompt: Some("retaken endpoint clip".into()),
+            },
+        )
+        .unwrap();
+        execute_job(&deps, &retaken, 0).unwrap();
+        let rows = db.list(None).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows
+            .iter()
+            .any(|row| row.metadata.prompt == "retaken endpoint clip"));
+        for row in rows {
+            assert_eq!(
+                row.metadata.chain.as_ref().unwrap().stages[0].keyframes[0].sha256,
+                expected_digest,
+            );
+        }
     }
 
     /// Ported from `completed_fade_successor_is_reencoded_after_previous_

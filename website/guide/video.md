@@ -271,7 +271,7 @@ audio is retained through stitching.
 Save this as `ref-chain.toml` beside an existing `hero.png`. Inspect the exact
 model on the target host first; this example uses its reviewed compact Turbo
 recipe. Paths resolve relative to the script and are probed before submission.
-The CLI inlines at most 32 MiB of reference media across the whole chain.
+The CLI inlines at most 32 MiB of authored media per part (source images, keyframes and references combined).
 
 ```toml
 schema = "mold.chain.v1"
@@ -331,6 +331,44 @@ Clips made by an older build's sequence composer are still in your library with
 their per-scene provenance intact. **Use these settings again** on one of them
 restores a plain one-shot clip built from the first scene's prompt.
 
+### Continue beyond 16 stages
+
+A part accepts at most 16 stages. Continue with separately viewable linked MP4
+parts; there is no overall part-count or duration limit, and no unbounded single
+MP4. Wait for the previous job to complete, then author new clips in `next.toml`
+with the same model identity, canvas, fps, carry and audio settings. The first
+stage must be `smooth`. For models that carry context, omit authored first
+source images and frame-0 keyframes that conflict with the incoming tail.
+Independent-clip models may use their ordinary authored inputs.
+
+```bash
+mold jobs show PART1_JOB_ID --json --host plato
+mold run --script next.toml --continue-from PART1_JOB_ID --dry-run --host plato
+mold run --script next.toml --continue-from PART1_JOB_ID --host plato --output /storage/mold/uat/part2.mp4
+```
+
+The output path belongs to the CLI machine; run on Plato for that Plato path.
+The server also publishes every part in its normal `MOLD_HOME` Library.
+The flag requires `--script`, refuses `--local`, and binds the latest completed
+take. A stale predecessor revision is refused. Older servers without linked-part
+capability are refused before submission; update the server first. To pin the latest completed take explicitly
+in TOML, omit the flag and add `[chain.continue_from]` with `job_id` and
+`finalize_take = 1` (use the actual latest take number). Place this table after
+the chain settings and before `[[stage]]`. Retaking or amending the predecessor
+invalidates that authority until a new latest take is completed. JSON/API
+requests use the same `continue_from` object.
+When reusing an exported script, remove its old `[chain.continue_from]` table
+before selecting a new predecessor with the flag. Conflicting flag and TOML
+authority is refused. A continuation job link remains
+host-bound in exported scripts; its predecessor must exist on the same host.
+
+The new job privately snapshots the last tail before creation, surviving prior
+job garbage collection. Earlier clips are never rerendered or reencoded; the new
+MP4 contains new clips only. LTX-2 carries latent motion, H3 FL2VA and
+image-conditioned Wan carry the last RGB frame. H3 Ref2VA, text-only Wan and
+legacy LTX-Video continue as independent clips. Duration estimates subtract the
+initial carried boundary when the model actually carries context.
+
 ### HTTP API
 
 Submit a canonical JSON `ChainRequest` to `POST /api/chain-jobs` using the
@@ -362,6 +400,8 @@ Keep the returned `job_id`. Read `GET /api/chain-jobs/{id}` or follow
 uses authenticated `GET /api/chain-jobs/{id}?include_source_media=true` to
 export a portable script with its retained input bytes. Ordinary detail and
 event snapshots omit payloads; exports return `Cache-Control: private, no-store`.
+TOML seeds and stage seed offsets accept integers or decimal strings; exports
+quote values above the signed 64-bit TOML limit without changing their value.
 H3 also publishes individual stage clips tagged `chain:<id>` and
 `chain-stage:<index>`; its final stitched print remains the chain result.
 Use `POST /api/generate/chain/validate` for read-only server validation.

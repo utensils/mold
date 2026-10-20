@@ -2137,9 +2137,20 @@ Examples:
 
         /// Path to a `mold.chain.v1` TOML script. When set, every other
         /// generation flag is ignored except `--output`, `--local`, `--host`,
-        /// and `--dry-run`.
+        /// `--continue-from`, and `--dry-run`.
         #[arg(long, value_name = "PATH", help_heading = "Server", value_hint = ValueHint::FilePath)]
         script: Option<std::path::PathBuf>,
+
+        /// Continue a completed job's latest take as a new bounded part.
+        /// Requires --script and the same server; earlier clips are not rerendered.
+        #[arg(
+            long,
+            value_name = "JOB_ID",
+            requires = "script",
+            conflicts_with = "local",
+            help_heading = "Video"
+        )]
+        continue_from: Option<String>,
 
         /// Parse and normalise the script without submitting. Prints the
         /// canonical stage list and estimated total frames to stdout.
@@ -3610,6 +3621,7 @@ async fn run(
             prompt,
             frames_per_clip,
             script,
+            continue_from,
             dry_run,
             gpus,
             t5_variant,
@@ -3670,6 +3682,7 @@ async fn run(
             if let Some(ref path) = script {
                 return commands::chain::run_from_script(
                     path,
+                    continue_from.as_deref(),
                     host.clone(),
                     output.clone(),
                     local,
@@ -5179,6 +5192,31 @@ mod tests {
             .expect("spawn parse thread")
             .join()
             .expect("parse thread panicked")
+    }
+
+    #[test]
+    fn chain_continuation_flag_requires_script_and_remote_execution() {
+        assert!(try_parse(&["run", "--continue-from", "previous"]).is_err());
+        assert!(try_parse(&[
+            "run",
+            "--script",
+            "next.toml",
+            "--continue-from",
+            "previous",
+            "--local"
+        ])
+        .is_err());
+        assert!(try_parse(&[
+            "run",
+            "--script",
+            "next.toml",
+            "--continue-from",
+            "previous",
+            "--host",
+            "plato",
+            "--dry-run"
+        ])
+        .is_ok());
     }
 
     /// `--video-only` skips the audio branch, so asking for audio beside it

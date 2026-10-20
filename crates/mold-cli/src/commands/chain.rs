@@ -355,6 +355,7 @@ pub(crate) struct ChainHdrInputs {
 impl ChainInputs {
     pub(crate) fn to_chain_request(&self) -> ChainRequest {
         ChainRequest {
+            continue_from: None,
             offload: None,
             collection: None,
             tags: None,
@@ -430,6 +431,12 @@ pub async fn run_chain(
         anyhow::bail!(
             "chained EXR export renders locally; re-run with --local — a remote server cannot \
              write the sidecar to your machine"
+        );
+    }
+
+    if local && req.continue_from.is_some() {
+        anyhow::bail!(
+            "linked chain parts require their predecessor's server; --local is unsupported"
         );
     }
 
@@ -548,6 +555,17 @@ pub async fn run_chain(
 /// run that loses its connection leaves a job the host finishes and
 /// `mold chain list` can still find.
 async fn run_chain_remote(client: &MoldClient, req: &ChainRequest) -> Result<VideoData> {
+    if req.continue_from.is_some() {
+        match client.linked_chain_parts_supported(&req.model).await? {
+            Some(true) => {}
+            Some(false) => anyhow::bail!(
+                "model '{}' does not support linked chain parts on this server", req.model
+            ),
+            None => anyhow::bail!(
+                "this server does not advertise linked chain parts; update the server before submitting a continued part"
+            ),
+        }
+    }
     let created = client.create_chain_job(req).await?;
     let job_id = created.job_id;
     // An authored sequence is a job the user can find again; an auto-chained
@@ -1187,8 +1205,8 @@ pub(crate) fn read_script_with_media_paths(
                             .context("chain reference size overflow")?;
                     }
                 }
-                anyhow::ensure!(total_reference_bytes <= mold_core::minimax_h3::MAX_INLINE_REFERENCE_BYTES,
-                    "chain inline references must total at most 32 MiB; use smaller files or fewer stages");
+                anyhow::ensure!(total_reference_bytes <= mold_core::chain::MAX_CHAIN_INLINE_MEDIA_BYTES,
+                    "chain authored media must total at most 32 MiB per part; use smaller files or fewer stages");
                 *references = canonical
                     .iter()
                     .map(toml::Value::try_from)
@@ -1201,12 +1219,35 @@ pub(crate) fn read_script_with_media_paths(
         .map_err(anyhow::Error::new)
 }
 
+/// Bind CLI sugar to the latest completed revision without replacing an
+/// explicit TOML authority. The server rechecks the same revision at admission.
+fn bind_cli_continuation(
+    authored: Option<&mold_core::chain::ChainContinuation>,
+    job_id: &str,
+    state: ChainJobState,
+    finalized_takes: usize,
+) -> Result<mold_core::chain::ChainContinuation> {
+    anyhow::ensure!(
+        state == ChainJobState::Completed && finalized_takes > 0,
+        "continuation predecessor '{job_id}' must be completed with a finalized take"
+    );
+    let latest = mold_core::chain::ChainContinuation {
+        job_id: job_id.into(),
+        finalize_take: u32::try_from(finalized_takes)
+            .context("predecessor take count exceeds supported range")?,
+    };
+    anyhow::ensure!(authored.is_none_or(|value| value == &latest),
+        "--continue-from conflicts with the TOML [chain.continue_from] job or take; use one matching authority");
+    Ok(latest)
+}
+
 /// Load a TOML script file, normalise it, and either submit or print a
 /// dry-run summary. Called from the `Commands::Run` early-return when
 /// `--script` is set.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_from_script(
     path: &std::path::Path,
+    continue_from: Option<&str>,
     host: Option<String>,
     output: Option<String>,
     local: bool,
@@ -1231,6 +1272,24 @@ pub async fn run_from_script(
     // otherwise be rejected for a seam that was never going to be applied,
     // and the dry-run totals below would describe a render that cannot happen.
     let mut built = build_request_from_script(&script)?;
+    built.validate_inline_media_budget()?;
+    if local && (continue_from.is_some() || built.continue_from.is_some()) {
+        anyhow::bail!(
+            "linked chain parts require their predecessor's server; --local is unsupported"
+        );
+    }
+    if let Some(job_id) = continue_from {
+        let client = crate::control::client_for_host(host.as_deref())?;
+        let previous = client.get_chain_job(job_id).await.with_context(|| {
+            format!("reading continuation predecessor '{job_id}' on the selected server")
+        })?;
+        built.continue_from = Some(bind_cli_continuation(
+            built.continue_from.as_ref(),
+            job_id,
+            previous.summary.state,
+            previous.finalizes.len(),
+        )?);
+    }
     let config = mold_core::Config::load_or_default();
     let authority = resolve_chain_model_authority(&built.model, &config);
     let substitution = normalize_script_motion_tail(&mut built, &authority);
@@ -1546,6 +1605,7 @@ pub(crate) fn build_request_from_script(
     script: &mold_core::chain::ChainScript,
 ) -> anyhow::Result<ChainRequest> {
     Ok(ChainRequest {
+        continue_from: script.chain.continue_from.clone(),
         offload: None,
         collection: None,
         tags: None,
@@ -1667,6 +1727,7 @@ pub async fn run_from_sugar(
 
     // Geometry, timing, and the denoise recipe all come from the model.
     let req = ChainRequest {
+        continue_from: None,
         offload: None,
         collection: None,
         tags: None,
@@ -1751,6 +1812,12 @@ fn print_dry_run_summary(req: &ChainRequest) {
     // An unset value is not "off": it is a remote submission whose muxer this
     // binary does not own, and the host resolves it at admission.
     println!("audio: {}", describe_enable_audio(req.enable_audio));
+    if let Some(previous) = &req.continue_from {
+        println!(
+            "continues: {} take {} (new part only; host validates at submission)",
+            previous.job_id, previous.finalize_take
+        );
+    }
     for (i, s) in req.stages.iter().enumerate() {
         let tag = match s.transition {
             TransitionMode::Smooth => "smooth",
@@ -1765,6 +1832,135 @@ fn print_dry_run_summary(req: &ChainRequest) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn continuation_preflight_refuses_old_or_unsupported_server_before_post() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        for (payload, expected) in [
+            (serde_json::json!({}), "update the server"),
+            (
+                serde_json::json!({"linked_parts":{"supported":false}}),
+                "does not support linked",
+            ),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/capabilities/chain-limits"))
+                .and(query_param("model", "test-model"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(payload))
+                .mount(&server)
+                .await;
+            let client = MoldClient::new(&server.uri());
+            let mut request = empty_chain_request();
+            request.model = "test-model".into();
+            request.continue_from = Some(mold_core::chain::ChainContinuation {
+                job_id: "previous".into(),
+                finalize_take: 1,
+            });
+            let error = run_chain_remote(&client, &request).await.unwrap_err();
+            assert!(error.to_string().contains(expected), "{error:#}");
+            let received = server.received_requests().await.unwrap();
+            assert_eq!(received.len(), 1);
+            assert_eq!(received[0].method, "GET");
+        }
+    }
+
+    #[tokio::test]
+    async fn continuation_preflight_preserves_auth_failure_without_post() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities/chain-limits"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("authentication required"))
+            .mount(&server)
+            .await;
+        let mut request = empty_chain_request();
+        request.model = "test-model".into();
+        request.continue_from = Some(mold_core::chain::ChainContinuation {
+            job_id: "previous".into(),
+            finalize_take: 1,
+        });
+        let error = run_chain_remote(&MoldClient::new(&server.uri()), &request)
+            .await
+            .unwrap_err();
+        assert!(
+            !error.to_string().contains("update the server"),
+            "{error:#}"
+        );
+        let received = server.received_requests().await.unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].method, "GET");
+    }
+
+    #[test]
+    fn script_continuation_projection_preserves_authority_and_initial_trim() {
+        let mut req = empty_chain_request();
+        req.stages = vec![stage_with_frames("new scene", 49)];
+        req.motion_tail_frames = 17;
+        req.continue_from = Some(mold_core::chain::ChainContinuation {
+            job_id: "previous".into(),
+            finalize_take: 2,
+        });
+        let script = mold_core::chain::ChainScript::from(&req);
+        let built = build_request_from_script(&script).unwrap();
+        assert_eq!(built.continue_from, req.continue_from);
+        assert_eq!(built.estimated_total_frames(), 32);
+    }
+
+    #[tokio::test]
+    async fn toml_continuation_refuses_local_even_during_dry_run() {
+        let mut request = empty_chain_request();
+        request.stages = vec![stage_with_frames("new scene", 49)];
+        request.continue_from = Some(mold_core::chain::ChainContinuation {
+            job_id: "previous".into(),
+            finalize_take: 1,
+        });
+        let script = mold_core::chain::ChainScript::from(&request);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("next.toml");
+        std::fs::write(&path, mold_core::chain_toml::write_script(&script).unwrap()).unwrap();
+        let error = run_from_script(
+            &path, None, None, None, true, true, false, false, None, None, None, None, None, false,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("--local is unsupported"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn cli_continuation_binds_latest_completed_take_and_rejects_conflicts() {
+        use mold_core::chain::ChainContinuation;
+        let bound = bind_cli_continuation(None, "previous", ChainJobState::Completed, 2).unwrap();
+        assert_eq!(bound.job_id, "previous");
+        assert_eq!(bound.finalize_take, 2);
+        assert!(
+            bind_cli_continuation(Some(&bound), "previous", ChainJobState::Completed, 2).is_ok()
+        );
+        for state in [
+            ChainJobState::Running,
+            ChainJobState::Paused,
+            ChainJobState::Failed,
+        ] {
+            assert!(bind_cli_continuation(None, "previous", state, 2).is_err());
+        }
+        assert!(bind_cli_continuation(None, "previous", ChainJobState::Completed, 0).is_err());
+        let stale = ChainContinuation {
+            job_id: "previous".into(),
+            finalize_take: 1,
+        };
+        assert!(
+            bind_cli_continuation(Some(&stale), "previous", ChainJobState::Completed, 2).is_err()
+        );
+        assert!(
+            bind_cli_continuation(Some(&bound), "different", ChainJobState::Completed, 2).is_err()
+        );
+    }
 
     #[test]
     fn h3_cli_seam_uses_task_contract_even_without_manifest_source_default() {
@@ -1851,6 +2047,7 @@ path = "hero.png"
     #[test]
     fn a_script_authored_wan_chain_takes_the_checkpoints_seam() {
         let wan_script_request = |model: &str, tail: u32| ChainRequest {
+            continue_from: None,
             model: model.to_string(),
             stages: vec![
                 stage_with_frames("a paper boat drifting down a rain gutter", 49),
@@ -1902,6 +2099,7 @@ path = "hero.png"
 
         // LTX-2's tail is a real latent window; the script still owns it.
         let mut ltx2 = ChainRequest {
+            continue_from: None,
             model: "ltx-2-19b-distilled:fp8".to_string(),
             stages: vec![
                 stage_with_frames("a drone shot over pine forest", 97),
@@ -2011,6 +2209,7 @@ path = "hero.png"
     /// are always spelled out at the call site.
     fn empty_chain_request() -> ChainRequest {
         ChainRequest {
+            continue_from: None,
             offload: None,
             collection: None,
             tags: None,
@@ -2074,6 +2273,7 @@ path = "hero.png"
 
         // A 53-frame chain is on wan's grid and must survive normalisation.
         let mut req = ChainRequest {
+            continue_from: None,
             model: "cv:2041121".into(),
             stages: vec![
                 stage_with_frames("a paper boat", 53),
@@ -2716,6 +2916,7 @@ path = "hero.png"
     #[test]
     fn exact_fit_shrinks_the_last_stage_to_the_requested_total() {
         let mut req = ChainRequest {
+            continue_from: None,
             offload: None,
             collection: None,
             tags: None,
@@ -2773,6 +2974,7 @@ path = "hero.png"
             for total in (105..=1537).step_by(8) {
                 let clip = 97u32;
                 let mut req = ChainRequest {
+                    continue_from: None,
                     offload: None,
                     collection: None,
                     tags: None,
@@ -2832,6 +3034,7 @@ path = "hero.png"
     #[test]
     fn exact_fit_refuses_a_layout_the_lattice_cannot_close() {
         let mut req = ChainRequest {
+            continue_from: None,
             offload: None,
             collection: None,
             tags: None,
@@ -2936,6 +3139,7 @@ path = "hero.png"
         let script = ChainScript {
             schema: "mold.chain.v1".into(),
             chain: ChainScriptChain {
+                continue_from: None,
                 model: "ltx-2-19b-distilled:fp8".into(),
                 width: 1216,
                 height: 704,
@@ -3034,6 +3238,7 @@ path = "hero.png"
     fn a_remote_chain_leaves_the_audio_answer_to_the_host() {
         let config = mold_core::Config::default();
         let req = ChainRequest {
+            continue_from: None,
             model: "ltx-2-19b-distilled:fp8".to_string(),
             stages: vec![stage_with_frames("a drone shot over pine forest", 97)],
             width: 1216,
@@ -3050,6 +3255,7 @@ path = "hero.png"
         // The same holds for a family that emits no sound at all: the host
         // is still the one that answers.
         let silent = ChainRequest {
+            continue_from: None,
             model: "wan22-ti2v-5b:q8".to_string(),
             stages: vec![stage_with_frames("a paper boat", 49)],
             width: 704,
@@ -3065,6 +3271,7 @@ path = "hero.png"
     fn a_local_chain_resolves_audio_against_this_build() {
         let config = mold_core::Config::default();
         let audio_family = ChainRequest {
+            continue_from: None,
             model: "ltx-2-19b-distilled:fp8".to_string(),
             stages: vec![stage_with_frames("a drone shot over pine forest", 97)],
             width: 1216,
@@ -3080,6 +3287,7 @@ path = "hero.png"
 
         // MP4 is the only container the stitched chain can carry a track in.
         let apng = ChainRequest {
+            continue_from: None,
             output_format: mold_core::OutputFormat::Apng,
             ..audio_family.clone()
         };
@@ -3090,6 +3298,7 @@ path = "hero.png"
 
         // A family with no audio path is off regardless of the muxer.
         let silent = ChainRequest {
+            continue_from: None,
             model: "wan22-ti2v-5b:q8".to_string(),
             stages: vec![stage_with_frames("a paper boat", 49)],
             width: 704,
@@ -3108,6 +3317,7 @@ path = "hero.png"
     fn a_local_mp4_build_turns_ltx2_chain_audio_on_by_default() {
         let config = mold_core::Config::default();
         let req = ChainRequest {
+            continue_from: None,
             model: "ltx-2-19b-distilled:fp8".to_string(),
             stages: vec![stage_with_frames("a drone shot over pine forest", 97)],
             width: 1216,
@@ -3123,6 +3333,7 @@ path = "hero.png"
     fn an_explicit_audio_choice_survives_both_routes() {
         let config = mold_core::Config::default();
         let base = ChainRequest {
+            continue_from: None,
             model: "ltx-2-19b-distilled:fp8".to_string(),
             stages: vec![stage_with_frames("a drone shot over pine forest", 97)],
             width: 1216,
@@ -3132,6 +3343,7 @@ path = "hero.png"
         };
 
         let off = ChainRequest {
+            continue_from: None,
             enable_audio: Some(false),
             ..base.clone()
         };
@@ -3142,6 +3354,7 @@ path = "hero.png"
         );
 
         let on = ChainRequest {
+            continue_from: None,
             enable_audio: Some(true),
             ..base
         };

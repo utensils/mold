@@ -75,6 +75,7 @@ prompt expansion for that run.
 | `--prompt <TEXT>`                                                                            | Repeat for multi-stage video chain sugar (LTX-2, LTX-Video, Wan, H3 server)                                                                                                                                                                         |
 | `--frames-per-clip <N>`                                                                      | Per-stage frame count for repeated `--prompt`                                                                                                                                                                                                       |
 | `--script <PATH>`                                                                            | Submit a `mold.chain.v1` TOML chain script                                                                                                                                                                                                          |
+| `--continue-from <JOB_ID>` | With `--script`, create a new durable part using the completed predecessor's owned tail on the same server; requires linked-part support and refuses `--local`. |
 | `--dry-run`                                                                                  | Parse/normalise repeated prompts or scripts without generating                                                                                                                                                                                      |
 | `--frames <N>`, `--fps <N>`                                                                  | Video frame count and output FPS                                                                                                                                                                                                                    |
 | `--duration <SECONDS>`                                                                       | MiniMax H3 duration from 4–15 seconds; resolves to its exact `17n+5` frame grid at 24 fps                                                                                                                                                           |
@@ -287,6 +288,15 @@ paths, while Ref2VA stages carry ordered typed generation references.
 mold chain validate shot.toml
 mold run --script shot.toml --dry-run
 ```
+
+Each durable part contains at most 16 stages. Continue for any number of parts
+with `mold run --script next.toml --continue-from PART1_JOB_ID --host HOST`.
+The predecessor must have a completed latest take on that server; the new
+part owns its copied tail and renders only its new clips. Parts remain separate
+viewable videos, with no total duration ceiling. The CLI checks server support
+before submission, and local execution is refused. See
+[open-ended continuation](/guide/video#continue-beyond-16-stages) for the script
+and model-specific carry rules.
 
 ## `mold jobs`
 

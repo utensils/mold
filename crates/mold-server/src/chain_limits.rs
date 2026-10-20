@@ -21,6 +21,15 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct LinkedPartLimits {
+    pub supported: bool,
+    pub max_stages_per_part: u32,
+    /// No product limit on successor parts. Each part owns bounded media and
+    /// its own immutable continuation tail instead of an ever-growing file.
+    pub max_parts: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SequenceSupport {
     pub supported: bool,
@@ -51,8 +60,14 @@ pub struct ChainLimits {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frames_per_clip_runtime_seconds: Option<u32>,
     pub frames_per_clip_recommended: u32,
+    /// Budget of one independently durable part, not the linked film.
     pub max_stages: u32,
+    /// Budget of one independently durable part, not the linked film.
     pub max_total_frames: u32,
+    /// Missing on older servers. Clients must check this before submitting
+    /// `continue_from`, which an older parser would otherwise ignore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_parts: Option<LinkedPartLimits>,
     pub fade_frames_max: u32,
     pub transition_modes: Vec<String>,
     pub quantization_family: String,
@@ -185,7 +200,7 @@ pub fn compute_limits(
         .max(floor)
         .min(cap);
 
-    const MAX_STAGES: u32 = 16;
+    const MAX_STAGES: u32 = mold_core::chain::MAX_CHAIN_STAGES as u32;
     let canonical_model = mold_core::manifest::resolve_model_name(model);
     let has_spatial_upscaler =
         mold_core::manifest::find_manifest(&canonical_model).is_some_and(|manifest| {
@@ -204,6 +219,11 @@ pub fn compute_limits(
         frames_per_clip_recommended: recommended,
         max_stages: MAX_STAGES,
         max_total_frames: cap * MAX_STAGES,
+        linked_parts: Some(LinkedPartLimits {
+            supported: sequence.supported,
+            max_stages_per_part: MAX_STAGES,
+            max_parts: None,
+        }),
         fade_frames_max: 32,
         transition_modes: vec!["smooth".into(), "cut".into(), "fade".into()],
         quantization_family: quant.to_string(),
@@ -216,6 +236,18 @@ pub fn compute_limits(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linked_parts_advertise_no_total_part_limit_and_keep_per_part_budget() {
+        let limits = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", None, Some(24));
+        let value = serde_json::to_value(&limits).unwrap();
+        assert_eq!(value["linked_parts"]["supported"], true);
+        assert_eq!(value["linked_parts"]["max_stages_per_part"], 16);
+        assert!(value["linked_parts"].get("max_parts").is_some());
+        assert!(value["linked_parts"]["max_parts"].is_null());
+        assert_eq!(limits.max_stages, 16);
+        assert_eq!(limits.max_total_frames, 1552);
+    }
 
     /// An LTX-2 clip is denoised as one generation, so its cap is the family's
     /// single-request ceiling — a 20s duration, not the old flat 97.
