@@ -96,7 +96,9 @@ pub(crate) fn protect_generate_request_for_wire(
     wire
 }
 
-pub(crate) fn protect_chain_request_for_wire(request: &crate::ChainRequest) -> crate::ChainRequest {
+/// Prepare a canonical chain for the legacy-compatible HTTP prompt boundary.
+/// Serialize this result directly; clients must not normalize it a second time.
+pub fn protect_chain_request_for_wire(request: &crate::ChainRequest) -> crate::ChainRequest {
     let mut wire = request.clone();
     for stage in &mut wire.stages {
         protect_prompt_for_wire(&mut stage.prompt);

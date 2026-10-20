@@ -430,6 +430,8 @@ use crate::queue::clean_error_message;
         crate::routes_chain_jobs::preview_chain_job_placement,
         crate::routes_chain_jobs::list_chain_jobs,
         crate::routes_chain_jobs::get_chain_job,
+        crate::chain_restart::options,
+        crate::chain_restart::export,
         crate::routes_chain_jobs::chain_job_events,
         crate::routes_chain_jobs::resume_chain_job,
         crate::routes_chain_jobs::retake_chain_job,
@@ -770,6 +772,14 @@ pub fn create_router(state: AppState) -> Router {
             "/api/chain-jobs/:id",
             get(crate::routes_chain_jobs::get_chain_job)
                 .delete(crate::routes_chain_jobs::delete_chain_job),
+        )
+        .route(
+            "/api/chain-jobs/:id/restart-options",
+            get(crate::chain_restart::options),
+        )
+        .route(
+            "/api/chain-jobs/:id/restart-export",
+            post(crate::chain_restart::export),
         )
         .route(
             "/api/chain-jobs/:id/events",
@@ -8662,6 +8672,7 @@ async fn server_capabilities(
             can_pause: true,
             can_pause_job: true,
             pre_render_transfer: durable_queue,
+            chain_restart: state.chain_jobs.is_some() && state.metadata_db.as_ref().is_some(),
             transfer_identity: state.queue_journal.transfer_identity(),
             can_cancel_all: true,
             can_reorder: true,

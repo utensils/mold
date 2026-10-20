@@ -1252,6 +1252,25 @@ impl MoldClient {
             .await?)
     }
 
+    /// Forward an exported, wire-ready new attempt without numeric or text rewriting.
+    pub async fn create_chain_job_json_on_instance(
+        &self,
+        request_json: &str,
+        operation_id: &str,
+        instance_id: &str,
+    ) -> Result<CreateChainJobResponse> {
+        let response = self
+            .client
+            .post(format!("{}/api/chain-jobs", self.base_url))
+            .header("x-mold-operation-id", operation_id)
+            .header("x-mold-destination-instance", instance_id)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(request_json.to_owned())
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(response).await?.json().await?)
+    }
+
     pub async fn list_chain_jobs(&self) -> Result<ChainJobListing> {
         let resp = self
             .client

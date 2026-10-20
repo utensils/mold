@@ -323,7 +323,12 @@ For several clips, use **Add clip** in the apps or a CLI/API script. Library **C
 latent motion tail; image-conditioned Wan and H3 FL2VA can continue from the
 last frame. Text-only Wan, legacy LTX-Video and H3 Ref2VA join independent
 clips. H3 sequences require an H3-enabled server. A complete script and job
-recovery workflow are in the [video guide](https://utensils.io/mold/guide/video#multi-prompt-scripts):
+recovery workflow are in the [video guide](https://utensils.io/mold/guide/video#multi-prompt-scripts).
+
+Failed video generations retain their inputs in the durable queue for safe
+movement to another machine. `mold jobs restart ID --to HOST` starts a separate
+attempt of an unlinked failed sequence using the destination's current recipe,
+while keeping the original job recoverable. Exact Resume preserves its frozen recipe.
 
 ```bash
 mold chain validate shot.toml

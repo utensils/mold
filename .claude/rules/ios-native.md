@@ -282,6 +282,8 @@ count. Viewer return restores the covered viewport; native previews explicitly
 inject thumbnail loaders. Native iOS omits the visual host-name thumbnail badge;
 Info and host sorting/filtering retain their authority. Unseen semantics are unchanged.
 
+**Keyboard dismissal.** The composer keyboard Done must clear its ordinary prompt FocusState and resign the actual UIKit first responder: shared clip rows do not own that local binding. Keep one keyboard action; expanded editors own their separate Done. Exercise scrolled clip rows, ordinary prompts and options/title/tag sheet dismissal without submitting a render.
+
 **Prompt editor.** Keep quick prompt entry bounded to three lines; Edit prompt
 opens a large native, keyboard-safe TextEditor sheet bound to the authoritative
 draft. Done and ordinary dismissal retain and save edits. Native typing preserves
