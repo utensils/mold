@@ -161,6 +161,7 @@ impl VideoMetadata {
             fps: Some(self.fps),
             chain_job_id: None,
             chain: None,
+            video_job: None,
             version: mold_core::build_info::version_string(),
             id_image_name: None,
             id_image_sha256: None,

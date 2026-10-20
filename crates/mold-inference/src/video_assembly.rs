@@ -73,6 +73,80 @@ pub(crate) fn track_config(track: &Mp4Track, movie_timescale: u32) -> Result<Tra
     })
 }
 
+#[derive(PartialEq)]
+struct PartFormat {
+    config: TrackConfig,
+    description: Vec<u8>,
+    frame_duration: u32,
+}
+
+fn part_format(input: File, checkpoint: &mut dyn FnMut() -> Result<()>) -> Result<PartFormat> {
+    let mut presentation = input.try_clone()?;
+    let packets = input.try_clone()?;
+    let reader = crate::video_assembly_input::checked_reader(input, checkpoint)?;
+    let mut videos = reader
+        .tracks()
+        .values()
+        .filter(|track| matches!(track.track_type(), Ok(TrackType::Video)));
+    let track = videos.next().context("missing video track")?;
+    ensure!(
+        videos.next().is_none()
+            && reader
+                .tracks()
+                .values()
+                .filter(|track| matches!(track.track_type(), Ok(TrackType::Audio)))
+                .count()
+                <= 1,
+        "video part has unsupported track layout"
+    );
+    let config = track_config(track, reader.moov.mvhd.timescale)?;
+    let entries = &track.trak.mdia.minf.stbl.stts.entries;
+    let frame_duration = entries
+        .first()
+        .context("missing video timeline")?
+        .sample_delta;
+    ensure!(
+        frame_duration > 0
+            && entries
+                .iter()
+                .all(|entry| entry.sample_count > 0 && entry.sample_delta == frame_duration),
+        "variable frame rate requires normalization"
+    );
+    let frames = entries.iter().try_fold(0u64, |sum, entry| {
+        sum.checked_add(u64::from(entry.sample_count))
+            .context("video sample count overflow")
+    })?;
+    ensure!(
+        frames > 0
+            && frames == u64::from(track.sample_count())
+            && frames.checked_mul(u64::from(frame_duration)) == Some(track.trak.mdia.mdhd.duration),
+        "video sample timeline is inconsistent"
+    );
+    ensure!(
+        track
+            .trak
+            .mdia
+            .minf
+            .stbl
+            .stss
+            .as_ref()
+            .is_none_or(|sync| sync.entries.first() == Some(&1)),
+        "video part does not begin with an independent picture"
+    );
+    crate::video_assembly_input::PacketCursor::new(track, packets)?;
+    let description = crate::video_assembly_boxes::read_track_box(
+        &mut presentation,
+        track.track_id(),
+        &[*b"mdia", *b"minf", *b"stbl", *b"stsd"],
+        4 * 1024 * 1024,
+    )?;
+    Ok(PartFormat {
+        config,
+        description,
+        frame_duration,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AssemblyReceipt {
     pub video_frames: u64,
@@ -95,6 +169,26 @@ pub struct Mp4FileAssembly {
 }
 
 impl Mp4FileAssembly {
+    /// Compare presentation and decoder configuration before committing either
+    /// file. This reads bounded metadata, without decoding picture payloads.
+    pub fn compatible_parts(
+        first: File,
+        second: File,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<bool> {
+        Ok(part_format(first, checkpoint)? == part_format(second, checkpoint)?)
+    }
+
+    /// A probe never changes or poisons the current staging movie.
+    pub fn accepts(&self, input: File, checkpoint: &mut dyn FnMut() -> Result<()>) -> Result<bool> {
+        ensure!(!self.poisoned, "video assembly already failed");
+        let candidate = part_format(input, checkpoint)?;
+        Ok(self.configs.is_empty()
+            || (self.configs.as_slice() == [candidate.config]
+                && self.sample_description.as_ref() == Some(&candidate.description)
+                && self.frame_duration == Some(candidate.frame_duration)))
+    }
+
     pub fn new(output: File) -> Self {
         Self {
             output: Some(output),
@@ -276,6 +370,42 @@ mod tests {
 
     fn reader(file: File) -> Result<mp4_rs::Mp4Reader<std::io::BufReader<File>>> {
         crate::video_assembly_input::checked_reader(file, &mut || Ok(()))
+    }
+
+    #[test]
+    fn compatibility_probe_does_not_poison_an_ongoing_assembly() {
+        let source = tempfile::NamedTempFile::new().unwrap();
+        let other = tempfile::NamedTempFile::new().unwrap();
+        let frames = vec![RgbImage::from_pixel(32, 32, Rgb([80, 90, 100])); 4];
+        std::fs::write(source.path(), video_enc::encode_mp4(&frames, 24).unwrap()).unwrap();
+        std::fs::write(other.path(), video_enc::encode_mp4(&frames, 48).unwrap()).unwrap();
+        assert!(Mp4FileAssembly::compatible_parts(
+            source.reopen().unwrap(),
+            source.reopen().unwrap(),
+            &mut || Ok(())
+        )
+        .unwrap());
+        assert!(!Mp4FileAssembly::compatible_parts(
+            source.reopen().unwrap(),
+            other.reopen().unwrap(),
+            &mut || Ok(())
+        )
+        .unwrap());
+        let output = tempfile::tempfile().unwrap();
+        let mut assembly = Mp4FileAssembly::new(output);
+        assert!(assembly
+            .accepts(source.reopen().unwrap(), &mut || Ok(()))
+            .unwrap());
+        assembly
+            .append(source.reopen().unwrap(), 3, &mut || Ok(()))
+            .unwrap();
+        assert!(!assembly
+            .accepts(other.reopen().unwrap(), &mut || Ok(()))
+            .unwrap());
+        assembly
+            .append(source.reopen().unwrap(), 2, &mut || Ok(()))
+            .unwrap();
+        assert_eq!(assembly.finish().unwrap().video_frames, 5);
     }
 
     #[test]
