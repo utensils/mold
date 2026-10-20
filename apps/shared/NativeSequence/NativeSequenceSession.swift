@@ -112,6 +112,21 @@ final class NativeSequenceSession {
         message = nil; preparing = false
     }
 
+    /// Model changes use that recipe's advertised frame grid, as ordinary
+    /// duration controls do. Off-grid values must not become uneditable.
+    func fitLengths(minimum: Int, maximum: Int, step: Int) {
+        guard var next = draft, minimum > 0, maximum >= minimum else { return }
+        let stride = max(1, step)
+        var changed = false
+        for index in next.stages.indices {
+            let original = next.stages[index].frames
+            let bounded = min(maximum, max(minimum, original))
+            let fitted = minimum + ((bounded - minimum) / stride) * stride
+            if original != fitted { next.stages[index].frames = fitted; changed = true }
+        }
+        if changed { draft = next; message = "Clip lengths adjusted to this model’s supported lengths." }
+    }
+
     static func baseRequest(_ draft: RenderDraft, model: String, maxIdentityPhotos: Int = 0) -> GenerateRequest {
         var request = RenderRequest.one(draft, model: model, maxIdentityPhotos: maxIdentityPhotos)
         // Authored clips have explicit lengths. Preserve the ordinary draft's

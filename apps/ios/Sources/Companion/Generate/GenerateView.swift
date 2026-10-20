@@ -48,6 +48,9 @@ struct GenerateView: View {
             }
         }
         .onChange(of: generate.draft) { _, draft in expansionUndo.observe(draft) }
+        .onChange(of: generate.sequence.draft) { _, draft in
+            if draft != nil { generate.saveDraft() }
+        }
         .navigationTitle(Destination.generate.title)
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $showsOptions) { MoreOptionsSheet() }

@@ -11,6 +11,12 @@ extension GenerateController {
             let limits = try await hosts.backend(for: host).chainLimits(model: modelName, fps: fps)
             guard target == captured, hosts.instanceID(of: host.id) == capturedInstallation, self.modelName == modelName, draft.fps == fps else { return }
             sequenceLimits = limits
+            if let temporal = recipe?.temporal {
+                sequence.fitLengths(minimum: limits.authoring?.minFrames ?? temporal.frames.min,
+                    maximum: min(limits.framesPerClipCap, temporal.frames.max),
+                    step: limits.authoring?.frameStep ?? temporal.frames.step)
+            }
+            if sequence.draft != nil { saveDraft() }
         } catch { /* Ordinary one-shot controls stay usable on older machines. */ }
     }
     func recoverSequences() {

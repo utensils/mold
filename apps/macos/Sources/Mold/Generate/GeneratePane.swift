@@ -57,6 +57,12 @@ struct GeneratePane: View {
         .persistingDraft(controller, in: drafts)
         // Once per machine, model and rate -- never from `body`.
         .task(id: chainLimitsKey) { refreshChainLimits() }
+        .onChange(of: advertisedChainLimits) { _, limits in
+            guard let limits, let temporal = recipe?.temporal else { return }
+            controller.sequence.fitLengths(minimum: limits.authoring?.minFrames ?? temporal.frames.min,
+                maximum: min(limits.framesPerClipCap, temporal.frames.max),
+                step: limits.authoring?.frameStep ?? temporal.frames.step)
+        }
         .navigationTitle("Generate")
         .navigationSubtitle(subtitle)
         // Before the pane's own `.toolbar`, so the column's switch is the

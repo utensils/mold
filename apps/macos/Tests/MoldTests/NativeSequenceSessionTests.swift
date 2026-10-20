@@ -33,6 +33,15 @@ struct NativeSequenceSessionTests {
         #expect(store.limits(host: host, model: "old", fps: 24) == nil)
     }
 
+    @Test func switchingModelsFitsEveryClipToTheNewSupportedGrid() {
+        let session = NativeSequenceSession(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        session.begin(prompt: "A robot", frames: 97)
+        session.draft?.stages[1].frames = 400
+        session.fitLengths(minimum: 107, maximum: 345, step: 17)
+        #expect(session.draft?.stages.map(\.frames) == [107, 345])
+        #expect(session.message?.contains("adjusted") == true)
+    }
+
     @Test func scalarClipDraftSurvivesRelaunch() {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let session = NativeSequenceSession(defaults: defaults)
