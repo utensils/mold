@@ -194,6 +194,27 @@ struct NativeSequenceAdmissionTests {
         #expect(restoredModel == "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step")
     }
 
+    @Test func startupRecoveryRetriesAfterTheMachineIdentityArrives() async throws {
+        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!)
+        let backend = SequenceBackendFixture()
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let print = try MoldJSON.decoder.decode(GalleryPrint.self, from: Data(#"{"filename":"verified.mp4","metadata":{"chain_job_id":"source"},"timestamp":1000,"format":"mp4"}"#.utf8))
+        let first = NativeSequenceSession(defaults: defaults)
+        first.openContinuation(entry: LibraryEntry(host: host, print: print), host: host,
+            installation: "same", backend: backend, current: { true }, opened: { _ in })
+        await settle { !first.preparing }
+        let launched = NativeSequenceSession(defaults: defaults)
+        launched.recover(host: host, installation: nil, backend: backend, current: { true })
+        for _ in 0 ..< 100 { await Task.yield() }
+        #expect(launched.restoringSource)
+        #expect(launched.continuation == nil)
+        #expect(await backend.privateReads == 1, "An unverified startup host cannot recall private source media")
+        launched.recover(host: host, installation: "same", backend: backend, current: { true })
+        await settle { launched.continuation != nil }
+        #expect(!launched.restoringSource)
+        #expect(launched.continuation?.model == "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step")
+    }
+
     @Test func oldRecoveryCannotReplaceAnExplicitlyOpenedNewerTakeOfTheSameJob() async throws {
         let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!)
         let backend = SequenceBackendFixture()

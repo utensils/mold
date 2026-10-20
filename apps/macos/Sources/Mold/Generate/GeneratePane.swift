@@ -56,7 +56,10 @@ struct GeneratePane: View {
         .reuseNotice(reuse, draft: controller.draft)
         .persistingDraft(controller, in: drafts)
         // Once per machine, model and rate -- never from `body`.
-        .task(id: chainLimitsKey) { refreshChainLimits() }
+        .task(id: chainLimitsKey) {
+            controller.recoverSequences()
+            refreshChainLimits()
+        }
         .onChange(of: advertisedChainLimits) { _, limits in
             guard !controller.sequence.restoringSource, let limits, let temporal = recipe?.temporal else { return }
             controller.sequence.fitLengths(minimum: limits.authoring?.minFrames ?? temporal.frames.min,
