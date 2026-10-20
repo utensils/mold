@@ -2,6 +2,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import { defineComponent, h, ref } from "vue";
 import Popover from "./Popover.vue";
+import popoverSource from "./Popover.vue?raw";
+import drawerSource from "./DrawerPanel.vue?raw";
+import modalSource from "./ModalPanel.vue?raw";
+import desktopTokens from "../mold-desktop.css?raw";
 
 function harness(open = false) {
   return mount(
@@ -48,6 +52,28 @@ afterEach(() => {
 });
 
 describe("Popover", () => {
+  it("keeps body-teleported menus above the drawer and modal that own their trigger", () => {
+    const layer = (source: string, selector: string) => {
+      const block = source
+        .slice(source.indexOf(`${selector} {`))
+        .split("}")[0]!;
+      const value = block
+        .match(/z-index:\s*([^;]+);/)![1]!
+        .replace(
+          /var\((--[\w-]+),\s*(\d+)\)/g,
+          (_, token: string, fallback: string) =>
+            desktopTokens.match(new RegExp(`${token}:\\s*(\\d+);`))?.[1] ??
+            fallback,
+        )
+        .replace(/^calc\((.*)\)$/, "$1");
+      const sum = value.split("+").map(Number);
+      expect(sum.every(Number.isFinite)).toBe(true);
+      return sum.reduce((total, next) => total + next, 0);
+    };
+    const menuLayer = layer(popoverSource, ".ms-popover__panel");
+    expect(menuLayer).toBeGreaterThan(layer(drawerSource, ".ms-drawer"));
+    expect(menuLayer).toBeGreaterThan(layer(modalSource, ".ms-modal"));
+  });
   it("shows the panel only while open, as a labelled dialog", async () => {
     const wrapper = harness();
     expect(panel()).toBeNull();

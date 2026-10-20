@@ -162,7 +162,8 @@ onBeforeUnmount(() => {
 
 .ms-popover__panel {
   position: fixed;
-  z-index: 30;
+  /* Teleported panels must stay above the drawer/modal containing the trigger. */
+  z-index: calc(var(--mold-z-modal, 100) + 1);
   min-width: 240px;
   /* A panel taller/wider than the viewport scrolls internally instead of
      leaving content stranded past the edge the shift-clamp cannot reach. */
