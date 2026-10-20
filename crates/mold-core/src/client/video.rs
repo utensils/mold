@@ -3,11 +3,17 @@ use super::*;
 use crate::video_job::{VideoJob, VideoJobPlan, VideoJobRequest};
 
 impl MoldClient {
-    pub async fn validate_video_job(&self, request: &VideoJobRequest) -> Result<VideoJobPlan> {
+    pub async fn validate_video_job(
+        &self,
+        request: &VideoJobRequest,
+        instance: &str,
+    ) -> Result<VideoJobPlan> {
+        require_instance(instance)?;
         request.validate_shape().map_err(anyhow::Error::msg)?;
         let response = self
             .client
             .post(format!("{}/api/video-jobs/validate", self.base_url))
+            .header("x-mold-destination-instance", instance)
             .json(request)
             .send()
             .await?;
@@ -44,8 +50,14 @@ impl MoldClient {
         )
     }
 
-    pub async fn get_video_job(&self, id: &str) -> Result<VideoJob> {
-        let response = self.client.get(self.video_job_url(id, "")).send().await?;
+    pub async fn get_video_job(&self, id: &str, instance: &str) -> Result<VideoJob> {
+        require_instance(instance)?;
+        let response = self
+            .client
+            .get(self.video_job_url(id, ""))
+            .header("x-mold-destination-instance", instance)
+            .send()
+            .await?;
         checked_job(
             error_for_status_with_body(response).await?.json().await?,
             id,
@@ -157,6 +169,14 @@ impl MoldClient {
     }
 }
 
+fn require_instance(instance: &str) -> Result<()> {
+    anyhow::ensure!(
+        !instance.is_empty(),
+        "Video requires a captured destination installation"
+    );
+    Ok(())
+}
+
 fn require_admission_identity(operation_id: &str, instance: &str) -> Result<()> {
     anyhow::ensure!(
         !instance.is_empty(),
@@ -199,6 +219,38 @@ mod tests {
     fn response(id: &str) -> serde_json::Value {
         serde_json::json!({"id":id,"state":"queued","plan":{"validation_revision":"proof","model":"h3-pdmd2:bf16","width":768,"height":768,"fps":24,"single_clip_max_frames":107,"overlap_frames":1,"join_mode":"continuous","clip_count":"14","part_count":"1","added_frames":"1440","source_frames":"0","total_frames":"1440","added_duration_ms":"60000","total_duration_ms":"60000","warnings":[]},"completed_clips":"0","active_child_id":null,"output_filename":null,"error":null,"error_detail":null,"created_at_ms":1,"updated_at_ms":1,"can_cancel":true,"can_resume":false,"can_delete":false})
     }
+    #[tokio::test]
+    async fn reads_and_validation_require_the_captured_installation() {
+        let server = MockServer::start().await;
+        let id = uuid::Uuid::new_v4().to_string();
+        Mock::given(method("GET"))
+            .and(path(format!("/api/video-jobs/{id}")))
+            .and(header("x-mold-destination-instance", "captured"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response(&id)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/video-jobs/validate"))
+            .and(header("x-mold-destination-instance", "captured"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response(&id)["plan"].clone()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = MoldClient::new(&server.uri());
+        assert_eq!(client.get_video_job(&id, "captured").await.unwrap().id, id);
+        assert_eq!(
+            client
+                .validate_video_job(&request(), "captured")
+                .await
+                .unwrap()
+                .clip_count,
+            14
+        );
+        assert!(client.get_video_job(&id, "").await.is_err());
+        assert!(client.validate_video_job(&request(), "").await.is_err());
+    }
+
     #[tokio::test]
     async fn cancellation_requires_an_explicit_accepted_receipt() {
         let server = MockServer::start().await;
