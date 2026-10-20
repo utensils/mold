@@ -3161,6 +3161,17 @@ onBeforeUnmount(() => {
   for (const stream of galleryStreams.values()) stream.abort.abort();
   galleryStreams.clear();
 });
+async function openContinuedVideo(value: {
+  filename: string;
+  owner: import("@studio/api/chainJobs").ChainOwner;
+}) {
+  closeLightbox(false);
+  await refreshAfterChange();
+  await router.push({
+    path: "/library",
+    query: { print: value.filename, printHost: value.owner.hostId },
+  });
+}
 </script>
 
 <template>
@@ -4146,6 +4157,7 @@ onBeforeUnmount(() => {
       @next="stepLightbox(1)"
       @copy-link="copyLibraryLink"
       @reuse="onReuse"
+      @continue-published="openContinuedVideo"
       @use-source="onUseAsSource"
       @use-endpoint="onUseAsEndpoint"
       @upscale="onUpscale"

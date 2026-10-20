@@ -558,59 +558,10 @@ export interface SseUpscaleCompleteEvent {
 // authoring surface: web builds this wire body itself in `useGenerateStream`.
 // Mirrors `mold_core::chain::{ChainRequest, ChainStage, ChainProgressEvent,
 // SseChainCompleteEvent}`.
-export interface ChainStageWire {
-  prompt: string;
-  frames: number;
-  source_image?: string | null;
-  negative_prompt?: string | null;
-  seed_offset?: number | null;
-  transition?: "smooth" | "cut" | "fade";
-  fade_frames?: number | null;
-  loras?: Array<{ path: string; scale: number; name?: string | null }>;
-}
-
-export interface ChainRequestWire {
-  model: string;
-  /** An auto-chained one-shot: the machine renders and stitches it, records
-   * the print with stage seeds but no chain job id, and deletes the job's
-   * artifacts afterwards. Absent for an authored sequence, which is durable
-   * and belongs in History. */
-  ephemeral?: boolean;
-  /** Title for the STITCHED print — an auto-chained render still produces ONE
-   * print, so this titles that print and never an intermediate clip. */
-  title?: string | null;
-  /** Creation-time filing for the stitched print, same normalization and
-   * limits as `GenerateRequestWire.tags`. Additive. */
-  tags?: string[];
-  /** Creation-time collection for the stitched print. Additive. */
-  collection?: { id?: string; name?: string };
-  stages?: ChainStageWire[];
-  motion_tail_frames?: number;
-  width: number;
-  height: number;
-  fps?: number;
-  seed?: number | null;
-  steps: number;
-  guidance: number;
-  strength?: number;
-  output_format?: OutputFormat;
-  placement?: DevicePlacement | null;
-  prompt?: string;
-  total_frames?: number;
-  clip_frames?: number;
-  source_image?: string | null;
-  /** Mux per-stage audio into the stitched MP4 (LTX-2 / LTX-2.3 only).
-   * Omit for the wire default of off — chains opt in to audio
-   * explicitly so existing callers don't suddenly produce audio they
-   * didn't ask for. The server returns 400 if `true` for non-AV
-   * families (see `chain_limits::family_supports_audio`). */
-  enable_audio?: boolean | null;
-  original_prompt?: string | null;
-  batch_id?: string | null;
-  batch_index?: number | null;
-  batch_count?: number | null;
-  output_mode?: "one-shot" | "sequence" | null;
-}
+export type {
+  ChainStageWire,
+  ChainRequestWire,
+} from "@studio/lib/api/chainTypes";
 
 export interface ExpandRequestWire {
   prompt: string;

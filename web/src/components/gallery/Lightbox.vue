@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import VideoClips from "@studio/components/VideoClips.vue";
 import { originAuthenticatedFetch as fetch } from "../../lib/originAuth";
 
 /*
@@ -118,6 +119,13 @@ const endpointChoices = inject(
   computed(() => []),
 );
 const emit = defineEmits<{
+  (
+    e: "continue-published",
+    value: {
+      filename: string;
+      owner: import("@studio/api/chainJobs").ChainOwner;
+    },
+  ): void;
   (e: "viewed", item: GalleryImage): void;
   (e: "close"): void;
   (e: "copy-link", item: GalleryImage): void;
@@ -808,6 +816,22 @@ async function performVideoExport(options: VideoExportOptions) {
     exportBusy.value = false;
   }
 }
+const clipsOwner = computed(() => {
+  const hostId = (props.item as { hostId?: string } | null)?.hostId;
+  const host = hostId ? getHost(hostId) : originHost();
+  return host
+    ? {
+        hostId: host.id,
+        label: host.name,
+        instanceId: host.instanceId,
+        target: {
+          baseUrl: host.url,
+          apiKey: host.apiKey ?? null,
+          connectionMode: host.connectionMode,
+        },
+      }
+    : null;
+});
 </script>
 
 <template>
@@ -1170,6 +1194,15 @@ async function performVideoExport(options: VideoExportOptions) {
               </svg>
               Reuse these settings
             </button>
+            <VideoClips
+              v-if="isVideoFile && item?.metadata.chain_job_id"
+              :source="{
+                jobId: item.metadata.chain_job_id,
+                filename: item.filename,
+              }"
+              :owner="clipsOwner"
+              @published="emit('continue-published', $event)"
+            />
           </template>
           <div class="lb__pair">
             <button
@@ -1581,6 +1614,15 @@ async function performVideoExport(options: VideoExportOptions) {
               </svg>
               Reuse these settings
             </button>
+            <VideoClips
+              v-if="isVideoFile && item?.metadata.chain_job_id"
+              :source="{
+                jobId: item.metadata.chain_job_id,
+                filename: item.filename,
+              }"
+              :owner="clipsOwner"
+              @published="emit('continue-published', $event)"
+            />
           </template>
           <div class="lb__pair">
             <button

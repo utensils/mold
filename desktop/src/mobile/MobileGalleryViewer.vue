@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import VideoClips from "@studio/components/VideoClips.vue";
 import SourceMediaPanel from "@studio/components/SourceMediaPanel.vue";
 import type { SourceMediaOwner, SourceMediaSelection } from "@studio/lib/sourceMediaBrowser";
 
@@ -162,6 +163,9 @@ const props = withDefaults(
 );
 
 const emit = defineEmits<{
+  "continue-published": [
+    value: { filename: string; owner: import("@studio/api/chainJobs").ChainOwner },
+  ];
   viewed: [];
   useRetainedSource: [selection: SourceMediaSelection];
   close: [];
@@ -1824,6 +1828,17 @@ onBeforeUnmount(() => {
           >
             {{ usingSource ? "Loading source…" : "Use as source" }}
           </button>
+          <VideoClips
+            v-if="!trashed && item.metadata.chain_job_id"
+            :source="{ jobId: item.metadata.chain_job_id, filename: item.filename }"
+            :owner="{
+              hostId: (item as { hostId?: string }).hostId ?? cacheKey,
+              label: hostName,
+              instanceId: instanceId,
+              target: target,
+            }"
+            @published="emit('continue-published', $event)"
+          />
           <button
             class="primary-button gallery-viewer-reuse"
             type="button"

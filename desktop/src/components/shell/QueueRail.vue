@@ -44,6 +44,12 @@ function sourceTarget(row: QueueRow) {
     : null;
 }
 function sourceJobId(row: QueueRow) {
+  if (
+    row.kind === "shared"
+      ? row.shared.kind !== "generation" || row.shared.execution === "chain"
+      : row.print.chainStageCount !== null
+  )
+    return "";
   return row.kind === "shared" ? row.shared.id : (row.print.recoveredJobId ?? row.print.id ?? "");
 }
 const title = (row: QueueRow) => rowTitle(row, hostModels.unionInstalled);

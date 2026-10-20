@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import VideoClips from "@studio/components/VideoClips.vue";
 import { jobStallLabel } from "@studio/lib/jobStall";
 import { hasActiveFreshVideoReferences } from "@studio/lib/minimaxH3Authoring";
 import { prepareH3VideoReferences } from "@studio/lib/prepareH3VideoReferences";
@@ -360,6 +361,9 @@ function loadMuted(): boolean {
   }
 }
 
+const clipsActive = ref(false);
+const clipsPinned = ref<{ hostId: string; model: string } | null>(null);
+const videoClipsRef = ref<InstanceType<typeof VideoClips> | null>(null);
 const form = useGenerateForm();
 const router = useRouter();
 const { status } = useStatusPoll();
@@ -3825,6 +3829,10 @@ async function onSubmit(
   allowStaleQuick = false,
   batchSize: number | null = null,
 ) {
+  if (clipsActive.value) {
+    await videoClipsRef.value?.submit();
+    return;
+  }
   if (submitInFlight.value) return;
   clearSelectedQueueRender();
   const attempt = ++submitAttempt;
@@ -5755,6 +5763,48 @@ onBeforeUnmount(() => {
   document.removeEventListener("pointerdown", onRecentMenuPointerDown);
   document.removeEventListener("keydown", onRecentMenuKeydown);
 });
+const clipsOwner = computed(() => {
+  const route = clipsPinned.value
+    ? routing.resolve(clipsPinned.value.model, [clipsPinned.value.hostId])
+    : routing.resolve(form.state.value.model || null);
+  return route
+    ? {
+        ...route,
+        target: { ...route.target, apiKey: route.target.apiKey ?? null },
+      }
+    : null;
+});
+const clipsInput = computed(() => {
+  try {
+    return { request: form.toRequest(currentModel.value), error: null };
+  } catch (error) {
+    return {
+      request: {
+        model: form.state.value.model,
+        prompt: form.state.value.prompt,
+        width: form.state.value.width,
+        height: form.state.value.height,
+        frames: form.state.value.frames,
+        fps: form.state.value.fps,
+        steps: form.state.value.steps,
+        guidance: form.state.value.guidance,
+      },
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+});
+function setClipsActive(value: boolean) {
+  if (value && !clipsPinned.value) {
+    const route = routing.resolve(form.state.value.model || null);
+    if (route)
+      clipsPinned.value = {
+        hostId: route.hostId,
+        model: form.state.value.model,
+      };
+  }
+  clipsActive.value = value;
+  if (!value) clipsPinned.value = null;
+}
 </script>
 
 <template>
@@ -5921,66 +5971,102 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
-        <ComposerCard
-          ref="composerCardRef"
+        <div
+          v-show="!clipsActive"
           :class="isPhone ? 'composer--docked' : 'composer--sticky'"
-          :prompt="form.state.value.prompt"
-          :aspect-label="aspectLabel"
-          :width="form.state.value.width"
-          :height="form.state.value.height"
-          :steps="form.state.value.steps"
-          :batch-size="form.state.value.batchSize"
-          :busy="ordinarySubmitBlocked || submitInFlight"
-          :cancellable="submitInFlight"
-          :busy-label="placementStatus ?? 'Planning generation…'"
-          :disabled-reason="generationInputBlocker"
-          :expanded="expanded"
-          :running="expandingPrompt || preparingVariations"
-          :expansion-host-label="expansionHostLabel"
-          :prompt-optional="canSkipPrompt"
-          :required-placeholder="requiredPromptPlaceholder"
-          :placeholder="composerPromptPlaceholder"
-          :transform-blocked-reason="promptTransformBlocked"
-          :history="promptHistory"
-          @update:prompt="onPromptAuthored"
-          @submit="onSubmit"
-          @cancel="cancelSubmitPlanning"
-          @expand="onExpand"
-          @remix="onRemix"
-          @undo-expand="undoExpand"
         >
-          <!-- The composer owns the Style chip on every width (desktop's
+          <ComposerCard
+            ref="composerCardRef"
+            :prompt="form.state.value.prompt"
+            :aspect-label="aspectLabel"
+            :width="form.state.value.width"
+            :height="form.state.value.height"
+            :steps="form.state.value.steps"
+            :batch-size="form.state.value.batchSize"
+            :busy="ordinarySubmitBlocked || submitInFlight"
+            :cancellable="submitInFlight"
+            :busy-label="placementStatus ?? 'Planning generation…'"
+            :disabled-reason="generationInputBlocker"
+            :expanded="expanded"
+            :running="expandingPrompt || preparingVariations"
+            :expansion-host-label="expansionHostLabel"
+            :prompt-optional="canSkipPrompt"
+            :required-placeholder="requiredPromptPlaceholder"
+            :placeholder="composerPromptPlaceholder"
+            :transform-blocked-reason="promptTransformBlocked"
+            :history="promptHistory"
+            @update:prompt="onPromptAuthored"
+            @submit="onSubmit"
+            @cancel="cancelSubmitPlanning"
+            @expand="onExpand"
+            @remix="onRemix"
+            @undo-expand="undoExpand"
+          >
+            <!-- The composer owns the Style chip on every width (desktop's
                pattern): the style is what the picture is made with, so it
                belongs beside the words, not in a settings column. -->
-          <template #style>
-            <CreateStylePicker
-              :models="composerModels"
-              :model="form.state.value.model"
-              :missing-model="missingModelId"
-              :availability-tag="styleAvailabilityTag"
-              :browse-to="output.browseTo.value"
-              empty-label="No styles ready"
-              @select="selectModel"
-              @browse="browseStyles"
-            />
-          </template>
-          <template #shape>
-            <ShapeChip
-              v-if="!outputShape.canvasless"
-              :label="shapeChipLabel"
-              :sublabel="shapeChipSublabel"
-              @open="openShapeGroup"
-            />
-          </template>
-          <template #count>
-            <MakeChip
-              :model-value="form.state.value.batchSize"
-              :locked="batchLocked"
-              :locked-reason="batchLockedReason"
-              @update:model-value="form.state.value.batchSize = $event"
-            />
-          </template>
-        </ComposerCard>
+            <template #style>
+              <CreateStylePicker
+                :models="composerModels"
+                :model="form.state.value.model"
+                :missing-model="missingModelId"
+                :availability-tag="styleAvailabilityTag"
+                :browse-to="output.browseTo.value"
+                empty-label="No styles ready"
+                @select="selectModel"
+                @browse="browseStyles"
+              />
+            </template>
+            <template #shape>
+              <ShapeChip
+                v-if="!outputShape.canvasless"
+                :label="shapeChipLabel"
+                :sublabel="shapeChipSublabel"
+                @open="openShapeGroup"
+              />
+            </template>
+            <template #count>
+              <MakeChip
+                :model-value="form.state.value.batchSize"
+                :locked="batchLocked"
+                :locked-reason="batchLockedReason"
+                @update:model-value="form.state.value.batchSize = $event"
+              />
+            </template>
+          </ComposerCard>
+        </div>
+        <VideoClips
+          ref="videoClipsRef"
+          :enabled="
+            output.kind.value === 'clip' &&
+            !submitInFlight &&
+            !ordinarySubmitBlocked
+          "
+          :request="clipsInput.request"
+          :owner="clipsOwner"
+          :owner-selection="routing.targetId.value"
+          :frame-contract="currentModel"
+          :blocked-reason="
+            clipsInput.error ??
+            (hasActiveFreshVideoReferences(
+              form.state.value.h3Authoring,
+              capabilities.sourceImageMode,
+            )
+              ? 'Normalize fresh video references with a single clip first, or use the CLI for this sequence.'
+              : null)
+          "
+          @active="setClipsActive"
+          @single="
+            onPromptAuthored($event.prompt);
+            form.state.value.frames = $event.frames;
+          "
+          @published="
+            router.push({
+              path: '/library',
+              query: { print: $event.filename, printHost: $event.owner.hostId },
+            })
+          "
+        />
         <EstimateBadge
           :request="estimateRequest"
           :target="estimateTarget"

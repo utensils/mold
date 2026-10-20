@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import VideoClips from "@studio/components/VideoClips.vue";
 import { jobStallLabel, parseQueueCancellationResponse } from "@studio/lib/jobStall";
 import { hasActiveFreshVideoReferences } from "@studio/lib/minimaxH3Authoring";
 import { prepareH3VideoReferences } from "@studio/lib/prepareH3VideoReferences";
@@ -946,6 +947,9 @@ watch(
   { deep: true },
 );
 const form = reactive<GenerateForm>(newGenerateForm());
+const clipsActive = ref(false);
+const clipsPinned = ref<{ hostId: string; model: string } | null>(null);
+const videoClipsRef = ref<InstanceType<typeof VideoClips> | null>(null);
 const composerDraft = createMobileComposerDraft();
 const composerDraftReady = ref(false);
 const restoredComposerModel = ref<string | null>(null);
@@ -7306,6 +7310,10 @@ async function presentSettledGeneration(
 }
 
 async function generate(): Promise<void> {
+  if (clipsActive.value) {
+    await videoClipsRef.value?.submit();
+    return;
+  }
   if (!composerDraftReady.value || composerDraftError.value || composerDraftMissing.value.length)
     return;
   clearSelectedQueueRender();
@@ -12677,6 +12685,53 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
   }
   if (action === "cancel") void cancelGeneration(row.print);
 }
+const clipsOwner = computed(() => {
+  const host = clipsPinned.value
+    ? routingHosts.value.find((candidate) => candidate.id === clipsPinned.value!.hostId)
+    : automaticRouting.value
+      ? provisionalAutomaticHost(form.model, form.family, formCarriesIdentity.value)
+      : selectedHost.value;
+  return host ? routeForMobileHost(host) : null;
+});
+const clipsInput = computed(() => {
+  try {
+    return { request: buildRequest(form), error: null };
+  } catch (error) {
+    return {
+      request: {
+        model: form.model,
+        prompt: form.prompt,
+        width: form.width,
+        height: form.height,
+        frames: form.frames,
+        fps: form.fps,
+        steps: form.steps,
+        guidance: form.guidance,
+      },
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+});
+async function openContinuedVideo(value: {
+  filename: string;
+  owner: import("@studio/api/chainJobs").ChainOwner;
+}) {
+  dismissSelectedPrint();
+  generatedViewerOpen.value = false;
+  tab.value = "gallery";
+  libraryScope.value = "prints";
+  await refreshGallery();
+  const print = gallery.value.find(
+    (candidate) => candidate.hostId === value.owner.hostId && candidate.filename === value.filename,
+  );
+  if (print) openPrint(print);
+}
+function setClipsActive(value: boolean) {
+  if (value && !clipsPinned.value && clipsOwner.value)
+    clipsPinned.value = { hostId: clipsOwner.value.hostId, model: form.model };
+  clipsActive.value = value;
+  if (!value) clipsPinned.value = null;
+}
 </script>
 
 <template>
@@ -13187,7 +13242,30 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           <p v-if="caps.promptMode === 'ignored'" class="section-note">
             {{ promptFieldPlaceholder }}
           </p>
-          <label v-show="caps.promptMode !== 'ignored'" class="field mobile-prompt-field">
+          <VideoClips
+            ref="videoClipsRef"
+            :enabled="selectedOutputKind === 'clip' && !preparedBatch"
+            :request="clipsInput.request"
+            :owner="clipsOwner"
+            :owner-selection="generateTarget"
+            :frame-contract="selectedGenerationModel"
+            :blocked-reason="
+              clipsInput.error ??
+              (hasActiveFreshVideoReferences(form.h3Authoring, caps.sourceImageMode)
+                ? 'Normalize fresh video references with a single clip first, or use the CLI for this sequence.'
+                : null)
+            "
+            @active="setClipsActive"
+            @single="
+              onPromptAuthored($event.prompt);
+              form.frames = $event.frames;
+            "
+            @published="openContinuedVideo"
+          />
+          <label
+            v-show="!clipsActive && caps.promptMode !== 'ignored'"
+            class="field mobile-prompt-field"
+          >
             <span>Prompt</span>
             <textarea
               id="mobile-prompt"
@@ -13198,7 +13276,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             />
           </label>
           <button
-            v-if="caps.promptMode !== 'ignored'"
+            v-if="!clipsActive && caps.promptMode !== 'ignored'"
             type="button"
             class="secondary-button"
             data-test="edit-prompt"
@@ -13249,7 +13327,10 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               </button></template
             >
           </PromptEditor>
-          <details v-show="caps.promptMode !== 'ignored'" class="mobile-prompt-modifiers">
+          <details
+            v-show="!clipsActive && caps.promptMode !== 'ignored'"
+            class="mobile-prompt-modifiers"
+          >
             <summary>Prompt extras</summary>
             <MobilePromptTools
               v-if="selectedTarget"
@@ -14727,7 +14808,11 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                   >
                     <MobileGenerationQueueCard
                       :source-target="retainedQueueSource(activityRowHostId(entry.local))"
-                      :source-job-id="activityRowJobId(entry.local)"
+                      :source-job-id="
+                        entry.local.print.chainStageCount !== null
+                          ? null
+                          : activityRowJobId(entry.local)
+                      "
                       :held="!!durableHold(entry.local.print)"
                       :download-available="
                         queueDownloadHint(
@@ -14778,7 +14863,11 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                   >
                     <MobileGenerationQueueCard
                       :source-target="retainedQueueSource(entry.shared.hostId)"
-                      :source-job-id="entry.shared.id"
+                      :source-job-id="
+                        entry.shared.kind === 'generation' && entry.shared.execution !== 'chain'
+                          ? entry.shared.id
+                          : null
+                      "
                       :held="sharedHeldQueueRow(entry.shared.hostId, entry.shared.id)"
                       :download-available="queueDownloadHint(entry.shared.hostId, entry.shared.id)"
                       :source-host-label="entry.shared.hostLabel"
@@ -15018,7 +15107,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
     </MobileLibrarySheet>
 
     <div
-      v-if="!settingsOpen && tab === 'generate' && selectedHost && !preparedBatch"
+      v-if="!clipsActive && !settingsOpen && tab === 'generate' && selectedHost && !preparedBatch"
       class="mobile-create-action"
       data-test="mobile-create-action"
     >
@@ -15086,6 +15175,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       :collections="libraryCollectionCards"
       @close="closePrint"
       @reuse="reuseSelectedPrint"
+      @continue-published="openContinuedVideo"
       @use-source="useSelectedPrintAsSource"
       @upscale="openViewerUpscale"
       @previous="navigateSelectedPrint(-1)"
@@ -15143,6 +15233,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       :generation-announcement="generationAnnouncement"
       @close="generatedViewerOpen = false"
       @reuse="reuseGeneratedPrint"
+      @continue-published="openContinuedVideo"
       @use-source="useGeneratedPrintAsSource"
       @upscale="openGeneratedUpscale"
     />

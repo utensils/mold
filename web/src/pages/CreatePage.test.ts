@@ -543,7 +543,7 @@ describe("CreatePage layout and behavior", () => {
   it("sticks the composer to the bottom with nothing clipping it", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
-    expect(wrapper.getComponent({ name: "ComposerCard" }).classes()).toContain(
+    expect(wrapper.get(".composer--sticky").classes()).toContain(
       "composer--sticky",
     );
 
@@ -578,7 +578,7 @@ describe("CreatePage layout and behavior", () => {
     );
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
-    expect(wrapper.getComponent({ name: "ComposerCard" }).classes()).toContain(
+    expect(wrapper.get(".composer--docked").classes()).toContain(
       "composer--docked",
     );
     wrapper.unmount();
