@@ -1,3 +1,9 @@
+import type { MinimaxH3AuthoringState } from "../lib/minimaxH3Authoring";
+import {
+  prepareClipsInputs,
+  prepareClipsReferences,
+} from "../lib/chainInputPreparation";
+import { domCanvasOps } from "../lib/sourceFitCanvas";
 import {
   loadVideoClipsDraft,
   saveVideoClipsDraft,
@@ -43,6 +49,15 @@ import {
 } from "../lib/videoDuration";
 
 export interface VideoClipsOptions {
+  referenceAuthoring?: MinimaxH3AuthoringState | null | undefined;
+  upscale?:
+    | ((
+        image: string,
+        model: string,
+        owner: ChainOwner,
+        signal: AbortSignal,
+      ) => Promise<string>)
+    | undefined;
   request?: ClipsBaseRequest | null | undefined;
   owner?: ChainOwner | null | undefined;
   enabled?: boolean | undefined;
@@ -67,6 +82,7 @@ export function useVideoClips(
   const captured = ref<{
     owner: ChainOwner;
     request: ClipsBaseRequest;
+    referenceAuthoring?: MinimaxH3AuthoringState;
     frameContract?: VideoFrameContract | null;
   } | null>(null);
   const clips = ref<VideoClipDraft[]>([]),
@@ -80,6 +96,10 @@ export function useVideoClips(
   const continuation = ref<ChainContinuation>(),
     admission = ref<ChainAdmission | null>(null),
     detail = ref<ChainJobDetail | null>(null);
+  let submissionToken: object | null = null;
+  let preparation: AbortController | null = null;
+  let preparedBase: ClipsBaseRequest | null = null;
+  let preparedReferences: ClipsBaseRequest | null = null;
   let revision = 0,
     timer: ReturnType<typeof setTimeout> | undefined,
     disposed = false;
@@ -140,7 +160,8 @@ export function useVideoClips(
       active.value &&
       !props.source &&
       captured.value &&
-      JSON.stringify(props.request) !== baseFingerprint.value,
+      JSON.stringify([props.request, props.referenceAuthoring]) !==
+        baseFingerprint.value,
   );
   const refusal = computed(() =>
     settingsChanged.value
@@ -305,9 +326,16 @@ export function useVideoClips(
   }
   async function open(recoverOnly = false) {
     if (!props.owner || (!props.request && !props.source)) return;
+    preparation?.abort();
+    submissionToken = null;
+    preparedBase = null;
+    preparedReferences = null;
     const stamp = ++revision;
     const sourceInput = props.source ? { ...props.source } : null;
-    baseFingerprint.value = JSON.stringify(props.request);
+    baseFingerprint.value = JSON.stringify([
+      props.request,
+      props.referenceAuthoring,
+    ]);
     capturedSelection.value = props.ownerSelection;
     active.value = true;
     cancelledBeforeAdmission.value = false;
@@ -324,6 +352,13 @@ export function useVideoClips(
     error.value = "";
     emit("active", true);
     captured.value = {
+      ...(!sourceInput && props.referenceAuthoring
+        ? {
+            referenceAuthoring: JSON.parse(
+              JSON.stringify(props.referenceAuthoring),
+            ) as MinimaxH3AuthoringState,
+          }
+        : {}),
       ...(props.frameContract
         ? { frameContract: { ...props.frameContract } }
         : {}),
@@ -452,6 +487,11 @@ export function useVideoClips(
     }
   }
   function close() {
+    preparation?.abort();
+    submissionToken = null;
+    busy.value = false;
+    preparedBase = null;
+    preparedReferences = null;
     const first =
       !props.source && !admission.value && !settingsChanged.value
         ? clips.value[0]
@@ -477,6 +517,7 @@ export function useVideoClips(
     emit("active", false);
   }
   function edited() {
+    preparation?.abort();
     plan.value = null;
     error.value = "";
     revision++;
@@ -522,11 +563,11 @@ export function useVideoClips(
         );
     edited();
   }
-  function request(): ChainRequestWire {
-    if (!captured.value || !limits.value)
+  function request(base = captured.value?.request): ChainRequestWire {
+    if (!captured.value || !base || !limits.value)
       throw new Error("Reconnect the video's machine first.");
     return buildClipsRequest(
-      captured.value.request,
+      base,
       clips.value,
       continuationTail.value ??
         plan.value?.motion_tail_frames ??
@@ -538,12 +579,32 @@ export function useVideoClips(
   async function validate(): Promise<ChainRequestWire | null> {
     if (!captured.value || ownerChanged.value || refusal.value) return null;
     const stamp = revision;
+    const signal = preparation?.signal;
+    const isCurrent = () =>
+      stamp === revision &&
+      !disposed &&
+      !ownerChanged.value &&
+      !refusal.value &&
+      !signal?.aborted;
     try {
       await assertChainOwner(captured.value.owner);
-      const candidate = request();
+      if (!isCurrent()) return null;
+      request(); // Bound repeated media before crop allocation.
+      if (!preparedReferences) {
+        const base = await prepareClipsReferences(
+          captured.value.request,
+          captured.value.referenceAuthoring,
+          {
+            ops: domCanvasOps,
+            current: isCurrent,
+          },
+        );
+        if (!isCurrent()) return null;
+        preparedReferences = base;
+      }
+      const candidate = request(preparedReferences);
       const result = await validateClips(captured.value.owner, candidate);
-      if (stamp !== revision || disposed || ownerChanged.value || refusal.value)
-        return null;
+      if (!isCurrent()) return null;
       plan.value = result;
       error.value = "";
       return { ...candidate, motion_tail_frames: result.motion_tail_frames };
@@ -557,10 +618,15 @@ export function useVideoClips(
     if (busy.value || admission.value || ownerChanged.value || !captured.value)
       return;
     busy.value = true;
+    const token = {};
+    submissionToken = token;
     const attempt = revision;
+    const controller = new AbortController();
+    preparation = controller;
+    const upscale = props.upscale;
     const submitted: ChainAdmission[] = [];
     try {
-      const candidate = await validate();
+      let candidate = await validate();
       if (
         !candidate ||
         attempt !== revision ||
@@ -569,19 +635,65 @@ export function useVideoClips(
         disposed
       )
         return;
+      const owner = captured.value.owner;
+      const current = () =>
+        submissionToken === token &&
+        !controller.signal.aborted &&
+        attempt === revision &&
+        !disposed &&
+        !ownerChanged.value &&
+        !refusal.value;
+      const inputs = (preparedReferences ??
+        captured.value.request) as ClipsBaseRequest & {
+        source_image?: string | null;
+        keyframes?: unknown[];
+      };
+      const needsPreparation =
+        !!inputs.source_image || !!inputs.keyframes?.length;
+      if (needsPreparation) {
+        preparation = controller;
+        if (!preparedBase) {
+          const prepared = await prepareClipsInputs(inputs, {
+            ops: domCanvasOps,
+            current: () => current() && !controller.signal.aborted,
+            ...(upscale
+              ? {
+                  upscale: async (image: string, model: string) => {
+                    await assertChainOwner(owner);
+                    if (!current() || controller.signal.aborted)
+                      throw new Error(
+                        "The video's machine changed while preparing.",
+                      );
+                    return upscale(image, model, owner, controller.signal);
+                  },
+                }
+              : {}),
+          });
+          if (!current() || controller.signal.aborted) return;
+          preparedBase = prepared;
+        }
+        if (!current() || controller.signal.aborted) return;
+        await assertChainOwner(owner);
+        if (!current() || controller.signal.aborted) return;
+        const preparedCandidate = request(preparedBase);
+        const checked = await validateClips(owner, preparedCandidate);
+        if (!current() || controller.signal.aborted) return;
+        plan.value = checked;
+        candidate = {
+          ...preparedCandidate,
+          motion_tail_frames: checked.motion_tail_frames,
+        };
+      }
+      if (!current()) return;
       await admitClips(
-        captured.value.owner,
+        owner,
         candidate,
         (record) => {
           submitted.push(record);
           persist(record);
         },
         undefined,
-        () =>
-          attempt === revision &&
-          !disposed &&
-          !ownerChanged.value &&
-          !refusal.value,
+        current,
       );
       if (attempt === revision && !disposed) await refresh();
     } catch (cause) {
@@ -599,7 +711,11 @@ export function useVideoClips(
       error.value = cause instanceof Error ? cause.message : String(cause);
       if (!rejected && admission.value) void refresh();
     } finally {
-      if (attempt === revision && !disposed) busy.value = false;
+      if (preparation === controller) preparation = null;
+      if (submissionToken === token) {
+        submissionToken = null;
+        busy.value = false;
+      }
     }
   }
   async function cancelKnownOperation() {
@@ -691,14 +807,21 @@ export function useVideoClips(
     },
     { immediate: true },
   );
+  watch(settingsChanged, (changed) => {
+    if (changed) preparation?.abort();
+  });
   watch(ownerChanged, (changed) => {
     if (changed) {
+      preparation?.abort();
       stopPoll();
       error.value =
         "This video's machine selection or connection changed. Reconnect its original machine to recover it.";
     } else if (admission.value) void refresh();
   });
   watch([() => props.source?.jobId, () => props.source?.filename], () => {
+    preparation?.abort();
+    preparedBase = null;
+    preparedReferences = null;
     revision++;
     stopPoll();
     active.value = false;
@@ -709,6 +832,7 @@ export function useVideoClips(
     emit("active", false);
   });
   onBeforeUnmount(() => {
+    preparation?.abort();
     disposed = true;
     revision++;
     stopPoll();

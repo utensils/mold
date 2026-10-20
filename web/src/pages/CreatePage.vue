@@ -5793,6 +5793,32 @@ const clipsInput = computed(() => {
     };
   }
 });
+async function upscaleClipsInput(
+  image: string,
+  model: string,
+  owner: import("@studio/api/chainJobs").ChainOwner,
+  signal: AbortSignal,
+): Promise<string> {
+  let result: string | null = null;
+  let failure: string | null = null;
+  await upscaleStream(
+    { image, model, output_format: "png" },
+    {
+      onProgress: () => {},
+      onComplete: (event) => {
+        result = event.image;
+      },
+      onError: (error) => {
+        failure = error.kind === "http" ? error.body : error.message;
+      },
+    },
+    signal,
+    { ...owner.target, apiKey: owner.target.apiKey ?? undefined },
+  );
+  if (failure) throw new Error(failure);
+  if (!result) throw new Error("Source upscaling did not return an image.");
+  return result;
+}
 function setClipsActive(value: boolean) {
   if (value && !clipsPinned.value) {
     const route = routing.resolve(form.state.value.model || null);
@@ -6043,6 +6069,12 @@ function setClipsActive(value: boolean) {
             !ordinarySubmitBlocked
           "
           :request="clipsInput.request"
+          :reference-authoring="
+            capabilities.sourceImageMode === 'ordered-references'
+              ? form.state.value.h3Authoring
+              : null
+          "
+          :upscale="upscaleClipsInput"
           :owner="clipsOwner"
           :owner-selection="routing.targetId.value"
           :frame-contract="currentModel"

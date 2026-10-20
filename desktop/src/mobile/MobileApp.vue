@@ -13246,6 +13246,13 @@ function setClipsActive(value: boolean) {
             ref="videoClipsRef"
             :enabled="selectedOutputKind === 'clip' && !preparedBatch"
             :request="clipsInput.request"
+            :reference-authoring="
+              caps.sourceImageMode === 'ordered-references' ? form.h3Authoring : null
+            "
+            :upscale="
+              (image, model, owner, signal) =>
+                upscaleImage({ image, model, target: owner.target, signal })
+            "
             :owner="clipsOwner"
             :owner-selection="generateTarget"
             :frame-contract="selectedGenerationModel"

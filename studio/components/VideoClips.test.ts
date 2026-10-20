@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import VideoClips from "./VideoClips.vue";
 import { ApiError } from "../api/client";
+import { domCanvasOps } from "../lib/sourceFitCanvas";
 import { CHAIN_ADMISSION_KEY } from "../api/chainJobs";
 const api = vi.hoisted(() => ({
   limits: vi.fn(),
@@ -70,7 +71,10 @@ beforeEach(() => {
     warnings: [],
   });
 });
-afterEach(() => wrapper?.unmount());
+afterEach(() => {
+  wrapper?.unmount();
+  vi.restoreAllMocks();
+});
 describe("compact video clips", () => {
   it("starts with one quiet action and authors ordered H3 prompts using the host frame grid", async () => {
     wrapper = mount(VideoClips, { props: { enabled: true, request, owner } });
@@ -590,4 +594,272 @@ describe("compact video clips", () => {
       ),
     ).toBe(true);
   });
+});
+
+describe("authored input preparation admission fence", () => {
+  it("keeps Check length read-only, then fits exact bytes once before validating and admitting", async () => {
+    const size = vi
+      .spyOn(domCanvasOps, "imageSize")
+      .mockResolvedValue({ width: 1344, height: 768 });
+    const fit = vi
+      .spyOn(domCanvasOps, "fitImage")
+      .mockResolvedValue("fitted-png");
+    api.limits.mockResolvedValue({
+      ...limits,
+      authoring: { ...limits.authoring, source_fit_supported: true },
+    });
+    const upscale = vi.fn(async () => "upscaled-png");
+    wrapper = mount(VideoClips, {
+      props: {
+        enabled: true,
+        owner,
+        request: {
+          ...request,
+          source_image: "original",
+          source_fit: {
+            mode: "upscale-then-fit",
+            upscalerModel: "upscaler",
+            fit: { mode: "pad-fit" },
+          },
+        },
+        upscale,
+      },
+    });
+    await wrapper.get("[data-test=video-clips-open]").trigger("click");
+    await flushPromises();
+    await wrapper
+      .get('textarea[aria-label="Clip 2 prompt"]')
+      .setValue("Robot waves");
+    await wrapper
+      .findAll("button")
+      .find((b) => b.text() === "Check length")!
+      .trigger("click");
+    await flushPromises();
+    expect(upscale).not.toHaveBeenCalled();
+    expect(fit).not.toHaveBeenCalled();
+    await (wrapper.vm as unknown as { submit: () => Promise<void> }).submit();
+    expect(upscale).toHaveBeenCalledTimes(1);
+    expect(fit).toHaveBeenCalledTimes(1);
+    expect(api.validate.mock.calls.at(-1)?.[1].stages[0].source_image).toBe(
+      "fitted-png",
+    );
+    expect(api.admit.mock.calls[0]?.[1].stages[0].source_image).toBe(
+      "fitted-png",
+    );
+    expect(api.admit.mock.calls[0]?.[1].source_fit).toMatchObject({
+      mode: "upscale-then-fit",
+    });
+    await (wrapper.vm as unknown as { submit: () => Promise<void> }).submit();
+    expect(upscale).toHaveBeenCalledTimes(1);
+    expect(fit).toHaveBeenCalledTimes(1);
+    size.mockRestore();
+    fit.mockRestore();
+  });
+  it("does not admit when installation changes while endpoint preparation awaits", async () => {
+    let resolve!: (value: { width: number; height: number }) => void;
+    const size = vi.spyOn(domCanvasOps, "imageSize").mockImplementation(
+      () =>
+        new Promise((r) => {
+          resolve = r;
+        }),
+    );
+    const fit = vi.spyOn(domCanvasOps, "fitImage").mockResolvedValue("fitted");
+    wrapper = mount(VideoClips, {
+      props: {
+        enabled: true,
+        owner,
+        request: { ...request, source_image: "original" },
+      },
+    });
+    await wrapper.get("[data-test=video-clips-open]").trigger("click");
+    await flushPromises();
+    await wrapper
+      .get('textarea[aria-label="Clip 2 prompt"]')
+      .setValue("Robot waves");
+    const pending = (
+      wrapper.vm as unknown as { submit: () => Promise<void> }
+    ).submit();
+    await flushPromises();
+    await vi.waitFor(() => expect(typeof resolve).toBe("function"));
+    await wrapper.setProps({ owner: { ...owner, instanceId: "replacement" } });
+    resolve({ width: 1344, height: 768 });
+    await pending;
+    expect(fit).not.toHaveBeenCalled();
+    expect(api.admit).not.toHaveBeenCalled();
+    size.mockRestore();
+    fit.mockRestore();
+  });
+});
+
+it("drops an edited crop preparation and returns usable instead of staying busy", async () => {
+  let finish!: (data: string) => void;
+  const fit = vi.spyOn(domCanvasOps, "fitImage").mockImplementation(
+    () =>
+      new Promise((r) => {
+        finish = r;
+      }),
+  );
+  const image = {
+    kind: "image",
+    mime_type: "image/png",
+    width: 1344,
+    height: 768,
+    media: { authority: "inline", data: "b3JpZ2luYWw=" },
+    provenance: { sha256: "original" },
+  } as const;
+  wrapper = mount(VideoClips, {
+    props: {
+      enabled: true,
+      owner,
+      request: { ...request, references: [image] },
+      referenceAuthoring: {
+        firstFrame: null,
+        lastFrame: null,
+        references: [
+          { reference: image, crop: { x: 0, y: 0, width: 768, height: 768 } },
+        ],
+      },
+    },
+  });
+  await wrapper.get("[data-test=video-clips-open]").trigger("click");
+  await flushPromises();
+  await wrapper
+    .get('textarea[aria-label="Clip 2 prompt"]')
+    .setValue("Robot waves");
+  const pending = (
+    wrapper.vm as unknown as { submit: () => Promise<void> }
+  ).submit();
+  await flushPromises();
+  await vi.waitFor(() => expect(fit).toHaveBeenCalledTimes(1));
+  const input = wrapper.get('textarea[aria-label="Clip 2 prompt"]')
+    .element as HTMLTextAreaElement;
+  input.value = "Late queued edit";
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  await flushPromises();
+  finish("Y3JvcHBlZA==");
+  await pending;
+  await flushPromises();
+  expect(api.admit).not.toHaveBeenCalled();
+  expect(
+    wrapper.get('textarea[aria-label="Clip 2 prompt"]').attributes("disabled"),
+  ).toBeUndefined();
+  fit.mockRestore();
+});
+
+it("never validates a pending reference crop as if original bytes were already cropped", async () => {
+  const image = {
+    kind: "image",
+    mime_type: "image/png",
+    width: 1344,
+    height: 768,
+    media: { authority: "inline", data: "b3JpZ2luYWw=" },
+    provenance: {
+      sha256: "original",
+      crop: {
+        x: 0,
+        y: 0,
+        width: 768,
+        height: 768,
+        source_width: 1344,
+        source_height: 768,
+        source_sha256: "original",
+      },
+    },
+  } as const;
+  const fit = vi
+    .spyOn(domCanvasOps, "fitImage")
+    .mockResolvedValue("Y3JvcHBlZA==");
+  api.validate.mockImplementation(async (_owner, wire) => {
+    for (const stage of wire.stages)
+      for (const ref of stage.generation_references ?? [])
+        if (ref.provenance?.crop && ref.provenance.crop.width !== ref.width)
+          throw new Error(
+            "crop size must equal cropped reference own dimensions",
+          );
+    return {
+      motion_tail_frames: 0,
+      estimated_total_frames: 214,
+      estimated_duration_ms: 8916,
+      fps: 24,
+      warnings: [],
+    };
+  });
+  wrapper = mount(VideoClips, {
+    props: {
+      enabled: true,
+      owner,
+      request: { ...request, references: [image] },
+      referenceAuthoring: {
+        firstFrame: null,
+        lastFrame: null,
+        references: [
+          { reference: image, crop: { x: 0, y: 0, width: 768, height: 768 } },
+        ],
+      },
+    },
+  });
+  await wrapper.get("[data-test=video-clips-open]").trigger("click");
+  await flushPromises();
+  await wrapper
+    .get('textarea[aria-label="Clip 2 prompt"]')
+    .setValue("Robot waves");
+  await wrapper
+    .findAll("button")
+    .find((b) => b.text() === "Check length")!
+    .trigger("click");
+  await flushPromises();
+  await vi.waitFor(() => expect(api.validate).toHaveBeenCalledTimes(1));
+  expect(fit).toHaveBeenCalledTimes(1);
+  expect(
+    api.validate.mock.calls[0]?.[1].stages[0].generation_references[0],
+  ).toMatchObject({
+    width: 768,
+    media: { data: "Y3JvcHBlZA==" },
+    provenance: { crop: { width: 768 } },
+  });
+  await (wrapper.vm as unknown as { submit: () => Promise<void> }).submit();
+  expect(api.admit).toHaveBeenCalledTimes(1);
+  expect(
+    api.admit.mock.calls[0]?.[1].stages[0].generation_references[0],
+  ).toMatchObject({
+    width: 768,
+    media: { data: "Y3JvcHBlZA==" },
+    provenance: { crop: { width: 768 } },
+  });
+  fit.mockRestore();
+});
+
+it("does not revive an aborted attempt when the owner changes away and back during validation", async () => {
+  let finish!: (value: unknown) => void;
+  api.validate.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  wrapper = mount(VideoClips, { props: { enabled: true, owner, request } });
+  await wrapper.get("[data-test=video-clips-open]").trigger("click");
+  await flushPromises();
+  await wrapper
+    .get('textarea[aria-label="Clip 2 prompt"]')
+    .setValue("Robot waves");
+  const pending = (
+    wrapper.vm as unknown as { submit: () => Promise<void> }
+  ).submit();
+  await flushPromises();
+  await wrapper.setProps({ owner: { ...owner, instanceId: "replacement" } });
+  await wrapper.setProps({ owner });
+  finish({
+    motion_tail_frames: 1,
+    estimated_total_frames: 213,
+    estimated_duration_ms: 8875,
+    fps: 24,
+    warnings: [],
+  });
+  await pending;
+  await flushPromises();
+  expect(api.admit).not.toHaveBeenCalled();
+  expect(
+    wrapper.get('textarea[aria-label="Clip 2 prompt"]').attributes("disabled"),
+  ).toBeUndefined();
 });
