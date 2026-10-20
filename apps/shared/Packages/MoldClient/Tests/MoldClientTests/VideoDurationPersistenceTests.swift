@@ -4,7 +4,7 @@ import Testing
 
 struct VideoDurationPersistenceTests {
     @Test func ordinaryDraftAndDurationScenesRestoreAtomicallyWithSourceOwner() throws {
-        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!, apiKey: "PRIVATE_KEY")
+        let host = MoldHost(name: "Workstation", baseURL: URL(string: "http://workstation:7680")!, apiKey: "PRIVATE_KEY")
         let owner = VideoJobOwner(host: host, instanceId: "installation")
         var ordinary = RenderDraft(); ordinary.prompt = #"literal\new"#
         ordinary.seed = UInt64.max
@@ -21,7 +21,7 @@ struct VideoDurationPersistenceTests {
         #expect(String(data: data, encoding: .utf8)?.contains("PRIVATE_KEY") == false)
     }
     @Test func restoredLibrarySourceCannotMoveToAnotherOriginOrInstallation() throws {
-        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!)
+        let host = MoldHost(name: "Workstation", baseURL: URL(string: "http://workstation:7680")!)
         let owner = VideoJobOwner(host: host, instanceId: "installation")
         let authoring = VideoDurationAuthoring(draft: .init(seconds: "30", source: .init(filename: "ordinary.mp4")),
             sourceOwner: .init(owner: owner, title: "Original"))

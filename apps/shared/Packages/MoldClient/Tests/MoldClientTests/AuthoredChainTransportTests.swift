@@ -29,7 +29,7 @@ private final class AuthoredChainTransport: StubTransport {
 @Suite(.serialized) struct AuthoredChainTransportTests {
     @Test func durableCreateUsesCapturedHostAndIdempotencyHeader() async throws {
         AuthoredChainTransport.requests = []
-        let backend: any MoldBackend = AuthoredChainTransport.backend(apiKey: "private-key", host: "plato")
+        let backend: any MoldBackend = AuthoredChainTransport.backend(apiKey: "private-key", host: "workstation")
         let fixture = AuthoredChainTests()
         let request = try AuthoredChainRequest(fixture.base(), stages: [.init(prompt: "One", frames: 209)], limits: fixture.limits())
         let accepted = try await backend.createChainJob(request, operationId: "op-1")
@@ -37,7 +37,7 @@ private final class AuthoredChainTransport: StubTransport {
         #expect(accepted.requestWarnings == ["Check collection"])
         let sent = try #require(AuthoredChainTransport.requests.last)
         #expect(sent.httpMethod == "POST")
-        #expect(sent.url?.host == "plato")
+        #expect(sent.url?.host == "workstation")
         #expect(sent.value(forHTTPHeaderField: "x-mold-operation-id") == "op-1")
         #expect(sent.value(forHTTPHeaderField: "X-Api-Key") == "private-key")
         #expect(sent.url?.query == nil)

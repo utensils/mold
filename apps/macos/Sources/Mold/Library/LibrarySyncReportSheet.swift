@@ -4,6 +4,7 @@ import SwiftUI
 struct LibrarySyncReportSheet: View {
     @Environment(LibraryStore.self) private var library
     @Environment(\.dismiss) private var dismiss
+    @FocusState private var reportFocused: Bool
 
     var body: some View {
         @Bindable var library = library
@@ -46,6 +47,9 @@ struct LibrarySyncReportSheet: View {
         .frame(width: 650)
         .frame(height: library.localSaveFailures.isEmpty && library.localSaveNotices.isEmpty ? nil : 500)
         .frame(minHeight: 180)
+        .focusable().focusEffectDisabled()
+        .focused($reportFocused)
+        .onAppear { reportFocused = true }
         .onExitCommand(perform: dismissReport)
     }
 

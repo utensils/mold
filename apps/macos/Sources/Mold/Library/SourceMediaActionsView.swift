@@ -28,11 +28,10 @@ struct SourceMediaActionsView<Content: View, Extra: View>: View {
             Menu("Source actions") { actionItems }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
-                .disabled(requested != nil)
             if requested != nil { ProgressView("Loading original…").accessibilityIdentifier("source-media-original-loading") }
             if let failure { Text(failure).accessibilityIdentifier("source-media-original-error").font(.caption).foregroundStyle(.secondary) }
         }
-        .contextMenu { actionItems; Divider(); extra() }
+        .rowActionMenu(menuActions, perform: performMenuAction, extra: extra)
         .task(id: requested) {
             if let action = requested {
                 await perform(action)
@@ -46,19 +45,21 @@ struct SourceMediaActionsView<Content: View, Extra: View>: View {
         .onChange(of: authority) { sharing.clear(); requested = nil }
         .onDisappear { sharing.clear(); requested = nil }
     }
-    @ViewBuilder private var actionItems: some View {
-        Button("Copy Source ID") { Clipboard.put(identity) }
-        Button("Copy CLI Command") {
+    private var menuActions: [RowAction<SourceMediaCommand>] {
+        SourceMediaCommand.actions(image: member.contentKind == "image", hasHash: member.contentSha256 != nil, busy: requested != nil)
+    }
+    private var actionItems: some View { RowActionMenu(actions: menuActions, perform: performMenuAction) }
+    private func performMenuAction(_ action: SourceMediaCommand) {
+        switch action {
+        case .sourceID: Clipboard.put(identity)
+        case .command:
             if let host = hosts.host(owner.hostID) { Clipboard.put(SourceMediaActions.command(filename: owner.print.filename, member: member, host: host.baseURL)) }
+        case .hash:
+            if let hash = member.contentSha256 { Clipboard.put(hash) }
+        case .copy: requested = .copy
+        case .save: requested = .save
+        case .share: requested = .share
         }
-        if let hash = member.contentSha256 { Button("Copy SHA-256") { Clipboard.put(hash) } }
-        Divider()
-        Button(member.contentKind == "image" ? "Copy Image" : "Copy File") { requested = .copy }
-            .disabled(requested != nil)
-        Button("Save a Copy…") { requested = .save }
-            .disabled(requested != nil)
-        Button("Share…") { requested = .share }
-            .disabled(requested != nil)
     }
     private func perform(_ action: FileAction) async {
         failure = nil
@@ -74,7 +75,7 @@ struct SourceMediaActionsView<Content: View, Extra: View>: View {
             guard let loaded = try await SourceMediaLoading.original(row: row, backend: hosts.backend(for: host), isCurrent: current), current() else { return }
             switch action {
             case .copy:
-                let data = try Data(contentsOf: loaded.file.url)
+                let data = try await MediaImport.bytes(of: loaded.file.url)
                 guard current() else { return }
                 NSPasteboard.general.clearContents()
                 if let image = NSImage(data: data) { NSPasteboard.general.writeObjects([image]) }
@@ -89,7 +90,7 @@ struct SourceMediaActionsView<Content: View, Extra: View>: View {
             case .save:
                 let panel = NSSavePanel(); panel.nameFieldStringValue = member.displayName
                 guard await panel.begin() == .OK, let url = panel.url, current() else { return }
-                try Data(contentsOf: loaded.file.url).write(to: url, options: .atomic)
+                try await MediaImport.copy(from: loaded.file.url, to: url)
             case .share:
                 guard let window = NSApp.keyWindow, let anchor = window.contentView, current() else { return }
                 let sourceHosts = hosts, sourceLibrary = library
@@ -100,5 +101,17 @@ struct SourceMediaActionsView<Content: View, Extra: View>: View {
                 })
             }
         } catch { if current() { failure = error.localizedDescription } }
+    }
+}
+
+/// One action plan drives both the inline menu and the contextual menu.
+enum SourceMediaCommand: Hashable {
+    case sourceID, command, hash, copy, save, share
+    static func actions(image: Bool, hasHash: Bool, busy: Bool) -> [RowAction<Self>] {
+        var rows: [RowAction<Self>] = [.init(kind: .sourceID, title: "Copy Source ID"), .init(kind: .command, title: "Copy CLI Command")]
+        if hasHash { rows.append(.init(kind: .hash, title: "Copy SHA-256")) }
+        rows += [.separator, .init(kind: .copy, title: image ? "Copy Image" : "Copy File", isDisabled: busy),
+                 .init(kind: .save, title: "Save a Copy…", isDisabled: busy), .init(kind: .share, title: "Share…", isDisabled: busy)]
+        return rows
     }
 }

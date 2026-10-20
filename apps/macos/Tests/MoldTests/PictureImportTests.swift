@@ -30,6 +30,18 @@ struct PictureImportTests {
         return try #require(CGImageSourceGetType(source) as String?)
     }
 
+    @Test func originalFileCopyReplacesOnlyTheChosenDestinationWithoutTranscoding() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let original = directory.appending(path: "original.bin"), destination = directory.appending(path: "copy.bin")
+        let bytes = Data([0, 1, 2, 255, 7])
+        try bytes.write(to: original); try Data("old".utf8).write(to: destination)
+        try await MediaImport.copy(from: original, to: destination)
+        #expect(try Data(contentsOf: destination) == bytes)
+        #expect(try Data(contentsOf: original) == bytes)
+    }
+
     @Test func aFormatTheEngineReadsIsPassedThroughUntouched() throws {
         for type in [UTType.png, .jpeg] {
             let original = try bytes(type)
@@ -109,7 +121,9 @@ struct PictureImportTests {
         for file in files {
             // The two readers themselves, and the UAT seeds, which read a
             // path from the environment rather than a person's pick.
-            guard !["PictureImport.swift", "MediaImport.swift"]
+            // LibrarySyncJournal owns private receipt storage, not picked media;
+            // its nonisolated load/write contract is tested by LibrarySyncRecordsTests.
+            guard !["PictureImport.swift", "MediaImport.swift", "LibrarySyncRecords.swift"]
                 .contains(file.lastPathComponent),
                 !file.lastPathComponent.hasSuffix("+UAT.swift")
             else { continue }

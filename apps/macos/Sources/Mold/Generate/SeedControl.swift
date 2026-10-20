@@ -14,9 +14,9 @@ struct SeedControl: View {
                     newSeedButton
                 }
                 VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 8) {
-                        modePicker
-                        newSeedButton
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 8) { modePicker; newSeedButton }
+                        VStack(alignment: .leading, spacing: 6) { modePicker; newSeedButton }
                     }
                     seedNumber(seed)
                 }
