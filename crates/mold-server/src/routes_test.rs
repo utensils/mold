@@ -652,6 +652,7 @@ mod tests {
 
     fn route_chain_request() -> ChainRequest {
         ChainRequest {
+            source_fit: None,
             continue_from: None,
             offload: None,
             collection: None,
@@ -21278,6 +21279,14 @@ mod tests {
             "ltx2 family advertises audio so the SPA can show the toggle",
         );
         assert_eq!(limits["supports_sequence"], true);
+        assert_eq!(
+            limits["authoring"],
+            serde_json::json!({
+                "source_fit_supported": true,
+                "motion_tail_frames": 17, "carry_mode": "latent", "min_frames": 1,
+                "frame_step": 8, "frame_offset": 1,
+            })
+        );
         assert!(limits["sequence_unsupported_reason"].is_null());
     }
 

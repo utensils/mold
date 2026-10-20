@@ -645,6 +645,7 @@ mod tests {
             authored_media_sha256: None,
         };
         ChainRequest {
+            source_fit: None,
             continue_from: None,
             offload: None,
             model: "ltx-2-19b-distilled:fp8".into(),

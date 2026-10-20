@@ -73,6 +73,7 @@ struct SchedulerActivity {
 struct SchedulerActivityIndex {
     by_work: HashMap<String, SchedulerActivity>,
     by_parent: HashMap<String, SchedulerActivity>,
+    chain_child_parents: HashMap<String, String>,
 }
 
 fn merge_scheduler_activity(current: &mut SchedulerActivity, candidate: &SchedulerActivity) {
@@ -101,6 +102,11 @@ fn scheduler_activity(state: &AppState) -> SchedulerActivityIndex {
         return index;
     };
     for work in plan.work_items {
+        if work.work_kind == "chain_stage" && work.work_id != work.parent_id {
+            index
+                .chain_child_parents
+                .insert(work.work_id.clone(), work.parent_id.clone());
+        }
         let runtime_progress = state
             .job_registry
             .progress_snapshot(&work.work_id)
@@ -170,6 +176,83 @@ fn scheduler_activity(state: &AppState) -> SchedulerActivityIndex {
     index
 }
 
+const STAGE_CHILD_ACTIVITY_FILE: &str = "active-stage-child.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StageChildActivity {
+    parent_id: String,
+    child_id: String,
+}
+
+/// Runner-owned display relation. One bounded file per parent survives restart;
+/// never derive ownership from public tags, titles or caller-supplied IDs.
+pub(crate) fn record_stage_child_activity(
+    job_dir: &std::path::Path,
+    parent_id: &str,
+    child_id: &str,
+) -> anyhow::Result<()> {
+    use std::io::Write;
+    let record = StageChildActivity {
+        parent_id: parent_id.to_string(),
+        child_id: child_id.to_string(),
+    };
+    let temporary = job_dir.join(format!(
+        ".{STAGE_CHILD_ACTIVITY_FILE}.{}",
+        uuid::Uuid::new_v4()
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| {
+        let mut file = options.open(&temporary)?;
+        file.write_all(&serde_json::to_vec(&record)?)?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, job_dir.join(STAGE_CHILD_ACTIVITY_FILE))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn retained_stage_child_activity(job_dir: &std::path::Path, parent_id: &str) -> Option<String> {
+    use std::io::Read;
+    let file = crate::batch_transaction::open_regular_file_no_follow(
+        &job_dir.join(STAGE_CHILD_ACTIVITY_FILE),
+    )
+    .ok()?;
+    let mut bytes = Vec::new();
+    file.take(4097).read_to_end(&mut bytes).ok()?;
+    if bytes.len() > 4096 {
+        return None;
+    }
+    let record: StageChildActivity = serde_json::from_slice(&bytes).ok()?;
+    (record.parent_id == parent_id && !record.child_id.is_empty()).then_some(record.child_id)
+}
+
+/// Hide a stage only while its authoritative parent is present in this
+/// snapshot. Missing parent/database evidence keeps real work visible.
+fn collapse_chain_stage_activity(
+    items: &mut Vec<ActiveWorkItem>,
+    parents: &HashMap<String, String>,
+) {
+    let represented: HashSet<String> = items
+        .iter()
+        .filter(|item| item.kind == "sequence" || item.execution.as_deref() == Some("chain"))
+        .map(|item| item.id.clone())
+        .collect();
+    items.retain(|item| {
+        !parents
+            .get(&item.id)
+            .is_some_and(|parent| represented.contains(parent))
+    });
+}
+
 /// Return the host-owned, nonterminal work snapshot used to reconcile Now
 /// Developing after a client restart or reconnect.
 #[utoipa::path(
@@ -185,6 +268,7 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
     let mut represented = HashSet::new();
     let mut unavailable_kinds = Vec::new();
     let scheduler = scheduler_activity(&state);
+    let mut chain_child_parents = scheduler.chain_child_parents.clone();
 
     for entry in queue.entries {
         represented.insert(entry.id.clone());
@@ -283,6 +367,9 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
             )
         }) {
             represented.insert(row.id.clone());
+            if let Some(child) = retained_stage_child_activity(&row.job_dir, &row.id) {
+                chain_child_parents.insert(child, row.id.clone());
+            }
             let ephemeral = mold_core::chain_job::ChainJobManifest::read_from_dir(&row.job_dir)
                 .is_ok_and(|manifest| manifest.ephemeral);
             let cancelling = row.state == mold_core::chain_job::ChainJobState::Running
@@ -387,6 +474,8 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
         });
     }
 
+    collapse_chain_stage_activity(&mut items, &chain_child_parents);
+
     items.sort_by_key(|item| (item.position.unwrap_or(usize::MAX), item.created_at_unix_ms));
     Json(ActiveWorkSnapshot {
         instance_id: state.instance_id.as_ref().clone(),
@@ -400,6 +489,48 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
 mod tests {
     use super::*;
     use mold_core::queue_progress::QueueJobProgress;
+
+    #[test]
+    fn chain_activity_counts_parent_once_and_keeps_unrepresented_work() {
+        let item = |id: &str, kind: &str, execution: Option<&str>| -> ActiveWorkItem {
+            serde_json::from_value(serde_json::json!({
+                "id":id,"kind":kind,"execution":execution,"phase":"running",
+                "created_at_unix_ms":1,"updated_at_unix_ms":1
+            }))
+            .unwrap()
+        };
+        let parents = HashMap::from([
+            ("child".to_string(), "authored".to_string()),
+            ("auto-child".to_string(), "auto".to_string()),
+            ("orphan".to_string(), "missing".to_string()),
+        ]);
+        let mut items = vec![
+            item("child", "generation", None),
+            item("authored", "sequence", None),
+            item("auto-child", "generation", None),
+            item("auto", "generation", Some("chain")),
+            item("orphan", "generation", None),
+            item("ordinary", "generation", None),
+        ];
+        collapse_chain_stage_activity(&mut items, &parents);
+        assert_eq!(
+            items.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["authored", "auto", "orphan", "ordinary"]
+        );
+    }
+
+    #[test]
+    fn chain_child_activity_survives_restart_and_rejects_other_parent_or_oversized_data() {
+        let dir = tempfile::tempdir().unwrap();
+        record_stage_child_activity(dir.path(), "parent", "child").unwrap();
+        assert_eq!(
+            retained_stage_child_activity(dir.path(), "parent").as_deref(),
+            Some("child")
+        );
+        assert!(retained_stage_child_activity(dir.path(), "other").is_none());
+        std::fs::write(dir.path().join(STAGE_CHILD_ACTIVITY_FILE), vec![b'x'; 4097]).unwrap();
+        assert!(retained_stage_child_activity(dir.path(), "parent").is_none());
+    }
 
     fn active_work() -> mold_core::QueueWorkItem {
         mold_core::QueueWorkItem {

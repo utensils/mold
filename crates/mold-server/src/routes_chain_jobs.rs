@@ -1383,6 +1383,7 @@ mod tests {
 
     fn req(format: OutputFormat) -> ChainRequest {
         ChainRequest {
+            source_fit: None,
             continue_from: None,
             offload: None,
             collection: None,

@@ -312,7 +312,12 @@ fn validate_h3_chain(req: &mut ChainRequest, family: &str) -> Result<(), ApiErro
         )));
     }
     req.enable_audio = Some(true);
-    req.motion_tail_frames = if task == Task::Fl2va { 1 } else { 0 };
+    req.motion_tail_frames = mold_core::validation::chain_motion_tail_frames_for_model(
+        family,
+        &req.model,
+        None,
+        req.motion_tail_frames,
+    );
     let normalized = req
         .clone()
         .normalise_with_family(Some(family))
@@ -378,6 +383,30 @@ fn validate_h3_chain(req: &mut ChainRequest, family: &str) -> Result<(), ApiErro
         })?;
     }
     Ok(())
+}
+
+/// Same concrete conditioning authority for admission and editor guidance.
+/// Wan reads checkpoint headers before falling back to manifest metadata.
+pub(crate) fn resolved_chain_source_image_contract(
+    config: &mold_core::Config,
+    model: &str,
+    family: &str,
+) -> Option<mold_core::SourceImageCapability> {
+    let canonical = mold_core::manifest::resolve_model_name(model);
+    let manifest_contract = mold_core::manifest::find_manifest(&canonical)
+        .and_then(|manifest| manifest.defaults.source_image);
+    let contract = if family == "wan" {
+        let probed = mold_core::ModelPaths::resolve(model, config).and_then(|paths| {
+            mold_inference::wan_source_image_capability(&paths.transformer, &paths.vae)
+        });
+        mold_core::SourceImageCapability::resolve(manifest_contract, probed)
+    } else {
+        manifest_contract
+    };
+    mold_core::validation::source_image_capability_for_engine(
+        (!family.is_empty()).then_some(family),
+        contract,
+    )
 }
 
 pub(crate) fn validate_and_normalize_chain_family(
@@ -502,19 +531,7 @@ pub(crate) fn validate_and_normalize_chain_family(
     // from the manifest's task structure. The manifest is the cold fallback
     // for a model that is not downloaded yet. Other families have no header
     // probe and their manifest contract binds directly.
-    let manifest_contract = manifest.and_then(|model| model.defaults.source_image);
-    let contract = if family == "wan" {
-        let probed = mold_core::ModelPaths::resolve(&req.model, config).and_then(|paths| {
-            mold_inference::wan_source_image_capability(&paths.transformer, &paths.vae)
-        });
-        mold_core::SourceImageCapability::resolve(manifest_contract, probed)
-    } else {
-        manifest_contract
-    };
-    let contract = mold_core::validation::source_image_capability_for_engine(
-        (!family.is_empty()).then_some(family.as_str()),
-        contract,
-    );
+    let contract = resolved_chain_source_image_contract(config, &req.model, &family);
 
     // Stage 0 is the only clip that can carry an opening image; every
     // continuation is seeded by the seam. Admission never asked the
@@ -841,6 +858,7 @@ mod tests {
 
     fn req(format: OutputFormat) -> ChainRequest {
         ChainRequest {
+            source_fit: None,
             continue_from: None,
             offload: None,
             collection: None,

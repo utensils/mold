@@ -474,6 +474,7 @@ mod tests {
         ChainScript {
             schema: "mold.chain.v1".into(),
             chain: ChainScriptChain {
+                source_fit: None,
                 continue_from: None,
                 model: "ltx-2-19b-distilled:fp8".into(),
                 width: 1216,
