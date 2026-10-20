@@ -18,7 +18,7 @@ paths:
 
 Moved from the root CLAUDE.md; loaded only when working under the paths above.
 
-In Short clip, choose **Add clip** to enter ordered prompts and lengths, then **Check length** and **Make video**. Move or remove rows without opening a separate editor. Library **Continue video** makes the next separate linked MP4 from the latest completed authored take on its original machine. Ordinary one-prompt generation and Reuse settings remain available.
+In browser and Tauri apps, choose **Add clip** in Short clip, enter ordered prompts and lengths, then **Check length** and **Make video**. Native macOS and iOS use **Add another clip** and **Generate video**, with validation performed automatically before submission. Move or remove rows without opening a separate editor. Library **Continue video** makes the next separate linked MP4 from the latest completed authored take on its original machine. Ordinary one-prompt generation and Reuse settings remain available.
 
 Keep the existing output switch and route. Do not restore the old timeline, `Simple | Scenes` strip, or second output mode. Web, Tauri desktop/mobile, and native macOS/iOS share the durable API contracts. Discord exposes a compact `/video` group alongside ordinary `/generate`.
 

@@ -176,7 +176,7 @@ only past the trained 2048px span; `off` past that span is refused. See
 Direct a video scene by scene with a TOML script. Each prompt becomes a stage; each boundary has a `transition` (`smooth`, `cut`, or `fade`).
 
 ::: tip Add clips in the apps
-In Short clip, choose **Add clip** to enter ordered prompts and lengths, then **Check length** and **Make video**. Move or remove rows without opening a separate editor. Library **Continue video** makes the next separate linked MP4 from the latest completed authored take on its original machine. Ordinary one-prompt generation and Reuse settings remain available.
+In browser and Tauri apps, choose **Add clip** in Short clip, enter ordered prompts and lengths, then **Check length** and **Make video**. Native macOS and iOS use **Add another clip** and **Generate video**, with validation performed automatically before submission. Move or remove rows without opening a separate editor. Library **Continue video** makes the next separate linked MP4 from the latest completed authored take on its original machine. Ordinary one-prompt generation and Reuse settings remain available.
 :::
 
 ### Canonical form
@@ -316,7 +316,7 @@ mold run --script ref-chain.toml --host HOST --output ref-chain.mp4
 
 ### Longer clips in the apps
 
-In Short clip, choose **Add clip** to enter ordered prompts and lengths, then **Check length** and **Make video**. Move or remove rows without opening a separate editor. Library **Continue video** makes the next separate linked MP4 from the latest completed authored take on its original machine. Ordinary one-prompt generation and Reuse settings remain available.
+In browser and Tauri apps, choose **Add clip** in Short clip, enter ordered prompts and lengths, then **Check length** and **Make video**. Native macOS and iOS use **Add another clip** and **Generate video**, with validation performed automatically before submission. Move or remove rows without opening a separate editor. Library **Continue video** makes the next separate linked MP4 from the latest completed authored take on its original machine. Ordinary one-prompt generation and Reuse settings remain available.
 
 Smooth is the default join. The selected model determines whether it carries motion or makes independent clips. Each part has bounded clips and memory; continue completed parts without a lifetime part limit. A continued part is a separate video. Unsupported source combinations are explained before submission.
 

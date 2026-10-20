@@ -2,7 +2,7 @@
 
 ## Product flow
 
-Keep the existing Short clip destination, model picker and ordinary one-prompt generation. Add clip expands ordered prompt and length rows in place. Add, move and remove are the only structural operations; no timeline or second output mode is needed. The editor has one primary Make video action after read-only validation reports delivered duration. The compact editor uses Smooth joins. Advanced Cut/Fade scripts remain available through CLI/API; the apps avoid adding per-clip source controls just to expose transitions.
+Keep the existing Short clip destination, model picker and ordinary one-prompt generation. Add clip expands ordered prompt and length rows in place. Add, move and remove are the only structural operations; no timeline or second output mode is needed. The browser editor has one primary Make video action after Check length reports delivered duration. Native apps use Add another clip and Generate video, validating automatically before submission. The compact editor uses Smooth joins. Advanced Cut/Fade scripts remain available through CLI/API; the apps avoid adding per-clip source controls just to expose transitions.
 
 Model, canvas, frame rate and audio apply to the whole part. Server generation profiles and chain limits remain the capability authority. A model that concatenates independent clips must be described honestly. Unsupported ordinary input combinations stop with an actionable reason instead of being dropped.
 

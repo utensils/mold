@@ -1062,6 +1062,6 @@ Queue toolbar actions carry explicit pause/resume and empty-queue icons in both 
 
 ## Multi-clip video
 
-In Short clip, choose **Add clip** to enter ordered prompts and lengths, then **Check length** and **Make video**. Move or remove rows without opening a separate editor. Library **Continue video** makes the next separate linked MP4 from the latest completed authored take on its original machine. Ordinary one-prompt generation and Reuse settings remain available.
+In Short clip, choose **Add another clip** to enter ordered prompts and lengths, then **Generate video**. The app validates the draft automatically before submitting it. Move or remove rows without opening a separate editor. Library **Continue video** makes the next separate linked MP4 from the latest completed authored take on its original machine. Ordinary one-prompt generation and Reuse settings remain available.
 
 The editor uses the selected host’s frame grid and validates delivered duration before admission. Reconnect recovers the same operation; Queue shows parent progress and supports applicable resume/cancel actions. Reference restoration is explicit after relaunch; drafts do not persist input bytes or credentials.
