@@ -8,7 +8,7 @@ import MoldClient
 /// `#if MOLD_EMBEDDED_ENGINE` and a remote-only build cannot call it: the
 /// decisions that must be right -- which home, which key, and whether to
 /// refuse -- are here, where every build can test them.
-struct EngineLaunch: Equatable, Sendable {
+nonisolated struct EngineLaunch: Equatable, Sendable {
     let home: String
     /// Never `nil`. A keyless engine on loopback is what review 05-H1 is
     /// about: `POST /api/shutdown` is unauthenticated by design because the
@@ -20,7 +20,7 @@ struct EngineLaunch: Equatable, Sendable {
 /// Why the engine will not be started. Each case carries the sentence shown
 /// in Settings ▸ This Mac -- the app never invents a second wording for the
 /// same refusal.
-enum EngineLaunchRefusal: Error, Equatable {
+nonisolated enum EngineLaunchRefusal: Error, Equatable {
     case home(String)
     case key(String)
 
@@ -32,7 +32,7 @@ enum EngineLaunchRefusal: Error, Equatable {
     }
 }
 
-enum EngineLaunchPlan {
+nonisolated enum EngineLaunchPlan {
     /// Resolves a launch, or refuses.
     ///
     /// The key follows `SecretStore.localEngineAPIKey`'s per-home authority.

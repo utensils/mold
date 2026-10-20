@@ -2,15 +2,6 @@ import Foundation
 import MoldClient
 
 extension MoldEngine {
-    /// Built and prepared before anything else in the app exists, because the
-    /// preamble writes `MOLD_HOME`, `MOLD_API_KEY` and `MOLD_CORS_ORIGIN`
-    /// with `setenv` (review 05-M4).
-    static func bootstrapped() -> MoldEngine {
-        let engine = MoldEngine()
-        engine.bootstrapAtLaunch()
-        return engine
-    }
-
     /// A dead or stopped engine must leave the machine list, or "This Mac"
     /// keeps pointing at a closed port. `MoldEngine` cannot reach `HostStore`,
     /// so the composition root hands it this.
@@ -30,35 +21,12 @@ extension MoldEngine {
     func prepared() -> EngineLaunch? {
         #if MOLD_EMBEDDED_ENGINE
         if let launch { return launch }
-        let resolved: EngineLaunch
-        do {
-            resolved = try EngineLaunchPlan.resolve(
-                home: MoldHome.resolve(), secrets: .shared, logDirectory: Self.logDirectory)
-        } catch {
-            // Nothing one-shot has been consumed, so Start can be pressed
-            // again once the drive is back or the store is writable.
-            transition(to: .failed(Failure(
-                reason: (error as? EngineLaunchRefusal)?.reason ?? "The engine couldn't start.",
-                relaunchNeeded: false)))
-            return nil
-        }
-        let code = resolved.home.withCString { home in
-            resolved.apiKey.withCString { key in
-                resolved.logDirectory.withCString { logs in
-                    mold_engine_bootstrap(home, key, logs)
-                }
-            }
-        }
-        guard code == 0 else {
-            transition(to: .failed(Failure(
-                reason: "The engine couldn't prepare itself. Relaunch Mold to try again — "
-                    + "Mold's log in ~/Library/Logs/Mold has the detail.",
-                relaunchNeeded: true)))
-            return nil
-        }
-        record(resolved)
-        if case .failed = state { transition(to: .stopped) }
-        return resolved
+        // Startup is the sole owner of credential IO and the one-shot preamble.
+        // Never retry either on the main actor after stores have begun networking.
+        transition(to: .failed(Failure(
+            reason: "The engine hasn't been prepared. Quit and relaunch Mold to try again.",
+            relaunchNeeded: true)))
+        return nil
         #else
         return nil
         #endif
@@ -87,9 +55,9 @@ extension MoldEngine {
 
     #if MOLD_EMBEDDED_ENGINE
     func bring(up launch: EngineLaunch) async {
-        // On the actor: one open(2) and one non-blocking flock on a local
-        // path, which is microseconds and cannot wait on a lock.
-        advisory = EngineInterlock.advisory(for: EngineInterlock.homeWriter())
+        // Nonblocking flock does not bound external-volume path resolution.
+        let writer = await Task.detached { EngineInterlock.homeWriter() }.value
+        advisory = EngineInterlock.advisory(for: writer)
         let port = await Task.detached { mold_engine_configured_port() }.value
         guard port != 0 else {
             transition(to: .failed(MoldEngine.Failure(
