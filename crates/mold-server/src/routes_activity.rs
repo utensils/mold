@@ -212,6 +212,7 @@ pub(crate) fn record_stage_child_activity(
         file.write_all(&serde_json::to_vec(&record)?)?;
         file.sync_all()?;
         std::fs::rename(&temporary, job_dir.join(STAGE_CHILD_ACTIVITY_FILE))?;
+        crate::dir_sync::sync_directory(job_dir)?;
         Ok(())
     })();
     if result.is_err() {
