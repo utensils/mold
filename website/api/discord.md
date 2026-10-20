@@ -28,6 +28,7 @@ MOLD_HOST=workstation MOLD_DISCORD_TOKEN="your-token" mold discord
 | Command              | Description                                                                                                                                |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | `/generate`          | Generate an image or video, including attachment-driven LTX-2 audio-to-video, retake, and keyframe modes and ordered MiniMax H3 references |
+| `/video`             | Make two prompted clips, continue linked parts and inspect durable progress; host-global lookup/control requires Manage Server             |
 | `/mesh`              | Generate a Hunyuan3D GLB from one source image or semantic front/left/back/right multiview attachments                                     |
 | `/transparent`       | Render a subject on a transparent background (PNG or WebP with alpha), optionally cut out of up to three ordered reference images          |
 | `/identity`          | Generate an image conditioned on a face reference photo (PuLID), with `identity_strength` and `identity_start_step`                        |
@@ -108,33 +109,49 @@ fixed transport value so the selected recipe or server remains authoritative.
 
 The profile-level controls follow the same boundary:
 
-| Generation profile contract                                                                         | Discord handling                                                                                                                                                                              |
-| --------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Recipe selector and defaults                                                                        | Reads the selected recipe's pipeline selector and defaults; focused attachments select specialized LTX-2 recipes.                                                                             |
-| Resolution domain, alignment, bounds, aspect, and presets                                           | Accepts explicit width/height, derives a source/reference aspect where documented, and leaves final validation to the advertised recipe. Discord does not reproduce the Studio preset picker. |
-| Step and guidance controls                                                                          | Exposes the numeric values and uses advertised defaults; fixed or hidden controls remain fixed or hidden.                                                                                     |
-| Temporal frames, FPS, duration, and grid                                                            | Exposes frames/FPS plus a duration convenience option, snapping and bounding through the advertised temporal contract.                                                                        |
-| Prompt requirement                                                                                  | Honors required, optional, or ignored prompt behavior. Ordinary `/mesh` needs image conditioning because Hunyuan3D ignores text.                                                              |
-| Source image and strength                                                                           | Exposes both when the recipe accepts them and rejects incompatible combinations before upload where possible.                                                                                 |
-| Negative prompt and audio                                                                           | Exposes both when supported; omission preserves recipe policy.                                                                                                                                |
-| Ordered reference images                                                                            | Exposes ordered attachments within Discord's option and request-size limits; server admission owns the recipe ceiling and format rules.                                                       |
-| Identity and transparency                                                                           | Exposed through `/identity` and `/transparent`, gated by server-advertised capability.                                                                                                        |
-| Mesh generation                                                                                     | Exposes ordinary image-to-mesh and named multiview controls through `/mesh`. Supplied-mesh, text-to-mesh, texture-only, mesh-roundtrip, and other durable workflow modes are CLI/API-only.    |
-| LoRA, ControlNet, masks, schedulers, sequence authoring, continuation, and advanced family controls | Intentionally excluded as listed above. Scripted chain jobs and their durable lifecycle are CLI/API-only.                                                                                     |
-| Output formats                                                                                      | Narrows the advertised formats to containers Discord can deliver safely; the server still performs final admission.                                                                           |
-| Provenance and delivery notes                                                                       | Display metadata only; they are not user-editable controls.                                                                                                                                   |
+| Generation profile contract                                       | Discord handling                                                                                                                                                                              |
+| ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Recipe selector and defaults                                      | Reads the selected recipe's pipeline selector and defaults; focused attachments select specialized LTX-2 recipes.                                                                             |
+| Resolution domain, alignment, bounds, aspect, and presets         | Accepts explicit width/height, derives a source/reference aspect where documented, and leaves final validation to the advertised recipe. Discord does not reproduce the Studio preset picker. |
+| Step and guidance controls                                        | Exposes the numeric values and uses advertised defaults; fixed or hidden controls remain fixed or hidden.                                                                                     |
+| Temporal frames, FPS, duration, and grid                          | Exposes frames/FPS plus a duration convenience option, snapping and bounding through the advertised temporal contract.                                                                        |
+| Prompt requirement                                                | Honors required, optional, or ignored prompt behavior. Ordinary `/mesh` needs image conditioning because Hunyuan3D ignores text.                                                              |
+| Source image and strength                                         | Exposes both when the recipe accepts them and rejects incompatible combinations before upload where possible.                                                                                 |
+| Negative prompt and audio                                         | Exposes both when supported; omission preserves recipe policy.                                                                                                                                |
+| Ordered reference images                                          | Exposes ordered attachments within Discord's option and request-size limits; server admission owns the recipe ceiling and format rules.                                                       |
+| Identity and transparency                                         | Exposed through `/identity` and `/transparent`, gated by server-advertised capability.                                                                                                        |
+| Mesh generation                                                   | Exposes ordinary image-to-mesh and named multiview controls through `/mesh`. Supplied-mesh, text-to-mesh, texture-only, mesh-roundtrip, and other durable workflow modes are CLI/API-only.    |
+| LoRA, ControlNet, masks, schedulers, and advanced family controls | Intentionally excluded as listed above. `/video` separately exposes compact durable authoring and linked continuation.                                                                        |
+| Output formats                                                    | Narrows the advertised formats to containers Discord can deliver safely; the server still performs final admission.                                                                           |
+| Provenance and delivery notes                                     | Display metadata only; they are not user-editable controls.                                                                                                                                   |
 
-Auto-chaining a single long video request is an engine implementation detail,
-not Discord sequence authoring. Discord has no `/sequence`, chain-job lifecycle,
-or durable mesh-workflow commands. Use `mold run --script`, `mold jobs`,
-`mold mesh-workflow`, or the corresponding HTTP APIs for those workflows.
+### Multi-clip video
+
+`/video make` takes two prompts, an optional installed model, seconds per clip,
+canvas size and image attachment. The server validates its frame grid and
+reports delivered duration before admitting one durable part. Ref2VA repeats
+the inline image reference in both clips; image-conditioned models use it as
+the opening image. Videos publish in the connected server's Mold Library.
+
+`/video continue` takes a completed source job ID and a new prompt. It creates
+the next separate MP4 using the latest take, original canvas, frame rate, audio
+and retained references. `/video status` reports progress and the published
+filename; `/video resume` and `/video cancel` control recoverable work. These
+four host-global commands require guild Manage Server permission because the
+host does not record Discord user ownership.
+
+Each make/continue operation consumes one ordinary generation quota slot.
+Pre-admission failures refund it. An uncertain POST retains its known job ID
+and charge: check status rather than submitting again. Advanced transitions,
+per-clip inputs, retakes/amendments and durable mesh workflows remain available
+through CLI/API. Ordinary `/generate` long-video splitting stays separate.
 
 ### Access boundary for host-global operations
 
 Queue rows, download jobs, Library filenames, saved prompts, and video-upscale
 jobs belong to the Mold host; the current server contract does not attach a
-Discord user owner to them. `/queue`, `/downloads`, `/video-upscale`, and
-`/gallery` are therefore guild-only commands that require Discord's **Manage
+Discord user owner to them. `/queue`, `/downloads`, `/video-upscale`,
+`/gallery`, and `/video continue|status|resume|cancel` are therefore guild-only commands that require Discord's **Manage
 Server** permission and always reply ephemerally. Global queue pause/resume and
 per-item pause/resume are separate actions and call separate server endpoints;
 one never stands in for the other. Gallery access is read-only, and Discord

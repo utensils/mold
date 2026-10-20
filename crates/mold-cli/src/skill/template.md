@@ -75,7 +75,7 @@ auto` to preserve useful alpha and remove opaque backgrounds, `on` to
   IDs, defaults, dimensions, frame grids, or runtime availability.
 - For multi-scene video or a clip longer than one render, read
   [Scripted sequences]({{reference_prefix}}/cli.md#scripted-sequences). Use
-  `mold run --script` and `mold jobs`. Apps also offer **Add clip** and Library **Continue video**; these use the same durable jobs. MiniMax H3
+  `mold run --script` and `mold jobs`. Apps also offer **Add clip** and Library **Continue video**; these use the same durable jobs. Discord offers `/video make` and guild Manage Server commands `/video continue|status|resume|cancel`. MiniMax H3
   sequences require a server. Each part has at most 16 stages; continue longer
   work with `mold run --script next.toml --continue-from JOB_ID --host HOST`,
   producing separate linked MP4 parts. Read the sequence reference before

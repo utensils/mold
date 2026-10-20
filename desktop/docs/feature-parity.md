@@ -442,7 +442,7 @@ mobile templates use `mold.mobile.generation.templates.v1`.
 
 ## 12. Discord bot (feature subset to mirror where cloud-shared)
 
-Slash commands (`poise`): `/generate` (prompt, model[autocomplete], source_image attachment, video_format, frames, fps, width, height, steps, guidance, seed, strength, audio, pipeline, negative_prompt), `/identity`, `/expand`, `/models`, `/status`, `/quota`, admin commands (MANAGE_GUILD gated: allow/block users, etc.). Access control: block list, allowed roles (`MOLD_DISCORD_ALLOWED_ROLES`), cooldown (`MOLD_DISCORD_COOLDOWN`), daily quota (`MOLD_DISCORD_DAILY_QUOTA`) with atomic slot consume + refund on failure. HTTP-only dep on mold-core (talks to `MOLD_HOST`).
+Slash commands (`poise`): `/video make` (two prompts and length, durable Library output), `/video continue|status|resume|cancel` (host-global, guild Manage Server), `/generate` (prompt, model[autocomplete], source_image attachment, video_format, frames, fps, width, height, steps, guidance, seed, strength, audio, pipeline, negative_prompt), `/identity`, `/expand`, `/models`, `/status`, `/quota`, admin commands (MANAGE_GUILD gated: allow/block users, etc.). Access control: block list, allowed roles (`MOLD_DISCORD_ALLOWED_ROLES`), cooldown (`MOLD_DISCORD_COOLDOWN`), daily quota (`MOLD_DISCORD_DAILY_QUOTA`) with atomic slot consume + refund on failure. HTTP-only dep on mold-core (talks to `MOLD_HOST`).
 
 ---
 
