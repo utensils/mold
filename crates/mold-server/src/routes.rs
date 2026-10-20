@@ -430,6 +430,11 @@ use crate::queue::clean_error_message;
         crate::routes_chain_jobs::preview_chain_job_placement,
         crate::routes_chain_jobs::list_chain_jobs,
         crate::routes_chain_jobs::get_chain_job,
+        crate::video_source_upload_routes::begin,
+        crate::video_source_upload_routes::status,
+        crate::video_source_upload_routes::append,
+        crate::video_source_upload_routes::complete,
+        crate::video_source_upload_routes::remove,
         crate::chain_restart::options,
         crate::chain_restart::export,
         crate::routes_chain_jobs::chain_job_events,
@@ -756,6 +761,23 @@ pub fn create_router(state: AppState) -> Router {
             "/api/generate/chain/validate",
             post(crate::routes_chain::validate_chain)
                 .layer(DefaultBodyLimit::max(CHAIN_PART_REQUEST_BODY_BYTES)),
+        )
+        .route(
+            "/api/video-source-uploads/:id",
+            post(crate::video_source_upload_routes::begin)
+                .get(crate::video_source_upload_routes::status)
+                .delete(crate::video_source_upload_routes::remove)
+                .layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
+        .route(
+            "/api/video-source-uploads/:id/chunks",
+            put(crate::video_source_upload_routes::append).layer(DefaultBodyLimit::max(
+                crate::video_source_upload::MAX_CHUNK_BYTES,
+            )),
+        )
+        .route(
+            "/api/video-source-uploads/:id/complete",
+            post(crate::video_source_upload_routes::complete),
         )
         .route(
             "/api/chain-jobs",

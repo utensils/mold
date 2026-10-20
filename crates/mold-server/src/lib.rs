@@ -3010,3 +3010,7 @@ mod tests {
 }
 
 mod chain_restart;
+
+mod video_source_upload;
+
+mod video_source_upload_routes;
