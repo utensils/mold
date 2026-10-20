@@ -1429,7 +1429,7 @@ fn list(args: &SkillListArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use clap::{CommandFactory, FromArgMatches};
     use std::collections::BTreeSet;
 
     #[derive(Deserialize)]
@@ -1908,8 +1908,16 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(64 << 20)
             .spawn(move || {
-                match crate::Cli::try_parse_from(std::iter::once("mold".to_string()).chain(argv)) {
-                    Ok(_) => Ok(()),
+                match crate::Cli::command()
+                    .try_get_matches_from(std::iter::once("mold".to_string()).chain(argv))
+                {
+                    Ok(matches) => {
+                        let typed_host = crate::host_given_on_command_line(&matches);
+                        let cli = crate::Cli::from_arg_matches(&matches)
+                            .map_err(|error| error.to_string())?;
+                        crate::reject_misplaced_host(&cli.command, typed_host)
+                            .map_err(|error| error.to_string())
+                    }
                     // `mold --help` and `mold <cmd> --help` are documented on
                     // purpose; clap reports them as errors that print help.
                     Err(error)
@@ -2037,6 +2045,7 @@ mod tests {
     fn every_documented_bash_command_in_the_corpus_parses_with_the_cli() {
         let bundle = render_bundle(RenderProfile::Portable).unwrap();
         let mut seen = 0usize;
+        let mut invalid = Vec::new();
         for (path, contents) in &bundle.files {
             if !path.ends_with(".md") {
                 continue;
@@ -2049,10 +2058,12 @@ mod tests {
                     "{path}: {command}"
                 );
                 seen += 1;
-                parse_on_large_stack(argv[1..].to_vec())
-                    .unwrap_or_else(|error| panic!("{path}: invalid example `{command}`: {error}"));
+                if let Err(error) = parse_on_large_stack(argv[1..].to_vec()) {
+                    invalid.push(format!("{path}: invalid example `{command}`: {error}"));
+                }
             }
         }
+        assert!(invalid.is_empty(), "{}", invalid.join("\n"));
         assert!(
             seen >= 20,
             "expected the corpus to document CLI examples, found {seen}"

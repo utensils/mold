@@ -29,7 +29,7 @@ For video sequences, copy the complete `shot.toml` from
 selected model, then validate and run it:
 
 ```bash
-mold info ltx-2-19b-distilled:fp8 --host workstation
+mold list --json --host workstation
 mold chain validate shot.toml
 mold run --script shot.toml --dry-run --host workstation
 mold run --script shot.toml --host workstation --output walk.mp4

@@ -65,9 +65,10 @@ auto` to preserve useful alpha and remove opaque backgrounds, `on` to
   when it is no longer needed. A workflow is durable on ONE machine, so there
   is no local form. A server restart parks an unfinished workflow without
   changing its attached child identity.
-- For model selection and current capabilities, use `mold list`, `mold info
-<model>`, or the selected server's `/api/models` data. These live surfaces are
-  authoritative. `display_name` is a presentation alias; use the stable `name`
+- For the selected server's models and current capabilities, use
+  `mold list --json --host HOST` or its `/api/models` data. `mold info MODEL`
+  inspects local model data; it rejects `--host`. Local script validation also
+  omits `--host`. The selected server is authoritative for remote recipes. `display_name` is a presentation alias; use the stable `name`
   in requests, commands, and saved settings. Curated aliases come from the
   manifest title and retain task/version/precision; never rename weight files.
   This skill intentionally does not duplicate changing model

@@ -310,7 +310,7 @@ Each stage is an independent clip; repeated references guide identity without
 claiming motion continuation.
 
 ```bash
-mold info minimax-h3-ref2va:comfy-pruned-int8-turbo-4step --host HOST
+mold list --json --host HOST
 mold chain validate ref-chain.toml
 mold run --script ref-chain.toml --dry-run --host HOST
 mold run --script ref-chain.toml --host HOST --output ref-chain.mp4

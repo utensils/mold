@@ -37,7 +37,7 @@ TOML FL2VA stages can name `first_frame_path` and `last_frame_path`, resolved
 relative to the script. A smooth continuation supplies the first frame, so use
 a cut or fade when authoring a new first frame. See
 [Video sequences](/guide/video#multi-prompt-scripts) for the complete script
-and lifecycle workflow. Inspect `mold info MODEL --host HOST` and
+and lifecycle workflow. Inspect `mold list --json --host HOST` and
 `/api/capabilities/chain-limits?model=MODEL` for the selected tier’s limits.
 
 ## Generated Examples

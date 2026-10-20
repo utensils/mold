@@ -17,9 +17,12 @@ mold run qwen-image-edit-2511:q8 "Change the chair to red leather; preserve ever
 mold upscale input.png --model real-esrgan-x4plus:fp16 --output output-4x.png
 ```
 
-Use `mold info <model>` or `/api/models` before selecting dimensions, frame
-counts, steps, guidance, conditioning, or audio. A catalog model can differ
-from a built-in manifest profile.
+For a remote recipe, use `mold list --json --host HOST` or that server's
+`/api/models` before choosing dimensions, frames, steps, conditioning or audio.
+`mold info MODEL` inspects local model data and rejects `--host`.
+`mold chain validate FILE` also runs locally: omit `--host`; use
+`mold run --script FILE --dry-run --host HOST` for a host-targeted run plan.
+Dry-run still does not prove that the host can load or render the recipe.
 
 A seed reproduces a render only within one mold version and one backend. FLUX.1
 and FLUX.2 in particular changed their arithmetic in mold 0.29, and the change
@@ -299,7 +302,7 @@ Authoring is CLI/API-only. Start with the selected host and model:
 ```bash
 mold host list
 mold ps --host workstation
-mold info ltx-2-19b-distilled:fp8 --host workstation
+mold list --json --host workstation
 ```
 
 Save this complete example as `shot.toml`. Replace the model and recipe values
@@ -478,7 +481,7 @@ Each stage is an independent clip; repeated references guide identity without
 claiming motion continuation.
 
 ```bash
-mold info minimax-h3-ref2va:comfy-pruned-int8-turbo-4step --host workstation
+mold list --json --host workstation
 mold chain validate ref-chain.toml
 mold run --script ref-chain.toml --dry-run --host workstation
 mold run --script ref-chain.toml --host workstation --output ref-chain.mp4
