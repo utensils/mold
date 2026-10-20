@@ -43,24 +43,24 @@ Rule: **plain words in sans, technical truth in mono, on the same row.**
 
 ## 2 · Lexicon (binding)
 
-| Say                                                      | Never say                               | Where                |
-| -------------------------------------------------------- | --------------------------------------- | -------------------- |
-| New image · Queue · My images · Styles · Machines        | Create, Library, Models, Hosts (as nav) | Nav, titles, palette |
-| Styles                                                   | Models, checkpoints                     | Nav, catalog         |
-| Style engine / Photoreal — best quality                  | flux-dev, SDXL (as the primary label)   | Composer chip, rows  |
-| Add-on looks                                             | LoRAs                                   | Inspector            |
-| Detail · passes                                          | Steps, sampler steps                    | Inspector, presets   |
-| Stick to my words                                        | Guidance, CFG                           | Inspector            |
-| Repeat this look · Keep \| Surprise me                   | Seed, Fixed \| Random                   | Inspector, metadata  |
-| Start from a photo · How much to change it               | img2img, denoise strength               | Inspector            |
-| Generate                                                 | Submit, Add to queue, Render            | Primary action       |
+| Say                                                      | Never say                               | Where                                |
+| -------------------------------------------------------- | --------------------------------------- | ------------------------------------ |
+| New image · Queue · My images · Styles · Machines        | Create, Library, Models, Hosts (as nav) | Nav, titles, palette                 |
+| Styles                                                   | Models, checkpoints                     | Nav, catalog                         |
+| Style engine / Photoreal — best quality                  | flux-dev, SDXL (as the primary label)   | Composer chip, rows                  |
+| Add-on looks                                             | LoRAs                                   | Inspector                            |
+| Detail · passes                                          | Steps, sampler steps                    | Inspector, presets                   |
+| Stick to my words                                        | Guidance, CFG                           | Inspector                            |
+| Repeat this look · Keep \| Surprise me                   | Seed, Fixed \| Random                   | Inspector, metadata                  |
+| Start from a photo · How much to change it               | img2img, denoise strength               | Inspector                            |
+| Generate                                                 | Submit, Add to queue, Render            | Primary action                       |
 | Write more for me                                        | Expand prompt                           | Composer chip (⌘E; Ctrl+E off Apple) |
-| Being made / Waiting / Finished / Needs a download first | active, queued, done, blocked           | Queue                |
-| Machines · this mac · making images here                 | Hosts, target host                      | Nav, Machines        |
-| Connect a machine · Rent a GPU · billing begins now      | Add host, Provision pod                 | Machines             |
-| My images · albums · Favourites · Everything             | Library, collections, gallery, Prints   | Nav, My images       |
-| Ready to use \| Browse more · Get it · ● ready           | Installed \| Discover, Pull, installed  | Styles               |
-| Short clip · Length · Smoothness                         | Sequence, clips, frames, fps, timeline  | Clip toolbar         |
+| Being made / Waiting / Finished / Needs a download first | active, queued, done, blocked           | Queue                                |
+| Machines · this mac · making images here                 | Hosts, target host                      | Nav, Machines                        |
+| Connect a machine · Rent a GPU · billing begins now      | Add host, Provision pod                 | Machines                             |
+| My images · albums · Favourites · Everything             | Library, collections, gallery, Prints   | Nav, My images                       |
+| Ready to use \| Browse more · Get it · ● ready           | Installed \| Discover, Pull, installed  | Styles                               |
+| Short clip · Add clip · Length · Smoothness              | Sequence mode, timeline                 | Clip toolbar and ordered clip rows   |
 
 Voice markers carried over from the CLI: terse, second person, directive.
 Units stay tight and mono (`14.9 / 24 GB`, `eta 8m12s`, `$1.44/hr`).

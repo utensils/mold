@@ -297,7 +297,7 @@ approved secret store at execution time.
 ## Scripted sequences
 
 Use `mold run --script` for several video clips stitched into one output.
-Authoring is CLI/API-only. Start with the selected host and model:
+Apps offer Add clip and Library Continue video. For agent workflows, use the CLI below and verify the published output on the requested host. Start with the selected host and model:
 
 ```bash
 mold host list

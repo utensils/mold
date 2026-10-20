@@ -1,0 +1,1 @@
+- **Multi-clip video in the apps.** Add ordered clips from Create and continue completed authored videos from Library on their original machine, with validated duration, durable progress and recovery across web, desktop, mobile and native Apple apps.
