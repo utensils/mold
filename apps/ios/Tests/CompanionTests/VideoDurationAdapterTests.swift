@@ -6,6 +6,18 @@ import Testing
 @testable import MoldCompanion
 
 extension GenerateControllerTests {
+    @Test func explicitReuseCannotKeepAnEarlierVideoPrefix() async throws {
+        let (generate, _) = try await setUp()
+        let host = try #require(generate.hosts.hosts.first)
+        let owner = VideoJobOwner(host: host, instanceId: "earlier-installation")
+        generate.videoDuration = .init(draft: .init(seconds: "30", source: .init(filename: "earlier.mp4")),
+            sourceOwner: .init(owner: owner, title: "Earlier"))
+        let print = try MoldJSON.decoder.decode(GalleryPrint.self, from: Data(
+            #"{"filename":"selected.mp4","metadata":{"prompt":"Selected new settings","model":"ltx-2.5-22b-distilled:bf16"},"timestamp":1790000000,"format":"mp4"}"#.utf8))
+        generate.reuse(LibraryEntry(host: host, print: print))
+        #expect(generate.videoDuration == nil, "Use These Settings starts a fresh movie instead of silently extending an earlier prefix")
+    }
+
     @Test func durationSubmissionKeepsLiteralPreparedFieldsAndLostReplyNeverFallsBack() async throws {
         var bound: FakeBackend?
         let (original, _) = try await setUp { host, _ in

@@ -84,6 +84,8 @@ extension GenerateController {
     /// on the machine that made it. A model this fleet no longer has leaves
     /// the choice alone and says so through `blocker`.
     func reuse(_ entry: LibraryEntry) {
+        videoDuration = nil
+        videoPlanner.clear()
         let reused = RenderDraft(reusing: entry.print.metadata)
         draft = reused
         if let name = entry.print.metadata.model {
