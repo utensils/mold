@@ -443,13 +443,6 @@ function beginSheetDrag(event: PointerEvent): void {
   sheetDragStartedInBody =
     event.target instanceof Node && !!sheetBody.value?.contains(event.target);
   sheetTravel = measureSheetTravel();
-  // Capture, so a finger that lifts over the media still finishes the drag
-  // here instead of stranding the sheet halfway open.
-  try {
-    sheetRoot.value?.setPointerCapture?.(event.pointerId);
-  } catch {
-    // A shell without pointer capture just keeps the default targeting.
-  }
 }
 
 function trackSheetDrag(event: PointerEvent): void {
@@ -464,6 +457,16 @@ function trackSheetDrag(event: PointerEvent): void {
     return;
   }
   if (sheetExpanded.value && sheetDragBelongsToBody()) return;
+  // Capturing at pointerdown retargets an ordinary button tap to the sheet,
+  // so its click never reaches the button. Claim only an actual vertical drag.
+  if (Math.abs(deltaY) < 6) return;
+  if (!sheetDragging.value) {
+    try {
+      sheetRoot.value?.setPointerCapture?.(event.pointerId);
+    } catch {
+      // A shell without pointer capture keeps normal pointer targeting.
+    }
+  }
   sheetDragging.value = true;
   sheetDrag.value = sheetExpanded.value
     ? Math.max(0, Math.min(sheetTravel, deltaY))

@@ -2323,6 +2323,38 @@ describe("MobileGalleryViewer sheet review fixes", () => {
 });
 
 describe("MobileGalleryViewer sheet mechanics", () => {
+  it("leaves a tap on a sheet control uncaptured so the control receives its click", async () => {
+    const view = mountViewer();
+    await flushPromises();
+    const sheet = view.get("[data-test='gallery-viewer-sheet']");
+    const capture = vi.fn();
+    (sheet.element as HTMLElement).setPointerCapture = capture;
+    const handle = view.get("[data-test='gallery-viewer-sheet-handle']");
+    await handle.trigger("pointerdown", {
+      pointerId: 50,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 180,
+      clientY: 600,
+    });
+    await handle.trigger("pointermove", {
+      pointerId: 50,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 181,
+      clientY: 598,
+    });
+    expect(capture).not.toHaveBeenCalled();
+    await handle.trigger("pointerup", {
+      pointerId: 50,
+      pointerType: "touch",
+      clientX: 181,
+      clientY: 598,
+    });
+    await handle.trigger("click");
+    expect(sheet.classes()).toContain("is-expanded");
+  });
+
   /** A cancelled gesture must not leave the sheet holding the pointer. */
   it("releases the pointer capture when a drag is cancelled", async () => {
     const view = mountViewer();
