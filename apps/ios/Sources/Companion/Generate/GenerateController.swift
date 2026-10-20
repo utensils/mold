@@ -12,6 +12,11 @@ import MoldClient
 final class GenerateController {
     let sequence: NativeSequenceSession
     var sequenceLimits: ChainLimits?
+    var videoDuration: VideoDurationAuthoring?
+    let videoPlanner = VideoPlanController()
+    let videoJobs: VideoJobCoordinator
+    var durationError: String?
+    @ObservationIgnored var durationTask: Task<Void, Never>?
 
     let retainedReuse = RetainedReuse()
     private(set) var sourceMediaRevision = 0
@@ -67,7 +72,9 @@ final class GenerateController {
 
     init(hosts: HostStore, ledger: PendingLedger = .shared,
          drafts: DraftStore = DraftStore(directory: URL.applicationSupportDirectory.appending(path: "io.utensils.mold.companion")),
-         initialMachine: MachineChoice? = nil, sequence: NativeSequenceSession = NativeSequenceSession()) {
+         initialMachine: MachineChoice? = nil, sequence: NativeSequenceSession = NativeSequenceSession(),
+         videoJobs: VideoJobCoordinator = VideoJobCoordinator()) {
+        self.videoJobs = videoJobs
         self.sequence = sequence
         self.hosts = hosts
         self.ledger = ledger
@@ -244,8 +251,14 @@ final class GenerateController {
             return sequence.refusal(base: NativeSequenceSession.baseRequest(draft, model: modelName,
                 maxIdentityPhotos: hosts.capabilities[host.id]?.maxIdentityPhotos ?? 0), limits: sequenceLimits)
         }
+        if usesVideoDuration, let refusal = durationBlocker { return refusal }
         // The draft's own refusal (MoldClient), the Mac's words exactly.
-        if sequence.continuation == nil, let recipe, let refusal = draft.refusal(for: recipe, retainedFields: retainedReferenceFields) { return refusal }
+        if sequence.continuation == nil, let recipe {
+            var validation = draft
+            if usesVideoDuration, let scenes = videoDuration?.draft, scenes.scenesEnabled,
+               let first = scenes.scenes.first { validation.prompt = first.prompt }
+            if let refusal = validation.refusal(for: recipe, retainedFields: retainedReferenceFields) { return refusal }
+        }
         return nil
     }
 }

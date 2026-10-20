@@ -86,6 +86,13 @@ struct GenerateView: View {
         }
         .onChange(of: hosts.models, initial: true) { _, _ in generate.settleChoice() }
         .onChange(of: hosts.upHosts.map(\.id)) { _, _ in generate.settleChoice() }
+        .task(id: DurationPlanKey(host: generate.target,
+            instance: generate.target.flatMap { hosts.instanceID(of: $0.id) },
+            enabled: generate.canAuthorVideoDuration, authoring: generate.videoDuration,
+            draft: generate.draft, model: generate.modelName)) {
+            generate.refreshDurationPlan()
+        }
+        .onChange(of: generate.videoDuration) { _, _ in generate.saveDraft() }
         .task(id: estimateKey) { await refreshEstimate() }
         .task(id: sequenceCapabilityKey) { await generate.refreshSequenceLimits() }
         .onChange(of: router.pendingContinuation, initial: true) { _, entry in
@@ -93,6 +100,15 @@ struct GenerateView: View {
             router.pendingContinuation = nil
             generate.continueVideo(entry)
         }
+    }
+
+    private struct DurationPlanKey: Equatable {
+        let host: MoldHost?
+        let instance: String?
+        let enabled: Bool
+        let authoring: VideoDurationAuthoring?
+        let draft: RenderDraft
+        let model: String?
     }
 
     private struct SequenceCapabilityKey: Equatable {
@@ -118,6 +134,7 @@ struct GenerateView: View {
 
     /// Debounced; a guess is said as a guess ("about"), never as a measurement.
     private func refreshEstimate() async {
+        guard !generate.usesVideoDuration else { estimate = nil; return }
         guard !generate.draft.media.generationReferences.contains(where: { $0.freshVideo != nil }) else { estimate = nil; return }
         try? await Task.sleep(for: .milliseconds(400))
         guard !Task.isCancelled, let host = generate.target, let model = generate.modelName else {

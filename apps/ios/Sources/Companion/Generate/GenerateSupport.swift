@@ -63,12 +63,15 @@ extension GenerateController {
     /// The draft survives the app being terminated (DESIGN.md §4): written on
     /// every Generate and when the app goes to the background.
     func saveDraft() {
-        drafts.save(DraftDescriptor(draft, model: modelName, family: model?.family, recipeID: recipe?.id ?? recipeID))
+        var saved = DraftDescriptor(draft, model: modelName, family: model?.family, recipeID: recipe?.id ?? recipeID)
+        saved.videoDuration = videoDuration
+        drafts.save(saved)
     }
 
     func restoreDraft() {
         guard let saved = drafts.load() else { return }
         saved.apply(to: &draft)
+        videoDuration = saved.videoDuration
         modelName = saved.model
         recipeID = saved.recipeID
         restoringChoice = saved.model != nil

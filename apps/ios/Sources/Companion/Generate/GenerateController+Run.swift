@@ -76,6 +76,7 @@ extension GenerateController {
                 })
             return
         }
+        if usesVideoDuration { generateDurationVideo(); return }
         let capturedInstance = hosts.instanceID(of: host.id)
         let ordinaryBackend = hosts.backend(for: host)
         let backend: any MoldBackend = if let http = ordinaryBackend as? HTTPBackend {
@@ -281,6 +282,8 @@ extension GenerateController {
     /// Keep the admitted batch while iOS suspends sockets in the background.
     func suspendFollowing() {
         followingSuspended = true
+        videoPlanner.clear()
+        videoJobs.suspend()
         runTask?.cancel()
         followingID = nil
         runTask = nil

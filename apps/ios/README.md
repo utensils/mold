@@ -32,6 +32,8 @@ Secure connection startup retries brief proxy pressure up to three times within 
 On iPhone, Generate opens as a scrolling form: choose the kind and machine,
 describe the result, then choose a model. Tap **Model** to search installed
 models and recipes; **Get More Models…** opens model management directly.
+On updated machines advertising duration video jobs, clips use one prompt and **Duration**. The initial value follows the selected recipe; changing models preserves a chosen duration. The server reports the single-generation limit and actual number of clips joined into one movie. **Define scenes** optionally supplies separate prompts. Source fitting, opening/closing frames, typed references, audio, batch variations and filing settings use the ordinary preparation path. Generate creates durable parent jobs; Queue shows each movie once with the server’s progress, Stop, Resume and explicit deletion of recovery data. An unanswered submission remains a known attempt to check in Queue before starting another. Saved durations and scenes survive a cold launch in the private draft file. Older machines keep the existing single-generation controls and authored-sequence drafts keep their separate-part behavior.
+
 The keyboard’s **Done** dismisses the active ordinary or clip prompt without losing edits, including after scrolling. Options and the expanded prompt editor dismiss their keyboard when closed.
 The prompt stays in one scrollable form as the keyboard and text size change;
 Generate stays visible above the phone tabs. The composer never shows running or finished media: tap the queue count to open live progress and supported previews in Queue. Background queue updates keep attachment browsing open. The prompt has one Expand action.
