@@ -19,7 +19,9 @@ export function queueSection(
   if (
     stale ||
     actionable ||
-    ["held", "blocked", "failed", "error", "paused"].includes(phase ?? "")
+    ["held", "blocked", "failed", "interrupted", "error", "paused"].includes(
+      phase ?? "",
+    )
   )
     return "attention";
   if (["queued", "accepted", "waiting", "pending"].includes(phase ?? ""))

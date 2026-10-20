@@ -855,7 +855,18 @@ pub async fn cancel_chain_job(
 pub async fn cancel_chain_job_mutation(
     State(state): State<AppState>,
     Path((id, operation_id)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
+    // New recovery clients require chain_restart_controls before sending this
+    // header. Check it before any tombstone or existing job can be mutated.
+    if let Some(expected) = headers.get("x-mold-destination-instance") {
+        if expected.to_str().ok() != Some(state.instance_id.as_str()) {
+            return Err(conflict(
+                "CHAIN_DESTINATION_CHANGED",
+                "Destination installation changed. Reconnect before stopping this attempt.",
+            ));
+        }
+    }
     let operation_id = uuid::Uuid::parse_str(&operation_id)
         .map_err(|_| ApiError::validation("operation id must be a UUID"))?
         .to_string();
@@ -2255,6 +2266,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn operation_cancel_refuses_replaced_destination_before_recording_a_tombstone() {
+        let state = state_with(
+            Arc::new(Some(MetadataDb::open_in_memory().unwrap())),
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-mold-destination-instance",
+            HeaderValue::from_static("old-installation"),
+        );
+        let result = cancel_chain_job_mutation(
+            State(state.clone()),
+            Path((id.clone(), id.clone())),
+            headers,
+        )
+        .await;
+        assert_eq!(result.unwrap_err().code, "CHAIN_DESTINATION_CHANGED");
+        assert!(!state.chain_jobs.as_ref().unwrap().take_mutation_cancel(&id));
+    }
+
+    #[tokio::test]
     async fn create_honours_a_cancel_that_arrives_before_the_mutation_request() {
         let home = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
@@ -2267,9 +2300,15 @@ mod tests {
 
         let error = with_mold_home(home.path(), || {
             futures::executor::block_on(async {
+                let mut cancel_headers = HeaderMap::new();
+                cancel_headers.insert(
+                    "x-mold-destination-instance",
+                    HeaderValue::from_str(&state.instance_id).unwrap(),
+                );
                 cancel_chain_job_mutation(
                     State(state.clone()),
                     Path((operation_id.clone(), operation_id.clone())),
+                    cancel_headers,
                 )
                 .await
                 .unwrap();
@@ -2398,6 +2437,7 @@ mod tests {
                 cancel_chain_job_mutation(
                     State(state.clone()),
                     Path((created.job_id.clone(), operation_id.clone())),
+                    HeaderMap::new(),
                 )
                 .await
                 .unwrap();

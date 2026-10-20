@@ -19,46 +19,133 @@ fn refusal(message: &str) -> ApiError {
 fn options_for(
     instance: &str,
     row: &mold_db::chain_jobs::ChainJobRow,
-    manifest: &ChainJobManifest,
+    manifest: Option<&ChainJobManifest>,
 ) -> Result<ChainRestartOptions, ApiError> {
-    let request = crate::chain_job_runner::effective_request(manifest)
-        .map_err(|_| refusal("The original request is unavailable."))?;
+    let request =
+        manifest.and_then(|manifest| crate::chain_job_runner::effective_request(manifest).ok());
     let reason = if !matches!(
         row.state,
         ChainJobState::Failed | ChainJobState::Paused | ChainJobState::Interrupted
     ) {
         Some("Only a failed or paused video can start a new attempt.")
-    } else if request.continue_from.is_some() {
+    } else if request.is_none() {
+        Some("The original request is unavailable. Only its recovery data can be deleted.")
+    } else if request
+        .as_ref()
+        .is_some_and(|request| request.continue_from.is_some())
+    {
         Some("This video retains a predecessor's motion. Resume it on its original machine; portable restart is unavailable.")
     } else {
         None
     };
-    // Includes overlays and media identity, frozen authority, lifecycle and revision.
-    // Replacing any of those invalidates an earlier authorisation to export.
     let revision = serde_json::to_vec(&(instance, &row.id, row.updated_at_ms, row.state, manifest))
         .map_err(|_| ApiError::internal("Could not inspect original video"))?;
     let availability = RestartAvailability {
         supported: reason.is_none(),
         reason: reason.map(str::to_owned),
     };
+    let discardable = matches!(
+        row.state,
+        ChainJobState::Failed | ChainJobState::Interrupted
+    );
     Ok(ChainRestartOptions {
         source_instance_id: instance.into(),
         source_revision: format!("{:x}", Sha256::digest(revision)),
         restart: availability.clone(),
-        send: if availability.supported
-            && request.stages.iter().any(|stage| !stage.loras.is_empty())
-        {
-            RestartAvailability {supported:false,reason:Some("This video uses machine-local adapters. Restart on this machine or select adapters on the destination.".into())}
-        } else {
-            availability
-        },
+        discard: Some(RestartAvailability { supported: discardable, reason: (!discardable).then(|| "Only failed or interrupted recovery data can be deleted. Cancel paused work first.".into()) }),
+        send: if availability.supported && request.as_ref().is_some_and(|request| request.stages.iter().any(|stage| !stage.loras.is_empty())) {
+            RestartAvailability { supported: false, reason: Some("This video uses machine-local adapters. Restart on this machine or select adapters on the destination.".into()) }
+        } else { availability },
     })
 }
 
-fn load(
-    state: &AppState,
-    id: &str,
-) -> Result<(mold_db::chain_jobs::ChainJobRow, ChainJobManifest), ApiError> {
+#[utoipa::path(post, path = "/api/chain-jobs/{id}/discard", tag = "chain-jobs",
+    params(("id" = String, Path, description = "Failed or interrupted recovery job")),
+    request_body = mold_core::job_restart::DiscardChainJobRequest,
+    responses((status = 204, description = "Recovery data deleted; Library outputs retained"), (status = 409, description = "Source changed or no longer discardable")))]
+pub(crate) async fn discard(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(authority): Json<mold_core::job_restart::DiscardChainJobRequest>,
+) -> Result<StatusCode, ApiError> {
+    if authority.source_instance_id != *state.instance_id {
+        return Err(ApiError::with_code(
+            "The source installation changed. Reopen the video.",
+            "CHAIN_RESTART_REVISION_CHANGED",
+            StatusCode::CONFLICT,
+        ));
+    }
+    let handle = state
+        .chain_jobs
+        .as_ref()
+        .ok_or_else(|| refusal("Durable video jobs are unavailable."))?;
+    {
+        let _guard = handle.lock_job(&id).await;
+        let db = state
+            .metadata_db
+            .as_ref()
+            .as_ref()
+            .ok_or_else(|| refusal("Durable video jobs are unavailable."))?;
+        let Some(row) = mold_db::chain_jobs::get_job(db, &id)
+            .map_err(|_| ApiError::internal("Could not read recovery job"))?
+        else {
+            return Ok(StatusCode::NO_CONTENT);
+        };
+        let manifest = ChainJobManifest::read_from_dir(&row.job_dir).ok();
+        let options = options_for(&state.instance_id, &row, manifest.as_ref())?;
+        if options.source_revision != authority.source_revision {
+            return Err(ApiError::with_code(
+                "The video changed. Reopen it before deleting recovery data.",
+                "CHAIN_RESTART_REVISION_CHANGED",
+                StatusCode::CONFLICT,
+            ));
+        }
+        if !options
+            .discard
+            .is_some_and(|availability| availability.supported)
+        {
+            return Err(ApiError::with_code(
+                "This job is no longer failed or interrupted. Nothing was deleted.",
+                "CHAIN_DISCARD_UNAVAILABLE",
+                StatusCode::CONFLICT,
+            ));
+        }
+        let root = crate::routes_chain_jobs::jobs_root()?;
+        let metadata = state.metadata_db.clone();
+        let deleting = id.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::chain_source_media::release_all(&root, &row.job_dir).map_err(|error| {
+                ApiError::internal(format!("Could not release retained inputs: {error:#}"))
+            })?;
+            if row.job_dir.exists() {
+                std::fs::remove_dir_all(&row.job_dir).map_err(|error| {
+                    ApiError::internal(format!("Could not delete recovery files: {error}"))
+                })?;
+            }
+            let db = metadata
+                .as_ref()
+                .as_ref()
+                .ok_or_else(|| refusal("Durable video jobs are unavailable."))?;
+            if !mold_db::chain_jobs::delete_job_not_running(db, &deleting)
+                .map_err(|_| ApiError::internal("Could not delete recovery job"))?
+            {
+                return Err(ApiError::with_code(
+                    "The video changed. Nothing more was deleted.",
+                    "CHAIN_DISCARD_UNAVAILABLE",
+                    StatusCode::CONFLICT,
+                ));
+            }
+            Ok::<(), ApiError>(())
+        })
+        .await
+        .map_err(|_| ApiError::internal("Recovery deletion did not finish"))??;
+    }
+    handle.cleanup_deleted(&id);
+    handle.remove_job_lock(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn load_row(state: &AppState, id: &str) -> Result<mold_db::chain_jobs::ChainJobRow, ApiError> {
     let db = state
         .metadata_db
         .as_ref()
@@ -73,6 +160,13 @@ fn load(
                 StatusCode::NOT_FOUND,
             )
         })?;
+    Ok(row)
+}
+fn load(
+    state: &AppState,
+    id: &str,
+) -> Result<(mold_db::chain_jobs::ChainJobRow, ChainJobManifest), ApiError> {
+    let row = load_row(state, id)?;
     let manifest = ChainJobManifest::read_from_dir(&row.job_dir)
         .map_err(|_| refusal("The original video manifest is unavailable."))?;
     Ok((row, manifest))
@@ -90,10 +184,11 @@ pub(crate) async fn options(
         .as_ref()
         .ok_or_else(|| refusal("Durable video jobs are unavailable."))?;
     let _guard = handle.lock_job(&id).await;
-    let (row, manifest) = load(&state, &id)?;
+    let row = load_row(&state, &id)?;
+    let manifest = ChainJobManifest::read_from_dir(&row.job_dir).ok();
     Ok((
         [(header::CACHE_CONTROL, "private, no-store")],
-        Json(options_for(&state.instance_id, &row, &manifest)?),
+        Json(options_for(&state.instance_id, &row, manifest.as_ref())?),
     ))
 }
 
@@ -159,7 +254,7 @@ pub(crate) async fn export(
         .ok_or_else(|| refusal("Durable video jobs are unavailable."))?;
     let _guard = handle.lock_job(&id).await;
     let (row, manifest) = load(&state, &id)?;
-    let options = options_for(&state.instance_id, &row, &manifest)?;
+    let options = options_for(&state.instance_id, &row, Some(&manifest))?;
     if authority.source_instance_id != options.source_instance_id
         || authority.source_revision != options.source_revision
     {
@@ -198,7 +293,7 @@ pub(crate) async fn export(
     .map_err(|_| refusal("Exact original inputs are unavailable. Nothing was restarted."))?;
     // Actor lock fences amendment, deletion and resume while media is authenticated.
     let (latest, current_manifest) = load(&state, &id)?;
-    if options_for(&state.instance_id, &latest, &current_manifest)?.source_revision
+    if options_for(&state.instance_id, &latest, Some(&current_manifest))?.source_revision
         != authority.source_revision
     {
         return Err(refusal(
@@ -247,6 +342,114 @@ mod tests {
         };
         (row, manifest)
     }
+
+    #[tokio::test]
+    async fn discard_refuses_replaced_owner_revision_and_resumed_work_without_deleting_inputs() {
+        use mold_core::job_restart::DiscardChainJobRequest;
+        for (lifecycle, wrong_owner, wrong_revision) in [
+            (ChainJobState::Failed, true, false),
+            (ChainJobState::Failed, false, true),
+            (ChainJobState::Queued, false, false),
+            (ChainJobState::Running, false, false),
+            (ChainJobState::Paused, false, false),
+            (ChainJobState::Completed, false, false),
+            (ChainJobState::Cancelled, false, false),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let (mut row, manifest) = fixture();
+            row.state = lifecycle;
+            row.job_dir = home.path().join("job");
+            std::fs::create_dir_all(&row.job_dir).unwrap();
+            manifest.write_atomic(&row.job_dir).unwrap();
+            let original = std::fs::read(row.job_dir.join("manifest.toml")).unwrap();
+            let mut state = AppState::for_tests();
+            state.metadata_db =
+                std::sync::Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+            state.chain_jobs = Some(std::sync::Arc::new(
+                crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+            ));
+            let db = state.metadata_db.as_ref().as_ref().unwrap();
+            mold_db::chain_jobs::insert_job(db, &row).unwrap();
+            let captured = options_for(&state.instance_id, &row, Some(&manifest)).unwrap();
+            let result = discard(
+                State(state.clone()),
+                Path(row.id.clone()),
+                Json(DiscardChainJobRequest {
+                    source_instance_id: if wrong_owner {
+                        "replacement".into()
+                    } else {
+                        captured.source_instance_id
+                    },
+                    source_revision: if wrong_revision {
+                        "stale".into()
+                    } else {
+                        captured.source_revision
+                    },
+                }),
+            )
+            .await;
+            assert!(result.is_err(), "discard must refuse {lifecycle:?} with changed owner={wrong_owner}, revision={wrong_revision}");
+            assert!(mold_db::chain_jobs::get_job(db, &row.id).unwrap().is_some());
+            assert_eq!(
+                std::fs::read(row.job_dir.join("manifest.toml")).unwrap(),
+                original
+            );
+        }
+    }
+    #[tokio::test]
+    async fn explicit_discard_removes_only_settled_recovery_data_even_with_missing_manifest() {
+        use mold_core::job_restart::DiscardChainJobRequest;
+        for (lifecycle, has_manifest) in [
+            (ChainJobState::Failed, true),
+            (ChainJobState::Interrupted, false),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let (mut row, manifest) = fixture();
+            row.state = lifecycle;
+            row.job_dir = home.path().join("job");
+            std::fs::create_dir_all(&row.job_dir).unwrap();
+            if has_manifest {
+                manifest.write_atomic(&row.job_dir).unwrap();
+            } else {
+                std::fs::write(row.job_dir.join("manifest.toml"), b"broken manifest").unwrap();
+            }
+            let gallery = home.path().join("saved-library.mp4");
+            std::fs::write(&gallery, b"saved output").unwrap();
+            let mut state = AppState::for_tests();
+            state.metadata_db =
+                std::sync::Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+            state.chain_jobs = Some(std::sync::Arc::new(
+                crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+            ));
+            let db = state.metadata_db.as_ref().as_ref().unwrap();
+            mold_db::chain_jobs::insert_job(db, &row).unwrap();
+            let loaded = ChainJobManifest::read_from_dir(&row.job_dir).ok();
+            let captured = options_for(&state.instance_id, &row, loaded.as_ref()).unwrap();
+            assert!(captured.discard.as_ref().unwrap().supported);
+            if !has_manifest {
+                assert!(!captured.restart.supported);
+            }
+            for _ in 0..2 {
+                assert_eq!(
+                    discard(
+                        State(state.clone()),
+                        Path(row.id.clone()),
+                        Json(DiscardChainJobRequest {
+                            source_instance_id: captured.source_instance_id.clone(),
+                            source_revision: captured.source_revision.clone(),
+                        })
+                    )
+                    .await
+                    .unwrap(),
+                    StatusCode::NO_CONTENT
+                );
+            }
+            assert!(mold_db::chain_jobs::get_job(db, &row.id).unwrap().is_none());
+            assert!(!row.job_dir.exists());
+            assert_eq!(std::fs::read(gallery).unwrap(), b"saved output");
+        }
+    }
+
     #[tokio::test]
     async fn revision_fenced_export_is_private_and_leaves_source_untouched() {
         use axum::response::IntoResponse;
@@ -264,7 +467,7 @@ mod tests {
         ));
         let db = state.metadata_db.as_ref().as_ref().unwrap();
         mold_db::chain_jobs::insert_job(db, &row).unwrap();
-        let authority = options_for(&state.instance_id, &row, &manifest).unwrap();
+        let authority = options_for(&state.instance_id, &row, Some(&manifest)).unwrap();
         let stale = RestartExportRequest {
             destination_instance_id: state.instance_id.as_ref().clone(),
             source_instance_id: "different-installation".into(),
@@ -348,18 +551,18 @@ mod tests {
     #[test]
     fn restart_export_is_revision_and_installation_bound() {
         let (mut row, manifest) = fixture();
-        let first = options_for("installation-a", &row, &manifest).unwrap();
+        let first = options_for("installation-a", &row, Some(&manifest)).unwrap();
         assert!(first.restart.supported && first.send.supported);
         row.updated_at_ms += 1;
         assert_ne!(
             first.source_revision,
-            options_for("installation-a", &row, &manifest)
+            options_for("installation-a", &row, Some(&manifest))
                 .unwrap()
                 .source_revision
         );
         assert_ne!(
             first.source_revision,
-            options_for("installation-b", &row, &manifest)
+            options_for("installation-b", &row, Some(&manifest))
                 .unwrap()
                 .source_revision
         );
@@ -368,7 +571,12 @@ mod tests {
     fn restart_refuses_live_and_linked_sources_without_lossy_fallback() {
         let (mut row, mut manifest) = fixture();
         row.state = ChainJobState::Running;
-        assert!(!options_for("a", &row, &manifest).unwrap().restart.supported);
+        assert!(
+            !options_for("a", &row, Some(&manifest))
+                .unwrap()
+                .restart
+                .supported
+        );
         row.state = ChainJobState::Failed;
         let mut request = manifest.request().unwrap();
         request.continue_from = Some(mold_core::chain::ChainContinuation {
@@ -376,7 +584,7 @@ mod tests {
             finalize_take: 1,
         });
         manifest.request_json = serde_json::to_string(&request).unwrap();
-        let options = options_for("a", &row, &manifest).unwrap();
+        let options = options_for("a", &row, Some(&manifest)).unwrap();
         assert!(!options.send.supported);
         assert!(options.send.reason.unwrap().contains("predecessor"));
         let db = mold_db::MetadataDb::open_in_memory().unwrap();
@@ -392,7 +600,7 @@ mod tests {
             name: Some("original".into()),
         });
         manifest.request_json = serde_json::to_string(&request).unwrap();
-        let options = options_for("original-installation", &row, &manifest).unwrap();
+        let options = options_for("original-installation", &row, Some(&manifest)).unwrap();
         assert!(options.restart.supported);
         assert!(!options.send.supported);
         let db = mold_db::MetadataDb::open_in_memory().unwrap();
