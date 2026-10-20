@@ -7,6 +7,7 @@ public struct LinkedPartLimits: Codable, Hashable, Sendable {
     public let maxParts: UInt64?
 }
 public struct ChainAuthoringLimits: Codable, Hashable, Sendable {
+    public let sourceFitSupported: Bool?
     public let motionTailFrames: Int
     public let carryMode: String
     public let minFrames: Int

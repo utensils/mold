@@ -37,6 +37,7 @@ public struct ChainScriptSettings: Codable, Hashable, Sendable {
     public var motionTailFrames: Int
     public var outputFormat: String
     public var enableAudio: Bool?
+    public var sourceFit: SourceFit?
 }
 public struct ChainScript: Codable, Hashable, Sendable {
     public var schema: String

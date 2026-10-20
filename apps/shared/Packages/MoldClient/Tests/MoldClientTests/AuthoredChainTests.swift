@@ -3,12 +3,13 @@ import Testing
 @testable import MoldClient
 
 struct AuthoredChainTests {
-    func limits(linked: Bool = true) throws -> ChainLimits {
+    func limits(linked: Bool = true, sourceFit: Bool? = nil) throws -> ChainLimits {
         try MoldJSON.decoder.decode(ChainLimits.self, from: Data("""
         {"model":"h3-test","fps":24,"frames_per_clip_cap":345,"frames_per_clip_recommended":209,
         "max_stages":16,"max_total_frames":5520,"supports_sequence":true,"supports_audio":true,
         "transition_modes":["smooth","cut","fade"],"fade_frames_max":32,
-        "linked_parts":{"supported":\(linked),"max_stages_per_part":16,"max_parts":null}}
+        "linked_parts":{"supported":\(linked),"max_stages_per_part":16,"max_parts":null},
+        "authoring":\(sourceFit.map { "{\"motion_tail_frames\":1,\"carry_mode\":\"rgb\",\"min_frames\":107,\"frame_step\":17,\"frame_offset\":5,\"source_fit_supported\":\($0)}" } ?? "null")}
         """.utf8))
     }
     func base() -> GenerateRequest {
@@ -155,6 +156,27 @@ struct AuthoredChainTests {
         #expect(throws: SequenceDraftError.self) {
             try AuthoredChainRequest(base, stages: [.init(prompt: "One", frames: 209)], limits: limits())
         }
+    }
+
+    @Test func sourceFitSurvivesAuthoredRequestAndScriptProjection() throws {
+        var base = base(); base.sourceFit = .default
+        #expect(throws: SequenceDraftError.self) {
+            try AuthoredChainRequest(base, stages: [.init(prompt: "One", frames: 209)], limits: limits())
+        }
+        #expect(throws: SequenceDraftError.self) {
+            try AuthoredChainRequest(base, stages: [.init(prompt: "One", frames: 209)], limits: limits(sourceFit: false))
+        }
+        let request = try AuthoredChainRequest(base, stages: [.init(prompt: "One", frames: 209)], limits: limits(sourceFit: true))
+        let json = try #require(JSONSerialization.jsonObject(with: MoldJSON.encoder.encode(request)) as? [String: Any])
+        #expect(json["source_fit"] != nil)
+        let data = Data("""
+        {"schema":"mold.chain.v1","chain":{"model":"h3-test","width":768,"height":512,"fps":24,
+        "steps":9,"guidance":0,"strength":1,"motion_tail_frames":1,"output_format":"mp4",
+        "source_fit":{"mode":"crop-fill","alignX":"center","alignY":"center"}},
+        "stage":[{"prompt":"One","frames":209,"transition":"smooth"}]}
+        """.utf8)
+        let script = try MoldJSON.decoder.decode(ChainScript.self, from: data)
+        #expect(script.chain.sourceFit == .default)
     }
 
 }

@@ -51,6 +51,7 @@ public struct AuthoredChainRequest: Codable, Hashable, Sendable {
     public var outputFormat: String = "mp4"
     public var outputMode: String = "sequence"
     public var enableAudio: Bool?
+    public var sourceFit: SourceFit?
     public var title: String?
     public var tags: [String]?
     public var collection: CollectionRef?
@@ -71,6 +72,7 @@ public struct AuthoredChainRequest: Codable, Hashable, Sendable {
         width = prepared.width; height = prepared.height; fps = prepared.fps ?? limits.fps ?? 24
         seed = prepared.seed; steps = prepared.steps; guidance = prepared.guidance
         strength = prepared.strength ?? 1; enableAudio = prepared.enableAudio
+        sourceFit = prepared.sourceFit
         title = prepared.title; tags = prepared.tags; collection = prepared.collection
         originalPrompt = prepared.originalPrompt; promptTransform = prepared.promptTransform?.wireSafe
         batchId = prepared.batchId; batchIndex = prepared.batchIndex; batchCount = prepared.batchCount
@@ -79,6 +81,9 @@ public struct AuthoredChainRequest: Codable, Hashable, Sendable {
 
     public func validateSubmission(limits: ChainLimits) throws {
         try validateMediaBudget()
+        if sourceFit != nil, limits.authoring?.sourceFitSupported != true {
+            throw SequenceDraftError.invalid("Update this machine before generating joined clips with source crop settings.")
+        }
         guard limits.supportsSequence else {
             throw SequenceDraftError.invalid(limits.sequenceUnsupportedReason ?? "This model does not support joined clips.")
         }
@@ -190,7 +195,6 @@ public struct AuthoredChainRequest: Codable, Hashable, Sendable {
         if request.audioFile != nil { unsupported.append("conditioning audio") }
         if request.sourceVideo != nil { unsupported.append("source video") }
         if request.extendVideo != nil || request.extendOverlapFrames != nil { unsupported.append("video extension") }
-        if request.sourceFit != nil { unsupported.append("source crop settings") }
         if request.pipeline != nil { unsupported.append("pipeline override") }
         if request.guidanceOverrides != nil { unsupported.append("guidance overrides") }
         if request.maskImage != nil { unsupported.append("mask") }

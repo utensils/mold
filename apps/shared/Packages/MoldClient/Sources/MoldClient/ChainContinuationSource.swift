@@ -35,12 +35,14 @@ public struct ChainContinuationSource: Hashable, Sendable {
         var base = GenerateRequest(prompt: stages.first?.prompt ?? "", model: settings.model,
             width: settings.width, height: settings.height, steps: settings.steps,
             guidance: settings.guidance, seed: seed)
+        base.sourceFit = settings.sourceFit
         base.fps = settings.fps; base.strength = settings.strength; base.enableAudio = settings.enableAudio
         if let originalComposer = composer {
             let composer = try originalComposer.authoredChainInputs()
             try AuthoredChainRequest.requireRepresentable(composer)
             base.seed = seed ?? composer.seed
             base.steps = composer.steps; base.guidance = composer.guidance; base.strength = composer.strength
+            base.sourceFit = composer.sourceFit
             base.sourceImage = composer.sourceImage; base.keyframes = composer.keyframes
             base.references = composer.references; base.frames = composer.frames
             base.negativePrompt = composer.negativePrompt; base.loras = composer.loras
