@@ -11864,6 +11864,10 @@ pub struct QueueCapabilities {
     /// Older servers ignore the header, so clients must require this capability.
     #[serde(default)]
     pub chain_restart: bool,
+    /// Operation cancellation rejects a supplied destination installation mismatch
+    /// before recording a tombstone or changing a job. Absent on older hosts.
+    #[serde(default)]
+    pub chain_restart_controls: bool,
     /// Opaque durable destination identity for transfer reconciliation across restarts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transfer_identity: Option<String>,

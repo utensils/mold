@@ -14,6 +14,15 @@ pub struct ChainRestartOptions {
     pub source_revision: String,
     pub restart: RestartAvailability,
     pub send: RestartAvailability,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discard: Option<RestartAvailability>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DiscardChainJobRequest {
+    pub source_instance_id: String,
+    pub source_revision: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -67,10 +76,12 @@ mod tests {
             serde_json::from_value(serde_json::json!({"can_pause":true,"can_cancel_all":true}))
                 .unwrap();
         assert!(!old.chain_restart);
+        assert!(!old.chain_restart_controls);
         let current: crate::QueueCapabilities = serde_json::from_value(
-            serde_json::json!({"can_pause":true,"can_cancel_all":true,"chain_restart":true}),
+            serde_json::json!({"can_pause":true,"can_cancel_all":true,"chain_restart":true,"chain_restart_controls":true}),
         )
         .unwrap();
         assert!(current.chain_restart);
+        assert!(current.chain_restart_controls);
     }
 }

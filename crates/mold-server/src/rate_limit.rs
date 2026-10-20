@@ -206,7 +206,8 @@ pub fn classify_route(path: &str, method: &axum::http::Method) -> Option<RouteTi
         }
         // Private restart exports authenticate and hydrate bounded media.
         ("POST", path)
-            if path.starts_with("/api/chain-jobs/") && path.ends_with("/restart-export") =>
+            if path.starts_with("/api/chain-jobs/")
+                && (path.ends_with("/restart-export") || path.ends_with("/discard")) =>
         {
             Some(RouteTier::Generation)
         }
@@ -302,6 +303,7 @@ mod tests {
         for path in [
             "/api/generation-transfers/abort",
             "/api/chain-jobs/job/restart-export",
+            "/api/chain-jobs/job/discard",
             "/api/queue/job/transfer/reserve",
             "/api/queue/job/transfer/seal",
             "/api/queue/job/transfer/release",
