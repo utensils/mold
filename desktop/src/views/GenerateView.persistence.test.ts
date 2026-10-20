@@ -69,6 +69,20 @@ describe("GenerateView form persistence", () => {
   });
   afterEach(() => (document.body.innerHTML = ""));
 
+  it("suppresses one-shot estimates while authored clips own the length", async () => {
+    const view = mountView();
+    useGenerateFormStore().form.model = "ltx-video:bf16";
+    await flushPromises();
+    const composer = view.getComponent({ name: "ComposerCard" });
+    expect(composer.props("estimateRequest")).toMatchObject({ model: "ltx-video:bf16" });
+    view.getComponent({ name: "VideoClips" }).vm.$emit("active", true);
+    await flushPromises();
+    expect(composer.props("estimateRequest")).toBeNull();
+    view.getComponent({ name: "VideoClips" }).vm.$emit("active", false);
+    await flushPromises();
+    expect(composer.props("estimateRequest")).toMatchObject({ model: "ltx-video:bf16" });
+  });
+
   it("retains the prompt and model across unmount and remount", async () => {
     const first = mountView();
     const store = useGenerateFormStore();

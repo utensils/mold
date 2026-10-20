@@ -1017,7 +1017,11 @@ const showStarterCards = computed(() =>
 
 /** The request the estimate badge previews — null until a model is chosen. */
 const estimateRequest = computed(() => {
-  if (!form.model || hasActiveFreshVideoReferences(form.h3Authoring, caps.value.sourceImageMode))
+  if (
+    clipsActive.value ||
+    !form.model ||
+    hasActiveFreshVideoReferences(form.h3Authoring, caps.value.sourceImageMode)
+  )
     return null;
   return buildGenerationEstimateRequest(buildRequest(form), form.family, selectedEntry.value);
 });

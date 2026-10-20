@@ -2585,7 +2585,11 @@ const developDisabled = computed(
     developBlockerReason.value !== null,
 );
 const estimateRequest = computed(() => {
-  if (!form.model || hasActiveFreshVideoReferences(form.h3Authoring, caps.value.sourceImageMode))
+  if (
+    clipsActive.value ||
+    !form.model ||
+    hasActiveFreshVideoReferences(form.h3Authoring, caps.value.sourceImageMode)
+  )
     return null;
   return buildGenerationEstimateRequest(
     buildRequest(form),

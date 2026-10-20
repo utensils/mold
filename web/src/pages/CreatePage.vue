@@ -1675,6 +1675,7 @@ const normalizationPickerCapability = computed(() => {
 });
 const estimateRequest = computed<GenerateRequestWire | null>(() => {
   if (
+    clipsActive.value ||
     !form.state.value.model ||
     hasActiveFreshVideoReferences(
       form.state.value.h3Authoring,

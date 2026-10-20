@@ -523,6 +523,28 @@ describe("CreatePage layout and behavior", () => {
     wrapper.unmount();
   });
 
+  it("suppresses one-shot estimates while authored clips own the length", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "ltx-video:bf16";
+    await nextTick();
+    const estimate = () => wrapper.getComponent({ name: "EstimateBadge" });
+    expect(estimate().props("request")).toMatchObject({
+      model: "ltx-video:bf16",
+    });
+    wrapper.getComponent({ name: "VideoClips" }).vm.$emit("active", true);
+    await nextTick();
+    expect(estimate().props("request")).toBeNull();
+    expect(wrapper.find(".estimate-badge").exists()).toBe(false);
+    wrapper.getComponent({ name: "VideoClips" }).vm.$emit("active", false);
+    await nextTick();
+    expect(estimate().props("request")).toMatchObject({
+      model: "ltx-video:bf16",
+    });
+    wrapper.unmount();
+  });
+
   it("uses the Mold Studio composer + controls-region workspace", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
