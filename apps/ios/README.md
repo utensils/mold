@@ -32,6 +32,7 @@ Secure connection startup retries brief proxy pressure up to three times within 
 On iPhone, Generate opens as a scrolling form: choose the kind and machine,
 describe the result, then choose a model. Tap **Model** to search installed
 models and recipes; **Get More Models…** opens model management directly.
+The keyboard’s **Done** dismisses the active ordinary or clip prompt without losing edits, including after scrolling. Options and the expanded prompt editor dismiss their keyboard when closed.
 The prompt stays in one scrollable form as the keyboard and text size change;
 Generate stays visible above the phone tabs. The composer never shows running or finished media: tap the queue count to open live progress and supported previews in Queue. Background queue updates keep attachment browsing open. The prompt has one Expand action.
 After a dropped connection, foreground reconnection rereads admitted batches and resumes progress without submitting them again.

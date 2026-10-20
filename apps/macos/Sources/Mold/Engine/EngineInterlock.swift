@@ -26,8 +26,8 @@ import Foundation
 /// Refusing would therefore stop a legitimate setup — the native app beside a
 /// `mold serve` on one home — that mold itself supports. What was missing is
 /// that nobody was TOLD, and that is what this fixes.
-enum EngineInterlock {
-    enum HomeWriter: Equatable {
+nonisolated enum EngineInterlock {
+    enum HomeWriter: Equatable, Sendable {
         /// Nobody is publishing here, or the lease is a dead process's
         /// leftover, which every reader already treats as stale.
         case none

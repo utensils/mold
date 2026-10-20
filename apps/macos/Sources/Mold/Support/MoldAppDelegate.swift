@@ -10,6 +10,8 @@ import UserNotifications
 @MainActor
 final class MoldAppDelegate: NSObject, NSApplicationDelegate {
     /// Set by the composition root, which owns all of them.
+    var cancelStartup: (() -> Void)?
+    private var preparedServicesActivated = false
     var engine: MoldEngine?
     var remotePairing: RemotePairingStore?
     var materializer: PrintMaterializer?
@@ -32,24 +34,21 @@ final class MoldAppDelegate: NSObject, NSApplicationDelegate {
     /// `UNUserNotificationCenter` too, and outside a real `.app` that aborts
     /// the process just as posting would.
     func applicationWillFinishLaunching(_ notification: Notification) {
-        guard MoldNotifications.isInsideBundle() else { return }
-        UNUserNotificationCenter.current().delegate = self
+        // Capture cold-launch notification clicks while storage is pending.
+        // This is an OS delegate bridge, not an app-owned network client.
+        if MoldNotifications.isInsideBundle() { UNUserNotificationCenter.current().delegate = self }
     }
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        // Appearance is a plain AppKit call and applies outside a real
-        // `.app` too; only the notification-center setup needs a bundle.
+    /// Called only after the private-storage worker and FFI preamble finish.
+    func activatePreparedServices() {
+        guard !preparedServicesActivated else { return }
+        preparedServicesActivated = true
         Appearance.stored(in: AppStorageSuite.defaults).apply()
+        PerformanceDiagnostics.shared.setActive(NSApp.isActive)
+        cancelStartup = nil
         #if DEBUG
         UATScript.runIfRequested(responses: notificationResponses)
         #endif
-        // Touching `shared` is what builds the updater; in a build with no
-        // updater this is `nil` and nothing is constructed, scheduled or
-        // fetched. It is NOT behind the notification bundle guard: `.commands` is
-        // evaluated during scene construction and `UpdateCommands` reads
-        // `shared` there, so a guard here would already be too late. The
-        // bundle question is asked where it can hold instead, as the fourth
-        // condition in `UpdaterActivation` (review F5#7).
         _ = SoftwareUpdates.shared
     }
 
@@ -57,6 +56,7 @@ final class MoldAppDelegate: NSObject, NSApplicationDelegate {
     /// whether a `gallery_added` frame counts and clears the badge on the
     /// transition back to `true` (decision 21).
     func applicationDidBecomeActive(_ notification: Notification) {
+        guard preparedServicesActivated else { return }
         PerformanceDiagnostics.shared.setActive(true)
         landedPrints?.isActive = true
         // The same signal, one meaning: while Mold is frontmost its panes are
@@ -65,13 +65,15 @@ final class MoldAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidResignActive(_ notification: Notification) {
+        guard preparedServicesActivated else { return }
         PerformanceDiagnostics.shared.setActive(false)
         landedPrints?.isActive = false
         heartbeat?.stop()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        PerformanceDiagnostics.shared.setActive(false)
+        cancelStartup?()
+        if preparedServicesActivated { PerformanceDiagnostics.shared.setActive(false) }
         remotePairing?.shutdown()
         if let library {
             library.flushUnreadMedia()

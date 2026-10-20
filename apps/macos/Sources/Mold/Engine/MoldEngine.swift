@@ -110,22 +110,6 @@ final class MoldEngine {
     /// (review F4).
     static func isPairable(_ host: MoldHost) -> Bool { host.id != localHostID }
 
-    /// Prepares this process for an engine, as early in the launch as the app
-    /// has a main actor.
-    ///
-    /// `mold_engine_bootstrap` writes `MOLD_HOME`, `MOLD_API_KEY` and
-    /// `MOLD_CORS_ORIGIN` with `setenv`, which reallocates `environ` and is
-    /// not safe beside a concurrent `getenv` — CFNetwork reads proxy
-    /// variables, among others. It used to run from a detached `Task` in a
-    /// fully launched app, with URLSession's threads and `HostStore` already
-    /// polling (review 05-M4). `@main`'s `init`, before a single store is
-    /// built, is the earliest point this app owns. Honestly: AppKit and the
-    /// Swift runtime have started threads of their own before `init` runs, so
-    /// this NARROWS the window rather than closing it. Closing it means
-    /// `run_server` taking the home and the key as parameters instead of
-    /// through the environment — a change to the engine, not to the embedder.
-    func bootstrapAtLaunch() { _ = prepared() }
-
     static var logDirectory: String {
         FileManager.default.homeDirectoryForCurrentUser
             .appending(path: "Library/Logs/Mold").path

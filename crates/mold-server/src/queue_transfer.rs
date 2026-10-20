@@ -27,6 +27,7 @@ fn remaining_budget(request: &GenerateRequest) -> anyhow::Result<u64> {
     let mut remaining = MAX_PORTABLE_MEMBER_BYTES;
     let scalar = [
         &request.source_image,
+        &request.id_image,
         &request.mask_image,
         &request.control_image,
         &request.audio_file,
@@ -38,6 +39,7 @@ fn remaining_budget(request: &GenerateRequest) -> anyhow::Result<u64> {
         .flatten()
         .map(Vec::len)
         .chain(request.id_images.iter().flatten().map(Vec::len))
+        .chain(request.edit_images.iter().flatten().map(Vec::len))
         .chain(
             request
                 .keyframes
@@ -185,6 +187,27 @@ fn portable_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn singular_identity_and_edit_images_share_the_portable_media_budget() {
+        for identity in [true, false] {
+            let mut request: GenerateRequest = serde_json::from_value(serde_json::json!({
+                "model":"ltx-2-19b-distilled:fp8", "prompt":"original", "width":512,
+                "height":512, "steps":4
+            }))
+            .unwrap();
+            request.source_image = Some(vec![1]);
+            let image = vec![0; MAX_PORTABLE_MEMBER_BYTES as usize];
+            if identity {
+                request.id_image = Some(image);
+            } else {
+                request.edit_images = Some(vec![image]);
+            }
+            assert!(
+                remaining_budget(&request).is_err(),
+                "every inline image counts toward one aggregate budget"
+            );
+        }
+    }
     #[test]
     fn legacy_mutable_path_is_refused_without_retained_media_authentication() {
         let directory = tempfile::tempdir().unwrap();

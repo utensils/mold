@@ -1,0 +1,1 @@
+- **Responsive native macOS startup.** Mold opens a startup window while preparing an external Mold home, instead of blocking before the first window. Private storage and engine preparation still finish before networking starts, and failures preserve the original home and credentials.
