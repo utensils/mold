@@ -11,6 +11,23 @@ pub async fn run(action: JobsAction, host: Option<&str>, _config: &Config) -> Re
         JobsAction::List { json } => jobs_list(&client, json).await,
         JobsAction::Show { id, json, script } => jobs_show(&client, &id, json, script).await,
         JobsAction::Resume { id } => jobs_resume(&client, &id).await,
+        JobsAction::Restart {
+            id,
+            to,
+            operation_id,
+            destination_api_key,
+        } => {
+            let destination = if let Some(target) = to.as_deref() {
+                let resolved = crate::control::resolve_target(Some(target))?;
+                match destination_api_key {
+                    Some(key) => MoldClient::with_api_key(&resolved, key),
+                    None => MoldClient::new(&resolved),
+                }
+            } else {
+                crate::control::client_for_host(host)?
+            };
+            jobs_restart(&client, &destination, &id, operation_id).await
+        }
         JobsAction::Retake {
             id,
             stage,
@@ -126,6 +143,73 @@ fn render_job_script(detail: &ChainJobDetail) -> Result<String> {
 async fn jobs_resume(client: &MoldClient, id: &str) -> Result<()> {
     let summary = client.resume_chain_job(id).await?;
     print_summary_action("resumed", &summary);
+    Ok(())
+}
+
+async fn jobs_restart(
+    source: &MoldClient,
+    destination: &MoldClient,
+    id: &str,
+    operation_id: Option<String>,
+) -> Result<()> {
+    let operation_id = match operation_id {
+        Some(value) => uuid::Uuid::parse_str(&value)
+            .context("--operation-id must be a UUID")?
+            .to_string(),
+        None => uuid::Uuid::new_v4().to_string(),
+    };
+    let options = source.chain_restart_options(id).await?;
+    let target_instance = destination
+        .server_status()
+        .await?
+        .instance_id
+        .context("Destination has no stable installation identity")?;
+    anyhow::ensure!(destination.capabilities().await?.queue.chain_restart,
+        "Update the destination Mold server before starting another attempt; safe destination-instance fencing is unavailable");
+    let availability = if target_instance == options.source_instance_id {
+        &options.restart
+    } else {
+        &options.send
+    };
+    anyhow::ensure!(
+        availability.supported,
+        "{}",
+        availability
+            .reason
+            .as_deref()
+            .unwrap_or("Restart is unavailable")
+    );
+    let exported = source
+        .export_chain_restart(
+            id,
+            &mold_core::job_restart::RestartExportRequest {
+                destination_instance_id: target_instance.clone(),
+                source_instance_id: options.source_instance_id.clone(),
+                source_revision: options.source_revision.clone(),
+            },
+        )
+        .await?;
+    anyhow::ensure!(
+        exported.source_instance_id == options.source_instance_id
+            && exported.source_revision == options.source_revision
+            && exported.destination_instance_id == target_instance,
+        "Source changed while exporting; nothing was submitted"
+    );
+    // Emit before POST so a disconnected terminal retains the reconciliation identity.
+    println!("New attempt operation: {operation_id}");
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let created = destination.create_chain_job_json_on_instance(&exported.request_json, &operation_id, &target_instance).await
+        .with_context(|| format!("New-attempt admission may be uncertain. Reconcile {operation_id} on {} before using another operation id; retry with --operation-id {operation_id}. Original {id} remains unchanged", destination.host()))?;
+    anyhow::ensure!(
+        created.job_id == operation_id,
+        "Destination returned a different operation identity; original remains unchanged"
+    );
+    println!(
+        "Started {} on {}. Original {} remains recoverable.",
+        created.job_id,
+        destination.host(),
+        id
+    );
     Ok(())
 }
 

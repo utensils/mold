@@ -370,6 +370,18 @@ mold jobs show job-abc123 --script --host workstation
 mold jobs resume job-abc123 --host workstation
 ```
 
+If exact Resume refuses an old frozen recipe, start a **new attempt** with
+`mold jobs restart JOB_ID --host SOURCE --to DESTINATION`. Omit `--to` for the
+original machine. The destination must advertise safe restart support; update
+older servers first. This revalidates today's destination recipe and keeps the
+original job. Keep the printed operation UUID; after a lost reply, inspect that
+UUID on the destination and repeat with `--operation-id UUID` to reconcile it.
+Linked parts explicitly refuse restart, and machine-local adapters refuse Send;
+Restart on the original machine keeps its adapters. Never drop conditioning to
+force a retry. Failed ordinary video jobs
+remain Held with their inputs; `mold queue send JOB_ID --to DESTINATION` uses
+the existing safe move workflow. Historical failures may have no retained inputs.
+
 Exported scripts quote seeds above TOML's signed-integer limit. Keep those
 quotes when editing so the full seed survives.
 

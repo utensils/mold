@@ -105,6 +105,14 @@ pub async fn create_chain_job(
     ),
     ApiError,
 > {
+    if let Some(expected) = headers.get("x-mold-destination-instance") {
+        if expected.to_str().ok() != Some(state.instance_id.as_str()) {
+            return Err(conflict(
+                "CHAIN_DESTINATION_CHANGED",
+                "Destination installation changed. Refresh before starting a new attempt.",
+            ));
+        }
+    }
     req.normalize_prompt_newlines();
     crate::routes::ensure_generation_available(&state)?;
     let handle = chain_jobs_handle(&state)?;

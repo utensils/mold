@@ -3007,3 +3007,5 @@ mod tests {
         assert!(message.contains("synthetic owner panic"));
     }
 }
+
+mod chain_restart;

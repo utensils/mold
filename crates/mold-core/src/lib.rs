@@ -165,3 +165,5 @@ pub use expand_prompts::{
 };
 
 pub mod queue_transfer;
+
+pub mod job_restart;

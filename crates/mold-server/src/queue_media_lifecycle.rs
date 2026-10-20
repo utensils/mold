@@ -1083,6 +1083,77 @@ mod tests {
     }
 
     #[test]
+    fn failed_video_inputs_survive_restart_gc_and_portable_move_export() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let journal = Arc::new(QueueJournal::new(db.clone(), Some(home.path()), "before"));
+        let owner = journal.owner_uuid().unwrap().to_owned();
+        let set = QueueMediaStore::open(home.path())
+            .unwrap()
+            .store
+            .seal_v2_with_operation_fingerprint(
+                &owner,
+                "failed-video",
+                &QueueMediaOperationFingerprint::sha256_v1(b"original video"),
+                &crate::queue_media_store::QueueMediaProjection {
+                    source_image: true,
+                    ..Default::default()
+                },
+                vec![SealMedia::bytes(
+                    "source_image",
+                    "scalar",
+                    b"exact-original-pixels".to_vec(),
+                )],
+            )
+            .unwrap();
+        let mut row = queue_row(&owner, "failed-video", &set.set_id);
+        row.model = "ltx-2-19b-distilled:fp8".into();
+        row.request_json = serde_json::json!({"model":row.model,"prompt":"original prompt","width":512,"height":512,"steps":4,"frames":97,"output_format":"mp4"}).to_string();
+        generation_queue::insert_with_media(
+            db.as_ref().as_ref().unwrap(),
+            &row,
+            &obligation(&owner, &set.set_id),
+        )
+        .unwrap();
+        let lifecycle = install_and_reconcile(home.path(), db.clone(), &journal);
+        let claim = journal.claim_feeder_by_id("failed-video").unwrap().unwrap();
+        let ticket = journal.attach_claimed("failed-video", claim.claim_token);
+        assert_eq!(
+            ticket.claim_dispatch(),
+            crate::queue_journal::DispatchClaim::Granted
+        );
+        ticket.fail("GPU memory exhausted");
+        assert_eq!(
+            journal.row("failed-video").unwrap().unwrap().state,
+            QueueRowState::Held
+        );
+        drop(journal);
+        drop(lifecycle);
+        let restarted = Arc::new(QueueJournal::new(db.clone(), Some(home.path()), "after"));
+        assert_eq!(restarted.owner_uuid(), Some(owner.as_str()));
+        let lifecycle = install_and_reconcile(home.path(), db.clone(), &restarted);
+        assert_eq!(
+            lifecycle.input_image_bytes(set).unwrap(),
+            b"exact-original-pixels"
+        );
+        let exported: mold_core::GenerateRequest = serde_json::from_slice(
+            &crate::queue_transfer::export_request(
+                &restarted,
+                "failed-video",
+                db.as_ref().as_ref(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            exported.source_image.as_deref(),
+            Some(b"exact-original-pixels".as_slice())
+        );
+        assert_eq!(exported.prompt, "original prompt");
+        assert!(restarted.claim_next_feeder().unwrap().is_none());
+    }
+
+    #[test]
     fn input_image_survives_store_reopen_and_never_uses_provenance() {
         let home = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
