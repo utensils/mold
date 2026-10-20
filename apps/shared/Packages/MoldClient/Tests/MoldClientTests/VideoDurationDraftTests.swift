@@ -64,4 +64,12 @@ struct VideoDurationDraftTests {
         #expect(draft.seconds == "35")
     }
 
+    @Test func initialRecipeLengthUsesCheckedIntegerArithmetic() throws {
+        #expect(try VideoDurationDraft.initialSeconds(frames: 107, fps: 24) == "4.458")
+        #expect(try VideoDurationDraft.initialSeconds(frames: 121, fps: 24) == "5.041")
+        #expect(try VideoDurationDraft.initialSeconds(frames: Int.max, fps: Int.max) == "1")
+        #expect(throws: (any Error).self) { try VideoDurationDraft.initialSeconds(frames: Int.max, fps: 1) }
+        #expect(throws: (any Error).self) { try VideoDurationDraft.initialSeconds(frames: 0, fps: 24) }
+    }
+
 }

@@ -3,7 +3,7 @@ import Foundation
 /// In-memory admission authority; the original draft remains editable and private.
 public struct PreparedVideoJob: Sendable {
     public let request: VideoJobRequest
-    private let release: @Sendable () async -> Void
+    let release: @Sendable () async -> Void
     public init(request: VideoJobRequest, release: @escaping @Sendable () async -> Void = {}) {
         self.request = request; self.release = release
     }
@@ -51,7 +51,8 @@ public extension HTTPBackend {
                 throw ReferenceUploadPolicy.refusal("REFERENCE_UPLOAD_SESSION_INVALID", "Video preparation expired. Try again from the original references.")
             }
             var prepared = original; prepared.generation = lease.request
-            return .init(request: prepared, release: { await lease.cancel() })
+            let cancellation = lease.cancellation
+            return .init(request: prepared, release: { await cancellation.cancel() })
         } catch { await lease.cancel(); throw error }
     }
 

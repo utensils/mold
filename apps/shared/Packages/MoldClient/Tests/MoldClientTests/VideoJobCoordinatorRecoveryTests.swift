@@ -82,4 +82,19 @@ extension VideoJobCoordinatorTests {
         #expect(coordinator.jobs.isEmpty)
     }
 
+    @Test func offlineRelaunchShowsKnownReceiptWithoutMakingAnyNetworkCall() async throws {
+        let (backend, owner, saved) = try setup()
+        let first = VideoJobCoordinator(defaults: saved)
+        try first.save(.init(operationId: "known-attempt", owner: owner))
+        let recovered = VideoJobCoordinator(defaults: saved)
+        recovered.restorePending(hosts: [owner.host])
+        #expect(recovered.jobs.first?.operationId == "known-attempt")
+        #expect(recovered.jobs.first?.owner.instanceId == owner.instanceId)
+        #expect(recovered.jobs.first?.message?.contains("Reconnect") == true)
+        recovered.restorePending(hosts: [])
+        #expect(recovered.unavailableRecoveryCount == 1)
+        #expect(backend.count("status()") == 0)
+        #expect(backend.count("createVideoJob(_:operationId:destinationInstanceId:)") == 0)
+    }
+
 }

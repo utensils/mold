@@ -11,6 +11,10 @@ struct NativeDurationJobs: View {
 
     var body: some View {
         Group {
+        if coordinator.unavailableRecoveryCount > 0 {
+            Text("\(coordinator.unavailableRecoveryCount) saved video attempts belong to removed or changed connections. Restore their original machines to check them.")
+                .fixedSize(horizontal: false, vertical: true)
+        }
         if let error = coordinator.error {
             Text(error).fixedSize(horizontal: false, vertical: true)
         }

@@ -6,6 +6,7 @@ import Observation
 @MainActor @Observable
 public final class VideoJobCoordinator {
     public nonisolated static let journalKey = "nativeDurationVideoJobsV1"
+    public internal(set) var unavailableRecoveryCount = 0
     public internal(set) var pending: [VideoJobAdmission] = []
     public internal(set) var jobs: [ObservedVideoJob] = []
     public internal(set) var pagination: [UUID: VideoJobPage] = [:]
@@ -18,6 +19,11 @@ public final class VideoJobCoordinator {
     @ObservationIgnored var followers: [String: Task<Void, Never>] = [:]
     var mutating: Set<String> = []
     @ObservationIgnored var readTokens: [String: UUID] = [:]
+    struct TransportCleanup {
+        let admission: VideoJobAdmission
+        let release: @Sendable () async -> Void
+    }
+    @ObservationIgnored var transportCleanups: [String: TransportCleanup] = [:]
     @ObservationIgnored var followTokens: [String: UUID] = [:]
 
     public init(defaults: UserDefaults = .standard) {
@@ -62,6 +68,17 @@ public final class VideoJobCoordinator {
 
     func changed() -> SequenceDraftError { .invalid("The video, machine, or connection changed. Check it and try again.") }
     func identity(_ id: String, owner: VideoJobOwner) -> String { owner.host.id.uuidString + ":" + id }
+    public func hasUncertainAdmission(on owner: VideoJobOwner) -> Bool {
+        pending.contains { record in
+            record.matches(owner) && !jobs.contains { $0.operationId == record.operationId && $0.owner == owner && $0.detail != nil }
+        }
+    }
+    func releaseTransport(_ id: String, owner: VideoJobOwner) async {
+        let key = identity(id, owner: owner)
+        guard let cleanup = transportCleanups[key], cleanup.admission.matches(owner) else { return }
+        transportCleanups[key] = nil
+        await cleanup.release()
+    }
     public func isMutating(_ job: ObservedVideoJob) -> Bool { mutating.contains(job.id) }
     public func isCancellationRequested(_ job: ObservedVideoJob) -> Bool {
         pending.contains { $0.operationId == job.operationId && $0.matches(job.owner) && $0.cancelRequested }

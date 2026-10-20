@@ -23,12 +23,16 @@ public extension VideoJobCoordinator {
             let value = try await backend.videoJob(id: id)
             guard fresh() else { return }
             guard value.id == id else { throw MoldClientError.malformedResponse }
+            await releaseTransport(id, owner: owner)
+            guard fresh() else { return }
             publish(value, owner: owner)
             if value.state == .completed || value.state == .cancelled { try forget(id, owner: owner) }
         } catch {
             guard fresh() else { return }
             if case let .http(status, code, _) = error as? MoldClientError,
                status == 410, code == "VIDEO_OPERATION_CANCELLED" {
+                await releaseTransport(id, owner: owner)
+                guard fresh() else { return }
                 ensure(id, owner: owner)
                 if let index = index(id, owner: owner) {
                     jobs[index].cancelledBeforeAdmission = true; jobs[index].message = "Cancelled before queueing"

@@ -109,4 +109,36 @@ import MoldClientTesting
         #expect(coordinator.pending.isEmpty)
     }
 
+    @Test func ambiguousAdmissionCannotMintAnotherUuidUntilExactReconciliation() async throws {
+        let (backend, owner, saved) = try setup()
+        backend.stub("createVideoJob(_:operationId:destinationInstanceId:)", throwing: MoldClientError.unreachable("Lost reply"))
+        let coordinator = VideoJobCoordinator(defaults: saved)
+        await coordinator.submit(request(), owner: owner, backend: backend, current: { true }, unchanged: { true })
+        let id = try #require(coordinator.pending.first?.operationId)
+        await coordinator.submit(request(), owner: owner, backend: backend, current: { true }, unchanged: { true })
+        #expect(backend.count("createVideoJob(_:operationId:destinationInstanceId:)") == 1)
+        #expect(coordinator.pending.count == 1)
+        backend.stub("videoJob(id:)", returning: try detail(id, state: "paused", resume: true))
+        await coordinator.refresh(id, owner: owner, backend: backend, current: { true })
+        await coordinator.submit(request(), owner: owner, backend: backend, current: { true }, unchanged: { true })
+        #expect(backend.count("createVideoJob(_:operationId:destinationInstanceId:)") == 2)
+    }
+
+    @Test func ambiguousPostKeepsOnlyLeaseCleanupUntilExactParentIsKnown() async throws {
+        let (backend, owner, saved) = try setup()
+        actor Release { var count = 0; func done() { count += 1 } }
+        let release = Release()
+        backend.stub("prepareVideoJob(_:)") { args in
+            PreparedVideoJob(request: args[0] as! VideoJobRequest, release: { await release.done() })
+        }
+        backend.stub("createVideoJob(_:operationId:destinationInstanceId:)", throwing: MoldClientError.unreachable("Lost reply"))
+        let coordinator = VideoJobCoordinator(defaults: saved)
+        await coordinator.submit(request(), owner: owner, backend: backend, current: { true }, unchanged: { true })
+        #expect(await release.count == 0)
+        let id = try #require(coordinator.pending.first?.operationId)
+        backend.stub("videoJob(id:)", returning: try detail(id, state: "paused", resume: true))
+        await coordinator.refresh(id, owner: owner, backend: backend, current: { true })
+        #expect(await release.count == 1)
+    }
+
 }

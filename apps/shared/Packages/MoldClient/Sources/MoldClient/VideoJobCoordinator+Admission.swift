@@ -1,12 +1,32 @@
 import Foundation
 
 public extension VideoJobCoordinator {
+    /// Rebuild visible receipts before any status answer, using only existing
+    /// connection records. A saved locator never creates a new connection.
+    func restorePending(hosts: [MoldHost]) {
+        unavailableRecoveryCount = 0
+        for record in pending {
+            guard let host = hosts.first(where: {
+                $0.id == record.hostId && $0.baseURL.absoluteString == record.origin && $0.connectionMode == record.connectionMode
+            }) else { unavailableRecoveryCount += 1; continue }
+            let owner = VideoJobOwner(host: host, instanceId: record.instanceId)
+            ensure(record.operationId, owner: owner)
+            if let index = index(record.operationId, owner: owner), jobs[index].detail == nil {
+                jobs[index].message = "Reconnect to this video's original machine to check its saved attempt."
+            }
+        }
+    }
+
     /// Prepare exactly one captured snapshot, then validate its actual inputs.
     /// The draft fence is used only before POST; admitted work owns its identity.
     func submit(_ request: VideoJobRequest, owner: VideoJobOwner, backend: any MoldBackend,
                 current: @escaping @MainActor () -> Bool, unchanged: @escaping @MainActor () -> Bool,
                 prepare: (@MainActor () async throws -> VideoJobRequest)? = nil) async {
         guard !isSubmitting, journalError == nil else { return }
+        guard !hasUncertainAdmission(on: owner) else {
+            error = "Check the saved video attempt in Queue before starting another video on this machine."
+            return
+        }
         let token = UUID(); submissionToken = token
         let fresh = { @MainActor in !Task.isCancelled && token == self.submissionToken && current() && unchanged() }
         isSubmitting = true; error = nil
@@ -35,7 +55,12 @@ public extension VideoJobCoordinator {
             publish(accepted, owner: owner)
             follow(record, owner: owner, backend: backend, current: current)
         } catch {
-            await transport?.cancel(); transport = nil
+            if let saved, !VideoRestartController.definitive(error), let transport {
+                // A delayed POST may still be consuming its grant. Keep only
+                // its tiny cleanup authority, never its prepared media bytes.
+                transportCleanups[identity(saved.operationId, owner: owner)] = .init(admission: saved, release: transport.release)
+            } else { await transport?.cancel() }
+            transport = nil
             if let saved, VideoRestartController.definitive(error) {
                 do {
                     try forget(saved.operationId, owner: owner)

@@ -59,6 +59,17 @@ public struct VideoDurationDraft: Codable, Hashable, Sendable {
         return .init(generation: generation, durationMs: duration, source: source, scenes: inputs.isEmpty ? nil : inputs)
     }
 
+    /// Whole-frame recipe defaults use integer arithmetic even for malformed
+    /// saved values, so restoring a draft cannot overflow or round via Double.
+    public static func initialSeconds(frames: Int, fps: Int) throws -> String {
+        guard frames > 0, fps > 0 else { throw invalidDuration() }
+        let product = UInt64(frames).multipliedFullWidth(by: 1_000)
+        let divisor = UInt64(fps)
+        guard product.high < divisor else { throw invalidDuration() }
+        let milliseconds = divisor.dividingFullWidth(product).quotient
+        return seconds(milliseconds: max(1, milliseconds))
+    }
+
     public static func seconds(milliseconds: UInt64) -> String {
         let whole = milliseconds / 1_000, fraction = milliseconds % 1_000
         guard fraction != 0 else { return String(whole) }
