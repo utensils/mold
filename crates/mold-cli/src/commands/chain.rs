@@ -356,6 +356,8 @@ impl ChainInputs {
     pub(crate) fn to_chain_request(&self) -> ChainRequest {
         ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             offload: None,
             collection: None,
@@ -1607,6 +1609,8 @@ pub(crate) fn build_request_from_script(
 ) -> anyhow::Result<ChainRequest> {
     Ok(ChainRequest {
         source_fit: script.chain.source_fit.clone(),
+        generation_controls: None,
+        incoming_source: None,
         continue_from: script.chain.continue_from.clone(),
         offload: None,
         collection: None,
@@ -1730,6 +1734,8 @@ pub async fn run_from_sugar(
     // Geometry, timing, and the denoise recipe all come from the model.
     let req = ChainRequest {
         source_fit: None,
+        generation_controls: None,
+        incoming_source: None,
         continue_from: None,
         offload: None,
         collection: None,
@@ -2051,6 +2057,8 @@ path = "hero.png"
     fn a_script_authored_wan_chain_takes_the_checkpoints_seam() {
         let wan_script_request = |model: &str, tail: u32| ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             model: model.to_string(),
             stages: vec![
@@ -2104,6 +2112,8 @@ path = "hero.png"
         // LTX-2's tail is a real latent window; the script still owns it.
         let mut ltx2 = ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             model: "ltx-2-19b-distilled:fp8".to_string(),
             stages: vec![
@@ -2215,6 +2225,8 @@ path = "hero.png"
     fn empty_chain_request() -> ChainRequest {
         ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             offload: None,
             collection: None,
@@ -2280,6 +2292,8 @@ path = "hero.png"
         // A 53-frame chain is on wan's grid and must survive normalisation.
         let mut req = ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             model: "cv:2041121".into(),
             stages: vec![
@@ -2924,6 +2938,8 @@ path = "hero.png"
     fn exact_fit_shrinks_the_last_stage_to_the_requested_total() {
         let mut req = ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             offload: None,
             collection: None,
@@ -2983,6 +2999,8 @@ path = "hero.png"
                 let clip = 97u32;
                 let mut req = ChainRequest {
                     source_fit: None,
+                    generation_controls: None,
+                    incoming_source: None,
                     continue_from: None,
                     offload: None,
                     collection: None,
@@ -3044,6 +3062,8 @@ path = "hero.png"
     fn exact_fit_refuses_a_layout_the_lattice_cannot_close() {
         let mut req = ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             offload: None,
             collection: None,
@@ -3250,6 +3270,8 @@ path = "hero.png"
         let config = mold_core::Config::default();
         let req = ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             model: "ltx-2-19b-distilled:fp8".to_string(),
             stages: vec![stage_with_frames("a drone shot over pine forest", 97)],
@@ -3268,6 +3290,8 @@ path = "hero.png"
         // is still the one that answers.
         let silent = ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             model: "wan22-ti2v-5b:q8".to_string(),
             stages: vec![stage_with_frames("a paper boat", 49)],
@@ -3285,6 +3309,8 @@ path = "hero.png"
         let config = mold_core::Config::default();
         let audio_family = ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             model: "ltx-2-19b-distilled:fp8".to_string(),
             stages: vec![stage_with_frames("a drone shot over pine forest", 97)],
@@ -3302,6 +3328,8 @@ path = "hero.png"
         // MP4 is the only container the stitched chain can carry a track in.
         let apng = ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             output_format: mold_core::OutputFormat::Apng,
             ..audio_family.clone()
@@ -3314,6 +3342,8 @@ path = "hero.png"
         // A family with no audio path is off regardless of the muxer.
         let silent = ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             model: "wan22-ti2v-5b:q8".to_string(),
             stages: vec![stage_with_frames("a paper boat", 49)],
@@ -3334,6 +3364,8 @@ path = "hero.png"
         let config = mold_core::Config::default();
         let req = ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             model: "ltx-2-19b-distilled:fp8".to_string(),
             stages: vec![stage_with_frames("a drone shot over pine forest", 97)],
@@ -3351,6 +3383,8 @@ path = "hero.png"
         let config = mold_core::Config::default();
         let base = ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             model: "ltx-2-19b-distilled:fp8".to_string(),
             stages: vec![stage_with_frames("a drone shot over pine forest", 97)],
@@ -3362,6 +3396,8 @@ path = "hero.png"
 
         let off = ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             enable_audio: Some(false),
             ..base.clone()
@@ -3374,6 +3410,8 @@ path = "hero.png"
 
         let on = ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             enable_audio: Some(true),
             ..base

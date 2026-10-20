@@ -722,7 +722,7 @@ pub(crate) fn create_job_with_params(
     let layout = JobDirLayout::new(job_dir.clone());
     layout.ensure_root()?;
 
-    if params.request.continue_from.is_some() {
+    if params.request.has_incoming_boundary() {
         let frozen = params
             .frozen_model
             .as_ref()
@@ -2231,7 +2231,7 @@ fn write_stage_artifacts(
     write_preview_jpeg(&layout.preview_path(stage_idx), frames.last().unwrap())?;
 
     let contributed = stage_contributed_frames(
-        if stage_idx == 0 && effective.continue_from.is_some() {
+        if stage_idx == 0 && effective.has_incoming_boundary() {
             1
         } else {
             stage_idx as usize
@@ -2271,7 +2271,7 @@ fn resume_carry_from_disk(
 ) -> anyhow::Result<Option<ChainTail>> {
     if stage_idx == 0 {
         let request = effective_request(manifest)?;
-        return if request.continue_from.is_some() {
+        return if request.has_incoming_boundary() {
             crate::chain_continuation::load(
                 job_dir,
                 &request,
@@ -2357,7 +2357,7 @@ fn finalize_job(
     // retake prompt/seed overlays retain the canonical media revision.
     let effective = effective_request_with_media(manifest, &job.job_dir)?;
     let layout = JobDirLayout::new(job.job_dir.clone());
-    if effective.continue_from.is_some() {
+    if effective.has_incoming_boundary() {
         crate::chain_continuation::load(
             &job.job_dir,
             &effective,
@@ -2445,7 +2445,7 @@ fn finalize_job(
         let incoming_fade_tail = pending_fade_tail.take();
 
         if stage_status.raw_segment {
-            if idx > 0 || effective.continue_from.is_some() {
+            if idx > 0 || effective.has_incoming_boundary() {
                 match stage.transition {
                     TransitionMode::Smooth => {
                         let drop = effective.motion_tail_frames as usize;
@@ -3142,7 +3142,7 @@ pub fn apply_amend(
     let candidate = amend_candidate_request(&old_effective, req)
         .normalise()
         .map_err(|e| anyhow!("{CHAIN_JOB_AMEND_INVALID}: {e}"))?;
-    if candidate.continue_from.is_some() {
+    if candidate.has_incoming_boundary() {
         crate::chain_continuation::load(
             &job_dir,
             &candidate,
@@ -4019,7 +4019,7 @@ pub(crate) fn build_stage_generate_request(
     stage_seed: u64,
     idx: usize,
 ) -> GenerateRequest {
-    GenerateRequest {
+    let mut request = GenerateRequest {
         offload: chain.offload,
         mesh: None,
         video_only: None,
@@ -4106,7 +4106,11 @@ pub(crate) fn build_stage_generate_request(
         true_cfg: None,
         cfg_start_step: None,
         transparent_background: None,
+    };
+    if let Some(controls) = &chain.generation_controls {
+        controls.apply_to(&mut request);
     }
+    request
 }
 
 /// Re-blend a completed LEGACY Fade successor after the stage before it was
@@ -5060,6 +5064,8 @@ mod tests {
     fn request(transitions: Vec<TransitionMode>) -> ChainRequest {
         ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             offload: None,
             collection: None,
@@ -7746,6 +7752,33 @@ mod tests {
         new.offload = Some(true);
         assert_eq!(preserved_stage_prefix(&old, &new), 0);
         assert_eq!(preserved_stage_prefix(&new, &new), 1);
+    }
+
+    #[test]
+    fn parent_scalar_controls_reach_actual_stage_request_including_lora_expert() {
+        let mut chain = request(vec![TransitionMode::Smooth]);
+        chain.generation_controls = Some(mold_core::chain::ChainGenerationControls {
+            sample_shift: Some(7.0),
+            pipeline: Some(mold_core::Ltx2PipelineMode::TwoStage),
+            loras: vec![mold_core::LoraWeight {
+                path: "adapter.safetensors".into(),
+                scale: 0.5,
+                expert: Some(mold_core::LoraExpert::Low),
+            }],
+            ..Default::default()
+        });
+        let request = build_stage_generate_request(&chain.stages[0], &chain, 42, 0);
+        assert_eq!(request.sample_shift, Some(7.0));
+        assert_eq!(
+            request.pipeline,
+            Some(mold_core::Ltx2PipelineMode::TwoStage)
+        );
+        assert_eq!(
+            request.loras.unwrap()[0].expert,
+            Some(mold_core::LoraExpert::Low)
+        );
+        assert_eq!(request.seed, Some(42));
+        assert_eq!(request.frames, Some(chain.stages[0].frames));
     }
 
     #[test]

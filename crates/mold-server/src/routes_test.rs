@@ -653,6 +653,8 @@ mod tests {
     fn route_chain_request() -> ChainRequest {
         ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             offload: None,
             collection: None,

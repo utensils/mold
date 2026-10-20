@@ -19,6 +19,8 @@ const MANIFEST: &str = "tail.json";
 #[serde(deny_unknown_fields)]
 struct Binding {
     version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    incoming_source: Option<mold_core::chain::ChainIncomingSource>,
     source_job_id: String,
     source_take: u32,
     model: String,
@@ -135,6 +137,52 @@ pub(crate) fn prepare(
     Ok(PreparedContinuation { binding, frames })
 }
 
+/// Called only by the durable parent after opening and authenticating exact
+/// visible source pixels. The request descriptor and frozen recipe bind every
+/// private tail byte; public legacy chain admission rejects this descriptor.
+pub(crate) fn prepare_external(
+    request: &ChainRequest,
+    frozen: &FrozenChainModel,
+    rgb_frames: Vec<image::RgbImage>,
+) -> anyhow::Result<PreparedContinuation> {
+    if request.incoming_source.is_none() || request.continue_from.is_some() {
+        bail!("external boundary requires one internal source authority");
+    }
+    validate_first_stage(request)?;
+    let expected = request.motion_tail_frames as usize;
+    if rgb_frames.len() != expected {
+        bail!("visible source tail frame count differs from frozen contract");
+    }
+    let bytes = u64::from(request.width)
+        .checked_mul(u64::from(request.height))
+        .and_then(|pixels| pixels.checked_mul(3))
+        .and_then(|bytes| bytes.checked_mul(rgb_frames.len() as u64))
+        .context("source tail size overflow")?;
+    if bytes > 512 * 1024 * 1024 {
+        bail!("source tail exceeds 512 MiB");
+    }
+    let mut binding = binding(request, &frozen.model_fingerprint)?;
+    let mut frames = Vec::with_capacity(expected);
+    let mut total = 0u64;
+    for frame in rgb_frames {
+        if frame.dimensions() != (request.width, request.height) {
+            bail!("visible source tail canvas differs from frozen contract");
+        }
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(frame).write_to(&mut png, image::ImageFormat::Png)?;
+        let png = png.into_inner();
+        total = total
+            .checked_add(png.len() as u64)
+            .filter(|total| *total <= 512 * 1024 * 1024)
+            .context("encoded source tail exceeds 512 MiB")?;
+        binding
+            .frame_sha256
+            .push(format!("{:x}", Sha256::digest(&png)));
+        frames.push(png);
+    }
+    Ok(PreparedContinuation { binding, frames })
+}
+
 pub(crate) fn persist(job_dir: &Path, prepared: &PreparedContinuation) -> anyhow::Result<()> {
     let destination = job_dir.join(DIRECTORY);
     if destination.symlink_metadata().is_ok() {
@@ -166,7 +214,7 @@ pub(crate) fn load(
     request: &ChainRequest,
     frozen: &FrozenChainModel,
 ) -> anyhow::Result<Option<ChainTail>> {
-    if request.continue_from.is_none() {
+    if !request.has_incoming_boundary() {
         return Ok(None);
     }
     let prepared = read_snapshot(job_dir, request, Some(frozen))?;
@@ -190,21 +238,34 @@ pub(crate) fn retained_frames(
     job_dir: &Path,
     request: &ChainRequest,
 ) -> anyhow::Result<Vec<Vec<u8>>> {
-    if request.continue_from.is_none() {
+    if !request.has_incoming_boundary() {
         return Ok(Vec::new());
     }
     Ok(read_snapshot(job_dir, request, None)?.frames)
 }
 
 fn binding(request: &ChainRequest, fingerprint: &str) -> anyhow::Result<Binding> {
-    let source = request
-        .continue_from
-        .as_ref()
-        .context("missing continuation predecessor")?;
+    if request.continue_from.is_some() && request.incoming_source.is_some() {
+        bail!("a part may have only one incoming boundary");
+    }
+    let (source_job_id, source_take) = if let Some(source) = &request.continue_from {
+        (source.job_id.clone(), source.finalize_take)
+    } else if let Some(source) = &request.incoming_source {
+        source.validate()?;
+        // v2 uses the typed source descriptor, not a pretend predecessor job.
+        (String::new(), 0)
+    } else {
+        bail!("missing incoming boundary");
+    };
     Ok(Binding {
-        version: 1,
-        source_job_id: source.job_id.clone(),
-        source_take: source.finalize_take,
+        version: if request.incoming_source.is_some() {
+            2
+        } else {
+            1
+        },
+        incoming_source: request.incoming_source.clone(),
+        source_job_id,
+        source_take,
         model: request.model.clone(),
         model_fingerprint: fingerprint.to_owned(),
         width: request.width,
@@ -380,6 +441,39 @@ mod tests {
             finalize_take: 1,
         });
         (row, manifest, child, frozen)
+    }
+
+    #[test]
+    fn external_boundary_owns_exact_visible_tail_and_refuses_rebinding() {
+        let root = tempfile::tempdir().unwrap();
+        let (source, _, mut request, frozen) = fixture(root.path(), 1);
+        request.continue_from = None;
+        request.incoming_source = Some(mold_core::chain::ChainIncomingSource {
+            parent_job_id: "parent".into(),
+            source_sha256: "a".repeat(64),
+            source_frames: 240,
+        });
+        let frames = vec![image::RgbImage::from_pixel(
+            request.width,
+            request.height,
+            image::Rgb([7, 8, 9]),
+        )];
+        let prepared = prepare_external(&request, &frozen, frames).unwrap();
+        let child = root.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        persist(&child, &prepared).unwrap();
+        std::fs::remove_dir_all(source.job_dir).unwrap();
+        let carry = load(&child, &request, &frozen).unwrap().unwrap();
+        assert_eq!(carry.tail_rgb_frames[0].get_pixel(0, 0).0, [7, 8, 9]);
+        let mut changed = request.clone();
+        changed.incoming_source.as_mut().unwrap().source_frames = 241;
+        assert!(load(&child, &changed, &frozen).is_err());
+        changed = request.clone();
+        changed.incoming_source.as_mut().unwrap().source_sha256 = "b".repeat(64);
+        assert!(load(&child, &changed, &frozen).is_err());
+        let mut changed_frozen = frozen;
+        changed_frozen.model_fingerprint = "changed".into();
+        assert!(load(&child, &request, &changed_frozen).is_err());
     }
 
     #[test]

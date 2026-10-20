@@ -24,6 +24,8 @@ use crate::error::{MoldError, Result};
 pub const CHAIN_JOB_SCHEMA: &str = "mold.chainjob.v1";
 /// Linked parts require incoming-tail semantics older runtimes must refuse.
 pub const CHAIN_JOB_LINKED_SCHEMA: &str = "mold.chainjob.v2";
+/// Internal parent boundary descriptors require exact visible-source semantics.
+pub const CHAIN_JOB_PARENT_SCHEMA: &str = "mold.chainjob.v3";
 
 // ── Job-dir layout: fixed relative names (spec §3.2) ──────────────────
 
@@ -330,7 +332,9 @@ impl ChainJobManifest {
             .collect();
 
         Ok(Self {
-            schema: if request.continue_from.is_some() {
+            schema: if request.incoming_source.is_some() || request.generation_controls.is_some() {
+                CHAIN_JOB_PARENT_SCHEMA.into()
+            } else if request.continue_from.is_some() {
                 CHAIN_JOB_LINKED_SCHEMA.into()
             } else {
                 CHAIN_JOB_SCHEMA.into()
@@ -389,10 +393,13 @@ impl ChainJobManifest {
             MoldError::Validation(format!("chain job manifest TOML parse failed: {e}"))
         })?;
         let schema = peek.schema.as_deref().unwrap_or("<missing>");
-        if schema != CHAIN_JOB_SCHEMA && schema != CHAIN_JOB_LINKED_SCHEMA {
+        if schema != CHAIN_JOB_SCHEMA
+            && schema != CHAIN_JOB_LINKED_SCHEMA
+            && schema != CHAIN_JOB_PARENT_SCHEMA
+        {
             return Err(MoldError::Validation(format!(
                 "chain job manifest schema '{schema}' is not supported by this mold version \
-                 (supported: '{CHAIN_JOB_SCHEMA}', '{CHAIN_JOB_LINKED_SCHEMA}')"
+                 (supported: '{CHAIN_JOB_SCHEMA}', '{CHAIN_JOB_LINKED_SCHEMA}', '{CHAIN_JOB_PARENT_SCHEMA}')"
             )));
         }
 
@@ -406,7 +413,27 @@ impl ChainJobManifest {
                     .get("continue_from")
                     .is_some_and(|link| !link.is_null())
             });
-        if linked != (schema == CHAIN_JOB_LINKED_SCHEMA) {
+        let incoming = serde_json::from_str::<serde_json::Value>(&manifest.request_json)
+            .ok()
+            .is_some_and(|request| {
+                request
+                    .get("incoming_source")
+                    .is_some_and(|source| !source.is_null())
+            });
+        let controls = serde_json::from_str::<serde_json::Value>(&manifest.request_json)
+            .ok()
+            .is_some_and(|request| {
+                request
+                    .get("generation_controls")
+                    .is_some_and(|controls| !controls.is_null())
+            });
+        let internal = incoming || controls;
+        if internal != (schema == CHAIN_JOB_PARENT_SCHEMA) || (incoming && linked) {
+            return Err(MoldError::Validation(
+                "internal source parts require the mold.chainjob.v3 manifest schema".into(),
+            ));
+        }
+        if !internal && linked != (schema == CHAIN_JOB_LINKED_SCHEMA) {
             return Err(MoldError::Validation(
                 "linked chain parts require the mold.chainjob.v2 manifest schema".into(),
             ));
@@ -901,6 +928,8 @@ mod tests {
     fn sample_request() -> ChainRequest {
         ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             offload: None,
             collection: None,
@@ -1484,6 +1513,8 @@ request_json = "{}"
     fn event_detail_fixture() -> ChainJobDetail {
         let request = crate::chain::ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             offload: None,
             collection: None,

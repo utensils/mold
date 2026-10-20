@@ -105,6 +105,7 @@ pub async fn create_chain_job(
     ),
     ApiError,
 > {
+    crate::routes_chain::require_public_chain_request(&req)?;
     if let Some(expected) = headers.get("x-mold-destination-instance") {
         if expected.to_str().ok() != Some(state.instance_id.as_str()) {
             return Err(conflict(
@@ -731,6 +732,7 @@ pub async fn amend_chain_job(
         require_persisted_chain_model_activation(&state, &row, &manifest).await?;
         let effective = crate::chain_job_runner::effective_request(&manifest)
             .map_err(|e| ApiError::internal(format!("failed to load chain request: {e:#}")))?;
+        crate::routes_chain::require_public_chain_request(&effective)?;
         let mut candidate = crate::chain_job_runner::amend_candidate_request(&effective, &req);
         let motion_tail_before = candidate.motion_tail_frames;
         crate::routes_chain::validate_chain_build_features(&candidate)?;
@@ -1400,6 +1402,8 @@ mod tests {
     fn req(format: OutputFormat) -> ChainRequest {
         ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             offload: None,
             collection: None,
