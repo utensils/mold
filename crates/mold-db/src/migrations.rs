@@ -3302,6 +3302,9 @@ CREATE TABLE video_jobs (
  updated_at_ms INTEGER NOT NULL
 );
 CREATE INDEX video_jobs_state ON video_jobs(state,created_at_ms);
+CREATE INDEX video_jobs_creation ON video_jobs(created_at_ms DESC,id DESC);
+CREATE INDEX video_jobs_recoverable ON video_jobs(created_at_ms DESC,id DESC) WHERE state IN ('queued','running','paused','failed','interrupted');
+CREATE INDEX video_jobs_runnable ON video_jobs(updated_at_ms,created_at_ms,id) WHERE state IN ('queued','running');
 CREATE TABLE video_job_aborts(id TEXT PRIMARY KEY,created_at_ms INTEGER NOT NULL);
 CREATE TABLE video_job_parts (
  parent_id TEXT NOT NULL REFERENCES video_jobs(id) ON DELETE CASCADE,

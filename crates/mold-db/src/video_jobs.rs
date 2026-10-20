@@ -123,6 +123,105 @@ pub fn list(db: &MetadataDb, limit: u32, offset: u64) -> Result<Vec<VideoJob>> {
     })
 }
 
+/// Internal stable position. HTTP cursors additionally bind installation and filter.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VideoJobCursor {
+    pub created_at_ms: i64,
+    pub id: String,
+}
+
+#[derive(Debug)]
+pub struct VideoJobPage {
+    pub jobs: Vec<VideoJob>,
+    pub has_more: bool,
+    pub next_cursor: Option<VideoJobCursor>,
+}
+
+/// Filter BEFORE limiting and seek past the last immutable creation key.
+/// Completion/removal of an earlier row cannot shift this page's position.
+pub fn list_page(
+    db: &MetadataDb,
+    limit: u32,
+    recoverable_only: bool,
+    cursor: Option<&VideoJobCursor>,
+) -> Result<VideoJobPage> {
+    anyhow::ensure!(
+        (1..=256).contains(&limit),
+        "video page limit must be between 1 and 256"
+    );
+    let filter = if recoverable_only {
+        "state IN ('queued','running','paused','failed','interrupted')"
+    } else {
+        "1"
+    };
+    let sql=format!("SELECT job_json,created_at_ms,id FROM video_jobs WHERE {filter} AND (?1 IS NULL OR created_at_ms < ?1 OR (created_at_ms = ?1 AND id < ?2)) ORDER BY created_at_ms DESC,id DESC LIMIT ?3");
+    db.with_conn(|conn| {
+        let mut statement = conn.prepare(&sql)?;
+        let mut rows = statement.query(params![
+            cursor.map(|value| value.created_at_ms),
+            cursor.map(|value| value.id.as_str()),
+            u64::from(limit) + 1
+        ])?;
+        let mut jobs = Vec::with_capacity(limit as usize);
+        let mut position = None;
+        while let Some(row) = rows.next()? {
+            if jobs.len() == limit as usize {
+                return Ok(VideoJobPage {
+                    jobs,
+                    has_more: true,
+                    next_cursor: position,
+                });
+            }
+            jobs.push(serde_json::from_str(&row.get::<_, String>(0)?)?);
+            position = Some(VideoJobCursor {
+                created_at_ms: row.get(1)?,
+                id: row.get(2)?,
+            });
+        }
+        Ok(VideoJobPage {
+            jobs,
+            has_more: false,
+            next_cursor: None,
+        })
+    })
+}
+
+/// One bounded actor turn. Meaningful progress updates rotate long parents.
+pub fn next_runnable(db: &MetadataDb) -> Result<Option<StoredVideoJob>> {
+    db.with_conn(|conn|conn.query_row("SELECT job_json,request_sha256,manifest_json,revision,cancel_requested,manifest_sha256 FROM video_jobs WHERE state IN ('queued','running') ORDER BY updated_at_ms,created_at_ms,id LIMIT 1",[],decode).optional().map_err(Into::into))
+}
+
+pub fn owner_for_child(db: &MetadataDb, child_id: &str) -> Result<Option<StoredVideoJob>> {
+    db.with_conn(|conn|conn.query_row("SELECT v.job_json,v.request_sha256,v.manifest_json,v.revision,v.cancel_requested,v.manifest_sha256 FROM video_job_parts p JOIN video_jobs v ON v.id=p.parent_id WHERE p.child_id=?1",[child_id],decode).optional().map_err(Into::into))
+}
+
+/// Missing parents stop orphaned workers rather than granting execution.
+pub fn cancellation_requested(db: &MetadataDb, id: &str) -> Result<bool> {
+    db.with_conn(|conn| {
+        conn.query_row(
+            "SELECT COALESCE((SELECT cancel_requested FROM video_jobs WHERE id=?1),1)",
+            [id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(Into::into)
+    })
+}
+
+/// The caller first validates frozen authority under its mutation lock.
+/// This explicit compare-and-swap alone clears earlier Stop intent.
+pub fn resume(db: &MetadataDb, id: &str, expected_revision: u64, now_ms: i64) -> Result<bool> {
+    db.transact_immediate(|conn| {
+        let current:Option<(String,u64)>=conn.query_row("SELECT job_json,revision FROM video_jobs WHERE id=?1 AND state IN ('failed','interrupted','paused')",[id],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
+        let Some((json,revision))=current else {return Ok(false);};
+        if revision!=expected_revision {return Ok(false);}
+        let next=revision.checked_add(1).context("video job revision exhausted")?;
+        let mut job:VideoJob=serde_json::from_str(&json)?;
+        job.state=VideoJobState::Queued;job.error=None;job.error_detail=None;job.updated_at_ms=now_ms;
+        job.can_cancel=true;job.can_resume=false;job.can_delete=false;
+        Ok(conn.execute("UPDATE video_jobs SET state='queued',cancel_requested=0,job_json=?2,revision=?3,updated_at_ms=?4 WHERE id=?1 AND revision=?5 AND state IN ('failed','interrupted','paused')",params![id,serde_json::to_string(&job)?,next,now_ms,expected_revision])?==1)
+    })
+}
+
 /// Cancellation intent is durable even when it beats the create POST. Running
 /// state remains owned until the child worker acknowledges its safe point.
 pub fn request_cancel(db: &MetadataDb, id: &str, now_ms: i64) -> Result<bool> {
@@ -212,6 +311,123 @@ mod tests {
             revision: 0,
             cancel_requested: false,
         }
+    }
+
+    #[test]
+    fn recovery_pages_do_not_hide_old_failures_or_skip_when_an_earlier_job_finishes() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        for index in 0..60 {
+            let mut row = stored();
+            row.job.id = format!("completed-{index:02}");
+            row.job.created_at_ms = 100 + index;
+            row.job.state = VideoJobState::Completed;
+            insert(&db, &row).unwrap();
+        }
+        for (id, created, state) in [
+            ("running", 9, VideoJobState::Running),
+            ("failed-b", 9, VideoJobState::Failed),
+            ("failed-a", 9, VideoJobState::Failed),
+            ("paused", 8, VideoJobState::Paused),
+            ("oldest", 7, VideoJobState::Interrupted),
+        ] {
+            let mut row = stored();
+            row.job.id = id.into();
+            row.job.created_at_ms = created;
+            row.job.state = state;
+            insert(&db, &row).unwrap();
+        }
+        let first = list_page(&db, 2, true, None).unwrap();
+        assert_eq!(
+            first
+                .jobs
+                .iter()
+                .map(|job| job.id.as_str())
+                .collect::<Vec<_>>(),
+            ["running", "failed-b"]
+        );
+        assert!(first.has_more);
+        let mut earlier = get(&db, "running").unwrap().unwrap();
+        earlier.job.state = VideoJobState::Completed;
+        checkpoint(&db, &earlier, None).unwrap();
+        let second = list_page(&db, 2, true, first.next_cursor.as_ref()).unwrap();
+        assert_eq!(
+            second
+                .jobs
+                .iter()
+                .map(|job| job.id.as_str())
+                .collect::<Vec<_>>(),
+            ["failed-a", "paused"]
+        );
+        let last = list_page(&db, 2, true, second.next_cursor.as_ref()).unwrap();
+        assert_eq!(last.jobs[0].id, "oldest");
+        assert!(!last.has_more);
+        assert!(last.next_cursor.is_none());
+        assert!(list_page(&db, 0, true, None).is_err());
+        assert!(list_page(&db, 257, true, None).is_err());
+    }
+
+    #[test]
+    fn resume_clears_stop_only_for_the_exact_recoverable_revision() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut row = stored();
+        row.job.state = VideoJobState::Failed;
+        row.cancel_requested = true;
+        row.job.error = Some("old failure".into());
+        row.job.error_detail = Some("old detail".into());
+        row.job.active_child_id = Some("child".into());
+        insert(&db, &row).unwrap();
+        assert!(!resume(&db, "parent", 1, 10).unwrap());
+        assert!(cancellation_requested(&db, "parent").unwrap());
+        assert!(resume(&db, "parent", 0, 10).unwrap());
+        let current = get(&db, "parent").unwrap().unwrap();
+        assert_eq!(current.job.state, VideoJobState::Queued);
+        assert!(!current.cancel_requested);
+        assert_eq!(current.job.active_child_id.as_deref(), Some("child"));
+        assert_eq!(current.revision, 1);
+        assert!(current.job.error.is_none() && current.job.error_detail.is_none());
+        assert!(current.job.can_cancel && !current.job.can_resume && !current.job.can_delete);
+        assert!(!resume(&db, "parent", 1, 11).unwrap());
+        request_cancel(&db, "never-admitted", 11).unwrap();
+        assert!(!resume(&db, "never-admitted", 0, 12).unwrap());
+        assert!(is_aborted(&db, "never-admitted").unwrap());
+    }
+
+    #[test]
+    fn bounded_actor_queries_keep_child_ownership_and_rotate_by_last_progress() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut first = stored();
+        first.job.state = VideoJobState::Running;
+        insert(&db, &first).unwrap();
+        let part = StoredVideoJobPart {
+            parent_id: "parent".into(),
+            index: 0,
+            child_id: "child".into(),
+            first_clip: 0,
+            clip_count: 1,
+            keep_frames: 97,
+            output_sha256: None,
+        };
+        first.job.active_child_id = Some("child".into());
+        checkpoint(&db, &first, Some(&part)).unwrap();
+        assert_eq!(
+            owner_for_child(&db, "child").unwrap().unwrap().job.id,
+            "parent"
+        );
+        assert!(owner_for_child(&db, "unrelated").unwrap().is_none());
+        assert!(!cancellation_requested(&db, "parent").unwrap());
+        assert!(cancellation_requested(&db, "gone").unwrap());
+        let mut second = stored();
+        second.job.id = "second".into();
+        second.job.created_at_ms = 2;
+        second.job.updated_at_ms = 2;
+        insert(&db, &second).unwrap();
+        assert_eq!(next_runnable(&db).unwrap().unwrap().job.id, "parent");
+        let mut first = get(&db, "parent").unwrap().unwrap();
+        first.job.updated_at_ms = 3;
+        checkpoint(&db, &first, None).unwrap();
+        assert_eq!(next_runnable(&db).unwrap().unwrap().job.id, "second");
+        request_cancel(&db, "parent", 4).unwrap();
+        assert!(cancellation_requested(&db, "parent").unwrap());
     }
 
     #[test]
