@@ -35,7 +35,7 @@ export function configureSecureRequestAdapter(adapter?: RequestAdapter): void {
   injectedAdapter = adapter;
 }
 /** The independently hosted Studio maps its relative API calls to its selected paired host. */
-export function configureSecureOrigin(provider: () => string | null): void {
+export function configureSecureOrigin(provider?: () => string | null): void {
   defaultOrigin = provider;
 }
 export function clearRelayInfoCache(): void {
@@ -274,6 +274,35 @@ export async function assertRegularRequest(
   }
 }
 
+/** Clone at the same URL so buffered JSON/form bodies stay buffered. Passing
+ * a Request as a URL constructor's init turns its body into a browser upload
+ * stream, which Chromium refuses over HTTP/1. A genuine origin rewrite must
+ * materialize that body once while retaining request policy and cancellation. */
+async function plaintextRequestAt(
+  request: Request,
+  url: URL,
+  headers: Headers,
+): Promise<Request> {
+  if (request.url === url.href) return new Request(request, { headers });
+  request.signal.throwIfAborted();
+  const body = request.body ? await request.arrayBuffer() : undefined;
+  request.signal.throwIfAborted();
+  return new Request(url, {
+    method: request.method,
+    headers,
+    body,
+    signal: request.signal,
+    credentials: request.credentials,
+    redirect: request.redirect,
+    mode: request.mode,
+    cache: request.cache,
+    integrity: request.integrity,
+    keepalive: request.keepalive,
+    referrer: request.referrer,
+    referrerPolicy: request.referrerPolicy,
+  });
+}
+
 /** Secure is the default. Regular HTTP requires an explicit direct selection. */
 export async function relayFetch(
   input: RequestInfo | URL,
@@ -305,9 +334,7 @@ export async function relayFetch(
     );
   }
   if (!profile && isLoopbackOrigin(url))
-    return globalThis.fetch(
-      new Request(new Request(url, request), { headers }),
-    );
+    return globalThis.fetch(await plaintextRequestAt(request, url, headers));
   if (!profile)
     throw new Error(
       "This machine needs secure pairing. Create a new pairing code in its settings.",
