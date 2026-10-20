@@ -5225,6 +5225,7 @@ function setClipsActive(value: boolean) {
       :recent="recentPrints"
       :last-seed="generation.lastSeedUsed"
       :canvas-intent="canvasIntent"
+      :clips-active="clipsActive"
       @append-word="appendPromptWord"
       @canvas-intent="setCanvasIntent"
       @reset-settings="invalidateRetainedRestore"

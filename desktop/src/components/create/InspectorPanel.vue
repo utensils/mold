@@ -78,6 +78,8 @@ const props = withDefaults(
     lastSeed?: number | null;
     /** Why the canvas holds its current size — the shape resolver's authority. */
     canvasIntent?: CanvasIntent;
+    /** Authored video jobs choose their final filename on the server. */
+    clipsActive?: boolean;
   }>(),
   {
     tab: "settings",
@@ -1086,6 +1088,7 @@ function resetSettings() {
         :model="form.model"
         :extension="fileUnderExtension"
         :batch-size="form.batchSize"
+        :show-filename-preview="!clipsActive"
         @update:state="setFileUnder"
       />
 

@@ -31,24 +31,29 @@ import { previewPrintFilename } from "../../lib/gallery/printFilename";
  * resolved (or created) by the routed host at develop time, which is what lets
  * one draft file correctly on any machine in the fleet.
  */
-const props = defineProps<{
-  /** The Create header's live print title. */
-  title: string;
-  /** The filing draft; every edit emits a NEW state object. */
-  state: FileUnderState;
-  /** Settings ▸ Library "Tag new prints with their title". */
-  autoTagTitle: boolean;
-  /** Fleet tags with counts, merged across connected hosts. */
-  tags: readonly TagCount[];
-  /** Fleet collections, merged by slug. */
-  collections: readonly (FileUnderCollectionLike & { count?: number })[];
-  /** Resolved model id — the filename preview's middle segment. */
-  model: string;
-  /** Output extension for the preview (`png`, `mp4`, …). */
-  extension: string;
-  /** Batch size, so a multi-print batch previews its `-{index}` segment. */
-  batchSize?: number;
-}>();
+const props = withDefaults(
+  defineProps<{
+    /** The Create header's live print title. */
+    title: string;
+    /** The filing draft; every edit emits a NEW state object. */
+    state: FileUnderState;
+    /** Settings ▸ Library "Tag new prints with their title". */
+    autoTagTitle: boolean;
+    /** Fleet tags with counts, merged across connected hosts. */
+    tags: readonly TagCount[];
+    /** Fleet collections, merged by slug. */
+    collections: readonly (FileUnderCollectionLike & { count?: number })[];
+    /** Resolved model id — the filename preview's middle segment. */
+    model: string;
+    /** Output extension for the preview (`png`, `mp4`, …). */
+    extension: string;
+    /** Batch size, so a multi-print batch previews its `-{index}` segment. */
+    batchSize?: number;
+    /** Joined clips receive their filename from the completed job. */
+    showFilenamePreview?: boolean;
+  }>(),
+  { showFilenamePreview: true },
+);
 
 const emit = defineEmits<{ "update:state": [state: FileUnderState] }>();
 
@@ -415,7 +420,11 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <p class="font-mono text-xs ms-fu__filename" data-test="file-under-filename">
+    <p
+      v-if="showFilenamePreview !== false"
+      class="font-mono text-xs ms-fu__filename"
+      data-test="file-under-filename"
+    >
       <span class="ms-fu__filename-key">files as</span>
       {{ previewStem }}<b v-if="previewSlug" class="ms-fu__filename-slug">{{ previewSlug }}</b>
     </p>

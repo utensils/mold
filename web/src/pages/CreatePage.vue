@@ -6447,6 +6447,7 @@ function setClipsActive(value: boolean) {
               :model="form.state.value.model"
               :ext="form.state.value.outputFormat"
               :timestamp="fileUnderStamp"
+              :show-filename-preview="!clipsActive"
             />
           </template>
 
