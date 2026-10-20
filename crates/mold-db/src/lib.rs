@@ -123,3 +123,5 @@ pub fn global_db() -> Option<&'static MetadataDb> {
         })
         .as_ref()
 }
+
+pub mod video_jobs;

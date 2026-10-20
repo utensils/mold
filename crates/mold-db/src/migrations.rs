@@ -704,6 +704,7 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 44,
         kind: MigrationKind::Sql(V44_GALLERY_ARCHIVE_PROJECTION),
     },
+    Migration { version:45, kind:MigrationKind::Sql(V45_VIDEO_JOBS) },
 ];
 
 /// v44: the committed-archive generation the gallery change feed's projector
@@ -988,7 +989,7 @@ DELETE FROM settings WHERE key LIKE 'tui.%';
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 44;
+pub const SCHEMA_VERSION: i64 = 45;
 
 /// Downloadable files that belong to one gallery print. The generation row
 /// remains the lifecycle authority, so permanent deletion cascades while
@@ -2084,7 +2085,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 44);
+        assert_eq!(SCHEMA_VERSION, 45);
         assert!(table_exists(&conn, "device_preferences"));
         assert!(table_exists(&conn, "mesh_workflow_jobs"));
         assert!(table_exists(&conn, "mesh_workflow_stages"));
@@ -2240,7 +2241,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 44);
+        assert_eq!(SCHEMA_VERSION, 45);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -2377,7 +2378,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 44);
+        assert_eq!(SCHEMA_VERSION, 45);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -2716,7 +2717,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 44);
+        assert_eq!(SCHEMA_VERSION, 45);
     }
 
     #[test]
@@ -3285,3 +3286,27 @@ CREATE TABLE generation_queue_transfers (
     created_at INTEGER NOT NULL
 );
 "#;
+
+// The scalar parent is bounded; the append-only part ledger grows on disk.
+const V45_VIDEO_JOBS: &str = "
+CREATE TABLE video_jobs (
+ id TEXT PRIMARY KEY,
+ state TEXT NOT NULL CHECK(state IN ('queued','running','paused','completed','failed','interrupted','cancelled')),
+ request_sha256 TEXT NOT NULL,
+ manifest_json TEXT NOT NULL,
+ job_json TEXT NOT NULL,
+ revision INTEGER NOT NULL DEFAULT 0,
+ cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancel_requested IN (0,1)),
+ created_at_ms INTEGER NOT NULL,
+ updated_at_ms INTEGER NOT NULL
+);
+CREATE INDEX video_jobs_state ON video_jobs(state,created_at_ms);
+CREATE TABLE video_job_aborts(id TEXT PRIMARY KEY,created_at_ms INTEGER NOT NULL);
+CREATE TABLE video_job_parts (
+ parent_id TEXT NOT NULL REFERENCES video_jobs(id) ON DELETE CASCADE,
+ part_index TEXT NOT NULL,
+ child_id TEXT NOT NULL UNIQUE,
+ part_json TEXT NOT NULL,
+ PRIMARY KEY(parent_id,part_index)
+);
+";
