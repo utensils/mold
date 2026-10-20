@@ -14,6 +14,7 @@ extension GeneratePane {
         let instance: String?
         let revision: String?
         let reachable: Bool
+        let restoringSource: Bool
     }
 
     var chainLimitsKey: ChainLimitsKey {
@@ -22,7 +23,8 @@ extension GeneratePane {
                        fps: controller.draft.fps, route: host,
                        instance: host.flatMap { hosts.instanceID(of: $0.id) },
                        revision: host.flatMap { if case let .up(status) = hosts.reachability[$0.id] { status.gitSha } else { nil } },
-                       reachable: host.map(hosts.isUp) ?? false)
+                       reachable: host.map(hosts.isUp) ?? false,
+                       restoringSource: controller.sequence.restoringSource)
     }
 
     /// This machine's answer for the chosen model. `nil` while it is in the

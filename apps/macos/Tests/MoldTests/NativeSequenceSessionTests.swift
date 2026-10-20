@@ -194,6 +194,35 @@ struct NativeSequenceAdmissionTests {
         #expect(restoredModel == "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step")
     }
 
+    @Test func oldRecoveryCannotReplaceAnExplicitlyOpenedNewerTakeOfTheSameJob() async throws {
+        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!)
+        let backend = SequenceBackendFixture()
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        func entry(_ filename: String) throws -> LibraryEntry {
+            let print = try MoldJSON.decoder.decode(GalleryPrint.self, from: Data("{\"filename\":\"\(filename)\",\"metadata\":{\"chain_job_id\":\"source\"},\"timestamp\":1000,\"format\":\"mp4\"}".utf8))
+            return LibraryEntry(host: host, print: print)
+        }
+        let original = NativeSequenceSession(defaults: defaults)
+        original.openContinuation(entry: try entry("verified.mp4"), host: host, installation: "same",
+            backend: backend, current: { true }, opened: { _ in })
+        await settle { !original.preparing }
+        let session = NativeSequenceSession(defaults: defaults)
+        var recoveredTakes: [Int] = []
+        session.restoreSource = { source, _ in recoveredTakes.append(source.take) }
+        await backend.holdNextPrivateRead()
+        session.recover(host: host, installation: "same", backend: backend, current: { true })
+        for _ in 0 ..< 100 where !(await backend.hasPrivateWaiter) { await Task.yield() }
+        #expect(await backend.hasPrivateWaiter)
+        await backend.advancePrivateTake()
+        session.openContinuation(entry: try entry("verified-2.mp4"), host: host, installation: "same",
+            backend: backend, current: { true }, opened: { _ in })
+        await settle { session.continuation?.take == 2 }
+        await backend.releasePrivateRead()
+        for _ in 0 ..< 100 { await Task.yield() }
+        #expect(session.continuation?.take == 2)
+        #expect(recoveredTakes.isEmpty, "A late old source must never replace the explicitly selected new take")
+    }
+
     @Test(arguments: [425, 499]) func unknownAdmissionStatusRetainsItsRecoveryRow(status: Int) async {
         let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!)
         let backend = SequenceBackendFixture()
@@ -232,6 +261,13 @@ private actor SequenceBackendFixture: MoldChainBackend {
     var createGate: CheckedContinuation<Void, Never>?
     var operationCancels = 0
     var privateReads = 0
+    var holdPrivate = false
+    var privateTake = 1
+    var privateGate: CheckedContinuation<Void, Never>?
+    var hasPrivateWaiter: Bool { privateGate != nil }
+    func holdNextPrivateRead() { holdPrivate = true }
+    func advancePrivateTake() { privateTake = 2 }
+    func releasePrivateRead() { privateGate?.resume(); privateGate = nil }
     var limitsHeld = false
     var limitsGate: CheckedContinuation<Void, Never>?
     var hasLimitsWaiter: Bool { limitsGate != nil }
@@ -259,11 +295,14 @@ private actor SequenceBackendFixture: MoldChainBackend {
     func chainJob(id: String, includeSourceMedia: Bool) async throws -> ChainJobDetail {
         if !includeSourceMedia { return try await chainJob(id: id) }
         privateReads += 1
-        return try MoldJSON.decoder.decode(ChainJobDetail.self, from: Data("""
+        let finalizes = privateTake == 1 ? #"[{"gallery_filename":"verified.mp4"}]"# : #"[{"gallery_filename":"verified.mp4"},{"gallery_filename":"verified-2.mp4"}]"#
+        let detail = try MoldJSON.decoder.decode(ChainJobDetail.self, from: Data("""
         {"id":"\(id)","state":"completed","model":"minimax-h3-ref2va:comfy-pruned-int8-turbo-4step","stage_count":1,"current_stage":0,
-        "finalizes":[{"gallery_filename":"verified.mp4"}],"script":{"schema":"mold.chain.v1","chain":{"model":"minimax-h3-ref2va:comfy-pruned-int8-turbo-4step","width":768,"height":512,"fps":24,"steps":4,"guidance":0,"strength":1,"motion_tail_frames":0,"output_format":"mp4","enable_audio":true},
+        "finalizes":\(finalizes),"script":{"schema":"mold.chain.v1","chain":{"model":"minimax-h3-ref2va:comfy-pruned-int8-turbo-4step","width":768,"height":512,"fps":24,"steps":4,"guidance":0,"strength":1,"motion_tail_frames":0,"output_format":"mp4","enable_audio":true},
         "stage":[{"prompt":"A robot","frames":107,"transition":"smooth","generation_references":[{"kind":"image","mime_type":"image/png","width":1,"height":1,"media":{"authority":"inline","data":"AA=="}}]}]}}
         """.utf8))
+        if holdPrivate { holdPrivate = false; await withCheckedContinuation { privateGate = $0 } }
+        return detail
     }
     func chainJob(id: String) async throws -> ChainJobDetail {
         if operationCancels > 0 { throw MoldClientError.http(status: 404, code: "MISSING", message: "No job") }

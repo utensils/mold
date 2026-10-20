@@ -24,7 +24,22 @@ final class NativeSequenceSession {
     static let pendingKey = "nativeAuthoredChainJobsV1"
     struct SavedDraft: Codable {
         struct Clip: Codable { let id: UUID; let prompt: String; let frames: Int; let transition: String }
-        struct Source: Codable { let host: UUID; let origin: String; let installation: String; let job: String; let take: Int; let filename: String; var hadReferences: Bool?; var title: String? = nil }
+        struct Source: Codable {
+            let host: UUID
+            let origin: String
+            let installation: String
+            let job: String
+            let take: Int
+            let filename: String
+            var hadReferences: Bool?
+            var title: String? = nil
+
+            func matchesAuthority(_ other: Source?) -> Bool {
+                guard let other else { return false }
+                return host == other.host && origin == other.origin && installation == other.installation
+                    && job == other.job && take == other.take && filename == other.filename
+            }
+        }
         let clips: [Clip]
         let source: Source?
     }
@@ -233,14 +248,14 @@ final class NativeSequenceSession {
                     let detail = try await backend.chainJob(id: source.job, includeSourceMedia: true)
                     let limits = try await backend.chainLimits(model: detail.model, fps: detail.script?.chain.fps)
                     let restored = try ChainContinuationSource(hostId: host.id, instanceId: installation, detail: detail, limits: limits)
-                    guard current(), savedSource?.job == source.job,
+                    guard current(), source.matchesAuthority(savedSource),
                           restored.take == source.take, detail.galleryFilename == source.filename else {
                         throw SequencePresentationError.changedSource
                     }
                     continuation = restored; continuationHost = host; continuationTitle = source.title ?? "this video"
                     restoreSource?(restored, host)
                 } catch {
-                    guard savedSource?.job == source.job else { return }
+                    guard source.matchesAuthority(savedSource) else { return }
                     message = "Can’t restore continued video. \(error.localizedDescription)"
                 }
             }

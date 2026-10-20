@@ -101,6 +101,7 @@ struct GenerateView: View {
         let model: String?
         let fps: Int?
         let revision: String?
+        let restoringSource: Bool
     }
     private var sequenceCapabilityKey: SequenceCapabilityKey {
         SequenceCapabilityKey(host: generate.target,
@@ -108,7 +109,7 @@ struct GenerateView: View {
             model: generate.modelName, fps: generate.draft.fps,
             revision: generate.target.flatMap { host in
                 if case let .up(status) = hosts.reachability(of: host) { status.gitSha } else { nil }
-            })
+            }, restoringSource: generate.sequence.restoringSource)
     }
 
     private var estimateKey: String {
