@@ -1,3 +1,5 @@
+mod video;
+
 use crate::catalog_wire::{CatalogFamiliesResponse, CatalogSearchPage, CatalogSearchQuery};
 use crate::chain::{ChainProgressEvent, ChainRequest};
 use crate::chain_job::{
