@@ -102,3 +102,17 @@ members, including incoming carry. Projected auto-expanded copies are checked
 before allocation, and scoped HTTP body limits account for base64 expansion.
 The SDK and CLI require an affirmative linked-part capability before submission;
 older servers cannot silently accept a context-free replacement.
+
+Real CLI continuation also passes on the CUDA candidate:
+
+- LTX-2 19B: job `a9406724-9f2b-4cf6-a428-7cddd555679d` continues
+  `e3a0cfd3-355d-433b-b68e-2e33f35ced2b` take 2. Its 33 raw frames
+  contribute 16 frames after the 17-frame incoming-tail trim. FFprobe confirms
+  16 frames at 24 fps and exactly matching 0.666667-second stereo 24 kHz audio.
+- Wan I2V A14B: job `9095566a-c473-4f7c-9569-ef20a3440837` continues
+  `33860118-026a-4c74-895e-e9de99559364` take 2. Its 17 raw frames
+  contribute 16 new frames after the one-frame RGB carry trim.
+
+Both use `mold run --script ... --continue-from ...`; earlier jobs and their
+completed stages are unchanged. Outputs and machine-readable receipts remain
+under the same Mold-home UAT directory.
