@@ -22,9 +22,9 @@ struct NativeDurationEditor: View {
             if let source = draft.source {
                 Text("Extending \(sourceTitle ?? source.filename)").font(.headline)
                     .fixedSize(horizontal: false, vertical: true)
-                if let sourceMachine { Text("On \(sourceMachine)").font(.caption).foregroundStyle(Color.secondaryText) }
+                if let sourceMachine { Text("On \(sourceMachine)").font(.caption).foregroundStyle(.secondaryText) }
                 Text("The original and new footage save together as a new video.")
-                    .font(.caption).foregroundStyle(Color.secondaryText)
+                    .font(.caption).foregroundStyle(.secondaryText)
                 Button("Start new video", action: startFresh).frame(minHeight: 44)
                     .accessibilityIdentifier("duration-start-fresh")
             }
@@ -44,7 +44,7 @@ struct NativeDurationEditor: View {
                     Button("Use one prompt") { draft.scenesEnabled = false }
                 }.frame(minHeight: 44)
                 Text("References apply to every scene. Opening and closing frames bound the whole video.")
-                    .font(.caption).foregroundStyle(Color.secondaryText)
+                    .font(.caption).foregroundStyle(.secondaryText)
             } else {
                 NativeDurationField(title: draft.source == nil ? "Duration" : "Add duration", seconds: $draft.seconds)
                 Button("Define scenes") {
@@ -56,22 +56,22 @@ struct NativeDurationEditor: View {
             if let maximum = planner.plan?.singleClipMaxFrames ?? singleClipMaxFrames {
                 let rate = max(1, planner.plan?.fps ?? fps)
                 Text("Single generation: up to \(Double(maximum) / Double(rate), format: .number.precision(.fractionLength(0 ... 2))) seconds")
-                    .font(.caption).foregroundStyle(Color.secondaryText)
+                    .font(.caption).foregroundStyle(.secondaryText)
                     .accessibilityIdentifier("duration-single-limit")
             }
             if planner.isCalculating {
-                Text("Calculating length…").font(.caption).foregroundStyle(Color.secondaryText)
+                Text("Calculating length…").font(.caption).foregroundStyle(.secondaryText)
             } else if let plan = planner.plan {
                 Text(plan.clipCount == 1 ? "1 clip · one video" : "\(plan.clipCount) clips joined into one video")
                     .font(.callout).accessibilityIdentifier("duration-plan-clips")
                 if plan.joinMode == .blendedShots, plan.clipCount > 1 {
                     Text("Shots blend together; motion does not carry between them.")
-                        .font(.caption).foregroundStyle(Color.secondaryText)
+                        .font(.caption).foregroundStyle(.secondaryText)
                 }
                 Text("\(draft.source == nil ? "Video" : "New total"): \(VideoDurationDraft.seconds(milliseconds: plan.totalDurationMs)) seconds")
-                    .font(.caption).foregroundStyle(Color.secondaryText)
+                    .font(.caption).foregroundStyle(.secondaryText)
                 ForEach(Array(plan.warnings.enumerated()), id: \.offset) { _, warning in
-                    Text(warning).font(.caption).foregroundStyle(Color.secondaryText)
+                    Text(warning).font(.caption).foregroundStyle(.secondaryText)
                 }
             }
             if let error = planner.error {

@@ -29,7 +29,7 @@ struct NativeDurationField: View {
 #else
                     .focusedValue(\.editingText, editing ? true : nil)
 #endif
-                Text("seconds").foregroundStyle(Color.secondaryText)
+                Text("seconds").foregroundStyle(.secondaryText)
                 Menu {
                     ForEach([5, 10, 15, 30, 60], id: \.self) { value in
                         Button("\(value) seconds") { seconds = String(value) }
@@ -68,3 +68,10 @@ struct NativeDurationScene: View {
         .padding(.vertical, 8)
     }
 }
+
+#if os(macOS)
+// iOS uses its audited asset-backed token; macOS keeps system secondary text.
+extension ShapeStyle where Self == Color {
+    static var secondaryText: Color { .secondary }
+}
+#endif
