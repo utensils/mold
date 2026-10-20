@@ -24,7 +24,7 @@ final class NativeSequenceSession {
     static let pendingKey = "nativeAuthoredChainJobsV1"
     struct SavedDraft: Codable {
         struct Clip: Codable { let id: UUID; let prompt: String; let frames: Int; let transition: String }
-        struct Source: Codable { let host: UUID; let origin: String; let installation: String; let job: String; let take: Int; let filename: String; var hadReferences: Bool? }
+        struct Source: Codable { let host: UUID; let origin: String; let installation: String; let job: String; let take: Int; let filename: String; var hadReferences: Bool?; var title: String? = nil }
         let clips: [Clip]
         let source: Source?
     }
@@ -40,6 +40,7 @@ final class NativeSequenceSession {
     var message: String?
     var historyNotice: String?
     var hasVisibleReferences = false
+    @ObservationIgnored var restoreSource: ((ChainContinuationSource, MoldHost) -> Void)?
     @ObservationIgnored var restoreReferences: (([GenerationReference]) -> Void)?
     var needsReferenceDecision: Bool { savedSource?.hadReferences == true && !hasVisibleReferences }
     func restoreOriginalReferences() {
@@ -234,7 +235,8 @@ final class NativeSequenceSession {
                           restored.take == source.take, detail.galleryFilename == source.filename else {
                         throw SequencePresentationError.changedSource
                     }
-                    continuation = restored; continuationHost = host; continuationTitle = source.filename
+                    continuation = restored; continuationHost = host; continuationTitle = source.title ?? "this video"
+                    restoreSource?(restored, host)
                 } catch {
                     guard savedSource?.job == source.job else { return }
                     message = "Can’t restore continued video. \(error.localizedDescription)"
@@ -377,7 +379,7 @@ extension NativeSequenceSession {
                 guard current(), generation == mine else { throw SequencePresentationError.changedMachine }
                 savedSource = SavedDraft.Source(host: host.id, origin: host.baseURL.absoluteString,
                     installation: installation, job: source.jobId, take: source.take, filename: entry.print.filename,
-                    hadReferences: source.script.stage.last?.generationReferences?.isEmpty == false)
+                    hadReferences: source.script.stage.last?.generationReferences?.isEmpty == false, title: entry.print.displayName)
                 continuation = source; continuationHost = host
                 continuationTitle = entry.print.displayName
                 preparing = false

@@ -75,6 +75,9 @@ final class GenerateController {
         machine = initialMachine ?? MachineChoice.load()
         restoreDraft()
         if sequence.draft != nil { kind = .clip }
+        sequence.restoreSource = { [weak self] source, host in
+            self?.restoreSequenceRecipe(source, host: host)
+        }
         sequence.restoreReferences = { [weak self] refs in
             self?.draft.media.generationReferences = refs.map(AuthoringReference.canonical)
         }
@@ -197,6 +200,11 @@ final class GenerateController {
     /// Keep a saved choice while its machine reconnects; only an explicit
     /// choice may replace a draft whose profile has not arrived yet.
     func settleChoice() {
+        guard !sequence.restoringSource else { return }
+        if let source = sequence.continuation, let host = sequence.continuationHost {
+            restoreSequenceRecipe(source, host: host)
+            return
+        }
         if restoringChoice, let model, let profile = model.generationProfile {
             let restoredRecipe = recipeID.flatMap { profile.recipe(named: $0) }
                 ?? profile.recipe(named: profile.defaultRecipeId)

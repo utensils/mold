@@ -88,6 +88,9 @@ final class GenerateController {
         self.handoff = handoff
         self.probe = probe
         self.chain = chain
+        sequence.restoreSource = { [weak self] source, host in
+            self?.restoreSequenceRecipe(source, host: host)
+        }
         sequence.restoreReferences = { [weak self] refs in
             self?.draft.media.generationReferences = refs.map(AuthoringReference.canonical)
         }

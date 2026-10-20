@@ -1,6 +1,15 @@
 import MoldClient
 
 extension GenerateController {
+    func restoreSequenceRecipe(_ source: ChainContinuationSource, host: MoldHost) {
+        modelName = source.model
+        recipeID = nil
+        hostID = host.id; machineChoice = host.id
+        draft.width = source.settings.width; draft.height = source.settings.height
+        draft.fps = source.settings.fps; draft.steps = source.settings.steps
+        draft.guidance = source.settings.guidance
+        draft.preferredAudio = source.settings.enableAudio
+    }
     func recoverSequences() {
         for host in hosts.hosts {
             guard let backend = hosts.backend(for: host.id) else { continue }
@@ -31,9 +40,7 @@ extension GenerateController {
                 self.draft = RenderDraft(reusing: entry.print.metadata)
                 self.draft.media = DraftMedia()
                 self.draft.media.generationReferences = (source.script.stage.last?.generationReferences ?? []).map(AuthoringReference.canonical)
-                self.draft.width = source.settings.width; self.draft.height = source.settings.height
-                self.draft.fps = source.settings.fps; self.draft.steps = source.settings.steps
-                self.draft.guidance = source.settings.guidance
+                self.restoreSequenceRecipe(source, host: host)
             })
     }
 }

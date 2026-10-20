@@ -185,6 +185,11 @@ struct NativeSequenceAdmissionTests {
         let relaunched = NativeSequenceSession(defaults: defaults)
         #expect(relaunched.restoringSource)
         #expect(!relaunched.needsReferenceDecision, "An explicit discard cannot revive old references")
+        var restoredModel: String?
+        relaunched.restoreSource = { source, _ in restoredModel = source.model }
+        relaunched.recover(host: host, installation: "same", backend: backend, current: { true })
+        await settle { relaunched.continuation != nil }
+        #expect(restoredModel == "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step")
     }
 
     @Test(arguments: [425, 499]) func unknownAdmissionStatusRetainsItsRecoveryRow(status: Int) async {

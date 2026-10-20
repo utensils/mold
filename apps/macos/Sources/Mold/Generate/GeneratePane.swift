@@ -58,7 +58,7 @@ struct GeneratePane: View {
         // Once per machine, model and rate -- never from `body`.
         .task(id: chainLimitsKey) { refreshChainLimits() }
         .onChange(of: advertisedChainLimits) { _, limits in
-            guard let limits, let temporal = recipe?.temporal else { return }
+            guard !controller.sequence.restoringSource, let limits, let temporal = recipe?.temporal else { return }
             controller.sequence.fitLengths(minimum: limits.authoring?.minFrames ?? temporal.frames.min,
                 maximum: min(limits.framesPerClipCap, temporal.frames.max),
                 step: limits.authoring?.frameStep ?? temporal.frames.step)
