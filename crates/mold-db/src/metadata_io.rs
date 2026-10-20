@@ -209,6 +209,7 @@ pub fn synthesize_from_filename(filename: &str, timestamp_secs: u64) -> OutputMe
         fps: None,
         chain_job_id: None,
         chain: None,
+        video_job: None,
         // A row reconstructed from the legacy columns knows nothing about a
         // 3-D workflow; the field only ever arrives with the saved JSON.
         mesh_workflow: None,
