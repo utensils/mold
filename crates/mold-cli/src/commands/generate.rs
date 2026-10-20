@@ -1090,6 +1090,7 @@ fn refit_request_after_pull(
 }
 
 pub struct Ltx2Options {
+    pub video_job: Option<crate::commands::video_jobs::VideoJobOptions>,
     pub frames: Option<u32>,
     pub predict_duration: bool,
     pub fps: Option<u32>,
@@ -1272,6 +1273,7 @@ pub async fn run(
     identity: crate::commands::identity::IdentityOptions,
 ) -> Result<()> {
     let Ltx2Options {
+        video_job,
         frames,
         predict_duration,
         fps,
@@ -1932,6 +1934,33 @@ pub async fn run(
                 bind_remote_reference_uploads(ctx.client(), &mut req, reference_uploads, batch)
                     .await?;
         }
+    }
+
+    if let Some(options) = video_job {
+        anyhow::ensure!(!local, "Requested-duration videos require a remote server");
+        anyhow::ensure!(batch == 1, "Requested-duration videos currently require --batch 1; each video is a separate durable operation");
+        anyhow::ensure!(
+            !filing.no_save,
+            "Requested-duration videos must be saved in the server Library"
+        );
+        req.seed = Some(base_seed);
+        let admitted = crate::commands::video_jobs::admit(ctx.client(), &req, &options, || {
+            if let Some(lease) = reference_session.as_mut() {
+                lease.preserve_for_uncertain_admission();
+            }
+        })
+        .await?;
+        let Some((job, instance)) = admitted else {
+            return Ok(());
+        };
+        return crate::commands::video_jobs::observe(
+            ctx.client(),
+            job,
+            &instance,
+            options.flags.detach,
+            output.as_deref(),
+        )
+        .await;
     }
 
     // Warn if user-provided dimensions don't match model recommendations.
@@ -6271,6 +6300,7 @@ mod tests {
             Some(42),
             1,
             Ltx2Options {
+                video_job: None,
                 mesh: None,
                 frames: None,
                 predict_duration: false,

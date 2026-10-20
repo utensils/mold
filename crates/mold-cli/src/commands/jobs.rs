@@ -8,7 +8,11 @@ use crate::{JobsAction, RetakeModeArg};
 pub async fn run(action: JobsAction, host: Option<&str>, _config: &Config) -> Result<()> {
     let client = crate::control::client_for_host(host)?;
     match action {
-        JobsAction::List { json } => jobs_list(&client, json).await,
+        JobsAction::List {
+            json,
+            cursor,
+            limit,
+        } => jobs_list(&client, json, cursor.as_deref(), limit).await,
         JobsAction::Show { id, json, script } => jobs_show(&client, &id, json, script).await,
         JobsAction::Resume { id } => jobs_resume(&client, &id).await,
         JobsAction::Restart {
@@ -96,7 +100,26 @@ struct RetakeArgs {
     prompt: Option<String>,
 }
 
-async fn jobs_list(client: &MoldClient, json: bool) -> Result<()> {
+async fn jobs_list(
+    client: &MoldClient,
+    json: bool,
+    cursor: Option<&str>,
+    limit: u32,
+) -> Result<()> {
+    let instance = crate::commands::video_jobs::supported_instance(client).await?;
+    anyhow::ensure!(
+        cursor.is_none() || instance.is_some(),
+        "This machine cannot continue a duration-video queue page"
+    );
+    let videos = if let Some(instance) = instance {
+        Some(
+            client
+                .list_video_jobs(&instance, limit, false, cursor)
+                .await?,
+        )
+    } else {
+        None
+    };
     let listing = client.list_chain_jobs().await?;
     // Teach the shell the ids this listing just showed: every other `mold
     // jobs` verb takes one, and a completer cannot ask the server (see
@@ -105,14 +128,53 @@ async fn jobs_list(client: &MoldClient, json: bool) -> Result<()> {
         cache.record_job_ids(listing.jobs.iter().map(|job| job.id.clone()));
     });
     if json {
-        println!("{}", serde_json::to_string_pretty(&listing)?);
+        let mut value = serde_json::to_value(&listing)?;
+        if let Some(page) = videos {
+            value["video_jobs"] = serde_json::to_value(page)?;
+        }
+        println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());
+    }
+    if let Some(page) = videos {
+        for job in page.jobs {
+            println!(
+                "{}  {:?}  {}/{} clips{}",
+                job.id,
+                job.state,
+                job.completed_clips,
+                job.plan.clip_count,
+                job.output_filename
+                    .map(|name| format!("  {name}"))
+                    .unwrap_or_default()
+            );
+        }
+        if let Some(cursor) = page.next_cursor {
+            println!("More videos: mold jobs list --cursor {cursor}");
+        }
     }
     print_listing(&listing);
     Ok(())
 }
 
 async fn jobs_show(client: &MoldClient, id: &str, json: bool, script: bool) -> Result<()> {
+    if let Some((job, _)) = crate::commands::video_jobs::lookup(client, id).await? {
+        anyhow::ensure!(!script, "This is a duration video; use --json to inspect its plan. Authored TOML export applies to script jobs");
+        if json {
+            println!("{}", serde_json::to_string_pretty(&job)?);
+        } else {
+            println!(
+                "{}: {:?}, {}/{} clips",
+                job.id, job.state, job.completed_clips, job.plan.clip_count
+            );
+            if let Some(name) = job.output_filename {
+                println!("Library: {name}");
+            }
+            if let Some(error) = job.error_detail.or(job.error) {
+                println!("{error}");
+            }
+        }
+        return Ok(());
+    }
     let detail = if script {
         client.get_chain_job_with_media(id).await?
     } else {
@@ -141,6 +203,11 @@ fn render_job_script(detail: &ChainJobDetail) -> Result<String> {
 }
 
 async fn jobs_resume(client: &MoldClient, id: &str) -> Result<()> {
+    if let Some((_, instance)) = crate::commands::video_jobs::lookup(client, id).await? {
+        client.resume_video_job(id, &instance).await?;
+        println!("resumed {id}");
+        return Ok(());
+    }
     let summary = client.resume_chain_job(id).await?;
     print_summary_action("resumed", &summary);
     Ok(())
@@ -407,6 +474,11 @@ fn render_amend_plan(id: &str, req: &mold_core::chain_job::AmendRequest) -> Stri
 }
 
 async fn jobs_cancel(client: &MoldClient, id: &str) -> Result<()> {
+    if let Some((_, instance)) = crate::commands::video_jobs::lookup(client, id).await? {
+        client.cancel_video_job(id, &instance).await?;
+        println!("cancel requested {id}");
+        return Ok(());
+    }
     let summary = client.cancel_chain_job(id).await?;
     print_summary_action("cancel requested", &summary);
     Ok(())
@@ -421,7 +493,11 @@ async fn jobs_delete(client: &MoldClient, id: &str, yes: bool) -> Result<()> {
             bail!("delete aborted");
         }
     }
-    client.delete_chain_job(id).await?;
+    if let Some((_, instance)) = crate::commands::video_jobs::lookup(client, id).await? {
+        client.delete_video_job(id, &instance).await?;
+    } else {
+        client.delete_chain_job(id).await?;
+    }
     println!("{} {}", "deleted".green(), id);
     Ok(())
 }

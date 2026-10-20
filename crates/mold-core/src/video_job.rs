@@ -537,3 +537,11 @@ mod capability_tests {
         );
     }
 }
+
+/// One bounded, installation-bound queue page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VideoJobPage {
+    pub jobs: Vec<VideoJob>,
+    pub has_more: bool,
+    pub next_cursor: Option<String>,
+}

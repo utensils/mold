@@ -781,6 +781,11 @@ pub enum JobsAction {
     List {
         #[arg(long)]
         json: bool,
+        /// Continue the bounded duration-video queue listing.
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=200))]
+        limit: u32,
     },
     /// Show one sequence job, or print the script that made it
     #[command(after_long_help = "\
@@ -1926,10 +1931,13 @@ Examples:
         #[arg(long, help_heading = "Video")]
         fps: Option<u32>,
 
-        /// MiniMax H3 duration in seconds (4 through 15). Resolves to the
-        /// nearest exact 17n+5 frame count on H3's fixed 24 FPS clock.
-        #[arg(long, conflicts_with = "frames", help_heading = "Video")]
-        duration: Option<f64>,
+        /// Requested video duration in seconds. Longer videos automatically
+        /// join model-sized clips with the appropriate overlap (remote server).
+        #[arg(long, value_parser = commands::video_jobs::parse_duration_ms, conflicts_with = "frames", help_heading = "Video")]
+        duration: Option<u64>,
+
+        #[command(flatten)]
+        video_job: commands::video_jobs::VideoJobFlags,
 
         /// Per-clip frame cap for chained video. When --frames exceeds this,
         /// the CLI splits into multiple chained clips stitched at render time.
@@ -3596,6 +3604,7 @@ async fn run(
             predict_duration,
             fps,
             duration,
+            mut video_job,
             clip_frames,
             motion_tail,
             audio,
@@ -3682,6 +3691,7 @@ async fn run(
             upscale: _upscale, // TODO: wire into generate pipeline for post-generation upscaling
         } => {
             apply_spatial_tile_override(spatial_tile.as_deref());
+            video_job.dry_run = dry_run;
 
             // A chain request has no title slot yet; refuse rather than
             // silently dropping the flag.
@@ -3795,6 +3805,7 @@ async fn run(
                 predict_duration,
                 fps,
                 duration,
+                video_job,
                 clip_frames,
                 motion_tail,
                 audio,
@@ -7041,7 +7052,7 @@ mod tests {
                 strength,
                 ..
             } => {
-                assert_eq!(duration, Some(8.5));
+                assert_eq!(duration, Some(8500));
                 assert_eq!(reference.len(), 3);
                 assert_eq!(reference[0].kind, commands::h3::ReferenceKind::Image);
                 assert_eq!(reference[1].kind, commands::h3::ReferenceKind::Video);

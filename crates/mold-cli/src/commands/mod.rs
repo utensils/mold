@@ -49,3 +49,5 @@ pub mod unload;
 pub mod update;
 pub mod upscale;
 pub mod video_upscale;
+
+pub(crate) mod video_jobs;

@@ -1149,7 +1149,8 @@ pub async fn run(
     frames: Option<u32>,
     predict_duration: bool,
     fps: Option<u32>,
-    duration: Option<f64>,
+    duration: Option<u64>,
+    video_job: crate::commands::video_jobs::VideoJobFlags,
     clip_frames: Option<u32>,
     motion_tail: u32,
     audio: bool,
@@ -1373,7 +1374,11 @@ pub async fn run(
     let mut h3_authoring = h3::prepare_authoring_candidates(
         &model,
         &family,
-        duration,
+        if local {
+            duration.map(|milliseconds| milliseconds as f64 / 1000.0)
+        } else {
+            None
+        },
         frames,
         fps,
         width,
@@ -1388,7 +1393,7 @@ pub async fn run(
     let fps = h3_authoring.fps.or(fps);
     let width = h3_authoring.width.or(width);
     let height = h3_authoring.height.or(height);
-    let format = if is_h3 {
+    let format = if is_h3 || duration.is_some() {
         OutputFormat::Mp4
     } else {
         format.unwrap_or(OutputFormat::Png)
@@ -2021,6 +2026,14 @@ pub async fn run(
         seed,
         batch,
         generate::Ltx2Options {
+            video_job: if local {
+                None
+            } else {
+                duration.map(|duration_ms| crate::commands::video_jobs::VideoJobOptions {
+                    duration_ms,
+                    flags: video_job,
+                })
+            },
             frames,
             predict_duration,
             fps,

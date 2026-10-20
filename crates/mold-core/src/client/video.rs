@@ -64,6 +64,65 @@ impl MoldClient {
         )
     }
 
+    /// Only the named parent-not-found response permits legacy protocol lookup.
+    pub async fn find_video_job(&self, id: &str, instance: &str) -> Result<Option<VideoJob>> {
+        require_instance(instance)?;
+        let response = self
+            .client
+            .get(self.video_job_url(id, ""))
+            .header("x-mold-destination-instance", instance)
+            .send()
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            let body = response.text().await?;
+            let value: serde_json::Value = serde_json::from_str(&body)?;
+            if value.get("code").and_then(serde_json::Value::as_str) == Some("VIDEO_JOB_NOT_FOUND")
+            {
+                return Ok(None);
+            }
+            anyhow::bail!("Unexpected video lookup refusal: {body}");
+        }
+        Ok(Some(checked_job(
+            error_for_status_with_body(response).await?.json().await?,
+            id,
+        )?))
+    }
+
+    pub async fn list_video_jobs(
+        &self,
+        instance: &str,
+        limit: u32,
+        recoverable_only: bool,
+        cursor: Option<&str>,
+    ) -> Result<crate::video_job::VideoJobPage> {
+        require_instance(instance)?;
+        anyhow::ensure!(
+            (1..=200).contains(&limit),
+            "Video queue page size must be between1 and200"
+        );
+        let mut builder = self
+            .client
+            .get(format!("{}/api/video-jobs", self.base_url))
+            .header("x-mold-destination-instance", instance)
+            .query(&[
+                ("limit", limit.to_string()),
+                ("recoverable_only", recoverable_only.to_string()),
+            ]);
+        if let Some(cursor) = cursor {
+            builder = builder.query(&[("cursor", cursor)]);
+        }
+        let page: crate::video_job::VideoJobPage =
+            error_for_status_with_body(builder.send().await?)
+                .await?
+                .json()
+                .await?;
+        anyhow::ensure!(
+            page.jobs.len() <= limit as usize && page.has_more == page.next_cursor.is_some(),
+            "Machine returned an incompatible video queue page"
+        );
+        Ok(page)
+    }
+
     pub async fn resume_video_job(&self, id: &str, instance: &str) -> Result<VideoJob> {
         anyhow::ensure!(
             !instance.is_empty(),
@@ -219,6 +278,18 @@ mod tests {
     fn response(id: &str) -> serde_json::Value {
         serde_json::json!({"id":id,"state":"queued","plan":{"validation_revision":"proof","model":"h3-pdmd2:bf16","width":768,"height":768,"fps":24,"single_clip_max_frames":107,"overlap_frames":1,"join_mode":"continuous","clip_count":"14","part_count":"1","added_frames":"1440","source_frames":"0","total_frames":"1440","added_duration_ms":"60000","total_duration_ms":"60000","warnings":[]},"completed_clips":"0","active_child_id":null,"output_filename":null,"error":null,"error_detail":null,"created_at_ms":1,"updated_at_ms":1,"can_cancel":true,"can_resume":false,"can_delete":false})
     }
+    #[tokio::test]
+    async fn only_named_parent_not_found_allows_protocol_fallback() {
+        for (status, body, absent) in [(404, serde_json::json!({"code":"VIDEO_JOB_NOT_FOUND"}), true), (404, serde_json::json!({"error":"generic"}), false), (405, serde_json::json!({}), false), (410, serde_json::json!({"code":"VIDEO_OPERATION_CANCELLED"}), false), (403, serde_json::json!({}), false)] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET")).and(path("/api/video-jobs/operation"))
+                .and(header("x-mold-destination-instance", "captured"))
+                .respond_with(ResponseTemplate::new(status).set_body_json(body)).mount(&server).await;
+            let result = MoldClient::new(&server.uri()).find_video_job("operation", "captured").await;
+            if absent { assert!(result.unwrap().is_none()); } else { assert!(result.is_err()); }
+        }
+    }
+
     #[tokio::test]
     async fn reads_and_validation_require_the_captured_installation() {
         let server = MockServer::start().await;
