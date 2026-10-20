@@ -122,6 +122,31 @@ public struct ChainJobStageDetail: Decodable, Hashable, Sendable {
     public let hasMedia: Bool?
     public let cacheReady: Bool?
     public let error: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case idx, state, seed, framesEmitted, generationTimeMs, hasPreview, hasMedia, cacheReady, error
+    }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        idx = try values.decode(Int.self, forKey: .idx)
+        state = try values.decode(String.self, forKey: .state)
+        // Deployed hosts use decimal strings; newer hosts may emit a JSON u64.
+        // Decode directly to UInt64 so neither format passes through Double.
+        if let text = try? values.decode(String.self, forKey: .seed) {
+            guard !text.isEmpty, text.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }), let parsed = UInt64(text) else {
+                throw DecodingError.dataCorruptedError(forKey: .seed, in: values, debugDescription: "Invalid unsigned seed")
+            }
+            seed = parsed
+        } else {
+            seed = try values.decodeIfPresent(UInt64.self, forKey: .seed)
+        }
+        framesEmitted = try values.decodeIfPresent(Int.self, forKey: .framesEmitted)
+        generationTimeMs = try values.decodeIfPresent(UInt64.self, forKey: .generationTimeMs)
+        hasPreview = try values.decodeIfPresent(Bool.self, forKey: .hasPreview)
+        hasMedia = try values.decodeIfPresent(Bool.self, forKey: .hasMedia)
+        cacheReady = try values.decodeIfPresent(Bool.self, forKey: .cacheReady)
+        error = try values.decodeIfPresent(String.self, forKey: .error)
+    }
 }
 public struct ChainJobListing: Decodable, Hashable, Sendable {
     public let jobs: [ChainJobDetail]
