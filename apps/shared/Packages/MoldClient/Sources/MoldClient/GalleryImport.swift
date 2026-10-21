@@ -68,14 +68,14 @@ public struct GalleryImport: Sendable {
         metadataSynthetic = embedded == nil ? (print.metadataSynthetic ?? false) : false
     }
 
-    public init(mirroring print: GalleryPrint, fileAt url: URL) throws {
+    public init(mirroring print: GalleryPrint, fileAt url: URL, sourceOffer: RetainedSourceMedia.TransferOffer? = nil) throws {
         self.init(prompt: print.metadata.prompt ?? "", model: print.metadata.model ?? "",
                   version: print.metadata.version ?? "", file: Data(),
                   timestamp: print.createdAt)
         fileURL = url
         originalMetadata = print.metadata
         let embedded = try EmbeddedPrintMetadata.json(in: url, named: print.filename)
-        originalMetadataJSON = embedded ?? print.rawMetadataJSON
+        originalMetadataJSON = sourceOffer?.canonicalMetadataJSON ?? embedded ?? print.rawMetadataJSON
         metadataSynthetic = embedded == nil ? (print.metadataSynthetic ?? false) : false
     }
 

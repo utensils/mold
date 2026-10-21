@@ -33,6 +33,13 @@ public extension RetainedSourceMedia {
         public let outputSizeBytes: Int
         public let metadata: OutputMetadata?
         public let members: [TransferMember]
+        // The typed projection is deliberately incomplete. Mirrors must retain
+        // and compare publication facts introduced by a newer server as well.
+        var rawMetadataJSON: Data? = nil
+        var canonicalMetadataJSON: Data? { rawMetadataJSON ?? metadata.flatMap { try? MoldJSON.encoder.encode($0) } }
+        private enum CodingKeys: String, CodingKey {
+            case archiveIdentitySha256, outputSha256, outputSizeBytes, metadata, members
+        }
 
         public init(archiveIdentitySha256: String, members: [TransferMember],
                     outputSha256: String, outputSizeBytes: Int, metadata: OutputMetadata?) {
@@ -63,10 +70,22 @@ public extension RetainedSourceMedia {
         case legacyInputsUnavailable
     }
 
+    /// Captured before downloading a mirror. The offer binds its complete
+    /// publication recipe to exact output bytes; it contains no input payloads.
+    struct MirrorSourcePreparation: Sendable {
+        public let sourceOffer: TransferOffer?
+        public var archiveIdentitySha256: String? { sourceOffer?.archiveIdentitySha256 }
+    }
+
     /// Check destination readiness before importing output bytes. An absent
     /// additive block cannot safely promise a source-bearing copy.
     static func preflightMirror(for filename: String, metadata: OutputMetadata?,
                                 from origin: any MoldBackend, to target: any MoldBackend) async throws -> String? {
+        try await prepareMirror(for: filename, metadata: metadata, from: origin, to: target).archiveIdentitySha256
+    }
+
+    static func prepareMirror(for filename: String, metadata: OutputMetadata?,
+                              from origin: any MoldBackend, to target: any MoldBackend) async throws -> MirrorSourcePreparation {
         let offer: TransferOffer
         do { offer = try await origin.retainedMediaTransferOffer(for: filename) }
         catch let error as MoldClientError {
@@ -75,7 +94,7 @@ public extension RetainedSourceMedia {
             guard inventory.availability == .unavailableLegacy, metadata != nil, !disclosable(metadata) else {
                 throw transferIncomplete("Update the source machine to copy this print’s retained media.")
             }
-            return nil
+            return MirrorSourcePreparation(sourceOffer: nil)
         }
         guard validTransferDigest(offer.archiveIdentitySha256) else { throw MoldClientError.malformedResponse }
         if offer.members.isEmpty && (disclosable(metadata) || disclosable(offer.metadata)) {
@@ -87,7 +106,7 @@ public extension RetainedSourceMedia {
                 throw transferIncomplete("Update the destination machine to retain this print’s source media.")
             }
         }
-        return offer.archiveIdentitySha256
+        return MirrorSourcePreparation(sourceOffer: offer)
     }
 
     /// Verify the copied output before reporting missing historical inputs.
@@ -96,6 +115,7 @@ public extension RetainedSourceMedia {
     static func mirrorSources(for sourceFilename: String, metadata: OutputMetadata?,
                               from origin: any MoldBackend, to target: any MoldBackend,
                               as targetFilename: String, expectedSourceArchiveIdentity: String? = nil, downloadedOutput: URL? = nil,
+                              capturedSourceOffer: TransferOffer? = nil,
                               isCurrent: @Sendable () async -> Bool = { true }) async throws -> MirrorResult {
         try Task.checkCancellation()
         guard await isCurrent() else { throw CancellationError() }
@@ -115,11 +135,14 @@ public extension RetainedSourceMedia {
         if let expectedSourceArchiveIdentity, expectedSourceArchiveIdentity != offer.archiveIdentitySha256 {
             throw transferIncomplete("The original print changed while copying. Try again.")
         }
+        if let capturedSourceOffer {
+            try verifyMirrorSource(capturedSourceOffer, matches: offer)
+        }
         let legacyInputsUnavailable = offer.members.isEmpty && (disclosable(metadata) || disclosable(offer.metadata))
         if legacyInputsUnavailable {
             try await requireLegacyInventory(for: sourceFilename, from: origin)
         } else if offer.members.isEmpty {
-            return .complete
+            if capturedSourceOffer == nil { return .complete }
         } else {
             try validateTransferMembers(offer.members)
         }
@@ -139,7 +162,7 @@ public extension RetainedSourceMedia {
         guard destination.outputSha256 == offer.outputSha256, destination.outputSizeBytes == offer.outputSizeBytes else {
             throw transferIncomplete("The local copy has different output bytes or generation settings.")
         }
-        guard try await mirrorRecipeMatches(destination.metadata, source: offer,
+        guard try await mirrorRecipeMatches(destination, source: offer,
                                             filename: sourceFilename, origin: origin, downloadedOutput: downloadedOutput) else {
             throw transferIncomplete("The local copy has different output bytes or generation settings.")
         }
@@ -177,6 +200,23 @@ public extension RetainedSourceMedia {
                      members: offer.members.map(\.contentIdentity), files: files), for: targetFilename)
         guard await isCurrent() else { throw CancellationError() }
         return .complete
+    }
+
+    static func revalidateMirrorSource(_ preparation: MirrorSourcePreparation, filename: String,
+                                       from origin: any MoldBackend) async throws {
+        guard let captured = preparation.sourceOffer else { return }
+        let current = try await origin.retainedMediaTransferOffer(for: filename)
+        try Task.checkCancellation()
+        try verifyMirrorSource(captured, matches: current)
+    }
+
+    private static func verifyMirrorSource(_ captured: TransferOffer, matches current: TransferOffer) throws {
+        guard captured.archiveIdentitySha256 == current.archiveIdentitySha256,
+              captured.outputSha256 == current.outputSha256, captured.outputSizeBytes == current.outputSizeBytes,
+              captured.members.map(\.contentIdentity) == current.members.map(\.contentIdentity),
+              mirrorMetadataMatches(captured.canonicalMetadataJSON, current.canonicalMetadataJSON) else {
+            throw transferIncomplete("The original print changed while copying. Try again.")
+        }
     }
 
     private static func requireLegacyInventory(for filename: String, from origin: any MoldBackend) async throws {

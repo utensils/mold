@@ -2,7 +2,15 @@ import Foundation
 
 public extension HTTPBackend {
     func retainedMediaTransferOffer(for filename: String) async throws -> RetainedSourceMedia.TransferOffer {
-        try await get(retainedSourceMediaPath(filename) + "/transfer")
+        let data = try await bytes(for: request(retainedSourceMediaPath(filename) + "/transfer"))
+        do {
+            var offer = try MoldJSON.decoder.decode(RetainedSourceMedia.TransferOffer.self, from: data)
+            if let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let metadata = object["metadata"] as? [String: Any] {
+                offer.rawMetadataJSON = try JSONSerialization.data(withJSONObject: metadata, options: .sortedKeys)
+            }
+            return offer
+        } catch { throw MoldClientError.malformedResponse }
     }
 
     func importRetainedMedia(_ transfer: RetainedSourceMedia.Transfer, for filename: String) async throws {

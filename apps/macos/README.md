@@ -904,7 +904,7 @@ The Also Running section can stop an ephemeral long-clip chain when its machine
 allows cancellation, and resume a paused chain. Its controls recheck the machine
 and activity before acting. Existing clip-upscale Pause, Resume and Cancel
 controls also reject disconnected machines, stale rows and duplicate requests.
-Durable authored sequence controls remain available in the machine's web app.
+Duration-based and authored videos expose their own parent controls in Queue.
 
 Shared generation jobs keep supported Cancel controls during model loading; automatic chains use their own cancellation authority.
 
@@ -913,6 +913,8 @@ Shared generation jobs keep supported Cancel controls during model loading; auto
 Library New badges and unread counts are saved on each client independently. Media discovered after the initial machine baseline stays new during a Library visit. Individual viewer display clears one print immediately; leaving Library clears the captured eligible projections from that visit. Unvisited, hidden, filtered-out and later arrivals remain unread. Merged copies count once; hidden collections and Trash do not count. Existing read history is preserved on upgrade. Native icon badges follow the same history, with the existing permission or preference controls.
 
 Queue rows keep a stable height as previews and progress arrive, preserving the scroll position while browsing. Preview reads share a bounded cache across row reuse.
+
+Library Sync captures the authenticated archive’s complete recipe before downloading. It verifies the output’s checksum and size before importing that recipe, preserving exact seeds, literal prompts, scenes and newer metadata fields. Changed archive facts are refused rather than replaced with a partial embedded recipe.
 
 Interrupted syncs remember acknowledged outputs before retained-input and organization work; retries repair the remaining work without copying the output again. Updated hosts batch verification of unchanged copies; older hosts preserve the full retained-input checks. Progress counts checked, copied, already-local and failed prints separately.
 
