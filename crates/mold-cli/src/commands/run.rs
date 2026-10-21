@@ -1260,11 +1260,10 @@ pub async fn run(
     let (mut width, mut height, mut steps, mut guidance, mut fps) =
         (width, height, steps, guidance, fps);
     if duration.is_some() && !local {
-        let client = crate::control::client_for_host(host.as_deref())?;
-        video_job.expected_instance = Some(
-            super::video_jobs::destination(&client, video_job.extend_library.is_some()).await?,
-        );
         if let Some(filename) = video_job.extend_library.as_deref() {
+            let client = crate::control::client_for_host(host.as_deref())?;
+            video_job.expected_instance =
+                Some(super::video_jobs::destination(&client, true).await?);
             validate_library_scale_overrides(
                 lora_scale,
                 !lora.is_empty() || camera_control.is_some(),
@@ -1397,6 +1396,14 @@ pub async fn run(
         anyhow::bail!(
             "MiniMax H3 --steps counts terminal-inclusive sigma grid points and must be at least 2"
         );
+    }
+
+    // Reject impossible local controls before contacting the host, but capture
+    // its installation before any user media is prepared. Library extension
+    // captures earlier because its original recipe is authenticated host data.
+    if duration.is_some() && !local && video_job.expected_instance.is_none() {
+        let client = crate::control::client_for_host(host.as_deref())?;
+        video_job.expected_instance = Some(super::video_jobs::destination(&client, false).await?);
     }
 
     // All Library-addressed inputs use one authenticated origin. Keep the
