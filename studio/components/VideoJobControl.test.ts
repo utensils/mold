@@ -117,3 +117,26 @@ it("does not close and reread an open job for an equivalent refreshed owner obje
   await flushPromises();
   expect(api.get).toHaveBeenCalledTimes(1);
 });
+it("keeps historical stopped videos available for a fresh attempt and server discard", async () => {
+  api.get.mockResolvedValue({
+    id: "known",
+    state: "cancelled",
+    completed_clips: "1",
+    plan: { clip_count: "2", total_duration_ms: "6000" },
+    can_cancel: false,
+    can_resume: false,
+    can_delete: true,
+  });
+  const wrapper = mount(VideoJobControl, {
+    props: { owner, jobId: "known", isCurrent: () => true, autoOpen: true },
+    global: { stubs: { ParentVideoRestart: true } },
+    attachTo: document.body,
+  });
+  wrappers.push(wrapper);
+  await flushPromises();
+  expect(wrapper.findComponent({ name: "ParentVideoRestart" }).exists()).toBe(
+    true,
+  );
+  expect(document.body.textContent).toContain("Delete recovery data");
+  expect(document.body.textContent).not.toContain("Resume video");
+});

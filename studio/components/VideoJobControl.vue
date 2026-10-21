@@ -224,7 +224,9 @@ onBeforeUnmount(() => {
             <ParentVideoRestart
               v-if="
                 captured &&
-                ['failed', 'paused', 'interrupted'].includes(detail.state)
+                ['failed', 'paused', 'interrupted', 'cancelled'].includes(
+                  detail.state,
+                )
               "
               :owner="captured"
               :job-id="detail.id"
