@@ -73,4 +73,5 @@ public struct EventsCapabilities: Codable, Hashable, Sendable {
 /// Positive readiness for authenticated retained-media gallery transfers.
 public struct RetainedMediaTransferCapabilities: Codable, Hashable, Sendable {
     public let protocolVersion: Int
+    public let videoArtifacts: Bool?
 }

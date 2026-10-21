@@ -10,7 +10,7 @@ private final class TransferRecipeTransport: StubTransport {
         let archive = String(repeating: changed ? "b" : "a", count: 64)
         let digest = String(repeating: "c", count: 64)
         return (200, Data("""
-        {"archive_identity_sha256":"\(archive)","output_sha256":"\(digest)","output_size_bytes":3,"metadata":{"prompt":"literal\\\\nline\\r\\nnext","seed":18446744073709551615,"video_job":{"id":"parent","source_frames":"0","total_frames":"144","authoring":{"duration_ms":"6000","boundary_frames":124,"seed":"18446744073709551615"},"artifacts":{"provenance_sha256":"\(changed ? "different" : "original")"}}},"members":[{"member_id":"member","role":"source_image","position":"0","sink":"memory","size_bytes":3,"sha256":"\(digest)"}]}
+        {"archive_identity_sha256":"\(archive)","output_sha256":"\(digest)","output_size_bytes":3,"metadata":{"prompt":"literal\\\\nline\\r\\nnext","seed":18446744073709551615,"video_job":{"id":"parent","source_frames":"0","total_frames":"144","authoring":{"duration_ms":"6000","boundary_frames":124,"seed":"18446744073709551615"},"artifacts":{"version":1,"bundle_id":"\(String(repeating:"b",count:64))","provenance":{"sha256":"\(String(repeating:"c",count:64))","size_bytes":"100"},"future_fact":"\(changed ? "different" : "original")"}}},"members":[{"member_id":"member","role":"source_image","position":"0","sink":"memory","size_bytes":3,"sha256":"\(digest)"}]}
         """.utf8))
     }
 }
@@ -34,7 +34,7 @@ struct RetainedTransferRecipeTests {
         object["video_job"] = ["id":"parent","source_frames":"24","total_frames":"168",
             "authoring":["duration_ms":"6000","boundary_frames":124,"input_frames":107,"seed":"18446744073709551615",
                 "scenes":[["prompt":literal,"duration_ms":"3000"],["prompt":"second\\n","duration_ms":"3000"]]],
-            "artifacts":["version":1,"bundle_id":"opaque","future_fact":"must survive"]] as [String:Any]
+            "artifacts":["version":1,"bundle_id":String(repeating:"b",count:64),"provenance":["sha256":String(repeating:"c",count:64),"size_bytes":"100"],"future_fact":"must survive"]] as [String:Any]
         let embeddedRecipe = try JSONSerialization.data(withJSONObject: object, options: .sortedKeys)
         object["job_id"] = "published-completion"
         object["generation_time_ms"] = 1234
@@ -78,7 +78,7 @@ struct RetainedTransferRecipeTests {
 
     @Test func capturedSourceRecipeIsRecheckedEvenWhenTheOutputIdentityDidNotChange() async throws {
         let backend = TransferRecipeTransport.backend()
-        var captured = try await RetainedSourceMedia.prepareMirror(for: "original.mp4", metadata: nil, from: backend, to: backend).sourceOffer!
+        var captured = try await backend.retainedMediaTransferOffer(for: "original.mp4")
         let object = try #require(JSONSerialization.jsonObject(with: captured.rawMetadataJSON!) as? [String:Any])
         var changed = object; changed["future_recipe"] = "changed"
         captured.rawMetadataJSON = try JSONSerialization.data(withJSONObject: changed)

@@ -7,6 +7,7 @@ public struct VideoJobPrintProvenance: Codable, Hashable, Sendable {
     @DecimalUInt64 public var sourceFrames: UInt64
     @DecimalUInt64 public var totalFrames: UInt64
     public let authoring: VideoJobPrintAuthoring?
+    public let artifacts: VideoJobArtifacts?
 }
 
 public struct VideoJobPrintAuthoring: Codable, Hashable, Sendable {

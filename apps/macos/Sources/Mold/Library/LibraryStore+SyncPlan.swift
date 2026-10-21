@@ -10,7 +10,8 @@ import MoldClient
 // each source's persisted mirror cursor -- the replica's change log -- plus the retry set (anything a run did
 // not seal), pending organization, and names This Mac's own log says changed.
 // Everything else is a sealed copy that nothing has touched since, so a run
-// in which nothing changed does no per-print work at all. A cursor the log
+// in which nothing changed does no per-print work for ordinary prints.
+// Publication assets are re-probed because older receipts did not bind them. A cursor the log
 // cannot answer (first run, relaunch, route or instance change) plans every
 // print, exactly as before.
 @MainActor
@@ -19,6 +20,12 @@ extension LibraryStore {
     /// everything anyway: what a source-side retained-input change with no
     /// gallery change waits for at most.
     static let fullPlanInterval: TimeInterval = 24 * 60 * 60
+
+    /// Pre-artifact receipts/checkpoints proved the movie and conditioning pins
+    /// only. Re-probe these separately owned assets even for a cached movie.
+    static func requiresPublicationAssetProbe(_ print: GalleryPrint) -> Bool {
+        print.metadata.videoJob?.artifacts != nil
+    }
 
     func planMirrorWork(_ sources: MirrorSources, destination: MirrorDestination,
                         syncAll: Bool, fullPlan requestedFull: Bool = true) async -> MirrorWorkPlan {
@@ -68,7 +75,9 @@ extension LibraryStore {
                         || (source.view.isTrash(name) && syncRecords.verifiedCopy(of: PrintID(host: hostID, filename: name),
                             on: local.id, authority: syncAuthority) != nil))
                 }
-                var names = Set<String>()
+                var names = Set(source.candidates.filter { name in
+                    source.view.live(name).map(Self.requiresPublicationAssetProbe) == true
+                })
                 for name in changed where candidate(name) { names.insert(name) }
                 for name in owed[hostID] ?? [] where candidate(name) { names.insert(name) }
                 for name in localChanged {
@@ -180,7 +189,7 @@ extension LibraryStore {
         var keptRemovedKeys: Set<String> = []
         var settled: Set<String> = []
         let localInstance = destination.instance
-        for (index, target) in targets.enumerated() {
+        for (index, var target) in targets.enumerated() {
             if syncStopped { break }
             let original = target.print.filename
             let sourceKey = target.key
@@ -198,8 +207,13 @@ extension LibraryStore {
                     continue
                 }
                 if syncRecords.verifiedOrigin(of: sourceID, authority: syncAuthority) != nil {
-                    // Already on the verified root/component: no echo writes.
-                    unchanged += 1; settled.insert(sourceKey)
+                    // An existing component must never echo output or organization.
+                    if Self.requiresPublicationAssetProbe(target.print) {
+                        target.assetsOnly = true
+                        targets[index] = target
+                        work.append(MirrorWorkItem(index:index,target:target,filename:verified.filename,
+                                                   occupied:true,cachedFilename:verified.filename))
+                    } else { unchanged += 1; settled.insert(sourceKey) }
                     continue
                 }
                 if records[sourceKey] == nil {
@@ -246,7 +260,8 @@ extension LibraryStore {
                 let destinationToken = destinationCheckpoint.flatMap { checkpoint in
                     checkpoint.revisions[existing.filename].map { checkpoint.instanceId + ":" + $0 }
                 }
-                if bucket.pending[sourceKey] == nil, cached.organizationIntent == nil, cached.provisional != true,
+                if !Self.requiresPublicationAssetProbe(target.print),
+                   bucket.pending[sourceKey] == nil, cached.organizationIntent == nil, cached.provisional != true,
                    target.isCurrent(),
                    let sourceToken, let destinationToken,
                    cached.sourceCheckpoint == sourceToken, cached.destinationCheckpoint == destinationToken,

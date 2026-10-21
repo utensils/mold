@@ -914,7 +914,7 @@ Library New badges and unread counts are saved on each client independently. Med
 
 Queue rows keep a stable height as previews and progress arrive, preserving the scroll position while browsing. Preview reads share a bounded cache across row reuse.
 
-Library Sync captures the authenticated archive’s complete recipe before downloading. It verifies the output’s checksum and size before importing that recipe, preserving exact seeds, literal prompts, scenes and newer metadata fields. Changed archive facts are refused rather than replaced with a partial embedded recipe.
+Library Sync captures the authenticated archive’s complete recipe before downloading. It verifies the output’s checksum and size before importing that recipe, preserving exact seeds, literal prompts, scenes and newer metadata fields. Changed archive facts are refused rather than replaced with a partial embedded recipe. Published Duration and extended videos also copy their exact PCM and provenance assets in resumable chunks of at most 4 MiB, retaining the portable descriptor and binding the files to the destination archive. Both machines must advertise asset-transfer support. Cached movies recheck these assets; an interrupted asset copy is not reported as complete. Genuine historical missing inputs remain disclosed.
 
 Interrupted syncs remember acknowledged outputs before retained-input and organization work; retries repair the remaining work without copying the output again. Updated hosts batch verification of unchanged copies; older hosts preserve the full retained-input checks. Progress counts checked, copied, already-local and failed prints separately.
 

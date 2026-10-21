@@ -22,6 +22,16 @@ struct LibrarySyncDeltaTests {
         return try! MoldJSON.decoder.decode(GalleryPrint.self, from: json)
     }
 
+    @Test func artifactCopiesCannotTrustPreAssetCheckpointReceipts() throws {
+        let ordinary = versionedPrint("a.mp4")
+        let raw = Data("""
+        {"filename":"a.mp4","timestamp":1000,"metadata":{"video_job":{"id":"parent","source_frames":"0","total_frames":"144","artifacts":{"version":1,"bundle_id":"\(String(repeating:"a",count:64))","provenance":{"sha256":"\(String(repeating:"b",count:64))","size_bytes":"100"}}}}}
+        """.utf8)
+        let artifact = try MoldJSON.decoder.decode(GalleryPrint.self,from:raw)
+        #expect(!LibraryStore.requiresPublicationAssetProbe(ordinary))
+        #expect(LibraryStore.requiresPublicationAssetProbe(artifact), "a completed old receipt is not evidence that publication assets were copied")
+    }
+
     private struct Bench {
         let local: MoldHost
         let remote: MoldHost
@@ -55,6 +65,26 @@ struct LibrarySyncDeltaTests {
         let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? target : source }
         hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
         return Bench(local: local, remote: remote, source: source, target: target, hosts: hosts, records: records)
+    }
+
+    @Test func oldCompletedReceiptReprobesMissingAssetsWithoutRecopyingMovie() async throws {
+        let bench = bench(["movie.mp4"],label:"asset-repair")
+        let artifact = try MoldJSON.decoder.decode(GalleryPrint.self,from:Data("""
+        {"filename":"movie.mp4","timestamp":1000,"size_bytes":3,"media_version":"1000:3","metadata":{"prompt":"fox","video_job":{"id":"parent","source_frames":"0","total_frames":"144","artifacts":{"version":1,"bundle_id":"\(String(repeating:"a",count:64))","provenance":{"sha256":"\(String(repeating:"b",count:64))","size_bytes":"100"}}}}}
+        """.utf8))
+        bench.source.prints = [artifact]; bench.target.prints = [artifact]
+        let library = bench.library()
+        var old = try #require(LocalSyncRecord(source:artifact,from:bench.remote.id,local:artifact,on:bench.local.id,
+                                               destinationInstance:bench.instance))
+        old.sourceCheckpoint = bench.remote.id.uuidString + ":source-movie.mp4"
+        old.destinationCheckpoint = bench.local.id.uuidString + ":local-movie.mp4"
+        old.sourceRoute = library.originContext(bench.remote.id)
+        old.destinationRoute = bench.local.baseURL.absoluteString
+        try await bench.records.checkpoint(old,key:bench.key("movie.mp4"),instance:bench.instance)
+        await library.syncAllLocally()
+        #expect(bench.source.callCount("retainedMediaTransferOffer") > 0)
+        #expect(!library.localSaveFailures.isEmpty, "missing publication assets cannot retain a pre-fix completed receipt")
+        #expect(bench.source.callCount("mediaFile") == 0 && bench.target.importedNames.isEmpty)
     }
 
     /// Per-print routes: anything a run asks about one print at a time.

@@ -10,6 +10,7 @@ struct MirrorTarget: Sendable {
     let isCurrent: @MainActor @Sendable () -> Bool
     let collections: [(slug: String, name: String)]
     var privacyOnly = false
+    var assetsOnly = false
 
     var key: String { LocalSyncRecord.key(hostID: hostID, filename: print.filename) }
 }
@@ -499,6 +500,7 @@ extension LibraryStore {
         var completed = 0
         func record(_ target: MirrorTarget, as filename: String, organize: Bool) {
             successfulCopies.append(MirrorCopy(target: target, filename: filename, newCopy: (organize && syncedCopies[target.key] == nil) || syncedCopies[target.key]?.initialOrganizationPending == true))
+            guard !target.assetsOnly else { return }
             let existing = syncedCopies[target.key]
             // A receipt is not a finished copy: its organization may never
             // have landed, so file its memberships again.
