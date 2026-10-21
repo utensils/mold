@@ -1094,6 +1094,188 @@ mod tests {
         (row, child)
     }
     #[test]
+    fn sealed_input_locator_survives_dispatch_publication_and_parent_discard() {
+        for (input_frames, locator) in [(Some(97), 96), (None, 0)] {
+            let home = tempfile::tempdir().unwrap();
+            let (mut state, _, mut draft) = fixture(home.path(), false, false);
+            let journal = std::sync::Arc::new(crate::queue_journal::QueueJournal::new(
+                state.metadata_db.clone(),
+                Some(home.path()),
+                state.instance_id.as_str(),
+            ));
+            journal
+                .install_queue_media_lifecycle(std::sync::Arc::new(
+                    crate::queue_media_lifecycle::QueueMediaLifecycle::new(
+                        state.metadata_db.clone(),
+                        home.path().to_path_buf(),
+                        journal.owner_uuid().unwrap().to_string(),
+                    ),
+                ))
+                .unwrap();
+            let lifecycle = journal.queue_media_lifecycle().unwrap();
+            assert!(
+                crate::queue_media_startup::reconcile_claimed_owner(&journal, lifecycle.as_ref())
+                    .unwrap()
+                    .durable_media_ready
+            );
+            assert!(lifecycle.runtime_store().is_ok());
+            state.queue_journal = journal;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(
+                    crate::video_job_manifest::jobs_root(&state).unwrap(),
+                    std::fs::Permissions::from_mode(0o700),
+                )
+                .unwrap();
+            }
+
+            let mut image = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgb8(RgbImage::from_pixel(32, 32, image::Rgb([1, 2, 3])))
+                .write_to(&mut image, image::ImageFormat::Png)
+                .unwrap();
+            let keyframes = vec![mold_core::KeyframeCondition {
+                frame: locator,
+                image: image.into_inner(),
+                name: None,
+            }];
+            draft.request.duration_ms = 1000;
+            draft.request.generation.frames = input_frames;
+            draft.request.generation.keyframes = Some(keyframes.clone());
+            draft.template.stages[0].frames = 25;
+            draft.template.stages[0].keyframes = Some(keyframes);
+            draft.envelope.maximum_frames = 25;
+            draft.envelope.frame_step = 8;
+            draft.envelope.frame_offset = 1;
+            draft.plan.single_clip_max_frames = 25;
+            draft.plan.clip_count = 1;
+            draft.plan.part_count = 1;
+            draft.plan.added_frames = 24;
+            draft.plan.total_frames = 24;
+            draft.plan.added_duration_ms = 1000;
+            draft.plan.total_duration_ms = 1000;
+            let id = uuid::Uuid::new_v4().to_string();
+            let prepared = crate::video_job_admission::PreparedVideo {
+                request: draft.request,
+                template: draft.template,
+                plan: draft.plan,
+                envelope: draft.envelope,
+                frozen: Some(draft.frozen),
+                frozen_loras: draft.frozen_loras,
+                source: None,
+                required_claims: vec![],
+            };
+            let pending =
+                crate::video_job_create::seal(&state, &id, "request", "owner", prepared).unwrap();
+            let mut row = pending.row();
+            let manifest = crate::video_job_manifest::read_manifest(&row).unwrap();
+            assert_eq!(manifest.request.generation.frames, input_frames);
+            assert_eq!(
+                manifest.template.stages[0].keyframes.as_ref().unwrap()[0].frame,
+                locator
+            );
+            let restored =
+                crate::video_job_manifest::hydrate_original_request(&state, &row, &manifest)
+                    .unwrap();
+            assert_eq!(restored.generation.frames, input_frames.or(Some(25)));
+            assert_eq!(
+                restored.generation.keyframes.as_ref().unwrap()[0].frame,
+                locator
+            );
+            let schedule = mold_core::video_job_schedule::VideoJobSchedule::new(
+                &manifest.request,
+                manifest.envelope,
+                24,
+                0,
+            )
+            .unwrap();
+            let part = schedule.part(0).unwrap();
+            let hydrated = crate::chain_source_media::hydrate(
+                &crate::video_job_manifest::jobs_root(&state).unwrap(),
+                &job_dir(&state, &id).unwrap(),
+                manifest.template.clone(),
+            )
+            .unwrap();
+            let runtime =
+                crate::video_job_actor::child_request(&id, 0, &manifest, hydrated, &part, None)
+                    .unwrap();
+            assert_eq!(runtime.stages[0].frames, 25);
+            assert_eq!(
+                runtime.stages[0].keyframes.as_ref().unwrap()[0].frame,
+                if locator == 0 { 0 } else { 24 }
+            );
+            let mut runtime_manifest = manifest.clone();
+            runtime_manifest.template = runtime;
+            let (child, child_manifest) = child(home.path(), &runtime_manifest, 0);
+            std::fs::write(
+                child.job_dir.join("final/output-1.mp4"),
+                mold_inference::ltx_video::video_enc::encode_mp4(
+                    &vec![RgbImage::new(32, 32); 25],
+                    24,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            mold_db::video_jobs::insert(db(&state).unwrap(), &row).unwrap();
+            let mut output = VideoJobOutput::open(&state, &row, &manifest, &mut || Ok(())).unwrap();
+            output
+                .accept_child(
+                    &state,
+                    &row,
+                    &manifest,
+                    0,
+                    &part,
+                    &child,
+                    &child_manifest,
+                    &mut || Ok(()),
+                )
+                .unwrap();
+            let owner = output
+                .finish(&state, &row, &manifest, &mut || Ok(()))
+                .unwrap();
+            row.job.state = VideoJobState::Completed;
+            mold_db::video_jobs::checkpoint(db(&state).unwrap(), &row, None).unwrap();
+            let settled = mold_db::video_jobs::get(db(&state).unwrap(), &id)
+                .unwrap()
+                .unwrap();
+            assert!(mold_db::video_jobs::delete_settled(
+                db(&state).unwrap(),
+                &id,
+                settled.revision,
+                100
+            )
+            .unwrap());
+            crate::chain_source_media::release_all(
+                &crate::video_job_manifest::jobs_root(&state).unwrap(),
+                &job_dir(&state, &id).unwrap(),
+            )
+            .unwrap();
+            std::fs::remove_dir_all(job_dir(&state, &id).unwrap()).unwrap();
+            let saved = db(&state)
+                .unwrap()
+                .get(&home.path().join("output"), &owner.final_name)
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved.metadata.frames, Some(24));
+            assert_eq!(saved.metadata.keyframes.as_ref().unwrap()[0].frame, locator);
+            let boundary_sha256 = saved.metadata.keyframes.as_ref().unwrap()[0].sha256.clone();
+            let authoring = saved.metadata.video_job.unwrap().authoring.unwrap();
+            assert_eq!(authoring.boundary_frames, 25);
+            assert_eq!(authoring.input_frames, input_frames);
+            assert_eq!(authoring.duration_ms, 1000);
+            let retained = crate::gallery_source_media::resolve_members(&state, &owner.final_name)
+                .unwrap()
+                .unwrap();
+            assert!(!retained.corrupt);
+            let boundary = retained
+                .members
+                .iter()
+                .find(|member| member.member.role == "stage_keyframe:0:0")
+                .unwrap();
+            assert_eq!(boundary.sha256, boundary_sha256);
+        }
+    }
+    #[test]
     fn published_authoring_uses_original_added_duration_and_literal_scenes() {
         let home = tempfile::tempdir().unwrap();
         let (_, _, mut manifest) = fixture(home.path(), false, false);

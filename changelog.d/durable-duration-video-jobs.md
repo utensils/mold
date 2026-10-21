@@ -4,3 +4,4 @@
 - **Keep stopped videos recoverable.** Stopping an accepted duration video now pauses it after child execution settles, preserving completed clips for explicit Resume. Older stopped videos remain visible and can Start again or Send to another host.
 - Restore authenticated reference images and opening/closing frames when reusing duration-video settings.
 - **Restore chained video settings accurately.** Published duration videos now retain the original duration, optional scenes, exact seed and authored frame boundaries after the queue item is discarded. Extension settings describe the added footage and leave the original video detached.
+- **Preserve authored frame locators at admission.** Chained videos keep their original endpoint settings through publication and Discard while each rendered clip uses its own valid frame boundary.

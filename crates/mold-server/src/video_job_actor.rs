@@ -7,7 +7,7 @@ use mold_core::{
     video_job_schedule::VideoJobPartPlan,
 };
 
-fn child_request(
+pub(crate) fn child_request(
     parent_id: &str,
     index: u64,
     manifest: &VideoJobManifest,

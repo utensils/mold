@@ -83,6 +83,8 @@ Accepted **Stop** pauses a duration parent after its exact child execution autho
 
 Published Duration metadata includes `video_job.authoring`: exact requested `duration_ms` (added time for Extend), optional ordered literal `scenes`, decimal-string `seed`, and `boundary_frames` from the qualified single-clip template. Optional `input_frames` preserves the original authored endpoint locator when it differs from that template; use `input_frames ?? boundary_frames` to match retained closing-frame metadata, never the published total frame count. **Use settings** creates a fresh editable generation draft. For an extended print, disclose that the original video is not attached. Authenticated Gallery media roles remain the only authority for authored images/endpoints/references after parent Discard. Missing authoring on older prints does not authorize guessing scenes or restoring a joined prompt. Authoring JSON is limited to 1 MiB at admission, with an explicit refusal and no truncation or time limit.
 
+Admission seals the original authored frame count and endpoint locators unchanged. Validate a normalized single-clip clone and remap endpoint positions only when building each bounded runtime child; changing the sealed locator would lose reusable authoring provenance.
+
 Generation base seeds and authored-chain base/offset seeds accept exact unsigned decimal strings as well as existing JSON integers. Canonical serialization remains numeric so request scopes and existing clients retain the same identity.
 
 ## Extension audio authority

@@ -281,7 +281,7 @@ pub(crate) async fn create(
     ))
 }
 
-fn seal(
+pub(crate) fn seal(
     state: &AppState,
     id: &str,
     identity: &str,
@@ -312,15 +312,8 @@ fn seal(
     prepared.template.materialize_seed();
     prepared.request.validation_revision = None;
     prepared.request.generation.seed = prepared.template.seed;
-    let frames = prepared.template.stages[0].frames;
-    if let Some(keyframes) = prepared.template.stages[0].keyframes.as_mut() {
-        for frame in keyframes {
-            if frame.frame != 0 {
-                frame.frame = frames - 1;
-            }
-        }
-    }
-    prepared.request.generation.frames = Some(frames);
+    // Seal logical endpoint locators unchanged. Full admission validates a
+    // normalized clone; each bounded child remaps endpoints at dispatch.
     prepared.request.generation.source_image = None;
     prepared.request.generation.keyframes = None;
     prepared.request.generation.references = None;
