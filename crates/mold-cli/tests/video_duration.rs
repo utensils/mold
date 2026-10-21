@@ -130,6 +130,37 @@ async fn ltx_duration_dry_run_never_submits_or_expands() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn duration_ignores_a_long_local_frame_default_for_legacy_routing() {
+    let env = TestEnv::new();
+    let mut config = mold_core::Config::default();
+    config.models.insert(
+        "ltx-2-19b-distilled:fp8".into(),
+        mold_core::ModelConfig {
+            default_frames: Some(1001),
+            ..Default::default()
+        },
+    );
+    env.write_config(&toml::to_string(&config).unwrap());
+    let server = MockServer::start().await;
+    parent_plan(&server, "ltx-2-19b-distilled:fp8", 10000, 17).await;
+    env.cmd()
+        .args([
+            "run",
+            "ltx-2-19b-distilled:fp8",
+            "A tracking shot through a garden",
+            "--duration",
+            "10",
+            "--dry-run",
+            "--host",
+            &server.uri(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("3 clips joined into one video"));
+    assert_read_only_plan(&server).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn chain_limits_preserves_the_server_contract() {
     let env = TestEnv::new();
     let server = MockServer::start().await;

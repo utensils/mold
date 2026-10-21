@@ -1476,7 +1476,9 @@ pub async fn run(
     // delegate to the chain helper. LTX-2 and wan auto-chain; other video
     // families error fast rather than silently over-producing.
     // `decide_chain_routing` declines outright for an audio-only pipeline.
-    {
+    // A Duration parent owns its bounded planning on the server; even a long
+    // local model default must not divert it into this legacy frame path.
+    if video_job.is_none() {
         use super::chain::{decide_chain_routing, warn_if_clamped, ChainRoutingDecision};
         let routing_fps = effective_fps.unwrap_or(mold_core::validation::LTX2_DEFAULT_FPS);
         // Wan's seam is last-frame image conditioning, so the routing needs

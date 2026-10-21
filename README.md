@@ -427,12 +427,10 @@ Native Mac local authoring inputs are saved privately alongside the prompt and s
 
 Before importing a source-bearing copy, clients check destination readiness. Windows local destinations currently cannot receive retained inputs, so those copies are refused before creating a local library output. Source-free copies remain supported, and Windows clients can recall retained sources from a supported remote machine.
 Unix storage-only destinations can receive retained-source backups when their gallery and encrypted media store are ready, even with generation workers disabled.
-For a video with one prompt, `mold run MODEL "prompt" --duration 45 --host HOST`
-resolves seconds onto the model's frame grid and automatically chains supported
-long videos. Add `--dry-run` to inspect clip lengths and delivered duration
-without generation. H3 FL2VA uses the paired server and publishes one stitched
-MP4 with audio; use `--script` for authored scene changes. Inspect live bounds
-with `mold chain limits MODEL --json --host HOST`.
+For advanced frame-level scripts, inspect the paired host's live bounds with
+`mold chain limits MODEL --json --host HOST`. For one prompt and a requested
+length, use **Duration** and its server plan as described in the
+[video guide](https://utensils.io/mold/guide/video#longer-videos).
 
 To install Mold's Agent Skill for supported coding agents,
 run:
