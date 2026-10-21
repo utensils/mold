@@ -46,12 +46,18 @@ public extension VideoJobCoordinator {
                 current: @escaping @MainActor () -> Bool) async {
         let backend = scoped(backend, owner: job.owner)
         guard job.detail?.canDelete == true, !mutating.contains(job.id) else { return }
-        mutating.insert(job.id); readTokens[job.id] = UUID()
-        defer { mutating.remove(job.id) }
+        mutating.insert(job.id); deleting.insert(job.id); readTokens[job.id] = UUID()
+        defer { mutating.remove(job.id); deleting.remove(job.id) }
         do {
             try await verify(job.owner, backend: backend, current: current)
-            try await backend.deleteVideoJob(id: job.operationId, destinationInstanceId: job.owner.instanceId)
+            do {
+                try await backend.deleteVideoJob(id: job.operationId, destinationInstanceId: job.owner.instanceId)
+            } catch {
+                guard case let .http(status, code, _) = error as? MoldClientError,
+                      status == 404, code == "VIDEO_JOB_NOT_FOUND" else { throw error }
+            }
             guard current(), !Task.isCancelled else { return }
+            try recordRemoval(job.operationId, owner: job.owner)
             try forget(job.operationId, owner: job.owner)
             retireReads(job.id)
             jobs.removeAll { $0.id == job.id && $0.owner == job.owner }

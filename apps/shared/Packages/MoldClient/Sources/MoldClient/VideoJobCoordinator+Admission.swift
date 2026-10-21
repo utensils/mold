@@ -6,6 +6,7 @@ public extension VideoJobCoordinator {
     func restorePending(hosts: [MoldHost]) {
         unavailableRecoveryCount = 0
         for record in pending {
+            guard !removals.contains(Removal(record)) else { continue }
             guard let host = hosts.first(where: {
                 $0.id == record.hostId && $0.baseURL.absoluteString == record.origin && $0.connectionMode == record.connectionMode
             }) else { unavailableRecoveryCount += 1; continue }
@@ -78,7 +79,8 @@ public extension VideoJobCoordinator {
     func recover(owner: VideoJobOwner, backend: any MoldBackend, current: @escaping @MainActor () -> Bool) async {
         guard current() else { return }
         for record in pending where record.matches(owner) {
-            guard current() else { return }
+            guard current(), !Task.isCancelled else { return }
+            guard pending.contains(record), !isRemoved(record.operationId, owner: owner) else { continue }
             ensure(record.operationId, owner: owner)
             await refresh(record.operationId, owner: owner, backend: backend, current: current)
             if let detail = jobs.first(where: { $0.operationId == record.operationId && $0.owner == owner })?.detail,
@@ -90,8 +92,13 @@ public extension VideoJobCoordinator {
 
     func discover(owner: VideoJobOwner, backend: any MoldBackend, activityIDs: [String] = [],
                   current: @escaping @MainActor () -> Bool) async {
+        let known = jobs.filter { $0.owner.host.id == owner.host.id && $0.owner.instanceId == owner.instanceId }.map(\.operationId)
         await loadPage(owner: owner, cursor: nil, backend: backend, current: current)
-        for id in Set(activityIDs) where index(id, owner: owner) == nil {
+        for job in jobs where job.owner == owner && job.detail?.state == .completed {
+            guard current(), !Task.isCancelled else { return }
+            await checkOutput(job, backend: backend, current: current, force: true)
+        }
+        for id in Set(activityIDs).union(known) where index(id, owner: owner) == nil {
             guard current(), !Task.isCancelled else { return }
             await refresh(id, owner: owner, backend: backend, current: current)
             follow(.init(operationId: id, owner: owner), owner: owner, backend: backend, current: current)

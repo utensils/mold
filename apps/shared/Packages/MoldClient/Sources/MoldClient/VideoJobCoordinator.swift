@@ -26,6 +26,10 @@ public final class VideoJobCoordinator {
     @ObservationIgnored var transportCleanups: [String: TransportCleanup] = [:]
     @ObservationIgnored var followTokens: [String: UUID] = [:]
     @ObservationIgnored var followOwners: [String: VideoJobOwner] = [:]
+    @ObservationIgnored var removals: Set<Removal> = []
+    @ObservationIgnored var removalError: String?
+    var deleting: Set<String> = []
+    var outputReads: [String: VideoJobOutputRead] = [:]
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -37,6 +41,15 @@ public final class VideoJobCoordinator {
         } catch {
             journalError = "This device’s video recovery record is unreadable. Keep it before repairing storage."
             self.error = journalError
+        }
+        do {
+            if let data = defaults.data(forKey: Self.removalsKey) {
+                guard data.count <= Self.removalBudget else { throw CocoaError(.fileReadCorruptFile) }
+                removals = try MoldJSON.localDecoder.decode(Set<Removal>.self, from: data)
+            }
+        } catch {
+            removalError = "Saved Queue dismissals are unreadable. Keep this device’s data before repairing storage."
+            self.error = removalError
         }
     }
 
@@ -76,7 +89,7 @@ public final class VideoJobCoordinator {
     func identity(_ id: String, owner: VideoJobOwner) -> String { owner.host.id.uuidString + ":" + id }
     public func hasUncertainAdmission(on owner: VideoJobOwner) -> Bool {
         pending.contains { record in
-            record.matches(owner) && !jobs.contains { $0.operationId == record.operationId && $0.owner == owner && $0.detail != nil }
+            record.matches(owner) && !isRemoved(record.operationId, owner: owner) && !jobs.contains { $0.operationId == record.operationId && $0.owner == owner && $0.detail != nil }
         }
     }
     func releaseTransport(_ id: String, owner: VideoJobOwner) async {
@@ -92,6 +105,7 @@ public final class VideoJobCoordinator {
             || pagination.values.contains { $0.error != nil || $0.hasMore || $0.isLoading }
     }
 
+    public func isDeleting(_ job: ObservedVideoJob) -> Bool { deleting.contains(job.id) }
     public func isMutating(_ job: ObservedVideoJob) -> Bool { mutating.contains(job.id) }
     public func isCancellationRequested(_ job: ObservedVideoJob) -> Bool {
         pending.contains { $0.operationId == job.operationId && $0.matches(job.owner) && $0.cancelRequested }
@@ -100,6 +114,7 @@ public final class VideoJobCoordinator {
         jobs.firstIndex { $0.operationId == id && $0.owner == owner }
     }
     func ensure(_ id: String, owner: VideoJobOwner) {
+        guard !isRemoved(id, owner: owner) else { return }
         if !jobs.contains(where: { $0.operationId == id && $0.owner.host.id == owner.host.id }) {
             jobs.append(.init(operationId: id, owner: owner))
         }
@@ -109,10 +124,15 @@ public final class VideoJobCoordinator {
         if let index = index(id, owner: owner) { jobs[index].message = text }
     }
     func publish(_ value: VideoJob, owner: VideoJobOwner) {
+        guard !isRemoved(value.id, owner: owner) else { return }
         if let stale = jobs.firstIndex(where: { $0.operationId == value.id && $0.owner.host.id == owner.host.id && $0.owner != owner }) {
             jobs[stale] = .init(operationId: value.id, owner: owner)
         }
         ensure(value.id, owner: owner)
+        if let index = index(value.id, owner: owner), jobs[index].detail?.outputFilename != value.outputFilename {
+            outputReads[jobs[index].id]?.cancel(); outputReads[jobs[index].id] = nil
+            jobs[index].outputAvailable = nil; jobs[index].outputMessage = nil
+        }
         if let index = index(value.id, owner: owner) { jobs[index].detail = value; jobs[index].message = value.state == .completed && value.outputFilename == nil
             ? "Completed, but no saved Library video was reported." : nil }
         let completed = jobs.filter { $0.detail?.state == .completed || $0.cancelledBeforeAdmission }
@@ -123,11 +143,11 @@ public final class VideoJobCoordinator {
         }
     }
     func retireReads(_ key: String) {
-        readTokens[key] = nil
+        readTokens[key] = nil; outputReads[key]?.cancel(); outputReads[key] = nil
         followers[key]?.cancel(); followers[key] = nil; followTokens[key] = nil; followOwners[key] = nil
     }
     public func cancelPreparation() { submissionToken = UUID(); isSubmitting = false }
     public func suspend() {
-        followers.values.forEach { $0.cancel() }; followers.removeAll(); followTokens.removeAll(); followOwners.removeAll(); readTokens.removeAll(); pageTokens.removeAll(); pagination.removeAll()
+        followers.values.forEach { $0.cancel() }; followers.removeAll(); followTokens.removeAll(); followOwners.removeAll(); readTokens.removeAll(); outputReads.values.forEach { $0.cancel() }; outputReads.removeAll(); pageTokens.removeAll(); pagination.removeAll()
     }
 }

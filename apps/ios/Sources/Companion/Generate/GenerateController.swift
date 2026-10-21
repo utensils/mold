@@ -97,7 +97,11 @@ final class GenerateController {
             self?.draft.media.generationReferences = refs.map(AuthoringReference.canonical)
         }
         hosts.listen { [weak self] id, event in
-            guard let self, !self.followingSuspended, self.activeBatch?.host == id else { return }
+            guard let self else { return }
+            if case let .gallery(change) = event, let host = self.hosts.host(id), let instance = self.hosts.instanceID(of: id) {
+                self.videoJobs.galleryChanged(change, owner: .init(host: host, instanceId: instance))
+            }
+            guard !self.followingSuspended, self.activeBatch?.host == id else { return }
             if case .resyncRequired = event { self.resumeFollowing() }
         }
     }
