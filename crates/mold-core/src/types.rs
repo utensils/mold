@@ -11914,6 +11914,8 @@ pub struct EventsCapabilities {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetainedMediaTransferCapabilities {
     pub protocol_version: u32,
+    #[serde(default)]
+    pub video_artifacts: bool,
 }
 
 /// Restart-safe encrypted request-media support for the durable generation

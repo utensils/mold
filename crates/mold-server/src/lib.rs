@@ -28,6 +28,7 @@ mod gallery_source_cache;
 mod gallery_source_media;
 mod gallery_source_thumbnail;
 mod gallery_sync;
+mod gallery_video_artifacts;
 mod generation_assets;
 #[allow(dead_code)]
 mod h3_admission;

@@ -252,3 +252,26 @@ stages are refused. Boundary locators come from the exact archived recipe,
 never the movie's total delivered frame count. Reuse sessions bind and recheck
 that locator with archive/member identity before consuming a session. Legacy
 full-sequence restoration uses each stage's authenticated retained inputs.
+
+Video-job Library copies also retain `video_job.artifacts` (provenance and optional
+exact PCM). Both hosts must advertise `retained_media_transfer.video_artifacts`.
+`/api/gallery/video-artifacts/:filename/:role` exports only `provenance` or `pcm`,
+in at most 4 MiB chunks, fenced by source installation and committed archive.
+The destination `transfer` begin/status/chunk/complete routes bind the unchanged
+portable descriptor to its exact committed destination archive. Sequential durable
+offsets and bounded same-offset retry comparison permit restart without duplicate
+bytes. Completion hashes/fsyncs every file, rechecks the current archive under the
+publication gate, then seals an owner-scoped imported bundle. Never inline PCM,
+apply a whole-video byte/duration ceiling, or rehash the growing file per chunk.
+The source offer's `video_artifacts_complete` and Sync checkpoint trust require a
+verified seal; a copied movie with partial artifacts is repairable, not complete.
+Trash retains artifacts; permanent deletion releases only that exact owner's
+flat or imported bundle, including partial imports. Storage-only hosts can copy
+these files without an inference worker or MP4 encoder.
+New publication seals and transfer completion persist a private, atomic verified
+file-facts receipt outside the global Gallery gate. Bind it to exact owner,
+descriptor, path, inode/device, size, mtime and ctime. Unchanged inventory must
+validate this receipt without rereading PCM after restart or across large
+libraries; changed facts invalidate proof. Pre-receipt bundles qualify once by
+full hash, then persist the same proof. Do not use a bounded in-memory cache as
+the only defense against repeated whole-library audio scans.

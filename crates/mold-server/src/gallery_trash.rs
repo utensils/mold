@@ -626,9 +626,7 @@ fn release_retired_media_pins(
         })?;
     if let (Some(db), Some((descriptor, identity))) = (db, assets) {
         let released = crate::video_archive_assets::root_from_db(db).and_then(|root| {
-            if root.join(&descriptor.bundle_id).exists() {
-                crate::video_archive_assets::release(&root, &descriptor, &identity)?;
-            }
+            crate::video_archive_assets::release(&root, &descriptor, &identity)?;
             Ok(())
         });
         if let Err(error) = released {

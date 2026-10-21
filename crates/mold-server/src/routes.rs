@@ -859,6 +859,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/models/load", post(load_model))
         .route("/api/models/pull", post(pull_model_endpoint))
         .route("/api/models/unload", delete(unload_model))
+        .merge(crate::gallery_video_artifacts::router())
         .route("/api/gallery", get(list_gallery))
         .route(
             "/api/gallery/changes",
@@ -8780,6 +8781,12 @@ async fn server_capabilities(
         retained_media_transfer: readiness.retained_transfer_ready().then_some(
             mold_core::RetainedMediaTransferCapabilities {
                 protocol_version: 1,
+                video_artifacts: state
+                    .metadata_db
+                    .as_ref()
+                    .as_ref()
+                    .and_then(|db| db.path().parent())
+                    .is_some_and(|path| path.is_absolute()),
             },
         ),
         reference_uploads: mold_core::ReferenceUploadCapabilities {

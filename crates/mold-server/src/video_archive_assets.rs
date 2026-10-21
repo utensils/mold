@@ -244,14 +244,26 @@ pub(crate) fn prepare(
     Ok(descriptor)
 }
 /// Bind only after Gallery committed this exact output identity.
-#[cfg(any(feature = "mp4", test))]
+#[cfg(test)]
 pub(crate) fn seal(
     root: &Path,
     descriptor: &VideoJobArtifacts,
     owner: &ArchivedChildIdentity,
 ) -> Result<()> {
+    seal_with_checkpoint(root, descriptor, owner, &mut || Ok(()))
+}
+#[cfg(any(feature = "mp4", test))]
+pub(crate) fn seal_with_checkpoint(
+    root: &Path,
+    descriptor: &VideoJobArtifacts,
+    owner: &ArchivedChildIdentity,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<()> {
     let directory = directory(root, descriptor)?;
     verify_descriptor(&directory, descriptor)?;
+    // Publication runs after the Gallery commit releases its global gate. Qualify
+    // immutable files once here so later inventory needs only durable file facts.
+    crate::gallery_video_artifacts::verify_files(&directory, owner, descriptor, checkpoint)?;
     match write_json(&directory, "owner.json", owner) {
         Ok(()) => Ok(()),
         Err(error) => {
@@ -327,11 +339,15 @@ pub(crate) fn release(
     descriptor: &VideoJobArtifacts,
     owner: &ArchivedChildIdentity,
 ) -> Result<bool> {
+    let imported = crate::gallery_video_artifacts::release_import(root, owner, descriptor)?;
+    if !root.join(&descriptor.bundle_id).try_exists()? {
+        return Ok(imported);
+    }
     let directory = directory(root, descriptor)?;
     verify_descriptor(&directory, descriptor)?;
     let existing: ArchivedChildIdentity = read_json(&directory.join("owner.json"))?;
     if existing != *owner {
-        return Ok(false);
+        return Ok(imported);
     }
     std::fs::remove_dir_all(directory)?;
     crate::dir_sync::sync_directory(root)?;

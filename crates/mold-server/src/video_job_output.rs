@@ -959,7 +959,12 @@ impl VideoJobOutput {
             &state.gallery_publication_gate,
             checkpoint,
         )?;
-        crate::video_archive_assets::seal(&assets_root, &assets, &owner)?;
+        crate::video_archive_assets::seal_with_checkpoint(
+            &assets_root,
+            &assets,
+            &owner,
+            checkpoint,
+        )?;
         crate::chain_source_media::handoff_current_to_gallery(
             db(state)?,
             &crate::video_job_manifest::jobs_root(state)?,
