@@ -323,6 +323,7 @@ The server renders one clip at a time and publishes one MP4 in its active
 it; independent clips use distinct seeds and a blended join. Duration has no
 fixed overall clip-count limit. The selected model, resolution and available
 memory still determine whether each clip fits. H3 requires an H3-enabled server.
+Legacy `mold chain limits` total-frame and clip-count bounds do not cap `--duration`.
 
 Extend an existing Library movie with a new prompt and **additional** seconds:
 
@@ -336,6 +337,8 @@ in Library. Select a supported model explicitly when a new attempt needs a
 different recipe; never remove required conditioning to force admission.
 
 `--dry-run` validates without submitting. `--detach` returns after acceptance.
+For the first submission, omit `--operation-id`: the CLI assigns and saves the UUID.
+Use that flag only to recover an existing printed UUID from the same CLI installation.
 CLI duration jobs publish one Library movie per invocation; batching and skipping
 Library saving are unavailable for this path.
 Use `--duration` with MP4 output; omit frame counts, clip/overlap overrides,

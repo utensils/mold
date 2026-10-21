@@ -1,8 +1,8 @@
 # Requested-duration video across surfaces
 
-User review is required before this feature merges or ships. Temporary UAT
-builds are permitted. Final production deployment and installer refresh follow
-approval and a green main revision.
+The owner authorized merge and deployment after independent review, completed
+UAT and green checks. Temporary UAT builds are permitted. Final production
+deployment and installer refresh follow a green main revision.
 
 ## Interaction
 
@@ -12,6 +12,11 @@ approval and a green main revision.
 - Keep a chosen duration when switching models; recompute the plan for that model.
 - Offer **Extend video** on an existing Library movie: prompt plus seconds to add.
   Publish the original plus extension as a new movie and retain the original.
+- **Use settings** restores an editable draft with the saved duration, literal
+  prompts, exact seed and authenticated inputs. For extensions, restore added
+  time and explain that the original video is not attached. Legacy authored
+  clips retain their individual settings; unavailable provenance refuses before
+  changing the current draft.
 - Keep exact **Resume** separate from **Start again** and **Send to another
   machine**. New attempts preserve original inputs and validate today's recipe.
 
@@ -37,15 +42,15 @@ validates the destination's current recipe. Placement and progress never move.
 
 ## Coverage and acceptance
 
-| Surface | Required proof |
-| --- | --- |
-| CLI and Rust SDK | One prompt/duration; Library extension; known-ID recovery; same-host restart and cross-host transfer; no duplicate POST after uncertainty |
-| Web | Playwright generation, extension, scene planning and durable Queue actions |
-| Tauri desktop/mobile | Shared composer and Library flows, shell build checks and browser-visible interaction proof |
-| Native macOS | Composer, Library extension, durable Queue/restart controls; debug-app UAT |
-| Native iOS | Composer/keyboard dismissal, extension and durable Queue/restart controls; Simulator UAT identified separately from physical-device proof |
-| Discord | Duration and optional next prompt; Library extension; owner receipt and recovery command tests |
-| Agent skill | Concise duration-first examples; independent Luna blind execution; correct published Library filename |
+| Surface              | Required proof                                                                                                                            |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| CLI and Rust SDK     | One prompt/duration; Library extension; known-ID recovery; same-host restart and cross-host transfer; no duplicate POST after uncertainty |
+| Web                  | Playwright generation, extension, scene planning and durable Queue actions                                                                |
+| Tauri desktop/mobile | Shared composer and Library flows, shell build checks and browser-visible interaction proof                                               |
+| Native macOS         | Composer, Library extension, durable Queue/restart controls; debug-app UAT                                                                |
+| Native iOS           | Composer/keyboard dismissal, extension and durable Queue/restart controls; Simulator UAT identified separately from physical-device proof |
+| Discord              | Duration and optional next prompt; Library extension; owner receipt and recovery command tests                                            |
+| Agent skill          | Concise duration-first examples; independent Luna blind execution; correct published Library filename                                     |
 
 All actual generation UAT targets Plato's active `/storage/mold`, publishing to
 its normal output Library in **Video chaining UI UAT**. Receipts are retained
@@ -55,4 +60,5 @@ visible from the active Library, with duration, audio and ownership verified.
 
 Independent reviews cover the shared contracts, browser/native behavior,
 backend ownership/cancellation, output assembly and CLI recovery. After all
-checks and UAT, present the working surfaces and PR for the user's review.
+checks and UAT, merge the reviewed feature, deploy main and refresh the local
+nightly CLI and skills.
