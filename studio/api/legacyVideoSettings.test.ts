@@ -333,3 +333,44 @@ it("restores a complete no-input legacy movie from a fresh authenticated exact G
   expect(result.request.stages[1]?.prompt).toBe(" B ");
   expect(fetch).not.toHaveBeenCalled();
 });
+
+it("refuses historical top-level conditioning when per-stage provenance is missing", async () => {
+  inventory.mockResolvedValue({
+    availability: "unavailable_legacy",
+    members: [],
+  });
+  for (const extra of [
+    { references: [{ kind: "image", sha256: "a".repeat(64) }] },
+    { generation_references: [{ kind: "image", sha256: "a".repeat(64) }] },
+    { keyframes: [{ frame: 0, sha256: "b".repeat(64) }] },
+  ]) {
+    const m = { ...metadata, ...extra };
+    json.mockImplementation(async (_t, path) =>
+      path === "/api/status"
+        ? { instance_id: "installation" }
+        : [{ filename: "movie.mp4", metadata: m }],
+    );
+    await expect(
+      inspectLegacyVideoSettings(owner, "movie.mp4", m),
+    ).rejects.toThrow(/conditioning|reference|keyframe|input/i);
+  }
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it("allows a historical no-input H3 source label without inventing a missing first frame", async () => {
+  inventory.mockResolvedValue({
+    availability: "unavailable_legacy",
+    members: [],
+  });
+  const m = { ...metadata, source_image_name: "text-to-video" };
+  json.mockImplementation(async (_t, path) =>
+    path === "/api/status"
+      ? { instance_id: "installation" }
+      : [{ filename: "movie.mp4", metadata: m }],
+  );
+  expect(
+    (await inspectLegacyVideoSettings(owner, "movie.mp4", m)).request.stages[0]
+      ?.source_image,
+  ).toBeUndefined();
+  expect(fetch).not.toHaveBeenCalled();
+});

@@ -53,6 +53,22 @@ function project(
     chain.stage_count !== chain.stages.length
   )
     throw new Error("This video did not save complete ordered clip settings.");
+  const hasList = (value: unknown) => Array.isArray(value) && value.length > 0;
+  const rawStages = chain.stages.map(record);
+  if (
+    (hasList(metadata.references) || hasList(metadata.generation_references)) &&
+    !rawStages.some((stage) => hasList(stage.generation_references))
+  )
+    throw new Error(
+      "This older video's reference conditioning lacks complete per-clip provenance. Use Start again from its saved job or reattach the original inputs.",
+    );
+  if (
+    hasList(metadata.keyframes) &&
+    !rawStages.some((stage) => hasList(stage.keyframes))
+  )
+    throw new Error(
+      "This older video's keyframe conditioning lacks complete per-clip provenance. Use Start again from its saved job or reattach the original inputs.",
+    );
   for (const key of [
     "spatial_upscale",
     "temporal_upscale",
@@ -278,7 +294,6 @@ export async function inspectLegacyVideoSettings(
       stages = chain.stages as unknown[];
     if (
       m.source_image_sha256 ||
-      m.source_image_name ||
       stages.some((value) => {
         const stage = record(value);
         return (
@@ -389,7 +404,8 @@ export async function inspectLegacyVideoSettings(
     };
   });
   if (
-    metadata.source_image_sha256 != null &&
+    (metadata.source_image_sha256 != null ||
+      Boolean(metadata.source_image_name)) &&
     !rows.some((row) => row.kind === "source" && row.stage === 0)
   )
     throw new Error(
