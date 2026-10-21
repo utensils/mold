@@ -794,7 +794,7 @@ Examples:
   mold jobs show job-abc123 --json
   mold jobs show job-abc123 --script > edited.toml")]
     Show {
-        /// Sequence job id as shown by `mold jobs list`
+        /// Video or sequence job id as shown by `mold jobs list`
         #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
         /// Print the raw `ChainJobDetail` document as JSON
@@ -806,7 +806,7 @@ Examples:
         script: bool,
     },
     Resume {
-        /// Sequence job id as shown by `mold jobs list`
+        /// Video or sequence job id as shown by `mold jobs list`
         #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
     },
@@ -830,7 +830,7 @@ Examples:
         operation_id: Option<String>,
     },
     Retake {
-        /// Sequence job id as shown by `mold jobs list`
+        /// Video or sequence job id as shown by `mold jobs list`
         #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
         /// Zero-based stage index (0 is the first clip)
@@ -858,7 +858,7 @@ Examples:
   mold jobs amend job-abc123 --script edited.toml --dry-run
   mold jobs amend job-abc123 --script edited.toml --fps 30 --no-audio")]
     Amend {
-        /// Sequence job id as shown by `mold jobs list`
+        /// Video or sequence job id as shown by `mold jobs list`
         #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
         /// Edited `mold.chain.v1` TOML script carrying the full stage list
@@ -890,12 +890,15 @@ Examples:
         dry_run: bool,
     },
     Cancel {
-        /// Sequence job id as shown by `mold jobs list`
+        /// Video or sequence job id as shown by `mold jobs list`
         #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
+        /// Stop a known duration-video admission, even before its queue row exists.
+        #[arg(long)]
+        video: bool,
     },
     Delete {
-        /// Sequence job id as shown by `mold jobs list`
+        /// Video or sequence job id as shown by `mold jobs list`
         #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
         #[arg(long)]
@@ -1933,7 +1936,7 @@ Examples:
 
         /// Requested video duration in seconds. Longer videos automatically
         /// join model-sized clips with the appropriate overlap (remote server).
-        #[arg(long, value_parser = commands::video_jobs::parse_duration_ms, conflicts_with = "frames", help_heading = "Video")]
+        #[arg(long, value_parser = commands::video_jobs::parse_duration_ms, conflicts_with_all = ["frames", "clip_frames", "frames_per_clip", "motion_tail", "predict_duration", "script", "upscale"], help_heading = "Video")]
         duration: Option<u64>,
 
         #[command(flatten)]
@@ -7064,6 +7067,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn duration_refuses_ignored_clip_authoring_controls() {
+        for flag in ["--clip-frames", "--frames-per-clip", "--motion-tail"] {
+            assert!(
+                try_parse(&["run", "a garden", "--duration", "30", flag, "17"]).is_err(),
+                "{flag}"
+            );
+        }
+        assert!(try_parse(&[
+            "jobs",
+            "cancel",
+            "01234567-89ab-4cde-8123-456789abcdef",
+            "--video"
+        ])
+        .is_ok());
+    }
     #[test]
     fn run_h3_duration_conflicts_with_explicit_frames() {
         let error = try_parse(&[

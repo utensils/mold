@@ -38,30 +38,6 @@ pub struct VideoRestartPrefix {
     pub upload_spec_json: String,
 }
 
-impl crate::MoldClient {
-    pub async fn video_restart_options(&self, id: &str) -> anyhow::Result<VideoRestartOptions> {
-        let path = crate::client::encode_path_segment(id);
-        Ok(serde_json::from_value(
-            self.queue_transfer_json(&format!("/api/video-jobs/{path}/restart-options"), None)
-                .await?,
-        )?)
-    }
-    pub async fn export_video_restart(
-        &self,
-        id: &str,
-        authority: &crate::job_restart::RestartExportRequest,
-    ) -> anyhow::Result<VideoRestartExport> {
-        let path = crate::client::encode_path_segment(id);
-        Ok(serde_json::from_value(
-            self.queue_transfer_json(
-                &format!("/api/video-jobs/{path}/restart-export"),
-                Some(&serde_json::to_value(authority)?),
-            )
-            .await?,
-        )?)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,5 +50,22 @@ mod tests {
             serde_json::to_value(value).unwrap()["size_bytes"],
             "9007199254740993"
         );
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    #[tokio::test]
+    async fn restart_options_are_fenced_to_the_captured_source_installation() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/api/video-jobs/job/restart-options")).and(header("x-mold-destination-instance","source"))
+          .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"source_instance_id":"source","source_revision":"revision","restart":{"supported":true},"send":{"supported":true}}))).expect(1).mount(&server).await;
+        let options = crate::MoldClient::new(&server.uri())
+            .video_restart_options("job", "source")
+            .await
+            .unwrap();
+        assert_eq!(options.source_instance_id, "source");
     }
 }

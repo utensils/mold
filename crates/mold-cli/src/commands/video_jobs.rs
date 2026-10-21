@@ -3,6 +3,12 @@
 #[derive(Debug, Clone, Default, clap::Args)]
 pub(crate) struct VideoJobFlags {
     #[arg(skip)]
+    pub expected_instance: Option<String>,
+    #[arg(skip)]
+    pub extension_recipe: Option<mold_core::GenerateRequest>,
+    #[arg(skip)]
+    pub recipe_overrides: std::collections::BTreeSet<&'static str>,
+    #[arg(skip)]
     pub dry_run: bool,
     /// Extend this exact video filename from the destination's Library.
     #[arg(long, requires = "duration", conflicts_with_all = ["local", "extend", "video"], help_heading = "Video")]
@@ -95,7 +101,10 @@ mod tests {
 }
 
 /// Capture the server installation before private validation or admission.
-async fn destination(client: &mold_core::MoldClient, extending: bool) -> anyhow::Result<String> {
+pub(crate) async fn destination(
+    client: &mold_core::MoldClient,
+    extending: bool,
+) -> anyhow::Result<String> {
     let capabilities = client.capabilities().await?;
     let caps = capabilities.video_jobs.as_ref();
     anyhow::ensure!(
@@ -112,19 +121,130 @@ async fn destination(client: &mold_core::MoldClient, extending: bool) -> anyhow:
         .ok_or_else(|| anyhow::anyhow!("This machine did not identify its installation"))
 }
 
+/// Original scalar defaults fill only fields the new command did not override.
+/// Newly prepared inputs, seeds, filing and prompt provenance remain untouched.
+pub(crate) fn apply_extension_recipe(
+    prepared: &mut mold_core::GenerateRequest,
+    flags: &VideoJobFlags,
+) {
+    let Some(base) = flags.extension_recipe.clone() else {
+        return;
+    };
+    macro_rules! restore {($($field:ident),*$(,)?)=>{$(if !flags.recipe_overrides.contains(stringify!($field)){prepared.$field=base.$field;})*};}
+    restore!(
+        model,
+        width,
+        height,
+        steps,
+        guidance,
+        negative_prompt,
+        scheduler,
+        cfg_plus,
+        strength,
+        reference_weight,
+        true_cfg,
+        cfg_start_step,
+        control_model,
+        control_scale,
+        loras,
+        fps,
+        enable_audio,
+        video_only,
+        pipeline,
+        ic_lora_control,
+        spatial_upscale,
+        temporal_upscale,
+        guidance_overrides,
+        sample_shift,
+        distill_strength_high,
+        distill_strength_low
+    );
+}
+pub(crate) async fn library_recipe(
+    client: &mold_core::MoldClient,
+    filename: &str,
+) -> anyhow::Result<mold_core::GenerateRequest> {
+    use anyhow::Context;
+    let row = client
+        .gallery_video_source(filename)
+        .await?
+        .context("Choose an existing video from this machine's Library")?;
+    anyhow::ensure!(
+        row.filename == filename
+            && row.trashed_at.is_none()
+            && (row.format == Some(mold_core::OutputFormat::Mp4)
+                || (row.format.is_none() && filename.to_ascii_lowercase().ends_with(".mp4"))),
+        "Choose an active Library MP4"
+    );
+    anyhow::ensure!(!row.metadata_synthetic,"This older print has no recoverable recipe; open Extend in an app and choose a video model");
+    mold_core::video_extension::extension_generation(&row.metadata, "").map_err(anyhow::Error::msg)
+}
+
+/// This is the first branch of `run`, before catalog lookup or opening input files.
+pub(crate) async fn reconcile(
+    client: &mold_core::MoldClient,
+    id: uuid::Uuid,
+    detach: bool,
+    output: Option<&str>,
+) -> anyhow::Result<()> {
+    let receipt = super::video_receipt::read(&id.to_string(), client.host())?;
+    anyhow::ensure!(
+        !receipt.chain,
+        "This receipt belongs to an authored part; use mold jobs show or restart"
+    );
+    let instance = destination(client, false).await?;
+    anyhow::ensure!(
+        instance == receipt.instance_id,
+        "The original video machine was replaced; no operation was changed"
+    );
+    let job = client
+        .get_video_job(&id.to_string(), &receipt.instance_id)
+        .await?;
+    observe(client, job, &receipt.instance_id, detach, output).await
+}
+
 pub(crate) async fn admit(
     client: &mold_core::MoldClient,
     generation: &mold_core::GenerateRequest,
     options: &VideoJobOptions,
     before_submission: impl FnOnce(),
 ) -> anyhow::Result<Option<(mold_core::video_job::VideoJob, String)>> {
+    admit_with_receipt(
+        client,
+        generation,
+        options,
+        before_submission,
+        |id, instance| super::video_receipt::store(id, client.host(), instance),
+    )
+    .await
+}
+async fn admit_with_receipt(
+    client: &mold_core::MoldClient,
+    generation: &mold_core::GenerateRequest,
+    options: &VideoJobOptions,
+    before_submission: impl FnOnce(),
+    persist: impl FnOnce(&str, &str) -> anyhow::Result<()>,
+) -> anyhow::Result<Option<(mold_core::video_job::VideoJob, String)>> {
     use crate::output::status;
     use anyhow::Context;
     use std::io::Write;
     let instance = destination(client, options.flags.extend_library.is_some()).await?;
+    anyhow::ensure!(
+        options
+            .flags
+            .expected_instance
+            .as_ref()
+            .is_none_or(|expected| expected == &instance),
+        "The selected video machine was replaced during preparation; nothing was submitted"
+    );
     if let Some(id) = options.flags.operation_id {
         // A supplied identity observes the original attempt. It must never
         // turn an absent/partially claimed admission into another generation.
+        let receipt = super::video_receipt::read(&id.to_string(), client.host())?;
+        anyhow::ensure!(
+            receipt.instance_id == instance,
+            "The original video machine was replaced"
+        );
         let job = client.get_video_job(&id.to_string(), &instance).await
             .context("Could not reconcile this operation. Inspect or cancel its exact ID before starting a new attempt")?;
         return Ok(Some((job, instance)));
@@ -157,6 +277,7 @@ pub(crate) async fn admit(
     }
     request.validation_revision = Some(plan.validation_revision);
     let operation = uuid::Uuid::new_v4().to_string();
+    persist(&operation, &instance)?;
     eprintln!("Video operation: {operation}");
     std::io::stderr().flush()?;
     before_submission();
@@ -176,8 +297,9 @@ pub(crate) async fn observe(
     use anyhow::Context;
     if detach {
         status!(
-            "Queued video {} on {}. Use mold jobs show {} to monitor it.",
+            "Video {}: {:?} on {}. Use mold jobs show {} to monitor it.",
             job.id,
+            job.state,
             client.host(),
             job.id
         );
@@ -268,6 +390,15 @@ pub(crate) async fn lookup(
     let Some(instance) = supported_instance(client).await? else {
         return Ok(None);
     };
+    if let Some(receipt) = super::video_receipt::read_optional(id, client.host())? {
+        anyhow::ensure!(
+            receipt.instance_id == instance,
+            "The original operation destination was replaced"
+        );
+        if receipt.chain {
+            return Ok(None);
+        }
+    }
     Ok(client
         .find_video_job(id, &instance)
         .await?
@@ -277,8 +408,8 @@ pub(crate) async fn lookup(
 #[cfg(test)]
 mod transport_tests {
     use super::*;
-    use wiremock::{Mock, MockServer, ResponseTemplate};
     use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn request() -> mold_core::GenerateRequest {
         let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({"model":"h3-pdmd2:bf16","prompt":"base","width":768,"height":768,"steps":4,"seed":u64::MAX,"output_format":"mp4"})).unwrap();
@@ -290,38 +421,172 @@ mod transport_tests {
     }
     async fn server() -> MockServer {
         let server = MockServer::start().await;
-        let caps = mold_core::ServerCapabilities { video_jobs: Some(mold_core::video_job::VideoJobCapabilities { supported:true, literal_prompts:true, library_extend:true, ..Default::default() }), ..Default::default() };
-        Mock::given(method("GET")).and(path("/api/capabilities"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(caps)).mount(&server).await;
+        let caps = mold_core::ServerCapabilities {
+            video_jobs: Some(mold_core::video_job::VideoJobCapabilities {
+                supported: true,
+                literal_prompts: true,
+                library_extend: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(caps))
+            .mount(&server)
+            .await;
         Mock::given(method("GET")).and(path("/api/status"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"version":"test","models_loaded":[],"gpu_info":null,"uptime_secs":1,"instance_id":"captured"}))).mount(&server).await;
-        Mock::given(method("POST")).and(path("/api/video-jobs/validate"))
+        Mock::given(method("POST"))
+            .and(path("/api/video-jobs/validate"))
             .and(header("x-mold-destination-instance", "captured"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(plan())).mount(&server).await;
+            .respond_with(ResponseTemplate::new(200).set_body_json(plan()))
+            .mount(&server)
+            .await;
         server
+    }
+    #[test]
+    fn duration_extension_preserves_original_recipe_explicit_overrides_and_fresh_inputs() {
+        let mut original = request();
+        original.steps = 9;
+        original.width = 1024;
+        original.height = 768;
+        original.fps = Some(24);
+        original.scheduler = Some(mold_core::Scheduler::Euler);
+        original.frames = None;
+        original.seed = None;
+        let mut prepared = request();
+        prepared.steps = 4;
+        prepared.source_image = Some(vec![1, 2]);
+        prepared.prompt = r"added\night".into();
+        prepared.title = Some("New title".into());
+        let flags = VideoJobFlags {
+            extension_recipe: Some(original),
+            recipe_overrides: std::collections::BTreeSet::from(["steps"]),
+            ..Default::default()
+        };
+        apply_extension_recipe(&mut prepared, &flags);
+        assert_eq!(prepared.steps, 4);
+        assert_eq!((prepared.width, prepared.height), (1024, 768));
+        assert_eq!(prepared.scheduler, Some(mold_core::Scheduler::Euler));
+        assert_eq!(prepared.source_image, Some(vec![1, 2]));
+        assert_eq!(prepared.prompt, r"added\night");
+        assert_eq!(prepared.title.as_deref(), Some("New title"));
+        assert_eq!(prepared.seed, Some(u64::MAX));
+    }
+    #[tokio::test]
+    async fn failed_receipt_write_never_claims_inputs_or_posts_generation() {
+        let server = server().await;
+        let options = VideoJobOptions {
+            duration_ms: 60000,
+            flags: Default::default(),
+        };
+        let result = admit_with_receipt(
+            &mold_core::MoldClient::new(&server.uri()),
+            &request(),
+            &options,
+            || panic!("failed receipt claimed media"),
+            |_, _| anyhow::bail!("disk unavailable"),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(!server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.url.path() == "/api/video-jobs"));
+    }
+    #[tokio::test]
+    async fn replaced_preparation_owner_never_validates_or_submits() {
+        let server = server().await;
+        let options = VideoJobOptions {
+            duration_ms: 60000,
+            flags: VideoJobFlags {
+                expected_instance: Some("original".into()),
+                ..Default::default()
+            },
+        };
+        assert!(admit_with_receipt(
+            &mold_core::MoldClient::new(&server.uri()),
+            &request(),
+            &options,
+            || panic!("wrong owner claimed media"),
+            |_, _| Ok(())
+        )
+        .await
+        .is_err());
+        assert!(!server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.method == "POST"));
     }
     #[tokio::test]
     async fn duration_dry_run_validates_without_admission_or_claiming_inputs() {
         let server = server().await;
-        let options = VideoJobOptions { duration_ms:60_000, flags:VideoJobFlags { dry_run:true, ..Default::default() } };
-        let result = admit(&mold_core::MoldClient::new(&server.uri()), &request(), &options, || panic!("dry run claimed media")).await.unwrap();
+        let options = VideoJobOptions {
+            duration_ms: 60_000,
+            flags: VideoJobFlags {
+                dry_run: true,
+                ..Default::default()
+            },
+        };
+        let result = admit_with_receipt(
+            &mold_core::MoldClient::new(&server.uri()),
+            &request(),
+            &options,
+            || panic!("dry run claimed media"),
+            |_, _| Ok(()),
+        )
+        .await
+        .unwrap();
         assert!(result.is_none());
-        assert_eq!(server.received_requests().await.unwrap().iter().filter(|request| request.url.path() == "/api/video-jobs").count(), 0);
+        assert_eq!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|request| request.url.path() == "/api/video-jobs")
+                .count(),
+            0
+        );
     }
     #[tokio::test]
     async fn ambiguous_admission_keeps_inputs_and_never_reposts() {
         let server = server().await;
-        Mock::given(method("POST")).and(path("/api/video-jobs"))
+        Mock::given(method("POST"))
+            .and(path("/api/video-jobs"))
             .and(header("x-mold-destination-instance", "captured"))
-            .respond_with(ResponseTemplate::new(503)).expect(1).mount(&server).await;
-        let options = VideoJobOptions { duration_ms:60_000, flags:Default::default() };
+            .respond_with(ResponseTemplate::new(503))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let options = VideoJobOptions {
+            duration_ms: 60_000,
+            flags: Default::default(),
+        };
         let mut retained = false;
-        let error = admit(&mold_core::MoldClient::new(&server.uri()), &request(), &options, || retained = true).await.unwrap_err();
+        let error = admit_with_receipt(
+            &mold_core::MoldClient::new(&server.uri()),
+            &request(),
+            &options,
+            || retained = true,
+            |_, _| Ok(()),
+        )
+        .await
+        .unwrap_err();
         assert!(retained);
         assert!(error.to_string().contains("--operation-id"));
         let requests = server.received_requests().await.unwrap();
-        let posted = requests.iter().find(|request| request.url.path() == "/api/video-jobs").unwrap();
-        let body: mold_core::video_job::VideoJobRequest = serde_json::from_slice(&posted.body).unwrap();
+        let posted = requests
+            .iter()
+            .find(|request| request.url.path() == "/api/video-jobs")
+            .unwrap();
+        let body: mold_core::video_job::VideoJobRequest =
+            serde_json::from_slice(&posted.body).unwrap();
         assert_eq!(body.generation.seed, Some(u64::MAX));
         assert_eq!(body.generation.prompt, r"literal\nscene");
         assert_eq!(body.duration_ms, 60_000);
@@ -331,10 +596,35 @@ mod transport_tests {
     async fn known_unknown_operation_never_starts_a_new_generation() {
         let server = server().await;
         let id = uuid::Uuid::new_v4();
-        Mock::given(method("GET")).and(path(format!("/api/video-jobs/{id}")))
-            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({"code":"VIDEO_JOB_NOT_FOUND"}))).mount(&server).await;
-        let options = VideoJobOptions { duration_ms:60_000, flags:VideoJobFlags { operation_id:Some(id), ..Default::default() } };
-        assert!(admit(&mold_core::MoldClient::new(&server.uri()), &request(), &options, || panic!("reconciliation submitted")).await.is_err());
-        assert!(!server.received_requests().await.unwrap().iter().any(|request| request.method == "POST"));
+        Mock::given(method("GET"))
+            .and(path(format!("/api/video-jobs/{id}")))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_json(serde_json::json!({"code":"VIDEO_JOB_NOT_FOUND"})),
+            )
+            .mount(&server)
+            .await;
+        let options = VideoJobOptions {
+            duration_ms: 60_000,
+            flags: VideoJobFlags {
+                operation_id: Some(id),
+                ..Default::default()
+            },
+        };
+        assert!(admit_with_receipt(
+            &mold_core::MoldClient::new(&server.uri()),
+            &request(),
+            &options,
+            || panic!("reconciliation submitted"),
+            |_, _| Ok(())
+        )
+        .await
+        .is_err());
+        assert!(!server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|request| request.method == "POST"));
     }
 }

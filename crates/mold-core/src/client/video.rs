@@ -280,13 +280,32 @@ mod tests {
     }
     #[tokio::test]
     async fn only_named_parent_not_found_allows_protocol_fallback() {
-        for (status, body, absent) in [(404, serde_json::json!({"code":"VIDEO_JOB_NOT_FOUND"}), true), (404, serde_json::json!({"error":"generic"}), false), (405, serde_json::json!({}), false), (410, serde_json::json!({"code":"VIDEO_OPERATION_CANCELLED"}), false), (403, serde_json::json!({}), false)] {
+        for (status, body, absent) in [
+            (404, serde_json::json!({"code":"VIDEO_JOB_NOT_FOUND"}), true),
+            (404, serde_json::json!({"error":"generic"}), false),
+            (405, serde_json::json!({}), false),
+            (
+                410,
+                serde_json::json!({"code":"VIDEO_OPERATION_CANCELLED"}),
+                false,
+            ),
+            (403, serde_json::json!({}), false),
+        ] {
             let server = MockServer::start().await;
-            Mock::given(method("GET")).and(path("/api/video-jobs/operation"))
+            Mock::given(method("GET"))
+                .and(path("/api/video-jobs/operation"))
                 .and(header("x-mold-destination-instance", "captured"))
-                .respond_with(ResponseTemplate::new(status).set_body_json(body)).mount(&server).await;
-            let result = MoldClient::new(&server.uri()).find_video_job("operation", "captured").await;
-            if absent { assert!(result.unwrap().is_none()); } else { assert!(result.is_err()); }
+                .respond_with(ResponseTemplate::new(status).set_body_json(body))
+                .mount(&server)
+                .await;
+            let result = MoldClient::new(&server.uri())
+                .find_video_job("operation", "captured")
+                .await;
+            if absent {
+                assert!(result.unwrap().is_none());
+            } else {
+                assert!(result.is_err());
+            }
         }
     }
 

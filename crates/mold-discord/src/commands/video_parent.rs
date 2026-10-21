@@ -412,7 +412,7 @@ pub(super) async fn prepare_extension(
     let source = ctx
         .data()
         .client
-        .gallery_item(filename)
+        .gallery_video_source(filename)
         .await?
         .context("Choose an existing video from this machine's Library.")?;
     let model = super::live_model(ctx, Some(source.metadata.model.clone())).await?;

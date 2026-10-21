@@ -1906,6 +1906,9 @@ pub async fn run(
     // local run must record what a remote one would.
     mold_core::validation::materialize_request_organization(&mut req)
         .map_err(|error| anyhow::anyhow!(error))?;
+    if let Some(options) = video_job.as_ref() {
+        crate::commands::video_jobs::apply_extension_recipe(&mut req, &options.flags);
+    }
     let base_seed = req.seed.unwrap_or_else(|| rand::thread_rng().gen());
     let mut reference_session = None;
     if local {

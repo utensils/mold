@@ -51,3 +51,7 @@ pub mod upscale;
 pub mod video_upscale;
 
 pub(crate) mod video_jobs;
+
+pub(crate) mod video_receipt;
+
+pub(crate) mod video_restart;
