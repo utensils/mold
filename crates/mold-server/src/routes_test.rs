@@ -18649,6 +18649,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gallery_import_fences_artifact_owner_before_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = mold_core::Config {
+            output_dir: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(tx),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let instance = state.instance_id.to_string();
+        let app = app_with_state(state);
+        let mut artifact_metadata = output_metadata("exact owned publication");
+        artifact_metadata.video_job = Some(serde_json::from_value(serde_json::json!({
+            "id":"66687089-6429-4a48-8a5d-f302c8889092", "manifest_sha256":"a".repeat(64),
+            "clip_count":"2", "part_count":"2", "added_frames":"144", "source_frames":"0", "total_frames":"144", "join_mode":"continuous",
+            "artifacts":{"version":1,"bundle_id":"b".repeat(64),"provenance":{"sha256":"c".repeat(64),"size_bytes":"100"}}
+        })).unwrap());
+        for (name, header, artifacts, expected) in [
+            ("missing.png", None, true, StatusCode::CONFLICT),
+            (
+                "wrong.png",
+                Some("different-instance"),
+                true,
+                StatusCode::CONFLICT,
+            ),
+            (
+                "ordinary-wrong.png",
+                Some("different-instance"),
+                false,
+                StatusCode::CONFLICT,
+            ),
+            (
+                "right.png",
+                Some(instance.as_str()),
+                true,
+                StatusCode::CREATED,
+            ),
+        ] {
+            let metadata = if artifacts {
+                artifact_metadata.clone()
+            } else {
+                output_metadata("ordinary")
+            };
+            let mut request = Request::put(format!("/api/gallery/import/{name}"))
+                .header("content-type", "application/vnd.mold.gallery-import");
+            if let Some(header) = header {
+                request = request.header("x-mold-destination-instance", header);
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    request
+                        .body(Body::from(gallery_import_body(
+                            Some(&metadata),
+                            &minimal_png(),
+                        )))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{}", json_body(response).await);
+            assert_eq!(
+                dir.path().join(name).exists(),
+                expected == StatusCode::CREATED
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn gallery_import_preserves_archive_completion_facts_with_exact_embedded_recipe() {
         let dir = tempfile::tempdir().unwrap();
         let config = mold_core::Config {

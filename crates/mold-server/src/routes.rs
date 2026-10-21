@@ -9602,6 +9602,24 @@ async fn import_gallery_file(
             )
         })?;
     let parsed_import = parse_gallery_import_prefix(&output_dir, &headers, body).await?;
+    let artifact_bearing = parsed_import
+        .descriptor
+        .metadata
+        .video_job
+        .as_ref()
+        .is_some_and(|video| video.artifacts.is_some());
+    if (artifact_bearing || headers.contains_key("x-mold-destination-instance"))
+        && headers
+            .get("x-mold-destination-instance")
+            .and_then(|value| value.to_str().ok())
+            != Some(state.instance_id.as_str())
+    {
+        return Err(ApiError::with_code(
+            "Destination installation changed. Refresh this Library copy before continuing.",
+            "GALLERY_DESTINATION_CHANGED",
+            StatusCode::CONFLICT,
+        ));
+    }
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

@@ -860,6 +860,8 @@ To keep a copy of a host's library current over HTTP, page `GET /api/gallery/cha
 
 Retained source media stays attached while any generated library output references it, including trashed outputs. Native library copies transfer those sources with the output and report incomplete copies when a server cannot preserve them. Existing local copies can be repaired by saving again. Native Mac Save Locally/Sync All can save verified finished outputs whose original inputs are explicitly unavailable legacy media; the summary discloses unavailable inputs separately from output-copy failures. This does not restore missing originals or permit corrupt/authentication failures. Newly completed jobs with identical retained input sets share encrypted media storage; provenance remains per-job. This does not merge different accompanying inputs or migrate historical outputs.
 
+Duration-video Library copies also retain separate provenance/audio archives and the full recipe. Retry Copy/Sync to repair interrupted assets. `mold library download` exports the finished movie only; it is not a complete Library backup. Missing declared archives are failures, distinct from disclosed legacy inputs.
+
 ```bash
 mold library source-media mold-flux-dev-q4-1700000000000.png
 mold library source-media mold-flux-dev-q4-1700000000000.png --json

@@ -396,6 +396,14 @@ input sets from newly completed jobs share storage while keeping per-job
 provenance. Native Mac and
 desktop library copies also retain those sources on supported destinations.
 
+
+Duration and extended-video copies preserve their complete captured recipe,
+retained inputs, and separate provenance/audio archive files. Sync resumes
+interrupted archive transfers and repairs missing assets on existing copies.
+A movie download alone is an output export, not a full Library backup. Missing
+legacy inputs are disclosed; a declared but incomplete video archive is a copy
+failure until repaired.
+
 In the native Mac app, **Use source** is available in the print inspector and source viewer, including right-click menus. Choose a supported input role, or **Choose model…** to select an installed compatible model, recipe and machine without leaving the source. Successful reuse opens Generate; other draft settings are preserved where the selected recipe supports them.
 
 Every GUI's print details lists retained source media, including reference images,

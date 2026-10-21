@@ -220,6 +220,13 @@ mobile queues, regardless of the submitting device. Library outputs retain their
 source media after queue cleanup; trash preserves those references, and deleting
 one output permanently does not remove sources still used by another output.
 
+Duration and extended-video copies preserve their complete captured recipe,
+retained inputs, and separate provenance/audio archive files. Sync resumes
+interrupted archive transfers and repairs missing assets on existing copies.
+A movie download alone is an output export, not a full Library backup. Missing
+legacy inputs are disclosed; a declared but incomplete video archive is a copy
+failure until repaired.
+
 Native Mac mirrors accept missing archive-only job IDs and generation durations, a short version matching the same version with a build suffix, and an alpha-channel fact derived from identical output bytes when absent on the source. The same compatibility check compares the gallery listing with its stable source archive, so completion bookkeeping does not falsely report a changed print. When an older archive omits scheduler or transparency settings, the source output is downloaded and its digest verified before its embedded recipe can corroborate those fields. Output bytes and all generation settings must still match; conflicting recorded provenance is refused. Retrying Sync All repairs retained inputs on compatible existing copies without duplicating their outputs.
 
 Native Mac Save Locally and Sync All count a verified finished print as saved when its source explicitly reports legacy inputs as unavailable. The sync summary reports unavailable original inputs separately; it does not claim they were retained. Existing copies still require matching output bytes and recipes. Corrupt or unauthenticated input archives, changed outputs, and unsupported source transfer contracts remain failures.
