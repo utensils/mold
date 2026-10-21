@@ -2,9 +2,12 @@ import Foundation
 
 public extension VideoJobCoordinator {
     func loadMore(owner: VideoJobOwner, backend: any MoldBackend, current: @escaping @MainActor () -> Bool) async {
-        guard let page = pagination[owner.host.id], page.owner == owner,
-              page.hasMore, !page.isLoading, let cursor = page.nextCursor else { return }
-        await loadPage(owner: owner, cursor: cursor, backend: backend, current: current)
+        guard let page = pagination[owner.host.id], page.owner == owner, !page.isLoading else { return }
+        if page.error != nil {
+            await loadPage(owner: owner, cursor: page.retryCursor, backend: backend, current: current)
+        } else if page.hasMore, let cursor = page.nextCursor {
+            await loadPage(owner: owner, cursor: cursor, backend: backend, current: current)
+        }
     }
 }
 
@@ -18,7 +21,7 @@ extension VideoJobCoordinator {
         let token = UUID(); pageTokens[owner.host.id] = token
         let previous = pagination[owner.host.id].flatMap { $0.owner == owner ? $0 : nil }
         pagination[owner.host.id] = .init(owner: owner, hasMore: previous?.hasMore ?? false,
-            nextCursor: previous?.nextCursor, isLoading: true, error: nil)
+            nextCursor: previous?.nextCursor, isLoading: true, error: nil, retryCursor: cursor)
         let fresh = { @MainActor in !Task.isCancelled && current() && self.pageTokens[owner.host.id] == token }
         defer {
             if pageTokens[owner.host.id] == token { pagination[owner.host.id]?.isLoading = false }
@@ -40,7 +43,6 @@ extension VideoJobCoordinator {
             if fresh() {
                 let message = UserFacingError.describe(error)
                 pagination[owner.host.id]?.error = message
-                self.error = message
             }
         }
     }

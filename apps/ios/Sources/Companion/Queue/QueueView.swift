@@ -18,12 +18,12 @@ struct QueueView: View {
                            message: String(localized: "Renders you start appear here. Add a machine to begin.")) {
                     Button("Add a Machine…") { router.addMachine() }.prominentAction()
                 }
-            } else if queue.isEmpty, generate.sequence.jobs.isEmpty, generate.videoJobs.jobs.isEmpty, generate.sequence.historyNotice == nil, generate.videoJobs.pending.isEmpty, generate.videoJobs.error == nil, generate.videoRestarts.pending.isEmpty, generate.videoRestarts.error == nil, !queue.unavailableMachines.isEmpty {
+            } else if queue.isEmpty, generate.sequence.jobs.isEmpty, !generate.videoJobs.hasQueueContent, generate.sequence.historyNotice == nil, generate.videoRestarts.pending.isEmpty, generate.videoRestarts.error == nil, !queue.unavailableMachines.isEmpty {
                 EmptyState(title: String(localized: "Queue unavailable"), symbol: Destination.queue.symbol,
                            message: String(localized: "Some machines could not provide their queues. Check Machines to reconnect, then pull to refresh.")) {
                     Button("Check Machines") { router.selection = .go(.machines) }.prominentAction()
                 }
-            } else if queue.isEmpty, generate.sequence.jobs.isEmpty, generate.videoJobs.jobs.isEmpty, generate.sequence.historyNotice == nil, generate.videoJobs.pending.isEmpty, generate.videoJobs.error == nil, generate.videoRestarts.pending.isEmpty, generate.videoRestarts.error == nil {
+            } else if queue.isEmpty, generate.sequence.jobs.isEmpty, !generate.videoJobs.hasQueueContent, generate.sequence.historyNotice == nil, generate.videoRestarts.pending.isEmpty, generate.videoRestarts.error == nil {
                 EmptyState(title: String(localized: "Nothing waiting"), symbol: Destination.queue.symbol,
                            message: String(localized: "Renders you start appear here, on every machine."))
             } else {
@@ -43,7 +43,7 @@ struct QueueView: View {
         .refreshable { await queue.reload(); await generate.discoverDurationVideos() }
         // A job just held asks for a decision: a warning, as on Generate.
         .sensoryFeedback(.warning, trigger: queue.heldCount) { old, new in new > old }
-        .task(id: hosts.upHosts.map(\.id)) { await queue.reload(); await generate.discoverSequences(); await generate.discoverDurationVideos() }
+        .task(id: hosts.queueDiscoveryKey) { await queue.reload(); await generate.discoverSequences(); await generate.discoverDurationVideos() }
         .task { await queue.followRunning() }
     }
 

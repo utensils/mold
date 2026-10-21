@@ -16,6 +16,7 @@ final class GenerateController {
     var durationSourceLoading = false
     var durationSourceError: String?
     var durationSourceToken = UUID()
+    @ObservationIgnored var durationSourceRestoration: DurationSourceRestoration?
 
     /// Not `private`: `GenerateController+Run` reports a machine's cancel
     /// failure through it.

@@ -38,6 +38,23 @@ struct QueueStoreTests {
         return (queue, hosts, fake)
     }
 
+    @Test func oldQueueReplyCannotOverwriteAChangedConnection() async throws {
+        let (queue, hosts, fake) = try await Self.setUp()
+        let host = hosts.hosts[0]
+        let previous = queue.listings[host.id]
+        let stale = try Self.decode(QueueListing.self, #"{"entries":[{"id":"stale","state":"queued"}]}"#)
+        fake.stub("queue()") { _ in
+            await MainActor.run {
+                var replacement = host
+                replacement.apiKey = "replacement"
+                hosts.setHosts([replacement])
+            }
+            return stale
+        }
+        await queue.poll(host.id)
+        #expect(queue.listings[host.id] == previous, "a cancelled old owner cannot publish into the reconnected queue")
+    }
+
     @Test func cancellingABatchUsesEachEligibleRouteAndLeavesOtherBatchesAlone() async throws {
         let (queue, hosts, fake) = try await Self.setUp(capabilities: #"{"queue":{"cooperative_cancellation":true}}"#)
         let id = hosts.hosts[0].id
@@ -434,10 +451,11 @@ extension QueueStoreTests {
     @Test func queueBadgeTotalsRunningAndPendingAcrossHosts() async throws {
         let (queue, hosts, fake) = try await Self.setUp()
         try hosts.add(name: "Second", address: "10.0.0.5", apiKey: nil, makeDefault: false)
+        await hosts.refreshAll()
         let listing = try Self.decode(QueueListing.self, #"{"entries":[{"id":"same","state":"running"},{"id":"q","state":"queued"},{"id":"p","state":"paused"},{"id":"h","state":"held"},{"id":"c","state":"cancelling"},{"id":"done","state":"complete"},{"id":"failed","state":"failed"},{"id":"cancelled","state":"cancelled"}],"live_only_entries":[{"id":"same","state":"running"}]}"#)
         fake.stub("queue()", returning: listing)
         for host in hosts.hosts {
-            let status = try Self.decode(ServerStatus.self, #"{"version":"0.34.0","busy":true,"uptime_secs":1}"#)
+            let status = try Self.decode(ServerStatus.self, #"{"version":"0.34.0","busy":true,"uptime_secs":1,"instance_id":"inst-1"}"#)
             hosts.setReachability(.up(status), for: host.id)
             await queue.poll(host.id)
         }
