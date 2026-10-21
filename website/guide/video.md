@@ -27,6 +27,14 @@ remains the default. Choose a longer duration, such as 30 seconds, to keep the
 same prompt across the whole movie. **Define scenes** optionally lets you enter
 different prompts and lengths.
 
+Library **Use settings** restores the original requested duration and optional
+scenes, exact seed, recipe controls and authenticated retained inputs. It prepares
+a fresh editable generation. For an extended movie, the duration describes the
+added footage and the original movie is not attached; choose **Extend video**
+to continue the full movie again. Scripted chains retain their per-clip settings
+where recorded. Missing historical settings or inputs are disclosed before a new
+generation, rather than silently shortening or flattening the movie.
+
 ```bash
 mold --host workstation run MODEL "a paper boat drifts along a sunlit stream" --duration 30
 ```

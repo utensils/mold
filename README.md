@@ -324,6 +324,11 @@ length summary shows the selected model's single-render limit and clip count.
 **Define scenes** optionally gives each scene its own prompt. Library **Extend
 video** adds another prompt and duration, publishing the original plus extension
 as a new movie. The original stays in Library.
+**Use settings** restores the original requested duration, optional scenes, seed,
+recipe controls and retained inputs into an editable draft. On an extended movie,
+it restores the settings for the added footage; use **Extend video** to attach
+that movie as a prefix again. Missing historical settings or required inputs are
+explained before generation.
 
 ```bash
 mold --host plato run MODEL "a paper boat drifts along a sunlit stream" --duration 30

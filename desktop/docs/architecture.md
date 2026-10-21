@@ -626,3 +626,13 @@ Incomplete hidden-source copies also publish hide-only journal evidence for the 
 Additive stall evidence leaves the existing job state enum unchanged. Queue progress accepts explicit `stall:null` recovery. HTTP 202 cancellation records accepted intent while tracking the worker and its reserved device until authoritative termination; it never settles a job on acceptance alone. Queue details include stage, stalled elapsed time, device ownership and operator-guided recovery, and Copy Details carries the diagnostic. Blocked-device wording is presented without changing queue order.
 
 The shared duration slider revalidates model frame-grid/minimum changes even when the displayed maximum stays the same. Requests already above the prior slider ceiling preserve intentional long/autochain or temporal-upscale frame counts.
+
+Duration-video Use settings reads bounded published `video_job.authoring`, so
+requested milliseconds, ordered scene prompts and full-range decimal seeds
+survive parent queue cleanup. `boundary_frames` and optional `input_frames`
+identify retained authored endpoints independently of total movie frames. Reuse
+prepares a fresh draft; an extended movie restores only its added-footage recipe
+and explicitly leaves the prefix unattached. Missing original authoring metadata
+is a visible compatibility refusal. Authenticated Gallery sessions map stage-zero
+reference and keyframe media; full legacy sequence restoration preserves each
+stage's recorded controls and media instead of taking only its first prompt.

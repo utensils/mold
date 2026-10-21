@@ -326,7 +326,7 @@ The desktop **Choose from gallery…** square grid follows the Library's perform
 
 ---
 
-## 7. Chain jobs / multi-prompt video (`mold.chain.v1`)
+## 7. Advanced scripted chain jobs (`mold.chain.v1`)
 
 **Authoring paths:**
 
@@ -341,7 +341,7 @@ The desktop **Choose from gallery…** square grid follows the Library's perform
 
 `ChainRequest.output_mode` records additive authoring provenance (`one-shot` or
 `sequence`) independently of execution routing, and the same value is retained
-in `OutputMetadata`. Ordinary long one-shots remain ephemeral; Add clip creates authored durable work. Reuse settings restores the first stage as a one-shot; the separate Continue video action creates a linked successor. A durable chain row with no recorded `output_mode` is resolved
+in `OutputMetadata`. These advanced frame/script paths are separate from the durable Duration workflow below. Use settings restores the recorded stages and their inputs into an editable sequence; unsupported or missing historical settings are disclosed. The separate legacy Continue video action creates a linked successor. A durable chain row with no recorded `output_mode` is resolved
 through `chain_job_id`.
 
 - `jobs list [--json]`, `jobs show <id>`, `jobs resume <id>`, `jobs cancel <id>`, `jobs delete <id> [--yes]`, `jobs gc`.
@@ -609,6 +609,14 @@ single-generation limit and actual joined-clip count. Optional Define scenes
 supplies ordered prompts and scene durations; there is no timeline or output
 mode picker. Audio and FPS remain normal recipe controls, while competing
 one-shot Frames/Duration/VRAM estimates are hidden during this workflow.
+
+Use settings restores published authoring duration, optional literal scene prompts,
+exact decimal seed, scalar controls and authenticated retained opening/closing
+frames and references. Total movie frames never replace the authored duration or
+boundary locator. Extended movies restore their added-footage settings into a
+fresh draft with an explicit prefix-not-attached notice. Missing authoring data or
+required retained media blocks silent lossy reuse. Advanced legacy chains preserve
+per-stage controls rather than flattening them into the simpler scenes editor.
 
 Library Extend works for ordinary generated videos as well as joined videos.
 It restores original scalar recipe settings and prompt, with a new random
