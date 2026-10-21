@@ -143,6 +143,18 @@ export function mergeLogicalEntries(
   });
 }
 
+/** Deep-linked prints can arrive before the grid's organization projection. */
+export function collectionSlugsForEntries(
+  raw: readonly HostGalleryImage[],
+  options: MergeLogicalOptions = {},
+): string[][] {
+  return raw.map(
+    (copy) =>
+      copy.organization?.collections ??
+      decorateEntries([copy], options)[0]!.organization!.collections,
+  );
+}
+
 /**
  * Stamp each physical copy with ITS OWN organization (no grouping) — what a
  * single-host filter shows, where every copy is its own row and collection

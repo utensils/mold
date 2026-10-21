@@ -257,3 +257,44 @@ describe("indexLogicalCopies", () => {
     expect(index.copiesByKey.get("c|missing.png")).toBeUndefined();
   });
 });
+it("resolves collection IDs for a directly opened Library print before its grid row is decorated", async () => {
+  const { collectionSlugsForEntries } = await import("./multiHostGallery");
+  const raw = {
+    ...img("video-own.mp4", 1),
+    hostId: "plato",
+    hostLabel: "Plato",
+    collections: ["collection-uuid"],
+  };
+  expect(
+    collectionSlugsForEntries([raw], {
+      resolveCollectionSlug: (host, id) =>
+        host === "plato" && id === "collection-uuid"
+          ? "video-chaining-ui-uat"
+          : null,
+    }),
+  ).toEqual([["video-chaining-ui-uat"]]);
+  expect(raw).not.toHaveProperty("organization");
+});
+it("keeps a decorated cross-host collection union and resolves identical IDs per owning host", async () => {
+  const { collectionSlugsForEntries } = await import("./multiHostGallery");
+  const raw = {
+    ...img("same.png", 1),
+    hostId: "plato",
+    hostLabel: "Plato",
+    collections: ["same-id"],
+  };
+  const resolver = (host: string, id: string) =>
+    id === "same-id" ? `${host}-collection` : null;
+  expect(
+    collectionSlugsForEntries([raw, { ...raw, hostId: "other" }], {
+      resolveCollectionSlug: resolver,
+    }),
+  ).toEqual([["plato-collection"], ["other-collection"]]);
+  const decorated = mergeLogicalEntries([raw], {
+    resolveCollectionSlug: resolver,
+  })[0]!;
+  decorated.organization!.collections = ["union-one", "union-two"];
+  expect(
+    collectionSlugsForEntries([decorated], { resolveCollectionSlug: resolver }),
+  ).toEqual([["union-one", "union-two"]]);
+});

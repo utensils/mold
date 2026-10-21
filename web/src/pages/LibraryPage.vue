@@ -109,6 +109,7 @@ import {
 } from "../composables/useGenerateForm";
 import {
   decorateEntries,
+  collectionSlugsForEntries,
   fetchMergedGallery,
   indexLogicalCopies,
   mergeLogicalEntries,
@@ -1384,9 +1385,12 @@ const selectionTags = computed(() => {
 function collectionRowsFor(
   items: readonly HostGalleryImage[],
 ): CollectionPickerRow[] {
+  const memberships = collectionSlugsForEntries(items, {
+    resolveCollectionSlug: resolver.value,
+  });
   return collections.value.map((collection) => {
-    const inIt = items.filter((item) =>
-      (item.organization?.collections ?? []).includes(collection.slug),
+    const inIt = memberships.filter((slugs) =>
+      slugs.includes(collection.slug),
     ).length;
     const partial =
       collection.hosts.length < organizingHostCount.value
