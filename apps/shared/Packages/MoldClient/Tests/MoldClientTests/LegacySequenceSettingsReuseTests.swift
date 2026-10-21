@@ -40,6 +40,27 @@ struct LegacySequenceSettingsReuseTests {
         #expect(throws: (any Error).self) { try original.materialized([(other, Data([1]))]) }
     }
 
+    @Test func emptyArchiveCannotDiscardUnmappedTopLevelConditioning() throws {
+        for (field, value) in [
+            ("references", [["kind":"image","mime_type":"image/png","sha256":"abc"]] as Any),
+            ("generation_references", [["kind":"image","mime_type":"image/png","sha256":"abc"]] as Any),
+            ("keyframes", [["frame":0,"sha256":"abc"]] as Any)
+        ] {
+            var object = try #require(JSONSerialization.jsonObject(with: MoldJSON.encoder.encode(metadata())) as? [String:Any])
+            object[field] = value
+            let claimed = try MoldJSON.decoder.decode(OutputMetadata.self, from: JSONSerialization.data(withJSONObject: object))
+            #expect(throws: (any Error).self) { try LegacySequenceSettingsReuse(metadata: claimed).materialized([]) }
+        }
+    }
+
+    @Test func historicalH3SourceLabelAloneDoesNotInventConditioning() throws {
+        var object = try #require(JSONSerialization.jsonObject(with: MoldJSON.encoder.encode(metadata())) as? [String:Any])
+        object["source_image_name"] = "H3 text-only label"
+        let labeled = try MoldJSON.decoder.decode(OutputMetadata.self, from: JSONSerialization.data(withJSONObject: object))
+        let restored = try LegacySequenceSettingsReuse(metadata: labeled).materialized([])
+        #expect(restored.sequence.stages[0].input.sourceImage == nil)
+    }
+
     @Test func missingTopSeedLocksTheRecordedFirstClipSeedBeforeComputingOffsets() throws {
         let full = try metadata()
         let encoded = try MoldJSON.encoder.encode(full)

@@ -8,6 +8,13 @@ public extension LegacySequenceSettingsReuse {
         guard downloaded.count <= AuthoredChainRequest.retainedMediaMemberLimit else { throw invalidInputs() }
         var result = self, seen = Set<String>(), total = 0
         let records = metadata.chain?.stages ?? []
+        // A top-level descriptor does not identify the authored clip that
+        // owns it. Never turn an incomplete archive into an unconditioned edit.
+        let hasTopReferences = !(metadata.references ?? []).isEmpty || !(metadata.generationReferences ?? []).isEmpty
+        guard !hasTopReferences || records.contains(where: { !($0.generationReferences ?? []).isEmpty }),
+              (metadata.keyframes ?? []).isEmpty || records.contains(where: { !($0.keyframes ?? []).isEmpty }) else {
+            throw invalidInputs()
+        }
         var boundaries: [Int: [Int: KeyframeCondition]] = [:]
         for (member, bytes) in downloaded {
             guard bytes.count <= AuthoredChainRequest.inlineMediaLimitBytes - total,
