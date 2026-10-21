@@ -386,3 +386,5 @@ retain granted access for the process and fence late panel answers. Opening or
 cancelling this panel must not start another bootstrap worker.
 
 Extend restores use shared token-owned cancellation/authority state. A changed captured owner or cancelled restore permits fresh inspection; old completion cannot overwrite its replacement or a newer explicit Library action. Queue listing errors stay page-owned, and the shared content predicate retains page Retry/loading rows in an otherwise-empty Queue.
+
+Duration progress followers bind their slot to the full captured owner. A replacement owner supersedes a pending stale reader without waiting for its socket; token-owned cleanup cannot remove the successor. Cache-only status is explicitly last known whenever the row’s current-owner predicate refuses controls.

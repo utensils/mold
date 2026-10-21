@@ -25,6 +25,7 @@ public final class VideoJobCoordinator {
     }
     @ObservationIgnored var transportCleanups: [String: TransportCleanup] = [:]
     @ObservationIgnored var followTokens: [String: UUID] = [:]
+    @ObservationIgnored var followOwners: [String: VideoJobOwner] = [:]
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -123,10 +124,10 @@ public final class VideoJobCoordinator {
     }
     func retireReads(_ key: String) {
         readTokens[key] = nil
-        followers[key]?.cancel(); followers[key] = nil; followTokens[key] = nil
+        followers[key]?.cancel(); followers[key] = nil; followTokens[key] = nil; followOwners[key] = nil
     }
     public func cancelPreparation() { submissionToken = UUID(); isSubmitting = false }
     public func suspend() {
-        followers.values.forEach { $0.cancel() }; followers.removeAll(); followTokens.removeAll(); readTokens.removeAll(); pageTokens.removeAll(); pagination.removeAll()
+        followers.values.forEach { $0.cancel() }; followers.removeAll(); followTokens.removeAll(); followOwners.removeAll(); readTokens.removeAll(); pageTokens.removeAll(); pagination.removeAll()
     }
 }

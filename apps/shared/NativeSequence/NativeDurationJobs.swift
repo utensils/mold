@@ -25,7 +25,7 @@ struct NativeDurationJobs: View {
                 Label("Video · \(job.owner.host.name)", systemImage: "film.stack").font(.headline)
                 if let detail = job.detail {
                     Text(detail.plan.model).font(.caption).foregroundStyle(.secondaryText)
-                    Text("\(detail.state.rawValue.capitalized) · \(min(detail.completedClips, detail.plan.clipCount)) of \(detail.plan.clipCount) clips")
+                    Text(Self.statusDescription(detail, current: current(job.owner)))
                     Text("\(VideoDurationDraft.seconds(milliseconds: detail.plan.totalDurationMs)) seconds · \(job.operationId.prefix(8))")
                         .font(.caption).foregroundStyle(.secondaryText)
                     if let error = detail.errorDetail ?? detail.error { Text(error).fixedSize(horizontal: false, vertical: true) }
@@ -61,6 +61,11 @@ struct NativeDurationJobs: View {
                 }
                 Button("Cancel", role: .cancel) { deleting = nil }
             } message: { Text("Saved Library videos remain. This job’s saved inputs and unfinished progress will be removed.") }
+    }
+
+    static func statusDescription(_ detail: VideoJob, current: Bool) -> String {
+        let status = "\(detail.state.rawValue.capitalized) · \(min(detail.completedClips, detail.plan.clipCount)) of \(detail.plan.clipCount) clips"
+        return current ? status : "Last known: \(status)"
     }
 
     @ViewBuilder private func actions(_ job: ObservedVideoJob) -> some View {

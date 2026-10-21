@@ -42,9 +42,11 @@ extension VideoJobCoordinatorTests {
         backend.stub("deleteVideoJob(id:destinationInstanceId:)", returning: ())
         let old = Task { await coordinator.refresh("parent", owner: owner, backend: backend, current: { true }) }
         for _ in 0..<100 where backend.count("videoJob(id:)") == 0 { await Task.yield() }
+        coordinator.followOwners[row.id] = owner
         await coordinator.delete(row, backend: backend, current: { true })
         gate.continuation.finish(); await old.value
         #expect(coordinator.jobs.isEmpty)
+        #expect(coordinator.followOwners[row.id] == nil, "Delete retires all progress-reader authority")
     }
 
     @Test func resumeClearsOldCancellationIntentDurablyBeforeMutation() async throws {

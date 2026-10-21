@@ -529,3 +529,5 @@ Stopped accepted duration videos remain paused in Queue and can resume from comp
 Queue rechecks the current machine credentials, route, installation and video capability when connection details settle, including while Queue stays open. Repeated progress updates do not relist the queue. A late response from an earlier connection cannot replace the current listing; paused videos stay paused until Resume is explicitly chosen.
 
 Extend rechecks its original source after connection details change, preserving the new prompt and duration. A replacement restore cannot overwrite a newer Library action. Video listing failures stay beside the affected machine with a working Retry action, even when no jobs have loaded; successful retry clears that listing error without clearing admission errors.
+
+Video progress readers follow the current captured connection after its details change. If that connection is not current, Queue labels cached progress **Last known** and keeps mutation controls unavailable until the original machine is verified again.
