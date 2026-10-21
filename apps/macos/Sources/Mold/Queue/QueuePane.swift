@@ -81,7 +81,10 @@ struct QueuePane: View {
             QueueDetailSheet(entry: target.entry, host: target.host)
         }
         .destructionDialog($pendingDestruction)
-        .task { await load(); await generate.discoverSequences(); await generate.recoverDurationJobs(activity: activity.byHost, discover: true) }
+        .task { await load(includeVideoParents: false); await generate.discoverSequences() }
+        .task(id: durationDiscoveryMembership) {
+            await generate.recoverDurationJobs(activity: activity.byHost, discover: true)
+        }
         .task {
             while !Task.isCancelled {
                 await queue.pollProgress()
@@ -126,12 +129,21 @@ struct QueuePane: View {
     // too. Seeds once; `isSeeded` then short-circuits `refresh`'s own
     // `poll`/`hydrate` (`QueueStore+Fixture.swift`), so a later Refresh press
     // cannot overwrite the fixture with a real machine's own answer.
-    func load() async {
+    func load(includeVideoParents: Bool = true) async {
         guard !queue.isSeeded else { return }
         if let fixture = Self.fixtureIfRequested() {
             queue.seed(from: fixture)
             return
         }
         await queue.refresh()
+        if includeVideoParents { await generate.recoverDurationJobs(activity: activity.byHost, discover: true) }
+    }
+
+    private var durationDiscoveryMembership: [VideoJobDiscoveryMembership] {
+        hosts.hosts.sorted { $0.id.uuidString < $1.id.uuidString }.compactMap { host in
+            guard hosts.capabilities[host.id]?.canCreateVideoJob == true,
+                  let owner = generate.durationOwner(host) else { return nil }
+            return VideoJobDiscoveryMembership(owner: owner, activity: activity.byHost[host.id])
+        }
     }
 }
