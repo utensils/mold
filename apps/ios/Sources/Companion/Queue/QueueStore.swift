@@ -160,9 +160,13 @@ final class QueueStore {
 
     func poll(_ id: MoldHost.ID) async {
         guard let host = hosts.host(id), hosts.isUp(host) else { listings[id] = nil; return }
+        let instance = hosts.instanceID(of: id)
+        let current = { !Task.isCancelled && self.hosts.host(id) == host
+            && self.hosts.isUp(host) && self.hosts.instanceID(of: id) == instance }
         let client = hosts.backend(for: host)
         do {
             let snapshot = try await client.queue()
+            guard current() else { return }
             let entries = snapshot.merged.filter(\.state.isLive)
             listings[id] = entries
             blockedReasons[id] = Dictionary((snapshot.plan?.workItems ?? []).compactMap { item in
@@ -173,14 +177,16 @@ final class QueueStore {
             pruneSourcePreviews()
             let batches = Array(Set(entries.compactMap(\.batchId))).sorted()
             if !batches.isEmpty, let listing = try? await client.batchStatuses(batchIds: batches) {
+                guard current() else { return }
                 children[id] = Dictionary(uniqueKeysWithValues: listing.batches.map { ($0.id, $0.children) })
             } else {
+                guard current() else { return }
                 children[id] = [:]
             }
         } catch is CancellationError {
             return
         } catch {
-            guard !Task.isCancelled else { return }
+            guard current() else { return }
             listings[id] = nil
             hosts.report(host, doing: String(localized: "list its queue"), error)
         }

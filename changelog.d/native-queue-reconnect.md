@@ -1,0 +1,1 @@
+- Fixed iOS Queue recovery after late machine connection and capability updates, restoring controls for paused videos without reopening the screen. Late replies from an earlier connection no longer overwrite the current queue.

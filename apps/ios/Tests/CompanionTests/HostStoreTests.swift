@@ -34,6 +34,42 @@ struct HostStoreTests {
         return try MoldJSON.decoder.decode(ServerStatus.self, from: Data(json.utf8))
     }
 
+    @Test func queueDiscoveryTracksCapabilitiesAndCapturedOwnerWithoutProgressChurn() throws {
+        let (hosts, _, _) = store()
+        let host = try hosts.add(name: "Plato", address: "plato.panther-chicken.ts.net", apiKey: "regular", makeDefault: false, connectionMode: .regular)
+        hosts.setReachability(.up(try status()), for: host.id)
+        let checkingCapabilities = hosts.queueDiscoveryKey
+        hosts.setCapabilities(try MoldJSON.decoder.decode(Capabilities.self,
+            from: Data(#"{"video_jobs":{"supported":true,"literal_prompts":true,"library_extend":true}}"#.utf8)), for: host.id)
+        let ready = hosts.queueDiscoveryKey
+        #expect(checkingCapabilities != ready, "capabilities arrive after status; Queue must discover the now-supported parents")
+        var refreshed = host
+        refreshed.connectionInstanceID = "inst-1"
+        hosts.applyConnection(refreshed, expectedURL: host.baseURL)
+        let refreshedOwner = hosts.queueDiscoveryKey
+        #expect(ready != refreshedOwner, "a late connection reply invalidates old captured row owners")
+        hosts.setReachability(.up(try MoldJSON.decoder.decode(ServerStatus.self, from: Data(#"{"version":"0.32.0","busy":true,"uptime_secs":99,"instance_id":"inst-1","queue_depth":4}"#.utf8))), for: host.id)
+        #expect(refreshedOwner == hosts.queueDiscoveryKey, "repeated status/progress must not create a polling loop")
+        hosts.setReachability(.up(try status(instance: "replacement")), for: host.id)
+        #expect(refreshedOwner != hosts.queueDiscoveryKey, "a replacement installation must cancel old discovery")
+        let live = hosts.queueDiscoveryKey
+        hosts.setReachability(.needsKey, for: host.id)
+        #expect(hosts.queueDiscoveryKey.isEmpty)
+        hosts.setReachability(.up(try status(instance: "replacement")), for: host.id)
+        #expect(hosts.queueDiscoveryKey == live)
+        var changed = try #require(hosts.host(host.id))
+        changed.apiKey = "new credential"; hosts.setHosts([changed])
+        let rekeyed = hosts.queueDiscoveryKey
+        #expect(rekeyed != live)
+        changed.baseURL = URL(string: "http://plato:7680")!; hosts.setHosts([changed])
+        let rerouted = hosts.queueDiscoveryKey
+        #expect(rerouted != rekeyed)
+        changed.connectionMode = .secure; hosts.setHosts([changed])
+        #expect(hosts.queueDiscoveryKey != rerouted)
+        hosts.setReachability(.down("offline"), for: host.id)
+        #expect(hosts.queueDiscoveryKey.isEmpty)
+    }
+
     @Test func loadingAnExistingDirectMachinePreservesItsRegularCredential() throws {
         let (_, credentials, file) = store()
         let id = UUID(), origin = URL(string: "https://direct.example")!

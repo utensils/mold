@@ -89,6 +89,21 @@ final class HostStore {
 
     var upHosts: [MoldHost] { hosts.filter(isUp) }
 
+    /// Refresh authority, not progress. Status can arrive before capabilities
+    /// and authenticated route metadata; each completed authority must relist
+    /// parent jobs instead of leaving their old captured owners disabled.
+    struct QueueDiscoveryTarget: Hashable {
+        let host: MoldHost
+        let instance: String?
+        let supportsVideoJobs: Bool
+    }
+    var queueDiscoveryKey: [QueueDiscoveryTarget] {
+        upHosts.sorted { $0.id.uuidString < $1.id.uuidString }.map {
+            QueueDiscoveryTarget(host: $0, instance: instanceID(of: $0.id),
+                                 supportsVideoJobs: capabilities[$0.id]?.canCreateVideoJob == true)
+        }
+    }
+
     /// The run of the server this machine last answered as: what a retry or
     /// a transfer must name. `nil` until it answers.
     func instanceID(of id: MoldHost.ID) -> String? {

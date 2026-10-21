@@ -43,7 +43,7 @@ struct QueueView: View {
         .refreshable { await queue.reload(); await generate.discoverDurationVideos() }
         // A job just held asks for a decision: a warning, as on Generate.
         .sensoryFeedback(.warning, trigger: queue.heldCount) { old, new in new > old }
-        .task(id: hosts.upHosts.map(\.id)) { await queue.reload(); await generate.discoverSequences(); await generate.discoverDurationVideos() }
+        .task(id: hosts.queueDiscoveryKey) { await queue.reload(); await generate.discoverSequences(); await generate.discoverDurationVideos() }
         .task { await queue.followRunning() }
     }
 

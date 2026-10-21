@@ -525,3 +525,5 @@ Historical IC-LoRA/ControlNet recipes that this native editor cannot faithfully 
 A refused Library extension remains visible and blocks Generate until acknowledged. **Keep current draft** leaves existing settings and media intact; pending source reads cannot replace that draft after acknowledgement.
 
 Stopped accepted duration videos remain paused in Queue and can resume from completed clips when the server advertises Resume. Historical cancelled parents remain available for an explicit fresh start or deletion of recovery data; accepted cancelled jobs are not dismissed locally. Cancelled-before-admission attempts can still be dismissed.
+
+Queue rechecks the current machine credentials, route, installation and video capability when connection details settle, including while Queue stays open. Repeated progress updates do not relist the queue. A late response from an earlier connection cannot replace the current listing; paused videos stay paused until Resume is explicitly chosen.
