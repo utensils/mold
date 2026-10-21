@@ -672,7 +672,7 @@ never answers produces no verdict: the row stays flagged as an interruption so
 a later resume can try again, and only a host that answers "no such job, no
 such print" settles it as a failure.
 
-Create keeps one output switch. **Add clip** expands ordered prompt/length rows with one Make video action; Library **Continue video** starts a separate linked part on its original machine. The model picker
+Create defaults to one prompt and **Duration**; **Define scenes** optionally expands ordered prompt/length rows with one Make video action. Library **Extend video** publishes the original plus added footage as a new movie; legacy **Continue video** starts a separate linked part on its original machine. The model picker
 lists every installed video checkpoint without narrowing, and the prompt, size,
 frame rate, steps, guidance, and seed fields are the only ones a clip needs.
 
@@ -1149,3 +1149,10 @@ more pagination. Unanswered operations remain reachable by their exact saved
 machine/operation identity after relaunch. Legacy hosts cannot silently shorten
 a saved Duration/Extend draft: the draft is shown with an update/reconnect
 explanation, and admission stays blocked until its capabilities are available.
+
+**Use settings** restores the saved duration, literal prompts, exact seed and
+authenticated original inputs into a fresh draft. An extended movie restores
+its added duration and explains that its original video is not attached. Legacy
+authored clips retain their individual settings; verified automatic clips may
+restore a single-prompt Duration with a saved-length notice. Missing provenance
+or original inputs produces an explanation before changing the current draft.
