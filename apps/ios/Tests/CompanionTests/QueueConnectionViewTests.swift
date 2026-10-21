@@ -40,12 +40,15 @@ struct QueueConnectionViewTests {
             drafts: DraftStore(directory: directory), sequence: NativeSequenceSession(defaults: defaults),
             videoJobs: videos, videoRestarts: VideoRestartController(defaults: defaults))
         let queue = QueueStore(hosts: hosts)
+        var disappeared = false
         let view = NavigationStack { QueueView() }.environment(hosts).environment(queue).environment(generate).environment(AppRouter())
+            .onDisappear { disappeared = true }
         let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousWindow = scene.windows.first(where: \.isKeyWindow)
         let window = UIWindow(windowScene: scene)
         window.rootViewController = UIHostingController(rootView: view)
         window.makeKeyAndVisible()
-        defer { window.isHidden = true; window.rootViewController = nil; videos.suspend() }
+        defer { window.isHidden = true; window.rootViewController = nil; videos.suspend(); previousWindow?.makeKeyAndVisible() }
         try await Task.sleep(for: .milliseconds(150))
         #expect(videos.jobs.isEmpty)
         hosts.setCapabilities(caps, for: host.id)
@@ -67,5 +70,9 @@ struct QueueConnectionViewTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try image.pngData()?.write(to: output)
         print("QUEUE_RECONNECT_SCREENSHOT \(output.path)")
+        window.isHidden = true; window.rootViewController = nil; videos.suspend()
+        previousWindow?.makeKeyAndVisible()
+        for _ in 0..<100 where !disappeared { try await Task.sleep(for: .milliseconds(20)) }
+        #expect(disappeared, "dismantling the hosted Queue must end its SwiftUI task lifetime")
     }
 }
