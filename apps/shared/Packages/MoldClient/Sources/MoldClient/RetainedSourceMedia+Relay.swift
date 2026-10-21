@@ -35,6 +35,19 @@ public extension RetainedSourceMedia {
                 grouped[field, default: []].append(try MoldJSON.encoder.encode(keyframe))
             } else { grouped[field, default: []].append(bytes) }
         }
+        let referenceInputs = downloaded.filter { field(forRole: $0.member.role) == .references }
+        if !referenceInputs.isEmpty {
+            let ordered = referenceMembers(referenceInputs.map(\.member))
+            guard ordered.count == referenceInputs.count,
+                  Set(referenceInputs.map { $0.member.memberId }).count == referenceInputs.count else {
+                throw RelayFailure.ambiguous(.references)
+            }
+            let bytesByID = Dictionary(uniqueKeysWithValues: referenceInputs.map { ($0.member.memberId, $0.bytes) })
+            grouped[.references] = try ordered.map {
+                guard let bytes = bytesByID[$0.memberId] else { throw RelayFailure.ambiguous(.references) }
+                return bytes
+            }
+        }
         for (field, bytes) in grouped {
             try relayed.inline(field, bytes)
         }
