@@ -54,6 +54,11 @@ rebuilds/relaunches in Simulator; `companion-run` launches once. Helpers accept
 
 ## Route the request
 
+- Match a named model or variant against the host's `name`, `display_name`
+  and `variant` before choosing a speed tier. **H3 Fast / FastH3** means the
+  listed **FastH3** variant, such as FastH3 V2; **Turbo** and **PDMD** are
+  different variants. Do not substitute one merely because it is faster. If
+  the requested named variant is unavailable, report that before generating.
 - For generation, editing, or upscaling, confirm the intended model family,
   task, output type, source media, and destination. Always read the shared
   guide and exactly one family base below. Add a task leaf only when the

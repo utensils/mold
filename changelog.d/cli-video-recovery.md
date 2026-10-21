@@ -5,3 +5,5 @@
   `mold jobs cancel ID --video` can stop an unanswered admission, and Restart or
   Send keeps the original operation while preserving full-range seeds and
   relaying any original movie in bounded chunks.
+
+- Clarify named H3 Fast/FastH3 variant selection so agent skills do not silently substitute Turbo or PDMD recipes.
