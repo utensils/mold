@@ -1589,6 +1589,7 @@ mod tests {
             source_frames: 0,
             total_frames: 24,
             join_mode: mold_core::video_job::VideoJoinMode::Continuous,
+            authoring: None,
             source_archive_identity_sha256: None,
             artifacts: Some(descriptor.clone()),
         });

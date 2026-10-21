@@ -190,7 +190,8 @@ pub(crate) fn hydrate_original_request(
     request.generation.keyframes = first.keyframes.clone();
     request.generation.references = first.generation_references.clone();
     request.generation.seed = template.seed;
-    request.generation.frames = Some(first.frames);
+    // Retained keyframes still use the original authored endpoint locator.
+    request.generation.frames = manifest.request.generation.frames.or(Some(first.frames));
     request.validation_revision = None;
     if let Some(source) = request.source.as_mut() {
         source.retained_upload = None;
@@ -210,6 +211,26 @@ pub(crate) mod tests {
         mold_db::video_jobs::StoredVideoJob{job:serde_json::from_value(serde_json::json!({"id":"parent","state":"queued","plan":plan,"completed_clips":"0","active_child_id":null,"output_filename":null,"error":null,"error_detail":null,"created_at_ms":1,"updated_at_ms":1,"can_cancel":true,"can_resume":false,"can_delete":true})).unwrap(),request_sha256:"request".into(),manifest_sha256:format!("{:x}",Sha256::digest(json.as_bytes())),manifest_json:json,revision:0,cancel_requested:false}
     }
 
+    #[test]
+    fn restart_hydration_preserves_original_endpoint_frame_locator() {
+        let home = tempfile::tempdir().unwrap();
+        let mut state = crate::state::AppState::for_tests();
+        state.metadata_db = std::sync::Arc::new(Some(
+            mold_db::MetadataDb::open(&home.path().join("mold.db")).unwrap(),
+        ));
+        let mut row = fixture();
+        row.job.id = uuid::Uuid::new_v4().to_string();
+        let mut manifest = read_manifest(&row).unwrap();
+        manifest.request.generation.frames = Some(25);
+        manifest.template.stages[0].keyframes = Some(vec![mold_core::KeyframeCondition {
+            frame: 24,
+            image: vec![1],
+            name: None,
+        }]);
+        let restored = hydrate_original_request(&state, &row, &manifest).unwrap();
+        assert_eq!(restored.generation.frames, Some(25));
+        assert_eq!(restored.generation.keyframes.unwrap()[0].frame, 24);
+    }
     #[test]
     fn parent_manifest_authenticates_exact_bytes_schema_and_public_plan() {
         let mut row = fixture();

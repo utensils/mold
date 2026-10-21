@@ -2,5 +2,5 @@
 - **Faithful Library recipes.** Preserve literal prompt and negative-prompt text and full-range seeds across Gallery records, archived metadata, Trash restore, and CLI reads.
 - **Stable extension sound and interrupted admission.** Freeze source MP4 audio into parent-owned PCM so deleting the original Library item cannot change resumed sound; keep admission and export locks until detached input work has finished.
 - **Keep stopped videos recoverable.** Stopping an accepted duration video now pauses it after child execution settles, preserving completed clips for explicit Resume. Older stopped videos remain visible and can Start again or Send to another host.
-
 - Restore authenticated reference images and opening/closing frames when reusing duration-video settings.
+- **Restore chained video settings accurately.** Published duration videos now retain the original duration, optional scenes, exact seed and authored frame boundaries after the queue item is discarded. Extension settings describe the added footage and leave the original video detached.

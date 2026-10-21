@@ -1785,6 +1785,31 @@ impl CollectionRef {
     }
 }
 
+pub(crate) fn deserialize_optional_seed<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Seed {
+        Integer(u64),
+        Decimal(String),
+    }
+    match Option::<Seed>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(Seed::Integer(seed)) => Ok(Some(seed)),
+        Some(Seed::Decimal(seed))
+            if !seed.is_empty() && seed.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            seed.parse::<u64>()
+                .map(Some)
+                .map_err(serde::de::Error::custom)
+        }
+        _ => Err(serde::de::Error::custom(
+            "seed must be an unsigned integer or decimal string",
+        )),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GenerateRequest {
     #[schema(example = "a cat sitting on a windowsill at sunset")]
@@ -1812,6 +1837,8 @@ pub struct GenerateRequest {
     #[serde(default = "default_guidance")]
     #[schema(example = 3.5)]
     pub guidance: f64,
+    /// Accept an exact decimal string from JavaScript; serialize as the legacy numeric seed.
+    #[serde(default, deserialize_with = "deserialize_optional_seed")]
     #[schema(example = 42)]
     pub seed: Option<u64>,
     #[serde(default = "default_batch_size")]
@@ -5981,6 +6008,44 @@ impl GpuBackend {
 mod tests {
     use super::*;
 
+    #[test]
+    fn generation_seed_decimal_string_preserves_full_u64_and_canonical_scope() {
+        let base = serde_json::json!({"prompt":"seed", "model":"ltx-video", "width":512, "height":512, "steps":4});
+        let mut numeric = base.clone();
+        numeric["seed"] = serde_json::json!(u64::MAX);
+        let mut decimal = base.clone();
+        decimal["seed"] = serde_json::json!(u64::MAX.to_string());
+        let a: GenerateRequest = serde_json::from_value(numeric).unwrap();
+        let b: GenerateRequest = serde_json::from_value(decimal).unwrap();
+        assert_eq!(b.seed, Some(u64::MAX));
+        assert_eq!(
+            serde_json::to_vec(&a).unwrap(),
+            serde_json::to_vec(&b).unwrap()
+        );
+        assert!(serde_json::to_value(&b).unwrap()["seed"].is_u64());
+        for seed in [serde_json::Value::Null, serde_json::json!(42)] {
+            let mut raw = base.clone();
+            raw["seed"] = seed;
+            assert!(serde_json::from_value::<GenerateRequest>(raw).is_ok());
+        }
+        for seed in [
+            "",
+            "-1",
+            "+1",
+            " 42",
+            "42 ",
+            "1.0",
+            "1e3",
+            "18446744073709551616",
+        ] {
+            let mut raw = base.clone();
+            raw["seed"] = serde_json::json!(seed);
+            assert!(
+                serde_json::from_value::<GenerateRequest>(raw).is_err(),
+                "{seed}"
+            );
+        }
+    }
     /// `loras` and `lora` are alternatives. Every reader spells the
     /// precedence `loras.or(lora)`; only the IC-LoRA control folds ever read
     /// both, and concatenating them recorded and merged one `mold run --lora`

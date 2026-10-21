@@ -84,6 +84,76 @@ pub struct VideoJobScene {
     pub duration_ms: u64,
 }
 
+/// Original editable Duration draft, independent of the delivered movie length.
+/// Contains only bounded scalar authoring data; media stays in Gallery authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct VideoJobAuthoring {
+    #[serde(with = "decimal_u64")]
+    #[schema(value_type = String)]
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scenes: Option<Vec<VideoJobScene>>,
+    /// Qualified single-clip frame count, never the full published movie length.
+    pub boundary_frames: u32,
+    /// Original endpoint locator when its frame count differs from the clip cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_frames: Option<u32>,
+    #[serde(with = "decimal_u64")]
+    #[schema(value_type = String)]
+    pub seed: u64,
+}
+
+impl VideoJobAuthoring {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.duration_ms == 0 || self.boundary_frames == 0 || self.input_frames == Some(0) {
+            return Err("invalid video authoring duration or frame boundary".into());
+        }
+        validate_scenes(self.scenes.as_deref(), self.duration_ms)?;
+        bounded_authoring_json(self, 1024 * 1024)
+    }
+}
+
+// Stream the size calculation so even rejected scene collections allocate no
+// second unbounded JSON buffer. Leave room for scalar authoring fields at admission.
+fn bounded_authoring_json(value: &impl Serialize, limit: usize) -> Result<(), String> {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_sub(bytes.len())
+                .ok_or_else(|| std::io::Error::other("video authoring metadata exceeds 1 MiB"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(Counter(limit), value).map_err(|error| error.to_string())
+}
+
+fn validate_scenes(scenes: Option<&[VideoJobScene]>, duration_ms: u64) -> Result<(), String> {
+    if let Some(scenes) = scenes {
+        if scenes.is_empty() || scenes.len() > 4096 {
+            return Err("scenes must contain 1 to 4096 entries".into());
+        }
+        let sum = scenes.iter().try_fold(0u64, |sum, scene| {
+            if scene.duration_ms == 0
+                || scene.prompt.trim().is_empty()
+                || scene.prompt.len() > 77000
+            {
+                return None;
+            }
+            sum.checked_add(scene.duration_ms)
+        });
+        if sum != Some(duration_ms) {
+            return Err("scene durations must be positive and sum exactly to duration_ms; prompts must be nonempty and at most 77000 bytes".into());
+        }
+        bounded_authoring_json(&scenes, 1024 * 1024 - 1024)?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum VideoJoinMode {
@@ -174,6 +244,11 @@ pub struct VideoJob {
 
 impl VideoJobRequest {
     pub fn validate_shape(&self) -> Result<(), String> {
+        if self.generation.frames == Some(0) {
+            return Err(
+                "frames must be positive when specifying an authored input boundary".into(),
+            );
+        }
         if self.duration_ms == 0 {
             return Err("duration_ms must be greater than zero".into());
         }
@@ -219,23 +294,7 @@ impl VideoJobRequest {
                 return Err("retained_upload requires its original archive identity".into());
             }
         }
-        if let Some(scenes) = &self.scenes {
-            if scenes.is_empty() || scenes.len() > 4096 {
-                return Err("scenes must contain 1 to 4096 entries".into());
-            }
-            let sum = scenes.iter().try_fold(0u64, |sum, scene| {
-                if scene.duration_ms == 0
-                    || scene.prompt.trim().is_empty()
-                    || scene.prompt.len() > 77000
-                {
-                    return None;
-                }
-                sum.checked_add(scene.duration_ms)
-            });
-            if sum != Some(self.duration_ms) {
-                return Err("scene durations must be positive and sum exactly to duration_ms; prompts must be nonempty and at most 77000 bytes".into());
-            }
-        }
+        validate_scenes(self.scenes.as_deref(), self.duration_ms)?;
         Ok(())
     }
 }
@@ -362,6 +421,25 @@ mod tests {
         })).unwrap()
     }
 
+    #[test]
+    fn authoring_zero_input_frames_refuses_before_generation() {
+        let mut req = request(serde_json::json!(30000));
+        req.generation.frames = Some(0);
+        assert!(req.validate_shape().is_err());
+    }
+    #[test]
+    fn authoring_metadata_is_bounded_before_admission() {
+        let mut req = request(serde_json::json!(14000));
+        req.scenes = Some(
+            (0..14)
+                .map(|_| VideoJobScene {
+                    prompt: "x".repeat(77000),
+                    duration_ms: 1000,
+                })
+                .collect(),
+        );
+        assert!(req.validate_shape().is_err());
+    }
     #[test]
     fn paused_video_offers_resume_without_another_stop() {
         assert!(VideoJobState::Paused.can_resume());

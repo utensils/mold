@@ -23,6 +23,33 @@ use std::{
     path::{Path, PathBuf},
 };
 
+fn published_authoring(
+    manifest: &VideoJobManifest,
+) -> Result<mold_core::video_job::VideoJobAuthoring> {
+    let boundary_frames = manifest
+        .template
+        .stages
+        .first()
+        .context("video template has no input stage")?
+        .frames;
+    let authoring = mold_core::video_job::VideoJobAuthoring {
+        duration_ms: manifest.request.duration_ms,
+        scenes: manifest.request.scenes.clone(),
+        boundary_frames,
+        input_frames: manifest
+            .request
+            .generation
+            .frames
+            .filter(|frames| *frames != boundary_frames),
+        seed: manifest
+            .template
+            .seed
+            .context("parent has no frozen seed")?,
+    };
+    authoring.validate().map_err(anyhow::Error::msg)?;
+    Ok(authoring)
+}
+
 const PCM: PcmFormat = crate::video_prefix_audio::FORMAT;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -906,6 +933,7 @@ impl VideoJobOutput {
             source_frames: manifest.plan.source_frames,
             total_frames: manifest.plan.total_frames,
             join_mode: manifest.plan.join_mode,
+            authoring: Some(published_authoring(manifest)?),
             source_archive_identity_sha256: manifest
                 .retained_source
                 .as_ref()
@@ -1066,6 +1094,45 @@ mod tests {
         (row, child)
     }
     #[test]
+    fn published_authoring_uses_original_added_duration_and_literal_scenes() {
+        let home = tempfile::tempdir().unwrap();
+        let (_, _, mut manifest) = fixture(home.path(), false, false);
+        manifest.request.duration_ms = 30_000;
+        manifest.request.generation.frames = Some(97);
+        manifest.template.stages[0].frames = 107;
+        manifest.template.seed = Some(u64::MAX);
+        manifest.request.scenes = Some(vec![
+            mold_core::video_job::VideoJobScene {
+                prompt: "first\\n\r\nline".into(),
+                duration_ms: 10_000,
+            },
+            mold_core::video_job::VideoJobScene {
+                prompt: "second\\t".into(),
+                duration_ms: 20_000,
+            },
+        ]);
+        let fresh = published_authoring(&manifest).unwrap();
+        assert_eq!(fresh.boundary_frames, 107); // H3's qualified 17n+5 grid.
+        assert_eq!((fresh.boundary_frames - 5) % 17, 0);
+        assert_eq!(fresh.input_frames, Some(97));
+        assert_eq!(fresh.seed, u64::MAX);
+        assert_eq!(fresh.scenes, manifest.request.scenes);
+        manifest.plan.source_frames = 1440;
+        manifest.plan.total_frames = 2160;
+        manifest.request.source = Some(mold_core::video_job::VideoJobSource {
+            filename: "source.mp4".into(),
+            expected_archive_identity_sha256: Some("a".repeat(64)),
+            retained_upload: None,
+        });
+        assert_eq!(
+            published_authoring(&manifest).unwrap(),
+            fresh,
+            "Extend restores added footage as a fresh draft, without the original prefix"
+        );
+        manifest.request.scenes = None;
+        assert!(published_authoring(&manifest).unwrap().scenes.is_none());
+    }
+    #[test]
     fn completed_parts_survive_child_removal_and_publish_one_exact_movie() {
         for audio in [false, true] {
             for blended in [false, true] {
@@ -1175,6 +1242,32 @@ mod tests {
                     .unwrap();
                 let provenance = record.metadata.video_job.unwrap();
                 assert_eq!(provenance.total_frames, 9);
+                let authoring = serde_json::to_value(&provenance).unwrap();
+                assert_eq!(authoring["authoring"]["duration_ms"], "375");
+                assert_eq!(authoring["authoring"]["boundary_frames"], 5);
+                row.job.state = VideoJobState::Completed;
+                mold_db::video_jobs::checkpoint(db(&state).unwrap(), &row, None).unwrap();
+                let settled = mold_db::video_jobs::get(db(&state).unwrap(), &row.job.id)
+                    .unwrap()
+                    .unwrap();
+                assert!(mold_db::video_jobs::delete_settled(
+                    db(&state).unwrap(),
+                    &row.job.id,
+                    settled.revision,
+                    100
+                )
+                .unwrap());
+                std::fs::remove_dir_all(job_dir(&state, &row.job.id).unwrap()).unwrap();
+                let saved = db(&state)
+                    .unwrap()
+                    .get(&home.path().join("output"), &owner.final_name)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    serde_json::to_value(saved.metadata.video_job.unwrap()).unwrap()["authoring"],
+                    authoring["authoring"]
+                );
+
                 let assets = provenance.artifacts.unwrap();
                 assert_eq!(assets.pcm.is_some(), audio);
                 if let Some(pcm) = assets.pcm.as_ref() {
@@ -1286,6 +1379,7 @@ mod tests {
             source_frames: 0,
             total_frames: 5,
             join_mode: VideoJoinMode::Continuous,
+            authoring: None,
             source_archive_identity_sha256: None,
             artifacts: Some(source_assets.clone()),
         });

@@ -47,6 +47,8 @@ pub struct VideoJobProvenance {
     pub total_frames: u64,
     pub join_mode: crate::video_job::VideoJoinMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authoring: Option<crate::video_job::VideoJobAuthoring>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_archive_identity_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifacts: Option<VideoJobArtifacts>,
@@ -72,6 +74,9 @@ impl VideoJobProvenance {
             || self.added_frames.checked_add(self.source_frames) != Some(self.total_frames)
         {
             return Err("invalid video provenance frame counts".into());
+        }
+        if let Some(authoring) = &self.authoring {
+            authoring.validate()?;
         }
         if let Some(artifacts) = &self.artifacts {
             artifacts.validate()?;
@@ -110,6 +115,18 @@ impl VideoJobArtifacts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn published_authoring_preserves_literal_scenes_duration_and_full_seed() {
+        let raw = serde_json::json!({
+            "id":"c7f8554e-53e7-4bd1-a203-346b72032e31", "manifest_sha256":"a".repeat(64),
+            "clip_count":"2", "part_count":"2", "added_frames":"144", "source_frames":"720", "total_frames":"864", "join_mode":"continuous",
+            "authoring":{"duration_ms":"9007199254740993", "boundary_frames":107, "input_frames":97, "seed":"18446744073709551615", "scenes":[{"prompt":"literal\\n\r\nnext", "duration_ms":"9007199254740993"}]}
+        });
+        let parsed: VideoJobProvenance = serde_json::from_value(raw.clone()).unwrap();
+        parsed.validate().unwrap();
+        let encoded = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(encoded["authoring"], raw["authoring"]);
+    }
     #[test]
     fn long_movie_provenance_stays_scalar_and_pcm_has_no_inline_media_budget() {
         let value:VideoJobProvenance=serde_json::from_value(serde_json::json!({"id":"c7f8554e-53e7-4bd1-a203-346b72032e31","manifest_sha256":"a".repeat(64),"clip_count":"9007199254740993","part_count":"562949953421313","added_frames":"9007199254740993","source_frames":"0","total_frames":"9007199254740993","join_mode":"blended_shots","artifacts":{"version":1,"bundle_id":"b".repeat(64),"provenance":{"sha256":"c".repeat(64),"size_bytes":"1200"},"pcm":{"file":{"sha256":"d".repeat(64),"size_bytes":"2764800000"},"sample_rate":48000,"channels":2,"frames":"345600000"}}})).unwrap();

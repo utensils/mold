@@ -326,6 +326,8 @@ kind of bare array. Add `?detail=1` (or `true`, or the bare flag) to get the
 an `unsupported_reason` naming why this host has none — which is the only way
 to tell "no camera controls for this checkpoint" from "none installed".
 
+Generation `seed`, authored-chain base `seed`, and stage `seed_offset` accept either an unsigned JSON integer or an exact decimal string, such as `"18446744073709551615"`. Use strings in JavaScript to preserve the full 64-bit value. Signed values, fractional notation, whitespace and overflow are refused. Responses and canonical request serialization retain the existing numeric representation. Published duration videos additionally expose a lossless decimal seed in `video_job.authoring`.
+
 ## Authentication
 
 When `MOLD_API_KEY` is set, all API requests must include an `X-Api-Key`

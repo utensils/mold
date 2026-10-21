@@ -265,6 +265,7 @@ pub struct ChainStage {
     /// v2 movie-maker override hook for "regenerate just this stage with a
     /// different seed".
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "crate::types::deserialize_optional_seed")]
     pub seed_offset: Option<u64>,
 
     // NEW in multi-prompt v2 ───────────────────────────────────────────
@@ -367,6 +368,7 @@ pub struct ChainRequest {
     /// Omission resolves to a random seed once at creation; explicit zero stays fixed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(example = 42)]
+    #[serde(deserialize_with = "crate::types::deserialize_optional_seed")]
     pub seed: Option<u64>,
 
     #[schema(example = 8)]
@@ -1794,6 +1796,34 @@ fn build_auto_expand_stages(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn authored_seed_decimal_strings_preserve_canonical_request_scope() {
+        let numeric = serde_json::json!({"model":"ltx-video", "width":512, "height":512, "steps":4, "guidance":0, "seed":u64::MAX, "stages":[{"prompt":"literal", "frames":97, "seed_offset":u64::MAX-1}]});
+        let mut decimal = numeric.clone();
+        decimal["seed"] = serde_json::json!(u64::MAX.to_string());
+        decimal["stages"][0]["seed_offset"] = serde_json::json!((u64::MAX - 1).to_string());
+        let numeric: super::ChainRequest = serde_json::from_value(numeric).unwrap();
+        let decoded: super::ChainRequest = serde_json::from_value(decimal.clone()).unwrap();
+        assert_eq!(decoded.seed, Some(u64::MAX));
+        assert_eq!(decoded.stages[0].seed_offset, Some(u64::MAX - 1));
+        assert_eq!(
+            serde_json::to_vec(&numeric).unwrap(),
+            serde_json::to_vec(&decoded).unwrap()
+        );
+        for value in ["-1", "1e3", "18446744073709551616"] {
+            let mut invalid = decimal.clone();
+            invalid["seed"] = serde_json::json!(value);
+            assert!(serde_json::from_value::<super::ChainRequest>(invalid).is_err());
+            let mut invalid = decimal.clone();
+            invalid["stages"][0]["seed_offset"] = serde_json::json!(value);
+            assert!(serde_json::from_value::<super::ChainRequest>(invalid).is_err());
+        }
+        decimal["seed"] = serde_json::Value::Null;
+        decimal["stages"][0]["seed_offset"] = serde_json::Value::Null;
+        let absent: super::ChainRequest = serde_json::from_value(decimal).unwrap();
+        assert_eq!(absent.seed, None);
+        assert_eq!(absent.stages[0].seed_offset, None);
+    }
     #[test]
     fn sequence_discovery_uses_every_reviewed_h3_identity_and_excludes_download_only_tiers() {
         for model in crate::minimax_h3::REVIEWED_COMPACT_MODELS {
