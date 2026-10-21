@@ -18649,6 +18649,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gallery_import_preserves_archive_completion_facts_with_exact_embedded_recipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = mold_core::Config {
+            output_dir: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let mut state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(tx),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        state.metadata_db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let db = state.metadata_db.clone();
+        let app = app_with_state(state);
+        let mut embedded = output_metadata("literal\\nline\r\nnext");
+        embedded.seed = u64::MAX;
+        let mut archive = embedded.clone();
+        archive.job_id = Some("completed-job".into());
+        archive.generation_time_ms = Some(1234);
+        archive.has_alpha = Some(false);
+        archive.version = format!("{} (abcdef012345 2026-10-20)", embedded.version);
+        let mut payload = b"mold:parameters\0".to_vec();
+        payload.extend(serde_json::to_vec(&embedded).unwrap());
+        let mut chunk = (payload.len() as u32).to_be_bytes().to_vec();
+        let mut body = b"tEXt".to_vec();
+        body.extend(payload);
+        let mut crc = !0u32;
+        for byte in &body {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        chunk.extend(body);
+        chunk.extend((!crc).to_be_bytes());
+        let mut bytes = minimal_png();
+        bytes.splice(33..33, chunk);
+        for (filename, metadata, expected) in [
+            ("complete.png", archive.clone(), StatusCode::CREATED),
+            ("complete.png", archive.clone(), StatusCode::OK),
+            (
+                "conflict.png",
+                {
+                    let mut bad = archive.clone();
+                    bad.seed -= 1;
+                    bad
+                },
+                StatusCode::CONFLICT,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::put(format!("/api/gallery/import/{filename}"))
+                        .header("content-type", "application/vnd.mold.gallery-import")
+                        .body(Body::from(gallery_import_body(Some(&metadata), &bytes)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{}", json_body(response).await);
+        }
+        let saved = db
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .get(dir.path(), "complete.png")
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.metadata, archive);
+        assert_eq!(
+            std::fs::read(dir.path().join("complete.png")).unwrap(),
+            bytes
+        );
+        assert!(!dir.path().join("conflict.png").exists());
+    }
+
+    #[tokio::test]
     async fn gallery_import_uses_no_replace_publication_metadata_and_events() {
         let dir = tempfile::tempdir().unwrap();
         let db = mold_db::MetadataDb::open_in_memory().unwrap();

@@ -9353,6 +9353,7 @@ pub(crate) fn validate_gallery_filename(filename: &str) -> Result<(), ApiError> 
 struct GalleryImportDescriptor {
     #[serde(default)]
     timestamp: Option<u64>,
+    #[serde(deserialize_with = "mold_core::video_job::deserialize_literal_metadata")]
     metadata: mold_core::OutputMetadata,
     metadata_synthetic: bool,
 }
@@ -9651,9 +9652,9 @@ async fn import_gallery_file(
         let valid =
             mold_db::metadata_io::is_valid_gallery_file(&staged_path, format, declared_file_len);
         let embedded = mold_db::metadata_io::read_embedded(&staged_path, format);
-        let embedded_matches = embedded
-            .as_ref()
-            .is_none_or(|embedded| embedded == &descriptor_for_validation.metadata);
+        let embedded_matches = embedded.as_ref().is_none_or(|embedded| {
+            crate::gallery_import_metadata::matches(embedded, &descriptor_for_validation.metadata)
+        });
         (valid, embedded_matches, embedded.is_some())
     })
     .await
@@ -9836,10 +9837,10 @@ async fn import_gallery_file(
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
-        if available_descriptors
-            .windows(2)
-            .any(|pair| pair[0] != pair[1])
-        {
+        if available_descriptors.windows(2).any(|pair| {
+            pair[0].1 != pair[1].1
+                || !crate::gallery_import_metadata::matches(&pair[0].0, &pair[1].0)
+        }) {
             let _ = transaction.rollback_unpublished();
             return Err(ApiError::with_code(
                 "existing gallery metadata authorities disagree",
@@ -9847,10 +9848,10 @@ async fn import_gallery_file(
                 StatusCode::CONFLICT,
             ));
         }
-        let authoritative = embedded_descriptor
+        let authoritative = archived_descriptor
             .as_ref()
-            .or(archived_descriptor.as_ref())
-            .or(recorded_descriptor.as_ref());
+            .or(recorded_descriptor.as_ref())
+            .or(embedded_descriptor.as_ref());
         match authoritative {
             Some((metadata, synthetic))
                 if metadata == &descriptor.metadata
@@ -9872,9 +9873,10 @@ async fn import_gallery_file(
                 ));
             }
         }
-        let metadata = embedded_descriptor
+        let metadata = archived_descriptor
             .map(|(metadata, _)| metadata)
             .or_else(|| recorded_descriptor.map(|(metadata, _)| metadata))
+            .or_else(|| embedded_descriptor.map(|(metadata, _)| metadata))
             .unwrap_or_else(|| descriptor.metadata.clone());
         if db_for_existing.as_ref().as_ref().is_some() && can_backfill_missing_row {
             let image = db_for_existing.as_ref().as_ref().and_then(|db| {

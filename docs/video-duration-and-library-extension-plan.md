@@ -54,6 +54,16 @@ GPU work retains one clip's inference envelope, independent of movie length.
 - [ ] Complete actual browser and native settings-reuse UAT, including extended
       output, media-bearing legacy clips and iOS keyboard dismissal.
 
+## Durable Library synchronization
+
+- [ ] Preserve the full captured metadata through native and browser copy paths,
+      including newer authoring and artifact fields and full-width seeds.
+- [ ] Transfer provenance and continuous audio archives in bounded, resumable
+      chunks with exact destination ownership and crash-safe completion.
+- [ ] Repair partial or existing-output copies; refuse changed binding/corrupt
+      content without silently weakening integrity checks.
+- [ ] Peer review and prove source-independent copies using Plato UAT media.
+
 ## Recovery and delivery
 
 - [x] Failed ordinary video retains its encrypted input in a non-retryable

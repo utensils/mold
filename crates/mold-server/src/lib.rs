@@ -22,6 +22,7 @@ mod durable_disposition;
 mod durable_generation_settlement;
 pub mod gallery_authority;
 mod gallery_changes_api;
+mod gallery_import_metadata;
 mod gallery_media_transfer;
 mod gallery_source_cache;
 mod gallery_source_media;

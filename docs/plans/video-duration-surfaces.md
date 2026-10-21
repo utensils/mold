@@ -62,3 +62,19 @@ Independent reviews cover the shared contracts, browser/native behavior,
 backend ownership/cancellation, output assembly and CLI recovery. After all
 checks and UAT, merge the reviewed feature, deploy main and refresh the local
 nightly CLI and skills.
+
+## Durable Library synchronization
+
+A copied duration or extended movie must retain its exact full metadata, original
+conditioning inputs and owned provenance/audio archive files. Native typed UI
+models must not discard newer recipe fields. Capture source authority before
+copying, verify the downloaded output, revalidate the source and bind the imported
+assets to the destination archive owner. Completion requires durable files;
+interrupted copies and existing-output retries repair missing assets without
+creating duplicate movies. Missing legacy inputs remain explicitly disclosed.
+
+Acceptance covers interrupted/resumed chunk transfers, changed source binding,
+corrupt payload rejection, exact full-width seeds and authoring metadata, and a
+copy that remains usable independently of its source. Actual source generation
+and sync UAT use Plato's Mold home; HAL9000 receives deployment/readiness checks
+only.
