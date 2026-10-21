@@ -19,18 +19,19 @@ extension LibraryStore {
     func reconcileMirrorOrganization(_ copies: MirrorCopies, sources: MirrorSources, prepared: MirrorDestination,
                                      explicitCopy: Bool) async -> MirrorOrganization {
         var result = MirrorOrganization(failedFiles: [], failures: [])
-        guard !copies.successful.isEmpty else { return result }
+        let successful = copies.successful.filter { !$0.target.assetsOnly }
+        guard !successful.isEmpty else { return result }
         let destination = prepared.backend
         let local = prepared.host
         let collections: [Collection]
         do { collections = try await destination.collections() }
-        catch { return MirrorOrganization(failedFiles: Set(copies.successful.map(\.filename)), failures: ["Destination collections: \(error.sentence)"]) }
+        catch { return MirrorOrganization(failedFiles: Set(successful.map(\.filename)), failures: ["Destination collections: \(error.sentence)"]) }
         let slugs = Dictionary(collections.map { ($0.id, $0.slug) }, uniquingKeysWith: { first, _ in first })
         let hidden = Set(collections.filter { $0.hidden == true }.map(\.slug))
         publishSyncProgress("Reconciling organization on \(local.name)…", force: true)
         // Fresh authoritative destination rows, after transfer. No per-print GETs.
         do { try await replica(for: local).pull(pullRequest(local, .live), using: destination) }
-        catch { return MirrorOrganization(failedFiles: Set(copies.successful.map(\.filename)), failures: ["Destination organization: \(error.sentence)"]) }
+        catch { return MirrorOrganization(failedFiles: Set(successful.map(\.filename)), failures: ["Destination organization: \(error.sentence)"]) }
         let view = await replica(for: local).mirrorView()
         var current = view.rows.mapValues { print in
             return LibraryOrganizationSnapshot(collections: Set(print.collectionList.compactMap { slugs[$0] }),
@@ -40,7 +41,7 @@ extension LibraryStore {
         // They contribute protection without becoming live transfer candidates.
         let components = syncLinks()
         var hiddenByComponent: [PrintID: Set<String>] = [:]
-        for copy in copies.successful {
+        for copy in successful {
             let sourceID = PrintID(host: copy.target.hostID, filename: copy.target.print.filename)
             let component = components[sourceID] ?? sourceID
             let members = Set(syncRecords.verifiedCopies(of: sourceID, authority: syncAuthority) + [sourceID])
@@ -55,13 +56,13 @@ extension LibraryStore {
         var byFilename: [String: [String: LocalSyncRecord]] = [:]
         for (key, record) in records { byFilename[record.destinationFilename, default: [:]][key] = record }
         var plannedRoots: [String: Set<String>] = [:]
-        for copy in copies.successful {
+        for copy in successful {
             let root = records[copy.target.key]?.originKey
                 ?? syncRecords.verifiedOrigin(of: PrintID(host: copy.target.hostID, filename: copy.target.print.filename), authority: syncAuthority)
                 ?? copy.target.key
             plannedRoots[copy.filename, default: []].insert(root)
         }
-        for copy in copies.successful.sorted(by: { $0.target.key < $1.target.key }) {
+        for copy in successful.sorted(by: { $0.target.key < $1.target.key }) {
             let target = copy.target, name = copy.filename, key = target.key
             do {
                 try Task.checkCancellation()
