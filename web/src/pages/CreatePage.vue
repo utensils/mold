@@ -6297,6 +6297,7 @@ watch(
           v-if="videoDuration.run.detail.value && videoDuration.run.owner.value"
           :job-id="videoDuration.run.detail.value.id"
           :owner="videoDuration.run.owner.value"
+          @removed="videoDuration.run.forgetRemoved"
           :auto-open="true"
         />
         <VideoClips

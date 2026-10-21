@@ -36,7 +36,9 @@ export function createVideoJobRun(
   const busy = ref(false),
     cancelling = ref(false),
     error = ref("");
-  const cancelledBeforeAdmission = ref(false);
+  const cancelledBeforeAdmission = ref(false),
+    removed = ref(false);
+  let acknowledgedId: string | null = null;
   const uncertain = computed(
     () =>
       !!admission.value &&
@@ -127,7 +129,10 @@ export function createVideoJobRun(
         throw new Error(
           "This machine returned a different video job. Keep the original attempt for recovery.",
         );
-      if (result) {
+      if (!result && acknowledgedId === known.operationId) {
+        await retire(known.operationId);
+      } else if (result) {
+        acknowledgedId = result.id;
         detail.value = result;
         await settled();
       }
@@ -139,7 +144,11 @@ export function createVideoJobRun(
       } else error.value = message(cause);
     }
   }
-  async function recover(captured: VideoJobOwner, known: VideoJobAdmission) {
+  async function recover(
+    captured: VideoJobOwner,
+    known: VideoJobAdmission,
+    options: { acknowledged?: boolean } = {},
+  ) {
     if (
       busy.value ||
       !sameChainOwner(known, captured) ||
@@ -147,6 +156,8 @@ export function createVideoJobRun(
     )
       return;
     epoch += 1;
+    acknowledgedId = options.acknowledged ? known.operationId : null;
+    removed.value = false;
     owner.value = { ...captured, target: { ...captured.target } };
     admission.value = known;
     detail.value = null;
@@ -177,6 +188,8 @@ export function createVideoJobRun(
       return;
     }
     const attempt = ++epoch;
+    acknowledgedId = null;
+    removed.value = false;
     owner.value = { ...captured, target: { ...captured.target } };
     detail.value = null;
     cancelledBeforeAdmission.value = false;
@@ -216,6 +229,7 @@ export function createVideoJobRun(
         throw new Error(
           "This machine returned a different video job. Keep the original attempt for recovery.",
         );
+      acknowledgedId = result.id;
       detail.value = result;
       if (admission.value?.cancelRequested)
         await cancelKnown(attempt, captured);
@@ -282,6 +296,52 @@ export function createVideoJobRun(
       if (attempt === epoch) busy.value = false;
     }
   }
+  async function retire(id: string) {
+    if (id !== (detail.value?.id ?? admission.value?.operationId)) return;
+    // Persist local retirement before hiding recovery; storage failure stays actionable.
+    if (admission.value) forgetVideoJobOperation(admission.value);
+    admission.value = null;
+    // Invalidate in-flight reads before clearing an acknowledged parent.
+    epoch += 1;
+    readRevision += 1;
+    removed.value = true;
+    acknowledgedId = null;
+    detail.value = null;
+    error.value = "";
+    const cleanup = release;
+    release = undefined;
+    await cleanup?.().catch(() => undefined);
+  }
+  async function remove() {
+    const captured = owner.value,
+      id = detail.value?.id;
+    if (
+      !captured ||
+      !id ||
+      busy.value ||
+      !detail.value?.can_delete ||
+      !isOwnerCurrent(captured)
+    )
+      return;
+    const attempt = ++epoch;
+    readRevision += 1;
+    busy.value = true;
+    try {
+      await mutateVideoJob(captured, id, "delete", () =>
+        current(attempt, captured),
+      );
+      if (current(attempt, captured)) await retire(id);
+    } finally {
+      busy.value = false;
+    }
+  }
+  function forgetRemoved(id: string) {
+    const captured = owner.value;
+    if (captured && isOwnerCurrent(captured) && acknowledgedId === id)
+      void retire(id).catch((cause) => {
+        error.value = message(cause);
+      });
+  }
   function dispose() {
     disposed = true;
     epoch += 1;
@@ -296,6 +356,9 @@ export function createVideoJobRun(
     error,
     uncertain,
     cancelledBeforeAdmission,
+    removed,
+    remove,
+    forgetRemoved,
     submit,
     recover,
     refresh,
