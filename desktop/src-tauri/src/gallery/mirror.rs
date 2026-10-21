@@ -118,7 +118,30 @@ fn has_source_markers(metadata: &mold_core::OutputMetadata) -> bool {
             .as_ref()
             .is_some_and(|items| !items.is_empty())
 }
+fn chain_position(role: &str) -> Option<&'static str> {
+    let mut parts = role.split(':');
+    let (count, position) = match parts.next()? {
+        "stage_source" => (1, "authored-source"),
+        "stage_reference" => (2, "authored-reference"),
+        "stage_keyframe" => (2, "authored-keyframe"),
+        "chain_continuation_tail" => (1, "continuation-tail"),
+        _ => return None,
+    };
+    for _ in 0..count {
+        let index = parts.next()?;
+        if !index
+            .parse::<u32>()
+            .is_ok_and(|value| value.to_string() == index)
+        {
+            return None;
+        }
+    }
+    parts.next().is_none().then_some(position)
+}
 fn valid_slot(member: &Member) -> bool {
+    if let Some(position) = chain_position(&member.role) {
+        return member.position == position;
+    }
     let indexed = member.position.strip_prefix("item:").is_some_and(|value| {
         value
             .parse::<u32>()
@@ -182,6 +205,52 @@ fn same_output(left: &Offer, right: &Offer) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn authored_chain_role_slots_match_server_and_refuse_malformed_evidence() {
+        let member = |role: &str, position: &str| Member {
+            member_id: Some("m".into()),
+            role: role.into(),
+            position: position.into(),
+            sink: "memory".into(),
+            size_bytes: 1,
+            sha256: "c".repeat(64),
+        };
+        for (role, position) in [
+            ("stage_source:0", "authored-source"),
+            ("stage_source:4294967295", "authored-source"),
+            ("stage_reference:2:0", "authored-reference"),
+            ("stage_keyframe:0:1", "authored-keyframe"),
+            ("chain_continuation_tail:1", "continuation-tail"),
+        ] {
+            assert!(valid_slot(&member(role, position)), "{role}/{position}");
+            assert!(!valid_slot(&member(role, "scalar")));
+        }
+        for (role, position) in [
+            ("stage_source:01", "authored-source"),
+            ("stage_source:4294967296", "authored-source"),
+            ("stage_source:-1", "authored-source"),
+            ("stage_reference:0:01", "authored-reference"),
+            ("stage_reference:0:4294967296", "authored-reference"),
+            ("stage_reference:1:2:3", "authored-reference"),
+            ("stage_keyframe:0", "authored-keyframe"),
+            ("chain_continuation_tail:01", "continuation-tail"),
+        ] {
+            assert!(!valid_slot(&member(role, position)), "{role}/{position}");
+        }
+        let mut offer = Offer {
+            archive_identity_sha256: "a".repeat(64),
+            members: vec![member("stage_reference:0:0", "authored-reference")],
+            output_sha256: None,
+            output_size_bytes: None,
+            metadata: None,
+        };
+        assert!(validate(&offer).is_ok());
+        offer.members.push(offer.members[0].clone());
+        assert!(validate(&offer).is_err());
+        offer.members.pop();
+        offer.members[0].sink = "/private/path".into();
+        assert!(validate(&offer).is_err());
+    }
     #[test]
     fn retained_transfer_limits_and_snapshot_checks() {
         let mut offer = Offer {

@@ -239,6 +239,29 @@ async function legacyCopyOffer(
     members: [],
   };
 }
+function chainPosition(role: string): string | undefined {
+  const [kind, ...indices] = role.split(":");
+  const slots: Record<string, [number, string]> = {
+    stage_source: [1, "authored-source"],
+    stage_reference: [2, "authored-reference"],
+    stage_keyframe: [2, "authored-keyframe"],
+    chain_continuation_tail: [1, "continuation-tail"],
+  };
+  const expected = slots[kind ?? ""];
+  return expected &&
+    indices.length === expected[0] &&
+    indices.every((index) => {
+      const value = Number(index);
+      return (
+        Number.isInteger(value) &&
+        value >= 0 &&
+        value <= 4294967295 &&
+        String(value) === index
+      );
+    })
+    ? expected[1]
+    : undefined;
+}
 export async function offer(
   machine: CopyMachine,
   filename: string,
@@ -300,17 +323,20 @@ export async function offer(
       /^(?:identity_images|edit_images|references|keyframes)$/.test(
         member.role,
       );
+    const authoredPosition = chainPosition(member.role);
     const role =
-      /^(?:source_image|identity_image|identity_images|edit_images|references|mask_image|control_image|audio_file|audio_file_path|source_video|source_video_path|extend_video|extend_video_path|keyframes|matting_processed_source_image|matting_processed_references|stage_source:(?:0|[1-9][0-9]*))$/.test(
+      authoredPosition !== undefined ||
+      /^(?:source_image|identity_image|identity_images|edit_images|references|mask_image|control_image|audio_file|audio_file_path|source_video|source_video_path|extend_video|extend_video_path|keyframes|matting_processed_source_image|matting_processed_references)$/.test(
         member.role,
       );
-    const position = indexed
-      ? /^item:(?:0|[1-9][0-9]*)$/.test(member.position)
-      : member.role === "matting_processed_references"
-        ? ["front", "left", "back", "right"].includes(member.position)
-        : member.role.startsWith("stage_source:")
-          ? member.position === "authored-source"
-          : member.position === "scalar";
+    const position =
+      authoredPosition !== undefined
+        ? member.position === authoredPosition
+        : indexed
+          ? /^item:(?:0|[1-9][0-9]*)$/.test(member.position)
+          : member.role === "matting_processed_references"
+            ? ["front", "left", "back", "right"].includes(member.position)
+            : member.position === "scalar";
     if (
       !role ||
       !position ||
