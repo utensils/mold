@@ -32,6 +32,27 @@ public extension RetainedSourceMedia {
         "references": .references,
     ]
 
+    /// A Duration parent retains one logical template stage. Keep its exact
+    /// authenticated role on the session; only classify its ordinary input.
+    static func field(forRole role: String) -> Field? {
+        if let field = fieldForRole[role] { return field }
+        let parts = role.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 3, parts[1] == "0", let position = Int(parts[2]), position >= 0,
+              String(position) == parts[2] else { return nil }
+        switch parts[0] {
+        case "stage_reference": return .references
+        case "stage_keyframe": return .keyframes
+        default: return nil
+        }
+    }
+
+    static func referenceMembers(_ members: [Member]) -> [Member] {
+        let selected = members.filter { field(forRole: $0.role) == .references }
+        guard selected.contains(where: { $0.role.hasPrefix("stage_reference:") }) else { return selected }
+        return selected.sorted { Int($0.role.split(separator: ":").last ?? "") ?? -1
+            < Int($1.role.split(separator: ":").last ?? "") ?? -1 }
+    }
+
     /// Roles the host will hand over for DOWNLOAD but refuses to hydrate: a
     /// matted picture reused as input would have matting applied twice
     /// (`reusable_role`, `gallery_source_media.rs:118-123`). Asking for one
@@ -51,7 +72,7 @@ public extension RetainedSourceMedia {
     ) -> [Member] {
         members.filter { member in
             guard !notReusableRoles.contains(member.role),
-                  let field = fieldForRole[member.role]
+                  let field = field(forRole: member.role)
             else { return false }
             return request.isVacant(field)
         }

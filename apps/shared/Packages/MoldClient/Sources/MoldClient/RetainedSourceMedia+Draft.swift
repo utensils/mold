@@ -9,7 +9,7 @@ public extension RetainedSourceMedia {
     ]
 
     static func draftField(for member: Member) -> Field? {
-        let field = fieldForRole[member.role]
+        let field = field(forRole: member.role)
         return field == .identityImages ? .identityImage : field
     }
 
