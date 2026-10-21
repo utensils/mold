@@ -153,8 +153,7 @@ struct Composer: View {
                 NativeDurationEditor(draft: Binding(get: { generate.videoDuration?.draft ?? authoring.draft }, set: {
                     generate.videoDuration?.draft = $0
                 }), planner: generate.videoPlanner, prompt: generate.draft.prompt,
-                    singleClipMaxFrames: generate.recipe?.temporal?.frames.max,
-                    fps: generate.draft.fps ?? 24, reuseNotice: generate.videoDuration?.reuseNotice, sourceTitle: generate.videoDuration?.sourceOwner?.title,
+                    reuseNotice: generate.videoDuration?.reuseNotice, sourceTitle: generate.videoDuration?.sourceOwner?.title,
                     sourceMachine: generate.videoDuration?.sourceOwner.flatMap { hosts.host($0.hostId)?.name },
                     busy: generate.durationTask != nil,
                     originalReferencesReplaced: !generate.draft.media.generationReferences.isEmpty,

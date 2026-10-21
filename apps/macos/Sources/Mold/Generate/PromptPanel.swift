@@ -81,8 +81,6 @@ struct PromptPanel: View {
                                     get: { controller.videoDuration?.draft ?? authoring.draft },
                                     set: { controller.videoDuration?.draft = $0 }),
                                     planner: controller.videoPlanner, prompt: draft.prompt,
-                                    singleClipMaxFrames: recipe.temporal?.frames.max,
-                                    fps: recipe.temporal?.fps.resolvedRate(draft.fps) ?? 24,
                                     reuseNotice: controller.videoDuration?.reuseNotice,
                                     sourceTitle: controller.videoDuration?.sourceOwner?.title,
                                     sourceMachine: host?.name, busy: controller.durationSubmitting,
