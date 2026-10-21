@@ -13,6 +13,28 @@ import UIKit
 /// switch adopting its recipe.
 @MainActor
 struct GenerateControllerTests {
+
+    @Test func videoSettingsRestoresLiteralScenesAndAddedDurationWithoutAttachingOldMovie() async throws {
+        let (generate, _) = try await setUp()
+        let host = try #require(generate.hosts.hosts.first)
+        let metadata = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(#"{"prompt":"literal\\nplus\r\nline","model":"minimax-h3-fl2va:comfy-pruned-int8-pdmd-2step","seed":18446744073709551615,"width":1344,"height":768,"steps":2,"guidance":1,"fps":24,"frames":720,"enable_audio":true,"video_job":{"id":"published","source_frames":"107","total_frames":"827","authoring":{"duration_ms":"30000","boundary_frames":107,"input_frames":97,"seed":"18446744073709551615","scenes":[{"prompt":"one\\n","duration_ms":"10000"},{"prompt":"two\r\n","duration_ms":"20000"}]}}}"#.utf8))
+        let restored = try VideoSettingsReuse(metadata: metadata)
+        let model = try self.model("minimax-h3-fl2va:comfy-pruned-int8-pdmd-2step")
+        let recipe = try NativeVideoSettingsRecipe.resolve(metadata: metadata, model: model)
+        generate.sequence.begin(prompt: "old clips", frames: 107)
+        generate.videoDuration = .init(draft: .init(seconds: "9", source: .init(filename: "old.mp4")))
+        generate.applyVideoSettings(restored, legacy: nil, model: model, recipe: recipe, on: host.id)
+        #expect(generate.sequence.draft == nil)
+        #expect(generate.videoDuration?.draft.seconds == "30")
+        #expect(generate.videoDuration?.draft.scenes.map(\.prompt) == ["one\\n", "two\r\n"])
+        #expect(generate.videoDuration?.draft.source == nil)
+        #expect(generate.durationSource == nil)
+        #expect(generate.videoDuration?.reuseNotice?.contains("not attached") == true)
+        #expect(generate.draft.frames == 97)
+        #expect(generate.draft.seed == UInt64.max && generate.draft.locksSeed)
+        #expect(generate.draft.prompt == "literal\\nplus\r\nline")
+        #expect(generate.draft.enableAudio)
+    }
     @Test func orphanedRestartReceiptKeepsQueueRecoveryVisibleWithoutMachines() async throws {
         let (original, _) = try await setUp()
         let host = try #require(original.hosts.hosts.first)

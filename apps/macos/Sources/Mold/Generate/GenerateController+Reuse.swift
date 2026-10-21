@@ -14,3 +14,19 @@ extension GenerateController {
             modelSupportsDurationPrediction: model.offersDurationPrediction)
     }
 }
+
+extension GenerateController {
+    func applyVideoSettings(_ restored: VideoSettingsReuse, legacy: LegacySequenceSettingsReuse?,
+                            model: Model, recipe: GenerationRecipe, on host: MoldHost.ID) {
+        sequence.startFresh()
+        let recipeDraft = legacy?.draft ?? restored.draft
+        draft = recipeDraft
+        adopt(model: model, on: host, keepingDraft: true, selectedRecipe: recipe)
+        // This locates the archived endpoints; requested duration is separate.
+        draft.frames = recipeDraft.frames
+        videoDuration = restored.duration
+        durationSource = nil; durationSourceError = nil
+        videoPlanner.clear()
+        if let legacy { sequence.restoreSettings(legacy) }
+    }
+}

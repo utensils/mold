@@ -350,3 +350,46 @@ private actor SequenceBackendFixture: MoldChainBackend {
         return try MoldJSON.decoder.decode(ChainLimits.self, from: Data(#"{"model":"minimax-h3-fl2va:fasth3-v2-int8","frames_per_clip_cap":345,"frames_per_clip_recommended":107,"fps":24,"max_stages":16,"max_total_frames":5520,"supports_sequence":true,"authoring":{"motion_tail_frames":1,"carry_mode":"last-rgb-frame","min_frames":107,"frame_step":17,"frame_offset":5},"linked_parts":{"supported":true,"max_stages_per_part":16,"max_parts":null}}"#.replacingOccurrences(of: "minimax-h3-fl2va:fasth3-v2-int8", with: model).utf8))
     }
 }
+
+extension NativeSequenceSessionTests {
+    @Test func reusedClipScalarsSurviveColdLaunchWithoutPersistingPrivateInputBytes() throws {
+        let metadata = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(#"{"prompt":"joined","model":"video","seed":18446744073709551615,"fps":24,"chain":{"stage_count":2,"motion_tail_frames":17,"stages":[{"prompt":"first","frames":107,"transition":"smooth","seed":"18446744073709551615"},{"prompt":"second","frames":107,"transition":"fade","fade_frames":9,"seed":"0","loras":[{"path":"adapter","scale":0.75}]}]}}"#.utf8))
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        var restored = try LegacySequenceSettingsReuse(metadata: metadata)
+        restored.sequence.stages[0].input.sourceImage = "private-input"
+        let first = NativeSequenceSession(defaults: defaults)
+        first.restoreSettings(restored)
+        #expect(first.draft?.stages.count == 2)
+        let data = try #require(defaults.data(forKey: "nativeSequenceDraftV1"))
+        #expect(!String(decoding: data, as: UTF8.self).contains("private-input"))
+        let cold = NativeSequenceSession(defaults: defaults)
+        #expect(cold.draft?.stages[1].input.seedOffset == UInt64.max)
+        #expect(cold.draft?.stages[1].input.fadeFrames == 9)
+        #expect(cold.draft?.stages[1].input.loras?.first?.path == "adapter")
+        let request = GenerateRequest(prompt: "first", model: "video", width: 768, height: 768, steps: 3, guidance: 0)
+        #expect(cold.refusal(base: request, limits: nil)?.contains("Use Settings") == true)
+        cold.startFresh()
+        #expect(cold.draft == nil)
+    }
+}
+
+extension NativeSequenceSessionTests {
+    @Test func globalInputsCannotSilentlyOverrideSavedClipAuthority() throws {
+        let metadata = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(#"{"prompt":"first","model":"video","seed":7,"chain":{"stage_count":1,"motion_tail_frames":0,"stages":[{"prompt":"first","frames":107,"transition":"smooth","seed":"7"}]}}"#.utf8))
+        var restored = try LegacySequenceSettingsReuse(metadata: metadata)
+        restored.sequence.stages[0].input.sourceImage = "original"
+        let session = NativeSequenceSession(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        session.restoreSettings(restored)
+        var request = GenerateRequest(prompt: "first", model: "video", width: 768, height: 768, steps: 3, guidance: 0)
+        #expect(session.settingsOverrideRefusal(base: request) == nil)
+        request.sourceImage = "replacement"
+        #expect(session.settingsOverrideRefusal(base: request) != nil)
+        session.useGlobalSettings(for: try #require(session.draft?.stages[0].id))
+        #expect(session.settingsOverrideRefusal(base: request) == nil)
+        #expect(session.draft?.stages[0].prompt == "first")
+        #expect(session.draft?.stages[0].frames == 107)
+        #expect(session.draft?.stages[0].transition == "smooth")
+        #expect(session.draft?.stages[0].input.sourceImage == nil)
+        #expect(session.draft?.stages[0].input.seedOffset == nil)
+    }
+}

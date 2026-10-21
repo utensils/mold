@@ -8,6 +8,12 @@ extension LibraryPane {
     /// The model is adopted from the machine that MADE the print, because a
     /// model installed on one host is not available on another.
     func reuse(_ entry: LibraryEntry) {
+        if entry.print.metadata.videoJob != nil || entry.print.metadata.chain != nil {
+            reuseVideoSettings(entry)
+            return
+        }
+        generate.sequence.startFresh()
+        generate.keepDraftAfterSourceFailure()
         generate.videoDuration = nil; generate.durationSource = nil
         let metadata = entry.print.metadata
         // Keep the current contract before replacing the draft. A print may

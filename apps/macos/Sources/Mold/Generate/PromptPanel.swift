@@ -70,7 +70,7 @@ struct PromptPanel: View {
                             NativeSequenceEditor(session: controller.sequence, fps: draft.fps ?? 24,
                                 frameRange: (chainLimits?.authoring?.minFrames ?? temporal.frames.min) ... max(chainLimits?.authoring?.minFrames ?? temporal.frames.min, min(temporal.frames.max, chainLimits?.framesPerClipCap ?? temporal.frames.max)),
                                 frameStep: chainLimits?.authoring?.frameStep ?? temporal.frames.step, maximumClips: chainLimits?.maxStages ?? 16,
-                                carryMode: chainLimits?.authoring?.carryMode)
+                                carryMode: chainLimits?.authoring?.carryMode, baseSeed: controller.draft.seed)
                         } else {
                             if Self.showsOrdinaryPrompt(durationActive: controller.usesDuration(on: host, recipe: recipe), authoring: controller.videoDuration) {
                                 prompt(recipe)
@@ -83,6 +83,7 @@ struct PromptPanel: View {
                                     planner: controller.videoPlanner, prompt: draft.prompt,
                                     singleClipMaxFrames: recipe.temporal?.frames.max,
                                     fps: recipe.temporal?.fps.resolvedRate(draft.fps) ?? 24,
+                                    reuseNotice: controller.videoDuration?.reuseNotice,
                                     sourceTitle: controller.videoDuration?.sourceOwner?.title,
                                     sourceMachine: host?.name, busy: controller.durationSubmitting,
                                     originalReferencesReplaced: !controller.draft.media.generationReferences.isEmpty,

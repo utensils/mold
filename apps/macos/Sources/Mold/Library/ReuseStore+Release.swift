@@ -28,7 +28,7 @@ extension ReuseStore {
     func availableFields(for draft: RenderDraft, request: GenerateRequest) -> Set<RetainedSourceMedia.Field> {
         guard let authority = pending(for: draft) else { return [] }
         return Set(RetainedSourceMedia.members(authority.members, forHydrating: request)
-            .compactMap { RetainedSourceMedia.fieldForRole[$0.role] })
+            .compactMap { RetainedSourceMedia.field(forRole: $0.role) })
     }
 
     func referenceRefusal(for draft: RenderDraft) -> String? {
@@ -36,7 +36,7 @@ extension ReuseStore {
         if attachingSource { return "Loading the retained source picture…" }
         if restoring { return notice ?? "Checking the original input files on their source machine…" }
         if let authority = pending(for: draft), draft.media.sourceImage == nil,
-           authority.members.filter({ RetainedSourceMedia.fieldForRole[$0.role] == .sourceImage }).count > 1 {
+           authority.members.filter({ RetainedSourceMedia.field(forRole: $0.role) == .sourceImage }).count > 1 {
             return "This archive has multiple source pictures for one input. Attach the picture to use before generating."
         }
         let references = draft.media.generationReferences
@@ -73,13 +73,13 @@ extension ReuseStore {
     func attachmentSentence(for draft: RenderDraft) -> String? {
         guard let authority = pending(for: draft) else { return nil }
         let remaining = authority.members.filter {
-            !(RetainedSourceMedia.fieldForRole[$0.role] == .sourceImage && draft.media.sourceImage != nil)
+            !(RetainedSourceMedia.field(forRole: $0.role) == .sourceImage && draft.media.sourceImage != nil)
         }
         guard !remaining.isEmpty else { return nil }
         let machine = hosts.host(authority.origin)?.name ?? "its machine"
         let what = remaining.count == 1
             ? "the source media" : "\(remaining.count) source files"
-        if authority.members.contains(where: { $0.role.hasPrefix("stage_source:") }) {
+        if savedRecipe?.metadata.videoJob == nil, authority.members.contains(where: { $0.role.hasPrefix("stage_source:") }) {
             let source = authority.members.contains { $0.role == "stage_source:0" } ? " and source picture" : ""
             return "Reusing the first stage’s settings\(source). Other stage inputs remain in the retained archive on \(machine)."
         }

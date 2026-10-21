@@ -10,6 +10,7 @@ struct NativeDurationEditor: View {
     let prompt: String
     let singleClipMaxFrames: Int?
     let fps: Int
+    var reuseNotice: String? = nil
     var sourceTitle: String? = nil
     var sourceMachine: String? = nil
     var busy = false
@@ -24,6 +25,9 @@ struct NativeDurationEditor: View {
     private var scenesActive: Bool { draft.scenesEnabled && !draft.scenes.isEmpty }
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if draft.source == nil, let reuseNotice {
+                Text(reuseNotice).font(.callout).fixedSize(horizontal: false, vertical: true)
+            }
             if let source = draft.source {
                 Text("Extending \(sourceTitle ?? source.filename)").font(.headline)
                     .fixedSize(horizontal: false, vertical: true)

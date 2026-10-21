@@ -107,7 +107,7 @@ struct Composer: View {
                 NativeSequenceEditor(session: generate.sequence, fps: generate.draft.fps ?? 24,
                     frameRange: (generate.sequenceLimits?.authoring?.minFrames ?? temporal?.frames.min ?? retainedFrames) ... max(generate.sequenceLimits?.authoring?.minFrames ?? temporal?.frames.min ?? retainedFrames, min(temporal?.frames.max ?? retainedFrames, generate.sequenceLimits?.framesPerClipCap ?? temporal?.frames.max ?? retainedFrames)),
                     frameStep: generate.sequenceLimits?.authoring?.frameStep ?? temporal?.frames.step ?? 1, maximumClips: generate.sequenceLimits?.maxStages ?? 16,
-                    carryMode: generate.sequenceLimits?.authoring?.carryMode)
+                    carryMode: generate.sequenceLimits?.authoring?.carryMode, baseSeed: generate.draft.seed)
             } else if generate.recipe?.capabilities.promptRequirement != .ignored && !(generate.usesVideoDuration && generate.videoDuration?.draft.scenesEnabled == true && generate.videoDuration?.draft.scenes.isEmpty == false) {
                 HStack(alignment: .top, spacing: 8) {
                     TextField("Prompt", text: $generate.draft.prompt,
@@ -154,7 +154,7 @@ struct Composer: View {
                     generate.videoDuration?.draft = $0
                 }), planner: generate.videoPlanner, prompt: generate.draft.prompt,
                     singleClipMaxFrames: generate.recipe?.temporal?.frames.max,
-                    fps: generate.draft.fps ?? 24, sourceTitle: generate.videoDuration?.sourceOwner?.title,
+                    fps: generate.draft.fps ?? 24, reuseNotice: generate.videoDuration?.reuseNotice, sourceTitle: generate.videoDuration?.sourceOwner?.title,
                     sourceMachine: generate.videoDuration?.sourceOwner.flatMap { hosts.host($0.hostId)?.name },
                     busy: generate.durationTask != nil,
                     originalReferencesReplaced: !generate.draft.media.generationReferences.isEmpty,

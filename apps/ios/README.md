@@ -365,6 +365,11 @@ other jobs may need.
 
 Reuse settings restores retained opening and closing frames into editable wells, preserving keyframe indices and ordered image references. Audio, source/continuation video, identity photos and control images restore with their saved settings where the selected recipe supports them. Continuation overlap and authored reference strength (including zero) are preserved. Older prints without recorded reference strength keep the server default. The original machine must retain the inputs; missing, damaged or oversized inputs are disclosed before generation. A new attachment or explicit removal wins over a late download, and restored wells never have a hidden archive fallback that can revive removed media.
 
+Use Settings on a completed Duration video restores its original single prompt, requested duration or optional scenes, literal text, exact seed and supported recipe settings. On an extended video it restores the added-footage settings into a fresh movie; the original video is not attached, and a notice distinguishes this from Extend Video. Original endpoints and ordered references are restored only from the authenticated clicked copy's retained archive.
+
+Older authored videos reopen all recorded clips, lengths, joins, effective seeds, adapters and per-clip inputs. Clip options show saved overrides and offer **Use global inputs and controls** before replacing them. Historical per-clip negative prompts were not recorded; only the recorded first value can be restored, and the editor explains this limitation. Explicit older automatic one-shot videos restore one prompt and saved-length duration only when their recorded recipe proves a uniform automatic split; the editor states that current joins may differ. Incomplete or unrepresentable automatic recipes, linked incoming carry, and unsupported conditioning controls are refused before changing the current draft. Private per-clip media is not stored in preferences: after a cold launch, reopen Use Settings on the original video to restore those inputs before generating.
+
+
 The Library's View Options includes a Machine picker. All Machines shows the
 shared library; choosing one machine shows and edits only its copies. Collection
 counts follow that scope. A collection confirmed absent on that machine is marked
@@ -507,7 +512,7 @@ Source Media uses the Library’s justified, aspect-preserving rows and two-poin
 
 ## Multi-clip video
 
-In Short clip, choose **Add another clip** to enter ordered prompts and lengths, then **Generate video**. The app validates the draft automatically before submitting it. Move or remove rows without opening a separate editor. Library **Continue video** makes the next separate linked MP4 from the latest completed authored take on its original machine. Ordinary one-prompt generation and Reuse settings remain available.
+Video creation starts with one prompt and **Duration**. The current recipe’s short duration is the initial choice; 30 seconds is a preset, and custom durations have no arbitrary product cap. The server shows its safe single-generation limit and how many clips join into one movie. **Define scenes** optionally adds per-scene prompts and durations. Library **Extend Video** opens **Add duration** for a new longer movie while preserving the original. Advanced older authored clips remain a separate compact clip editor when restored with Use Settings.
 
 The editor uses the selected host’s frame grid and validates delivered duration before admission. Reconnect recovers the same operation; Queue shows parent progress and supports applicable resume/cancel actions. Reference restoration is explicit after relaunch; drafts do not persist input bytes or credentials.
 
