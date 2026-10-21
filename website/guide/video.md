@@ -72,9 +72,15 @@ mold --host workstation jobs cancel VIDEO_UUID --video
 mold --host workstation library download PRINT.mp4 --output ./
 ```
 
-**Resume** preserves completed clips and the frozen model. **Start again**
-creates a new attempt with the original inputs and the destination's current
-recipe. **Send to another machine** uses the selected machine's current recipe:
+**Stop** pauses an accepted Duration job, retaining completed clips and its frozen
+recipe for an explicit **Resume** on the original machine. Historical Cancelled
+Duration jobs require **Start again** or **Send** when the server offers them.
+A `410 VIDEO_OPERATION_CANCELLED` for an unanswered admission permanently
+cancels that UUID; it cannot be resumed or reused.
+
+**Start again** creates a new attempt with the original inputs and the
+destination's current recipe. **Send to another machine** uses the selected
+machine's current recipe:
 
 ```bash
 mold --host SOURCE jobs restart VIDEO_UUID

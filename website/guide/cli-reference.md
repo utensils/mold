@@ -1184,8 +1184,12 @@ scripts, inspect `mold chain limits MODEL --json --host HOST`.
 Library `--extend-library PRINT.mp4 --duration 10` adds ten seconds and publishes
 a new full movie while retaining the original. Keep the printed operation UUID
 for `mold jobs show`; `mold jobs cancel UUID --video` can stop even an unanswered
-admission. See [Longer videos](/guide/video#longer-videos) for exact recovery and
-Restart/Send commands.
+admission. Stop pauses accepted Duration jobs for an explicit Resume on the
+original machine. Historical Cancelled Duration jobs require Start again or
+Send when offered; an unanswered admission confirmed by
+`410 VIDEO_OPERATION_CANCELLED` is permanently cancelled and its UUID cannot be
+resumed or reused. See [Longer videos](/guide/video#longer-videos) for recovery
+and Restart/Send commands.
 Paired hosts require the CLI's Secure transport; API paths in documentation do
 not imply that a raw curl request will work. Dry-run creates no generation or
 prompt-expansion work.
