@@ -117,6 +117,7 @@ import { attachPickedVideo } from "../../lib/sourceAttachment";
 
 const props = withDefaults(
   defineProps<{
+    durationActive?: boolean;
     form: GenerateForm;
     routingRequest?: Partial<GenerateRoutingRequest> | null | undefined;
     /**
@@ -253,7 +254,7 @@ const frameStep = computed(() => videoFrameStep(videoContract.value));
 const frameMinimum = computed(() => minVideoFrames(videoContract.value));
 const fixedFps = computed(() => fixedVideoFps(videoContract.value));
 const framesError = computed(() =>
-  caps.value.supportsVideo
+  !props.durationActive && caps.value.supportsVideo
     ? fixedFps.value !== null
       ? videoFramesError(props.form.frames, videoContract.value)
       : videoFrameGridError(props.form.frames, videoContract.value)
@@ -268,7 +269,7 @@ watch(
 );
 const generationRequest = computed(() => buildRequest(props.form));
 const chainDecision = computed<ChainRoutingDecision>(() =>
-  caps.value.supportsVideo
+  !props.durationActive && caps.value.supportsVideo
     ? decideGenerateRequestRouting(generationRequest.value, props.form.family, props.selectedModel)
     : { kind: "single" },
 );
@@ -911,6 +912,7 @@ const searchedUpscalers = computed(() =>
         data-test="section-video"
       >
         <VideoDurationSlider
+          v-if="!durationActive"
           :frames="form.frames"
           :fps="form.fps"
           :model="selectedModel"
@@ -921,8 +923,9 @@ const searchedUpscalers = computed(() =>
           @update:frames="form.frames = $event"
         />
 
-        <label class="ms-label">Frames ({{ frameGridLabel }})</label>
+        <label v-if="!durationActive" class="ms-label">Frames ({{ frameGridLabel }})</label>
         <input
+          v-if="!durationActive"
           v-model.number="form.frames"
           type="number"
           :step="frameStep"
@@ -933,9 +936,13 @@ const searchedUpscalers = computed(() =>
           :class="framesError ? 'ms-input--error' : ''"
           @change="snapFramesField"
         />
-        <p v-if="framesError" class="ms-error">{{ framesError }}</p>
+        <p v-if="!durationActive && framesError" class="ms-error">{{ framesError }}</p>
 
-        <div v-if="chainDecision.kind === 'chain'" data-test="chain-cue" class="ms-cue">
+        <div
+          v-if="!durationActive && chainDecision.kind === 'chain'"
+          data-test="chain-cue"
+          class="ms-cue"
+        >
           Will render as
           <span class="font-mono text-xs font-semibold text-fg">{{
             chainDecision.stageCount

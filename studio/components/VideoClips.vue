@@ -22,6 +22,7 @@ const {
   cancelBusy,
   editing,
   restoredDraft,
+  restoredSettings,
   minFrames,
   step,
   maxFrames,
@@ -84,6 +85,9 @@ defineExpose({ submit });
         Creates the next separate video part from the latest completed take. New
         random seed.
       </p>
+      <p v-if="restoredSettings && !admission" class="video-clips-note">
+        {{ restoredSettings.notice }}
+      </p>
       <p v-if="restoredDraft && !admission" class="video-clips-note">
         Restored your clips. Review them before making the video.
       </p>
@@ -103,6 +107,31 @@ defineExpose({ submit });
           :key="clip.id"
           class="video-clips-row"
         >
+          <p v-if="clip.restored" class="video-clips-note">
+            {{ clip.restored.transition }} join<span
+              v-if="clip.restored.fade_frames"
+            >
+              · {{ clip.restored.fade_frames }} fade frames</span
+            >
+            · seed
+            {{
+              String(
+                BigInt(
+                  String(
+                    (captured?.request as { seed?: number | string })?.seed ??
+                      0,
+                  ),
+                ) ^ BigInt(String(clip.restored.seed_offset ?? 0)),
+              )
+            }}
+            · {{ clip.restored.loras?.length ?? 0 }} adapters ·
+            {{ clip.restored.generation_references?.length ?? 0 }} references ·
+            {{ clip.restored.keyframes?.length ?? 0 }} keyframes<span
+              v-if="clip.restored.source_image"
+            >
+              · first frame</span
+            >
+          </p>
           <div class="video-clips-row-header">
             <strong>Clip {{ index + 1 }}</strong
             ><span />

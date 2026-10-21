@@ -762,3 +762,15 @@ it("fuzzy-filters Generate upscalers and retains the current selection", async (
   await wrapper.get('[data-test="mobile-upscale"]').setValue(upscaler.name);
   expect(buildRequest(form).upscale_model).toBe(upscaler.name);
 });
+it("keeps FPS options but removes a competing frame and duration authoring path", () => {
+  const form = reactive(formFor("ltx2", "ltx-2-19b-distilled:fp8"));
+  const wrapper = mount(MobileGenerateParameters, { props: { form, durationActive: true } });
+  expect(wrapper.find('[data-test="mobile-advanced-duration"]').exists()).toBe(false);
+  expect(wrapper.find('[data-test="mobile-frames"]').exists()).toBe(false);
+});
+it("leaves bounded stage frames to the new parent validator when ordinary frames are hidden", () => {
+  const form = reactive(formFor("ltx2", "ltx-2-19b-distilled:fp8"));
+  form.frames = 100;
+  const wrapper = mount(MobileGenerateParameters, { props: { form, durationActive: true } });
+  expect(wrapper.emitted("validity-change")?.at(-1)).toEqual([true]);
+});

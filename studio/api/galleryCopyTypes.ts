@@ -26,6 +26,7 @@ export interface CopyOffer {
   metadata: object;
   members: Member[];
   rawMetadata: string;
+  video_artifacts_complete?: boolean;
 }
 export interface CopyReceipt {
   version: 1;
@@ -77,6 +78,8 @@ export interface CopyOptions {
   destination: CopyMachine;
   filename: string;
   current(): boolean;
+  /** Optional immutable listing/recipe fence, checked before any destination write. */
+  verifySourceOffer?(offer: CopyOffer): void;
   journal: CopyJournal;
   signal?: AbortSignal;
   deliberate?: boolean;

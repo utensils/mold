@@ -169,7 +169,35 @@ fn revisions_for(
                 .iter()
                 .map(|m| (&m.member, &m.position, &m.sink, &m.sha256))
                 .collect();
-            let bytes = serde_json::to_vec(&(entry, members, media.legacy)).map_err(|e| {
+            let artifact = if let Some(assets) = entry
+                .record()
+                .metadata
+                .video_job
+                .as_ref()
+                .and_then(|job| job.artifacts.as_ref())
+            {
+                let Some(root) = state
+                    .metadata_db
+                    .as_ref()
+                    .as_ref()
+                    .and_then(|db| crate::video_archive_assets::root_from_db(db).ok())
+                else {
+                    continue;
+                };
+                let Ok(evidence) =
+                    crate::gallery_video_artifacts::evidence(&root, &entry.identity, assets)
+                else {
+                    continue;
+                };
+                Some(evidence)
+            } else {
+                None
+            };
+            let serialized = match artifact {
+                Some(evidence) => serde_json::to_vec(&(entry, members, media.legacy, evidence)),
+                None => serde_json::to_vec(&(entry, members, media.legacy)),
+            };
+            let bytes = serialized.map_err(|e| {
                 ApiError::internal(format!("gallery checkpoint serialization failed: {e}"))
             })?;
             revisions.insert(name.clone(), revision(&bytes));

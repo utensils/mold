@@ -63,6 +63,7 @@ pub struct GenerationRecord {
     pub file_mtime_ms: Option<i64>,
     pub file_size_bytes: Option<i64>,
     pub format: OutputFormat,
+    #[serde(deserialize_with = "mold_core::video_job::deserialize_literal_metadata")]
     pub metadata: OutputMetadata,
     pub generation_time_ms: Option<i64>,
     pub backend: Option<String>,
@@ -256,6 +257,7 @@ mod tests {
             frames: None,
             fps: None,
             chain_job_id: None,
+            video_job: None,
             chain: None,
             version: "v".into(),
             id_image_name: None,

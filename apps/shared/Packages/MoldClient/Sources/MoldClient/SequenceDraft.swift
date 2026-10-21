@@ -6,7 +6,19 @@ public struct SequenceDraft: Codable, Hashable, Sendable {
         public var id: UUID
         public var input: ChainStageInput
         public var prompt: String { get { input.prompt } set { input.prompt = newValue } }
-        public var frames: Int { get { input.frames } set { input.frames = newValue } }
+        public var frames: Int {
+            get { input.frames }
+            set {
+                let previous = input.frames
+                if previous > 1, newValue > 0 {
+                    input.keyframes = input.keyframes?.map { keyframe in
+                        guard keyframe.frame == previous - 1 else { return keyframe }
+                        var closing = keyframe; closing.frame = newValue - 1; return closing
+                    }
+                }
+                input.frames = newValue
+            }
+        }
         public var transition: String { get { input.transition } set { input.transition = newValue } }
         public var keyframes: [KeyframeCondition]? { get { input.keyframes } set { input.keyframes = newValue } }
         public var generationReferences: [GenerationReference]? {
@@ -29,7 +41,7 @@ public struct SequenceDraft: Codable, Hashable, Sendable {
         let stage = stages.remove(at: from); stages.insert(stage, at: to)
     }
     public func wireStages() -> [ChainStageInput] { stages.map(\.input) }
-    public func request(base: GenerateRequest, limits: ChainLimits, repeatReferences: Bool = true) throws -> AuthoredChainRequest {
-        try AuthoredChainRequest(base, stages: wireStages(), limits: limits, repeatReferences: repeatReferences)
+    public func request(base: GenerateRequest, limits: ChainLimits, repeatReferences: Bool = true, motionTailFrames: Int? = nil) throws -> AuthoredChainRequest {
+        try AuthoredChainRequest(base, stages: wireStages(), limits: limits, motionTailFrames: motionTailFrames, repeatReferences: repeatReferences)
     }
 }

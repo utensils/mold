@@ -8,8 +8,8 @@ Mold supports generating video clips using LTX Video (including LTX-2.5), Wan
 2.1/2.2, and MiniMax H3. The CLI and API can stitch authored clips into a
 durable sequence. LTX-2, image-conditioned Wan and H3 FL2VA can carry context
 across smooth seams; text-only Wan, legacy LTX-Video and H3 Ref2VA compose
-independent clips. Automatic long one-shots are limited to models with a
-continuation path. A dev checkpoint
+independent clips. Duration jobs use the selected recipe's continuation or
+blended-clip path to produce one longer movie. A dev checkpoint
 renders its clips through the two-stage pipeline, so expect roughly twice the
 wall time per clip as a distilled one; stage 1 runs classifier-free guidance
 as two sequential forward passes.
@@ -18,6 +18,153 @@ An opening image conditions the first clip only. On LTX-2 and LTX-2.3 the
 same image also rides every smooth continuation as a soft identity anchor;
 on LTX-2.5, which was trained with keyframe conditioning and would read that
 anchor as a keyframe to cut back to, continuations carry the motion tail alone.
+
+## Longer videos
+
+Enter one prompt and choose **Duration**. The apps show the selected model's
+single-render limit and how many clips will be joined. The normal short duration
+remains the default. Choose a longer duration, such as 30 seconds, to keep the
+same prompt across the whole movie. **Define scenes** optionally lets you enter
+different prompts and lengths.
+
+Library **Use settings** restores the original requested duration and optional
+scenes, exact seed, recipe controls and authenticated retained inputs. It prepares
+a fresh editable generation. For an extended movie, the duration describes the
+added footage and the original movie is not attached; choose **Extend video**
+to continue the full movie again. Scripted chains retain their per-clip settings
+where recorded. Missing historical settings or inputs are disclosed before a new
+generation, rather than silently shortening or flattening the movie.
+
+```bash
+mold --host workstation run MODEL "a paper boat drifts along a sunlit stream" --duration 30
+```
+
+Choose `MODEL` from that host's `mold list --json` results. Duration is in seconds
+and accepts decimal values. `--dry-run` checks the complete request without
+queuing it; `--detach` returns after acceptance. Longer duration jobs require an
+updated server, including H3-enabled builds for MiniMax H3. Use MP4 output and
+omit frame-count, overlap and script overrides when choosing duration.
+
+The server renders one bounded clip at a time and joins the result into one
+Library MP4. Models with continuation support carry motion context; independent
+clips use distinct deterministic seeds and a blended join. Overlap is chosen
+from the selected recipe. There is no fixed overall duration or clip-count cap;
+the host must have enough memory for each clip and enough disk for the movie.
+Longer duration does not require keeping the entire movie in GPU memory.
+
+### Extend a Library movie
+
+Choose **Extend video** from a Library movie, enter the next prompt, and choose
+how many seconds to **add**. Mold keeps the original movie and publishes a new
+movie containing the original plus extension. It starts from the original
+model and settings and validates the current host recipe before submission.
+
+```bash
+mold --host workstation run "the boat passes beneath a stone bridge" \
+  --extend-library PRINT.mp4 --duration 10
+```
+
+The server publication goes to its active `MOLD_HOME` Library automatically.
+`--output movie.mp4` downloads an additional copy onto the CLI machine.
+
+### Recover a duration job
+
+Keep the printed video UUID. After a lost reply or disconnect, inspect it before
+submitting another movie. A completed `show --json` response contains the exact
+`output_filename` to download.
+
+```bash
+mold --host workstation jobs show VIDEO_UUID --json
+mold --host workstation jobs resume VIDEO_UUID
+mold --host workstation jobs cancel VIDEO_UUID --video
+mold --host workstation library download PRINT.mp4 --output ./
+```
+
+**Stop** pauses an accepted Duration job, retaining completed clips and its frozen
+recipe for an explicit **Resume** on the original machine. Historical Cancelled
+Duration jobs require **Start again** or **Send** when the server offers them.
+A `410 VIDEO_OPERATION_CANCELLED` for an unanswered admission permanently
+cancels that UUID; it cannot be resumed or reused.
+
+**Start again** creates a new attempt with the original inputs and the
+destination's current recipe. **Send to another machine** uses the selected
+machine's current recipe:
+
+```bash
+mold --host SOURCE jobs restart VIDEO_UUID
+mold --host SOURCE jobs restart VIDEO_UUID --to DESTINATION
+```
+
+Keep the new UUID too. Repeating the original submission with
+`--operation-id UUID` on the same CLI installation reconciles its private local
+receipt; a repeated `run` command still needs `--duration`. Use `jobs show` when
+inspecting an ID from another client. Stop also works for a pending submission
+that has not yet appeared in Queue. Local adapter files require the original
+host. Failed jobs and their recovery inputs remain available until discarded.
+
+The advanced script workflow below retains exact per-stage frame and transition
+controls and can publish separate linked parts.
+
+### Duration API
+
+Capture the server's `instance_id` from `/api/status` and send it as
+`x-mold-destination-instance` on every duration request. Check the additive
+`video_jobs` capability block before offering this workflow. An older server
+does not implicitly support duration jobs.
+
+1. `POST /api/video-jobs/validate?planning_only=true` returns a cheap scalar
+   length summary. It neither uploads media nor reserves a generation slot.
+2. Prepare the selected recipe's normal media inputs, then
+   `POST /api/video-jobs/validate` for full validation and its revision proof.
+3. Generate and retain an operation UUID **before** submitting. Send the same
+   request to `POST /api/video-jobs`, with `x-mold-operation-id` and the full
+   validation revision. A lost reply is reconciled with that UUID.
+4. Observe `GET /api/video-jobs/{id}` or its `/events` SSE stream. SSE uses
+   `snapshot` events containing the full public job. A completed job exposes
+   `output_filename` for its Library movie.
+
+The duration payload wraps the normal generation request. Duration/count fields
+use decimal strings so clients can retain their complete unsigned range. Choose
+all generation controls from the selected host recipe. For example, this request
+uses the installed H3 PDMD 2-step recipe, whose terminal-inclusive grid requires
+three steps:
+
+```json
+{
+  "generation": {
+    "model": "minimax-h3-fl2va:comfy-pruned-int8-pdmd-2step",
+    "prompt": "a paper boat drifts along a sunlit stream",
+    "width": 768,
+    "height": 768,
+    "steps": 3,
+    "guidance": 0,
+    "strength": 1,
+    "fps": 24,
+    "enable_audio": true,
+    "output_format": "mp4",
+    "seed": 42
+  },
+  "duration_ms": "30000"
+}
+```
+
+H3 requires guidance `0` and strength `1`; generic generation defaults do not
+apply. Other H3 variants can require a different step count, so use the selected
+recipe rather than copying this example to another model. Optional `scenes`
+contain `prompt` and decimal-string `duration_ms`, summing exactly to the total.
+The API preserves literal prompt text. Forward exported `request_json` and
+`upload_spec_json` strings unchanged when a client cannot preserve full u64
+numbers in parsed JSON.
+
+`GET /api/video-jobs` provides bounded, installation-bound cursor pages.
+`POST /api/video-jobs/{id}/cancel` durably accepts Stop even for a submission
+whose acceptance is uncertain. `/resume` preserves the frozen recipe;
+`DELETE /api/video-jobs/{id}` discards a settled queue entry while retaining any
+published Library movie. `/restart-options`, `/restart-export` and
+`/restart-source` support a fresh attempt with original inputs. Prefix upload
+uses `/api/video-source-uploads`, bounded chunks and destination-side SHA
+verification. Use the Rust SDK's transfer helpers or the CLI for this handshake.
+The running server's `/api/docs` documents exact headers and response shapes.
 
 ### Wan sequences
 
@@ -29,11 +176,10 @@ Crossfade). Clip lengths sit on wan's `4k+1` grid, and `--frames` past the
 per-clip envelope auto-chains instead of failing — the last clip is sized so
 the stitched video delivers exactly the frames you asked for.
 
-A **text-to-video** tier is the exception: it hands nothing across a seam, so
-an automatic split would render the same clip again rather than extend it.
-`mold run`, the apps, and `POST /api/chain-jobs` all refuse a one-shot past
-that tier's clip size with the same sentence. A scripted sequence still
-composes those clips deliberately.
+A **text-to-video** tier hands no image context across a seam. Duration jobs
+join independently seeded clips with blending. A direct frame-count one-shot
+through the older generation/chain route still refuses requests past that
+tier's clip size; a scripted sequence can also compose clips deliberately.
 
 Legacy LTX-Video also has no image-to-video handoff. Mold therefore keeps its
 one-shot requests as one denoise up to the 257-frame engine ceiling instead of

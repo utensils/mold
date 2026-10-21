@@ -17,7 +17,7 @@ extension ReuseStore {
               let backend = hosts.backend(for: authority.origin) else { return }
         let fence = currentFence
         let instance = hosts.instanceID(of: authority.origin)
-        let members = authority.members.filter { $0.role == "references" }
+        let members = RetainedSourceMedia.referenceMembers(authority.members)
         for (reference, member) in zip(draft.media.generationReferences, members) {
             guard isCurrent(fence), !Task.isCancelled else { return }
             guard ["image", "named_image"].contains(reference.kind), referencePreviews[reference] == nil else { continue }

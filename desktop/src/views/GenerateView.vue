@@ -1,4 +1,14 @@
 <script setup lang="ts">
+import { requestVideoDurationReset } from "@studio/lib/videoLibraryExtensionHandoff";
+import {
+  pendingVideoLibraryExtension,
+  takeVideoLibraryExtension,
+} from "@studio/lib/videoLibraryExtensionHandoff";
+import { durationVideoCopies } from "@studio/lib/videoDurationAuthoring";
+import VideoDurationEditor from "@studio/components/VideoDurationEditor.vue";
+import VideoJobControl from "@studio/components/VideoJobControl.vue";
+import { shallowRef } from "vue";
+import { createVideoDurationAuthoring } from "@studio/composables/useVideoDurationAuthoring";
 import VideoClips from "@studio/components/VideoClips.vue";
 import { missingModelReferenceRetry } from "../lib/missingModelReferenceRetry";
 import { jobStallLabel } from "@studio/lib/jobStall";
@@ -105,6 +115,8 @@ import { strongestRoutableGpu, useHostsStore, type FeasibleRouteResult } from ".
 import { useConnectionStore } from "../stores/connection";
 import {
   useGenerationStore,
+  planBatchRequests,
+  resolveBaseSeed,
   jobPhase,
   jobProgress,
   jobProgressCopy,
@@ -712,6 +724,16 @@ async function pullMissingModel() {
 // back — this view unmounts on every route change.
 const formStore = useGenerateFormStore();
 const form = formStore.form;
+const incomingVideoBoundary = computed(
+  () =>
+    !!videoDurationRef.value?.draft.value?.extension &&
+    videoDurationRef.value?.planner.plan.value?.join_mode === "continuous",
+);
+const originalVideoReferences = computed(
+  () => !!videoDurationRef.value?.draft.value?.extension?.references.length,
+);
+const videoDurationRef = shallowRef<ReturnType<typeof createVideoDurationAuthoring> | null>(null);
+const videoFormRevision = ref(0);
 const clipsActive = ref(false);
 const clipsPinned = ref<{ hostId: string; model: string } | null>(null);
 const videoClipsRef = ref<InstanceType<typeof VideoClips> | null>(null);
@@ -862,8 +884,8 @@ const recentPrints = computed(() => hostGallery.merged.slice(0, RECENT_PRINTS_CA
  * door that opens this tab promises those settings, so it must be the same
  * path, not a prompt-only shortcut.
  */
-function reuseRecentPrint(entry: MergedPrint) {
-  reuseStillPrint(entry);
+async function reuseRecentPrint(entry: MergedPrint) {
+  if (!(await reuseStillPrint(entry))) return;
   inspectorTab.value = "settings";
   void nextTick(() => composerRef.value?.focus?.());
 }
@@ -964,7 +986,7 @@ const formValidationError = computed(
     ) ??
     meshTargetFacesValidationError(form) ??
     namedViewsValidationError(form) ??
-    (caps.value.supportsVideo
+    (!videoDurationRef.value?.visible.value && caps.value.supportsVideo
       ? videoFramesError(form.frames, contractEntry.value ?? { family: form.family })
       : null) ??
     (caps.value.supportsVideo ? fpsValidationError(form.fps) : null) ??
@@ -972,6 +994,7 @@ const formValidationError = computed(
     audioOutputValidationError(form) ??
     sourceConditioningValidationError(form, {
       ignoreUnsupportedStagedSource: true,
+      incomingVideoBoundary: incomingVideoBoundary.value,
     }) ??
     identityConditioningValidationError(form) ??
     advancedVideoValidationError(form) ??
@@ -980,7 +1003,7 @@ const formValidationError = computed(
 /** Exact submit blocker for request-shape and automatic-chain validation. */
 const chainValidationError = computed<string | null>(() => {
   if (formValidationError.value) return formValidationError.value;
-  if (!caps.value.supportsVideo) return null;
+  if (!caps.value.supportsVideo || videoDurationRef.value?.visible.value) return null;
   const request = buildRequest(form);
   const decision = decideGenerateRequestRouting(request, form.family, selectedEntry.value);
   if (decision.kind === "reject") return decision.reason;
@@ -1019,6 +1042,7 @@ const showStarterCards = computed(() =>
 const estimateRequest = computed(() => {
   if (
     clipsActive.value ||
+    videoDurationRef.value?.visible.value ||
     !form.model ||
     hasActiveFreshVideoReferences(form.h3Authoring, caps.value.sourceImageMode)
   )
@@ -3357,7 +3381,10 @@ function sourcePreprocessingNeedsRoute(draft: ReturnType<typeof cloneGenerateFor
 // that quietly does nothing is exactly the dead end the prepared-expansion
 // invariant forbids.
 const promptMissing = computed(
-  () => promptRequired(promptInputForForm(form)) && !form.prompt.trim(),
+  () =>
+    !videoDurationRef.value?.scenesActive.value &&
+    promptRequired(promptInputForForm(form)) &&
+    !form.prompt.trim(),
 );
 const h3AuthoringError = computed(() =>
   minimaxH3AuthoringError(
@@ -3365,6 +3392,10 @@ const h3AuthoringError = computed(() =>
     form.model,
     form.h3Authoring,
     caps.value.requiresSourceImage,
+    {
+      incomingBoundary: incomingVideoBoundary.value,
+      retainedReferences: originalVideoReferences.value,
+    },
   ),
 );
 
@@ -3377,6 +3408,7 @@ const generationInputBlockerReason = computed<string | null>(() => {
   // Required media is the first actionable step for a conditioned model. The
   // ordinary empty-prompt blocker stays visually quiet, but must not hide the
   // H3 opening-frame correction until the user starts typing.
+  if (videoDurationRef.value?.blocker.value) return videoDurationRef.value.blocker.value;
   if (h3AuthoringError.value) return h3AuthoringError.value;
   if (promptMissing.value) return "Add a prompt before generating.";
   if (!form.model) return "Choose a style first.";
@@ -3469,6 +3501,8 @@ async function generate(batchOverride: number | null = null) {
   }
   if (generationInputBlockerReason.value || preparedSubmitting.value || submissionPlanning.value)
     return;
+  const capturedVideoRevision = videoFormRevision.value;
+  const capturedDurationStamp = videoDurationRef.value?.stamp.value;
   clearSelectedQueueRender();
   const prepared = preparedBatch.value;
   if (
@@ -3574,6 +3608,7 @@ async function generate(batchOverride: number | null = null) {
       : draftCaps.forcesBatchSizeOne
         ? 1
         : draft.batchSize;
+    if (videoDurationRef.value?.visible.value) durationVideoCopies(draft.batchSize, batch);
     // With multiple live hosts — or a dead primary while another host can
     // serve — route the batch (sticky pick, Auto = least busy, or Most
     // capable) — model-aware, so hosts that already have the weights win.
@@ -3664,11 +3699,9 @@ async function generate(batchOverride: number | null = null) {
       sourcePreprocessed = true;
     }
     const preliminaryRequest = preparedReferenceLease?.request ?? buildRequest(draft);
-    const preliminaryRouting = decideGenerateRequestRouting(
-      preliminaryRequest,
-      draft.family,
-      routingModel,
-    );
+    const preliminaryRouting = videoDurationRef.value?.visible.value
+      ? { kind: "single" as const }
+      : decideGenerateRequestRouting(preliminaryRequest, draft.family, routingModel);
     if (preliminaryRouting.kind === "reject") {
       toasts.push(preliminaryRouting.reason, "error");
       return;
@@ -3881,7 +3914,9 @@ async function generate(batchOverride: number | null = null) {
         height: decoded?.height ?? null,
       });
     }
-    const chainRouting = decideGenerateRequestRouting(request, draft.family, routingModel);
+    const chainRouting = videoDurationRef.value?.visible.value
+      ? { kind: "single" as const }
+      : decideGenerateRequestRouting(request, draft.family, routingModel);
     if (chainRouting.kind === "reject") {
       toasts.push(chainRouting.reason, "error");
       return;
@@ -3978,6 +4013,54 @@ async function generate(batchOverride: number | null = null) {
     // snapshots its own model + params, so tweaking the form afterwards is safe.
     // A machine that cannot carry this print refuses it by name and queues
     // nothing; there is no second submission path to fall through to.
+    if (videoDurationRef.value?.visible.value) {
+      const duration = videoDurationRef.value;
+      const plans = preparedReferenceLease
+        ? [preparedReferenceLease.request]
+        : planBatchRequests(request, batch, resolveBaseSeed(request.seed), requestOptions);
+      const owner = { ...route, target: { ...route.target, apiKey: route.target.apiKey ?? null } };
+      try {
+        for (const plan of plans)
+          await duration.submitPrepared(owner, plan, {
+            referenceUploads: route.referenceUploads,
+            ...(preparedReferenceLease ? { preparedReferenceLease } : {}),
+            ...(requestOptions.retainedSource
+              ? { retainedSource: requestOptions.retainedSource }
+              : {}),
+            signal: submitSignal,
+            isCurrent: () =>
+              submissionGuard.isCurrent(submitToken) &&
+              videoFormRevision.value === capturedVideoRevision &&
+              duration.stamp.value === capturedDurationStamp,
+          });
+        preparedLeaseHandedOff = true;
+      } catch (cause) {
+        if (duration.run.admission.value) preparedLeaseHandedOff = true;
+        toasts.push(cause instanceof Error ? cause.message : String(cause), "error");
+        return;
+      }
+      composer.invalidateRetainedSource();
+      if (preparedSubmission) {
+        preparationGuard.invalidate();
+        preparedBatch.value = null;
+        preparedSubmitting.value = false;
+      }
+      quickExpansionSnapshot.value = null;
+      missingModel.value = null;
+      composerRef.value?.record?.(preparedSubmission?.originalPrompt ?? request.prompt);
+      recordPromptHistoryCache(
+        availablePromptHistoryStorage(),
+        hosts.all.map((host) => ({ hostId: host.id, hostLabel: host.label })),
+        route.hostId,
+        {
+          prompt: preparedSubmission?.originalPrompt ?? request.prompt,
+          model: request.model,
+          used_at: Date.now(),
+        },
+      );
+      toasts.push(plans.length === 1 ? "Video queued" : `${plans.length} videos queued`);
+      return;
+    }
     let settled: ReturnType<typeof generation.submitBatch>["settled"];
     try {
       ({ settled } = generation.submitBatch(request, batch, route, chainRouting, requestOptions));
@@ -4370,6 +4453,7 @@ function applyPrefill() {
     );
   }
   applyPrefillToForm(form, prefill, installedModels.value);
+  requestVideoDurationReset("metadata" in prefill ? prefill.metadata : undefined);
   inspectSelectedQueueRender("metadata" in prefill ? prefill.queueSelection : undefined);
   if ("metadata" in prefill && prefill.print) showRestoredPrint(prefill.print);
   discloseMissingRestoredModel();
@@ -4647,6 +4731,7 @@ onCreateIntent(
     quickExpansionSnapshot.value = null;
     submissionGuard.invalidate();
     formStore.clearComposer();
+    requestVideoDurationReset();
     void nextTick(() => composerRef.value?.focus?.());
   },
 );
@@ -4767,6 +4852,59 @@ function setClipsActive(value: boolean) {
   clipsActive.value = value;
   if (!value) clipsPinned.value = null;
 }
+
+watch(
+  form,
+  () => {
+    videoFormRevision.value += 1;
+  },
+  { deep: true, flush: "sync" },
+);
+const videoDuration = createVideoDurationAuthoring({
+  key: "mold.desktop.video-duration.v1",
+  clip: computed(() => isClip.value),
+  legacyActive: computed(() => clipsActive.value),
+  supported: computed(() => {
+    const host = clipsOwner.value;
+    const capability = host ? hosts.capabilities[host.hostId]?.video_jobs : null;
+    return capability?.supported === true && capability.literal_prompts === true;
+  }),
+  owner: computed(() =>
+    clipsOwner.value
+      ? {
+          ...clipsOwner.value,
+          target: { ...clipsOwner.value.target, apiKey: clipsOwner.value.target.apiKey ?? null },
+        }
+      : null,
+  ),
+  frames: computed(() => form.frames),
+  fps: computed(() => form.fps),
+  generation: computed(() => clipsInput.value.request),
+});
+videoDurationRef.value = videoDuration;
+watch(
+  pendingVideoLibraryExtension,
+  async (value) => {
+    if (!value) return;
+    const selection = takeVideoLibraryExtension();
+    if (!selection) return;
+    try {
+      await appPrefs.update({ generateTargetHost: selection.owner.hostId });
+      composer.invalidateRetainedSource();
+      applyPrefillToForm(
+        form,
+        { metadata: selection.metadata as unknown as OutputMetadata },
+        installedModels.value,
+      );
+      form.seed = "";
+      await nextTick();
+      videoDuration.extend(selection);
+    } catch (cause) {
+      videoDuration.run.error.value = cause instanceof Error ? cause.message : String(cause);
+    }
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
@@ -5147,6 +5285,7 @@ function setClipsActive(value: boolean) {
           <ComposerCard
             ref="composerRef"
             :form="form"
+            :prompt-hidden="videoDuration.scenesActive.value"
             :effective-batch-size="effectiveBatchSize"
             :expansion-running="expansionRunning"
             :expansion-host-label="expansionHostLabel"
@@ -5167,7 +5306,7 @@ function setClipsActive(value: boolean) {
             :placeholder="composerPlaceholder"
             :length-frames="form.frames"
             :length-fps="form.fps"
-            :length-contract="composerLengthContract"
+            :length-contract="videoDuration.visible.value ? null : composerLengthContract"
             @prompt-authored="onPromptAuthored"
             @update:length-frames="form.frames = $event"
             @generate="composerGenerate"
@@ -5192,11 +5331,51 @@ function setClipsActive(value: boolean) {
                 @canvas-intent="setCanvasIntent"
               />
             </template>
+            <template #duration>
+              <VideoDurationEditor
+                v-if="!clipsActive && videoDuration.visible.value && videoDuration.draft.value"
+                v-model="videoDuration.draft.value"
+                :prompt="form.prompt"
+                :source-title="videoDuration.draft.value.extension?.title"
+                :source-machine="videoDuration.draft.value.extension?.machine"
+                @start-fresh="videoDuration.reset()"
+                :plan="videoDuration.planner.plan.value"
+                :checking="videoDuration.planner.checking.value"
+                :error="
+                  videoDuration.blocker.value ??
+                  videoDuration.planner.error.value ??
+                  videoDuration.run.error.value
+                "
+                :disabled="composerSubmitting"
+                @single-prompt="onPromptAuthored($event, 'typed')"
+              />
+            </template>
           </ComposerCard>
         </div>
+
+        <div
+          v-if="videoDuration.run.admission.value && !videoDuration.run.detail.value"
+          role="status"
+        >
+          Confirming this video on its machine…
+          <button type="button" @click="videoDuration.run.refresh()">Check queue</button>
+          <button
+            type="button"
+            :disabled="videoDuration.run.cancelling.value"
+            @click="videoDuration.run.cancel()"
+          >
+            Stop video
+          </button>
+        </div>
+        <VideoJobControl
+          v-if="videoDuration.run.detail.value && videoDuration.run.owner.value"
+          :job-id="videoDuration.run.detail.value.id"
+          :owner="videoDuration.run.owner.value"
+          :auto-open="true"
+        />
         <VideoClips
           ref="videoClipsRef"
-          :enabled="isClip && !composerSubmitting && !preparedBatch"
+          :enabled="isClip && !videoDuration.visible.value && !composerSubmitting && !preparedBatch"
           :request="clipsInput.request"
           :reference-authoring="
             caps.sourceImageMode === 'ordered-references' ? form.h3Authoring : null
@@ -5231,6 +5410,8 @@ function setClipsActive(value: boolean) {
 
     <!-- Inspector (persisted, left-edge resizable width) -->
     <InspectorPanel
+      :incoming-video-boundary="incomingVideoBoundary"
+      :duration-active="videoDuration.visible.value"
       :form="form"
       :tab="inspectorTab"
       :recent="recentPrints"

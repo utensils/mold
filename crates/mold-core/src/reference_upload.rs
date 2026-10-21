@@ -108,6 +108,13 @@ impl ReferenceUploadLease {
         self.cancellation.disarm();
     }
 
+    /// A durable admission POST may have claimed this input even if its reply
+    /// was lost. Keep the lease alive for exact operation reconciliation;
+    /// dropping a local observer must not revoke the server's pending claim.
+    pub fn preserve_for_uncertain_admission(&mut self) {
+        self.cancellation.disarm();
+    }
+
     /// Explicitly release an unused lease. Drop remains armed when transport
     /// cancellation interrupts this await, so it can schedule one final try.
     pub async fn cancel(&mut self) -> Result<()> {

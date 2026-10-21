@@ -1,4 +1,10 @@
 <script setup lang="ts">
+import {
+  VIDEO_LIBRARY_EXTENSION_NAVIGATION,
+  pendingVideoLibraryExtension,
+} from "@studio/lib/videoLibraryExtensionHandoff";
+
+import { VIDEO_LIBRARY_NAVIGATION } from "@studio/lib/videoLibraryNavigation";
 import OriginalMediaHost from "@studio/components/OriginalMediaHost.vue";
 import { startLibraryUnreadObserver } from "./stores/libraryUnread";
 import { originApiTarget } from "./lib/originAuth";
@@ -7,7 +13,7 @@ import HeldQueueTransferDialog from "@studio/components/HeldQueueTransferDialog.
 import { provideHeldQueueTransfer } from "@studio/composables/useHeldQueueTransfer";
 
 import { computed, onBeforeUnmount, onMounted, provide, ref } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import ToastShelf from "@ui/components/ToastShelf.vue";
 import DownloadsPopover from "./components/shell/DownloadsPopover.vue";
 import AppNav from "./components/shell/AppNav.vue";
@@ -36,6 +42,17 @@ import {
 } from "./composables/useResources";
 
 const route = useRoute();
+const router = useRouter();
+provide(VIDEO_LIBRARY_NAVIGATION, (value) => {
+  void router.push({
+    path: "/library",
+    query: { print: value.filename, printHost: value.owner.hostId },
+  });
+});
+provide(VIDEO_LIBRARY_EXTENSION_NAVIGATION, (value) => {
+  pendingVideoLibraryExtension.value = value;
+  void router.push("/create");
+});
 const stopLibraryUnreadObserver = startLibraryUnreadObserver();
 onBeforeUnmount(stopLibraryUnreadObserver);
 

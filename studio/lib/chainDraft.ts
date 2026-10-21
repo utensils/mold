@@ -1,3 +1,4 @@
+import { exactSeed } from "./videoSettingsReuse";
 import type {
   ChainContinuation,
   ChainRequestWire,
@@ -8,6 +9,8 @@ export interface VideoClipDraft {
   id: string;
   prompt: string;
   frames: number;
+  /** Authenticated legacy inputs stay private in memory, never text-only draft storage. */
+  restored?: ChainStageWire;
 }
 export interface ClipsBaseRequest {
   model: string;
@@ -66,16 +69,15 @@ export function chainInputRefusal<T extends ClipsBaseRequest>(
     )
     .map(([key]) => key);
   const extra = request as ClipsBaseRequest & {
-    seed?: number;
+    seed?: number | string;
     batch_size?: number;
     output_format?: string;
     save_to_gallery?: boolean;
   };
-  if (
-    extra.seed != null &&
-    (!Number.isSafeInteger(extra.seed) || extra.seed < 0)
-  )
-    unsupported.push("seed (choose a whole number from 0 to 9007199254740991)");
+  if (extra.seed != null && !exactSeed(extra.seed))
+    unsupported.push(
+      "seed (use a whole unsigned 64-bit value from 0 to 18446744073709551615)",
+    );
   const keyframes = (
     request as ClipsBaseRequest & { keyframes?: Array<{ frame: number }> }
   ).keyframes;
@@ -177,33 +179,79 @@ export function buildClipsRequest<T extends ClipsBaseRequest>(
     throw new Error(
       "These video clips exceed 64 retained inputs. Use fewer clips or references in this part.",
     );
-  const stages: ChainStageWire[] = clips.map((clip, index) => ({
-    prompt: clip.prompt,
-    frames: clip.frames,
-    transition: "smooth",
-    ...(fields.negative_prompt
-      ? { negative_prompt: fields.negative_prompt }
-      : {}),
-    ...(fields.loras?.length ? { loras: fields.loras } : {}),
-    ...(fields.references?.length
-      ? { generation_references: fields.references }
-      : {}),
-    ...(index === 0 && fields.source_image
-      ? { source_image: fields.source_image }
-      : {}),
-    ...(fields.keyframes?.length
+  const stages: ChainStageWire[] = clips.map((clip, index) =>
+    clip.restored
       ? {
-          keyframes: fields.keyframes
-            .filter((frame) =>
-              frame.frame === 0 ? index === 0 : index === clips.length - 1,
-            )
-            .map((frame) => ({
-              ...frame,
-              frame: frame.frame === 0 ? 0 : clip.frames - 1,
-            })),
+          ...JSON.parse(JSON.stringify(clip.restored)),
+          prompt: clip.prompt,
+          frames: clip.frames,
+          ...(clip.restored.keyframes
+            ? {
+                keyframes: clip.restored.keyframes.map((frame) => {
+                  const position =
+                    frame.frame === clip.restored!.frames - 1
+                      ? clip.frames - 1
+                      : frame.frame;
+                  if (position >= clip.frames)
+                    throw new Error(
+                      "A saved interior keyframe lies outside this clip. Restore its length or remove that clip.",
+                    );
+                  return { ...frame, frame: position };
+                }),
+              }
+            : {}),
         }
-      : {}),
-  }));
+      : {
+          prompt: clip.prompt,
+          frames: clip.frames,
+          transition: "smooth",
+          ...(fields.negative_prompt
+            ? { negative_prompt: fields.negative_prompt }
+            : {}),
+          ...(fields.loras?.length ? { loras: fields.loras } : {}),
+          ...(fields.references?.length
+            ? { generation_references: fields.references }
+            : {}),
+          ...(index === 0 && fields.source_image
+            ? { source_image: fields.source_image }
+            : {}),
+          ...(fields.keyframes?.length
+            ? {
+                keyframes: fields.keyframes
+                  .filter((frame) =>
+                    frame.frame === 0
+                      ? index === 0
+                      : index === clips.length - 1,
+                  )
+                  .map((frame) => ({
+                    ...frame,
+                    frame: frame.frame === 0 ? 0 : clip.frames - 1,
+                  })),
+              }
+            : {}),
+        },
+  );
+  let actualBytes = 0,
+    actualMembers = continuation ? motionTail : 0;
+  for (const stage of stages) {
+    const inputs = [
+      ...(stage.source_image ? [stage.source_image] : []),
+      ...(stage.keyframes ?? []).map((k) => k.image),
+    ];
+    for (const reference of stage.generation_references ?? []) {
+      if (reference.media.authority !== "inline")
+        throw new Error(
+          "Restored clip references require their original inline media.",
+        );
+      inputs.push(reference.media.data);
+    }
+    actualMembers += inputs.length;
+    for (const input of inputs) actualBytes += decodedBytes(input);
+  }
+  if (actualBytes > 32 * 1024 * 1024 || actualMembers > 64)
+    throw new Error(
+      "These video clips exceed the retained input budget (32 MiB / 64 inputs).",
+    );
   return {
     model: base.model,
     width: base.width,

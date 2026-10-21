@@ -359,7 +359,7 @@ fn build_trash_import(
     if let Some(meta) = tombstone
         .metadata_json
         .as_deref()
-        .and_then(|json| serde_json::from_str::<mold_core::OutputMetadata>(json).ok())
+        .and_then(|json| mold_core::prompt_text::output_metadata_from_literal_json(json).ok())
     {
         record.metadata = meta;
         record.metadata_synthetic = false;
@@ -623,6 +623,34 @@ mod tests {
             collections: Vec::new(),
             metadata_json: None,
         }
+    }
+
+    #[test]
+    fn restored_trash_metadata_preserves_literal_prompts_and_full_seed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("literal.png");
+        write_valid_png(&path);
+        let mut metadata = crate::metadata_io::synthesize_from_filename("literal.png", 0);
+        metadata.prompt = r"scene\npath".into();
+        metadata.negative_prompt = Some(r"bad\ttext".into());
+        metadata.seed = u64::MAX;
+        let mut tombstone = tombstone_for(dir.path(), "literal.png", 1);
+        tombstone.metadata_json = Some(serde_json::to_string(&metadata).unwrap());
+        let import = build_trash_import(
+            dir.path(),
+            "literal.png",
+            mold_core::OutputFormat::Png,
+            &path,
+            None,
+            None,
+            tombstone,
+        );
+        assert_eq!(import.record.metadata.prompt, metadata.prompt);
+        assert_eq!(
+            import.record.metadata.negative_prompt,
+            metadata.negative_prompt
+        );
+        assert_eq!(import.record.metadata.seed, u64::MAX);
     }
 
     /// A trashed row whose bytes sit in `.trash/` survives reconcile; the

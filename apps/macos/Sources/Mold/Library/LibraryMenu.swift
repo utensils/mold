@@ -49,6 +49,8 @@ struct LibraryMenu {
             canReuse: actions.reuse != nil && !scope.isTrash,
             canContinueVideo: actions.continueVideo != nil && !scope.isTrash && targets.count == 1
                 && targets[0].print.kind == .clip && targets[0].print.metadata.chainJobId != nil,
+            canExtendVideo: actions.extendVideo != nil && !scope.isTrash && targets.count == 1
+                && targets[0].print.isVideo && actions.hosts.host(targets[0].hostID).flatMap { actions.hosts.capabilities[$0.id] }?.canExtendLibraryVideo == true,
             canUseAsSource: canAttach(using: actions.useAsSource),
             canAddReference: canAttach(using: actions.addAsReference),
             canUseEndpoints: canAttach(using: actions.useAsFirstFrame) && canAttach(using: actions.useAsLastFrame),

@@ -1,4 +1,10 @@
 <script setup lang="ts">
+import {
+  VIDEO_LIBRARY_EXTENSION_NAVIGATION,
+  pendingVideoLibraryExtension,
+} from "@studio/lib/videoLibraryExtensionHandoff";
+
+import { VIDEO_LIBRARY_NAVIGATION } from "@studio/lib/videoLibraryNavigation";
 import OriginalMediaHost from "@studio/components/OriginalMediaHost.vue";
 import HeldQueueTransferDialog from "@studio/components/HeldQueueTransferDialog.vue";
 import { provideHeldQueueTransfer } from "@studio/composables/useHeldQueueTransfer";
@@ -77,6 +83,16 @@ import { useUiStore } from "./stores/ui";
 import { useUpdaterStore } from "./stores/updater";
 
 const router = useRouter();
+provide(VIDEO_LIBRARY_NAVIGATION, (value) => {
+  void router.push({
+    path: "/library",
+    query: { print: value.filename, printHost: value.owner.hostId },
+  });
+});
+provide(VIDEO_LIBRARY_EXTENSION_NAVIGATION, (value) => {
+  pendingVideoLibraryExtension.value = value;
+  void router.push("/generate");
+});
 const appPrefs = useAppPrefsStore();
 const connection = useConnectionStore();
 const contextMenu = useContextMenuStore();

@@ -47,6 +47,7 @@ import { primaryModifierPressed, shortcutLabel } from "../../lib/platform";
  */
 const props = withDefaults(
   defineProps<{
+    promptHidden?: boolean;
     form: GenerateForm;
     effectiveBatchSize: number;
     /** The recipe renders one at a time: the Make chip reads 1 and locks. */
@@ -269,6 +270,7 @@ function onKeydown(e: KeyboardEvent) {
     e.preventDefault();
     // Blocked by the recipe: the view owns the refusal, so the shortcut still
     // reaches it and answers with the reason rather than dying silently here.
+    if (props.promptHidden) return;
     if (transformBlockedReason.value) emit("expand");
     else expandControl.value?.expand();
   } else if (e.key === "ArrowUp" && promptEl.value && caretOnFirstLine(promptEl.value)) {
@@ -287,6 +289,7 @@ function focus() {
   promptEl.value?.focus();
 }
 function expand() {
+  if (props.promptHidden) return;
   expandControl.value?.expand();
 }
 /** Record a submitted prompt so ↑ recalls it next time. */
@@ -319,7 +322,7 @@ defineExpose({ focus, expand, record, isEditingPrompt: () => promptEditorOpen.va
       >
         <span class="prompt-resize-handle__grip" aria-hidden="true" />
       </div>
-      <div class="ms-composer__prompt-row">
+      <div v-if="!promptHidden" class="ms-composer__prompt-row">
         <textarea
           ref="promptEl"
           :value="promptText"
@@ -350,6 +353,7 @@ defineExpose({ focus, expand, record, isEditingPrompt: () => promptEditorOpen.va
           </button>
         </div>
       </div>
+      <slot name="duration" />
       <div class="ms-composer__controls">
         <!-- The Style chip IS the picker (StylePicker.vue, filled by the view);
              it opens its menu in place rather than being a door to a second
@@ -394,6 +398,7 @@ defineExpose({ focus, expand, record, isEditingPrompt: () => promptEditorOpen.va
           />
         </span>
         <ExpandControl
+          v-if="!promptHidden"
           ref="expandControl"
           :prompt="form.prompt"
           :batch-size="effectiveBatchSize"

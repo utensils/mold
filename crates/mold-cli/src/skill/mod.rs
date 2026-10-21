@@ -1536,6 +1536,42 @@ mod tests {
     }
 
     #[test]
+    fn every_profile_preserves_named_video_variant_before_speed_routing() {
+        for profile in RenderProfile::ALL {
+            let bundle = render_bundle(profile).unwrap();
+            let text = &bundle.files["SKILL.md"];
+            for required in [
+                "`name`, `display_name`",
+                "H3 Fast / FastH3",
+                "FastH3 V2",
+                "**Turbo** and **PDMD**",
+                "report that before generating",
+            ] {
+                assert!(
+                    text.contains(required),
+                    "{} lacks {required}",
+                    profile.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_profile_distinguishes_new_duration_submission_from_recovery() {
+        for profile in RenderProfile::ALL {
+            let bundle = render_bundle(profile).unwrap();
+            let text = &bundle.files["references/cli.md"];
+            for required in [
+                "For the first submission, omit `--operation-id`",
+                "CLI assigns and saves the UUID",
+                "Legacy `mold chain limits` total-frame and clip-count bounds do not cap `--duration`",
+            ] {
+                assert!(text.contains(required), "{} lacks {required}", profile.name());
+            }
+        }
+    }
+
+    #[test]
     fn every_agent_profile_renders_valid_discoverable_bundle() {
         let profiles = AGENTS
             .iter()

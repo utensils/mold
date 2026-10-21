@@ -1,3 +1,4 @@
+import { protectLegacyGenerateWire } from "../lib/legacyGenerateWire";
 import { ApiError, apiFetchTo, type ApiTarget } from "./client";
 
 export type RetainedSourceMediaAvailability =
@@ -145,7 +146,7 @@ export async function createRetainedSourceMediaReuseSession<TRequest>(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      target_request: targetRequest,
+      target_request: protectLegacyGenerateWire(targetRequest),
       member_ids: [...memberIds],
     }),
   });

@@ -1,3 +1,4 @@
+import { exactSeed } from "@studio/lib/videoSettingsReuse";
 import type { GenerateRequest, OutputFormat } from "../lib/api/types";
 import type {
   DurableGenerationQueueCapabilities,
@@ -33,7 +34,7 @@ export interface MobileDurableGenerationPresentation {
   height: number;
   steps: number;
   guidance: number;
-  seed: number;
+  seed: number | string;
   format: OutputFormat;
   submittedAtMs: number;
 }
@@ -94,7 +95,7 @@ function parsePresentation(value: unknown): MobileDurableGenerationPresentation 
     !finiteNumber(value.height) ||
     !finiteNumber(value.steps) ||
     !finiteNumber(value.guidance) ||
-    !finiteNumber(value.seed) ||
+    !exactSeed(value.seed) ||
     typeof value.format !== "string" ||
     !OUTPUT_FORMATS.has(value.format as OutputFormat) ||
     !finiteNumber(value.submittedAtMs)

@@ -76,9 +76,12 @@ prompt expansion for that run.
 | `--frames-per-clip <N>`                                                                      | Per-stage frame count for repeated `--prompt`                                                                                                                                                                                                       |
 | `--script <PATH>`                                                                            | Submit a `mold.chain.v1` TOML chain script                                                                                                                                                                                                          |
 | `--continue-from <JOB_ID>`                                                                   | With `--script`, create a new durable part using the completed predecessor's owned tail on the same server; requires linked-part support and refuses `--local`.                                                                                     |
-| `--dry-run`                                                                                  | Parse/normalise repeated prompts or scripts without generating                                                                                                                                                                                      |
+| `--dry-run`                                                                                  | Preview without generation or prompt expansion; Duration fully validates the selected server’s prepared request and plan.                                                                                                                           |
 | `--frames <N>`, `--fps <N>`                                                                  | Video frame count and output FPS                                                                                                                                                                                                                    |
-| `--duration <SECONDS>`                                                                       | Video duration in seconds; resolves using the model FPS/grid and automatically chains supported long videos. H3 uses fixed 24 fps and `17n+5` clips                                                                                                 |
+| `--duration <SECONDS>`                                                                       | Requested delivered seconds on the model FPS clock; an updated remote server joins recipe-sized clips and trims padding. Do not combine with frame, overlap or script overrides. Forced-local H3 remains bounded to one generation.                 |
+| `--extend-library <PRINT.mp4>`                                                               | With Duration, publish the original Library movie plus added footage as a new movie on its captured host; retain the original.                                                                                                                      |
+| `--operation-id <UUID>`                                                                      | With Duration, reconcile an existing operation using this CLI installation’s private owner receipt; never create a replacement.                                                                                                                     |
+| `--detach`                                                                                   | With Duration, return after durable acceptance; inspect the printed operation with `mold jobs show`.                                                                                                                                                |
 | `--predict-duration`                                                                         | Let a qualified LTX-2.5 model choose a clip length from 1–20 seconds                                                                                                                                                                                |
 | `--clip-frames <N>`                                                                          | Per-clip cap for chained video renders                                                                                                                                                                                                              |
 | `--motion-tail <N>`                                                                          | Overlap frames reused between chained clips                                                                                                                                                                                                         |
@@ -1169,13 +1172,24 @@ mold run minimax-h3-fl2va:fasth3-v2-int8 "A continuous tracking shot through a g
 mold run minimax-h3-fl2va:fasth3-v2-int8 "A continuous tracking shot through a garden" --duration 45 --host workstation --output garden.mp4
 ```
 
-H3 FL2VA automatically continues clips on the paired server and publishes one
-stitched MP4 with audio. The preview reports delivered duration and clip lengths;
-frame grids and overlap trims can make the result slightly longer than requested.
-H3 without endpoints is text-to-video. Ref2VA needs authored independent clips
-with `--script`. LTX-2 and continuation-capable Wan also accept `--duration`;
-text-only Wan retains its automatic-continuation refusal. Use
-`mold chain limits MODEL --json --host HOST` for the server's current bounds.
+Duration requires an updated server advertising `video_jobs` support and creates
+one durable parent. Its read-only plan reports the single-generation limit,
+joined clip count and delivered length. Each child uses the selected recipe's
+normal short window; the final movie trims grid padding on its FPS clock.
+H3 FL2VA without endpoints is text-to-video and carries motion between clips.
+H3 Ref2VA, text-only Wan and legacy LTX also support Duration through independent
+blended clips; they do not gain temporal continuity. H3 keeps synchronized audio.
+Forced-local Duration remains a single bounded H3 render. For advanced frame
+scripts, inspect `mold chain limits MODEL --json --host HOST`.
+Library `--extend-library PRINT.mp4 --duration 10` adds ten seconds and publishes
+a new full movie while retaining the original. Keep the printed operation UUID
+for `mold jobs show`; `mold jobs cancel UUID --video` can stop even an unanswered
+admission. Stop pauses accepted Duration jobs for an explicit Resume on the
+original machine. Historical Cancelled Duration jobs require Start again or
+Send when offered; an unanswered admission confirmed by
+`410 VIDEO_OPERATION_CANCELLED` is permanently cancelled and its UUID cannot be
+resumed or reused. See [Longer videos](/guide/video#longer-videos) for recovery
+and Restart/Send commands.
 Paired hosts require the CLI's Secure transport; API paths in documentation do
 not imply that a raw curl request will work. Dry-run creates no generation or
 prompt-expansion work.

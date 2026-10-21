@@ -225,26 +225,37 @@ async fn preoccupied_client_id_requires_exact_admitted_request_before_any_reatta
         .seal_operation_receipt_v1(&owner, &client, &fingerprint)
         .unwrap();
     let serialized = serde_json::to_string(&request).unwrap();
+    state.metadata_db.as_ref().as_ref().unwrap().with_conn(|conn| {
+        conn.execute("INSERT INTO chain_jobs(id,state,model,request_json,job_dir,stage_count,created_at,updated_at) VALUES('parent','running','mock-model','{}','/jobs/parent',1,0,0)",[])?;
+        Ok(())
+    }).unwrap();
+    let stage_owner = mold_db::chain_stage_generations::ChainStageOwner {
+        chain_id: "parent".into(),
+        stage_index: 0,
+    };
     state
         .queue_journal
-        .record_batch_with_media(crate::queue_journal::MediaBatchJournalAdmission {
-            id: "stored-batch",
-            client_batch_id: &client,
-            operation_receipt: receipt.as_str(),
-            children: &[crate::queue_journal::MediaJournalAdmission {
-                id: "stored-child",
-                model: &request.model,
-                request_json: &serialized,
-                media_set: None,
-                output_dir: root.path(),
-                target_gpu: None,
-                target_device_id: None,
-                completion_payload: SseCompletionPayload::MetadataOnly,
-                seed_pinned: false,
-                admission_authority: None,
-            }],
-            observer_job_ids: &[],
-        })
+        .record_batch_with_media_owned(
+            crate::queue_journal::MediaBatchJournalAdmission {
+                id: "stored-batch",
+                client_batch_id: &client,
+                operation_receipt: receipt.as_str(),
+                children: &[crate::queue_journal::MediaJournalAdmission {
+                    id: "stored-child",
+                    model: &request.model,
+                    request_json: &serialized,
+                    media_set: None,
+                    output_dir: root.path(),
+                    target_gpu: None,
+                    target_device_id: None,
+                    completion_payload: SseCompletionPayload::MetadataOnly,
+                    seed_pinned: false,
+                    admission_authority: None,
+                }],
+                observer_job_ids: &[],
+            },
+            Some(&stage_owner),
+        )
         .unwrap();
     let before = state
         .queue_journal
@@ -253,7 +264,7 @@ async fn preoccupied_client_id_requires_exact_admitted_request_before_any_reatta
         .unwrap();
     let mut foreign = request.clone();
     foreign.prompt = "someone else's operation".into();
-    let conflict = verify_or_admit_child(&state, &client, &foreign)
+    let conflict = verify_or_admit_child(&state, &client, &foreign, "parent", 0)
         .await
         .unwrap_err();
     assert!(
@@ -270,7 +281,7 @@ async fn preoccupied_client_id_requires_exact_admitted_request_before_any_reatta
         "foreign collision must not cancel or mutate the existing child"
     );
     assert_eq!(
-        verify_or_admit_child(&state, &client, &request)
+        verify_or_admit_child(&state, &client, &request, "parent", 0)
             .await
             .unwrap(),
         "stored-batch"

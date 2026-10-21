@@ -23,7 +23,9 @@ struct RetainedDraftRestorationTests {
 
     @Test func restoresOrderedKeyframesAndReferencesWithoutPromotingAMissingTarget() throws {
         let frames = [KeyframeCondition(frame: 0, image: "first"), .init(frame: 48, image: "middle"), .init(frame: 96, image: "last")]
-        let downloaded = try frames.map { (member("keyframes"), try MoldJSON.encoder.encode($0)) }
+        let downloaded = try frames.enumerated().map { index, frame in
+            (member("keyframes", name: "frame-\(index)"), try MoldJSON.encoder.encode(frame))
+        }
         let restored = try RetainedSourceMedia.materializedDraft(downloaded + [
             (member("edit_images", name: "target.png"), Data([1])),
             (member("edit_images", name: "reference.png"), Data([2]))

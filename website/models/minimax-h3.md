@@ -579,16 +579,19 @@ mold run minimax-h3-fl2va:comfy-pruned-int8 \
   --first-frame pavilion.png --duration 5
 ```
 
-For one prompt across a longer FL2VA video, use `--duration 45 --host HOST`.
-The CLI automatically continues supported clips on the paired server and saves
-one stitched MP4 with audio. Add `--dry-run` first to inspect clip lengths and
-delivered duration; the frame grid and seam trims can make it slightly longer
-than requested. With no endpoints FL2VA is text-to-video. A first or last frame
-belongs to the outer boundary of the whole video. Ref2VA sequences remain
-explicit authored scripts because their clips do not carry temporal context.
-Inspect the selected host with `mold list --json --host HOST` and
-`mold chain limits MODEL --json --host HOST`; raw HTTP cannot access a paired
-Secure host.
+For one prompt across a longer video, use `--duration 45 --host HOST` with an
+updated H3 server advertising Duration support. It creates one durable parent
+and saves one MP4 with synchronized audio. Add `--dry-run` first for full
+read-only validation and the server's planned clip count and delivered length.
+Each child uses the selected recipe's normal short window; the final movie
+trims grid padding on H3's 24 FPS clock. FL2VA carries motion between clips and
+accepts text-only prompts when no endpoints are attached. First and last frames
+belong to the outer boundaries of the whole movie. Ref2VA also supports Duration,
+using independent blended clips and retained ordered references rather than
+claiming motion continuity. Forced-local Duration remains one bounded H3 render.
+For explicit frame-level scripts, inspect the paired host's authored-chain bounds
+with `mold chain limits MODEL --json --host HOST`. Discover installed recipes with
+`mold list --json --host HOST`; raw HTTP cannot access a paired Secure host.
 
 ### Canvas and duration
 

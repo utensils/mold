@@ -42,6 +42,8 @@ pub(crate) struct TransferDescriptor {
     output_size_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     metadata: Option<mold_core::OutputMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    video_artifacts_complete: Option<bool>,
 }
 #[derive(Serialize)]
 pub(crate) struct TransferResult {
@@ -55,12 +57,15 @@ fn invalid(message: impl Into<String>) -> ApiError {
         StatusCode::BAD_REQUEST,
     )
 }
-fn conflict() -> ApiError {
+fn conflict_at(stage: &str) -> ApiError {
     ApiError::with_code(
-        "the output or retained-media binding changed",
+        format!("Library transfer conflict: {stage}"),
         "RETAINED_MEDIA_TRANSFER_CONFLICT",
         StatusCode::CONFLICT,
     )
+}
+fn conflict() -> ApiError {
+    conflict_at("publication binding changed")
 }
 fn chain_stage_source(role: &str) -> bool {
     role.strip_prefix("stage_source:").is_some_and(|index| {
@@ -198,16 +203,18 @@ pub(crate) fn offer_for(state: &AppState, filename: &str) -> Result<TransferDesc
     let entry = state
         .gallery_publication_gate
         .validated_transfer_entry(&output_dir, filename)
-        .map_err(|_| conflict())?
+        .map_err(|_| conflict_at("committed Gallery output changed or is unavailable"))?
         .ok_or_else(|| ApiError::not_found("gallery output not found"))?;
     let resolved = crate::gallery_source_media::resolve_members_from_pins(
         state,
         entry.identity.clone(),
         entry.retained_media,
     )?
-    .ok_or_else(conflict)?;
+    .ok_or_else(|| conflict_at("retained-media authority unavailable"))?;
     if resolved.corrupt {
-        return Err(conflict());
+        return Err(conflict_at(
+            "retained-media manifests unavailable or changed",
+        ));
     }
     let mut members = Vec::new();
     for member in resolved.members {
@@ -223,7 +230,24 @@ pub(crate) fn offer_for(state: &AppState, filename: &str) -> Result<TransferDesc
     if !members.is_empty() {
         validate_members(&members).map_err(|_| conflict())?;
     }
+    let video_artifacts_complete = entry
+        .record
+        .metadata
+        .video_job
+        .as_ref()
+        .and_then(|job| job.artifacts.as_ref())
+        .map(|assets| {
+            state
+                .metadata_db
+                .as_ref()
+                .as_ref()
+                .and_then(|db| crate::video_archive_assets::root_from_db(db).ok())
+                .is_some_and(|root| {
+                    crate::gallery_video_artifacts::evidence(&root, &entry.identity, assets).is_ok()
+                })
+        });
     Ok(TransferDescriptor {
+        video_artifacts_complete,
         archive_identity_sha256: resolved.archive_identity_sha256,
         members,
         output_sha256: Some(entry.identity.checksum_sha256),
@@ -411,12 +435,12 @@ fn commit_transfer(
         .map_err(|_| ApiError::internal("transfer store lock unavailable"))?;
     let existing = offer_for(state, filename)?;
     if existing.archive_identity_sha256 != descriptor.archive_identity_sha256 {
-        return Err(conflict());
+        return Err(conflict_at("archive identity changed"));
     }
     let wanted = normalized(&descriptor.members);
     if !existing.members.is_empty() {
         if normalized(&existing.members) != wanted {
-            return Err(conflict());
+            return Err(conflict_at("existing input slots disagree"));
         }
         repair_projection(state, filename)?;
         return Ok(TransferResult {
@@ -838,6 +862,47 @@ mod tests {
             .commit(&state.gallery_publication_gate, state.metadata_db.clone())
             .await
             .unwrap();
+    }
+    #[tokio::test]
+    async fn transfer_conflicts_identify_output_changes_and_retained_manifest_failures() {
+        let (mut state, _home, gallery) = fixture().await;
+        publish(&state, gallery.path(), "diagnostic.png").await;
+        tokio::task::spawn_blocking(move || {
+            let mut descriptor = offer_for(&state, "diagnostic.png").unwrap();
+            let mut item = member();
+            item.sha256 = format!("{:x}", Sha256::digest(b"abc"));
+            descriptor.members = vec![item];
+            commit_transfer(&state, "diagnostic.png", &descriptor, |_, m| {
+                Ok(crate::queue_media_store::SealMedia::bytes(
+                    &m.role,
+                    &m.position,
+                    b"abc".to_vec(),
+                ))
+            })
+            .unwrap();
+            state.queue_journal = std::sync::Arc::new(crate::queue_journal::QueueJournal::new(
+                state.metadata_db.clone(),
+                None,
+                "diagnostic",
+            ));
+            let retained = offer_for(&state, "diagnostic.png").err().unwrap();
+            assert!(
+                retained.error.contains("retained-media manifests"),
+                "{}",
+                retained.error
+            );
+            std::fs::write(gallery.path().join("diagnostic.png"), b"changed").unwrap();
+            let output = offer_for(&state, "diagnostic.png").err().unwrap();
+            assert!(
+                output.error.contains("committed Gallery output"),
+                "{}",
+                output.error
+            );
+            assert_eq!(retained.code, "RETAINED_MEDIA_TRANSFER_CONFLICT");
+            assert_eq!(output.code, retained.code);
+        })
+        .await
+        .unwrap();
     }
     #[tokio::test]
     async fn transferred_sources_survive_origin_removal_and_deduplicate_siblings() {

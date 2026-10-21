@@ -1,3 +1,4 @@
+import { exactSeed, incrementExactSeed } from "@studio/lib/videoSettingsReuse";
 import type { ReferenceUploadLease } from "@studio/api/referenceUploads";
 import { jobStallLabel, parseQueueCancellationResponse } from "@studio/lib/jobStall";
 import { reactive } from "vue";
@@ -7,6 +8,7 @@ import { apiFetchTo, currentTarget, type ApiTarget, apiJsonTo } from "../lib/api
 import { sseStream } from "../lib/api/sse";
 import { evictMedia, galleryMediaPath, streamableMediaUrl } from "../lib/gallery/media";
 import { ipc } from "../lib/ipc";
+import { captureMirrorSource } from "../lib/mirrorGalleryCopy";
 import { notifyGenerated, notifyGenerationFailed } from "../lib/notify";
 import { describeTransportError } from "../lib/api/errors";
 import {
@@ -134,7 +136,7 @@ export interface JobRoute {
 /** Filesystem-safe local filename for a saved output. */
 export function suggestOutputFilename(
   model: string,
-  seed: number,
+  seed: number | string,
   format: string,
   nowMs: number = Date.now(),
   role?: "original" | "upscaled",
@@ -182,8 +184,11 @@ export function needsHostRoute(opts: {
  * otherwise a fresh random base is drawn so the run is reproducible from the
  * first sibling. Pure given `rng`.
  */
-export function resolveBaseSeed(seed: number | undefined, rng: () => number = randomSeed): number {
-  return seed !== undefined && Number.isFinite(seed) ? seed : rng();
+export function resolveBaseSeed(
+  seed: number | string | undefined,
+  rng: () => number = randomSeed,
+): number | string {
+  return seed !== undefined && exactSeed(seed) ? seed : rng();
 }
 
 export interface BatchRequestOptions {
@@ -212,7 +217,7 @@ export interface BatchRequestOptions {
 export function planBatchRequests(
   req: GenerateRequest,
   batchSize: number,
-  baseSeed: number,
+  baseSeed: number | string,
   options: BatchRequestOptions = {},
 ): GenerateRequest[] {
   const size = Math.max(1, Math.floor(batchSize));
@@ -244,7 +249,7 @@ export function planBatchRequests(
     ...(options.batchId !== undefined
       ? { batch_id: options.batchId, batch_index: i + 1, batch_count: size }
       : {}),
-    seed: baseSeed + i,
+    seed: incrementExactSeed(baseSeed, i),
     batch_size: 1,
   }));
 }
@@ -560,7 +565,7 @@ export const useGenerationStore = defineStore("generation", {
       return state.jobs.filter((j) => j.status !== "complete" && j.status !== "error");
     },
     /** Seed of the most recent finished print — powers "lock last seed". */
-    lastSeedUsed(state): number | null {
+    lastSeedUsed(state): number | string | null {
       for (let i = state.jobs.length - 1; i >= 0; i--) {
         const result = state.jobs[i]!.result;
         if (result) return result.seed_used;
@@ -1187,7 +1192,19 @@ export const useGenerationStore = defineStore("generation", {
               const origin = await originGalleryRow(target, filename);
               const metadata = origin?.metadata ?? null;
               if (metadata && result.filename === filename) result.metadata = metadata;
-              await ipc.mirrorGalleryPrint(target, filename, metadata, origin?.timestamp);
+              await ipc.mirrorGalleryPrint(
+                target,
+                filename,
+                metadata,
+                origin?.timestamp,
+                captureMirrorSource(
+                  record.tracker.hostId,
+                  record.tracker.expectedInstanceId,
+                  target,
+                  () => useHostsStore().all.find((row) => row.id === record.tracker.hostId),
+                  (message) => useToastStore().push(message, "warning"),
+                ),
+              );
               void useGalleryStore().refreshHost("local");
             } catch (error) {
               console.warn("local save of remote durable output failed:", error);
@@ -2118,9 +2135,21 @@ export const useGenerationStore = defineStore("generation", {
         return;
       }
       try {
+        const sourceHost = useHostsStore().all.find((row) => row.id === originHostId);
+        if (originHostId && !sourceHost)
+          throw new Error("Reconnect the source machine before saving this print.");
+        const sourceContext = sourceHost
+          ? captureMirrorSource(
+              sourceHost.id,
+              sourceHost.instanceId,
+              target,
+              () => useHostsStore().all.find((row) => row.id === originHostId),
+              (message) => useToastStore().push(message, "warning"),
+            )
+          : undefined;
         const origin = await originGalleryRow(target, filename);
         const metadata = origin?.metadata ?? null;
-        await ipc.mirrorGalleryPrint(target, filename, metadata, origin?.timestamp);
+        await ipc.mirrorGalleryPrint(target, filename, metadata, origin?.timestamp, sourceContext);
         void useGalleryStore().refreshHost("local");
       } catch (error) {
         console.warn("local save of remote sequence output failed:", error);

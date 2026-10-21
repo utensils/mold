@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { seedFromInput } from "@studio/lib/videoSettingsReuse";
 /*
  * Advanced controls (Mold Studio Create) — capability-gated, always-open
  * icon sections. Each section maps onto EXISTING form fields; sections a
@@ -88,6 +89,7 @@ import {
 
 const props = withDefaults(
   defineProps<{
+    durationActive?: boolean;
     /** Sheet open state (phone only; ignored when inline). */
     open?: boolean;
     modelValue: GenerateFormState;
@@ -862,7 +864,7 @@ function resetAdvanced() {
           :value="modelValue.seed ?? ''"
           @input="
             patch({
-              seed: Number(($event.target as HTMLInputElement).value) || null,
+              seed: seedFromInput(($event.target as HTMLInputElement).value),
             })
           "
         />
@@ -872,13 +874,13 @@ function resetAdvanced() {
         v-if="caps.supportsVideo"
         icon="video"
         title="Video"
-        :summary="`${predictDuration && canPredictDuration ? 'Automatic length' : `${modelValue.frames ?? 25} frames`} · ${modelValue.fps ?? 24} fps`"
+        :summary="`${durationActive ? 'Duration above' : predictDuration && canPredictDuration ? 'Automatic length' : `${modelValue.frames ?? 25} frames`} · ${modelValue.fps ?? 24} fps`"
         :open="true"
         :header-interactive="false"
         data-test="section-video"
       >
         <div
-          v-if="canPredictDuration"
+          v-if="!durationActive && canPredictDuration"
           class="adv__row"
           data-test="predict-duration-control"
         >
@@ -889,7 +891,10 @@ function resetAdvanced() {
             @update:model-value="setPredictDuration"
           />
         </div>
-        <div v-if="!predictDuration || !canPredictDuration" class="adv__field">
+        <div
+          v-if="!durationActive && (!predictDuration || !canPredictDuration)"
+          class="adv__field"
+        >
           <VideoDurationSlider
             :frames="modelValue.frames ?? selectedModel?.default_frames ?? 25"
             :fps="modelValue.fps ?? selectedModel?.default_fps ?? 24"
@@ -904,10 +909,17 @@ function resetAdvanced() {
             @update:frames="patch({ frames: $event })"
           />
         </div>
-        <p v-else class="adv__hint" data-test="predicted-duration-hint">
+        <p
+          v-else-if="!durationActive"
+          class="adv__hint"
+          data-test="predicted-duration-hint"
+        >
           The host will choose 1–20 seconds from the prompt.
         </p>
-        <div v-if="!predictDuration || !canPredictDuration" class="adv__field">
+        <div
+          v-if="!durationActive && (!predictDuration || !canPredictDuration)"
+          class="adv__field"
+        >
           <label class="adv__label">Frames ({{ frameGridLabel }})</label>
           <input
             class="adv__input"

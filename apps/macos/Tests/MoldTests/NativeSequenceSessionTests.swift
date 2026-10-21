@@ -5,9 +5,22 @@ import Testing
 
 @MainActor
 struct NativeSequenceSessionTests {
+    @Test func confirmedDiscardRemovesOnlyExactCapturedMachineInstallation() throws {
+        let session=NativeSequenceSession(defaults:UserDefaults(suiteName:UUID().uuidString)!)
+        let host=MoldHost(name:"Machine",baseURL:URL(string:"http://machine:7680")!,apiKey:"secret")
+        let old=NativeSequenceSession.Job(jobId:"same",host:host,installation:"old",detail:nil,message:"Failed")
+        let replacement=NativeSequenceSession.Job(jobId:"same",host:host,installation:"new",detail:nil,message:"Failed")
+        session.jobs=[replacement]
+        try session.remember(.init(id:"same",host:host.id,origin:host.baseURL.absoluteString,installation:"new"))
+        session.removeDiscarded(old)
+        #expect(session.jobs.count==1 && session.pending.count==1)
+        session.removeDiscarded(replacement)
+        #expect(session.jobs.isEmpty && session.pending.isEmpty)
+    }
+
     @Test func pendingAdmissionSurvivesRelaunchWithoutCredentialsOrMedia() throws {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
-        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!, apiKey: "private")
+        let host = MoldHost(name: "Workstation", baseURL: URL(string: "http://workstation:7680")!, apiKey: "private")
         let record = NativeSequenceSession.Pending(id: UUID().uuidString, host: host.id,
             origin: host.baseURL.absoluteString, installation: "installation")
         let first = NativeSequenceSession(defaults: defaults)
@@ -89,7 +102,7 @@ struct NativeSequenceAdmissionTests {
         }
     }
     @Test func acceptedButLostReplyRecoversKnownIDWithoutResubmitting() async throws {
-        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!)
+        let host = MoldHost(name: "Workstation", baseURL: URL(string: "http://workstation:7680")!)
         let backend = SequenceBackendFixture()
         let session = NativeSequenceSession(defaults: UserDefaults(suiteName: UUID().uuidString)!)
         session.begin(prompt: "A robot waters a garden", frames: 107)
@@ -106,7 +119,7 @@ struct NativeSequenceAdmissionTests {
         #expect(session.jobs.isEmpty)
     }
     @Test func definitiveRefusalDoesNotLeaveAnUncertainPendingJob() async {
-        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!)
+        let host = MoldHost(name: "Workstation", baseURL: URL(string: "http://workstation:7680")!)
         let backend = SequenceBackendFixture()
         await backend.reject()
         let session = NativeSequenceSession(defaults: UserDefaults(suiteName: UUID().uuidString)!)
@@ -121,7 +134,7 @@ struct NativeSequenceAdmissionTests {
         #expect(await backend.creates == 1)
     }
     @Test func editedClipsDuringPreparationDoNotSubmitStalePlan() async {
-        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!)
+        let host = MoldHost(name: "Workstation", baseURL: URL(string: "http://workstation:7680")!)
         let backend = SequenceBackendFixture()
         let session = NativeSequenceSession(defaults: UserDefaults(suiteName: UUID().uuidString)!)
         session.begin(prompt: "A robot", frames: 107)
@@ -139,7 +152,7 @@ struct NativeSequenceAdmissionTests {
     }
 
     @Test func stopBeforeAcceptanceSettlesAbsentJobWithoutPollingForever() async {
-        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!)
+        let host = MoldHost(name: "Workstation", baseURL: URL(string: "http://workstation:7680")!)
         let backend = SequenceBackendFixture()
         await backend.holdCreate()
         let session = NativeSequenceSession(defaults: UserDefaults(suiteName: UUID().uuidString)!)
@@ -159,7 +172,7 @@ struct NativeSequenceAdmissionTests {
     }
 
     @Test func continuedReferencesRequireExplicitRecoveryAfterRemoval() async throws {
-        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!)
+        let host = MoldHost(name: "Workstation", baseURL: URL(string: "http://workstation:7680")!)
         let backend = SequenceBackendFixture()
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let session = NativeSequenceSession(defaults: defaults)
@@ -195,7 +208,7 @@ struct NativeSequenceAdmissionTests {
     }
 
     @Test func startupRecoveryRetriesAfterTheMachineIdentityArrives() async throws {
-        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!)
+        let host = MoldHost(name: "Workstation", baseURL: URL(string: "http://workstation:7680")!)
         let backend = SequenceBackendFixture()
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let print = try MoldJSON.decoder.decode(GalleryPrint.self, from: Data(#"{"filename":"verified.mp4","metadata":{"chain_job_id":"source"},"timestamp":1000,"format":"mp4"}"#.utf8))
@@ -216,7 +229,7 @@ struct NativeSequenceAdmissionTests {
     }
 
     @Test func oldRecoveryCannotReplaceAnExplicitlyOpenedNewerTakeOfTheSameJob() async throws {
-        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!)
+        let host = MoldHost(name: "Workstation", baseURL: URL(string: "http://workstation:7680")!)
         let backend = SequenceBackendFixture()
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         func entry(_ filename: String) throws -> LibraryEntry {
@@ -245,7 +258,7 @@ struct NativeSequenceAdmissionTests {
     }
 
     @Test(arguments: [425, 499]) func unknownAdmissionStatusRetainsItsRecoveryRow(status: Int) async {
-        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!)
+        let host = MoldHost(name: "Workstation", baseURL: URL(string: "http://workstation:7680")!)
         let backend = SequenceBackendFixture()
         await backend.reject(status: status)
         let session = NativeSequenceSession(defaults: UserDefaults(suiteName: UUID().uuidString)!)
@@ -260,7 +273,7 @@ struct NativeSequenceAdmissionTests {
     }
 
     @Test func changedRouteRefusesBeforeMutation() async {
-        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!)
+        let host = MoldHost(name: "Workstation", baseURL: URL(string: "http://workstation:7680")!)
         let backend = SequenceBackendFixture()
         let session = NativeSequenceSession(defaults: UserDefaults(suiteName: UUID().uuidString)!)
         session.begin(prompt: "A robot", frames: 107)
@@ -335,5 +348,48 @@ private actor SequenceBackendFixture: MoldChainBackend {
     func chainLimits(model: String, fps: Int?) async throws -> ChainLimits {
         if limitsHeld { await withCheckedContinuation { limitsGate = $0 } }
         return try MoldJSON.decoder.decode(ChainLimits.self, from: Data(#"{"model":"minimax-h3-fl2va:fasth3-v2-int8","frames_per_clip_cap":345,"frames_per_clip_recommended":107,"fps":24,"max_stages":16,"max_total_frames":5520,"supports_sequence":true,"authoring":{"motion_tail_frames":1,"carry_mode":"last-rgb-frame","min_frames":107,"frame_step":17,"frame_offset":5},"linked_parts":{"supported":true,"max_stages_per_part":16,"max_parts":null}}"#.replacingOccurrences(of: "minimax-h3-fl2va:fasth3-v2-int8", with: model).utf8))
+    }
+}
+
+extension NativeSequenceSessionTests {
+    @Test func reusedClipScalarsSurviveColdLaunchWithoutPersistingPrivateInputBytes() throws {
+        let metadata = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(#"{"prompt":"joined","model":"video","seed":18446744073709551615,"fps":24,"chain":{"stage_count":2,"motion_tail_frames":17,"stages":[{"prompt":"first","frames":107,"transition":"smooth","seed":"18446744073709551615"},{"prompt":"second","frames":107,"transition":"fade","fade_frames":9,"seed":"0","loras":[{"path":"adapter","scale":0.75}]}]}}"#.utf8))
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        var restored = try LegacySequenceSettingsReuse(metadata: metadata)
+        restored.sequence.stages[0].input.sourceImage = "private-input"
+        let first = NativeSequenceSession(defaults: defaults)
+        first.restoreSettings(restored)
+        #expect(first.draft?.stages.count == 2)
+        let data = try #require(defaults.data(forKey: "nativeSequenceDraftV1"))
+        #expect(!String(decoding: data, as: UTF8.self).contains("private-input"))
+        let cold = NativeSequenceSession(defaults: defaults)
+        #expect(cold.draft?.stages[1].input.seedOffset == UInt64.max)
+        #expect(cold.draft?.stages[1].input.fadeFrames == 9)
+        #expect(cold.draft?.stages[1].input.loras?.first?.path == "adapter")
+        let request = GenerateRequest(prompt: "first", model: "video", width: 768, height: 768, steps: 3, guidance: 0)
+        #expect(cold.refusal(base: request, limits: nil)?.contains("Use Settings") == true)
+        cold.startFresh()
+        #expect(cold.draft == nil)
+    }
+}
+
+extension NativeSequenceSessionTests {
+    @Test func globalInputsCannotSilentlyOverrideSavedClipAuthority() throws {
+        let metadata = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(#"{"prompt":"first","model":"video","seed":7,"chain":{"stage_count":1,"motion_tail_frames":0,"stages":[{"prompt":"first","frames":107,"transition":"smooth","seed":"7"}]}}"#.utf8))
+        var restored = try LegacySequenceSettingsReuse(metadata: metadata)
+        restored.sequence.stages[0].input.sourceImage = "original"
+        let session = NativeSequenceSession(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        session.restoreSettings(restored)
+        var request = GenerateRequest(prompt: "first", model: "video", width: 768, height: 768, steps: 3, guidance: 0)
+        #expect(session.settingsOverrideRefusal(base: request) == nil)
+        request.sourceImage = "replacement"
+        #expect(session.settingsOverrideRefusal(base: request) != nil)
+        session.useGlobalSettings(for: try #require(session.draft?.stages[0].id))
+        #expect(session.settingsOverrideRefusal(base: request) == nil)
+        #expect(session.draft?.stages[0].prompt == "first")
+        #expect(session.draft?.stages[0].frames == 107)
+        #expect(session.draft?.stages[0].transition == "smooth")
+        #expect(session.draft?.stages[0].input.sourceImage == nil)
+        #expect(session.draft?.stages[0].input.seedOffset == nil)
     }
 }

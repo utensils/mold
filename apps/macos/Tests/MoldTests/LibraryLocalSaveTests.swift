@@ -1125,6 +1125,30 @@ struct LibraryLocalSaveTests {
         #expect(library.localSaveFailures.isEmpty)
     }
 
+    @Test func changedSourceRecipeBeforeImportDoesNotPublishAPartialCopy() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("changed-before-copy")
+        let source = FakeBackend(host: remote, noRetainedMedia: true)
+        let destination = FakeBackend(host: local, noRetainedMedia: true)
+        let original = versionedPrint("changed.png", prompt: "original")
+        let changed = versionedPrint("changed.png", prompt: "changed")
+        source.prints = [original]; source.mediaAnswer = Data([1, 2, 3])
+        var reads = 0
+        source.retainedTransferOfferResponder = { _ in
+            reads += 1
+            return .init(archiveIdentitySha256: String(repeating: "a", count: 64), members: [],
+                outputSha256: "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81", outputSizeBytes: 3,
+                metadata: reads == 1 ? original.metadata : changed.metadata)
+        }
+        let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? destination : source }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+        await library.syncAllLocally()
+        #expect(destination.importedNames.isEmpty)
+        #expect(source.callCount("retainedSourceMediaBytes") == 0)
+        #expect(library.localSaveFailures.contains { $0.contains("changed while copying") })
+    }
+
     @Test func receiptBeforeOrganizationStillInitializesAfterRestartedRun() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("receipt-organization-origin")
@@ -1141,7 +1165,7 @@ struct LibraryLocalSaveTests {
         var calls = 0
         source.retainedTransferOfferResponder = { _ in
             calls += 1
-            if calls > 1 { throw MoldClientError.unreachable("interrupted") }
+            if calls > 2 { throw MoldClientError.unreachable("interrupted") }
             return .init(archiveIdentitySha256: String(repeating: "a", count: 64), members: [],
                 outputSha256: "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81", outputSizeBytes: 3, metadata: original.build().metadata)
         }

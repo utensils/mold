@@ -44,6 +44,8 @@ public struct RenderDraft: Hashable, Sendable {
     /// means "let the server pick" and must never be spelled as the string
     /// `"auto"` (`RenderDraft+Recipe.swift`'s `adopting`).
     public var pipeline: String?
+    public var spatialUpscale: String?
+    public var temporalUpscale: String?
     /// The person's audio choice, apart from whether the current recipe can
     /// honour it. `nil` is untouched, whose default is sound ON for a capable
     /// video recipe. Moving through a still or video-only recipe must not turn

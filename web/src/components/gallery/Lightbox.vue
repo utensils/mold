@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { publishedSeed } from "@mold/studio/lib/videoSettingsReuse";
+import VideoExtendButton from "@studio/components/VideoExtendButton.vue";
 import VideoClips from "@studio/components/VideoClips.vue";
 import { originAuthenticatedFetch as fetch } from "../../lib/originAuth";
 
@@ -118,6 +120,7 @@ const endpointChoices = inject(
   SOURCE_ATTACHMENT_CHOICES,
   computed(() => []),
 );
+const extendVideoAvailable = ref(false);
 const emit = defineEmits<{
   (
     e: "continue-published",
@@ -528,7 +531,9 @@ const modelLabel = computed(() =>
 const dimensions = computed(() =>
   props.item ? formatResolution(props.item.metadata) : "",
 );
-const seed = computed(() => props.item?.metadata.seed ?? null);
+const seed = computed(() =>
+  props.item ? publishedSeed(props.item.metadata) : null,
+);
 const steps = computed(() => props.item?.metadata.steps ?? null);
 const guidance = computed(() => props.item?.metadata.guidance ?? null);
 const pipeline = computed(() =>
@@ -1194,8 +1199,20 @@ const clipsOwner = computed(() => {
               </svg>
               Reuse these settings
             </button>
+            <VideoExtendButton
+              v-if="isVideoFile && item && !inTrash"
+              :owner="clipsOwner"
+              :filename="item.filename"
+              :metadata="item.metadata"
+              :title="item.title"
+              @available="extendVideoAvailable = $event"
+            />
             <VideoClips
-              v-if="isVideoFile && item?.metadata.chain_job_id"
+              v-if="
+                !extendVideoAvailable &&
+                isVideoFile &&
+                item?.metadata.chain_job_id
+              "
               :source="{
                 jobId: item.metadata.chain_job_id,
                 filename: item.filename,
@@ -1614,8 +1631,20 @@ const clipsOwner = computed(() => {
               </svg>
               Reuse these settings
             </button>
+            <VideoExtendButton
+              v-if="isVideoFile && item && !inTrash"
+              :owner="clipsOwner"
+              :filename="item.filename"
+              :metadata="item.metadata"
+              :title="item.title"
+              @available="extendVideoAvailable = $event"
+            />
             <VideoClips
-              v-if="isVideoFile && item?.metadata.chain_job_id"
+              v-if="
+                !extendVideoAvailable &&
+                isVideoFile &&
+                item?.metadata.chain_job_id
+              "
               :source="{
                 jobId: item.metadata.chain_job_id,
                 filename: item.filename,

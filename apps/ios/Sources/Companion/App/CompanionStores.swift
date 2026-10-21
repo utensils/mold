@@ -83,6 +83,7 @@ final class CompanionStores {
         hosts.startWatching()
         generate.resumeFollowing()
         generate.recoverSequences()
+        await generate.discoverDurationVideos()
         async let library: Void = library.reload()
         async let queue: Void = queue.reload()
         async let models: Void = models.resume()

@@ -120,7 +120,6 @@ other than legacy 404/405 must surface, and rejected uploads or license refusals
 must never trigger a downgrade or forced-local retry. Server-owned model/license
 decisions remain authoritative; H3 has no client acceptance gate.
 
-
 ## Fresh reference-video normalization
 
 Authenticated V2 upload hosts may advertise nested `video_normalization` v1
@@ -141,12 +140,19 @@ works. Both input/output bytes and immutable existing-path validation copies
 share quota accounting, held until owned workers/children finish cleanup even
 if the request disconnects. Unsupported hosts retain the old canonical path.
 
+**CLI requested duration and legacy frame counts.** Remote `--duration` uses
+an owner-bound durable `/api/video-jobs` parent and requires affirmative server
+support. Use the selected recipe's normal short window for every child, retain
+synchronized audio, and trim clip-grid padding to the requested length on the
+24 FPS output clock. FL2VA carries its final RGB boundary; Ref2VA uses independent
+blended clips with distinct seeds, preserving its ordered references without
+claiming temporal continuity. Forced-local Duration remains one bounded H3
+render. `--dry-run` performs full read-only validation without generation or
+prompt expansion.
 
-**CLI long one-shots.** `--duration` above the single-clip range, or `--frames`
-above 345, routes sequence-capable FL2VA to the existing durable chain API.
-Keep per-clip 17n+5 bounds, one-frame carry trims, synchronized audio and outer
-endpoint placement; rebalance earlier clips in whole grid steps when the final
-107-frame floor would add unnecessary duration. Show delivered duration before
-submission. Ref2VA does not gain automatic temporal continuity. `--dry-run`
-submits neither generation nor expansion, and paired-host inspection uses
-`mold chain limits MODEL --host HOST --json`, never a raw proxy HTTP request.
+Explicit `--frames` above 345 retains the advanced, sequence-capable FL2VA
+chain path: per-clip `17n+5` bounds, one-frame carry trims and outer endpoints;
+rebalance whole grid steps when the final 107-frame floor would otherwise add
+unnecessary duration. This legacy frame/script path retains bounded chain parts.
+Inspect its live limits with `mold chain limits MODEL --host HOST --json` over
+the authenticated paired client, never a raw proxy HTTP request.

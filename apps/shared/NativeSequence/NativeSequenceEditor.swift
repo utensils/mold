@@ -11,6 +11,7 @@ struct NativeSequenceEditor: View {
     let frameStep: Int
     let maximumClips: Int
     var carryMode: String? = nil
+    var baseSeed: UInt64? = nil
 
     var body: some View {
         if let draft = session.draft {
@@ -20,6 +21,9 @@ struct NativeSequenceEditor: View {
                         .font(.headline).fixedSize(horizontal: false, vertical: true)
                     Text("The next part saves as a separate video, using the original model, picture size and sound settings.")
                         .font(.caption).foregroundStyle(sequenceSecondary)
+                }
+                if let notice = session.settingsReuseNotice {
+                    Text(notice).font(.callout).fixedSize(horizontal: false, vertical: true)
                 }
                 if session.needsReferenceDecision {
                     Text("Restore the original references, attach new ones, or continue without references.")
@@ -41,6 +45,10 @@ struct NativeSequenceEditor: View {
                                     .disabled(index == 0)
                                 Button("Move later") { session.draft?.move(from: index, to: index + 1) }
                                     .disabled(index + 1 == draft.stages.count)
+                                if session.settingsReuseNotice != nil {
+                                    Button("Use global inputs and controls") { session.useGlobalSettings(for: stage.id) }
+                                        .disabled(session.settingsInputsNeedRestoration)
+                                }
                                 Button("Remove clip", role: .destructive) { session.draft?.remove(id: stage.id) }
                                     .disabled(draft.stages.count <= 1)
                             } label: { Label("Clip \(index + 1) options", systemImage: "ellipsis.circle") }
@@ -52,6 +60,12 @@ struct NativeSequenceEditor: View {
                             .lineLimit(2 ... 5)
                             .accessibilityLabel("Clip \(index + 1) prompt")
                             .accessibilityIdentifier("sequence-prompt-\(index)")
+                        if session.settingsReuseNotice != nil {
+                            ForEach(Self.savedControls(stage, baseSeed: baseSeed), id: \.self) { value in
+                                Text(value).font(.caption).foregroundStyle(sequenceSecondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
                         Stepper(value: stageFrames(index), in: frameRange, step: max(1, frameStep)) {
                             Text("Length: \((Double(stage.frames) / Double(max(1, fps))).formatted(.number.precision(.fractionLength(1 ... 2)))) seconds")
                                 .fixedSize(horizontal: false, vertical: true)
@@ -88,6 +102,23 @@ struct NativeSequenceEditor: View {
             .disabled(session.preparing)
         }
     }
+    static func savedControls(_ stage: SequenceDraft.Stage, baseSeed: UInt64?) -> [String] {
+        var lines: [String] = []
+        if stage.input.sourceImage != nil { lines.append("Original first frame") }
+        for reference in stage.generationReferences ?? [] {
+            lines.append("Original \(reference.kind) reference: \(reference.provenance?.name ?? "Reference")")
+        }
+        for frame in stage.keyframes ?? [] { lines.append("Original frame \(frame.frame): \(frame.name ?? "Image")") }
+        if let seed = baseSeed, let offset = stage.input.seedOffset { lines.append("Seed: \(seed ^ offset)") }
+        if let negative = stage.input.negativePrompt, !negative.isEmpty { lines.append("Negative prompt: \(negative)") }
+        for adapter in stage.input.loras ?? [] {
+            let name = adapter.name ?? adapter.path.split(separator: "/").last.map(String.init) ?? "Adapter"
+            lines.append("Adapter: \(name) · \(adapter.scale)")
+        }
+        if stage.transition != "smooth" { lines.append("Join: \(stage.transition.capitalized)") }
+        return lines
+    }
+
     private func stagePrompt(_ index: Int) -> Binding<String> {
         Binding(get: { session.draft?.stages[safe: index]?.prompt ?? "" }, set: {
             guard session.draft?.stages.indices.contains(index) == true else { return }
@@ -110,6 +141,9 @@ struct NativeSequenceJobs: View {
     @Bindable var session: NativeSequenceSession
     let backend: (NativeSequenceSession.Job) -> (any MoldChainBackend)?
     var open: ((MoldHost, String) -> Void)?
+    var restart: ((NativeSequenceSession.Job) -> Void)?
+    var discard: ((NativeSequenceSession.Job) -> Void)?
+    var canRestart: (NativeSequenceSession.Job) -> Bool = { _ in false }
     var body: some View {
         if let notice = session.historyNotice { Text(notice).fixedSize(horizontal: false, vertical: true) }
         ForEach(session.jobs) { job in
@@ -130,15 +164,22 @@ struct NativeSequenceJobs: View {
                     if detail.state == .completed || detail.state == .cancelled {
                         Button("Dismiss completed video") { session.dismiss(job) }.frame(minHeight: 44)
                     }
-                    if detail.state != .completed && detail.state != .cancelled, let backend = backend(job) {
-                        HStack {
-                            if detail.state == .paused || detail.state.rawValue == "interrupted" || detail.state == .failed {
-                                Button("Resume") { session.resume(job, backend: backend) }
-                            }
-                            Button("Stop", role: .destructive) { session.cancel(job, backend: backend) }
-                                .disabled(job.cancelling)
+                    if let backend = backend(job) {
+                        if ChainJobRecoveryPolicy.canResume(state:detail.state,ephemeral:detail.ephemeral == true) {
+                            Button("Resume") { session.resume(job,backend:backend) }.frame(minHeight:44)
                         }
-                        .frame(minHeight: 44)
+                        if ChainJobRecoveryPolicy.canCancel(state:detail.state) {
+                            Button("Stop",role:.destructive) { session.cancel(job,backend:backend) }
+                                .disabled(job.cancelling).frame(minHeight:44)
+                        }
+                        if canRestart(job) {
+                            if let restart, detail.state == .failed || detail.state == .interrupted || detail.state == .paused {
+                                Button("Start again…") {restart(job)}.frame(minHeight:44)
+                            }
+                            if let discard, detail.state == .failed || detail.state == .interrupted {
+                                Button("Delete job…",role:.destructive) {discard(job)}.frame(minHeight:44)
+                            }
+                        }
                     }
                 } else if let backend = backend(job) {
                     Button("Stop", role: .destructive) { session.cancel(job, backend: backend) }

@@ -10730,11 +10730,8 @@ describe("MobileApp gallery", () => {
     expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-current")).toBe("page");
   });
 
-  it("reuses a stitched print as a one shot carrying clip 1's prompt", async () => {
-    // A stitched print's `metadata.prompt` is every clip's prompt joined by
-    // newlines — a blob nobody wrote. Reuse restores the print's model, canvas
-    // and seed as an ORDINARY one shot, and takes the prompt from clip 1's own
-    // recorded stage. There is no clip rail on any surface any more.
+  it("refuses an older stitched print without exact clip provenance", async () => {
+    // Missing exact stage seeds must not silently flatten a saved sequence.
     const sequenceModel: ModelEntry = {
       ...model,
       name: "ltx-video-0.9.8-2b-distilled:bf16",
@@ -10746,6 +10743,7 @@ describe("MobileApp gallery", () => {
       filename: "sequence.mp4",
       metadata: {
         ...print.metadata,
+        scheduler: null,
         model: sequenceModel.name,
         prompt: "a harbour at dawn\nthe boats leave",
         chain_job_id: "job-9",
@@ -10776,20 +10774,13 @@ describe("MobileApp gallery", () => {
     await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
     await flushPromises();
 
-    expect(wrapper.get("[data-test='mobile-tab-generate']").attributes("aria-current")).toBe(
-      "page",
-    );
-    expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(false);
-    expect(wrapper.find("[data-test='mobile-sequence-clip']").exists()).toBe(false);
-    const prompt = fieldControl("Prompt").element as HTMLTextAreaElement;
-    expect(prompt.value).toBe("a harbour at dawn");
-    expect(prompt.value).not.toContain("the boats leave");
-    expect(currentStyleId()).toBe(sequenceModel.name);
+    expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-current")).toBe("page");
+    expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(true);
+    expect(wrapper.find(".gallery-viewer-reuse-error").text()).toMatch(/exact per-clip seeds/);
   });
 
-  it("never refuses reuse of an H3 stitched print", async () => {
-    // The old clip rail refused an H3 chain outright. With one output there is
-    // nothing to refuse: the print restores as a one shot like any other.
+  it("applies the same exact provenance refusal to H3 without a family bypass", async () => {
+    // The same provenance contract applies regardless of model family.
     const h3Model: ModelEntry = {
       ...model,
       name: "minimax-h3-fl2va:official-bf16",
@@ -10800,6 +10791,7 @@ describe("MobileApp gallery", () => {
       filename: "invalid-h3-sequence.mp4",
       metadata: {
         ...print.metadata,
+        scheduler: null,
         model: h3Model.name,
         prompt: "opening\nclosing",
         chain_job_id: "job-h3",
@@ -10829,11 +10821,8 @@ describe("MobileApp gallery", () => {
     await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
     await flushPromises();
 
-    expect(wrapper.find(".gallery-viewer-reuse-error").exists()).toBe(false);
-    expect(wrapper.get("[data-test='mobile-tab-generate']").attributes("aria-current")).toBe(
-      "page",
-    );
-    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe("opening");
+    expect(wrapper.find(".gallery-viewer-reuse-error").text()).toMatch(/exact per-clip seeds/);
+    expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-current")).toBe("page");
   });
 
   it("reloads model ownership after removing the active host before reuse", async () => {

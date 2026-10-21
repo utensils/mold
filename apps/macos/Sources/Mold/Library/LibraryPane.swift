@@ -69,6 +69,7 @@ struct LibraryPane: View {
         LibraryActions(hosts: hosts, library: library,
                        lifecycleHostIDs: selectedMachines.isEmpty ? nil : selectedMachines,
                        reuse: reuse,
+                       extendVideo: extendVideo,
                        continueVideo: { entry in
                            reuseStore.clear()
                            generate.continueVideo(entry)

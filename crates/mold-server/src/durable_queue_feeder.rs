@@ -3871,6 +3871,72 @@ mod tests {
         (report, rx.try_recv().ok())
     }
 
+    #[tokio::test]
+    async fn interrupted_video_parent_keeps_exact_owned_stage_out_of_runtime_until_resume() {
+        let (state, mut rx) = state(1);
+        admit(&state, 1);
+        let db = state.metadata_db.as_ref().as_ref().unwrap();
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO chain_jobs(id,state,model,request_json,job_dir,stage_count,created_at,updated_at) VALUES('chain','running','mock-model','{}','/jobs/chain',1,0,0)",[])?;
+            conn.execute("INSERT INTO video_jobs(id,state,request_sha256,manifest_json,manifest_sha256,job_json,created_at_ms,updated_at_ms) VALUES('parent','interrupted','sha','{}','sha','{}',0,0)",[])?;
+            conn.execute("INSERT INTO chain_stage_generations(generation_id,chain_id,stage_index,video_parent_id) VALUES('job-0','chain',0,'parent')",[])?;
+            Ok(())
+        }).unwrap();
+        let (report, job) = one_feeder_pass(&state, &mut rx).await;
+        assert_eq!(report.submitted, 0);
+        assert!(job.is_none());
+        assert!(state.job_registry.entry("job-0").is_none());
+        assert!(mold_db::generation_queue::get(db, "job-0")
+            .unwrap()
+            .is_some());
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE video_jobs SET state='running' WHERE id='parent'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let claim = state
+            .queue_journal
+            .claim_feeder_by_id("job-0")
+            .unwrap()
+            .unwrap();
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE video_jobs SET cancel_requested=1 WHERE id='parent'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let mut request = request("still owned");
+        assert!(matches!(
+            register_claimed_runtime(&state, &claim.row, &claim.claim_token, &mut request)
+                .await
+                .unwrap(),
+            ClaimRegistration::OutsideRuntimeWindow
+        ));
+        assert!(state.job_registry.entry("job-0").is_none());
+        state
+            .queue_journal
+            .attach_claimed("job-0", claim.claim_token)
+            .retain();
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE video_jobs SET cancel_requested=0 WHERE id='parent'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let (report, job) = one_feeder_pass(&state, &mut rx).await;
+        assert_eq!(report.submitted, 1);
+        assert_eq!(job.as_ref().map(|job| job.id.as_str()), Some("job-0"));
+        state.queue_journal.retain_all();
+        drop(job);
+    }
+
     /// Fail closed: a request this build cannot read is parked for
     /// inspection, never guessed at and never silently dropped.
     #[tokio::test]

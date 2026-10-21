@@ -54,6 +54,8 @@ export interface TimeRange {
 }
 
 export interface OutputMetadata {
+  /** Published duration authoring is validated by videoSettingsForReuse. */
+  video_job?: Record<string, unknown> | null;
   output_mode?: "one-shot" | "sequence" | null;
   chain_job_id?: string | null;
   prefix_cache?: "retained" | "recomputed" | null;
@@ -86,7 +88,7 @@ export interface OutputMetadata {
    * as a refusal. It is the only answer a client has for a print whose model
    * is not installed anywhere. */
   family?: string | null;
-  seed: number;
+  seed: number | string;
   steps: number;
   guidance: number;
   width: number;
@@ -221,6 +223,12 @@ export interface MeshServerCapabilities {
 }
 
 export interface ServerCapabilities {
+  /** Durable requested-duration movies; absence is an older host. */
+  video_jobs?: {
+    supported?: boolean;
+    literal_prompts?: boolean;
+    library_extend?: boolean;
+  } | null;
   catalog?: { available: boolean; families: string[] } | null;
   generation_profile_v1?: boolean;
   /** 3-D mesh support (additive; absent on servers that predate it):

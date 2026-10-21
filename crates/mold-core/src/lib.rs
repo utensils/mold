@@ -1,3 +1,6 @@
+#[cfg(test)]
+#[path = "../build_git_watch.rs"]
+mod build_git_watch_tests;
 pub mod build_info;
 pub mod catalog;
 pub mod catalog_wire;
@@ -65,6 +68,7 @@ pub mod types;
 pub mod user_error;
 pub mod validation;
 pub mod video_normalization;
+pub mod video_plan;
 pub mod video_upscale;
 pub mod wan_expert_marker;
 
@@ -164,6 +168,13 @@ pub use expand_prompts::{
     IgnoredPromptAdvice,
 };
 
-pub mod queue_transfer;
-
 pub mod job_restart;
+pub mod queue_transfer;
+pub mod video_extension;
+pub mod video_job;
+
+pub mod video_job_schedule;
+
+pub mod video_restart;
+
+pub mod video_artifacts;

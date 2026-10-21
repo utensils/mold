@@ -170,12 +170,15 @@ pub fn pause_queued_for_shutdown(db: &MetadataDb, updated_at_ms: i64) -> Result<
 pub fn next_queued_job(db: &MetadataDb) -> Result<Option<ChainJobRow>> {
     db.with_conn(|conn| {
         conn.query_row(
-            "SELECT id, state, model, request_json, job_dir, stage_count,
+            &format!(
+                "SELECT id, state, model, request_json, job_dir, stage_count,
                     current_stage, error, created_at, updated_at, finalized_at
              FROM chain_jobs
-             WHERE state = ?1
+             WHERE state = ?1 AND ({})
              ORDER BY created_at ASC, id ASC
              LIMIT 1",
+                crate::video_job_child_owners::EXECUTABLE_SQL
+            ),
             params![ChainJobState::Queued.as_str()],
             row_to_job,
         )
@@ -192,9 +195,12 @@ pub fn next_queued_job(db: &MetadataDb) -> Result<Option<ChainJobRow>> {
 pub fn claim_job(db: &MetadataDb, id: &str) -> Result<bool> {
     db.with_conn(|conn| {
         let n = conn.execute(
-            "UPDATE chain_jobs
+            &format!(
+                "UPDATE chain_jobs
              SET state = ?1, updated_at = ?2
-             WHERE id = ?3 AND state = ?4",
+             WHERE id = ?3 AND state = ?4 AND ({})",
+                crate::video_job_child_owners::EXECUTABLE_SQL
+            ),
             params![
                 ChainJobState::Running.as_str(),
                 now_ms(),
@@ -628,6 +634,49 @@ mod tests {
             updated_at_ms: created_at_ms,
             finalized_at_ms: None,
         }
+    }
+
+    #[test]
+    fn internal_parent_ownership_survives_deletion_and_fences_child_claims() {
+        let db = db();
+
+        insert_job(&db, &job("ordinary", ChainJobState::Queued, 1)).unwrap();
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO video_jobs(id,state,request_sha256,manifest_json,manifest_sha256,job_json,created_at_ms,updated_at_ms) VALUES('parent','interrupted','sha','{}','sha','{}',0,0)",[])?;
+            conn.execute("INSERT INTO video_job_parts(parent_id,part_index,child_id,part_json) VALUES('parent','0','child','{}')",[])?;
+            Ok(())
+        }).unwrap();
+        insert_job(&db, &job("child", ChainJobState::Queued, 0)).unwrap();
+        assert!(!claim_job(&db, "child").unwrap());
+        assert_eq!(next_queued_job(&db).unwrap().unwrap().id, "ordinary");
+        assert_eq!(
+            crate::video_job_child_owners::parent_id(&db, "child")
+                .unwrap()
+                .as_deref(),
+            Some("parent")
+        );
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE video_jobs SET state='running' WHERE id='parent'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(claim_job(&db, "child").unwrap());
+        db.with_conn(|conn| {
+            conn.execute("DELETE FROM video_jobs WHERE id='parent'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(!crate::video_job_child_owners::execution_allowed(&db, "child").unwrap());
+        assert_eq!(
+            crate::video_job_child_owners::parent_id(&db, "child")
+                .unwrap()
+                .as_deref(),
+            Some("parent")
+        );
+        assert!(crate::video_job_child_owners::execution_allowed(&db, "ordinary").unwrap());
     }
 
     fn stage(job_id: &str, idx: u32, state: StageState, seed: u64) -> ChainJobStageRow {

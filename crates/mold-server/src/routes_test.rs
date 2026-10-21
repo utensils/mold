@@ -440,6 +440,30 @@ mod tests {
     }
 
     #[test]
+    fn parent_camera_materialization_keeps_scalar_control_adapters() {
+        let mut chain: mold_core::ChainRequest = serde_json::from_value(serde_json::json!({
+            "model":"ltx-2-19b-distilled:fp8","width":512,"height":512,"steps":4,"guidance":1,
+            "stages":[{"prompt":"walk","frames":97}]}))
+        .unwrap();
+        let controls = mold_core::chain::ChainGenerationControls {
+            loras: vec![mold_core::LoraWeight {
+                path: "camera-control:pan-left".into(),
+                scale: 0.5,
+                expert: None,
+            }],
+            ..Default::default()
+        };
+        chain.generation_controls = Some(controls);
+        assert_eq!(
+            crate::routes::chain_camera_control_request(&chain)
+                .loras
+                .unwrap()[0]
+                .path,
+            "camera-control:pan-left"
+        );
+    }
+
+    #[test]
     fn generation_fixture_ignores_process_output_override() {
         let _env = env_lock();
         let previous = std::env::var_os("MOLD_OUTPUT_DIR");
@@ -653,6 +677,8 @@ mod tests {
     fn route_chain_request() -> ChainRequest {
         ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             offload: None,
             collection: None,
@@ -1285,6 +1311,7 @@ mod tests {
             temporal_upscale: None,
             chain_job_id: None,
             chain: None,
+            video_job: None,
             frames: None,
             fps: None,
             version: "test".into(),
@@ -18523,6 +18550,7 @@ mod tests {
             fps: None,
             chain_job_id: None,
             chain: None,
+            video_job: None,
             version: "test".into(),
             id_image_name: None,
             id_image_sha256: None,
@@ -18618,6 +18646,163 @@ mod tests {
             0,
             "filesystem fallback must still apply size/header validation"
         );
+    }
+
+    #[tokio::test]
+    async fn gallery_import_fences_artifact_owner_before_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = mold_core::Config {
+            output_dir: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(tx),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let instance = state.instance_id.to_string();
+        let app = app_with_state(state);
+        let mut artifact_metadata = output_metadata("exact owned publication");
+        artifact_metadata.video_job = Some(serde_json::from_value(serde_json::json!({
+            "id":"66687089-6429-4a48-8a5d-f302c8889092", "manifest_sha256":"a".repeat(64),
+            "clip_count":"2", "part_count":"2", "added_frames":"144", "source_frames":"0", "total_frames":"144", "join_mode":"continuous",
+            "artifacts":{"version":1,"bundle_id":"b".repeat(64),"provenance":{"sha256":"c".repeat(64),"size_bytes":"100"}}
+        })).unwrap());
+        for (name, header, artifacts, expected) in [
+            ("missing.png", None, true, StatusCode::CONFLICT),
+            (
+                "wrong.png",
+                Some("different-instance"),
+                true,
+                StatusCode::CONFLICT,
+            ),
+            (
+                "ordinary-wrong.png",
+                Some("different-instance"),
+                false,
+                StatusCode::CONFLICT,
+            ),
+            (
+                "right.png",
+                Some(instance.as_str()),
+                true,
+                StatusCode::CREATED,
+            ),
+        ] {
+            let metadata = if artifacts {
+                artifact_metadata.clone()
+            } else {
+                output_metadata("ordinary")
+            };
+            let mut request = Request::put(format!("/api/gallery/import/{name}"))
+                .header("content-type", "application/vnd.mold.gallery-import");
+            if let Some(header) = header {
+                request = request.header("x-mold-destination-instance", header);
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    request
+                        .body(Body::from(gallery_import_body(
+                            Some(&metadata),
+                            &minimal_png(),
+                        )))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{}", json_body(response).await);
+            assert_eq!(
+                dir.path().join(name).exists(),
+                expected == StatusCode::CREATED
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gallery_import_preserves_archive_completion_facts_with_exact_embedded_recipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = mold_core::Config {
+            output_dir: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let mut state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(tx),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        state.metadata_db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let db = state.metadata_db.clone();
+        let app = app_with_state(state);
+        let mut embedded = output_metadata("literal\\nline\r\nnext");
+        embedded.seed = u64::MAX;
+        let mut archive = embedded.clone();
+        archive.job_id = Some("completed-job".into());
+        archive.generation_time_ms = Some(1234);
+        archive.has_alpha = Some(false);
+        archive.version = format!("{} (abcdef012345 2026-10-20)", embedded.version);
+        let mut payload = b"mold:parameters\0".to_vec();
+        payload.extend(serde_json::to_vec(&embedded).unwrap());
+        let mut chunk = (payload.len() as u32).to_be_bytes().to_vec();
+        let mut body = b"tEXt".to_vec();
+        body.extend(payload);
+        let mut crc = !0u32;
+        for byte in &body {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        chunk.extend(body);
+        chunk.extend((!crc).to_be_bytes());
+        let mut bytes = minimal_png();
+        bytes.splice(33..33, chunk);
+        for (filename, metadata, expected) in [
+            ("complete.png", archive.clone(), StatusCode::CREATED),
+            ("complete.png", archive.clone(), StatusCode::OK),
+            (
+                "conflict.png",
+                {
+                    let mut bad = archive.clone();
+                    bad.seed -= 1;
+                    bad
+                },
+                StatusCode::CONFLICT,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::put(format!("/api/gallery/import/{filename}"))
+                        .header("content-type", "application/vnd.mold.gallery-import")
+                        .body(Body::from(gallery_import_body(Some(&metadata), &bytes)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{}", json_body(response).await);
+        }
+        let saved = db
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .get(dir.path(), "complete.png")
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.metadata, archive);
+        assert_eq!(
+            std::fs::read(dir.path().join("complete.png")).unwrap(),
+            bytes
+        );
+        assert!(!dir.path().join("conflict.png").exists());
     }
 
     #[tokio::test]
@@ -19506,6 +19691,7 @@ mod tests {
             fps: None,
             chain_job_id: None,
             chain: None,
+            video_job: None,
             version: "t".into(),
             id_image_name: None,
             id_image_sha256: None,
@@ -24965,5 +25151,156 @@ mod tests {
             format!("{api_error:?}").contains("s3cret"),
             "the authenticated caller keeps the verbatim reason"
         );
+    }
+
+    #[cfg(feature = "mp4")]
+    fn duration_capability_state(
+        root: &std::path::Path,
+        install_admission: bool,
+    ) -> (AppState, tokio_util::sync::CancellationToken) {
+        let db = Arc::new(Some(
+            mold_db::MetadataDb::open(&root.join("mold.db")).unwrap(),
+        ));
+        let (mut state, _rx) = durable_state_with_admission_policy(
+            db,
+            root,
+            MockEngine::ready(),
+            true,
+            install_admission,
+            "video-capability-test",
+        );
+        install_authoritative_v2(&mut state);
+        state.chain_jobs = Some(Arc::new(
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        ));
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        state.video_jobs = Some(crate::video_job_actor::spawn(
+            state.clone(),
+            shutdown.clone(),
+        ));
+        (state, shutdown)
+    }
+
+    #[cfg(feature = "mp4")]
+    #[tokio::test]
+    async fn capabilities_video_jobs_offer_complete_protocol_on_ready_keyed_and_keyless_hosts() {
+        for keyed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (state, shutdown) = duration_capability_state(root.path(), true);
+            let auth = keyed.then(|| {
+                Arc::new(crate::auth::ApiKeySet::new(
+                    std::collections::HashSet::from(["video-test-key".to_owned()]),
+                ))
+            });
+            let app = app_with_state(state)
+                .layer(axum::middleware::from_fn(crate::auth::require_api_key))
+                .layer(crate::auth::test_loopback_peer())
+                .layer(axum::middleware::from_fn_with_state(
+                    auth,
+                    crate::auth::inject_auth_state,
+                ));
+            let response = app
+                .oneshot(
+                    Request::get("/api/capabilities")
+                        .header("x-api-key", "video-test-key")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            shutdown.cancel();
+            assert_eq!(
+                body["video_jobs"],
+                serde_json::json!({
+                    "supported": true, "literal_prompts": true, "library_extend": true,
+                    "source_transfer": true, "restart": true,
+                }),
+                "keyed={keyed}"
+            );
+        }
+    }
+
+    #[cfg(feature = "mp4")]
+    #[tokio::test]
+    async fn capabilities_video_jobs_refuse_each_unready_authority() {
+        for missing in [
+            "database",
+            "captured_home",
+            "chain_runner",
+            "video_actor",
+            "generation",
+            "scheduler",
+            "journal",
+            "output",
+            "reconciled_media",
+            "admission",
+            "media_services",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let (mut state, shutdown) =
+                duration_capability_state(root.path(), missing != "admission");
+            match missing {
+                "database" => state.metadata_db = Arc::new(None),
+                "captured_home" => {
+                    state.metadata_db =
+                        Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()))
+                }
+                "chain_runner" => state.chain_jobs = None,
+                "video_actor" => state.video_jobs = None,
+                "generation" => state.set_generation_unavailable("maintenance"),
+                "scheduler" => {
+                    install_dispatch_mode(&mut state, crate::dispatch_mode::DispatchMode::Legacy)
+                }
+                "journal" => {
+                    state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::disabled())
+                }
+                "output" => state.output_disabled_override = true,
+                "reconciled_media" => state
+                    .queue_journal
+                    .set_durable_media_status(false, vec!["input storage unavailable".into()]),
+                "admission" => {}
+                "media_services" => {
+                    state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
+                        state.metadata_db.clone(),
+                        Some(root.path()),
+                        "unreconciled",
+                    ));
+                    state.queue_journal.set_durable_media_ready(true);
+                }
+                _ => unreachable!(),
+            }
+            let response = app_with_state(state)
+                .oneshot(
+                    Request::get("/api/capabilities")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            shutdown.cancel();
+            assert!(
+                body.get("video_jobs").is_none(),
+                "missing={missing}: {body}"
+            );
+        }
+    }
+
+    #[cfg(not(feature = "mp4"))]
+    #[tokio::test]
+    async fn capabilities_video_jobs_remain_absent_without_mp4() {
+        let response = app_with_state(AppState::for_tests())
+            .oneshot(
+                Request::get("/api/capabilities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(json_body(response).await.get("video_jobs").is_none());
     }
 }

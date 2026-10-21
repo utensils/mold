@@ -70,6 +70,7 @@ import type {
 const props = withDefaults(
   defineProps<{
     modelValue: GenerateFormState;
+    incomingVideoBoundary?: boolean;
     family: string;
     normalizationCapabilities?:
       | import("@studio/api/referenceNormalizationTypes").VideoNormalizationCapabilities
@@ -225,7 +226,7 @@ const sourceConditioningError = computed(() =>
   plan.value.kind === "single"
     ? sourceImageValidationError({
         capability: caps.value.sourceImageCapability,
-        hasSourceImage: hasSource.value,
+        hasSourceImage: props.incomingVideoBoundary === true || hasSource.value,
         isExtend: submitsExtend({
           family: props.family,
           extendVideo: props.modelValue.extendVideo,
@@ -530,6 +531,7 @@ function clearControl() {
     <!-- Ordered picture strip (Qwen edit / FLUX.2 references). -->
     <template v-else-if="plan.kind === 'attachments'">
       <SourceMediaWells
+        :incoming-boundary="incomingVideoBoundary"
         v-if="plan.primary === 'target'"
         :plan="plan"
         :source="
@@ -600,6 +602,7 @@ function clearControl() {
          on FLUX.2 [klein], live together on an additive IP-Adapter recipe. -->
     <template v-else-if="plan.kind === 'single' || twoWells">
       <SourceMediaWells
+        :incoming-boundary="incomingVideoBoundary"
         :plan="plan"
         :parked="exclusive?.parked === 'source'"
         :note="exclusive?.parked === 'source' ? exclusive.note : null"
@@ -813,6 +816,7 @@ function clearControl() {
     <!-- MiniMax H3 FL2VA boundaries: the exact same wells, H3-owned state. -->
     <template v-else-if="plan.kind === 'h3-boundaries'">
       <SourceMediaWells
+        :incoming-boundary="incomingVideoBoundary"
         :plan="plan"
         :source="h3Authoring.firstFrame"
         :end-frame="h3Authoring.lastFrame"

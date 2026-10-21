@@ -23,6 +23,7 @@ export interface SourceMediaImage {
 const props = withDefaults(
   defineProps<{
     plan: SourceMediaPlan;
+    incomingBoundary?: boolean;
     source?: SourceMediaImage | null;
     endFrame?: SourceMediaImage | null;
     disabled?: boolean;
@@ -151,6 +152,7 @@ const showEndWell = computed(() => {
  * badge outlives it — that is a contract, not a heading — so it moves rather
  * than disappearing with the head.
  */
+const showOpening = computed(() => !props.incomingBoundary || !!props.source);
 const showSourceHead = computed(
   () => !props.titled || showEndWell.value || sourceLabel.value !== "Source",
 );
@@ -172,7 +174,7 @@ const endHint = computed(() =>
     data-test="source-media-wells"
     :data-parked="parked || undefined"
   >
-    <div v-if="showSourceHead" class="smw__head">
+    <div v-if="showOpening && showSourceHead" class="smw__head">
       <span class="smw__label">{{ sourceLabel }}</span>
       <span
         v-if="required"
@@ -182,7 +184,10 @@ const endHint = computed(() =>
       >
       <span class="smw__rule" aria-hidden="true" />
     </div>
-    <div v-else-if="required" class="smw__head smw__head--badge-only">
+    <div
+      v-else-if="showOpening && required"
+      class="smw__head smw__head--badge-only"
+    >
       <span
         class="smw__label smw__label--required"
         data-test="source-required-badge"
@@ -191,6 +196,7 @@ const endHint = computed(() =>
       <span class="smw__rule" aria-hidden="true" />
     </div>
     <ImageDropWell
+      v-if="showOpening"
       :image="source?.data || null"
       :mime-type="source?.mimeType ?? null"
       :filename="source?.filename ?? null"

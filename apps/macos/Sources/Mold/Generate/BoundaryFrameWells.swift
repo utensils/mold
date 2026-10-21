@@ -9,7 +9,9 @@ struct BoundaryFrameWells: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            well(first: true)
+            if !controller.durationUsesSourceEnding || BoundaryFramePolicy.image(first: true, draft: draft, capabilities: recipe.capabilities) != nil {
+                well(first: true)
+            }
             well(first: false)
         }
         .onChange(of: draft.frames) {

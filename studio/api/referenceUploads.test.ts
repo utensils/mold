@@ -924,3 +924,46 @@ describe("MiniMax H3 reference upload leases", () => {
     });
   });
 });
+it("protects legacy scope prompts while the ready reference request remains literal", async () => {
+  const literal = String.raw`C:\new\render` + "\r\nActual line";
+  const fixture = await requestFixture();
+  const request = {
+    ...fixture,
+    references: [fixture.references![0]!],
+    prompt: literal,
+    negative_prompt: literal,
+    original_prompt: literal,
+    prompt_transform: { source_prompt: literal, root_prompt: literal },
+  };
+  let scope: typeof request | undefined;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        scope = JSON.parse(String(init.body)).request;
+        return Response.json({
+          instance_id: INSTANCE_ID,
+          expires_at_ms: 20_000,
+          request_scope_sha256: SCOPE_DIGEST,
+          session_handle: "one-session",
+          uploads: [{ reference: 1, handle: "one-upload" }],
+        });
+      }
+      return Response.json(uploadComplete(request.references[0]!, 1, true));
+    }),
+  );
+  const lease = await prepareReferenceUploads({
+    target: TARGET,
+    expectedInstanceId: INSTANCE_ID,
+    capabilities: CAPABILITIES,
+    request,
+    now: () => 10_000,
+  });
+  expect(scope?.prompt).toBe(literal.replaceAll("\\", "\\\\"));
+  expect(scope?.prompt_transform.root_prompt).toBe(
+    literal.replaceAll("\\", "\\\\"),
+  );
+  expect(lease.request.prompt).toBe(literal);
+  expect(lease.request.original_prompt).toBe(literal);
+  expect(lease.request.prompt_transform.source_prompt).toBe(literal);
+});

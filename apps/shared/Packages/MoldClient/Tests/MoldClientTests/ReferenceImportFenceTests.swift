@@ -43,3 +43,13 @@ import Testing
     #expect(!fence.isCurrent(model: "h3", host: host.id, recipe: nil, media: DraftMedia(), authority: changed, instance: "one"))
     #expect(!fence.isCurrent(model: "h3", host: host.id, recipe: nil, media: DraftMedia(), authority: host, instance: "two"))
 }
+
+@Test func choosingAnotherLibraryPrefixInvalidatesAnUnfinishedInputImport() {
+    let host = UUID(), media = DraftMedia()
+    let first = VideoJobSource(filename: "first.mp4", expectedArchiveIdentitySha256: "first")
+    let second = VideoJobSource(filename: "second.mp4", expectedArchiveIdentitySha256: "second")
+    let captured = ReferenceImportFence(model: "video", host: host, recipe: nil, media: media, videoSource: first)
+    #expect(captured.isCurrent(model: "video", host: host, recipe: nil, media: media, videoSource: first))
+    #expect(!captured.isCurrent(model: "video", host: host, recipe: nil, media: media, videoSource: second))
+    #expect(!captured.isCurrent(model: "video", host: host, recipe: nil, media: media, videoSource: nil))
+}

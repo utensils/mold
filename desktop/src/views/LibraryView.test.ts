@@ -930,11 +930,7 @@ describe("LibraryView Use these settings retained source media", () => {
     keyed.wrapper.unmount();
   });
 
-  // Scene-by-scene authoring is retired, but the prints it made — and every
-  // auto-chained long clip the host stitches — still carry `metadata.chain`.
-  // They are ordinary prints here: one reuse door, down the retained-source
-  // road, with no authoring re-entry left on the row.
-  it("reuses a chain-stitched print down the ordinary road", async () => {
+  it("refuses incomplete legacy clip settings before replacing the current draft", async () => {
     const stitched: GalleryImage = {
       ...prints[0]!,
       filename: "remote-stitched.mp4",
@@ -954,8 +950,7 @@ describe("LibraryView Use these settings retained source media", () => {
         },
       },
     };
-    const inventory = { availability: "unavailable_legacy" as const, members: [] };
-    retainedInventoryMock.mockResolvedValueOnce(inventory);
+
     const { wrapper, router } = await mountView(stitched);
 
     const tile = wrapper.findAll("button").find((button) => button.text().includes("seed 9"));
@@ -969,12 +964,10 @@ describe("LibraryView Use these settings retained source media", () => {
 
     await reuseFromContextMenu(wrapper);
 
-    // The same road any other print takes: retained authority attached, the
-    // print named on the prefill, and Create is where it lands.
-    expect(retainedInventoryMock).toHaveBeenCalledWith("remote-stitched.mp4", plato);
-    expect(useComposerStore().retainedSource?.inventory).toEqual(inventory);
-    expect(useComposerStore().prefill).toMatchObject({ metadata: stitched.metadata });
-    expect(router.currentRoute.value.path).toBe("/create");
+    expect(useComposerStore().prefill).toBeNull();
+    expect(router.currentRoute.value.path).not.toBe("/create");
+    expect(useToastStore().items.length).toBeGreaterThan(0);
+    expect(retainedInventoryMock).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
@@ -1511,6 +1504,25 @@ describe("scope counts and Escape in a text field", () => {
 });
 
 describe("Library bulk local saving", () => {
+  it("counts a completed older copy as saved while disclosing its unavailable original inputs", async () => {
+    const remote = { ...prints[0]!, filename: "legacy.mp4" };
+    const { wrapper } = await mountView(remote);
+    nativeSave.enabled = true;
+    nativeSave.mirror.mockImplementation(async (_target, _name, _metadata, _time, context) => {
+      context.onWarning("The original inputs were not saved by this older host.");
+      return "legacy.mp4";
+    });
+    window.dispatchEvent(new Event("mold:library-select-all"));
+    await flushPromises();
+    await wrapper.get("[data-test='bulk-save-locally']").trigger("click");
+    await flushPromises();
+    const toast = useToastStore().items.at(-1)!;
+    expect(toast.message).toBe("Processed successfully 1 of 1 prints");
+    expect(toast.kind).toBe("warning");
+    expect(toast.description).toContain("original inputs");
+    wrapper.unmount();
+  });
+
   it("repairs retained sources using the remote physical copy of an already local print", async () => {
     const remote = { ...prints[0]!, filename: "repair.png" };
     const { wrapper, gallery } = await mountView(remote, (store) => {
@@ -1528,6 +1540,7 @@ describe("Library bulk local saving", () => {
       remote.filename,
       remote.metadata,
       remote.timestamp,
+      expect.objectContaining({ id: "plato-7680", current: expect.any(Function) }),
     );
     expect(nativeSave.save).not.toHaveBeenCalled();
     wrapper.unmount();

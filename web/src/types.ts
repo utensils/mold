@@ -190,7 +190,7 @@ export interface GenerateRequestWire {
   height: number;
   steps: number;
   guidance: number;
-  seed?: number | null;
+  seed?: number | string | null;
   batch_size?: number;
   output_format?: OutputFormat;
   /** 3-D controls; refused at admission on a recipe with no `mesh` block. */
@@ -494,7 +494,7 @@ export interface SseCompleteEvent {
   original_image?: string | null;
   original_width?: number | null;
   original_height?: number | null;
-  seed_used: number;
+  seed_used: number | string;
   generation_time_ms: number;
   model: string;
   video_frames?: number | null;
@@ -722,7 +722,7 @@ export interface GenerateFormState {
    * `null`/absent means nothing has been read yet, which reads as "no". */
   identitySupported?: boolean | null;
   seedMode: SeedMode;
-  seed: number | null; // null = random
+  seed: number | string | null; // null = random
   batchSize: number;
   strength: number;
   frames: number | null;

@@ -1,3 +1,6 @@
+mod video;
+mod video_restart;
+
 use crate::catalog_wire::{CatalogFamiliesResponse, CatalogSearchPage, CatalogSearchQuery};
 use crate::chain::{ChainProgressEvent, ChainRequest};
 use crate::chain_job::{

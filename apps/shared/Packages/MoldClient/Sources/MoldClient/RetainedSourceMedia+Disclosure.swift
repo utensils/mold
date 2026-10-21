@@ -29,6 +29,7 @@ public extension RetainedSourceMedia {
             || !metadata.editImageDigests.isEmpty
             || !(metadata.idImageSha256S ?? []).isEmpty
             || !(metadata.references ?? []).isEmpty
+            || !(metadata.generationReferences ?? []).isEmpty
             || !(metadata.keyframes ?? []).isEmpty
     }
 

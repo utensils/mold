@@ -209,6 +209,7 @@ pub fn synthesize_from_filename(filename: &str, timestamp_secs: u64) -> OutputMe
         fps: None,
         chain_job_id: None,
         chain: None,
+        video_job: None,
         // A row reconstructed from the legacy columns knows nothing about a
         // 3-D workflow; the field only ever arrives with the saved JSON.
         mesh_workflow: None,
@@ -406,7 +407,8 @@ fn read_png_metadata(path: &Path) -> Option<OutputMetadata> {
 
     for chunk in &info.uncompressed_latin1_text {
         if chunk.keyword == "mold:parameters" {
-            if let Ok(meta) = serde_json::from_str::<OutputMetadata>(&chunk.text) {
+            if let Ok(meta) = mold_core::prompt_text::output_metadata_from_literal_json(&chunk.text)
+            {
                 return Some(meta);
             }
         }
@@ -414,7 +416,7 @@ fn read_png_metadata(path: &Path) -> Option<OutputMetadata> {
     for chunk in &info.utf8_text {
         if chunk.keyword == "mold:parameters" {
             if let Ok(text) = chunk.get_text() {
-                if let Ok(meta) = serde_json::from_str::<OutputMetadata>(&text) {
+                if let Ok(meta) = mold_core::prompt_text::output_metadata_from_literal_json(&text) {
                     return Some(meta);
                 }
             }
@@ -445,7 +447,9 @@ fn read_gif_metadata(path: &Path) -> Option<OutputMetadata> {
             }
             if let Ok(text) = std::str::from_utf8(&comment) {
                 if let Some(json) = text.strip_prefix("mold:parameters ") {
-                    if let Ok(meta) = serde_json::from_str::<OutputMetadata>(json) {
+                    if let Ok(meta) =
+                        mold_core::prompt_text::output_metadata_from_literal_json(json)
+                    {
                         return Some(meta);
                     }
                 }
@@ -484,7 +488,9 @@ fn read_jpeg_metadata(path: &Path) -> Option<OutputMetadata> {
                 let comment = &data[i + 4..i + 2 + len];
                 if let Ok(text) = std::str::from_utf8(comment) {
                     if let Some(json) = text.strip_prefix("mold:parameters ") {
-                        if let Ok(meta) = serde_json::from_str::<OutputMetadata>(json) {
+                        if let Ok(meta) =
+                            mold_core::prompt_text::output_metadata_from_literal_json(json)
+                        {
                             return Some(meta);
                         }
                     }
@@ -650,6 +656,34 @@ mod tests {
         let p = dir.path().join("plain.gif");
         std::fs::write(&p, b"GIF89a\x01\x00\x01\x00\x00\x00\x00\x3B").unwrap();
         assert!(read_embedded(&p, OutputFormat::Gif).is_none());
+    }
+
+    #[test]
+    fn mold_embedded_metadata_preserves_literal_prompt_and_negative() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("literal.png");
+        let mut metadata: OutputMetadata = serde_json::from_str(&minimal_metadata_json()).unwrap();
+        metadata.prompt = r"scene\npath".into();
+        metadata.negative_prompt = Some(r"bad\ttext".into());
+        metadata.seed = u64::MAX;
+        let mut encoder = png::Encoder::new(std::fs::File::create(&path).unwrap(), 1, 1);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .add_text_chunk(
+                "mold:parameters".into(),
+                serde_json::to_string(&metadata).unwrap(),
+            )
+            .unwrap();
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&[1, 2, 3])
+            .unwrap();
+        let loaded = read_embedded(&path, OutputFormat::Png).unwrap();
+        assert_eq!(loaded.prompt, metadata.prompt);
+        assert_eq!(loaded.negative_prompt, metadata.negative_prompt);
+        assert_eq!(loaded.seed, u64::MAX);
     }
 
     fn tiny_png(width: u32, height: u32) -> Vec<u8> {

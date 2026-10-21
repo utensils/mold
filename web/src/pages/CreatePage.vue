@@ -1,4 +1,17 @@
 <script setup lang="ts">
+import {
+  videoSettingsForReuse,
+  incrementExactSeed,
+} from "@studio/lib/videoSettingsReuse";
+import { requestVideoDurationReset } from "@studio/lib/videoLibraryExtensionHandoff";
+import { durationVideoCopies } from "@studio/lib/videoDurationAuthoring";
+import {
+  pendingVideoLibraryExtension,
+  takeVideoLibraryExtension,
+} from "@studio/lib/videoLibraryExtensionHandoff";
+import VideoDurationEditor from "@studio/components/VideoDurationEditor.vue";
+import VideoJobControl from "@studio/components/VideoJobControl.vue";
+import { createVideoDurationAuthoring } from "@studio/composables/useVideoDurationAuthoring";
 import VideoClips from "@studio/components/VideoClips.vue";
 import { jobStallLabel } from "@studio/lib/jobStall";
 import { hasActiveFreshVideoReferences } from "@studio/lib/minimaxH3Authoring";
@@ -361,6 +374,18 @@ function loadMuted(): boolean {
   }
 }
 
+const incomingVideoBoundary = computed(
+  () =>
+    !!videoDurationRef.value?.draft.value?.extension &&
+    videoDurationRef.value?.planner.plan.value?.join_mode === "continuous",
+);
+const originalVideoReferences = computed(
+  () => !!videoDurationRef.value?.draft.value?.extension?.references.length,
+);
+const videoDurationRef = shallowRef<ReturnType<
+  typeof createVideoDurationAuthoring
+> | null>(null);
+const videoFormRevision = ref(0);
 const clipsActive = ref(false);
 const clipsPinned = ref<{ hostId: string; model: string } | null>(null);
 const videoClipsRef = ref<InstanceType<typeof VideoClips> | null>(null);
@@ -1030,7 +1055,7 @@ const selectedIndex = ref<number>(-1);
 // the rail ~1.5 s after landing and the persistence watcher then writes the
 // shortened list, so the job rail alone forgets the seed across reloads.
 // `completedSeedToLock` filters chain completions that fabricate seed_used=0.
-const lastSeedUsed = ref<number | null>(loadLastSeed());
+const lastSeedUsed = ref<number | string | null>(loadLastSeed());
 const stream = useGenerateStream(
   (job) => {
     const seed = completedSeedToLock(job);
@@ -1505,6 +1530,10 @@ const h3FrameError = computed(() =>
     form.state.value.model,
     form.state.value.h3Authoring,
     capabilities.value.requiresSourceImage,
+    {
+      incomingBoundary: incomingVideoBoundary.value,
+      retainedReferences: originalVideoReferences.value,
+    },
   ),
 );
 /** The prompt rule for the request being built. The resolved recipe is the
@@ -1550,7 +1579,9 @@ const sourceConditioningError = computed<string | null>(() =>
     ? null
     : sourceImageValidationError({
         capability: capabilities.value.sourceImageCapability,
-        hasSourceImage: form.state.value.imageAttachments.length > 0,
+        hasSourceImage:
+          incomingVideoBoundary.value ||
+          form.state.value.imageAttachments.length > 0,
         isExtend: submitsExtend({
           family: currentFamily.value,
           extendVideo: form.state.value.extendVideo,
@@ -1580,7 +1611,10 @@ const promptBlocker = computed<string | null>(() =>
 /** Everything that stops this render before it is planned, in the order the
  * person can act on it. Rendered inline beside Generate, never as a toast. */
 const generationInputBlocker = computed<string | null>(
-  () => h3FrameError.value ?? promptBlocker.value,
+  () =>
+    videoDurationRef.value?.blocker.value ??
+    h3FrameError.value ??
+    (videoDurationRef.value?.scenesActive.value ? null : promptBlocker.value),
 );
 // A conditioned render may go out undescribed — the server admits it, so the
 // composer says so instead of implying a prompt is mandatory.
@@ -1632,14 +1666,18 @@ const gpuListForPlacement = computed(
 );
 
 const chainDecision = computed(() =>
-  decideGenerateRequestRouting(
-    form.toRequest(currentModel.value),
-    currentModel.value?.family ?? null,
-    currentModel.value,
-  ),
+  videoDurationRef.value?.visible.value
+    ? { kind: "single" as const }
+    : decideGenerateRequestRouting(
+        form.toRequest(currentModel.value),
+        currentModel.value?.family ?? null,
+        currentModel.value,
+      ),
 );
 const singleShotPreservationNote = computed(() => {
-  const decision = chainDecision.value;
+  const decision = videoDurationRef.value?.visible.value
+    ? { kind: "single" as const }
+    : chainDecision.value;
   if (decision.kind !== "single" || !decision.preservedAutoChainFields?.length)
     return null;
   return `Will render as one ${form.state.value.frames}-frame clip to preserve ${autoChainFieldList(decision.preservedAutoChainFields)}. This may use more GPU memory than automatic chaining.`;
@@ -1676,6 +1714,7 @@ const normalizationPickerCapability = computed(() => {
 const estimateRequest = computed<GenerateRequestWire | null>(() => {
   if (
     clipsActive.value ||
+    videoDurationRef.value?.visible.value ||
     !form.state.value.model ||
     hasActiveFreshVideoReferences(
       form.state.value.h3Authoring,
@@ -2086,6 +2125,7 @@ function applyGenerationHandoff() {
   form.state.value = applyMetadataToForm(form.state.value, metadata, {
     models: models.value,
   });
+  requestVideoDurationReset(metadata);
   inspectSelectedQueueRender(handoff.queueSelection);
   void restoreReusedIdentityPhoto(metadata);
   fileUnder.restoreFromMetadata(metadata);
@@ -3184,7 +3224,11 @@ function validateSubmit(): boolean {
     showAdvanced.value = true;
     return false;
   }
-  if (promptBlocker.value) {
+  if (videoDurationRef.value?.blocker.value) {
+    composerError.value = videoDurationRef.value.blocker.value;
+    return false;
+  }
+  if (!videoDurationRef.value?.scenesActive.value && promptBlocker.value) {
     composerError.value = promptBlocker.value;
     return false;
   }
@@ -3768,12 +3812,60 @@ function withBatchOverride(
 
 /** False when the machine refused the print — nothing was queued, so the
  * caller must keep the reviewed rewrite rather than clearing it. */
-function submitRequestCopies(
+async function submitRequestCopies(
   base: GenerateRequestWire,
   decision: ReturnType<typeof decideGenerateRequestRouting>,
   route: HostRoute | null,
   preparedReferenceLease?: ReferenceUploadLease<GenerateRequestWire>,
-): boolean {
+  isCurrent: () => boolean = () => true,
+): Promise<boolean> {
+  const duration = videoDurationRef.value;
+  if (duration?.visible.value) {
+    if (!route) {
+      toast("error", "Reconnect the selected video machine before generating.");
+      return false;
+    }
+    try {
+      const request = preparedReferenceLease?.request ?? {
+        ...base,
+        ...fileUnder.requestFields(),
+      };
+      const copies = requestCopyCount(request);
+      const batchId = createUuid();
+      const baseSeed =
+        request.seed ?? crypto.getRandomValues(new Uint32Array(1))[0]!;
+      const plans =
+        preparedReferenceLease || copies === 1
+          ? [request]
+          : Array.from({ length: copies }, (_, index) => ({
+              ...request,
+              batch_size: 1,
+              batch_id: batchId,
+              batch_index: index + 1,
+              batch_count: copies,
+              seed: incrementExactSeed(baseSeed, index),
+            }));
+      durationVideoCopies(form.state.value.batchSize, plans.length);
+      const owner = {
+        ...route,
+        target: { ...route.target, apiKey: route.target.apiKey ?? null },
+      };
+      for (const plan of plans)
+        await duration.submitPrepared(owner, plan, {
+          referenceUploads: route.referenceUploads,
+          ...(preparedReferenceLease ? { preparedReferenceLease } : {}),
+          isCurrent,
+        });
+      toast(
+        "success",
+        plans.length === 1 ? "Video queued" : `${plans.length} videos queued`,
+      );
+      return true;
+    } catch (cause) {
+      toast("error", cause instanceof Error ? cause.message : String(cause));
+      return false;
+    }
+  }
   if (preparedReferenceLease)
     return submitOrRefuse(() =>
       stream.submit(
@@ -3807,7 +3899,7 @@ function submitRequestCopies(
     batch_id: batchId,
     batch_index: index + 1,
     batch_count: copies,
-    seed: baseSeed + index,
+    seed: incrementExactSeed(baseSeed, index),
   }));
   return submitOrRefuse(() =>
     stream.submitBatch(
@@ -3878,6 +3970,8 @@ async function onSubmitInner(
     capabilities.value.sourceImageMode,
   );
   const formStamp = JSON.stringify(form.state.value);
+  const capturedDurationStamp = videoDurationRef.value?.stamp.value;
+  const capturedVideoRevision = videoFormRevision.value;
   const filingStamp = JSON.stringify(fileUnder.requestFields());
   const capturedFreshRequest = preparingFreshVideo
     ? {
@@ -3963,7 +4057,9 @@ async function onSubmitInner(
           JSON.stringify(quick.promptTransform),
         );
     }
-    const decision = chainDecision.value;
+    const decision = videoDurationRef.value?.visible.value
+      ? { kind: "single" as const }
+      : chainDecision.value;
     if (decision.kind === "reject") {
       toast("error", decision.reason);
       return;
@@ -4376,8 +4472,21 @@ async function onSubmitInner(
     )
       return;
     if (boundaryExpected && !boundaryIsCurrent()) return;
-    if (!submitRequestCopies(req, decision, route, preparedReferenceLease))
-      return;
+    const submitted = await submitRequestCopies(
+      req,
+      decision,
+      route,
+      preparedReferenceLease,
+      () =>
+        isCurrent() &&
+        videoFormRevision.value === capturedVideoRevision &&
+        videoDurationRef.value?.stamp.value === capturedDurationStamp,
+    );
+    // An unanswered parent POST still owns the exact uploaded input scope.
+    // Its controller releases that lease only after acknowledgement or refusal.
+    if (videoDurationRef.value?.run.admission.value)
+      preparedLeaseHandedOff = true;
+    if (!submitted) return;
     preparedLeaseHandedOff = true;
     clearRetainedSourceReuseIntent();
     quickPrepared.value = null;
@@ -4397,7 +4506,10 @@ async function onSubmitInner(
       form.state.value.seedMode === "increment" &&
       form.state.value.seed !== null
     ) {
-      form.state.value.seed += Math.max(1, form.state.value.batchSize);
+      form.state.value.seed = incrementExactSeed(
+        form.state.value.seed,
+        Math.max(1, form.state.value.batchSize),
+      );
     }
   } catch (error) {
     if (!preparingFreshVideo) throw error;
@@ -4433,7 +4545,9 @@ async function onExpand() {
   if (form.state.value.batchSize > 1) {
     if (preparingVariations.value) return;
     if (!validateSubmit()) return;
-    const decision = chainDecision.value;
+    const decision = videoDurationRef.value?.visible.value
+      ? { kind: "single" as const }
+      : chainDecision.value;
     if (decision.kind === "reject") {
       toast("error", decision.reason);
       return;
@@ -4598,7 +4712,9 @@ async function onRemix() {
   if (!form.state.value.prompt.trim()) return;
   if (!validateSubmit()) return;
   const baseRequest = form.toRequest(currentModel.value);
-  const decision = chainDecision.value;
+  const decision = videoDurationRef.value?.visible.value
+    ? { kind: "single" as const }
+    : chainDecision.value;
   if (decision.kind === "reject") {
     toast("error", decision.reason);
     return;
@@ -4668,7 +4784,9 @@ async function prepareRemixBatch(response: RemixResponseWire) {
   const route = remixPrintRoute.value ?? remixRoute.value;
   if (!route) return;
   const baseRequest = form.toRequest(currentModel.value);
-  const decision = chainDecision.value;
+  const decision = videoDurationRef.value?.visible.value
+    ? { kind: "single" as const }
+    : chainDecision.value;
   if (decision.kind === "reject") {
     toast("error", decision.reason);
     return;
@@ -5216,11 +5334,19 @@ function openItem(item: GalleryImage) {
 }
 
 function recreateFromGallery(item: GalleryImage) {
+  try {
+    videoSettingsForReuse(item.metadata);
+  } catch (error) {
+    composerError.value =
+      error instanceof Error ? error.message : String(error);
+    return;
+  }
   clearSelectedQueueRender();
   form.state.value = applyMetadataToForm(form.state.value, item.metadata, {
     format: item.format,
     models: models.value,
   });
+  requestVideoDurationReset(item.metadata);
   void restoreReusedIdentityPhoto(item.metadata);
   fileUnder.restoreFromMetadata(item.metadata);
   noticeFirstLastFrameRestore(item.metadata);
@@ -5832,6 +5958,68 @@ function setClipsActive(value: boolean) {
   clipsActive.value = value;
   if (!value) clipsPinned.value = null;
 }
+
+watch(
+  () => [form.state.value, fileUnder.state.value],
+  () => {
+    videoFormRevision.value += 1;
+  },
+  { deep: true, flush: "sync" },
+);
+const videoDuration = createVideoDurationAuthoring({
+  key: "mold.web.video-duration.v1",
+  clip: computed(() => output.kind.value === "clip"),
+  legacyActive: computed(() => clipsActive.value),
+  supported: computed(() => {
+    const host = clipsOwner.value;
+    const capability = host
+      ? routing.capabilitiesByHost.value[host.hostId]?.video_jobs
+      : null;
+    return (
+      capability?.supported === true && capability.literal_prompts === true
+    );
+  }),
+  owner: computed(() =>
+    clipsOwner.value
+      ? {
+          ...clipsOwner.value,
+          target: {
+            ...clipsOwner.value.target,
+            apiKey: clipsOwner.value.target.apiKey ?? null,
+          },
+        }
+      : null,
+  ),
+  frames: computed(() => form.state.value.frames),
+  fps: computed(() => form.state.value.fps),
+  generation: computed(() => clipsInput.value.request),
+});
+videoDurationRef.value = videoDuration;
+watch(
+  pendingVideoLibraryExtension,
+  async (value) => {
+    if (!value) return;
+    const selection = takeVideoLibraryExtension();
+    if (!selection) return;
+    try {
+      routing.setTarget(selection.owner.hostId);
+      await nextTick();
+      clearRetainedSourceReuseIntent();
+      form.state.value = applyMetadataToForm(
+        form.state.value,
+        selection.metadata as unknown as OutputMetadata,
+        { models: models.value },
+      );
+      form.state.value.seed = null;
+      await nextTick();
+      videoDuration.extend(selection);
+    } catch (cause) {
+      videoDuration.run.error.value =
+        cause instanceof Error ? cause.message : String(cause);
+    }
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
@@ -6005,6 +6193,7 @@ function setClipsActive(value: boolean) {
           <ComposerCard
             ref="composerCardRef"
             :prompt="form.state.value.prompt"
+            :prompt-hidden="videoDuration.scenesActive.value"
             :aspect-label="aspectLabel"
             :width="form.state.value.width"
             :height="form.state.value.height"
@@ -6060,12 +6249,61 @@ function setClipsActive(value: boolean) {
                 @update:model-value="form.state.value.batchSize = $event"
               />
             </template>
+            <template #duration>
+              <VideoDurationEditor
+                v-if="
+                  !clipsActive &&
+                  videoDuration.visible.value &&
+                  videoDuration.draft.value
+                "
+                v-model="videoDuration.draft.value"
+                :prompt="form.state.value.prompt"
+                :source-title="videoDuration.draft.value.extension?.title"
+                :source-machine="videoDuration.draft.value.extension?.machine"
+                @start-fresh="videoDuration.reset()"
+                :plan="videoDuration.planner.plan.value"
+                :checking="videoDuration.planner.checking.value"
+                :error="
+                  videoDuration.blocker.value ??
+                  videoDuration.planner.error.value ??
+                  videoDuration.run.error.value
+                "
+                :disabled="submitInFlight"
+                @single-prompt="onPromptAuthored($event, 'typed')"
+              />
+            </template>
           </ComposerCard>
         </div>
+
+        <div
+          v-if="
+            videoDuration.run.admission.value && !videoDuration.run.detail.value
+          "
+          role="status"
+        >
+          Confirming this video on its machine…
+          <button type="button" @click="videoDuration.run.refresh()">
+            Check queue
+          </button>
+          <button
+            type="button"
+            :disabled="videoDuration.run.cancelling.value"
+            @click="videoDuration.run.cancel()"
+          >
+            Stop video
+          </button>
+        </div>
+        <VideoJobControl
+          v-if="videoDuration.run.detail.value && videoDuration.run.owner.value"
+          :job-id="videoDuration.run.detail.value.id"
+          :owner="videoDuration.run.owner.value"
+          :auto-open="true"
+        />
         <VideoClips
           ref="videoClipsRef"
           :enabled="
             output.kind.value === 'clip' &&
+            !videoDuration.visible.value &&
             !submitInFlight &&
             !ordinarySubmitBlocked
           "
@@ -6411,6 +6649,7 @@ function setClipsActive(value: boolean) {
                with the source wells; only its two knobs are Advanced. -->
           <template v-if="railSheet === 'source'">
             <SourceMediaPanel
+              :incoming-video-boundary="incomingVideoBoundary"
               v-model="form.state.value"
               :family="currentFamily"
               :models="models"
@@ -6480,7 +6719,9 @@ function setClipsActive(value: boolean) {
               :model="form.state.value.model"
               :ext="form.state.value.outputFormat"
               :timestamp="fileUnderStamp"
-              :show-filename-preview="!clipsActive"
+              :show-filename-preview="
+                !clipsActive && !videoDuration.visible.value
+              "
             />
           </template>
 
@@ -6500,6 +6741,7 @@ function setClipsActive(value: boolean) {
               @canvas-intent="setCanvasIntent"
             />
             <AdvancedDrawer
+              :duration-active="videoDuration.visible.value"
               :mobile="false"
               v-model="form.state.value"
               :family="currentFamily"

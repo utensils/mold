@@ -326,6 +326,8 @@ kind of bare array. Add `?detail=1` (or `true`, or the bare flag) to get the
 an `unsupported_reason` naming why this host has none — which is the only way
 to tell "no camera controls for this checkpoint" from "none installed".
 
+Generation `seed`, authored-chain base `seed`, and stage `seed_offset` accept either an unsigned JSON integer or an exact decimal string, such as `"18446744073709551615"`. Use strings in JavaScript to preserve the full 64-bit value. Signed values, fractional notation, whitespace and overflow are refused. Responses and canonical request serialization retain the existing numeric representation. Published duration videos additionally expose a lossless decimal seed in `video_job.authoring`.
+
 ## Authentication
 
 When `MOLD_API_KEY` is set, all API requests must include an `X-Api-Key`
@@ -2659,6 +2661,47 @@ an explicit local `mold system metal-memory` command.
 Pre-render moves require `queue.pre_render_transfer` on both machines. Reservation, sealing, and destination abort records survive restarts. Clients reconcile accepted batches by the reserved transfer ID before completing the source; after an interrupted attempt they retry the same destination. Older source servers retain Held-only transfers.
 
 `GET /api/gallery/sync-checkpoint` returns protocol version 1, the server instance ID, and opaque revisions keyed by filename. It performs metadata and retained-manifest checks without hashing output payloads. Missing or unverifiable entries must use the ordinary transfer verification path. Revisions are not a cursor or permission to skip changed source/destination identities.
+
+### Durable video archive transfers
+
+A source-media transfer offer includes `video_artifacts_complete` when its
+metadata declares `video_job.artifacts`. A complete Library copy retains that
+portable descriptor and its provenance/PCM files in addition to the finished
+movie and conditioning inputs. Require affirmative
+`retained_media_transfer.video_artifacts: true` on both machines before
+importing an artifact-bearing output; older receiver support is not implied by
+`protocol_version` or generation capabilities. These file transfers require no
+GPU or video encoder.
+
+Capture each machine's instance and the exact source/destination archive
+identities. Requests use `x-mold-gallery-archive-identity` plus
+`x-mold-source-instance` for source reads or `x-mold-destination-instance` for
+receiver operations. Artifact-bearing ordinary Gallery imports also require the
+captured destination instance. Imports preserve the full authenticated recipe;
+only documented missing completion facts and equivalent base/build version
+strings may differ from embedded metadata. Conflicting generation settings,
+authoring or artifact descriptors remain errors.
+
+- `GET /api/gallery/video-artifacts/:filename/:role?offset_bytes=N` reads at
+  most 4 MiB; `role` is `provenance` or `pcm`.
+- `POST /api/gallery/video-artifacts/:filename/transfer` begins/resumes with
+  `{archive_identity_sha256, artifacts}` matching the committed receiver output.
+- `GET /api/gallery/video-artifacts/:filename/transfer/:handle` reports progress.
+- `PUT /api/gallery/video-artifacts/:filename/transfer/:handle/:role?offset_bytes=N`
+  appends at most 4 MiB. Exact retries are idempotent; gaps and changed bytes fail.
+- `POST /api/gallery/video-artifacts/:filename/transfer/:handle/complete` verifies
+  hashes and durably seals assets to the destination archive owner.
+
+Progress is `{handle, archive_identity_sha256, offsets, complete}`; offsets are
+decimal strings and the optional PCM offset is absent without PCM. Preserve
+64-bit counts without floating-point conversion. After an interrupted reply,
+resume the same receiver-owned transfer and confirmed offsets. Do not report
+success until completion and a fresh exact-output offer both verify the archive.
+An existing movie or an older completed sync receipt does not prove its separate
+assets are present. Chunk memory remains bounded independently of movie length. Unchanged sealed files
+use durable verification records bound to exact file facts, owner and descriptor.
+Older bundles need one initial full verification; changed file facts invalidate
+that record and require verification again.
 
 ### Source Media identities and preview performance
 

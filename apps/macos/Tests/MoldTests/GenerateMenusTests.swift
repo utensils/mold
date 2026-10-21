@@ -147,7 +147,7 @@ struct GenerateMenusTests {
         for yes in [false, true] {
             for also in [false, true] {
                 offered.formUnion(
-                    GenerateMenus.result(canUseAsSource: yes, canAddReference: also).kinds)
+                    GenerateMenus.result(canUseAsSource: yes, canAddReference: also, canUseEndpoints: yes).kinds)
                 offered.formUnion(GenerateMenus.inspectable(
                     GenerateMenus.controlWell(hasPicture: yes, canPaste: also),
                     hasOriginal: yes).kinds)

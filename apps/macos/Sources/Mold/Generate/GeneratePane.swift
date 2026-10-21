@@ -59,6 +59,7 @@ struct GeneratePane: View {
         .task(id: chainLimitsKey) {
             controller.recoverSequences()
             refreshChainLimits()
+            await controller.recoverDurationJobs()
         }
         .onChange(of: advertisedChainLimits) { _, limits in
             guard !controller.sequence.restoringSource, let limits, let temporal = recipe?.temporal else { return }
@@ -66,6 +67,8 @@ struct GeneratePane: View {
                 maximum: min(limits.framesPerClipCap, temporal.frames.max),
                 step: limits.authoring?.frameStep ?? temporal.frames.step)
         }
+        .task(id: durationSourceKey) { await controller.restoreDurationSource() }
+        .task(id: durationPlanKey) { controller.planDuration(on: host, recipe: recipe) }
         .navigationTitle("Generate")
         .navigationSubtitle(subtitle)
         // Before the pane's own `.toolbar`, so the column's switch is the
@@ -198,4 +201,32 @@ private struct RetainedRecoveryKey: Equatable {
     let recipe: String?
     let reachability: [UUID: HostStore.Reachability]
     let instances: [UUID: String]
+}
+
+extension GeneratePane {
+    struct DurationPlanKey: Hashable {
+        let request: VideoJobRequest?
+        let owner: VideoJobOwner?
+        let recipe: GenerationRecipe?
+        let capable: Bool
+    }
+    var durationPlanKey: DurationPlanKey {
+        .init(request: try? controller.durationRequest(on: host, planning: true),
+              owner: controller.durationOwner(host), recipe: recipe,
+              capable: host.flatMap { hosts.capabilities[$0.id] }?.canCreateVideoJob == true)
+    }
+}
+
+extension GeneratePane {
+    struct DurationSourceKey: Hashable {
+        let source: VideoJobSource?
+        let sourceOwner: VideoLibrarySourceOwner?
+        let owner: VideoJobOwner?
+        let reachable: Bool
+    }
+    var durationSourceKey: DurationSourceKey {
+        let sourceHost = controller.videoDuration?.sourceOwner.flatMap { hosts.host($0.hostId) }
+        return .init(source: controller.videoDuration?.draft.source, sourceOwner: controller.videoDuration?.sourceOwner,
+                     owner: controller.durationOwner(sourceHost), reachable: sourceHost.map(hosts.isUp) ?? false)
+    }
 }

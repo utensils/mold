@@ -8,6 +8,7 @@
 //! the previous filesystem-only behavior).
 
 pub mod chain_jobs;
+pub mod chain_stage_generations;
 pub mod config_sync;
 mod db;
 mod device_preferences;
@@ -38,6 +39,7 @@ pub mod secure_bootstrap;
 pub mod secure_devices;
 pub mod settings;
 pub mod trash;
+pub mod video_job_child_owners;
 pub mod video_upscale_jobs;
 
 pub use db::{MetadataDb, METADATA_DB_BUSY_TIMEOUT};
@@ -123,3 +125,5 @@ pub fn global_db() -> Option<&'static MetadataDb> {
         })
         .as_ref()
 }
+
+pub mod video_jobs;

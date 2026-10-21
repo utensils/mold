@@ -43,7 +43,7 @@ use crate::state::AppState;
 /// changes for EXISTING prints (a new field, a different title fallback,
 /// …): every cursor then resets and clients rebuild, because no seq records
 /// a change the code made.
-pub(crate) const ROW_FORMAT: u32 = 1;
+pub(crate) const ROW_FORMAT: u32 = 2;
 
 pub(crate) const DEFAULT_LIMIT: usize = 500;
 pub(crate) const MAX_LIMIT: usize = 2000;

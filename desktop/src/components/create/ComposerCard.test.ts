@@ -603,3 +603,14 @@ describe("resizable prompt", () => {
 function savePromptHeightForTest(px: number) {
   localStorage.setItem("mold.desktop.promptEditorHeight.v1", String(px));
 }
+
+it("keeps duration authoring before the desktop Generate action", () => {
+  const w = mountComposer(
+    baseForm(),
+    {},
+    { duration: '<label data-test="duration-inline">Duration <input value="6" /></label>' },
+  );
+  const duration = w.get('[data-test="duration-inline"]').element,
+    submit = w.get('[data-test="generate-button"]').element;
+  expect(duration.compareDocumentPosition(submit) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});

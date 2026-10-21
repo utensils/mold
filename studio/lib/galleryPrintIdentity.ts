@@ -4,7 +4,7 @@ export interface GalleryPrintIdentityInput {
   size_bytes?: number | null;
   metadata_synthetic?: boolean;
   metadata?: {
-    seed?: number | null;
+    seed?: number | string | null;
     model?: string | null;
   } | null;
 }
@@ -22,7 +22,7 @@ export const GALLERY_IDENTITY_WINDOW_SECS = 3600;
  */
 export function galleryIdentitySeed(
   item: GalleryPrintIdentityInput,
-): number | null {
+): number | string | null {
   if (item.metadata_synthetic) {
     const match = /-(\d+)-(\d+)(?:-(?:original|upscaled))?\.[a-z0-9]+$/i.exec(
       item.filename,

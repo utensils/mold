@@ -43,6 +43,18 @@ pub(crate) async fn run(client: &MoldClient, request: Request) -> Result<()> {
     }
 }
 
+/// Download a known, already published original without scanning the Library.
+pub(crate) async fn download_published(
+    client: &MoldClient,
+    filename: &str,
+    output: &str,
+) -> Result<()> {
+    match plan_destinations(&[filename.to_owned()], Some(output))? {
+        Plan::Stdout(name) => download_to_stdout(client, &name, false).await,
+        Plan::Files(files) => download_files(client, files, false, false).await,
+    }
+}
+
 /// The listing's filename for each input: an exact name, else the one name
 /// it is a prefix of. An ambiguous prefix lists a few of its matches.
 fn resolve_names(rows: &[GalleryImage], inputs: &[String]) -> Result<Vec<String>> {

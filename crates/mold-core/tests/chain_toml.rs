@@ -110,6 +110,8 @@ fn normalised_request_survives_round_trip() {
     // Build a ChainRequest → normalise → project to ChainScript → TOML → back → compare.
     let req = ChainRequest {
         source_fit: None,
+        generation_controls: None,
+        incoming_source: None,
         continue_from: None,
         offload: None,
         collection: None,

@@ -81,6 +81,7 @@ nvml = ["dep:nvml-wrapper"]
 test-support = []
 
 [dependencies]
+tempfile = "3"
 mold-relay = { path = "../mold-relay", package = "mold-ai-relay", default-features = false }
 mold-secure = { path = "../mold-secure", package = "mold-ai-secure" }
 mold-secure-client = { path = "../mold-secure-client", package = "mold-ai-secure-client" }
@@ -158,7 +159,6 @@ flume = { version = "0.12", default-features = false }
 # against the private loader without exposing that loader on a runnable feature.
 mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.36.0", features = ["h3-private-uat"] }
 filetime = "0.2"
-tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 mp4-rs = { package = "mp4", version = "0.14" }
 # Chain route tests build a synthetic motion-tail Tensor via the same

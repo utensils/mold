@@ -516,7 +516,8 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     /// Every create recorded, so `releaseSubmit` knows a chain gate is the
     /// one being released.
     nonisolated(unsafe) private var recordedChainCreates: [String] = []
-    nonisolated(unsafe) var cancelledChainJobIds: [String] = []
+    var cancelledChainJobIds: [String] { submitLock.withLock { cancelledChainIds } }
+    nonisolated(unsafe) private var cancelledChainIds: [String] = []
     nonisolated(unsafe) var chainJobDetails: [String: ChainJobDetail] = [:]
     /// Ids whose event stream is held OPEN, pushed with `emitChainEvent`.
     nonisolated(unsafe) var chainEventsHeldOpen: Set<String> = []
@@ -600,7 +601,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
 
     func cancelChainJob(id: String) async throws {
         try record("cancelChainJob")
-        submitLock.withLock { cancelledChainJobIds.append(id) }
+        submitLock.withLock { cancelledChainIds.append(id) }
     }
 
     nonisolated(unsafe) var resumedChainJobIds: [String] = []

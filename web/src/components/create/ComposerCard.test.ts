@@ -504,3 +504,17 @@ it("opens a live prompt editor while preserving the page authoring contract", as
   expect(wrapper.emitted("submit")).toBeUndefined();
   wrapper.unmount();
 });
+
+it("shows duration authoring before the Generate action in the same composer", () => {
+  const w = factory({
+    slots: {
+      duration:
+        '<label data-test="duration-inline">Duration <input value="6" /></label>',
+    },
+  });
+  const duration = w.get('[data-test="duration-inline"]').element,
+    submit = w.get('[data-test="composer-submit"]').element;
+  expect(
+    duration.compareDocumentPosition(submit) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+});

@@ -823,6 +823,11 @@ other jobs may need.
 
 Reuse settings restores retained opening and closing frames into editable wells, preserving keyframe indices and ordered image references. Audio, source/continuation video, identity photos and control images restore with their saved settings where the selected recipe supports them. Continuation overlap and authored reference strength (including zero) are preserved. Older prints without recorded reference strength keep the server default. The original machine must retain the inputs; missing, damaged or oversized inputs are disclosed before generation. A new attachment or explicit removal wins over a late download, and restored wells never have a hidden archive fallback that can revive removed media.
 
+Use Settings on a completed Duration video restores its original single prompt, requested duration or optional scenes, literal text, exact seed and supported recipe settings. On an extended video it restores the added-footage settings into a fresh movie; the original video is not attached, and a notice distinguishes this from Extend Video. Original endpoints and ordered references are restored only from the authenticated clicked copy's retained archive.
+
+Older authored videos reopen all recorded clips, lengths, joins, effective seeds, adapters and per-clip inputs. Clip options show saved overrides and offer **Use global inputs and controls** before replacing them. Historical per-clip negative prompts were not recorded; only the recorded first value can be restored, and the editor explains this limitation. Explicit older automatic one-shot videos restore one prompt and saved-length duration only when their recorded recipe proves a uniform automatic split; the editor states that current joins may differ. Incomplete or unrepresentable automatic recipes, linked incoming carry, and unsupported conditioning controls are refused before changing the current draft. Private per-clip media is not stored in preferences: after a cold launch, reopen Use Settings on the original video to restore those inputs before generating.
+
+
 Library machine filters apply to collection, favourite and Trash counts and to
 all media actions, including filing a dragged print. Collection badges distinguish
 an empty shelf from one absent on the selected machine and an unavailable
@@ -899,7 +904,7 @@ The Also Running section can stop an ephemeral long-clip chain when its machine
 allows cancellation, and resume a paused chain. Its controls recheck the machine
 and activity before acting. Existing clip-upscale Pause, Resume and Cancel
 controls also reject disconnected machines, stale rows and duplicate requests.
-Durable authored sequence controls remain available in the machine's web app.
+Duration-based and authored videos expose their own parent controls in Queue.
 
 Shared generation jobs keep supported Cancel controls during model loading; automatic chains use their own cancellation authority.
 
@@ -908,6 +913,8 @@ Shared generation jobs keep supported Cancel controls during model loading; auto
 Library New badges and unread counts are saved on each client independently. Media discovered after the initial machine baseline stays new during a Library visit. Individual viewer display clears one print immediately; leaving Library clears the captured eligible projections from that visit. Unvisited, hidden, filtered-out and later arrivals remain unread. Merged copies count once; hidden collections and Trash do not count. Existing read history is preserved on upgrade. Native icon badges follow the same history, with the existing permission or preference controls.
 
 Queue rows keep a stable height as previews and progress arrive, preserving the scroll position while browsing. Preview reads share a bounded cache across row reuse.
+
+Library Sync captures the authenticated archive’s complete recipe before downloading. It verifies the output’s checksum and size before importing that recipe, preserving exact seeds, literal prompts, scenes and newer metadata fields. Changed archive facts are refused rather than replaced with a partial embedded recipe. Published Duration and extended videos also copy their exact PCM and provenance assets in resumable chunks of at most 4 MiB, retaining the portable descriptor and binding the files to the destination archive. Both machines must advertise asset-transfer support. Cached movies recheck these assets; an interrupted asset copy is not reported as complete. Genuine historical missing inputs remain disclosed.
 
 Interrupted syncs remember acknowledged outputs before retained-input and organization work; retries repair the remaining work without copying the output again. Updated hosts batch verification of unchanged copies; older hosts preserve the full retained-input checks. Progress counts checked, copied, already-local and failed prints separately.
 
@@ -1074,6 +1081,18 @@ Queue toolbar actions carry explicit pause/resume and empty-queue icons in both 
 
 ## Multi-clip video
 
-In Short clip, choose **Add another clip** to enter ordered prompts and lengths, then **Generate video**. The app validates the draft automatically before submitting it. Move or remove rows without opening a separate editor. Library **Continue video** makes the next separate linked MP4 from the latest completed authored take on its original machine. Ordinary one-prompt generation and Reuse settings remain available.
+On updated machines advertising duration video jobs, use one prompt and **Duration**. The initial value follows the selected recipe; a chosen length survives model changes and a cold launch. The server reports the single-generation limit and number of clips joined into one movie. **Define scenes** optionally adds separate prompts. Generate prepares ordinary source media, typed references and batch variations, then creates one durable Queue parent per movie. Queue offers the server’s progress, Stop, Resume, deletion of recovery data and paged recovery. An unanswered submission remains a known attempt to check before making another.
+
+Library **Extend Video…** opens the original recipe and adds duration to its ending, producing a longer movie while keeping the original. The original machine and source identity stay pinned; original typed references are shown and inherited unless replaced. Historical opening and closing images are cleared. For continuous extension, the original ending supplies the first frame; a newly attached opening image remains visible and must be removed before generating. Older machines retain the existing single-generation controls, while saved authored-sequence drafts keep their separate-part **Continue video** behavior.
 
 The editor uses the selected host’s frame grid and validates delivered duration before admission. Reconnect recovers the same operation; Queue shows parent progress and supports applicable resume/cancel actions. Reference restoration is explicit after relaunch; drafts do not persist input bytes or credentials.
+
+Failed, interrupted, paused or historical cancelled video jobs offer **Start again…** when their machine supports recovery. Choose the same machine to start again, or another compatible machine to **Send video**. This creates a new attempt and keeps the original. Saved attempts remain in Queue after relaunch and can be checked or stopped using their original operation identity; unanswered submissions are never silently submitted again. **Delete job…** removes the confirmed job’s recovery data while keeping saved Library videos.
+
+Extend preserves compatible original spatial and temporal upscaling, shows the inherited recipe, and starts new footage with a fresh random seed unless one is explicitly chosen.
+
+Historical IC-LoRA/ControlNet recipes that this native editor cannot faithfully preserve show an explicit refusal; use the saved job’s **Start again** when available, or the CLI with the original retained controls. These settings are never silently removed.
+
+A refused Library extension remains visible and blocks Generate until acknowledged. **Keep current draft** leaves existing settings and media intact; pending source reads cannot replace that draft after acknowledgement.
+
+Stopped accepted duration videos remain paused in Queue and can resume from completed clips when the server advertises Resume. Historical cancelled parents remain available for an explicit fresh start or deletion of recovery data; accepted cancelled jobs are not dismissed locally. Cancelled-before-admission attempts can still be dismissed.

@@ -468,7 +468,7 @@ fn build_stage_generate_request(
     stage_seed: u64,
     idx: usize,
 ) -> GenerateRequest {
-    GenerateRequest {
+    let mut request = GenerateRequest {
         offload: chain.offload,
         mesh: None,
         video_only: None,
@@ -577,7 +577,11 @@ fn build_stage_generate_request(
         true_cfg: None,
         cfg_start_step: None,
         transparent_background: None,
+    };
+    if let Some(controls) = &chain.generation_controls {
+        controls.apply_to(&mut request);
     }
+    request
 }
 
 #[cfg(test)]
@@ -766,6 +770,8 @@ mod tests {
     fn chain_req(stages: Vec<ChainStage>, motion_tail_frames: u32) -> ChainRequest {
         ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             offload: None,
             collection: None,
@@ -1396,6 +1402,8 @@ mod tests {
         // total_frames = 97 * count (no ceil rounding complication).
         let req = ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             offload: None,
             collection: None,

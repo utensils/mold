@@ -25,27 +25,27 @@ MOLD_HOST=workstation MOLD_DISCORD_TOKEN="your-token" mold discord
 
 ## Slash Commands
 
-| Command              | Description                                                                                                                                |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `/generate`          | Generate an image or video, including attachment-driven LTX-2 audio-to-video, retake, and keyframe modes and ordered MiniMax H3 references |
-| `/video`             | Make two prompted clips, continue linked parts and inspect durable progress; host-global lookup/control requires Manage Server             |
-| `/mesh`              | Generate a Hunyuan3D GLB from one source image or semantic front/left/back/right multiview attachments                                     |
-| `/transparent`       | Render a subject on a transparent background (PNG or WebP with alpha), optionally cut out of up to three ordered reference images          |
-| `/identity`          | Generate an image conditioned on a face reference photo (PuLID), with `identity_strength` and `identity_start_step`                        |
-| `/expand`            | Expand a short prompt into detailed generation prompts                                                                                     |
-| `/remix`             | Rewrite a prompt into subject-preserving alternatives, one creative dimension each (`dimensions`, `style`, `variations` 1-5)               |
-| `/upscale`           | Upscale an attached PNG, JPEG, or WebP with a server-side Real-ESRGAN model; the result is private to the requester                        |
-| `/search`            | Search the external model catalog read-only; results are sanitized, bounded, and ephemeral                                                 |
-| `/models`            | List available models with download/loaded status                                                                                          |
-| `/status`            | Show server health, queue summary, and every GPU/MIG device; large fleets paginate across limit-safe follow-up embeds                      |
-| `/quota`             | Check your remaining daily generation quota                                                                                                |
-| `/queue`             | Inspect or control the host-global queue (guild-only, Manage Server, ephemeral)                                                            |
-| `/downloads`         | Inspect or cancel host-global model downloads (guild-only, Manage Server, ephemeral)                                                       |
-| `/video-upscale`     | Manage Library-backed video upscales (guild-only, Manage Server, ephemeral)                                                                |
-| `/gallery`           | Browse host-global Library metadata read-only (guild-only, Manage Server, ephemeral)                                                       |
-| `/admin reset-quota` | Reset a user's daily quota (requires Manage Server)                                                                                        |
-| `/admin block`       | Temporarily block a user from generating (requires Manage Server)                                                                          |
-| `/admin unblock`     | Unblock a previously blocked user (requires Manage Server)                                                                                 |
+| Command              | Description                                                                                                                                       |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/generate`          | Generate an image or video, including attachment-driven LTX-2 audio-to-video, retake, and keyframe modes and ordered MiniMax H3 references        |
+| `/video`             | Make a video from one prompt and duration, extend Library videos, and inspect durable progress; host-global lookup/control requires Manage Server |
+| `/mesh`              | Generate a Hunyuan3D GLB from one source image or semantic front/left/back/right multiview attachments                                            |
+| `/transparent`       | Render a subject on a transparent background (PNG or WebP with alpha), optionally cut out of up to three ordered reference images                 |
+| `/identity`          | Generate an image conditioned on a face reference photo (PuLID), with `identity_strength` and `identity_start_step`                               |
+| `/expand`            | Expand a short prompt into detailed generation prompts                                                                                            |
+| `/remix`             | Rewrite a prompt into subject-preserving alternatives, one creative dimension each (`dimensions`, `style`, `variations` 1-5)                      |
+| `/upscale`           | Upscale an attached PNG, JPEG, or WebP with a server-side Real-ESRGAN model; the result is private to the requester                               |
+| `/search`            | Search the external model catalog read-only; results are sanitized, bounded, and ephemeral                                                        |
+| `/models`            | List available models with download/loaded status                                                                                                 |
+| `/status`            | Show server health, queue summary, and every GPU/MIG device; large fleets paginate across limit-safe follow-up embeds                             |
+| `/quota`             | Check your remaining daily generation quota                                                                                                       |
+| `/queue`             | Inspect or control the host-global queue (guild-only, Manage Server, ephemeral)                                                                   |
+| `/downloads`         | Inspect or cancel host-global model downloads (guild-only, Manage Server, ephemeral)                                                              |
+| `/video-upscale`     | Manage Library-backed video upscales (guild-only, Manage Server, ephemeral)                                                                       |
+| `/gallery`           | Browse host-global Library metadata read-only (guild-only, Manage Server, ephemeral)                                                              |
+| `/admin reset-quota` | Reset a user's daily quota (requires Manage Server)                                                                                               |
+| `/admin block`       | Temporarily block a user from generating (requires Manage Server)                                                                                 |
+| `/admin unblock`     | Unblock a previously blocked user (requires Manage Server)                                                                                        |
 
 ## Capability and exclusion matrix
 
@@ -99,7 +99,7 @@ fixed transport value so the selected recipe or server remains authoritative.
 | `audio_file_path`                                               | Intentional exclusion                        | Server-local paths are trusted-deployment API/CLI inputs and are never accepted from chat.                                                                                                                       |
 | `source_video`, `retake_range`                                  | Implemented                                  | `/generate` attachment plus start/end options for LTX-2 retake.                                                                                                                                                  |
 | `source_video_path`                                             | Intentional exclusion                        | Server-local paths are trusted-deployment API/CLI inputs.                                                                                                                                                        |
-| `extend_video`, `extend_video_path`, `extend_overlap_frames`    | Intentional exclusion                        | Video continuation and its server-local path form remain CLI/API and Studio capabilities.                                                                                                                        |
+| `extend_video`, `extend_video_path`, `extend_overlap_frames`    | Intentional exclusion                        | Legacy path-based continuation remains CLI/API-only; `/video extend` uses an authenticated Library filename.                                                                                                     |
 | `keyframes`                                                     | Implemented with a Discord bound             | `/generate` accepts two or three LTX-2 keyframes, or the two endpoint images supported by Wan.                                                                                                                   |
 | `hdr_exr_dir`, `hdr_exr_full_float`                             | Intentional exclusion                        | Host-local EXR sidecar output is a CLI/API workflow.                                                                                                                                                             |
 | `pipeline`                                                      | Implemented                                  | `/generate` exposes ordinary LTX-2 recipes; attachment-driven audio, retake, and keyframe modes select their recipe automatically.                                                                               |
@@ -125,33 +125,50 @@ The profile-level controls follow the same boundary:
 | Output formats                                                    | Narrows the advertised formats to containers Discord can deliver safely; the server still performs final admission.                                                                           |
 | Provenance and delivery notes                                     | Display metadata only; they are not user-editable controls.                                                                                                                                   |
 
-### Multi-clip video
+### Duration and extending videos
 
-`/video make` takes two prompts, an optional installed model, seconds per clip,
-canvas size and image attachment. The server validates its frame grid and
-reports delivered duration before admitting one durable part. Ref2VA repeats
-the inline image reference in both clips; image-conditioned models use it as
-the opening image. Videos publish in the connected server's Mold Library.
+`/video make prompt:"A garden at dawn" duration:"30"` uses one prompt and the
+requested total length in seconds. Omit duration to keep the selected model's
+short recipe length. The server chooses bounded clips, overlap and joins, and
+publishes one finished video in its Mold Library. There is no one-generation
+length ceiling on the requested duration. Optional `next_prompt` defines a
+second scene; the two scenes share the requested total duration. Optional
+model, canvas, image and audio controls retain server validation. Ref2VA uses
+the image as a typed reference; image-conditioned recipes use an opening image.
 
-`/video continue` takes a completed source job ID and a new prompt. It creates
-the next separate MP4 using the latest take, original canvas, frame rate, audio
-and retained references. `/video status` reports progress and the published
-filename; `/video resume` and `/video cancel` control recoverable work. These
-four host-global commands require guild Manage Server permission because the
-host does not record Discord user ownership.
+`/video extend filename:"mold-example.mp4" prompt:"The camera moves closer"
+duration:"10"` adds ten seconds to that exact Library video and publishes a
+new longer MP4. It restores the original scalar recipe, starts new random
+sampling, and leaves the original video unchanged. The server authenticates the
+source and restores retained references where available. Missing historical
+inputs produce an actionable refusal. Extend requires guild Manage Server
+permission. These commands require affirmative duration-video capabilities;
+an older server is refused before admission.
 
-Each make/continue operation consumes one ordinary generation quota slot.
-Pre-admission failures refund it. An uncertain POST retains its known job ID
-and charge: check status rather than submitting again. Advanced transitions,
-per-clip inputs, retakes/amendments and durable mesh workflows remain available
-through CLI/API. Ordinary `/generate` long-video splitting stays separate.
+The bot publishes a copyable **Video ID** (`jobUUID@installationUUID`) before
+admitting work. Keep the whole value for `/video status`, `/video resume` or
+`/video cancel`, including after a bot restart. These host-wide controls require
+guild Manage Server permission and refuse a replaced server installation.
+Status reports clip progress and the exact published filename. Cancel can stop
+an admission whose reply was lost; check status until it settles.
+
+`/video continue` remains the advanced legacy operation that makes the next
+**separate** MP4 from a completed authored part. To inspect or control an old
+part ID, explicitly use `legacy_part:true` with status, resume or cancel. It is
+never guessed from an API error. Cross-server Send, advanced transitions,
+per-clip inputs, retakes and amendments remain CLI/API or app operations.
+
+Each make, extend or continue operation consumes one ordinary generation quota
+slot. Pre-admission failures refund it. An uncertain POST retains its published
+Video ID and charge: check that ID rather than submitting again. The bot does
+not claim publication until the server returns a Library filename.
 
 ### Access boundary for host-global operations
 
 Queue rows, download jobs, Library filenames, saved prompts, and video-upscale
 jobs belong to the Mold host; the current server contract does not attach a
 Discord user owner to them. `/queue`, `/downloads`, `/video-upscale`,
-`/gallery`, and `/video continue|status|resume|cancel` are therefore guild-only commands that require Discord's **Manage
+`/gallery`, and `/video extend|continue|status|resume|cancel` are therefore guild-only commands that require Discord's **Manage
 Server** permission and always reply ephemerally. Global queue pause/resume and
 per-item pause/resume are separate actions and call separate server endpoints;
 one never stands in for the other. Gallery access is read-only, and Discord

@@ -3845,3 +3845,104 @@ describe("retained recipe scalars", () => {
     expect(form.extendOverlapFrames).toBe(17);
   });
 });
+it("reuses a duration movie's exact seed and original input boundary, not published total frames", () => {
+  const f = newGenerateForm();
+  const metadata = {
+    model: "minimax-h3-fl2va",
+    prompt: " literal\\n\r\n ",
+    seed: 18446744073709552000,
+    frames: 480,
+    fps: 24,
+    steps: 9,
+    guidance: 0,
+    width: 768,
+    height: 768,
+    version: "test",
+    video_job: {
+      source_frames: "240",
+      authoring: {
+        duration_ms: "10000",
+        boundary_frames: 124,
+        input_frames: 107,
+        seed: "18446744073709551615",
+      },
+    },
+  } as OutputMetadata;
+  applyMetadataToForm(f, metadata);
+  expect(f.seed).toBe("18446744073709551615");
+  expect(f.frames).toBe(107);
+  expect(f.prompt).toBe(" literal\\n\r\n ");
+  expect(buildRequest(f).seed).toBe("18446744073709551615");
+});
+it("refuses incomplete duration provenance before changing the existing form", () => {
+  const f = newGenerateForm();
+  f.prompt = "keep my draft";
+  const before = JSON.stringify(f);
+  expect(() =>
+    applyMetadataToForm(f, {
+      model: "other",
+      prompt: "old",
+      seed: 1,
+      width: 1,
+      height: 1,
+      steps: 1,
+      guidance: 1,
+      video_job: { id: "old" },
+    } as OutputMetadata),
+  ).toThrow(/older video/);
+  expect(JSON.stringify(f)).toBe(before);
+});
+
+it("preserves literal whitespace in a restored legacy clip prompt", () => {
+  const form = newGenerateForm();
+  applyMetadataToForm(form, {
+    prompt: "summary",
+    model: "model",
+    seed: 1,
+    steps: 1,
+    guidance: 0,
+    width: 768,
+    height: 768,
+    chain: {
+      stage_count: 1,
+      motion_tail_frames: 1,
+      stages: [{ prompt: "  literal\\n\r\n ", frames: 107, transition: "smooth" }],
+    },
+  } as never);
+  expect(form.prompt).toBe("  literal\\n\r\n ");
+});
+
+it("restores automatic legacy conditioning into the ordinary request including full seed", () => {
+  const form = newGenerateForm();
+  const base = {
+    model: "minimax-h3-fl2va:official-bf16",
+    prompt: "literal",
+    width: 768,
+    height: 768,
+    steps: 9,
+    guidance: 0,
+    frames: 107,
+    fps: 24,
+    output_format: "mp4" as const,
+    seed: "18446744073709551615",
+    source_image: "YQ==",
+    source_image_name: "original.png",
+  };
+  applyRequestToForm(form, base, []);
+  expect(buildRequest(form)).toMatchObject({ source_image: "YQ==", seed: "18446744073709551615" });
+  const reference = {
+    kind: "image" as const,
+    media: { authority: "inline" as const, data: "Yg==" },
+    mime_type: "image/png",
+    width: 768,
+    height: 768,
+    provenance: { name: "reference.png", sha256: "a".repeat(64) },
+  };
+  const { source_image: _source, source_image_name: _name, ...refBase } = base;
+  applyRequestToForm(
+    form,
+    { ...refBase, model: "minimax-h3-ref2va:official-bf16", references: [reference] },
+    [],
+  );
+  expect(buildRequest(form).references).toEqual([reference]);
+});

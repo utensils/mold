@@ -17,6 +17,6 @@ public nonisolated enum RetainedReferenceGuard {
                                   members: [RetainedSourceMedia.Member]) -> Bool {
         !references.isEmpty && references == original
             && references.allSatisfy { $0.media.authority == "descriptor" }
-            && members.filter { $0.role == "references" }.count == references.count
+            && RetainedSourceMedia.referenceMembers(members).count == references.count
     }
 }

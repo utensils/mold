@@ -6,6 +6,11 @@ import {
 } from "./galleryMirrorOrganization";
 import { retainedSourceMediaDisclosable } from "./gallerySourceMedia";
 import {
+  declaredVideoArtifacts,
+  requireVideoArtifactTransfer,
+  transferGalleryVideoArtifacts,
+} from "./galleryVideoArtifacts";
+import {
   embeddedMirrorMetadata,
   mirrorMetadataMatches,
 } from "../lib/galleryMirrorIdentity";
@@ -97,6 +102,17 @@ async function transfer(options: CopyOptions): Promise<CopyReceipt> {
     options.nativeLegacyOffer,
   );
   check();
+  options.verifySourceOffer?.(origin);
+  check();
+  const artifacts = declaredVideoArtifacts(origin.metadata);
+  if (artifacts) {
+    await requireVideoArtifactTransfer(source, destination, check, signal);
+    check();
+    if (origin.video_artifacts_complete !== true)
+      throw new Error(
+        "The original video's saved audio and clip history are incomplete. Repair the source before copying.",
+      );
+  }
   let legacyInputsUnavailable = false;
   if (
     !origin.members.length &&
@@ -121,7 +137,10 @@ async function transfer(options: CopyOptions): Promise<CopyReceipt> {
         await apiFetchTo(
           source.target,
           `/api/gallery/image/${encodeURIComponent(filename)}`,
-          { signal: signal ?? null },
+          {
+            signal: signal ?? null,
+            headers: { "x-mold-source-instance": source.instanceId },
+          },
         ),
         origin.output_size_bytes,
         signal,
@@ -383,7 +402,7 @@ async function transfer(options: CopyOptions): Promise<CopyReceipt> {
       : (sourceSnapshot.item.metadata_synthetic ?? false);
     const timestamp = sourceSnapshot.item.timestamp;
     const descriptor = new TextEncoder().encode(
-      `{"metadata":${embedded ?? origin.rawMetadata},"metadata_synthetic":${JSON.stringify(synthetic)}${Number.isSafeInteger(timestamp) && timestamp! >= 0 ? `,"timestamp":${timestamp}` : ""}}`,
+      `{"metadata":${origin.rawMetadata},"metadata_synthetic":${JSON.stringify(synthetic)}${Number.isSafeInteger(timestamp) && timestamp! >= 0 ? `,"timestamp":${timestamp}` : ""}}`,
     );
     const prefix = new Uint8Array(12);
     const view = new DataView(prefix.buffer);
@@ -398,7 +417,10 @@ async function transfer(options: CopyOptions): Promise<CopyReceipt> {
         `/api/gallery/import/${encodeURIComponent(filename)}`,
         {
           method: "PUT",
-          headers: { "Content-Type": "application/vnd.mold.gallery-import" },
+          headers: {
+            "Content-Type": "application/vnd.mold.gallery-import",
+            "x-mold-destination-instance": destination.instanceId,
+          },
           body: new Blob([prefix, descriptor, bytes]),
           signal: signal ?? null,
         },
@@ -466,7 +488,10 @@ async function transfer(options: CopyOptions): Promise<CopyReceipt> {
         await apiFetchTo(
           source.target,
           `/api/gallery/source-media/${encodeURIComponent(filename)}/${encodeURIComponent(member.member_id!)}`,
-          { signal: signal ?? null },
+          {
+            signal: signal ?? null,
+            headers: { "x-mold-source-instance": source.instanceId },
+          },
         ),
         member.size_bytes,
         signal,
@@ -490,6 +515,9 @@ async function transfer(options: CopyOptions): Promise<CopyReceipt> {
               method: "PUT",
               headers: {
                 "Content-Type": "application/vnd.mold.retained-media-transfer",
+                "x-mold-destination-instance": destination.instanceId,
+                "x-mold-gallery-archive-identity":
+                  targetCopyOffer.archive_identity_sha256,
               },
               body: new Blob(chunks),
               signal: signal ?? null,
@@ -509,6 +537,20 @@ async function transfer(options: CopyOptions): Promise<CopyReceipt> {
       throw new Error(
         "Source media transfer was not confirmed. Copy again to repair this print.",
       );
+  }
+  if (artifacts) {
+    await transferGalleryVideoArtifacts({
+      source,
+      destination,
+      sourceFilename: filename,
+      destinationFilename: targetName,
+      sourceArchive: origin.archive_identity_sha256,
+      destinationArchive: targetCopyOffer.archive_identity_sha256,
+      artifacts,
+      check,
+      ...(signal ? { signal } : {}),
+    });
+    check();
   }
   await checkpoint("sources");
   const contributors =
@@ -616,6 +658,14 @@ async function transfer(options: CopyOptions): Promise<CopyReceipt> {
   check();
   if (!(await matches(finalDestination, targetName)))
     throw new Error("The destination output changed during copying.");
+  if (
+    artifacts &&
+    (finalSource.video_artifacts_complete !== true ||
+      finalDestination.video_artifacts_complete !== true)
+  )
+    throw new Error(
+      "The video's saved audio and clip history could not be verified. Copy again to repair it.",
+    );
   const comparable = (o: CopyOffer) =>
     JSON.stringify(
       o.members.map((member) => [

@@ -149,6 +149,13 @@ Local authoring inputs are saved privately with your prompt and scalar settings.
 
 Native shipping builds include the reviewed Metal H3 engine; remote generation uses the selected host's capabilities.
 
+Duration and extended-video copies preserve their complete captured recipe,
+retained inputs, and separate provenance/audio archive files. Sync resumes
+interrupted archive transfers and repairs missing assets on existing copies.
+A movie download alone is an output export, not a full Library backup. Missing
+legacy inputs are disclosed; a declared but incomplete video archive is a copy
+failure until repaired.
+
 **Save All to This Mac** copies retained inputs with every supported output type, independently of model family. The destination owns the source, identity, mask/control, edit/typed references, audio/video, keyframes, continuation and chain stage media, so reuse does not need the original machine. Incomplete source transfers are reported as failures. Reusing sequence settings restores the first stage's source; later stages remain in the copied archive. Rebuilding the complete authored sequence remains a separate workflow.
 
 ## Queue, discovery and video preferences

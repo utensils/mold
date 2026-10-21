@@ -115,6 +115,7 @@ public extension RenderDraft {
         // author named it. Restoring the former on a print that named nothing
         // pins a choice nobody made (`generateForm.ts` `pipelineForSettingsReuse`).
         pipeline = metadata.pipelineRequested == true ? metadata.pipeline : nil
+        spatialUpscale = metadata.spatialUpscale; temporalUpscale = metadata.temporalUpscale
         outputFormat = metadata.outputFormat
         // The REQUEST, never `has_alpha`: that describes the file, which a
         // transparent reference edited with the toggle off also sets

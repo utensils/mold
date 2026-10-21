@@ -1,3 +1,4 @@
+import { exactSeed, seedFromInput } from "@studio/lib/videoSettingsReuse";
 /**
  * Persistence + eligibility rules for Create's "lock last (seed)" affordance.
  *
@@ -10,22 +11,22 @@
 export const LAST_SEED_STORAGE_KEY = "mold.web.lastSeed.v1";
 
 /** A lockable seed is a finite non-negative integer-ish number. */
-function validSeed(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+function validSeed(value: unknown): value is number | string {
+  return exactSeed(value);
 }
 
-export function loadLastSeed(): number | null {
+export function loadLastSeed(): number | string | null {
   try {
     const raw = localStorage.getItem(LAST_SEED_STORAGE_KEY);
     if (raw === null) return null;
-    const parsed = Number(raw);
+    const parsed = seedFromInput(raw);
     return validSeed(parsed) ? parsed : null;
   } catch {
     return null;
   }
 }
 
-export function storeLastSeed(seed: number): void {
+export function storeLastSeed(seed: number | string): void {
   try {
     localStorage.setItem(LAST_SEED_STORAGE_KEY, String(seed));
   } catch {
@@ -43,9 +44,9 @@ export function storeLastSeed(seed: number): void {
  */
 export function completedSeedToLock(job: {
   chain: unknown | null;
-  request: { seed?: number | null };
-  result: { seed_used: number } | null;
-}): number | null {
+  request: { seed?: number | string | null };
+  result: { seed_used: number | string } | null;
+}): number | string | null {
   const seed = job.result?.seed_used;
   if (!validSeed(seed)) return null;
   if (job.chain != null && job.request.seed == null) return null;

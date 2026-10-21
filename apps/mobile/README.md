@@ -672,7 +672,7 @@ never answers produces no verdict: the row stays flagged as an interruption so
 a later resume can try again, and only a host that answers "no such job, no
 such print" settles it as a failure.
 
-Create keeps one output switch. **Add clip** expands ordered prompt/length rows with one Make video action; Library **Continue video** starts a separate linked part on its original machine. The model picker
+Create defaults to one prompt and **Duration**; **Define scenes** optionally expands ordered prompt/length rows with one Make video action. Library **Extend video** publishes the original plus added footage as a new movie; legacy **Continue video** starts a separate linked part on its original machine. The model picker
 lists every installed video checkpoint without narrowing, and the prompt, size,
 frame rate, steps, guidance, and seed fields are the only ones a clip needs.
 
@@ -1119,3 +1119,40 @@ Stalled work stays live and may reserve its device. Queue rows and Job Details s
 In Queue, a failed, interrupted or paused multi-clip video offers **Start again…**. Review the destination, then choose **Start again** on its original machine or **Send video** on another connected machine. Saved prompts, seed, settings and inputs stay together; the original remains unchanged. Machine-local adapters can restart only on their original machine. Unsupported retained inputs explain the refusal before admission. A lost reply keeps the known job for **Check queue**, and **Stop new attempt** cancels that destination operation without changing the original.
 
 On updated machines, **Delete recovery data…** is available for a failed or interrupted multi-clip job. Its separate confirmation deletes that job and retained inputs; saved Library videos remain available. The original installation and job revision must still match. **Stop new attempt** requires the updated installation-fenced control; an interrupted cancellation reply keeps its intent for reconciliation with the same job ID.
+
+### Duration videos and extending saved videos
+
+The shared Tauri phone interface uses the same updated-server video workflow
+as web and desktop: one prompt with **Duration**, an authoritative single-clip
+limit and actual joined-clip count, and optional **Define scenes**. Duration
+starts from the current short recipe, remains selected when changing models,
+and accepts presets or custom seconds without an arbitrary client-side upper
+limit. Existing source fitting, pending reference crops, video normalization,
+audio settings, and File under choices run through their normal preparation
+before a fresh full validation and durable parent admission.
+
+A Library video's **Extend video…** action opens its original recipe and prompt
+with **Add duration**. The original stays saved, and the new movie includes
+its full original prefix plus the new footage. Source identity is pinned to
+the owning machine; changing machines never silently transfers it. Original
+retained reference cards remain visible. A continuous plan uses the original
+ending as its opening boundary, hides an empty opening well, and asks the user
+to remove any conflicting opening image. Start new video explicitly drops the
+prefix. A closing frame remains available where the recipe supports it.
+
+Queue offers parent progress and state-appropriate Stop, Resume, deletion of
+recovery data, and **Start again or send…**. Saved videos remain in Library when
+recovery data is deleted. A same-machine restart reuses its local immutable
+prefix; an explicit Send relays that prefix to the chosen machine in bounded
+chunks and leaves the original job alone. Saved video jobs have stable Load
+more pagination. Unanswered operations remain reachable by their exact saved
+machine/operation identity after relaunch. Legacy hosts cannot silently shorten
+a saved Duration/Extend draft: the draft is shown with an update/reconnect
+explanation, and admission stays blocked until its capabilities are available.
+
+**Use settings** restores the saved duration, literal prompts, exact seed and
+authenticated original inputs into a fresh draft. An extended movie restores
+its added duration and explains that its original video is not attached. Legacy
+authored clips retain their individual settings; verified automatic clips may
+restore a single-prompt Duration with a saved-length notice. Missing provenance
+or original inputs produces an explanation before changing the current draft.

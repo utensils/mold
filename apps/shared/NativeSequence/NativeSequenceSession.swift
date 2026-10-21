@@ -22,32 +22,16 @@ final class NativeSequenceSession {
         var cancelling = false
     }
     static let pendingKey = "nativeAuthoredChainJobsV1"
-    struct SavedDraft: Codable {
-        struct Clip: Codable { let id: UUID; let prompt: String; let frames: Int; let transition: String }
-        struct Source: Codable {
-            let host: UUID
-            let origin: String
-            let installation: String
-            let job: String
-            let take: Int
-            let filename: String
-            var hadReferences: Bool?
-            var title: String? = nil
-
-            func matchesAuthority(_ other: Source?) -> Bool {
-                guard let other else { return false }
-                return host == other.host && origin == other.origin && installation == other.installation
-                    && job == other.job && take == other.take && filename == other.filename
-            }
-        }
-        let clips: [Clip]
-        let source: Source?
-    }
     var draft: SequenceDraft? { didSet {
         if oldValue != draft { generation += 1; validatedPlan = nil; preparing = false; saveDraft() }
     } }
     private var savedSource: SavedDraft.Source?
     var restoringSource: Bool { savedSource != nil && continuation == nil }
+
+    var reusedMotionTailFrames: Int?
+    var settingsInputsNeedRestoration = false
+    var settingsHadInputs = false
+    var settingsReuseNotice: String?
 
     var continuation: ChainContinuationSource?
     var continuationHost: MoldHost?
@@ -88,18 +72,24 @@ final class NativeSequenceSession {
            !saved.clips.isEmpty, saved.clips.count <= 16 {
             var restored = SequenceDraft(prompt: saved.clips[0].prompt, frames: saved.clips[0].frames)
             restored.stages = saved.clips.map { clip in
-                var stage = SequenceDraft.Stage(prompt: clip.prompt, frames: clip.frames, transition: clip.transition)
-                stage.id = clip.id
-                return stage
+                clip.stage
             }
             // The observable draft writes its journal when assigned. Restore
             // authority first so a launch cannot erase it from the next launch.
-            savedSource = saved.source; draft = restored
+            savedSource = saved.source
+            reusedMotionTailFrames = saved.reusedMotionTailFrames
+            settingsHadInputs = saved.settingsHadInputs == true
+            settingsInputsNeedRestoration = settingsHadInputs
+            settingsReuseNotice = saved.settingsReuseNotice
+            draft = restored
+            if settingsInputsNeedRestoration { message = "Reopen Use Settings on the original video to restore its clip inputs before generating." }
         }
     }
     private func saveDraft() {
         guard let draft else { defaults.removeObject(forKey: "nativeSequenceDraftV1"); return }
-        let saved = SavedDraft(clips: draft.stages.map { .init(id: $0.id, prompt: $0.prompt, frames: $0.frames, transition: $0.transition) }, source: savedSource)
+        let saved = SavedDraft(clips: draft.stages.map(SavedDraft.Clip.init), source: savedSource,
+            reusedMotionTailFrames: reusedMotionTailFrames, settingsHadInputs: settingsHadInputs,
+            settingsReuseNotice: settingsReuseNotice)
         if let data = try? JSONEncoder().encode(saved) { defaults.set(data, forKey: "nativeSequenceDraftV1") }
     }
 
@@ -119,6 +109,7 @@ final class NativeSequenceSession {
     func begin(prompt: String, frames: Int) {
         generation += 1
         savedSource = nil
+        resetSettingsReuse()
         draft = SequenceDraft(prompt: prompt, frames: frames)
         draft?.append()
         continuation = nil; continuationHost = nil; continuationTitle = nil; message = nil
@@ -126,6 +117,7 @@ final class NativeSequenceSession {
     func startFresh() {
         generation += 1
         savedSource = nil
+        resetSettingsReuse()
         draft = nil; continuation = nil; continuationHost = nil; continuationTitle = nil
         message = nil; preparing = false
     }
@@ -165,12 +157,14 @@ final class NativeSequenceSession {
 
     func refusal(base: GenerateRequest, limits: ChainLimits?) -> String? {
         guard let draft else { return nil }
+        if let conflict = settingsOverrideRefusal(base: base) { return conflict }
+        if settingsInputsNeedRestoration { return "Reopen Use Settings on the original video to restore its clip inputs before generating." }
         if needsReferenceDecision { return "Restore the original references or confirm continuing without them." }
         if restoringSource { return "Reconnect to the original machine to restore this continued video, or choose Start fresh." }
         guard let limits else { return "Checking this machine’s video support…" }
         do {
             if let continuation { _ = try continuation.request(stages: draft.wireStages(), composer: base) }
-            else { _ = try draft.request(base: base, limits: limits, repeatReferences: true) }
+            else { _ = try draft.request(base: base, limits: limits, repeatReferences: true, motionTailFrames: reusedMotionTailFrames) }
             return nil
         } catch { return error.localizedDescription }
     }
@@ -179,6 +173,11 @@ final class NativeSequenceSession {
                 backend: any MoldChainBackend, current: @escaping @MainActor () -> Bool,
                 prepare: (@MainActor () async throws -> GenerateRequest)? = nil) {
         guard let draft, !preparing else { return }
+        if let conflict = settingsOverrideRefusal(base: base) { message = conflict; return }
+        guard !settingsInputsNeedRestoration else {
+            message = "Reopen Use Settings on the original video to restore its clip inputs before generating."
+            return
+        }
         guard !needsReferenceDecision else {
             message = "Restore the original references or confirm continuing without them."
             return
@@ -202,7 +201,7 @@ final class NativeSequenceSession {
                                                                detail: detail, limits: limits)
                     guard refreshed.take == continuation.take, refreshed.settings == continuation.settings else { throw SequencePresentationError.changedSource }
                     request = try continuation.request(stages: draft.wireStages(), composer: base)
-                } else { request = try draft.request(base: base, limits: limits, repeatReferences: true) }
+                } else { request = try draft.request(base: base, limits: limits, repeatReferences: true, motionTailFrames: reusedMotionTailFrames) }
                 let plan = try await backend.validateChain(request)
                 guard mine == generation, current() else { throw SequencePresentationError.changedMachine }
                 validatedPlan = plan
@@ -352,6 +351,13 @@ final class NativeSequenceSession {
         guard job.detail?.state == .completed || job.detail?.state == .cancelled else { return }
         jobs.removeAll { $0.id == job.id }
         authorities[job.id] = nil; stopped.remove(job.id)
+    }
+    func removeDiscarded(_ job: Job) {
+        guard let index=jobs.firstIndex(where:{$0.id==job.id && $0.host==job.host && $0.installation==job.installation}) else {return}
+        tasks[job.id]?.cancel();tasks[job.id]=nil;followTokens[job.id]=nil
+        authorities[job.id]=nil;stopped.remove(job.id)
+        forget(job.jobId,host:job.host.id)
+        jobs.remove(at:index)
     }
     func resume(_ job: Job, backend: any MoldChainBackend) {
         guard let isCurrent = authorities[job.id], isCurrent() else { return }

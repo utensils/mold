@@ -446,7 +446,7 @@ pub(crate) fn purge_trashed_print_blocking(
                     format!("{e:#}"),
                 )
             })?;
-        release_retired_media_pins(dir, name, gate, media_lifecycle)?;
+        release_retired_media_pins(dir, name, Some(db), gate, media_lifecycle)?;
     }
     Ok(())
 }
@@ -579,7 +579,7 @@ pub(crate) fn hard_delete_live_print_blocking(
                     "failed to checkpoint gallery deletion projection: {error:#}"
                 ))
             })?;
-        release_retired_media_pins(dir, name, gate, media_lifecycle)?;
+        release_retired_media_pins(dir, name, db, gate, media_lifecycle)?;
     }
     Ok(())
 }
@@ -592,9 +592,30 @@ fn remove_gallery_media_projection(db: &MetadataDb, dir: &Path, name: &str) -> a
 fn release_retired_media_pins(
     dir: &Path,
     name: &str,
+    db: Option<&MetadataDb>,
     gate: &GalleryPublicationGate,
     lifecycle: Option<&crate::queue_media_lifecycle::QueueMediaLifecycle>,
 ) -> Result<(), ApiError> {
+    let assets = gate
+        .committed_archive_index(dir)
+        .map_err(|error| {
+            internal(
+                "failed to inspect retired video artifacts",
+                format!("{error:#}"),
+            )
+        })?
+        .retired_entries
+        .get(name)
+        .and_then(|entry| {
+            entry
+                .record()
+                .metadata
+                .video_job
+                .as_ref()?
+                .artifacts
+                .as_ref()
+                .map(|descriptor| (descriptor.clone(), entry.identity.clone()))
+        });
     let pins = gate
         .finalize_retained_media_release(dir, [name.to_owned()])
         .map_err(|error| {
@@ -603,6 +624,15 @@ fn release_retired_media_pins(
                 format!("{error:#}"),
             )
         })?;
+    if let (Some(db), Some((descriptor, identity))) = (db, assets) {
+        let released = crate::video_archive_assets::root_from_db(db).and_then(|root| {
+            crate::video_archive_assets::release(&root, &descriptor, &identity)?;
+            Ok(())
+        });
+        if let Err(error) = released {
+            tracing::warn!(file = %name, %error, "video artifact release needs reconciliation");
+        }
+    }
     let Some(lifecycle) = lifecycle else {
         // Authority already excludes these pins. A future complete startup
         // scan may collect the encrypted orphans; never guess without one.
@@ -1521,6 +1551,70 @@ pub(crate) fn spawn_trash_sweeper(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trash_retains_video_artifacts_and_permanent_delete_releases_only_its_owner() {
+        use sha2::{Digest, Sha256};
+        use std::io::Write as _;
+        let home = tempfile::tempdir().unwrap();
+        let db = MetadataDb::open(&home.path().join("mold.db")).unwrap();
+        let dir = home.path().join("output");
+        let assets = crate::video_archive_assets::root_from_db(&db).unwrap();
+        let mut provenance = tempfile::tempfile().unwrap();
+        provenance.write_all(b"provenance\n").unwrap();
+        let descriptor = crate::video_archive_assets::prepare(
+            &assets,
+            "job",
+            (
+                provenance,
+                mold_core::video_artifacts::VideoArtifactFile {
+                    sha256: format!("{:x}", Sha256::digest(b"provenance\n")),
+                    size_bytes: 11,
+                },
+            ),
+            None,
+            &mut || Ok(()),
+        )
+        .unwrap();
+        let req = serde_json::from_str(r#"{"prompt":"an owl","model":"ltx-video:fp16","width":64,"height":64,"steps":1,"guidance":1.0}"#).unwrap();
+        let mut metadata = mold_core::OutputMetadata::from_generate_request(&req, 1, None, "test");
+        metadata.video_job = Some(mold_core::video_artifacts::VideoJobProvenance {
+            id: uuid::Uuid::new_v4().to_string(),
+            manifest_sha256: "a".repeat(64),
+            clip_count: 1,
+            part_count: 1,
+            added_frames: 24,
+            source_frames: 0,
+            total_frames: 24,
+            join_mode: mold_core::video_job::VideoJoinMode::Continuous,
+            authoring: None,
+            source_archive_identity_sha256: None,
+            artifacts: Some(descriptor.clone()),
+        });
+        let mut movie = tempfile::tempfile().unwrap();
+        movie.write_all(b"movie bytes").unwrap();
+        let gate = GalleryPublicationGate::default();
+        let identity = crate::queue::publish_video_file_to_dir_named(
+            &dir,
+            "movie.mp4",
+            movie,
+            &metadata,
+            None,
+            Some(&db),
+            None,
+            &gate,
+            &mut || Ok(()),
+        )
+        .unwrap();
+        crate::video_archive_assets::seal(&assets, &descriptor, &identity).unwrap();
+        trash_print_blocking(&dir, "movie.mp4", &db, &gate, 1).unwrap();
+        assert!(crate::video_archive_assets::open(&assets, &descriptor, &identity).is_ok());
+        purge_trashed_print_blocking(&dir, "movie.mp4", &db, &gate, None).unwrap();
+        assert!(
+            !assets.join(&descriptor.bundle_id).exists(),
+            "permanent deletion must release the movie's private artifacts"
+        );
+    }
 
     #[test]
     fn gallery_change_feed_upkeep_records_retention_and_collects_old_tombstones() {

@@ -70,12 +70,14 @@ import PanelResizeHandle from "../shell/PanelResizeHandle.vue";
 
 const props = withDefaults(
   defineProps<{
+    durationActive?: boolean;
+    incomingVideoBoundary?: boolean;
     form: GenerateForm;
     tab?: InspectorTab;
     /** Recent prints, newest first, for the Recent tab. */
     recent?: MergedPrint[];
     /** Seed of the most recent finished print — powers "lock last seed". */
-    lastSeed?: number | null;
+    lastSeed?: number | string | null;
     /** Why the canvas holds its current size — the shape resolver's authority. */
     canvasIntent?: CanvasIntent;
     /** Authored video jobs choose their final filename on the server. */
@@ -638,7 +640,13 @@ function resetSettings() {
         <div class="ms-group-label uppercase">Start from a photo</div>
         <!-- `titled`: this label IS the group's heading, so the wells drop a
              legend that would only read it back. -->
-        <SourceImageWell ref="sourceWell" :form="form" :selected-model="contractModel" titled />
+        <SourceImageWell
+          :incoming-video-boundary="incomingVideoBoundary"
+          ref="sourceWell"
+          :form="form"
+          :selected-model="contractModel"
+          titled
+        />
         <div v-if="maskDoorAvailable || showIdentity" class="ms-doors">
           <button
             v-if="maskDoorAvailable"
@@ -908,7 +916,11 @@ function resetSettings() {
            human-facing control; exact frames stay in Advanced. -->
       <div v-if="showClipCard" class="ms-field ms-card" data-test="clip-card">
         <div class="ms-group-label uppercase">Clip</div>
-        <div v-if="canPredictDuration" class="ms-field--row" data-test="predict-duration-control">
+        <div
+          v-if="!durationActive && canPredictDuration"
+          class="ms-field--row"
+          data-test="predict-duration-control"
+        >
           <span class="ms-field__label ms-field__label--inline">Predict duration</span>
           <SwitchToggle
             :model-value="form.predictDuration"
@@ -917,7 +929,7 @@ function resetSettings() {
           />
         </div>
         <VideoDurationSlider
-          v-if="!form.predictDuration"
+          v-if="!durationActive && !form.predictDuration"
           :frames="form.frames"
           :fps="form.fps"
           :model="contractModel"
@@ -927,7 +939,7 @@ function resetSettings() {
           :routing-request="durationRoutingRequest"
           @update:frames="form.frames = $event"
         />
-        <p v-else class="ms-field__hint" data-test="predicted-duration-hint">
+        <p v-else-if="!durationActive" class="ms-field__hint" data-test="predicted-duration-hint">
           The host will choose 1–20 seconds from the prompt.
         </p>
 
@@ -1088,7 +1100,7 @@ function resetSettings() {
         :model="form.model"
         :extension="fileUnderExtension"
         :batch-size="form.batchSize"
-        :show-filename-preview="!clipsActive"
+        :show-filename-preview="!clipsActive && !durationActive"
         @update:state="setFileUnder"
       />
 
@@ -1113,6 +1125,7 @@ function resetSettings() {
         </span>
       </button>
       <AdvancedSettings
+        :duration-active="durationActive"
         v-if="advancedExpanded"
         id="desktop-inline-advanced"
         :form="form"

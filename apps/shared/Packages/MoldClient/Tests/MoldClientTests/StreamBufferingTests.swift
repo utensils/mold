@@ -106,5 +106,7 @@ private final class CountingBytes: AsyncSequence, @unchecked Sendable {
         // a chain's frames are DELTAS, so an older one dropped loses a stage
         // boundary the newer one does not repeat.
         "HTTPBackend+Chain.swift",
+        "HTTPBackend+Video.swift",      // Full parent snapshots, latest only.
+        "MoldBackend+Video.swift",      // Already-finished unsupported-backend fallback.
     ])
 }

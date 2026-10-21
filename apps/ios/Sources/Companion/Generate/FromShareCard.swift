@@ -119,14 +119,14 @@ struct FromShareCard: View {
     private func attach(_ item: ShareInbox.Item, _ use: @escaping (ImportedPicture) throws -> Void) {
         working = true
         let fence = ReferenceImportFence(model: generate.modelName, host: generate.target?.id,
-            recipe: generate.recipe, media: generate.draft.media)
+            recipe: generate.recipe, media: generate.draft.media, videoSource: generate.videoDuration?.draft.source, videoSourceOwner: generate.videoDuration?.sourceOwner)
         let accepting = referenceAccepting
         Task {
             defer { working = false }
             do {
                 let picture = try await PictureImport.load(ShareInbox.url(of: item), accepting: accepting)
                 guard !Task.isCancelled, fence.isCurrent(model: generate.modelName, host: generate.target?.id,
-                    recipe: generate.recipe, media: generate.draft.media) else {
+                    recipe: generate.recipe, media: generate.draft.media, videoSource: generate.videoDuration?.draft.source, videoSourceOwner: generate.videoDuration?.sourceOwner) else {
                     problem = "Attachments changed while importing. Choose the shared picture again."
                     return
                 }

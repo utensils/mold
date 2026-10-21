@@ -539,6 +539,33 @@ fn source_image_contract_error(
     mold_core::validation::source_image_contract_violation(family, model, capability, has_source)
 }
 
+fn validate_library_scale_overrides(
+    lora_scale: f64,
+    has_lora: bool,
+    control_scale: f64,
+    has_control: bool,
+) -> Result<()> {
+    anyhow::ensure!(lora_scale == 1.0 || has_lora,
+        "--lora-scale requires --lora or a camera preset when extending a Library video; inherited adapters are unchanged");
+    anyhow::ensure!(control_scale == 1.0 || has_control,
+        "--control-scale requires a new control input when extending a Library video; inherited controls are unchanged");
+    Ok(())
+}
+
+// A Library prefix supplies a required incoming boundary. It must not make
+// text-only recipes appear to accept a newly attached image.
+fn library_source_contract(
+    capability: Option<mold_core::SourceImageCapability>,
+    has_library_prefix: bool,
+) -> Option<mold_core::SourceImageCapability> {
+    match (capability, has_library_prefix) {
+        (Some(mold_core::SourceImageCapability::Required), true) => {
+            Some(mold_core::SourceImageCapability::Optional)
+        }
+        _ => capability,
+    }
+}
+
 /// The `has_source` argument above, from the flags that carry source frames.
 ///
 /// This preflight runs before the request exists, so it cannot call
@@ -1149,7 +1176,8 @@ pub async fn run(
     frames: Option<u32>,
     predict_duration: bool,
     fps: Option<u32>,
-    duration: Option<f64>,
+    duration: Option<u64>,
+    video_job: crate::commands::video_jobs::VideoJobFlags,
     clip_frames: Option<u32>,
     motion_tail: u32,
     audio: bool,
@@ -1212,7 +1240,107 @@ pub async fn run(
     expand_model: Option<String>,
     dry_run: bool,
 ) -> Result<()> {
+    if let Some(id) = video_job.operation_id {
+        let client = crate::control::client_for_host(host.as_deref())?;
+        return super::video_jobs::reconcile(&client, id, video_job.detach, output.as_deref())
+            .await;
+    }
+    anyhow::ensure!(
+        duration.is_none() || clip_frames.is_none(),
+        "--clip-frames cannot override the duration planner"
+    );
+    anyhow::ensure!(
+        duration.is_none() || format.is_none_or(|f| f == OutputFormat::Mp4),
+        "--duration publishes MP4; remove the incompatible --format"
+    );
     let mut config = Config::load_or_default();
+    let mut video_job = video_job;
+    let mut model_or_prompt = model_or_prompt;
+    let mut prompt_rest = prompt_rest;
+    let (mut width, mut height, mut steps, mut guidance, mut fps) =
+        (width, height, steps, guidance, fps);
+    if duration.is_some() && !local {
+        if let Some(filename) = video_job.extend_library.as_deref() {
+            let client = crate::control::client_for_host(host.as_deref())?;
+            video_job.expected_instance =
+                Some(super::video_jobs::destination(&client, true).await?);
+            validate_library_scale_overrides(
+                lora_scale,
+                !lora.is_empty() || camera_control.is_some(),
+                control_scale,
+                control.is_some() || control_model.is_some(),
+            )?;
+            let explicit_model = model_or_prompt.as_deref().is_some_and(|first| {
+                is_known_model(first, &config)
+                    || crate::catalog_bridge::looks_like_catalog_id(first)
+            });
+            macro_rules! marked {
+                ($field:literal,$condition:expr) => {
+                    if $condition {
+                        video_job.recipe_overrides.insert($field);
+                    }
+                };
+            }
+            marked!("model", explicit_model);
+            marked!("width", width.is_some());
+            marked!("height", height.is_some());
+            marked!("steps", steps.is_some());
+            marked!("guidance", guidance.is_some());
+            marked!("fps", fps.is_some());
+            marked!("negative_prompt", negative_prompt.is_some() || no_negative);
+            marked!(
+                "scheduler",
+                scheduler.is_some() || wan_flags.sample_solver.is_some()
+            );
+            marked!("cfg_plus", cfg_plus);
+            marked!("strength", strength.is_some());
+            marked!("reference_weight", reference_weight.is_some());
+            marked!("true_cfg", identity.true_cfg.is_some());
+            marked!("cfg_start_step", identity.cfg_start_step.is_some());
+            marked!("control_model", control_model.is_some());
+            marked!(
+                "control_scale",
+                control.is_some() || control_model.is_some()
+            );
+            marked!("loras", !lora.is_empty() || camera_control.is_some());
+            marked!("enable_audio", audio || no_audio);
+            marked!("video_only", video_only);
+            marked!("pipeline", pipeline.is_some());
+            marked!("ic_lora_control", ic_lora_control.is_some());
+            marked!("spatial_upscale", spatial_upscale.is_some());
+            marked!("temporal_upscale", temporal_upscale.is_some());
+            marked!(
+                "guidance_overrides",
+                guidance_flags.stg_scale.is_some()
+                    || guidance_flags.stg_blocks.is_some()
+                    || guidance_flags.rescale_scale.is_some()
+                    || guidance_flags.modality_scale.is_some()
+                    || guidance_flags.skip_step.is_some()
+            );
+            marked!("sample_shift", wan_flags.sample_shift.is_some());
+            marked!(
+                "distill_strength_high",
+                wan_flags.distill_strength.is_some()
+            );
+            marked!("distill_strength_low", wan_flags.distill_strength.is_some());
+            let base = super::video_jobs::library_recipe(&client, filename).await?;
+            if !explicit_model {
+                let mut words = Vec::new();
+                if let Some(first) = model_or_prompt.take() {
+                    words.push(first);
+                }
+                words.append(&mut prompt_rest);
+                model_or_prompt = Some(base.model.clone());
+                prompt_rest = words;
+            }
+            width = width.or(Some(base.width));
+            height = height.or(Some(base.height));
+            steps = steps.or(Some(base.steps));
+            guidance = guidance.or(Some(base.guidance));
+            fps = fps.or(base.fps);
+            video_job.extension_recipe = Some(base);
+        }
+    }
 
     // Async catalog ID pre-pass: if the user typed `cv:<id>` / `hf:<repo>`,
     // resolve it (sidecar-first, then live) and inject the synthesized
@@ -1225,36 +1353,7 @@ pub async fn run(
     let (model, prompt) = resolve_run_args(model_or_prompt.as_deref(), &prompt_rest, &mut config)?;
     let family = resolve_family(&model, &config);
     let is_h3 = mold_core::minimax_h3::is_family(&family);
-    let (duration, frames, fps) = if let Some(seconds) = duration.filter(|_| !is_h3) {
-        anyhow::ensure!(
-            frames.is_none() && !predict_duration,
-            "--duration conflicts with --frames and --predict-duration"
-        );
-        let fps = fps
-            .or_else(|| config.resolved_model_config(&model).effective_fps())
-            .unwrap_or(24);
-        anyhow::ensure!(
-            mold_core::validation::max_frames_for_family_at_fps(&family, fps).is_some(),
-            "--duration requires a video model"
-        );
-        let requested = seconds * f64::from(fps);
-        anyhow::ensure!(
-            seconds.is_finite()
-                && seconds > 0.0
-                && fps > 0
-                && requested <= f64::from(u32::MAX - 32),
-            "--duration must be positive, finite and within the supported frame range"
-        );
-        let step = mold_core::validation::frame_step_for_family(&family).unwrap_or(1);
-        let offset = mold_core::validation::frame_offset_for_family(&family).unwrap_or(0);
-        let minimum = mold_core::validation::min_frames_for_family(&family).unwrap_or(1);
-        let frames = (requested.ceil() as u32).max(minimum);
-        let frames = frames + (step + offset - frames % step) % step;
-        (None, Some(frames), Some(fps))
-    } else {
-        (duration, frames, fps)
-    };
-
+    anyhow::ensure!(!(local&&duration.is_some()&&!is_h3),"--local duration is available only for one bounded H3 generation; use a remote server for automatic video joining");
     if predict_duration && !mold_core::ltx25_manifest::is_contract_manifest(&model) {
         anyhow::bail!("--predict-duration is available only for LTX-2.5 checkpoints");
     }
@@ -1297,6 +1396,14 @@ pub async fn run(
         anyhow::bail!(
             "MiniMax H3 --steps counts terminal-inclusive sigma grid points and must be at least 2"
         );
+    }
+
+    // Reject impossible local controls before contacting the host, but capture
+    // its installation before any user media is prepared. Library extension
+    // captures earlier because its original recipe is authenticated host data.
+    if duration.is_some() && !local && video_job.expected_instance.is_none() {
+        let client = crate::control::client_for_host(host.as_deref())?;
+        video_job.expected_instance = Some(super::video_jobs::destination(&client, false).await?);
     }
 
     // All Library-addressed inputs use one authenticated origin. Keep the
@@ -1407,7 +1514,11 @@ pub async fn run(
     let mut h3_authoring = h3::prepare_authoring_candidates(
         &model,
         &family,
-        duration,
+        if local {
+            duration.map(|milliseconds| milliseconds as f64 / 1000.0)
+        } else {
+            None
+        },
         frames,
         fps,
         width,
@@ -1417,12 +1528,13 @@ pub async fn run(
         last_frame.as_deref(),
         h3_references,
         &fresh_video_indices,
+        !local && duration.is_some() && video_job.extend_library.is_some(),
     )?;
     let frames = h3_authoring.frames.or(frames);
     let fps = h3_authoring.fps.or(fps);
     let width = h3_authoring.width.or(width);
     let height = h3_authoring.height.or(height);
-    let format = if is_h3 {
+    let format = if is_h3 || duration.is_some() {
         OutputFormat::Mp4
     } else {
         format.unwrap_or(OutputFormat::Png)
@@ -1508,7 +1620,10 @@ pub async fn run(
     if let Some(message) = source_image_contract_error(
         Some(family.as_str()),
         &model,
-        resolve_source_image_contract(&model, host.as_deref(), local).await,
+        library_source_contract(
+            resolve_source_image_contract(&model, host.as_deref(), local).await,
+            !local && duration.is_some() && video_job.extend_library.is_some(),
+        ),
         cli_carries_source_frames(
             &image,
             &keyframe,
@@ -2055,6 +2170,14 @@ pub async fn run(
         seed,
         batch,
         generate::Ltx2Options {
+            video_job: if local {
+                None
+            } else {
+                duration.map(|duration_ms| crate::commands::video_jobs::VideoJobOptions {
+                    duration_ms,
+                    flags: video_job,
+                })
+            },
             frames,
             predict_duration,
             fps,
@@ -2479,6 +2602,37 @@ mod tests {
     /// The pre-dispatch contract check. Identical table in
     /// `mold-ai-discord`; both must agree with the server's admission gate,
     /// whose wording they reuse verbatim.
+    #[test]
+    fn library_extension_refuses_orphan_scale_overrides_instead_of_ignoring_them() {
+        assert!(validate_library_scale_overrides(0.5, false, 1.0, false)
+            .unwrap_err()
+            .to_string()
+            .contains("--lora-scale requires"));
+        assert!(validate_library_scale_overrides(1.0, false, 0.5, false)
+            .unwrap_err()
+            .to_string()
+            .contains("--control-scale requires"));
+        assert!(validate_library_scale_overrides(0.5, true, 0.5, true).is_ok());
+        assert!(validate_library_scale_overrides(1.0, false, 1.0, false).is_ok());
+    }
+
+    #[test]
+    fn duration_library_prefix_satisfies_required_opening_without_accepting_forbidden_images() {
+        use mold_core::SourceImageCapability::{Optional, Required, Unsupported};
+        assert_eq!(
+            library_source_contract(Some(Required), true),
+            Some(Optional)
+        );
+        assert_eq!(
+            library_source_contract(Some(Required), false),
+            Some(Required)
+        );
+        assert_eq!(
+            library_source_contract(Some(Unsupported), true),
+            Some(Unsupported)
+        );
+    }
+
     #[test]
     fn source_image_contract_rejects_exactly_what_admission_rejects() {
         use mold_core::SourceImageCapability::{Optional, Required, Unsupported};

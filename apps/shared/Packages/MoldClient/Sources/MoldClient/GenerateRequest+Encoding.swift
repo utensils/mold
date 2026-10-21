@@ -15,7 +15,7 @@ extension GenerateRequest {
     /// hide behind.
     enum CodingKeys: String, CodingKey {
         case prompt, model, width, height, steps, guidance, batchSize, negativePrompt, seed,
-             saveToGallery, frames, fps, pipeline, enableAudio, videoOnly, sourceImage,
+             saveToGallery, frames, fps, pipeline, spatialUpscale, temporalUpscale, enableAudio, videoOnly, sourceImage,
              sourceImageName, strength, editImages, references, referenceWeight, maskImage, loras, idImage,
              idImageName, idImages, idImageNames, idWeight, idStartStep, controlImage,
              controlModel, controlScale, keyframes, extendVideo, extendOverlapFrames, audioFile,
@@ -56,6 +56,8 @@ public extension GenerateRequest {
         try container.encodeIfPresent(frames, forKey: .frames)
         try container.encodeIfPresent(fps, forKey: .fps)
         try container.encodeIfPresent(pipeline, forKey: .pipeline)
+        try container.encodeIfPresent(spatialUpscale, forKey: .spatialUpscale)
+        try container.encodeIfPresent(temporalUpscale, forKey: .temporalUpscale)
         try container.encodeIfPresent(enableAudio, forKey: .enableAudio)
         try container.encodeIfPresent(videoOnly, forKey: .videoOnly)
         try container.encodeIfPresent(sourceImage, forKey: .sourceImage)

@@ -1,3 +1,9 @@
+import {
+  pendingLegacyVideoSettings,
+  videoDurationReusePending,
+  videoDurationResetPending,
+} from "../lib/videoLibraryExtensionHandoff";
+import type { LegacyVideoSettings } from "../api/legacyVideoSettings";
 import type { MinimaxH3AuthoringState } from "../lib/minimaxH3Authoring";
 import {
   prepareClipsInputs,
@@ -93,6 +99,7 @@ export function useVideoClips(
   const capturedSelection = ref<string | undefined>();
   const draftKey = ref("");
   const restoredDraft = ref(false);
+  const restoredSettings = ref<LegacyVideoSettings | null>(null);
   const continuation = ref<ChainContinuation>(),
     admission = ref<ChainAdmission | null>(null),
     detail = ref<ChainJobDetail | null>(null);
@@ -324,9 +331,10 @@ export function useVideoClips(
     )
       timer = setTimeout(() => void refresh(), 2500);
   }
-  async function open(recoverOnly = false) {
+  async function open(recoverOnly = false, restored?: LegacyVideoSettings) {
     if (!props.owner || (!props.request && !props.source)) return;
     preparation?.abort();
+    restoredSettings.value = restored ?? null;
     submissionToken = null;
     preparedBase = null;
     preparedReferences = null;
@@ -362,10 +370,25 @@ export function useVideoClips(
       ...(props.frameContract
         ? { frameContract: { ...props.frameContract } }
         : {}),
-      owner: { ...props.owner, target: { ...props.owner.target } },
-      request: JSON.parse(
-        JSON.stringify(props.request ?? {}),
-      ) as ClipsBaseRequest,
+      owner: restored
+        ? { ...restored.owner, target: { ...restored.owner.target } }
+        : { ...props.owner, target: { ...props.owner.target } },
+      request: restored
+        ? (() => {
+            const {
+              stages,
+              motion_tail_frames: _tail,
+              output_mode: _mode,
+              output_format: _format,
+              ...base
+            } = restored.request;
+            return {
+              ...base,
+              prompt: stages[0]!.prompt,
+              frames: stages[0]!.frames,
+            };
+          })()
+        : (JSON.parse(JSON.stringify(props.request ?? {})) as ClipsBaseRequest),
     };
     try {
       // A local shell may know its route before its status UUID is hydrated.
@@ -463,6 +486,19 @@ export function useVideoClips(
         captured.value.frameContract = contract;
       }
       limits.value = result;
+      if (restored) {
+        continuationTail.value = restored.request.motion_tail_frames ?? null;
+        draftKey.value = "";
+        clips.value = restored.request.stages.map((stage) => ({
+          id: crypto.randomUUID(),
+          prompt: stage.prompt,
+          frames: stage.frames,
+          restored: stage,
+        }));
+        restoredDraft.value = true;
+        await validate();
+        return;
+      }
       draftKey.value = JSON.stringify([
         owner.hostId,
         owner.instanceId,
@@ -532,7 +568,26 @@ export function useVideoClips(
   }
   function add() {
     if (clips.value.length < (limits.value?.max_stages ?? 16)) {
-      clips.value.push(newClip());
+      const next = newClip(),
+        previous = clips.value.at(-1)?.restored;
+      if (restoredSettings.value && previous) {
+        const {
+          source_image: _source,
+          keyframes: _keys,
+          transition: _join,
+          fade_frames: _fade,
+          ...template
+        } = JSON.parse(
+          JSON.stringify(previous),
+        ) as import("../lib/api/chainTypes").ChainStageWire;
+        next.restored = {
+          ...template,
+          prompt: next.prompt,
+          frames: next.frames,
+          transition: "smooth",
+        };
+      }
+      clips.value.push(next);
       edited();
     }
   }
@@ -807,6 +862,64 @@ export function useVideoClips(
     },
     { immediate: true },
   );
+  let handoffEpoch = 0;
+  watch(
+    [
+      pendingLegacyVideoSettings,
+      () => JSON.stringify(props.owner),
+      () => props.request?.model,
+    ],
+    async () => {
+      const stamp = ++handoffEpoch,
+        restored = pendingLegacyVideoSettings.value;
+      if (
+        !restored ||
+        !props.owner ||
+        !props.request ||
+        active.value ||
+        restored.owner.hostId !== props.owner.hostId ||
+        restored.request.model !== props.request.model
+      )
+        return;
+      const ownerSnapshot = JSON.stringify(props.owner);
+      try {
+        if (
+          (props.owner.instanceId &&
+            restored.owner.instanceId !== props.owner.instanceId) ||
+          restored.owner.target.baseUrl !== props.owner.target.baseUrl ||
+          restored.owner.target.apiKey !== props.owner.target.apiKey ||
+          restored.owner.target.connectionMode !==
+            props.owner.target.connectionMode
+        )
+          throw new Error(
+            "The original machine installation changed. Reopen Use settings from its original Library.",
+          );
+        await assertChainOwner(restored.owner);
+        if (
+          stamp !== handoffEpoch ||
+          disposed ||
+          ownerSnapshot !== JSON.stringify(props.owner) ||
+          pendingLegacyVideoSettings.value !== restored
+        )
+          return;
+        pendingLegacyVideoSettings.value = null;
+        if (restored.automaticDuration) {
+          videoDurationReusePending.value = restored.automaticDuration;
+          videoDurationResetPending.value = true;
+        } else void open(false, restored);
+      } catch (cause) {
+        if (stamp !== handoffEpoch || disposed) return;
+        pendingLegacyVideoSettings.value = null;
+        active.value = true;
+        loading.value = false;
+        captured.value = null;
+        limits.value = null;
+        error.value = cause instanceof Error ? cause.message : String(cause);
+        emit("active", true);
+      }
+    },
+    { immediate: true, flush: "post" },
+  );
   watch(settingsChanged, (changed) => {
     if (changed) preparation?.abort();
   });
@@ -853,6 +966,7 @@ export function useVideoClips(
     cancelBusy,
     editing,
     restoredDraft,
+    restoredSettings,
     minFrames,
     step,
     maxFrames,

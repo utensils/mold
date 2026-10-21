@@ -41,7 +41,7 @@ extension LibraryVisibilityTests {
 }
 
 extension LibraryVisibilityTests {
-    @Test func explicitlyOpenedHiddenPrintDoesNotEnterSourceBrowser() async throws {
+    @Test func dedicatedSourceBrowserIncludesLiveHiddenPrintsButRetainsPhysicalOwnerChecks() async throws {
         let host = MoldHost(name: "Fixture", baseURL: URL(string: "http://fixture")!)
         let fake = FakeBackend(host: host)
         fake.collectionRows = [Collection(id: "private", name: "Private", slug: "source-private-\(UUID())", hidden: true)]
@@ -52,7 +52,7 @@ extension LibraryVisibilityTests {
         let entry = LibraryEntry(host: host, print: row)
         scoped.items = [entry]
         let authority = SourceMediaAuthority(owner: entry, route: host, instance: nil)
-        #expect(!scoped.allowsSource(authority))
+        #expect(scoped.allowsSource(authority), "The dedicated Source Media section includes live hidden collections")
         #expect(scoped.allowsSource(authority, detail: true))
         #expect(!library.allowsSource(authority, detail: true))
     }

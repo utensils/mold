@@ -1,3 +1,4 @@
+import { protectLegacyGenerateWire } from "../lib/legacyGenerateWire";
 import type {
   GenerationReference,
   GenerationReferenceProvenance,
@@ -882,7 +883,7 @@ export async function prepareReferenceUploads<
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        request: scopedRequest,
+        request: protectLegacyGenerateWire(scopedRequest),
         upload_references: uploadReferences,
       }),
       ...signal,

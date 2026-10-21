@@ -22,7 +22,7 @@ struct ImageConditioningWells: View {
         if layout.showsSourceWell || layout.references != nil {
             VStack(alignment: .trailing, spacing: 4) {
                 HStack(alignment: .top, spacing: 8) {
-                    if layout.showsSourceWell {
+                    if layout.showsSourceWell && (!controller.durationUsesSourceEnding || draft.media.sourceImage != nil) {
                         SourceImageWell(
                             draft: $draft,
                             recipe: recipe,

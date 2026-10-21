@@ -54,6 +54,7 @@ struct LibrarySelection: Equatable {
     /// uses, so an item cannot mean two things.
     let perform: (LibraryAction) -> Void
 
+    var canExtendVideo = false
     var canContinueVideo = false
     var lifecycleBusy = false
     var canUseEndpoints = false
@@ -71,7 +72,7 @@ struct LibrarySelection: Equatable {
         LibraryMenuPlan(scope: scope.menuKind, count: count, allFavorite: allFavorite,
                         name: name, shelves: shelves, enclosingShelf: enclosingShelf,
                         exportFormats: exportFormats, meshExports: meshExports,
-                        canReuse: canReuse, canContinueVideo: canContinueVideo, canUseAsSource: canUseAsSource,
+                        canReuse: canReuse, canContinueVideo: canContinueVideo, canExtendVideo: canExtendVideo, canUseAsSource: canUseAsSource,
                         canAddReference: canAddReference, canUseEndpoints: canUseEndpoints,
                         canUpscale: canUpscale, upscalers: upscalers,
                         trashCount: trashCount, localSaveCount: localSaveCount,
@@ -79,7 +80,7 @@ struct LibrarySelection: Equatable {
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.canContinueVideo == rhs.canContinueVideo && lhs.copyDestinations == rhs.copyDestinations && lhs.canUseEndpoints == rhs.canUseEndpoints && lhs.lifecycleBusy == rhs.lifecycleBusy && lhs.targets == rhs.targets
+        lhs.canExtendVideo == rhs.canExtendVideo && lhs.canContinueVideo == rhs.canContinueVideo && lhs.copyDestinations == rhs.copyDestinations && lhs.canUseEndpoints == rhs.canUseEndpoints && lhs.lifecycleBusy == rhs.lifecycleBusy && lhs.targets == rhs.targets
             && lhs.count == rhs.count && lhs.allFavorite == rhs.allFavorite
             && lhs.scope == rhs.scope && lhs.shelves == rhs.shelves
             && lhs.enclosingShelf == rhs.enclosingShelf

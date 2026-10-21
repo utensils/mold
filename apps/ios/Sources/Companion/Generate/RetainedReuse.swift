@@ -21,6 +21,7 @@ final class RetainedReuse {
     var expectedFields: Set<RetainedSourceMedia.Field> = []
     private var originalSourceRevision: Int?
     private var selectedEntry: LibraryEntry?
+    private var selectedCopyOnly = false
     var canDiscard: Bool { authority != nil || !expectedFields.isEmpty }
     var originalRevisions: [RetainedSourceMedia.Field: Int] = [:]
     var settledFields: Set<RetainedSourceMedia.Field> = []
@@ -45,15 +46,16 @@ final class RetainedReuse {
         version == fence
     }
 
-    func probe(_ entry: LibraryEntry, fence: Int, controller: GenerateController) async {
+    func probe(_ entry: LibraryEntry, fence: Int, controller: GenerateController, onlySelectedCopy: Bool = false) async {
         defer { if version == fence { probing = false } }
         guard version == fence else { return }
         hosts = controller.hosts
         selectedEntry = entry
+        selectedCopyOnly = onlySelectedCopy
         var unavailable: RetainedSourceMedia.Availability?
         var candidate: (copy: LibraryEntry, inventory: RetainedSourceMedia.Inventory, route: MoldHost, instance: String?)?
         var coverage = -1
-        for copy in entry.everyCopy {
+        for copy in onlySelectedCopy ? [entry] : entry.everyCopy {
             guard isCurrent(fence, draft: controller.draft), !Task.isCancelled else { return }
             guard let route = controller.hosts.host(copy.hostID) else { continue }
             let instance = controller.hosts.instanceID(of: copy.hostID)
@@ -70,7 +72,7 @@ final class RetainedReuse {
                 continue
             }
             let availableFields = Set(inventory.members.compactMap { member -> RetainedSourceMedia.Field? in
-                let field = RetainedSourceMedia.fieldForRole[member.role]
+                let field = RetainedSourceMedia.field(forRole: member.role)
                 return field == .identityImages ? .identityImage : field
             })
             let covered = expectedFields.intersection(availableFields).count
@@ -91,7 +93,7 @@ final class RetainedReuse {
         guard isCurrent(fence, draft: controller.draft), !Task.isCancelled else { return }
         expectedFields.formUnion(inventory.members.compactMap { member -> RetainedSourceMedia.Field? in
             guard !RetainedSourceMedia.notReusableRoles.contains(member.role) else { return nil }
-            let field = RetainedSourceMedia.fieldForRole[member.role]
+            let field = RetainedSourceMedia.field(forRole: member.role)
             return field == .identityImages ? .identityImage : field
         })
         let captured = Authority(filename: copy.print.filename, origin: copy.hostID,
@@ -112,7 +114,7 @@ final class RetainedReuse {
         }
         authority = remaining.isEmpty ? nil : Authority(filename: copy.print.filename,
             origin: copy.hostID, members: remaining, route: route, instance: instance)
-        if inventory.members.contains(where: { $0.role.hasPrefix("stage_source:") }) {
+        if entry.print.metadata.videoJob == nil, inventory.members.contains(where: { $0.role.hasPrefix("stage_source:") }) {
             let source = inventory.members.contains { $0.role == "stage_source:0" } ? " and source picture" : ""
             notice = "Reusing the first stage’s settings\(source). Other stage inputs remain in the retained archive."
         } else if !remaining.isEmpty {
@@ -131,7 +133,7 @@ final class RetainedReuse {
 
     func sourcePictureRefusal(in draft: RenderDraft) -> String? {
         guard draft.media.sourceImage == nil, let authority,
-              authority.members.filter({ RetainedSourceMedia.fieldForRole[$0.role] == .sourceImage }).count > 1 else { return nil }
+              authority.members.filter({ RetainedSourceMedia.field(forRole: $0.role) == .sourceImage }).count > 1 else { return nil }
         return "This archive has multiple source pictures for one input. Attach the picture to use before generating."
     }
 
@@ -165,7 +167,7 @@ final class RetainedReuse {
 
     private func hasMissingFields(for request: GenerateRequest?) -> Bool {
         let retained = Set((snapshot()?.members ?? []).compactMap { member -> RetainedSourceMedia.Field? in
-            let field = RetainedSourceMedia.fieldForRole[member.role]
+            let field = RetainedSourceMedia.field(forRole: member.role)
             return field == .identityImages ? .identityImage : field
         })
         return expectedFields.contains { field in
@@ -183,7 +185,8 @@ final class RetainedReuse {
         restoreFailed = false
         notice = nil
         probing = true
-        Task { await probe(entry, fence: fence, controller: controller) }
+        let onlySelectedCopy = selectedCopyOnly
+        Task { await probe(entry, fence: fence, controller: controller, onlySelectedCopy: onlySelectedCopy) }
     }
 
     private static func expectedFields(in metadata: OutputMetadata?) -> Set<RetainedSourceMedia.Field> {

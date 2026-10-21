@@ -1,3 +1,4 @@
+import { protectLegacyGenerateWire } from "../lib/legacyGenerateWire";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { apiJsonTo, apiFetchTo, type ApiTarget } from "./client";
 import {
@@ -205,7 +206,7 @@ export async function prepareNormalizedReferenceUploads<
   }
   const frozenBody = JSON.stringify({
     protocol_version: 1,
-    request,
+    request: protectLegacyGenerateWire(request),
     reference_candidates: candidates,
   });
   const fingerprint = hex(

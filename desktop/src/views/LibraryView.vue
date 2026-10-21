@@ -116,6 +116,7 @@ import {
 } from "@studio/api/videoUpscale";
 import { useAppPrefsStore } from "../stores/appPrefs";
 import { useHostsStore } from "../stores/hosts";
+import { captureMirrorSource } from "../lib/mirrorGalleryCopy";
 import { useEventsStore } from "../stores/events";
 import {
   defaultUpscaler,
@@ -437,7 +438,17 @@ function localMirrorSource(entry: MergedPrint) {
     if (gallery.hostFor(location.sourceKey)?.kind !== "remote") continue;
     const target = gallery.targetOf(location.sourceKey);
     const item = gallery.rowOf(location.sourceKey, location.filename);
-    if (target && item) return { target, item };
+    if (target && item)
+      return {
+        target,
+        item,
+        context: captureMirrorSource(
+          location.sourceKey,
+          gallery.hostFor(location.sourceKey)?.instanceId,
+          target,
+          () => hosts.all.find((row) => row.id === location.sourceKey),
+        ),
+      };
   }
   return null;
 }
@@ -465,6 +476,7 @@ async function saveSelectedLocally(selection: MergedPrint[]) {
   localSaveBusy.value = true;
   let saved = 0;
   const failures: string[] = [];
+  const warnings: string[] = [];
   try {
     for (const [index, entry] of targets.entries()) {
       localSaveProgress.value = `Processing ${index + 1} of ${targets.length} selected prints…`;
@@ -476,6 +488,7 @@ async function saveSelectedLocally(selection: MergedPrint[]) {
           source.item.filename,
           source.item.metadata,
           source.item.timestamp,
+          { ...source.context, onWarning: (message: string) => warnings.push(message) },
         );
         saved++;
       } catch (error) {
@@ -487,12 +500,13 @@ async function saveSelectedLocally(selection: MergedPrint[]) {
     if (saved) await gallery.refreshHost("local");
     const description =
       failures[0] ??
+      warnings[0] ??
       (selection.length > targets.length
         ? `${selection.length - targets.length} prints unavailable for local saving.`
         : "");
     toasts.push(
       `Processed successfully ${saved} of ${targets.length} prints`,
-      failures.length ? "error" : "info",
+      failures.length ? "error" : warnings.length ? "warning" : "info",
       description ? { description } : {},
     );
   } finally {
@@ -828,10 +842,10 @@ async function transitionUpscale(action: "pause" | "resume" | "cancel") {
 // restores exactly like any other print — this is the ONLY path that attaches
 // retained source-media authority (`composer.set` invalidates it).
 
-function reuseSettings(entry: MergedPrint) {
+async function reuseSettings(entry: MergedPrint) {
   // Full metadata → full-fidelity restore (negative prompt, LoRAs,
   // scheduler, video params, …) via `applyPrefillToForm`.
-  reuseStillPrint(entry);
+  if (!(await reuseStillPrint(entry))) return;
   lightboxOpen.value = false;
   void router.push("/create");
 }

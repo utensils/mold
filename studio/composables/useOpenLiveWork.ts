@@ -53,6 +53,10 @@ export function openLiveWorkWith<M extends object>(
   surface: LiveWorkSurface<M>,
 ): (row: FleetActiveWork) => Promise<void> {
   return async (row: FleetActiveWork) => {
+    if (row.kind === "video_job") {
+      await surface.go("/queue");
+      return;
+    }
     if (row.kind === "sequence" || row.execution === "chain") {
       await surface.go(surface.chainDestination(row));
       return;

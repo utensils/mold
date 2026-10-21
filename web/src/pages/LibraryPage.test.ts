@@ -1,3 +1,10 @@
+vi.mock("@studio/api/chainJobs", async (original) => ({
+  ...(await original<typeof import("@studio/api/chainJobs")>()),
+  captureChainOwner: vi.fn(async (owner) => ({
+    ...owner,
+    instanceId: "fixture-installation",
+  })),
+}));
 import { readFileSync } from "node:fs";
 import { enableAutoUnmount, flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -764,7 +771,7 @@ describe("LibraryPage", () => {
     expect(pushMock).toHaveBeenCalledWith({ name: "create" });
   });
 
-  it("reuse degrades a stitched print to a one-shot on the first clip's prompt", async () => {
+  it("refuses incomplete legacy clip provenance before changing the current draft", async () => {
     // The print's own `metadata.prompt` is every clip newline-joined — a
     // description of the render, never a prompt anybody can re-submit.
     const stitched: GalleryImage = {
@@ -797,16 +804,9 @@ describe("LibraryPage", () => {
     await wrapper.find("[data-test='lb-reuse']").trigger("click");
     await flushPromises();
 
-    const state = useGenerateForm().state.value;
-    expect(state.prompt).toBe("the harbour at dawn");
-    expect(state.model).toBe("sdxl:fp16");
-    expect(state.width).toBe(1024);
-    expect(state.height).toBe(576);
-    expect(state.seed).toBe(77);
-    // A plain one-shot restore: no clip rail, no sequence output query.
-    expect(pushMock).toHaveBeenCalledWith({ name: "create" });
-    expect(pushMock).not.toHaveBeenCalledWith(
-      expect.objectContaining({ query: { output: "sequence" } }),
+    expect(pushMock).not.toHaveBeenCalledWith({ name: "create" });
+    expect(useNotifications().toasts.at(-1)?.text).toMatch(
+      /exact per-clip seeds|clip lengths|recipe settings/i,
     );
   });
 

@@ -86,13 +86,35 @@ struct GenerateView: View {
         }
         .onChange(of: hosts.models, initial: true) { _, _ in generate.settleChoice() }
         .onChange(of: hosts.upHosts.map(\.id)) { _, _ in generate.settleChoice() }
+        .task(id: DurationPlanKey(host: generate.target,
+            instance: generate.target.flatMap { hosts.instanceID(of: $0.id) },
+            enabled: generate.canAuthorVideoDuration, authoring: generate.videoDuration,
+            draft: generate.draft, model: generate.modelName)) {
+            generate.refreshDurationPlan()
+        }
+        .onChange(of: generate.videoDuration) { _, _ in generate.saveDraft() }
         .task(id: estimateKey) { await refreshEstimate() }
         .task(id: sequenceCapabilityKey) { await generate.refreshSequenceLimits() }
+        .task(id: durationSourceKey) { await generate.restoreDurationSource() }
+        .onChange(of: router.pendingVideoExtension, initial: true) { _, entry in
+            guard let entry else { return }
+            router.pendingVideoExtension = nil
+            generate.extendVideo(entry)
+        }
         .onChange(of: router.pendingContinuation, initial: true) { _, entry in
             guard let entry else { return }
             router.pendingContinuation = nil
             generate.continueVideo(entry)
         }
+    }
+
+    private struct DurationPlanKey: Equatable {
+        let host: MoldHost?
+        let instance: String?
+        let enabled: Bool
+        let authoring: VideoDurationAuthoring?
+        let draft: RenderDraft
+        let model: String?
     }
 
     private struct SequenceCapabilityKey: Equatable {
@@ -118,6 +140,7 @@ struct GenerateView: View {
 
     /// Debounced; a guess is said as a guess ("about"), never as a measurement.
     private func refreshEstimate() async {
+        guard !generate.usesVideoDuration else { estimate = nil; return }
         guard !generate.draft.media.generationReferences.contains(where: { $0.freshVideo != nil }) else { estimate = nil; return }
         try? await Task.sleep(for: .milliseconds(400))
         guard !Task.isCancelled, let host = generate.target, let model = generate.modelName else {
@@ -178,5 +201,21 @@ extension PrintKind {
 extension View {
     func hideKeyboard() {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
+}
+
+extension GenerateView {
+    private struct DurationSourceKey: Hashable {
+        let source: VideoJobSource?
+        let sourceOwner: VideoLibrarySourceOwner?
+        let host: MoldHost?
+        let instance: String?
+        let reachable: Bool
+    }
+    private var durationSourceKey: DurationSourceKey {
+        let host = generate.videoDuration?.sourceOwner.flatMap { hosts.host($0.hostId) }
+        return .init(source: generate.videoDuration?.draft.source, sourceOwner: generate.videoDuration?.sourceOwner,
+                     host: host, instance: host.flatMap { hosts.instanceID(of: $0.id) },
+                     reachable: host.map(hosts.isUp) ?? false)
     }
 }

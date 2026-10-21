@@ -80,12 +80,13 @@ pub(crate) async fn discard(
         .as_ref()
         .ok_or_else(|| refusal("Durable video jobs are unavailable."))?;
     {
-        let _guard = handle.lock_job(&id).await;
+        let guard = handle.lock_job(&id).await;
         let db = state
             .metadata_db
             .as_ref()
             .as_ref()
             .ok_or_else(|| refusal("Durable video jobs are unavailable."))?;
+        crate::video_job_child_authority::require_public_chain(db, &id)?;
         let Some(row) = mold_db::chain_jobs::get_job(db, &id)
             .map_err(|_| ApiError::internal("Could not read recovery job"))?
         else {
@@ -114,6 +115,8 @@ pub(crate) async fn discard(
         let metadata = state.metadata_db.clone();
         let deleting = id.clone();
         tokio::task::spawn_blocking(move || {
+            // Deletion and retained-input release outlive a dropped HTTP future.
+            let _guard = guard;
             crate::chain_source_media::release_all(&root, &row.job_dir).map_err(|error| {
                 ApiError::internal(format!("Could not release retained inputs: {error:#}"))
             })?;
@@ -151,6 +154,7 @@ fn load_row(state: &AppState, id: &str) -> Result<mold_db::chain_jobs::ChainJobR
         .as_ref()
         .as_ref()
         .ok_or_else(|| refusal("Durable video jobs are unavailable."))?;
+    crate::video_job_child_authority::require_public_chain(db, id)?;
     let row = mold_db::chain_jobs::get_job(db, id)
         .map_err(|_| ApiError::internal("Could not read original video"))?
         .ok_or_else(|| {
@@ -341,6 +345,32 @@ mod tests {
             finalized_at_ms: None,
         };
         (row, manifest)
+    }
+
+    #[tokio::test]
+    async fn discard_refuses_reserved_duration_children_before_lookup_or_deletion() {
+        let mut state = AppState::for_tests();
+        state.metadata_db =
+            std::sync::Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        state.chain_jobs = Some(std::sync::Arc::new(
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        ));
+        let child = uuid::Uuid::new_v4().to_string();
+        state.metadata_db.as_ref().as_ref().unwrap().with_conn(|conn| {
+            conn.execute("INSERT INTO video_job_child_owners(child_id,parent_id) VALUES(?1,'removed-parent')", [&child])?;
+            Ok(())
+        }).unwrap();
+        let error = discard(
+            State(state.clone()),
+            Path(child),
+            Json(mold_core::job_restart::DiscardChainJobRequest {
+                source_instance_id: state.instance_id.to_string(),
+                source_revision: "captured".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "VIDEO_JOB_CHILD_OWNED");
     }
 
     #[tokio::test]

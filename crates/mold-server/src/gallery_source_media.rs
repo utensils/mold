@@ -77,7 +77,7 @@ pub(crate) fn private_media_authorized(
 /// `archive_identity_sha256`, which is what stops a DIFFERENT request consuming
 /// it. The constant is domain-separated so it can never collide with a real
 /// `ApiKeySet::durable_identity` digest.
-fn reuse_credential_identity(
+pub(crate) fn reuse_credential_identity(
     authenticated: Option<&Extension<crate::auth::ApiKeyAuthenticated>>,
 ) -> String {
     match authenticated {
@@ -115,7 +115,27 @@ fn downloadable_role(role: &str) -> bool {
     )
 }
 
+fn stage_zero_slot(role: &str, prefix: &str) -> Option<usize> {
+    let value = role.strip_prefix(prefix)?.strip_prefix("0:")?;
+    let index = value.parse::<usize>().ok()?;
+    (value == index.to_string()).then_some(index)
+}
+
+fn reuse_role(role: &str) -> &str {
+    if stage_zero_slot(role, "stage_reference:").is_some() {
+        "references"
+    } else if stage_zero_slot(role, "stage_keyframe:").is_some() {
+        "keyframes"
+    } else {
+        role
+    }
+}
+
 fn reusable_role(role: &str) -> bool {
+    if role.starts_with("stage_reference:") || role.starts_with("stage_keyframe:") {
+        return stage_zero_slot(role, "stage_reference:").is_some()
+            || stage_zero_slot(role, "stage_keyframe:").is_some();
+    }
     if role.starts_with("chain_continuation_tail:") {
         return false;
     }
@@ -423,16 +443,38 @@ fn present_member(member: &mut ResolvedMember, metadata: &mold_core::OutputMetad
                 kind = match stage
                     .and_then(|stage| stage.generation_references.get(item_index?))
                     .map(|reference| reference.kind)
-                {
+                    .or_else(|| {
+                        (stage_index == Some(0) && metadata.video_job.is_some())
+                            .then(|| {
+                                metadata
+                                    .references
+                                    .as_ref()?
+                                    .get(item_index?)
+                                    .map(|r| r.kind)
+                            })
+                            .flatten()
+                    }) {
                     Some(mold_core::GenerationReferenceKind::Image) => "image",
                     Some(mold_core::GenerationReferenceKind::Video) => "video",
                     Some(mold_core::GenerationReferenceKind::Audio) => "audio",
+                    Some(mold_core::GenerationReferenceKind::Mesh) => "mesh",
                     _ => "unknown",
                 };
             } else {
                 frame_index = stage
                     .and_then(|stage| stage.keyframes.get(item_index?))
-                    .map(|frame| frame.frame);
+                    .map(|frame| frame.frame)
+                    .or_else(|| {
+                        (stage_index == Some(0) && metadata.video_job.is_some())
+                            .then(|| {
+                                metadata
+                                    .keyframes
+                                    .as_ref()?
+                                    .get(item_index?)
+                                    .map(|f| f.frame)
+                            })
+                            .flatten()
+                    });
             }
             format!(
                 "Stage {} {} {}",
@@ -660,8 +702,10 @@ struct ReuseSessionMember {
     index: usize,
     role: String,
     position: String,
+    frame_index: Option<u32>,
 }
 
+#[derive(Clone)]
 struct ReuseSession {
     instance_id: String,
     credential_identity: String,
@@ -684,8 +728,10 @@ fn unix_timestamp() -> u64 {
         .as_secs()
 }
 
-fn request_sha256(request: &mold_core::GenerateRequest) -> Result<String, ApiError> {
-    let bytes = serde_json::to_vec(request)
+pub(crate) fn request_sha256(request: &mold_core::GenerateRequest) -> Result<String, ApiError> {
+    let mut scoped = request.clone();
+    mold_core::prompt_text::normalize_real_line_endings_for_scope(&mut scoped);
+    let bytes = serde_json::to_vec(&scoped)
         .map_err(|error| ApiError::internal(format!("reuse request encoding failed: {error}")))?;
     let mut digest = Sha256::new();
     digest.update(b"mold.gallery-source-reuse-request.v1\0");
@@ -709,12 +755,70 @@ fn issue_session_token() -> Result<(String, [u8; 32]), ApiError> {
     Ok((token, hash))
 }
 
+#[cfg(test)]
 fn take_reuse_session(
     token_hash: &[u8; 32],
     now: u64,
     instance_id: &str,
     credential_identity: &str,
     request_digest: &str,
+) -> Result<ReuseSession, ApiError> {
+    read_reuse_session(
+        token_hash,
+        now,
+        instance_id,
+        credential_identity,
+        request_digest,
+        true,
+        None,
+    )
+}
+
+fn take_reuse_session_with_receipt(
+    token_hash: &[u8; 32],
+    now: u64,
+    instance_id: &str,
+    credential_identity: &str,
+    request_digest: &str,
+    receipt: Option<&mut crate::reference_uploads::ConsumptionReceipt<'_>>,
+) -> Result<ReuseSession, ApiError> {
+    read_reuse_session(
+        token_hash,
+        now,
+        instance_id,
+        credential_identity,
+        request_digest,
+        true,
+        receipt,
+    )
+}
+
+fn peek_reuse_session(
+    token_hash: &[u8; 32],
+    now: u64,
+    instance_id: &str,
+    credential_identity: &str,
+    request_digest: &str,
+) -> Result<ReuseSession, ApiError> {
+    read_reuse_session(
+        token_hash,
+        now,
+        instance_id,
+        credential_identity,
+        request_digest,
+        false,
+        None,
+    )
+}
+
+fn read_reuse_session(
+    token_hash: &[u8; 32],
+    now: u64,
+    instance_id: &str,
+    credential_identity: &str,
+    request_digest: &str,
+    consume: bool,
+    receipt: Option<&mut crate::reference_uploads::ConsumptionReceipt<'_>>,
 ) -> Result<ReuseSession, ApiError> {
     let mut sessions = reuse_sessions()
         .lock()
@@ -736,6 +840,32 @@ fn take_reuse_session(
             "RETAINED_MEDIA_REUSE_SCOPE_MISMATCH",
             StatusCode::CONFLICT,
         ));
+    }
+    if !consume {
+        return Ok(held.clone());
+    }
+    if let Some(receipt) = receipt {
+        let result = receipt(&crate::reference_uploads::InputConsumptionClaim {
+            kind: "gallery_reuse".to_string(),
+            session_sha256: token_hash
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            request_scope_sha256: held.request_sha256.clone(),
+            credential_identity: held.credential_identity.clone(),
+            instance_id: held.instance_id.clone(),
+        });
+        if let Err(error) = result {
+            match error {
+                crate::reference_uploads::ConsumptionReceiptError::NotPublished(error) => {
+                    return Err(error)
+                }
+                crate::reference_uploads::ConsumptionReceiptError::Published(error) => {
+                    sessions.remove(token_hash);
+                    return Err(error);
+                }
+            }
+        }
     }
     Ok(sessions
         .remove(token_hash)
@@ -789,6 +919,7 @@ fn selected_members(
             index: member.index,
             role: member.member.role.clone(),
             position: member.position.clone(),
+            frame_index: member.member.frame_index,
         });
     }
     selected.sort_by_key(|member| (member.pin_id.clone(), member.index));
@@ -880,6 +1011,78 @@ pub(crate) async fn hydrate_reuse_session(
     headers: &HeaderMap,
     request: &mut mold_core::GenerateRequest,
 ) -> Result<(), ApiError> {
+    hydrate_reuse_session_with_mode(
+        state,
+        authenticated,
+        auth,
+        headers,
+        request,
+        MAX_SOURCE_DOWNLOAD_BYTES,
+        true,
+        None,
+    )
+    .await
+}
+
+#[cfg(feature = "mp4")]
+pub(crate) async fn preview_hydrate_reuse_session(
+    state: &AppState,
+    authenticated: Option<&Extension<crate::auth::ApiKeyAuthenticated>>,
+    auth: Option<&Extension<crate::auth::AuthState>>,
+    headers: &HeaderMap,
+    request: &mut mold_core::GenerateRequest,
+    maximum_bytes: u64,
+) -> Result<(), ApiError> {
+    hydrate_reuse_session_with_mode(
+        state,
+        authenticated,
+        auth,
+        headers,
+        request,
+        maximum_bytes,
+        false,
+        None,
+    )
+    .await
+}
+
+/// Consume only after authenticated bytes have been hydrated successfully.
+/// The receipt is written under the exclusive one-use session lock.
+#[cfg(feature = "mp4")]
+pub(crate) async fn hydrate_reuse_session_with_receipt(
+    state: &AppState,
+    authenticated: Option<&Extension<crate::auth::ApiKeyAuthenticated>>,
+    auth: Option<&Extension<crate::auth::AuthState>>,
+    headers: &HeaderMap,
+    request: &mut mold_core::GenerateRequest,
+    maximum_bytes: u64,
+    receipt: &mut crate::reference_uploads::ConsumptionReceipt<'_>,
+) -> Result<(), ApiError> {
+    hydrate_reuse_session_with_mode(
+        state,
+        authenticated,
+        auth,
+        headers,
+        request,
+        maximum_bytes,
+        true,
+        Some(receipt),
+    )
+    .await
+}
+
+// Keep authorization and one-use claim fences explicit at this boundary.
+#[allow(clippy::too_many_arguments)]
+async fn hydrate_reuse_session_with_mode(
+    state: &AppState,
+    authenticated: Option<&Extension<crate::auth::ApiKeyAuthenticated>>,
+    auth: Option<&Extension<crate::auth::AuthState>>,
+    headers: &HeaderMap,
+    request: &mut mold_core::GenerateRequest,
+    maximum_bytes: u64,
+    consume: bool,
+    receipt: Option<&mut crate::reference_uploads::ConsumptionReceipt<'_>>,
+) -> Result<(), ApiError> {
     let Some(handle) = headers.get(REUSE_SESSION_HEADER) else {
         return Ok(());
     };
@@ -901,7 +1104,8 @@ pub(crate) async fn hydrate_reuse_session(
     let request_digest = request_sha256(request)?;
     let token_hash = session_token_hash(handle);
     let now = unix_timestamp();
-    let session = take_reuse_session(
+    let _publication = state.gallery_publication_gate.read().await;
+    let session = peek_reuse_session(
         &token_hash,
         now,
         state.instance_id.as_str(),
@@ -929,17 +1133,29 @@ pub(crate) async fn hydrate_reuse_session(
             StatusCode::CONFLICT,
         ));
     }
+    let mut selected_bytes = 0u64;
     for selected in &session.members {
         let current_member = current
             .members
             .iter()
             .find(|member| member.member.member_id == selected.member_id)
             .ok_or_else(|| ApiError::not_found("retained source-media member was removed"))?;
+        selected_bytes = selected_bytes
+            .checked_add(current_member.member.size_bytes)
+            .filter(|bytes| *bytes <= maximum_bytes)
+            .ok_or_else(|| {
+                ApiError::with_code(
+                    "Retained inputs exceed this operation's media budget",
+                    "RETAINED_SOURCE_MEDIA_TOO_LARGE",
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                )
+            })?;
         if current_member.media_set != selected.media_set
             || current_member.pin_id != selected.pin_id
             || current_member.index != selected.index
             || current_member.member.role != selected.role
             || current_member.position != selected.position
+            || current_member.member.frame_index != selected.frame_index
         {
             return Err(ApiError::with_code(
                 "retained source-media member identity changed",
@@ -957,23 +1173,40 @@ pub(crate) async fn hydrate_reuse_session(
     })?;
     let members = session.members;
     let decrypted = tokio::task::spawn_blocking(move || {
+        let mut remaining = maximum_bytes;
         members
             .into_iter()
             .map(|member| {
-                lifecycle
-                    .gallery_member_bytes(
-                        member.media_set.clone(),
-                        member.pin_id.clone(),
-                        member.index,
-                    )
-                    .map(|bytes| (member, bytes))
+                let bytes = lifecycle.gallery_member_bytes_bounded(
+                    member.media_set.clone(),
+                    member.pin_id.clone(),
+                    member.index,
+                    remaining,
+                )?;
+                remaining -= bytes.len() as u64;
+                Ok::<_, crate::queue_media_store::QueueMediaError>((member, bytes))
             })
             .collect::<Result<Vec<_>, _>>()
     })
     .await
     .map_err(|error| ApiError::internal(format!("reuse session decrypt task failed: {error}")))?
     .map_err(|error| ApiError::internal(format!("reuse session decrypt failed: {error}")))?;
-    hydrate_selected_members(request, decrypted)
+    // Hydration may reject incompatible targets. Do not spend the session
+    // until every selected byte and its target mapping have been validated.
+    let mut hydrated = request.clone();
+    hydrate_selected_members(&mut hydrated, decrypted)?;
+    if consume {
+        take_reuse_session_with_receipt(
+            &token_hash,
+            unix_timestamp(),
+            state.instance_id.as_str(),
+            &credential_identity,
+            &request_digest,
+            receipt,
+        )?;
+    }
+    *request = hydrated;
+    Ok(())
 }
 
 fn ensure_hydration_target_is_empty(
@@ -982,8 +1215,35 @@ fn ensure_hydration_target_is_empty(
 ) -> Result<(), ApiError> {
     let roles = members
         .iter()
-        .map(|member| member.role.as_str())
+        .map(|member| reuse_role(&member.role))
         .collect::<HashSet<_>>();
+    for (prefix, canonical) in [
+        ("stage_reference:", "references"),
+        ("stage_keyframe:", "keyframes"),
+    ] {
+        let mut slots = members
+            .iter()
+            .filter_map(|member| stage_zero_slot(&member.role, prefix))
+            .collect::<Vec<_>>();
+        slots.sort_unstable();
+        if slots
+            .iter()
+            .enumerate()
+            .any(|(expected, actual)| expected != *actual)
+            || (!slots.is_empty() && members.iter().any(|member| member.role == canonical))
+            || members
+                .iter()
+                .any(|member| member.role.starts_with(prefix) && !reusable_role(&member.role))
+            || (canonical == "keyframes"
+                && members
+                    .iter()
+                    .any(|member| member.role.starts_with(prefix) && member.frame_index.is_none()))
+        {
+            return Err(ApiError::validation(
+                "retained stage inputs require a complete, unambiguous first-stage topology",
+            ));
+        }
+    }
     let source_count = members
         .iter()
         .filter(|member| matches!(member.role.as_str(), "source_image" | "stage_source:0"))
@@ -1011,7 +1271,7 @@ fn ensure_hydration_target_is_empty(
     }
     let selected_references = members
         .iter()
-        .filter(|member| member.role == "references")
+        .filter(|member| reuse_role(&member.role) == "references")
         .count();
     if selected_references > 0 {
         let references = request.references.as_deref().ok_or_else(|| {
@@ -1050,8 +1310,26 @@ fn hydrate_selected_members(
     let mut edit_images = Vec::new();
     let mut references = Vec::new();
     let mut keyframes = Vec::new();
+    let mut decrypted = decrypted;
+    // A retained archive may span pins with unrelated storage indices. Authored
+    // stage positions, rather than pin order, define reference ordering.
+    decrypted.sort_by_key(|(member, _)| {
+        stage_zero_slot(&member.role, "stage_reference:")
+            .or_else(|| stage_zero_slot(&member.role, "stage_keyframe:"))
+            .unwrap_or(usize::MAX)
+    });
     for (member, bytes) in decrypted {
-        match member.role.as_str() {
+        if stage_zero_slot(&member.role, "stage_keyframe:").is_some() {
+            keyframes.push(mold_core::KeyframeCondition {
+                frame: member
+                    .frame_index
+                    .expect("archived frame locator checked above"),
+                image: bytes,
+                name: None,
+            });
+            continue;
+        }
+        match reuse_role(&member.role) {
             "source_image" | "stage_source:0" => request.source_image = Some(bytes),
             "identity_image" => request.id_image = Some(bytes),
             "identity_images" => identity_images.push(bytes),
@@ -1537,6 +1815,31 @@ mod tests {
             present_member(&mut member, &metadata);
             assert_eq!(member.member.media_kind.as_deref(), Some(kind));
         }
+        metadata.video_job = Some(
+            serde_json::from_value(serde_json::json!({
+                "id":"a9c465f9-661b-421b-b960-7bf1ce85b614", "manifest_sha256":"a".repeat(64),
+                "clip_count":"2","part_count":"2","added_frames":"144","source_frames":"0",
+                "total_frames":"144","join_mode":"continuous"
+            }))
+            .unwrap(),
+        );
+        metadata.frames = Some(144);
+        member.member.role = "stage_keyframe:0:0".into();
+        present_member(&mut member, &metadata);
+        assert_eq!(
+            member.member.frame_index,
+            Some(24),
+            "the authored endpoint is not the movie's final frame"
+        );
+        member.member.role = "stage_keyframe:1:0".into();
+        present_member(&mut member, &metadata);
+        assert_eq!(
+            member.member.frame_index, None,
+            "never borrow first-stage authority for another stage"
+        );
+        member.member.role = "stage_reference:0:0".into();
+        present_member(&mut member, &metadata);
+        assert_eq!(member.member.media_kind.as_deref(), Some("mesh"));
         member.member.role = "chain_continuation_tail:4294967295".into();
         present_member(&mut member, &metadata);
         assert_eq!(
@@ -1800,6 +2103,7 @@ mod tests {
             pin_id: "a".repeat(64),
             index,
             role: role.to_string(),
+            frame_index: None,
             position: if index == 0 {
                 "scalar".to_string()
             } else {
@@ -1832,6 +2136,97 @@ mod tests {
         )
         .is_err());
         assert!(target.source_image.is_none());
+    }
+
+    #[test]
+    fn stage_zero_reference_and_boundary_roles_restore_in_authored_order() {
+        let mut target = request();
+        target.references = Some(serde_json::from_value(serde_json::json!([
+            {"kind":"image", "media":{"authority":"descriptor"},"mime_type":"image/png","width":64,"height":64},
+            {"kind":"image", "media":{"authority":"descriptor"},"mime_type":"image/png","width":64,"height":64}
+        ])).unwrap());
+        let mut boundary = selected("stage_keyframe:0:0", 3);
+        boundary.frame_index = Some(123);
+        hydrate_selected_members(
+            &mut target,
+            vec![
+                (selected("stage_reference:0:1", 0), vec![22]),
+                (selected("stage_reference:0:0", 1), vec![11]),
+                (boundary, vec![33]),
+            ],
+        )
+        .unwrap();
+        let refs = target.references.unwrap();
+        assert_eq!(
+            refs[0].media(),
+            &mold_core::GenerationReferenceAuthority::Inline { data: vec![11] }
+        );
+        assert_eq!(
+            refs[1].media(),
+            &mold_core::GenerationReferenceAuthority::Inline { data: vec![22] }
+        );
+        assert_eq!(target.keyframes.unwrap()[0].frame, 123);
+    }
+
+    #[test]
+    fn ordinary_reference_order_is_not_replaced_by_storage_indices() {
+        let mut target = request();
+        target.references = Some(serde_json::from_value(serde_json::json!([
+            {"kind":"image", "media":{"authority":"descriptor"},"mime_type":"image/png","width":64,"height":64},
+            {"kind":"image", "media":{"authority":"descriptor"},"mime_type":"image/png","width":64,"height":64}
+        ])).unwrap());
+        hydrate_selected_members(
+            &mut target,
+            vec![
+                (selected("references", 9), vec![11]),
+                (selected("references", 0), vec![22]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            target.references.unwrap()[0].media(),
+            &mold_core::GenerationReferenceAuthority::Inline { data: vec![11] }
+        );
+    }
+
+    #[test]
+    fn stage_reuse_refuses_missing_positions_and_other_stages_before_mutation() {
+        for role in [
+            "stage_reference:1:0",
+            "stage_keyframe:1:0",
+            "stage_reference:0:1",
+            "stage_keyframe:0:0",
+        ] {
+            let mut target = request();
+            assert!(
+                hydrate_selected_members(&mut target, vec![(selected(role, 0), vec![1])]).is_err(),
+                "{role}"
+            );
+            assert!(target.source_image.is_none());
+            assert!(target.keyframes.is_none());
+        }
+    }
+
+    #[test]
+    fn stage_reuse_rejects_duplicate_mixed_and_noncanonical_reference_authority() {
+        for roles in [
+            vec!["stage_reference:0:0", "stage_reference:0:0"],
+            vec!["stage_reference:0:0", "references"],
+            vec!["stage_reference:0:00"],
+            vec!["stage_reference:00:0"],
+        ] {
+            let mut target = request();
+            assert!(hydrate_selected_members(
+                &mut target,
+                roles
+                    .iter()
+                    .enumerate()
+                    .map(|(i, role)| (selected(role, i), vec![1]))
+                    .collect()
+            )
+            .is_err());
+            assert!(target.references.is_none());
+        }
     }
 
     #[test]
@@ -2003,6 +2398,31 @@ mod tests {
     }
 
     #[test]
+    fn literal_parent_reuse_scope_preserves_backslashes_and_equates_real_line_endings() {
+        let mut literal = request();
+        literal.prompt = "actual\r\nline and literal\\n".into();
+        let legacy: mold_core::GenerateRequest = serde_json::from_value(
+            serde_json::to_value(mold_core::prompt_text::protect_generate_request_for_wire(
+                &literal,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            request_sha256(&legacy).unwrap(),
+            request_sha256(&literal).unwrap()
+        );
+        let mut changed = literal.clone();
+        changed.prompt.push_str("changed");
+        assert_ne!(
+            request_sha256(&literal).unwrap(),
+            request_sha256(&changed).unwrap()
+        );
+        assert!(literal.prompt.contains('\r'));
+        assert!(literal.prompt.contains("\\n"));
+    }
+
+    #[test]
     fn request_digest_is_typed_deterministic_and_media_sensitive() {
         let first = request();
         let mut same = serde_json::from_slice::<mold_core::GenerateRequest>(
@@ -2035,7 +2455,7 @@ mod tests {
     }
 
     #[test]
-    fn reuse_session_is_scope_bound_and_consumed_exactly_once() {
+    fn reuse_session_receipt_is_scope_bound_and_consumed_exactly_once() {
         let token = format!("test-{}", uuid::Uuid::new_v4());
         let token_hash = session_token_hash(&token);
         let now = unix_timestamp();
@@ -2061,6 +2481,33 @@ mod tests {
                 .code,
             "RETAINED_MEDIA_REUSE_SCOPE_MISMATCH"
         );
+        for _ in 0..2 {
+            peek_reuse_session(&token_hash, now, "instance-a", "credential-a", "request").unwrap();
+        }
+        assert_eq!(
+            peek_reuse_session(&token_hash, now, "instance-a", "other-client", "request")
+                .err()
+                .unwrap()
+                .code,
+            "RETAINED_MEDIA_REUSE_SCOPE_MISMATCH"
+        );
+        let mut refuse = |_: &crate::reference_uploads::InputConsumptionClaim| {
+            Err(
+                crate::reference_uploads::ConsumptionReceiptError::NotPublished(
+                    ApiError::internal("receipt could not be persisted"),
+                ),
+            )
+        };
+        assert!(take_reuse_session_with_receipt(
+            &token_hash,
+            now,
+            "instance-a",
+            "credential-a",
+            "request",
+            Some(&mut refuse)
+        )
+        .is_err());
+        peek_reuse_session(&token_hash, now, "instance-a", "credential-a", "request").unwrap();
         take_reuse_session(&token_hash, now, "instance-a", "credential-a", "request").unwrap();
         assert_eq!(
             take_reuse_session(&token_hash, now, "instance-a", "credential-a", "request")

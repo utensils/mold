@@ -25,6 +25,7 @@ public struct GalleryImport: Sendable {
     /// An existing Mold print carries its own recipe; Finder imports do not.
     public var originalMetadata: OutputMetadata?
     var originalMetadataJSON: Data?
+    var destinationInstance: String? = nil
     public var metadataSynthetic = true
 
     public init(prompt: String, model: String, width: Int = 0, height: Int = 0,
@@ -68,14 +69,15 @@ public struct GalleryImport: Sendable {
         metadataSynthetic = embedded == nil ? (print.metadataSynthetic ?? false) : false
     }
 
-    public init(mirroring print: GalleryPrint, fileAt url: URL) throws {
+    public init(mirroring print: GalleryPrint, fileAt url: URL, sourceOffer: RetainedSourceMedia.TransferOffer? = nil) throws {
         self.init(prompt: print.metadata.prompt ?? "", model: print.metadata.model ?? "",
                   version: print.metadata.version ?? "", file: Data(),
                   timestamp: print.createdAt)
         fileURL = url
         originalMetadata = print.metadata
         let embedded = try EmbeddedPrintMetadata.json(in: url, named: print.filename)
-        originalMetadataJSON = embedded ?? print.rawMetadataJSON
+        originalMetadataJSON = sourceOffer?.canonicalMetadataJSON ?? embedded ?? print.rawMetadataJSON
+        destinationInstance = sourceOffer?.artifactAuthority?.destinationInstance
         metadataSynthetic = embedded == nil ? (print.metadataSynthetic ?? false) : false
     }
 
@@ -179,6 +181,14 @@ extension HTTPBackend {
     public func importPrint(_ item: GalleryImport, as filename: String) async throws -> String {
         var request = self.request("/api/gallery/import/\(escaped(filename))")
         request.httpMethod = "PUT"
+        let raw = item.originalMetadataJSON.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let hasArtifacts = (raw?["video_job"] as? [String: Any])?["artifacts"] != nil || item.originalMetadata?.videoJob?.artifacts != nil
+        if hasArtifacts {
+            guard let instance = item.destinationInstance, UUID(uuidString: instance) != nil else {
+                throw RetainedSourceMedia.transferIncomplete("Reconnect the destination before copying all saved video data.")
+            }
+            request.setValue(instance, forHTTPHeaderField: "x-mold-destination-instance")
+        }
         request.setValue(GalleryImport.contentType, forHTTPHeaderField: "Content-Type")
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("mold-gallery-import-\(UUID().uuidString)")

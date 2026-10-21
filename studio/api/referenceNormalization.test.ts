@@ -339,3 +339,27 @@ describe("negotiated reference normalization", () => {
     ).toBe(true);
   });
 });
+it("fingerprints the exact protected legacy wire body while keeping final prompts literal", async () => {
+  const input = options(),
+    text = String.raw`C:\new\render` + "\r\nActual line";
+  const request = {
+    ...input.request,
+    prompt: text,
+    negative_prompt: text,
+    original_prompt: text,
+    prompt_transform: { root_prompt: text, source_prompt: text },
+  };
+  const fetchMock = transport();
+  vi.stubGlobal("fetch", fetchMock);
+  const lease = await prepareNormalizedReferenceUploads<typeof request>({
+    ...input,
+    request,
+  });
+  const body = JSON.parse(String(fetchMock.mock.calls[0]![1]!.body));
+  expect(body.request.prompt).toBe(text.replaceAll("\\", "\\\\"));
+  expect(body.request.prompt_transform.root_prompt).toBe(
+    text.replaceAll("\\", "\\\\"),
+  );
+  expect(lease.request.prompt).toBe(text);
+  expect(lease.request.prompt_transform.source_prompt).toBe(text);
+});

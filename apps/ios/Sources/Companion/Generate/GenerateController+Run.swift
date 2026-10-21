@@ -76,6 +76,7 @@ extension GenerateController {
                 })
             return
         }
+        if usesVideoDuration { generateDurationVideo(); return }
         let capturedInstance = hosts.instanceID(of: host.id)
         let ordinaryBackend = hosts.backend(for: host)
         let backend: any MoldBackend = if let http = ordinaryBackend as? HTTPBackend {
@@ -281,6 +282,8 @@ extension GenerateController {
     /// Keep the admitted batch while iOS suspends sockets in the background.
     func suspendFollowing() {
         followingSuspended = true
+        videoPlanner.clear()
+        videoJobs.suspend()
         runTask?.cancel()
         followingID = nil
         runTask = nil
@@ -326,7 +329,7 @@ extension GenerateController {
         let request = RenderRequest.one(draft, model: modelName,
             maxIdentityPhotos: target.flatMap { hosts.capabilities[$0.id]?.maxIdentityPhotos } ?? 0)
         return Set(RetainedSourceMedia.members(authority.members, forHydrating: request).compactMap {
-            RetainedSourceMedia.fieldForRole[$0.role]
+            RetainedSourceMedia.field(forRole: $0.role)
         })
     }
 }

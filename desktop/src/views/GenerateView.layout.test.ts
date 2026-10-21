@@ -188,7 +188,7 @@ describe("GenerateView layout", () => {
     // snapshotted `promptMode` back onto the shared rule, so a recipe that
     // IGNORES the prompt enables Generate with an empty one.
     expect(viewSource).toMatch(
-      /const promptMissing = computed\(\s*\(\) => promptRequired\(promptInputForForm\(form\)\) && !form\.prompt\.trim\(\),\s*\);/,
+      /const promptMissing = computed\(\s*\(\) =>\s*!videoDurationRef\.value\?\.scenesActive\.value &&\s*promptRequired\(promptInputForForm\(form\)\) &&\s*!form\.prompt\.trim\(\),\s*\);/,
     );
     expect(viewSource).toContain("const generationInputBlockerReason = computed");
     expect(viewSource).toContain("if (generationInputBlockerReason.value ||");

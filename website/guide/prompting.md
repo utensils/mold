@@ -77,8 +77,8 @@ The expander budget is 700 words per route. Word limits below are the corpus def
 | `wan22-ti2v-5b` | `wan` | `shared.md`, `families/wan.md`, `wan/image-conditioned.md`, `models/wan22-ti2v-5b.md` | 80 | 681 |
 | `wan22-t2v-a14b` | `wan` | `shared.md`, `families/wan.md`, `wan/text-to-video.md` | 100 | 574 |
 | `wan22-i2v-a14b` | `wan` | `shared.md`, `families/wan.md`, `wan/image-conditioned.md` | 80 | 584 |
-| `minimax-h3-fl2va` | `minimax-h3` | `shared.md`, `families/minimax-h3.md`, `minimax-h3/base-modes.md` | 250 | 644 |
-| `minimax-h3-ref2va` | `minimax-h3` | `shared.md`, `families/minimax-h3.md`, `minimax-h3/ref2va.md` | 300 | 693 |
+| `minimax-h3-fl2va` | `minimax-h3` | `shared.md`, `families/minimax-h3.md`, `minimax-h3/base-modes.md` | 250 | 653 |
+| `minimax-h3-ref2va` | `minimax-h3` | `shared.md`, `families/minimax-h3.md`, `minimax-h3/ref2va.md` | 300 | 702 |
 | `real-esrgan-x4plus` | `upscaler` | `shared.md`, `families/upscaler.md` | 20 | 229 |
 | `real-esrgan-x4plus-anime` | `upscaler` | `shared.md`, `families/upscaler.md` | 20 | 229 |
 | `real-esrgan-anime-v3` | `upscaler` | `shared.md`, `families/upscaler.md` | 20 | 229 |
@@ -1563,7 +1563,8 @@ and `<Audio n>` keep one meaning across every section.
 
 #### Generation context
 
-Match the described duration to the requested four to fifteen seconds.
+For one model clip, match the described action to that clip’s duration; upstream
+prompting examples describe four to fifteen seconds.
 `overall_soundscape` is one to four sentences of ambience, action sounds, and
 non-verbal sounds, never repeating dialogue or music. `non_diegetic_music`
 covers instrumentation, tempo, and dynamics; `N/A` when no score is wanted.
@@ -1593,6 +1594,9 @@ Expansion produces this grammar when given the H3 route. Check live runtime
 availability before promising speech.
 
 #### CLI
+
+Mold’s `--duration` can join many clips into a longer movie. Single-clip timing
+guidance and `max_runtime_seconds` do not cap that movie’s total duration.
 
 Read exactly one direct task leaf from `SKILL.md`: base modes for FL2VA
 identities, or Ref2VA for reference-conditioned identities.

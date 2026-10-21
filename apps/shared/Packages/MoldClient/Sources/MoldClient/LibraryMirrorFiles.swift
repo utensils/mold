@@ -41,8 +41,32 @@ public enum LibraryMirrorFiles {
         }
     }
 
-    public static func importDescriptor(for print: GalleryPrint, file: URL) async throws -> GalleryImport {
-        try await run { try GalleryImport(mirroring: print, fileAt: file) }
+    public static func importDescriptor(for print: GalleryPrint, file: URL,
+                                        sourceOffer: RetainedSourceMedia.TransferOffer? = nil) async throws -> GalleryImport {
+        try await run {
+            if let sourceOffer {
+                guard RetainedSourceMedia.validTransferDigest(sourceOffer.archiveIdentitySha256),
+                      RetainedSourceMedia.validTransferDigest(sourceOffer.outputSha256),
+                      sourceOffer.outputSizeBytes > 0, sourceOffer.canonicalMetadataJSON != nil else {
+                    throw MoldClientError.malformedResponse
+                }
+                let handle = try FileHandle(forReadingFrom: file)
+                defer { try? handle.close() }
+                var digest = SHA256(), count = 0
+                while let chunk = try handle.read(upToCount: chunkSize), !chunk.isEmpty {
+                    try Task.checkCancellation()
+                    guard chunk.count <= sourceOffer.outputSizeBytes - count else {
+                        throw RetainedSourceMedia.transferIncomplete("The downloaded output changed while copying. Try again.")
+                    }
+                    count += chunk.count; digest.update(data: chunk)
+                }
+                let hash = digest.finalize().map { String(format: "%02x", $0) }.joined()
+                guard count == sourceOffer.outputSizeBytes, hash == sourceOffer.outputSha256 else {
+                    throw RetainedSourceMedia.transferIncomplete("The downloaded output changed while copying. Try again.")
+                }
+            }
+            return try GalleryImport(mirroring: print, fileAt: file, sourceOffer: sourceOffer)
+        }
     }
 
     static func run<T: Sendable>(_ operation: @escaping @Sendable () throws -> T) async throws -> T {

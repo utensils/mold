@@ -170,7 +170,7 @@ Before importing a source-bearing copy, clients check destination readiness. Win
 
 `/api/capabilities.retained_media_transfer = { "protocol_version": 1 }` is the explicit receiver-readiness contract. It requires Unix, enabled gallery output and journal, and a reconciled encrypted media lifecycle/admission store. It does not require generation workers: a storage-only or maintenance host can receive backups. Keep this separate from generation's `durable_media` admission predicate. Clients require this supported version before importing source-bearing outputs; queue `durable_media` alone does not establish transfer support.
 
-Native Mac mirror compatibility keeps exact output digests, sizes and recipes. Embedded metadata may omit archive-only `job_id` and `generation_time_ms`, or carry the same version without its `(revision date)` suffix. An import may add the output-container `has_alpha` fact absent on the original archive; tolerate its absence only within the exact-output mirror check, and reject conflicting present values. Apply mirror compatibility to listing-versus-source archive comparisons too; completion bookkeeping is not an archive replacement. Missing scheduler/transparency facts require a bounded source-output download verified against the captured size and SHA-256, then exact corroboration from that output's embedded recipe; never ignore them based on absence alone. Only those differences are accepted; conflicting facts present on both sides and unknown recipe fields remain significant. Existing-copy matching uses the same contract before byte comparison, so retries repair inputs without duplicate outputs.
+Native Mac mirror compatibility keeps exact output digests, sizes and recipes. Embedded metadata may omit archive-only `job_id` and `generation_time_ms`, or carry the same version without its `(revision date)` suffix. An import may add the output-container `has_alpha` fact absent on the original archive; tolerate its absence only within the exact-output mirror check, and reject conflicting present values. Apply mirror compatibility to listing-versus-source archive comparisons too; completion bookkeeping is not an archive replacement. Missing scheduler/transparency facts require a bounded source-output download verified against the captured size and SHA-256, then exact corroboration from that output's embedded recipe; never ignore them based on absence alone. Only those differences are accepted; conflicting facts present on both sides and unknown recipe fields remain significant. Server import applies the same completion-only compatibility to embedded recipes while retaining the full authenticated archive descriptor; existing-copy retries prefer committed archive metadata over the older embedded projection. Existing-copy matching uses the same contract before byte comparison, so retries repair inputs without duplicate outputs.
 
 Retained image previews use authenticated `GET /api/gallery/source-media/:filename/:member_id/thumbnail`. Resolve exact publication-owned members, bound original/decode memory and concurrent rendering, return a 320-pixel PNG with private/no-store headers, and never accept paths or provenance filenames as byte authority. Client response reads are bounded to 2 MiB. Preview bytes stay separate from descriptor/session authority.
 
@@ -220,7 +220,6 @@ responses are private/no-store. Browsing creates no pins; Trash and permanent
 deletion retain their existing ownership rules. There is no independent source
 upload, pinning or deletion action.
 
-
 **Source identity and derived caches remain subordinate to ownership.** Additive
 `content_sha256` is the SHA-256 of exact reusable bytes: raw members use their
 authenticated manifest digest, while keyframes hash the actual unwrapped image
@@ -242,3 +241,37 @@ the entire stream but retain only the requested member and create no sibling
 plaintext files. Responses stay private/no-store; caches never persist plaintext.
 
 Thumbnail misses additionally hold a separate two-slot payload-lifetime permit from selected-member extraction through rendering and plaintext drop; the shared cold-work permit alone cannot bound buffers waiting between phases.
+
+Stored `GenerationRecord.metadata`, committed archive records, Mold `mold:parameters` containers, Trash metadata, and `GalleryImage.metadata` carry logical strings serialized by Mold. Decode them with the explicit literal metadata reader; never reapply legacy prompt-escape normalization. Keep the legacy request parser unchanged. A decoding fix that changes existing Gallery rows must bump `gallery_changes_api::ROW_FORMAT` and its golden fixture so feed cursors and listing validators invalidate stale replicas.
+
+For a duration movie, authenticated reuse maps retained `stage_source:0`,
+`stage_reference:0:<position>` and `stage_keyframe:0:<position>` into a fresh
+ordinary generation request. Reference and boundary positions must be complete
+and unambiguous; mixed ordinary/stage aliases, missing frame locators and later
+stages are refused. Boundary locators come from the exact archived recipe,
+never the movie's total delivered frame count. Reuse sessions bind and recheck
+that locator with archive/member identity before consuming a session. Legacy
+full-sequence restoration uses each stage's authenticated retained inputs.
+
+Video-job Library copies also retain `video_job.artifacts` (provenance and optional
+exact PCM). Both hosts must advertise `retained_media_transfer.video_artifacts`.
+`/api/gallery/video-artifacts/:filename/:role` exports only `provenance` or `pcm`,
+in at most 4 MiB chunks, fenced by source installation and committed archive.
+The destination `transfer` begin/status/chunk/complete routes bind the unchanged
+portable descriptor to its exact committed destination archive. Sequential durable
+offsets and bounded same-offset retry comparison permit restart without duplicate
+bytes. Completion hashes/fsyncs every file, rechecks the current archive under the
+publication gate, then seals an owner-scoped imported bundle. Never inline PCM,
+apply a whole-video byte/duration ceiling, or rehash the growing file per chunk.
+The source offer's `video_artifacts_complete` and Sync checkpoint trust require a
+verified seal; a copied movie with partial artifacts is repairable, not complete.
+Trash retains artifacts; permanent deletion releases only that exact owner's
+flat or imported bundle, including partial imports. Storage-only hosts can copy
+these files without an inference worker or MP4 encoder.
+New publication seals and transfer completion persist a private, atomic verified
+file-facts receipt outside the global Gallery gate. Bind it to exact owner,
+descriptor, path, inode/device, size, mtime and ctime. Unchanged inventory must
+validate this receipt without rereading PCM after restart or across large
+libraries; changed facts invalidate proof. Pre-receipt bundles qualify once by
+full hash, then persist the same proof. Do not use a bounded in-memory cache as
+the only defense against repeated whole-library audio scans.

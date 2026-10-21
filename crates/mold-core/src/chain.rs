@@ -94,6 +94,99 @@ impl ChainContinuation {
     }
 }
 
+/// Typed scalar recipe controls, bound into the internal child request digest.
+/// Media stays in the existing encrypted authored-input store.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChainGenerationControls {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline: Option<crate::Ltx2PipelineMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial_upscale: Option<crate::Ltx2SpatialUpscale>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temporal_upscale: Option<crate::Ltx2TemporalUpscale>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guidance_overrides: Option<crate::Ltx2GuidanceOverrides>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_shift: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distill_strength_high: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distill_strength_low: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ic_lora_control: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduler: Option<crate::Scheduler>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cfg_plus: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_only: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loras: Vec<crate::LoraWeight>,
+}
+impl ChainGenerationControls {
+    pub fn from_generation(request: &GenerateRequest) -> Self {
+        Self {
+            pipeline: request.pipeline,
+            spatial_upscale: request.spatial_upscale,
+            temporal_upscale: request.temporal_upscale,
+            guidance_overrides: request.guidance_overrides.clone(),
+            sample_shift: request.sample_shift,
+            distill_strength_high: request.distill_strength_high,
+            distill_strength_low: request.distill_strength_low,
+            ic_lora_control: request.ic_lora_control.clone(),
+            scheduler: request.scheduler,
+            cfg_plus: request.cfg_plus,
+            video_only: request.video_only,
+            loras: request.caller_lora_stack(),
+        }
+    }
+    pub fn apply_to(&self, request: &mut GenerateRequest) {
+        request.pipeline = self.pipeline;
+        request.spatial_upscale = self.spatial_upscale;
+        request.temporal_upscale = self.temporal_upscale;
+        request.guidance_overrides = self.guidance_overrides.clone();
+        request.sample_shift = self.sample_shift;
+        request.distill_strength_high = self.distill_strength_high;
+        request.distill_strength_low = self.distill_strength_low;
+        request.ic_lora_control = self.ic_lora_control.clone();
+        request.scheduler = self.scheduler;
+        request.cfg_plus = self.cfg_plus;
+        request.video_only = self.video_only;
+        request.lora = None;
+        request.loras = (!self.loras.is_empty()).then(|| self.loras.clone());
+    }
+}
+
+/// Immutable authority of the exact visible source pixels retained by a parent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChainIncomingSource {
+    pub parent_job_id: String,
+    pub source_sha256: String,
+    #[serde(with = "crate::video_job::decimal_u64")]
+    #[schema(value_type=String)]
+    pub source_frames: u64,
+}
+impl ChainIncomingSource {
+    pub fn validate(&self) -> Result<()> {
+        if self.parent_job_id.is_empty()
+            || !self
+                .parent_job_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+            || self.source_frames == 0
+            || self.source_sha256.len() != 64
+            || !self.source_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(MoldError::Validation(
+                "invalid internal video source boundary authority".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Structured multi-clip provenance block on [`crate::OutputMetadata`]
 /// (additive; absent for single generations and legacy rows).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -172,6 +265,8 @@ pub struct ChainStage {
     /// v2 movie-maker override hook for "regenerate just this stage with a
     /// different seed".
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "crate::types::deserialize_optional_seed")]
+    #[schema(schema_with = crate::types::optional_seed_schema)]
     pub seed_offset: Option<u64>,
 
     // NEW in multi-prompt v2 ───────────────────────────────────────────
@@ -221,6 +316,14 @@ pub struct ChainStage {
 /// former so downstream code only deals with `stages`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChainRequest {
+    /// Scalar generation settings for internal durable video children. Public
+    /// legacy routes reject this field instead of silently ignoring controls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_controls: Option<ChainGenerationControls>,
+    /// Server-authored incoming pixels for a durable video parent. Legacy public
+    /// chain routes refuse this descriptor; only the internal parent may create it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incoming_source: Option<ChainIncomingSource>,
     /// Policy used by the client to prepare source pixels. Pixels are already
     /// fitted; preserve ordinary provenance without fitting them again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -266,6 +369,8 @@ pub struct ChainRequest {
     /// Omission resolves to a random seed once at creation; explicit zero stays fixed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(example = 42)]
+    #[serde(deserialize_with = "crate::types::deserialize_optional_seed")]
+    #[schema(schema_with = crate::types::optional_seed_schema)]
     pub seed: Option<u64>,
 
     #[schema(example = 8)]
@@ -940,7 +1045,7 @@ impl ChainRequest {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        GenerateRequest {
+        let mut request = GenerateRequest {
             offload: self.offload,
             mesh: None,
             video_only: None,
@@ -1025,7 +1130,11 @@ impl ChainRequest {
             true_cfg: None,
             cfg_start_step: None,
             transparent_background: None,
+        };
+        if let Some(controls) = &self.generation_controls {
+            controls.apply_to(&mut request);
         }
+        request
     }
 
     /// Gallery/PNG metadata for the stitched chain output, derived from
@@ -1165,8 +1274,19 @@ impl ChainRequest {
     /// manifest-only behaviour for callers that do not.
     pub fn normalise_with_family(mut self, family_hint: Option<&str>) -> Result<Self> {
         self.validate_inline_media_budget()?;
-        if let Some(source) = &self.continue_from {
+        if let Some(source) = &self.incoming_source {
             source.validate()?;
+            if self.continue_from.is_some() {
+                return Err(MoldError::Validation(
+                    "a part may have only one incoming boundary".into(),
+                ));
+            }
+        }
+        if self.has_incoming_boundary() {
+            if let Some(source) = &self.continue_from {
+                source.validate()?;
+            }
+
             if self.stages.is_empty()
                 || self.prompt.is_some()
                 || self.total_frames.is_some()
@@ -1419,7 +1539,7 @@ impl ChainRequest {
                 .checked_add(stage.keyframes.as_ref().map_or(0, Vec::len))?
                 .checked_add(stage.generation_references.as_ref().map_or(0, Vec::len))
         });
-        let incoming = if self.continue_from.is_some() {
+        let incoming = if self.has_incoming_boundary() {
             self.motion_tail_frames as usize
         } else {
             0
@@ -1445,12 +1565,16 @@ impl ChainRequest {
         Ok(self)
     }
 
+    pub fn has_incoming_boundary(&self) -> bool {
+        self.continue_from.is_some() || self.incoming_source.is_some()
+    }
+
     /// Delivered frames from one stage, including the incoming external tail.
     pub fn stage_contributed_frames(&self, idx: usize) -> Option<u32> {
         let stage = self.stages.get(idx)?;
         let next = self.stages.get(idx + 1);
         Some(stage_contributed_frames(
-            if idx == 0 && self.continue_from.is_some() {
+            if idx == 0 && self.has_incoming_boundary() {
                 1
             } else {
                 idx
@@ -1675,6 +1799,34 @@ fn build_auto_expand_stages(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn authored_seed_decimal_strings_preserve_canonical_request_scope() {
+        let numeric = serde_json::json!({"model":"ltx-video", "width":512, "height":512, "steps":4, "guidance":0, "seed":u64::MAX, "stages":[{"prompt":"literal", "frames":97, "seed_offset":u64::MAX-1}]});
+        let mut decimal = numeric.clone();
+        decimal["seed"] = serde_json::json!(u64::MAX.to_string());
+        decimal["stages"][0]["seed_offset"] = serde_json::json!((u64::MAX - 1).to_string());
+        let numeric: super::ChainRequest = serde_json::from_value(numeric).unwrap();
+        let decoded: super::ChainRequest = serde_json::from_value(decimal.clone()).unwrap();
+        assert_eq!(decoded.seed, Some(u64::MAX));
+        assert_eq!(decoded.stages[0].seed_offset, Some(u64::MAX - 1));
+        assert_eq!(
+            serde_json::to_vec(&numeric).unwrap(),
+            serde_json::to_vec(&decoded).unwrap()
+        );
+        for value in ["-1", "1e3", "18446744073709551616"] {
+            let mut invalid = decimal.clone();
+            invalid["seed"] = serde_json::json!(value);
+            assert!(serde_json::from_value::<super::ChainRequest>(invalid).is_err());
+            let mut invalid = decimal.clone();
+            invalid["stages"][0]["seed_offset"] = serde_json::json!(value);
+            assert!(serde_json::from_value::<super::ChainRequest>(invalid).is_err());
+        }
+        decimal["seed"] = serde_json::Value::Null;
+        decimal["stages"][0]["seed_offset"] = serde_json::Value::Null;
+        let absent: super::ChainRequest = serde_json::from_value(decimal).unwrap();
+        assert_eq!(absent.seed, None);
+        assert_eq!(absent.stages[0].seed_offset, None);
+    }
+    #[test]
     fn sequence_discovery_uses_every_reviewed_h3_identity_and_excludes_download_only_tiers() {
         for model in crate::minimax_h3::REVIEWED_COMPACT_MODELS {
             assert!(
@@ -1790,6 +1942,8 @@ mod tests {
     fn an_installed_catalog_wan_checkpoint_normalises_on_wans_grid() {
         let installed_wan = || ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             model: "cv:2041121".into(),
             stages: vec![
@@ -1823,6 +1977,8 @@ mod tests {
         // Wan's grid is still enforced, just wan's and not LTX-2's.
         let off_grid = ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             stages: vec![wan_stage("one", 50), wan_stage("two", 50)],
             ..installed_wan()
@@ -1865,6 +2021,8 @@ mod tests {
     ) -> ChainRequest {
         ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             offload: None,
             collection: None,
@@ -1900,6 +2058,8 @@ mod tests {
     fn canonical_request(stages: Vec<ChainStage>, motion_tail_frames: u32) -> ChainRequest {
         ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             offload: None,
             collection: None,
@@ -2524,6 +2684,8 @@ mod tests {
     fn chain_script_projects_from_request() {
         let req = ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             offload: None,
             collection: None,
@@ -2770,6 +2932,8 @@ mod tests {
     fn stage_list_request(stages: Vec<(TransitionMode, u32, Option<u32>)>) -> ChainRequest {
         ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             offload: None,
             collection: None,
@@ -3114,6 +3278,66 @@ mod tests {
         assert!(
             request.normalise().is_err(),
             "all authored input kinds share one bounded part budget"
+        );
+    }
+
+    #[test]
+    fn parent_scalar_controls_remain_in_canonical_authority_and_metadata() {
+        let mut request = canonical_request(vec![make_stage(97)], 17);
+        request.generation_controls = Some(ChainGenerationControls {
+            sample_shift: Some(7.0),
+            distill_strength_high: Some(1.5),
+            pipeline: Some(crate::Ltx2PipelineMode::TwoStage),
+            ..Default::default()
+        });
+        request.prompt_transform = Some(crate::PromptTransformProvenance {
+            operation: crate::PromptTransformOperation::Expand,
+            root_prompt: Some(r"root\new".into()),
+            source_prompt: "source\\new\r\nline".into(),
+            source_kind: crate::RemixSourceKind::Direct,
+            task: crate::ExpandTask::TextToImage,
+            dimensions: vec![],
+        });
+        let projected = request.synthetic_generate_request(OutputFormat::Mp4, 97, 24);
+        assert_eq!(projected.sample_shift, Some(7.0));
+        assert_eq!(projected.distill_strength_high, Some(1.5));
+        assert_eq!(projected.pipeline, Some(crate::Ltx2PipelineMode::TwoStage));
+        let manifest =
+            crate::chain_job::ChainJobManifest::new("child".into(), 1, &request).unwrap();
+        assert_eq!(manifest.schema, "mold.chainjob.v3");
+        assert_eq!(
+            manifest.request().unwrap().prompt_transform,
+            request.prompt_transform
+        );
+        assert_eq!(
+            manifest.request().unwrap().generation_controls,
+            request.generation_controls
+        );
+    }
+
+    #[test]
+    fn internal_source_boundary_is_part_of_canonical_authority_and_delivered_count() {
+        let request = canonical_request(vec![make_stage(97)], 17);
+        let mut wire = serde_json::to_value(&request).unwrap();
+        let authority = serde_json::json!({"parent_job_id":"parent-job","source_sha256":"a".repeat(64),"source_frames":"240"});
+        wire["incoming_source"] = authority.clone();
+        let request: ChainRequest = serde_json::from_value(wire).unwrap();
+        let request = request.normalise().unwrap();
+        assert_eq!(request.estimated_total_frames(), 80);
+        assert_eq!(
+            serde_json::to_value(&request).unwrap()["incoming_source"],
+            authority
+        );
+        let manifest =
+            crate::chain_job::ChainJobManifest::new("child".into(), 1, &request).unwrap();
+        assert_eq!(manifest.schema, "mold.chainjob.v3");
+        let mut downgraded = manifest.clone();
+        downgraded.schema = "mold.chainjob.v1".into();
+        assert!(
+            crate::chain_job::ChainJobManifest::from_toml(&downgraded.to_toml().unwrap()).is_err()
+        );
+        assert!(
+            crate::chain_job::ChainJobManifest::from_toml(&manifest.to_toml().unwrap()).is_ok()
         );
     }
 

@@ -10,6 +10,7 @@ struct MirrorTarget: Sendable {
     let isCurrent: @MainActor @Sendable () -> Bool
     let collections: [(slug: String, name: String)]
     var privacyOnly = false
+    var assetsOnly = false
 
     var key: String { LocalSyncRecord.key(hostID: hostID, filename: print.filename) }
 }
@@ -260,8 +261,9 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
     do {
         guard await target.isCurrent() else { throw MoldClientError.unreachable(routeChanged) }
         try checkSyncStagingSpace(for: target.print)
-        let sourceIdentity = try await RetainedSourceMedia.preflightMirror(
+        let sourcePreparation = try await RetainedSourceMedia.prepareMirror(
             for: target.print.filename, metadata: target.print.metadata, from: target.source, to: destination)
+        let sourceIdentity = sourcePreparation.archiveIdentitySha256
         guard await target.isCurrent() else { throw MoldClientError.unreachable(routeChanged) }
         let file = try await target.source.mediaFile(target.print.filename, trashed: false)
         defer { try? FileManager.default.removeItem(at: file) }
@@ -282,7 +284,7 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
                     receipted = true
                 }
                 let sourceMedia = try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
-                    from: target.source, to: destination, as: requestedName, expectedSourceArchiveIdentity: sourceIdentity, downloadedOutput: file, isCurrent: { await target.isCurrent() })
+                    from: target.source, to: destination, as: requestedName, expectedSourceArchiveIdentity: sourceIdentity, downloadedOutput: file, capturedSourceOffer: sourcePreparation.sourceOffer, isCurrent: { await target.isCurrent() })
                 return MirrorResult(filename: requestedName, alreadyLocal: true, error: nil, sourceMedia: sourceMedia, receipted: receipted)
             }
         }
@@ -300,12 +302,14 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
                     receipted = true
                 }
                 let sourceMedia = try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
-                    from: target.source, to: destination, as: filename, expectedSourceArchiveIdentity: sourceIdentity, downloadedOutput: file, isCurrent: { await target.isCurrent() })
+                    from: target.source, to: destination, as: filename, expectedSourceArchiveIdentity: sourceIdentity, downloadedOutput: file, capturedSourceOffer: sourcePreparation.sourceOffer, isCurrent: { await target.isCurrent() })
                 return MirrorResult(filename: filename, alreadyLocal: true, error: nil, sourceMedia: sourceMedia, receipted: receipted)
             }
         }
         guard await target.isCurrent() else { throw MoldClientError.unreachable(routeChanged) }
-        let item = try await LibraryMirrorFiles.importDescriptor(for: target.print, file: file)
+        let item = try await LibraryMirrorFiles.importDescriptor(for: target.print, file: file, sourceOffer: sourcePreparation.sourceOffer)
+        guard await target.isCurrent() else { throw MoldClientError.unreachable(routeChanged) }
+        try await RetainedSourceMedia.revalidateMirrorSource(sourcePreparation, filename: target.print.filename, from: target.source)
         guard await target.isCurrent() else { throw MoldClientError.unreachable(routeChanged) }
         try await receipts?.markPending(target.key, filename)
         // The server may commit the file before its response is lost; the
@@ -324,7 +328,7 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
             receipted = true
         }
         let sourceMedia = try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
-            from: target.source, to: destination, as: imported, expectedSourceArchiveIdentity: sourceIdentity, downloadedOutput: file, isCurrent: { await target.isCurrent() })
+            from: target.source, to: destination, as: imported, expectedSourceArchiveIdentity: sourceIdentity, downloadedOutput: file, capturedSourceOffer: sourcePreparation.sourceOffer, isCurrent: { await target.isCurrent() })
         return MirrorResult(filename: imported, alreadyLocal: false, error: nil, sourceMedia: sourceMedia, receipted: true)
     } catch {
         return MirrorResult(filename: nil, alreadyLocal: false,
@@ -496,6 +500,7 @@ extension LibraryStore {
         var completed = 0
         func record(_ target: MirrorTarget, as filename: String, organize: Bool) {
             successfulCopies.append(MirrorCopy(target: target, filename: filename, newCopy: (organize && syncedCopies[target.key] == nil) || syncedCopies[target.key]?.initialOrganizationPending == true))
+            guard !target.assetsOnly else { return }
             let existing = syncedCopies[target.key]
             // A receipt is not a finished copy: its organization may never
             // have landed, so file its memberships again.

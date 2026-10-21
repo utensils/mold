@@ -1,3 +1,4 @@
+import { exactSeed, videoSettingsForReuse } from "@studio/lib/videoSettingsReuse";
 /**
  * Reactive form state for the Generate workspace and the pure builder that
  * turns it into a wire `GenerateRequest`. The capability matrix
@@ -1089,7 +1090,13 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
     form.sourceImageCapability,
     form.recipeCapabilities,
   );
-  const parsedSeed = form.seed.trim() === "" ? undefined : Number(form.seed);
+  const seedText = form.seed.trim();
+  const parsedSeed =
+    seedText === ""
+      ? undefined
+      : exactSeed(seedText) && BigInt(seedText) > BigInt(Number.MAX_SAFE_INTEGER)
+        ? seedText
+        : Number(seedText);
   let loras: LoraWeight[] = form.loras.map((l) => ({ path: l.path, scale: l.scale }));
 
   // Camera motion rides the ordinary loras[] stack (mirrors the CLI's
@@ -1122,7 +1129,7 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   const conditioning = conditioningForRequest(caps.sourceImageMode, wells);
 
   const req: GenerateRequest = {
-    prompt: form.prompt.trim(),
+    prompt: form.prompt,
     model: form.model,
     width: form.width,
     height: form.height,
@@ -1149,7 +1156,7 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   );
   if (namedViews.length) req.references = namedViews;
 
-  if (parsedSeed !== undefined && Number.isFinite(parsedSeed)) req.seed = parsedSeed;
+  if (parsedSeed !== undefined && exactSeed(parsedSeed)) req.seed = parsedSeed;
   if (req.prompt && form.originalPrompt && form.originalPrompt !== req.prompt) {
     req.original_prompt = form.originalPrompt;
   }
@@ -1463,8 +1470,8 @@ function loraNameFromPath(path: string): string {
  * exactly what the person typed.
  */
 export function restoredPrompt(metadata: OutputMetadata): string {
-  const firstClip = metadata.chain?.stages?.[0]?.prompt?.trim();
-  if (firstClip) return firstClip;
+  const firstClip = metadata.chain?.stages?.[0]?.prompt;
+  if (firstClip?.trim()) return firstClip;
   return metadata.prompt ?? "";
 }
 
@@ -1482,6 +1489,7 @@ export function applyMetadataToForm(
   metadata: OutputMetadata,
   models: ModelEntry[] = [],
 ): void {
+  const videoReuse = videoSettingsForReuse(metadata);
   form.cameraControl = null;
   const model = findInstalledModel(models, metadata.model);
   if (model) {
@@ -1526,7 +1534,7 @@ export function applyMetadataToForm(
   form.height = metadata.generation_height || metadata.height || form.height;
   form.steps = metadata.steps || form.steps;
   form.guidance = metadata.guidance ?? form.guidance;
-  form.seed = metadata.seed == null ? "" : String(metadata.seed);
+  form.seed = videoReuse?.seed ?? (metadata.seed == null ? "" : String(metadata.seed));
   form.scheduler = normalizeMetadataScheduler(metadata.scheduler);
   form.cfgPlus = metadata.cfg_plus ?? false;
   if (metadata.strength != null) form.strength = metadata.strength;
@@ -1565,7 +1573,7 @@ export function applyMetadataToForm(
   }
 
   // Video params (`video_frames`/`video_fps` are legacy desktop aliases).
-  const frames = metadata.frames ?? metadata.video_frames;
+  const frames = videoReuse?.frames ?? metadata.frames ?? metadata.video_frames;
   if (frames != null) form.frames = frames;
   // Preserve authored provenance even when Library reuse happens before the
   // inventory row arrives. Request building remains fail-closed against
@@ -1786,6 +1794,23 @@ export function applyRequestToForm(
     form.endFrame = { filename: last!.image.filename, base64: last!.image.base64 };
     form.keyframes = [];
   }
+  if (
+    !generationCapabilitiesForForm(
+      form.family,
+      form.model,
+      form.pipeline,
+      form.guidanceCapabilities,
+      form.sourceImageCapability,
+      form.recipeCapabilities,
+    ).supportsKeyframes &&
+    form.keyframes.length === 1 &&
+    form.keyframes[0]!.frame === 0 &&
+    !form.sourceImage
+  ) {
+    form.sourceImage = form.keyframes[0]!.image.base64;
+    form.sourceImageName = form.keyframes[0]!.image.filename;
+    form.keyframes = [];
+  }
   form.pipeline = request.pipeline ?? null;
   form.icLoraControl = request.ic_lora_control ?? null;
   form.retakeRange = request.retake_range ?? null;
@@ -1798,13 +1823,13 @@ export function applyRequestToForm(
     form.h3Authoring.references = (request.references ?? []).map((reference) => ({
       reference: JSON.parse(JSON.stringify(reference)),
     }));
-    if (request.source_image) {
+    if (form.sourceImage) {
       form.h3Authoring.firstFrame = {
         filename: request.source_image_name ?? "First frame",
         mimeType: "image/*",
         width: 0,
         height: 0,
-        data: request.source_image,
+        data: form.sourceImage,
       };
     }
     const finalFrame = (request.frames ?? form.frames) - 1;

@@ -1,0 +1,100 @@
+import Foundation
+
+public extension VideoJobCoordinator {
+    /// Rebuild visible receipts before any status answer, using only existing
+    /// connection records. A saved locator never creates a new connection.
+    func restorePending(hosts: [MoldHost]) {
+        unavailableRecoveryCount = 0
+        for record in pending {
+            guard let host = hosts.first(where: {
+                $0.id == record.hostId && $0.baseURL.absoluteString == record.origin && $0.connectionMode == record.connectionMode
+            }) else { unavailableRecoveryCount += 1; continue }
+            let owner = VideoJobOwner(host: host, instanceId: record.instanceId)
+            ensure(record.operationId, owner: owner)
+            if let index = index(record.operationId, owner: owner), jobs[index].detail == nil {
+                jobs[index].message = "Reconnect to this video's original machine to check its saved attempt."
+            }
+        }
+    }
+
+    /// Prepare exactly one captured snapshot, then validate its actual inputs.
+    /// The draft fence is used only before POST; admitted work owns its identity.
+    func submit(_ request: VideoJobRequest, owner: VideoJobOwner, backend: any MoldBackend,
+                current: @escaping @MainActor () -> Bool, unchanged: @escaping @MainActor () -> Bool,
+                prepare: (@MainActor () async throws -> VideoJobRequest)? = nil) async {
+        let backend = scoped(backend, owner: owner)
+        guard !isSubmitting, journalError == nil else { return }
+        guard !hasUncertainAdmission(on: owner) else {
+            error = "Check the saved video attempt in Queue before starting another video on this machine."
+            return
+        }
+        let token = UUID(); submissionToken = token
+        let fresh = { @MainActor in !Task.isCancelled && token == self.submissionToken && current() && unchanged() }
+        isSubmitting = true; error = nil
+        var saved: VideoJobAdmission?
+        var transport: PreparedVideoJob?
+        defer { if token == submissionToken { isSubmitting = false } }
+        do {
+            try await verify(owner, backend: backend, current: fresh)
+            let inputs = try await prepare?() ?? request
+            guard fresh() else { throw changed() }
+            transport = try await backend.prepareVideoJob(inputs)
+            guard fresh(), let staged = transport else { throw changed() }
+            var prepared = staged.request
+            let plan = try await backend.validateVideoJob(prepared)
+            guard fresh(), !plan.validationRevision.isEmpty else { throw changed() }
+            prepared.validationRevision = plan.validationRevision
+            try await verify(owner, backend: backend, current: fresh)
+            guard fresh() else { throw changed() }
+            let record = VideoJobAdmission(operationId: UUID().uuidString.lowercased(), owner: owner)
+            try save(record); saved = record
+            ensure(record.operationId, owner: owner)
+            let accepted = try await backend.createVideoJob(prepared, operationId: record.operationId, destinationInstanceId: owner.instanceId)
+            guard accepted.id == record.operationId else { throw MoldClientError.malformedResponse }
+            await transport?.cancel(); transport = nil
+            guard current() else { return }
+            publish(accepted, owner: owner)
+            follow(record, owner: owner, backend: backend, current: current)
+        } catch {
+            if let saved, !VideoRestartController.definitive(error), let transport {
+                // A delayed POST may still be consuming its grant. Keep only
+                // its tiny cleanup authority, never its prepared media bytes.
+                transportCleanups[identity(saved.operationId, owner: owner)] = .init(admission: saved, release: transport.release)
+            } else { await transport?.cancel() }
+            transport = nil
+            if let saved, VideoRestartController.definitive(error) {
+                do {
+                    try forget(saved.operationId, owner: owner)
+                    jobs.removeAll { $0.operationId == saved.operationId && $0.owner == owner }
+                } catch { self.error = UserFacingError.describe(error); return }
+            }
+            if token == submissionToken { self.error = UserFacingError.describe(error) }
+            if let saved, pending.contains(where: { $0.operationId == saved.operationId && $0.matches(owner) }) {
+                message(UserFacingError.describe(error), id: saved.operationId, owner: owner)
+            }
+        }
+    }
+
+    func recover(owner: VideoJobOwner, backend: any MoldBackend, current: @escaping @MainActor () -> Bool) async {
+        guard current() else { return }
+        for record in pending where record.matches(owner) {
+            guard current() else { return }
+            ensure(record.operationId, owner: owner)
+            await refresh(record.operationId, owner: owner, backend: backend, current: current)
+            if let detail = jobs.first(where: { $0.operationId == record.operationId && $0.owner == owner })?.detail,
+               detail.state == .queued || detail.state == .running {
+                follow(record, owner: owner, backend: backend, current: current)
+            }
+        }
+    }
+
+    func discover(owner: VideoJobOwner, backend: any MoldBackend, activityIDs: [String] = [],
+                  current: @escaping @MainActor () -> Bool) async {
+        await loadPage(owner: owner, cursor: nil, backend: backend, current: current)
+        for id in Set(activityIDs) where index(id, owner: owner) == nil {
+            guard current(), !Task.isCancelled else { return }
+            await refresh(id, owner: owner, backend: backend, current: current)
+            follow(.init(operationId: id, owner: owner), owner: owner, backend: backend, current: current)
+        }
+    }
+}

@@ -15,6 +15,18 @@ import Testing
 /// eleven views attach `.contextMenu` themselves.
 @MainActor
 struct MenuSurfaceTests {
+    @Test func sourceMediaCommandsKeepMetadataAvailableWhileFileLoadingIsReserved() {
+        let rows = SourceMediaCommand.actions(image: true, hasHash: true, busy: true)
+        #expect(rows.first(where: { $0.kind == .hash })?.isDisabled == false)
+        #expect(rows.first(where: { $0.kind == .sourceID })?.isDisabled == false)
+        for command in [SourceMediaCommand.copy, .save, .share] {
+            #expect(rows.first(where: { $0.kind == command })?.isDisabled == true)
+        }
+        let available = SourceMediaCommand.actions(image: false, hasHash: false, busy: false)
+        #expect(available.compactMap(\.kind).contains(SourceMediaCommand.hash) == false)
+        #expect(available.first(where: { $0.kind == .copy })?.title == "Copy File")
+    }
+
     /// Nothing attaches a contextual menu except the one door.
     ///
     /// A source scan rather than a convention, for the same reason

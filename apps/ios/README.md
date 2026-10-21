@@ -32,6 +32,10 @@ Secure connection startup retries brief proxy pressure up to three times within 
 On iPhone, Generate opens as a scrolling form: choose the kind and machine,
 describe the result, then choose a model. Tap **Model** to search installed
 models and recipes; **Get More Models…** opens model management directly.
+On updated machines advertising duration video jobs, clips use one prompt and **Duration**. The initial value follows the selected recipe; changing models preserves a chosen duration. The server reports the single-generation limit and actual number of clips joined into one movie. **Define scenes** optionally supplies separate prompts. Source fitting, opening/closing frames, typed references, audio, batch variations and filing settings use the ordinary preparation path. Generate creates durable parent jobs; Queue shows each movie once with the server’s progress, Stop, Resume and explicit deletion of recovery data. An unanswered submission remains a known attempt to check in Queue before starting another. Saved durations and scenes survive a cold launch in the private draft file. Older machines keep the existing single-generation controls and authored-sequence drafts keep their separate-part behavior.
+
+Library **Extend Video…** prefills the original recipe and **Add duration**, preserving the original movie. Its machine and source identity stay pinned across a cold launch. Original typed references remain visible and are inherited unless replaced; historical opening and closing images are cleared. For continuous extension, the selected video supplies the first frame. An explicitly attached opening image remains visible with an actionable conflict instead of being discarded.
+
 The keyboard’s **Done** dismisses the active ordinary or clip prompt without losing edits, including after scrolling. Options and the expanded prompt editor dismiss their keyboard when closed.
 The prompt stays in one scrollable form as the keyboard and text size change;
 Generate stays visible above the phone tabs. The composer never shows running or finished media: tap the queue count to open live progress and supported previews in Queue. Background queue updates keep attachment browsing open. The prompt has one Expand action.
@@ -361,6 +365,11 @@ other jobs may need.
 
 Reuse settings restores retained opening and closing frames into editable wells, preserving keyframe indices and ordered image references. Audio, source/continuation video, identity photos and control images restore with their saved settings where the selected recipe supports them. Continuation overlap and authored reference strength (including zero) are preserved. Older prints without recorded reference strength keep the server default. The original machine must retain the inputs; missing, damaged or oversized inputs are disclosed before generation. A new attachment or explicit removal wins over a late download, and restored wells never have a hidden archive fallback that can revive removed media.
 
+Use Settings on a completed Duration video restores its original single prompt, requested duration or optional scenes, literal text, exact seed and supported recipe settings. On an extended video it restores the added-footage settings into a fresh movie; the original video is not attached, and a notice distinguishes this from Extend Video. Original endpoints and ordered references are restored only from the authenticated clicked copy's retained archive.
+
+Older authored videos reopen all recorded clips, lengths, joins, effective seeds, adapters and per-clip inputs. Clip options show saved overrides and offer **Use global inputs and controls** before replacing them. Historical per-clip negative prompts were not recorded; only the recorded first value can be restored, and the editor explains this limitation. Explicit older automatic one-shot videos restore one prompt and saved-length duration only when their recorded recipe proves a uniform automatic split; the editor states that current joins may differ. Incomplete or unrepresentable automatic recipes, linked incoming carry, and unsupported conditioning controls are refused before changing the current draft. Private per-clip media is not stored in preferences: after a cold launch, reopen Use Settings on the original video to restore those inputs before generating.
+
+
 The Library's View Options includes a Machine picker. All Machines shows the
 shared library; choosing one machine shows and edits only its copies. Collection
 counts follow that scope. A collection confirmed absent on that machine is marked
@@ -503,6 +512,16 @@ Source Media uses the Library’s justified, aspect-preserving rows and two-poin
 
 ## Multi-clip video
 
-In Short clip, choose **Add another clip** to enter ordered prompts and lengths, then **Generate video**. The app validates the draft automatically before submitting it. Move or remove rows without opening a separate editor. Library **Continue video** makes the next separate linked MP4 from the latest completed authored take on its original machine. Ordinary one-prompt generation and Reuse settings remain available.
+Video creation starts with one prompt and **Duration**. The current recipe’s short duration is the initial choice; 30 seconds is a preset, and custom durations have no arbitrary product cap. The server shows its safe single-generation limit and how many clips join into one movie. **Define scenes** optionally adds per-scene prompts and durations. Library **Extend Video** opens **Add duration** for a new longer movie while preserving the original. Advanced older authored clips remain a separate compact clip editor when restored with Use Settings.
 
 The editor uses the selected host’s frame grid and validates delivered duration before admission. Reconnect recovers the same operation; Queue shows parent progress and supports applicable resume/cancel actions. Reference restoration is explicit after relaunch; drafts do not persist input bytes or credentials.
+
+Failed, interrupted, paused or historical cancelled video jobs offer **Start again…** when their machine supports recovery. Choose the same machine to start again, or another compatible machine to **Send video**. This creates a new attempt and keeps the original. Saved attempts remain in Queue after relaunch and can be checked or stopped using their original operation identity; unanswered submissions are never silently submitted again. **Delete job…** removes the confirmed job’s recovery data while keeping saved Library videos.
+
+Extend preserves compatible original spatial and temporal upscaling, shows the inherited recipe, and starts new footage with a fresh random seed unless one is explicitly chosen.
+
+Historical IC-LoRA/ControlNet recipes that this native editor cannot faithfully preserve show an explicit refusal; use the saved job’s **Start again** when available, or the CLI with the original retained controls. These settings are never silently removed.
+
+A refused Library extension remains visible and blocks Generate until acknowledged. **Keep current draft** leaves existing settings and media intact; pending source reads cannot replace that draft after acknowledgement.
+
+Stopped accepted duration videos remain paused in Queue and can resume from completed clips when the server advertises Resume. Historical cancelled parents remain available for an explicit fresh start or deletion of recovery data; accepted cancelled jobs are not dismissed locally. Cancelled-before-admission attempts can still be dismissed.

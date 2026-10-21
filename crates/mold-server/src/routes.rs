@@ -430,6 +430,11 @@ use crate::queue::clean_error_message;
         crate::routes_chain_jobs::preview_chain_job_placement,
         crate::routes_chain_jobs::list_chain_jobs,
         crate::routes_chain_jobs::get_chain_job,
+        crate::video_source_upload_routes::begin,
+        crate::video_source_upload_routes::status,
+        crate::video_source_upload_routes::append,
+        crate::video_source_upload_routes::complete,
+        crate::video_source_upload_routes::remove,
         crate::chain_restart::options,
         crate::chain_restart::export,
         crate::chain_restart::discard,
@@ -668,6 +673,7 @@ pub fn create_router(state: AppState) -> Router {
     // Stateful routes (need AppState) are added first, then .with_state() converts
     // Router<AppState> → Router<()>. Stateless routes (OpenAPI, docs) are merged after.
     Router::new()
+        .merge(crate::video_jobs::router())
         .route("/api/generate", post(generate))
         .route("/api/generate/estimate", post(generate_estimate))
         .route(
@@ -759,6 +765,23 @@ pub fn create_router(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(CHAIN_PART_REQUEST_BODY_BYTES)),
         )
         .route(
+            "/api/video-source-uploads/:id",
+            post(crate::video_source_upload_routes::begin)
+                .get(crate::video_source_upload_routes::status)
+                .delete(crate::video_source_upload_routes::remove)
+                .layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
+        .route(
+            "/api/video-source-uploads/:id/chunks",
+            put(crate::video_source_upload_routes::append).layer(DefaultBodyLimit::max(
+                crate::video_source_upload::MAX_CHUNK_BYTES,
+            )),
+        )
+        .route(
+            "/api/video-source-uploads/:id/complete",
+            post(crate::video_source_upload_routes::complete),
+        )
+        .route(
             "/api/chain-jobs",
             post(crate::routes_chain_jobs::create_chain_job)
                 .get(crate::routes_chain_jobs::list_chain_jobs)
@@ -836,6 +859,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/models/load", post(load_model))
         .route("/api/models/pull", post(pull_model_endpoint))
         .route("/api/models/unload", delete(unload_model))
+        .merge(crate::gallery_video_artifacts::router())
         .route("/api/gallery", get(list_gallery))
         .route(
             "/api/gallery/changes",
@@ -2104,26 +2128,35 @@ pub(crate) async fn materialize_chain_camera_controls(
     config: &mold_core::Config,
     request: &mold_core::ChainRequest,
 ) -> Result<(), ApiError> {
+    let generate = chain_camera_control_request(request);
+    let planned = plan_builtin_ltx2_camera_controls_in_config(config, &generate)?;
+    materialize_builtin_ltx2_camera_controls(state, &planned).await
+}
+
+pub(crate) fn chain_camera_control_request(
+    request: &mold_core::ChainRequest,
+) -> mold_core::GenerateRequest {
     let mut generate = request.synthetic_generate_request(
         mold_core::OutputFormat::Mp4,
         request.estimated_total_frames(),
         request.fps,
     );
-    generate.loras = Some(
-        request
-            .stages
-            .iter()
-            .flat_map(|stage| stage.loras.iter())
-            .map(|lora| mold_core::LoraWeight {
-                path: lora.path.clone(),
-                scale: lora.scale,
+    if request.generation_controls.is_none() {
+        generate.loras = Some(
+            request
+                .stages
+                .iter()
+                .flat_map(|stage| stage.loras.iter())
+                .map(|lora| mold_core::LoraWeight {
+                    path: lora.path.clone(),
+                    scale: lora.scale,
 
-                expert: None,
-            })
-            .collect(),
-    );
-    let planned = plan_builtin_ltx2_camera_controls_in_config(config, &generate)?;
-    materialize_builtin_ltx2_camera_controls(state, &planned).await
+                    expert: None,
+                })
+                .collect(),
+        );
+    }
+    generate
 }
 
 async fn materialize_builtin_ltx2_camera_controls(
@@ -3448,6 +3481,7 @@ async fn cancel_generation_batch(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<mold_core::GenerationBatchStatus>, ApiError> {
+    crate::video_job_child_authority::require_public_batch(&state, &id).await?;
     cancel_generation_batch_children(&state, &id).await?;
     let journal = state.queue_journal.clone();
     let detail = spawn_queue_read(move || {
@@ -7159,6 +7193,10 @@ async fn list_queue(
         schedulable_offset,
     )?;
 
+    crate::video_job_child_authority::suppress_owned_generations(&state, &mut entries).await?;
+    let mut live_only_entries = live_only_entries;
+    crate::video_job_child_authority::suppress_owned_generations(&state, &mut live_only_entries)
+        .await?;
     enrich_queue_model_downloads(&state, &mut entries).await?;
     let page = mold_core::QueuePage {
         limit,
@@ -7445,7 +7483,13 @@ where
     tokio::task::spawn_blocking(mutation)
         .await
         .map_err(|error| ApiError::internal(format!("queue mutation task failed: {error}")))?
-        .map_err(|error| ApiError::internal(format!("queue mutation failed: {error:#}")))
+        .map_err(|error| {
+            if error.is::<mold_db::video_job_child_owners::OwnedChildMutation>() {
+                crate::video_job_child_authority::owned()
+            } else {
+                ApiError::internal(format!("queue mutation failed: {error:#}"))
+            }
+        })
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -7709,6 +7753,7 @@ async fn patch_queue_job(
     Path(id): Path<String>,
     Json(req): Json<QueuePatchRequest>,
 ) -> Result<Json<crate::job_registry::JobEntry>, ApiError> {
+    crate::video_job_child_authority::require_public_generation(&state, &id).await?;
     if let Some(Some(target)) = req.target_gpu {
         let available = state
             .gpu_pool
@@ -7893,6 +7938,7 @@ async fn cancel_queue_job(
     Path(id): Path<String>,
     Query(query): Query<CancelQueueJobQuery>,
 ) -> Result<Response, ApiError> {
+    crate::video_job_child_authority::require_public_generation(&state, &id).await?;
     // Serialize the durable probe, bounded registry revocation, and durable
     // cancellation with feeder publication and PATCH. SQLite can block behind
     // another connection, so the scheduler fence is acquired only for the
@@ -7952,7 +7998,7 @@ struct CancelQueueJobQuery {
 /// What one row's cancellation did, so the single-job route can answer 404
 /// while the batch route simply skips a child nobody can cancel any more.
 #[derive(Debug, PartialEq, Eq)]
-enum QueueJobCancelOutcome {
+pub(crate) enum QueueJobCancelOutcome {
     Pending,
     Cancelled,
     Completing,
@@ -7963,7 +8009,7 @@ enum QueueJobCancelOutcome {
 /// `lock_durable_transition`, which is what serializes this against feeder
 /// publication and PATCH — it is deliberately not taken here so a batch can
 /// cancel every child under one transition.
-async fn cancel_one_queue_job(
+pub(crate) async fn cancel_one_queue_job(
     state: &AppState,
     id: &str,
 ) -> Result<QueueJobCancelOutcome, ApiError> {
@@ -8094,6 +8140,7 @@ async fn export_held_queue_job(
     Path(id): Path<String>,
     Json(authority): Json<TransferAuthority>,
 ) -> Result<impl IntoResponse, ApiError> {
+    crate::video_job_child_authority::require_public_generation(&state, &id).await?;
     {
         let _transition = state.queue_journal.lock_durable_transition().await;
         validate_held_transfer(&state, &id, &authority).await?;
@@ -8130,6 +8177,7 @@ async fn complete_held_queue_transfer(
     Path(id): Path<String>,
     Json(authority): Json<TransferAuthority>,
 ) -> Result<StatusCode, ApiError> {
+    crate::video_job_child_authority::require_public_generation(&state, &id).await?;
     let _transition = state.queue_journal.lock_durable_transition().await;
     validate_held_transfer(&state, &id, &authority).await?;
     // Never stop a job another client has resumed while bytes were travelling.
@@ -8158,6 +8206,7 @@ async fn retry_queue_job(
     Path(id): Path<String>,
     Json(authority): Json<mold_core::GenerationRetryRequest>,
 ) -> Result<StatusCode, ApiError> {
+    crate::video_job_child_authority::require_public_generation(&state, &id).await?;
     if authority.job_id != id {
         return Err(ApiError::with_code(
             "retry job authority does not match the route",
@@ -8207,6 +8256,7 @@ async fn pause_queue_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    crate::video_job_child_authority::require_public_generation(&state, &id).await?;
     set_one_queue_job_paused(&state, &id, true).await
 }
 
@@ -8225,6 +8275,7 @@ async fn resume_queue_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    crate::video_job_child_authority::require_public_generation(&state, &id).await?;
     set_one_queue_job_paused(&state, &id, false).await
 }
 
@@ -8362,6 +8413,7 @@ async fn pause_queue(State(state): State<AppState>) -> Result<Json<QueuePauseRes
     )
 )]
 async fn resume_queue(State(state): State<AppState>) -> Result<Json<QueuePauseResponse>, ApiError> {
+    crate::video_job_child_authority::require_no_owned_waiting_generations(&state, true).await?;
     let v2_authoritative = state.scheduled_work.v2_authoritative();
     let changed = if v2_authoritative {
         state
@@ -8408,6 +8460,7 @@ async fn cancel_all_queue(
     State(state): State<AppState>,
 ) -> Result<Json<QueueCancelAllResponse>, ApiError> {
     let _durable_transition = state.queue_journal.lock_durable_transition().await;
+    crate::video_job_child_authority::require_no_owned_waiting_generations(&state, false).await?;
     let journal = state.queue_journal.clone();
     if spawn_queue_read(move || journal.any_transfer_reserved()).await? {
         return Err(ApiError::with_code(
@@ -8572,6 +8625,38 @@ async fn discovery_peers(
     Ok(Json(peers))
 }
 
+/// Offer the complete duration protocol only when its runners, captured home,
+/// publication and reconciled encrypted input authority are all available.
+/// This is a runtime snapshot; model-specific feasibility belongs to validation.
+fn video_job_capabilities(
+    state: &AppState,
+    readiness: &DurableAdmissionReadiness,
+) -> Option<mold_core::video_job::VideoJobCapabilities> {
+    #[cfg(feature = "mp4")]
+    let video_actor_ready = state.video_jobs.is_some();
+    #[cfg(not(feature = "mp4"))]
+    let video_actor_ready = false;
+    let captured_home = state
+        .metadata_db
+        .as_ref()
+        .as_ref()
+        .and_then(|db| db.path().parent())
+        .is_some_and(|home| home.is_absolute());
+    (video_actor_ready
+        && captured_home
+        && state.chain_jobs.is_some()
+        && state.generation_unavailable().is_none()
+        && readiness.generation_admitted()
+        && readiness.media_ready())
+    .then_some(mold_core::video_job::VideoJobCapabilities {
+        supported: true,
+        literal_prompts: true,
+        library_extend: true,
+        source_transfer: true,
+        restart: true,
+    })
+}
+
 /// Report the feature toggles a client needs to render correctly (hide the
 /// delete button when delete isn't allowed, etc.). Authentication follows the
 /// rest of `/api/*` when an API key is configured.
@@ -8654,6 +8739,7 @@ async fn server_capabilities(
         ),
     };
     Json(mold_core::ServerCapabilities {
+        video_jobs: video_job_capabilities(&state, &readiness),
         generation_profile_v1: true,
         licenses: true,
         gallery,
@@ -8695,6 +8781,12 @@ async fn server_capabilities(
         retained_media_transfer: readiness.retained_transfer_ready().then_some(
             mold_core::RetainedMediaTransferCapabilities {
                 protocol_version: 1,
+                video_artifacts: state
+                    .metadata_db
+                    .as_ref()
+                    .as_ref()
+                    .and_then(|db| db.path().parent())
+                    .is_some_and(|path| path.is_absolute()),
             },
         ),
         reference_uploads: mold_core::ReferenceUploadCapabilities {
@@ -9268,6 +9360,7 @@ pub(crate) fn validate_gallery_filename(filename: &str) -> Result<(), ApiError> 
 struct GalleryImportDescriptor {
     #[serde(default)]
     timestamp: Option<u64>,
+    #[serde(deserialize_with = "mold_core::video_job::deserialize_literal_metadata")]
     metadata: mold_core::OutputMetadata,
     metadata_synthetic: bool,
 }
@@ -9516,6 +9609,24 @@ async fn import_gallery_file(
             )
         })?;
     let parsed_import = parse_gallery_import_prefix(&output_dir, &headers, body).await?;
+    let artifact_bearing = parsed_import
+        .descriptor
+        .metadata
+        .video_job
+        .as_ref()
+        .is_some_and(|video| video.artifacts.is_some());
+    if (artifact_bearing || headers.contains_key("x-mold-destination-instance"))
+        && headers
+            .get("x-mold-destination-instance")
+            .and_then(|value| value.to_str().ok())
+            != Some(state.instance_id.as_str())
+    {
+        return Err(ApiError::with_code(
+            "Destination installation changed. Refresh this Library copy before continuing.",
+            "GALLERY_DESTINATION_CHANGED",
+            StatusCode::CONFLICT,
+        ));
+    }
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -9566,9 +9677,9 @@ async fn import_gallery_file(
         let valid =
             mold_db::metadata_io::is_valid_gallery_file(&staged_path, format, declared_file_len);
         let embedded = mold_db::metadata_io::read_embedded(&staged_path, format);
-        let embedded_matches = embedded
-            .as_ref()
-            .is_none_or(|embedded| embedded == &descriptor_for_validation.metadata);
+        let embedded_matches = embedded.as_ref().is_none_or(|embedded| {
+            crate::gallery_import_metadata::matches(embedded, &descriptor_for_validation.metadata)
+        });
         (valid, embedded_matches, embedded.is_some())
     })
     .await
@@ -9751,10 +9862,10 @@ async fn import_gallery_file(
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
-        if available_descriptors
-            .windows(2)
-            .any(|pair| pair[0] != pair[1])
-        {
+        if available_descriptors.windows(2).any(|pair| {
+            pair[0].1 != pair[1].1
+                || !crate::gallery_import_metadata::matches(&pair[0].0, &pair[1].0)
+        }) {
             let _ = transaction.rollback_unpublished();
             return Err(ApiError::with_code(
                 "existing gallery metadata authorities disagree",
@@ -9762,10 +9873,10 @@ async fn import_gallery_file(
                 StatusCode::CONFLICT,
             ));
         }
-        let authoritative = embedded_descriptor
+        let authoritative = archived_descriptor
             .as_ref()
-            .or(archived_descriptor.as_ref())
-            .or(recorded_descriptor.as_ref());
+            .or(recorded_descriptor.as_ref())
+            .or(embedded_descriptor.as_ref());
         match authoritative {
             Some((metadata, synthetic))
                 if metadata == &descriptor.metadata
@@ -9787,9 +9898,10 @@ async fn import_gallery_file(
                 ));
             }
         }
-        let metadata = embedded_descriptor
+        let metadata = archived_descriptor
             .map(|(metadata, _)| metadata)
             .or_else(|| recorded_descriptor.map(|(metadata, _)| metadata))
+            .or_else(|| embedded_descriptor.map(|(metadata, _)| metadata))
             .unwrap_or_else(|| descriptor.metadata.clone());
         if db_for_existing.as_ref().as_ref().is_some() && can_backfill_missing_row {
             let image = db_for_existing.as_ref().as_ref().and_then(|db| {
@@ -12195,10 +12307,16 @@ async fn delete_model_placement(
 
 // ── /api/openapi.json ─────────────────────────────────────────────────────────
 
-async fn openapi_json() -> impl IntoResponse {
+pub(crate) fn api_document() -> utoipa::openapi::OpenApi {
     let mut doc = ApiDoc::openapi();
+    #[cfg(feature = "mp4")]
+    doc.merge(crate::video_job_openapi::VideoJobApiDoc::openapi());
     doc.info.version = mold_core::build_info::VERSION.to_string();
-    Json(doc)
+    doc
+}
+
+async fn openapi_json() -> impl IntoResponse {
+    Json(api_document())
 }
 
 // ── /api/docs ─────────────────────────────────────────────────────────────────

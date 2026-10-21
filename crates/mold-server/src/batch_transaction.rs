@@ -6749,6 +6749,37 @@ mod tests {
 
     /// Publish one import end to end under its own parent id, as two
     /// independent imports do when they share a gallery.
+    #[tokio::test]
+    async fn committed_archive_preserves_literal_prompts_and_full_seed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut saved = record("literal.png", 0);
+        saved.metadata.prompt = r"scene\npath".into();
+        saved.metadata.negative_prompt = Some(r"bad\ttext".into());
+        saved.metadata.seed = u64::MAX;
+        let expected = saved.metadata.clone();
+        let mut batch = GalleryImportTransaction::begin(
+            dir.path(),
+            "literal-parent",
+            0,
+            serde_json::json!({}),
+            saved,
+        )
+        .unwrap();
+        batch.stage_bytes(b"canonical media").unwrap();
+        batch.mark_prepared().unwrap();
+        batch
+            .commit(&GalleryPublicationGate::default(), Arc::new(None))
+            .await
+            .unwrap();
+        let index = GalleryPublicationGate::default()
+            .committed_archive_index(dir.path())
+            .unwrap();
+        let actual = &index.get("literal.png").unwrap().record.metadata;
+        assert_eq!(actual.prompt, expected.prompt);
+        assert_eq!(actual.negative_prompt, expected.negative_prompt);
+        assert_eq!(actual.seed, u64::MAX);
+    }
+
     async fn publish_import(dir: &Path, parent_id: &str, name: &str, seed: u64, bytes: &[u8]) {
         let mut transaction = GalleryImportTransaction::begin(
             dir,

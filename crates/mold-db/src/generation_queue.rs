@@ -288,12 +288,9 @@ const QUEUE_REORDER_CANDIDATES_SQL: &str = "
 /// registry. The v18 replay index covers `(owner_uuid, state, created_at)` and
 /// SQLite supplies `rowid` as the stable final key, so the read stops at the
 /// runtime window instead of walking or materializing the retained backlog.
-const CLAIMED_QUEUE_RUNTIME_WINDOW_SQL: &str = "
-    SELECT id
-      FROM generation_queue
-     WHERE owner_uuid = ?1 AND state = 'queued'
-     ORDER BY created_at, rowid
-     LIMIT ?2";
+fn claimed_queue_runtime_window_sql() -> String {
+    format!("SELECT id FROM generation_queue WHERE owner_uuid = ?1 AND state = 'queued' AND ({}) ORDER BY created_at, rowid LIMIT ?2", crate::chain_stage_generations::EXECUTABLE_SQL)
+}
 
 /// One runtime reservation of an oldest queued row.
 ///
@@ -870,13 +867,16 @@ pub fn find_owned_ids(
 pub fn mark_dispatched(db: &MetadataDb, id: &str, now_ms: i64) -> Result<Option<u32>> {
     db.with_conn(|conn| {
         conn.query_row(
-            "UPDATE generation_queue
+            &format!(
+                "UPDATE generation_queue
                 SET state = 'running',
                     dispatch_attempts = dispatch_attempts + 1,
                     started_at = ?2,
                     updated_at = ?2
-              WHERE id = ?1
+              WHERE id = ?1 AND ({})
           RETURNING dispatch_attempts",
+                crate::chain_stage_generations::EXECUTABLE_SQL
+            ),
             params![id, now_ms],
             |row| row.get::<_, i64>(0).map(|count| count as u32),
         )
@@ -901,7 +901,8 @@ pub fn claim_next(
     }
     db.with_conn(|conn| {
         conn.query_row(
-            "UPDATE generation_queue
+            &format!(
+                "UPDATE generation_queue
                 SET claim_token = ?2, updated_at = ?3
               WHERE id = (
                     SELECT id
@@ -909,6 +910,7 @@ pub fn claim_next(
                      WHERE owner_uuid = ?1
                        AND state = 'queued'
                        AND claim_token IS NULL
+                       AND ({})
                        AND NOT EXISTS (
                             SELECT 1 FROM generation_queue WHERE claim_token = ?2
                        )
@@ -921,6 +923,8 @@ pub fn claim_next(
                     target_gpu, target_device_id, completion_payload, seed_pinned,
                     dispatch_attempts, replay_seen, held_reason, created_at, updated_at,
                     started_at, media_set_id, admission_authority, rowid",
+                crate::chain_stage_generations::EXECUTABLE_SQL
+            ),
             params![owner_uuid, claim_token, now_ms],
             |row| {
                 Ok(QueueClaim {
@@ -955,12 +959,14 @@ pub fn claim_by_id(
     }
     db.with_conn(|conn| {
         conn.query_row(
-            "UPDATE generation_queue
+            &format!(
+                "UPDATE generation_queue
                 SET claim_token = ?3, updated_at = ?4
               WHERE id = ?2
                 AND owner_uuid = ?1
                 AND state = 'queued'
                 AND claim_token IS NULL
+                AND ({})
                 AND NOT EXISTS (
                     SELECT 1 FROM generation_queue WHERE claim_token = ?3
                 )
@@ -968,6 +974,8 @@ pub fn claim_by_id(
                     target_gpu, target_device_id, completion_payload, seed_pinned,
                     dispatch_attempts, replay_seen, held_reason, created_at, updated_at,
                     started_at, media_set_id, admission_authority, rowid",
+                crate::chain_stage_generations::EXECUTABLE_SQL
+            ),
             params![owner_uuid, id, claim_token, now_ms],
             |row| {
                 Ok(QueueClaim {
@@ -1027,7 +1035,7 @@ pub fn claimed_runtime_position(
         };
 
         let ids = conn
-            .prepare(CLAIMED_QUEUE_RUNTIME_WINDOW_SQL)?
+            .prepare(&claimed_queue_runtime_window_sql())?
             .query_map(params![owner_uuid, sql_limit], |row| {
                 row.get::<_, String>(0)
             })?
@@ -1091,13 +1099,16 @@ pub fn mark_dispatched_claimed(
 ) -> Result<Option<u32>> {
     db.with_conn(|conn| {
         conn.query_row(
-            "UPDATE generation_queue
+            &format!(
+                "UPDATE generation_queue
                 SET state = 'running',
                     dispatch_attempts = dispatch_attempts + 1,
                     started_at = ?3,
                     updated_at = ?3
-              WHERE id = ?1 AND state = 'queued' AND claim_token = ?2
+              WHERE id = ?1 AND state = 'queued' AND claim_token = ?2 AND ({})
           RETURNING dispatch_attempts",
+                crate::chain_stage_generations::EXECUTABLE_SQL
+            ),
             params![id, claim_token, now_ms],
             |row| row.get::<_, i64>(0).map(|count| count as u32),
         )
@@ -1539,6 +1550,7 @@ pub fn resume_all_paused(
     now_ms: i64,
 ) -> Result<PausedWorkResume> {
     db.transact_immediate(|conn| {
+        crate::video_job_child_owners::require_ordinary_bulk_on_conn(conn, owner_uuid, true)?;
         let inconsistent: Option<(String, String)> = conn
             .query_row(
                 "SELECT q.id, child.state
@@ -2570,20 +2582,19 @@ mod tests {
 
     #[test]
     fn claimed_runtime_window_is_payload_free_and_uses_the_replay_index() {
-        let normalized = CLAIMED_QUEUE_RUNTIME_WINDOW_SQL.to_ascii_lowercase();
+        let sql = claimed_queue_runtime_window_sql();
+        let normalized = sql.to_ascii_lowercase();
         for forbidden in ["request_json", "output_dir", "completion_payload"] {
             assert!(
                 !normalized.contains(forbidden),
-                "runtime order window selected {forbidden}: {CLAIMED_QUEUE_RUNTIME_WINDOW_SQL}"
+                "runtime order window selected {forbidden}: {sql}"
             );
         }
 
         let db = MetadataDb::open_in_memory().unwrap();
         let plan = db
             .with_conn(|conn| {
-                let mut stmt = conn.prepare(&format!(
-                    "EXPLAIN QUERY PLAN {CLAIMED_QUEUE_RUNTIME_WINDOW_SQL}"
-                ))?;
+                let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
                 let rows = stmt
                     .query_map(params!["owner-a", 3_i64], |row| row.get::<_, String>(3))?
                     .collect::<rusqlite::Result<Vec<_>>>()?;

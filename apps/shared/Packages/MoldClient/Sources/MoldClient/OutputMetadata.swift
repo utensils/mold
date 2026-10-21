@@ -73,6 +73,8 @@ public struct OutputMetadata: Codable, Hashable, Sendable {
     public let idWeight: Double?
     public let idStartStep: Int?
     public let references: [ReferenceProvenance]?
+    /// Historical exports may use the request-style spelling.
+    public var generationReferences: [ReferenceProvenance]? = nil
     public let keyframes: [KeyframeProvenance]?
     public let audioFilePath: String?
     public let sourceVideoPath: String?
@@ -124,6 +126,7 @@ public struct OutputMetadata: Codable, Hashable, Sendable {
     /// only the durable job carries the id beside it.
     public let chain: ChainProvenance?
     public let chainJobId: String?
+    public let videoJob: VideoJobPrintProvenance?
     public let version: String?
 }
 

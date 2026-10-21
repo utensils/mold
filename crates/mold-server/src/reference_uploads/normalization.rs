@@ -1087,7 +1087,7 @@ mod store_tests {
             };
         }
         assert!(store
-            .upload_sources_for_request("auth-a", &request, None)
+            .upload_sources_for_request("auth-a", &request, None, true)
             .await
             .is_err());
         let receipt = FinalizeReceipt {
@@ -1115,7 +1115,7 @@ mod store_tests {
             .await
             .is_err());
         assert!(store
-            .upload_sources_for_request("auth-a", &request, None)
+            .upload_sources_for_request("auth-a", &request, None, true)
             .await
             .is_err());
         payload.receipts.pop();
@@ -1145,11 +1145,11 @@ mod store_tests {
             repeated.request_scope_sha256
         );
         assert!(store
-            .upload_sources_for_request("auth-b", &request, None)
+            .upload_sources_for_request("auth-b", &request, None, true)
             .await
             .is_err());
         assert!(store
-            .upload_sources_for_request("auth-a", &request, None)
+            .upload_sources_for_request("auth-a", &request, None, true)
             .await
             .is_ok());
     }

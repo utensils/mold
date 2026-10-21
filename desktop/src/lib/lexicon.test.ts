@@ -38,7 +38,7 @@ import { ENGINE_KEY_SCHEMAS, SECTIONS } from "./settingsSchema";
 const menuSource = readFileSync("src-tauri/src/menu.rs", "utf8");
 
 function quoted(source: string): string[] {
-  return [...source.matchAll(/"([^"\n]+)"/g)].map((m) => m[1]!);
+  return [...source.replace(/\bfrom\s+"[^"\n]+"/g, "").matchAll(/"([^"\n]+)"/g)].map((m) => m[1]!);
 }
 
 describe("lexicon — destinations", () => {

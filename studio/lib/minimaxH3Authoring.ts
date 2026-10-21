@@ -852,13 +852,14 @@ export function minimaxH3AuthoringError(
   model: string,
   state: MinimaxH3AuthoringState | null | undefined,
   requireFirstFrame = false,
+  retained: { incomingBoundary?: boolean; retainedReferences?: boolean } = {},
 ): string | null {
   if (!isMinimaxH3Identity(family, model)) return null;
   const task = minimaxH3TaskForModel(model);
   if (!task) return "Choose MiniMax H3 Frames or MiniMax H3 References.";
   const value = state ?? emptyMinimaxH3AuthoringState();
   if (task === "fl2va") {
-    if (requireFirstFrame && !value.firstFrame) {
+    if (requireFirstFrame && !value.firstFrame && !retained.incomingBoundary) {
       return "This reviewed MiniMax H3 runtime requires a first frame.";
     }
     if (requireFirstFrame && value.lastFrame) {
@@ -872,6 +873,7 @@ export function minimaxH3AuthoringError(
     }
     return null;
   }
+  if (retained.retainedReferences && value.references.length === 0) return null;
   const budget = minimaxH3ReferenceBudget(value.references);
   if (budget.errors[0]) return budget.errors[0];
   const missing = value.references.findIndex(minimaxH3ReferenceNeedsMedia);

@@ -1785,6 +1785,41 @@ impl CollectionRef {
     }
 }
 
+pub(crate) fn optional_seed_schema() -> utoipa::openapi::schema::Schema {
+    use utoipa::openapi::schema::{ObjectBuilder, OneOfBuilder, Type};
+    utoipa::openapi::schema::Schema::OneOf(OneOfBuilder::new()
+        .item(ObjectBuilder::new().schema_type(Type::Integer).minimum(Some(0_u64)).maximum(Some(u64::MAX)))
+        .item(ObjectBuilder::new().schema_type(Type::String).pattern(Some("^[0-9]+$"))
+            .description(Some("Exact unsigned decimal integer in the inclusive range 0 through 18446744073709551615.")))
+        .item(ObjectBuilder::new().schema_type(Type::Null))
+        .build())
+}
+
+pub(crate) fn deserialize_optional_seed<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Seed {
+        Integer(u64),
+        Decimal(String),
+    }
+    match Option::<Seed>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(Seed::Integer(seed)) => Ok(Some(seed)),
+        Some(Seed::Decimal(seed))
+            if !seed.is_empty() && seed.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            seed.parse::<u64>()
+                .map(Some)
+                .map_err(serde::de::Error::custom)
+        }
+        _ => Err(serde::de::Error::custom(
+            "seed must be an unsigned integer or decimal string",
+        )),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GenerateRequest {
     #[schema(example = "a cat sitting on a windowsill at sunset")]
@@ -1812,6 +1847,9 @@ pub struct GenerateRequest {
     #[serde(default = "default_guidance")]
     #[schema(example = 3.5)]
     pub guidance: f64,
+    /// Accept an exact decimal string from JavaScript; serialize as the legacy numeric seed.
+    #[serde(default, deserialize_with = "deserialize_optional_seed")]
+    #[schema(schema_with = optional_seed_schema)]
     #[schema(example = 42)]
     pub seed: Option<u64>,
     #[serde(default = "default_batch_size")]
@@ -3447,6 +3485,10 @@ pub struct OutputMetadata {
     /// settings authoring surface.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain: Option<crate::chain::ChainOutputMetadata>,
+    /// Bounded whole-video provenance. Full clip history remains in an owned
+    /// archive artifact rather than growing every Library row indefinitely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_job: Option<crate::video_artifacts::VideoJobProvenance>,
     /// The durable 3-D workflow that produced this print, and the role it
     /// plays in it (additive). Every stage of a workflow publishes an ordinary
     /// print, so this is what lets a client route a queue row back to the 3-D
@@ -3704,6 +3746,7 @@ impl OutputMetadata {
             fps: req.fps,
             chain_job_id: None,
             chain: None,
+            video_job: None,
             // A fact about the stored file; the encoder or the publication
             // path (`apply_still_output`) records it.
             has_alpha: None,
@@ -5976,6 +6019,79 @@ impl GpuBackend {
 mod tests {
     use super::*;
 
+    #[test]
+    fn seed_request_schemas_describe_only_integer_decimal_string_or_null() {
+        for (schema, field) in [
+            (
+                serde_json::to_value(<GenerateRequest as utoipa::PartialSchema>::schema()).unwrap(),
+                "seed",
+            ),
+            (
+                serde_json::to_value(
+                    <crate::chain::ChainRequest as utoipa::PartialSchema>::schema(),
+                )
+                .unwrap(),
+                "seed",
+            ),
+            (
+                serde_json::to_value(<crate::chain::ChainStage as utoipa::PartialSchema>::schema())
+                    .unwrap(),
+                "seed_offset",
+            ),
+        ] {
+            let variants = schema["properties"][field]["oneOf"]
+                .as_array()
+                .expect("exact seed wire alternatives");
+            assert_eq!(variants.len(), 3);
+            assert_eq!(variants[0]["type"], "integer");
+            assert_eq!(variants[0]["minimum"], 0);
+            assert_eq!(variants[0]["maximum"], serde_json::json!(u64::MAX));
+            assert_eq!(variants[1]["type"], "string");
+            assert_eq!(variants[1]["pattern"], "^[0-9]+$");
+            assert_eq!(variants[2]["type"], "null");
+            assert!(!schema["required"]
+                .as_array()
+                .is_some_and(|fields| fields.iter().any(|value| value == field)));
+        }
+    }
+    #[test]
+    fn generation_seed_decimal_string_preserves_full_u64_and_canonical_scope() {
+        let base = serde_json::json!({"prompt":"seed", "model":"ltx-video", "width":512, "height":512, "steps":4});
+        let mut numeric = base.clone();
+        numeric["seed"] = serde_json::json!(u64::MAX);
+        let mut decimal = base.clone();
+        decimal["seed"] = serde_json::json!(u64::MAX.to_string());
+        let a: GenerateRequest = serde_json::from_value(numeric).unwrap();
+        let b: GenerateRequest = serde_json::from_value(decimal).unwrap();
+        assert_eq!(b.seed, Some(u64::MAX));
+        assert_eq!(
+            serde_json::to_vec(&a).unwrap(),
+            serde_json::to_vec(&b).unwrap()
+        );
+        assert!(serde_json::to_value(&b).unwrap()["seed"].is_u64());
+        for seed in [serde_json::Value::Null, serde_json::json!(42)] {
+            let mut raw = base.clone();
+            raw["seed"] = seed;
+            assert!(serde_json::from_value::<GenerateRequest>(raw).is_ok());
+        }
+        for seed in [
+            "",
+            "-1",
+            "+1",
+            " 42",
+            "42 ",
+            "1.0",
+            "1e3",
+            "18446744073709551616",
+        ] {
+            let mut raw = base.clone();
+            raw["seed"] = serde_json::json!(seed);
+            assert!(
+                serde_json::from_value::<GenerateRequest>(raw).is_err(),
+                "{seed}"
+            );
+        }
+    }
     /// `loras` and `lora` are alternatives. Every reader spells the
     /// precedence `loras.or(lora)`; only the IC-LoRA control folds ever read
     /// both, and concatenating them recorded and merged one `mold run --lora`
@@ -11027,6 +11143,7 @@ mod tests {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GalleryImage {
     pub filename: String,
+    #[serde(deserialize_with = "crate::video_job::deserialize_literal_metadata")]
     pub metadata: OutputMetadata,
     pub timestamp: u64,
     /// File format inferred from extension. Omitted for backwards compat when
@@ -11797,6 +11914,8 @@ pub struct EventsCapabilities {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetainedMediaTransferCapabilities {
     pub protocol_version: u32,
+    #[serde(default)]
+    pub video_artifacts: bool,
 }
 
 /// Restart-safe encrypted request-media support for the durable generation
@@ -12286,6 +12405,10 @@ pub struct MiniMaxH3Capability {
 /// can add their own sub-structs without churning existing fields.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerCapabilities {
+    /// Arbitrary-duration parents. Absent until admission and recovery are live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_jobs: Option<crate::video_job::VideoJobCapabilities>,
+
     /// `/api/models` rows carry a complete version-1 generation profile.
     /// Absent/false identifies a legacy host whose flattened fields require
     /// the contained one-release client adapter.

@@ -1,3 +1,4 @@
+import Foundation
 import MoldClient
 
 extension GenerateController {
@@ -53,6 +54,8 @@ extension GenerateController {
         let capturedInstallation = hosts.instanceID(of: host.id)
         sequence.openContinuation(entry: entry, host: host, installation: capturedInstallation,
             backend: hosts.backend(for: host), current: { self.hosts.host(captured.id) == captured && self.hosts.instanceID(of: captured.id) == capturedInstallation }, opened: { source in
+                self.videoDuration = nil; self.durationSource = nil; self.durationSourceError = nil
+                self.durationSourceToken = UUID(); self.durationSourceLoading = false
                 self.modelName = source.model
                 self.retainedReuse.clear()
                 self.kind = .clip; self.machine = .pinned(host.id)

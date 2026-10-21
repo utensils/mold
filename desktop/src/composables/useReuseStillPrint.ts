@@ -1,4 +1,12 @@
 import {
+  inspectLegacyVideoSettings,
+  legacyAutomaticRequest,
+} from "@studio/api/legacyVideoSettings";
+import { captureChainOwner } from "@studio/api/chainJobs";
+import { pendingLegacyVideoSettings } from "@studio/lib/videoLibraryExtensionHandoff";
+import { useAppPrefsStore } from "../stores/appPrefs";
+import { videoSettingsForReuse } from "@studio/lib/videoSettingsReuse";
+import {
   retainedSourceMediaDisclosable,
   retainedSourceMediaDisclosure,
   retainedSourceMediaInventory,
@@ -20,15 +28,66 @@ export function useReuseStillPrint() {
   const gallery = useGalleryStore();
   const toasts = useToastStore();
 
-  return function reuseStillPrint(entry: MergedPrint) {
+  let epoch = 0;
+  return async function reuseStillPrint(entry: MergedPrint) {
+    const attempt = ++epoch;
+    let legacy: Awaited<ReturnType<typeof inspectLegacyVideoSettings>> | null = null;
+    try {
+      if (entry.item.metadata.chain && !entry.item.metadata.video_job) {
+        const target = gallery.targetOfOrNull(entry.sourceKey);
+        if (!target)
+          throw new Error("Reconnect the video's original machine before restoring its clips.");
+        const owner = await captureChainOwner({
+          hostId: entry.sourceKey,
+          label: entry.hostLabel,
+          instanceId: "",
+          target,
+        });
+        legacy = await inspectLegacyVideoSettings(
+          owner,
+          entry.item.filename,
+          entry.item.metadata,
+          () => attempt === epoch,
+        );
+        if (attempt !== epoch) return false;
+        await useAppPrefsStore().update({
+          generateTargetHost: entry.sourceKey === "local" ? null : entry.sourceKey,
+        });
+        if (attempt !== epoch) return false;
+      }
+      videoSettingsForReuse(entry.item.metadata);
+    } catch (error) {
+      toasts.push(error instanceof Error ? error.message : String(error), "error");
+      return false;
+    }
+    pendingLegacyVideoSettings.value = null;
     // The bucket's authority may be unresolved (this device before its engine
     // answers); the recipe still restores, and the canvas says the media
     // cannot load rather than the whole reuse refusing.
     const target = gallery.targetOfOrNull(entry.sourceKey);
     // The settings AND the picture they made: the prefill names the print so
     // the canvas shows it once the recipe has landed in the form.
+    const restoreMetadata = legacy
+      ? {
+          ...entry.item.metadata,
+          seed: legacy.request.seed!,
+          frames: legacy.request.stages[0]!.frames,
+          prompt: legacy.request.stages[0]!.prompt,
+        }
+      : entry.item.metadata;
     const retainedVersion = composer.beginRetainedSourceReuse({
-      metadata: entry.item.metadata,
+      ...(legacy?.automaticDuration
+        ? {
+            request: {
+              ...legacyAutomaticRequest(legacy),
+              title: entry.item.title ?? entry.item.metadata.title ?? "",
+              ...(entry.item.metadata.tags ? { tags: entry.item.metadata.tags } : {}),
+              ...(entry.item.metadata.collection
+                ? { collection: { name: entry.item.metadata.collection } }
+                : {}),
+            },
+          }
+        : { metadata: restoreMetadata }),
       print: {
         filename: entry.item.filename,
         metadata: entry.item.metadata,
@@ -38,6 +97,11 @@ export function useReuseStillPrint() {
         settledAtMs: entry.item.timestamp * 1000,
       },
     });
+    if (legacy) {
+      pendingLegacyVideoSettings.value = legacy;
+      composer.declineRetainedSource(retainedVersion);
+      return true;
+    }
     // The merged Library prefers a local output mirror, but mirroring the
     // output does not copy the producing host's private source-media archive.
     // Ask every known copy before disclosing an unavailable inventory, and
@@ -107,5 +171,6 @@ export function useReuseStillPrint() {
           : null;
       if (disclosure) toasts.push(disclosure, "error");
     })();
+    return true;
   };
 }

@@ -171,3 +171,11 @@ describe("openLiveWorkWith", () => {
     expect(go).toHaveBeenCalledWith("/machines/workstation");
   });
 });
+it("opens a duration parent in Queue without looking it up as an ordinary generation", async () => {
+  const queueLookup = findQueueEntryById.mockClear();
+  await openLiveWorkWith(surface())(
+    row({ kind: "video_job", execution: null }),
+  );
+  expect(queueLookup).not.toHaveBeenCalled();
+  expect(go).toHaveBeenLastCalledWith("/queue");
+});

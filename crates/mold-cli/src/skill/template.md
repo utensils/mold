@@ -54,6 +54,11 @@ rebuilds/relaunches in Simulator; `companion-run` launches once. Helpers accept
 
 ## Route the request
 
+- Match a named model or variant against the host's `name`, `display_name`
+  and `variant` before choosing a speed tier. **H3 Fast / FastH3** means the
+  listed **FastH3** variant, such as FastH3 V2; **Turbo** and **PDMD** are
+  different variants. Do not substitute one merely because it is faster. If
+  the requested named variant is unavailable, report that before generating.
 - For generation, editing, or upscaling, confirm the intended model family,
   task, output type, source media, and destination. Always read the shared
   guide and exactly one family base below. Add a task leaf only when the
@@ -89,17 +94,17 @@ auto` to preserve useful alpha and remove opaque backgrounds, `on` to
   manifest title and retain task/version/precision; never rename weight files.
   This skill intentionally does not duplicate changing model
   IDs, defaults, dimensions, frame grids, or runtime availability.
-- For multi-scene video or a clip longer than one render, read
-  [Scripted sequences]({{reference_prefix}}/cli.md#scripted-sequences). Use
-  `mold run MODEL "prompt" --duration SECONDS --dry-run --host HOST` for a
-  single prompt, then omit `--dry-run` to render. Use `mold run --script`
-  and `mold jobs` for authored scene changes. Apps also offer **Add clip** and Library **Continue video**; these use the same durable jobs. Discord offers `/video make` and guild Manage Server commands `/video continue|status|resume|cancel`. MiniMax H3
-  sequences require a server. Each part has at most 16 stages; continue longer
-  work with `mold run --script next.toml --continue-from JOB_ID --host HOST`,
-  producing separate linked MP4 parts. Read the sequence reference before
-  continuing; linking independent clips does not create motion continuity.
-  Discover the selected model before choosing frames
-  or conditioning; a smooth seam depends on its advertised capabilities.
+- For multi-scene video or a clip longer than one render, start with
+  [Longer videos]({{reference_prefix}}/cli.md#longer-videos):
+  `mold --host HOST run MODEL "prompt" --duration 30` publishes one joined MP4.
+  Extend a Library movie with `--extend-library PRINT.mp4 --duration 10`.
+  Apps offer **Duration**, optional **Define scenes**, and Library **Extend video**.
+  Discord offers `/video make` and `/video extend`. Keep the printed video UUID;
+  inspect it before retrying after a disconnect. Longer videos require an updated
+  server, including MiniMax H3. Model-guide timing and `max_runtime_seconds`
+  describe one clip, not the joined movie. The selected model determines
+  continuous or blended joins. For explicit frame-level scripts and separate linked parts,
+  read [Scripted sequences]({{reference_prefix}}/cli.md#scripted-sequences).
 - For ordinary CLI, queue, server, library, and remote-host workflows, read
   [`{{reference_prefix}}/cli.md`]({{reference_prefix}}/cli.md).
 - To hand the user a print's file, list it and download the original:
