@@ -33,8 +33,8 @@ public extension RetainedSourceMedia {
             if field == .keyframes {
                 guard keyframePayloads[member.memberId] == nil else { throw RelayFailure.ambiguous(.keyframes) }
                 if member.role.hasPrefix("stage_keyframe:") {
-                guard let frame = member.frameIndex, frame >= 0 else { throw RelayFailure.unsupportedRole(member.role) }
-                let keyframe = KeyframeCondition(frame: frame, image: bytes.base64EncodedString(), name: member.displayName)
+                    guard let frame = member.frameIndex, frame >= 0 else { throw RelayFailure.unsupportedRole(member.role) }
+                    let keyframe = KeyframeCondition(frame: frame, image: bytes.base64EncodedString(), name: member.displayName)
                     keyframePayloads[member.memberId] = try MoldJSON.encoder.encode(keyframe)
                 } else { keyframePayloads[member.memberId] = bytes }
             } else { grouped[field, default: []].append(bytes) }

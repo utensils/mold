@@ -6,7 +6,19 @@ public struct SequenceDraft: Codable, Hashable, Sendable {
         public var id: UUID
         public var input: ChainStageInput
         public var prompt: String { get { input.prompt } set { input.prompt = newValue } }
-        public var frames: Int { get { input.frames } set { input.frames = newValue } }
+        public var frames: Int {
+            get { input.frames }
+            set {
+                let previous = input.frames
+                if previous > 1, newValue > 0 {
+                    input.keyframes = input.keyframes?.map { keyframe in
+                        guard keyframe.frame == previous - 1 else { return keyframe }
+                        var closing = keyframe; closing.frame = newValue - 1; return closing
+                    }
+                }
+                input.frames = newValue
+            }
+        }
         public var transition: String { get { input.transition } set { input.transition = newValue } }
         public var keyframes: [KeyframeCondition]? { get { input.keyframes } set { input.keyframes = newValue } }
         public var generationReferences: [GenerationReference]? {

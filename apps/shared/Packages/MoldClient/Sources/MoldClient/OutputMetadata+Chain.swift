@@ -8,8 +8,8 @@ import Foundation
 
 /// How a stitched clip was split (`chain.rs:66-70`).
 ///
-/// Reuse restores the first prompt as an ordinary render. Explicit Continue
-/// separately verifies its durable source job and latest take on the holding host.
+/// Use Settings preserves the complete authored recipe, or a verified automatic
+/// one-prompt recipe. Explicit Continue separately verifies durable source authority.
 public struct ChainProvenance: Codable, Hashable, Sendable {
     public let continueFrom: ChainContinuation?
     public let stageCount: Int?

@@ -61,4 +61,62 @@ struct LegacySequenceSettingsReuseTests {
         }
     }
 
+    func automaticMetadata(secondPrompt: String = "same", secondSeed: String = "7", transition: String = "smooth", frames: Int = 197) throws -> OutputMetadata {
+        try MoldJSON.decoder.decode(OutputMetadata.self, from: Data("""
+        {"output_mode":"one-shot","prompt":"joined","model":"video","seed":7,"width":768,"height":768,"steps":3,"guidance":0,"fps":24,"frames":\(frames),"chain":{"stage_count":2,"motion_tail_frames":17,"stages":[{"prompt":"same","frames":107,"transition":"smooth","seed":"7"},{"prompt":"\(secondPrompt)","frames":107,"transition":"\(transition)","seed":"\(secondSeed)"}]}}
+        """.utf8))
+    }
+
+    @Test func explicitUniformAutomaticVideoRestoresOnePromptAndSavedLength() throws {
+        let legacy = try LegacySequenceSettingsReuse(metadata: automaticMetadata())
+        let restored = try VideoSettingsReuse(legacyAutomatic: legacy)
+        #expect(restored.draft.prompt == "same")
+        #expect(restored.draft.frames == 107)
+        #expect(restored.draft.seed == 7 && restored.draft.locksSeed)
+        #expect(restored.duration?.draft.seconds == "8.208")
+        #expect(restored.duration?.draft.scenesEnabled == false)
+        #expect(restored.duration?.draft.source == nil)
+        #expect(restored.notice?.contains("saved length") == true)
+    }
+
+    @Test func explicitAutomaticVideoRefusesUnrecordedOrDifferentAuthoredChoices() throws {
+        for metadata in [try automaticMetadata(secondPrompt: "different"), try automaticMetadata(secondSeed: "9"),
+                         try automaticMetadata(transition: "cut"), try automaticMetadata(frames: 196)] {
+            let legacy = try LegacySequenceSettingsReuse(metadata: metadata)
+            #expect(throws: (any Error).self) { try VideoSettingsReuse(legacyAutomatic: legacy) }
+        }
+        var laterInput = try LegacySequenceSettingsReuse(metadata: automaticMetadata())
+        laterInput.sequence.stages[1].input.sourceImage = "AQ=="
+        #expect(throws: (any Error).self) { try VideoSettingsReuse(legacyAutomatic: laterInput) }
+        var oldClosingFrame = try LegacySequenceSettingsReuse(metadata: automaticMetadata())
+        oldClosingFrame.sequence.stages[0].input.keyframes = [.init(frame: 106, image: "AQ==")]
+        #expect(throws: (any Error).self) { try VideoSettingsReuse(legacyAutomatic: oldClosingFrame) }
+    }
+
+    @Test func verifiedIndexedAutomaticSeedsKeepTheOriginalSinglePromptIntent() throws {
+        let legacy = try LegacySequenceSettingsReuse(metadata: automaticMetadata(secondSeed: "6"))
+        let restored = try VideoSettingsReuse(legacyAutomatic: legacy)
+        #expect(restored.draft.seed == 7 && restored.draft.locksSeed)
+        #expect(restored.duration?.draft.seconds == "8.208")
+        #expect(restored.duration?.draft.scenesEnabled == false)
+    }
+
+    @Test func legacyBoundaryOrderFollowsArchivedPositionsRatherThanDownloadOrFrameOrder() throws {
+        let source = try automaticMetadata()
+        var object = try #require(JSONSerialization.jsonObject(with: MoldJSON.encoder.encode(source)) as? [String:Any])
+        var chain = object["chain"] as! [String:Any], stages = chain["stages"] as! [[String:Any]]
+        stages[0]["keyframes"] = [
+            ["frame":106,"sha256":TransportDigest.sha256(Data([1]))],
+            ["frame":0,"sha256":TransportDigest.sha256(Data([2]))]
+        ]
+        chain["stages"] = stages; object["chain"] = chain
+        let metadata = try MoldJSON.decoder.decode(OutputMetadata.self, from: JSONSerialization.data(withJSONObject: object))
+        let original = try LegacySequenceSettingsReuse(metadata: metadata)
+        let zero = RetainedSourceMedia.Member(memberId: "last", role: "stage_keyframe:0:0", displayName: "last", sizeBytes: 1)
+        let one = RetainedSourceMedia.Member(memberId: "first", role: "stage_keyframe:0:1", displayName: "first", sizeBytes: 1)
+        let restored = try original.materialized([(one,Data([2])),(zero,Data([1]))])
+        #expect(restored.sequence.stages[0].keyframes?.map(\.frame) == [106,0])
+        #expect(restored.sequence.stages[0].keyframes?.map(\.image) == ["AQ==","Ag=="])
+    }
+
 }

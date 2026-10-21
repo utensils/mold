@@ -8,6 +8,7 @@ public extension LegacySequenceSettingsReuse {
         guard downloaded.count <= AuthoredChainRequest.retainedMediaMemberLimit else { throw invalidInputs() }
         var result = self, seen = Set<String>(), total = 0
         let records = metadata.chain?.stages ?? []
+        var boundaries: [Int: [Int: KeyframeCondition]] = [:]
         for (member, bytes) in downloaded {
             guard bytes.count <= AuthoredChainRequest.inlineMediaLimitBytes - total,
                   seen.insert(member.role).inserted else { throw invalidInputs() }
@@ -35,15 +36,21 @@ public extension LegacySequenceSettingsReuse {
                       let index = frames[position].frame, index >= 0,
                       index < result.sequence.stages[stage].frames,
                       frames[position].sha256?.lowercased() == digest else { throw invalidInputs() }
-                result.sequence.stages[stage].input.keyframes = (result.sequence.stages[stage].input.keyframes ?? [])
-                    + [.init(frame: index, image: encoded, name: frames[position].name ?? member.displayName)]
+                boundaries[stage, default: [:]][position] = .init(frame: index, image: encoded,
+                    name: frames[position].name ?? member.displayName)
             default: throw invalidInputs()
             }
         }
         for index in records.indices {
+            let expected = records[index].keyframes?.count ?? 0
             guard result.sequence.stages[index].generationReferences?.allSatisfy({ $0.media.authority == "inline" }) ?? true,
-                  (result.sequence.stages[index].keyframes?.count ?? 0) == (records[index].keyframes?.count ?? 0) else { throw invalidInputs() }
-            result.sequence.stages[index].input.keyframes?.sort { $0.frame < $1.frame }
+                  (boundaries[index]?.count ?? 0) == expected else { throw invalidInputs() }
+            if expected > 0 {
+                result.sequence.stages[index].input.keyframes = try (0..<expected).map { position in
+                    guard let frame = boundaries[index]?[position] else { throw invalidInputs() }
+                    return frame
+                }
+            }
         }
         if metadata.sourceImageSha256 != nil, result.sequence.stages[0].input.sourceImage == nil { throw invalidInputs() }
         return result
