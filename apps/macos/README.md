@@ -1085,3 +1085,5 @@ Failed or interrupted video jobs offer **Start again…** when their machine sup
 Extend preserves compatible original spatial and temporal upscaling, shows the inherited recipe, and starts new footage with a fresh random seed unless one is explicitly chosen.
 
 Historical IC-LoRA/ControlNet recipes that this native editor cannot faithfully preserve show an explicit refusal; use the saved job’s **Start again** when available, or the CLI with the original retained controls. These settings are never silently removed.
+
+A refused Library extension remains visible and blocks Generate until acknowledged. **Keep current draft** leaves existing settings and media intact; pending source reads cannot replace that draft after acknowledgement.

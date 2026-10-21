@@ -145,6 +145,10 @@ struct Composer: View {
                 .accessibilityIdentifier("prompt-history")
                 .disabled(generate.target == nil && hosts.preferredHost == nil)
             }
+            if let error = generate.durationSourceError,
+               generate.videoDuration?.draft.source == nil || !generate.usesVideoDuration {
+                NativeVideoSourceFailure(message: error, keepDraft: generate.keepDraftAfterSourceFailure)
+            }
             if generate.usesVideoDuration, let authoring = generate.videoDuration {
                 NativeDurationEditor(draft: Binding(get: { generate.videoDuration?.draft ?? authoring.draft }, set: {
                     generate.videoDuration?.draft = $0
@@ -159,7 +163,7 @@ struct Composer: View {
                     sourceNotice: generate.durationSourceError,
                     retrySource: { Task { await generate.restoreDurationSource() } }, retry: { generate.refreshDurationPlan() },
                     startFresh: { generate.videoDuration?.startFresh(); generate.durationSource = nil; generate.durationSourceError = nil; generate.saveDraft() })
-                if let error = generate.durationError ?? generate.videoJobs.error {
+                if let error = generate.durationError ?? generate.videoJobs.error, error != generate.durationSourceError {
                     Text(error).font(.callout).fixedSize(horizontal: false, vertical: true)
                 }
             }

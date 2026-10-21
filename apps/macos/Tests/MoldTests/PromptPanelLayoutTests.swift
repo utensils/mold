@@ -7,6 +7,26 @@ import Testing
 
 @MainActor
 struct PromptPanelLayoutTests {
+    @Test func sourceOpeningFailureBlocksOrdinaryPromptUntilExplicitAcknowledgement() {
+        let hosts = HostStore(hosts: []) { _ in FakeBackend(host: MoldHost(name: "test", baseURL: URL(string: "http://test")!)) }
+        let controller = GenerateController(hosts: hosts, defaults: ConfigStore(hosts: hosts))
+        controller.draft.prompt = "Existing draft"
+        let original = controller.draft, token = controller.durationSourceToken
+        controller.durationSourceError = "Original controls cannot be preserved. Use Start again or CLI."
+        #expect(controller.durationSourceOpeningRefusal == controller.durationSourceError)
+        controller.keepDraftAfterSourceFailure()
+        #expect(controller.durationSourceOpeningRefusal == nil)
+        #expect(controller.durationSourceToken != token)
+        #expect(controller.draft == original)
+        controller.durationSourceLoading = true
+        #expect(controller.durationSourceOpeningRefusal == "Checking original video inputs…")
+        controller.durationSourceLoading = false
+        controller.videoDuration = .init(draft: .init(seconds: "5", source: .init(filename: "original.mp4")))
+        #expect(controller.durationRecipeRefusal(nil) != nil, "A missing video recipe must not drop the selected prefix into ordinary generation")
+        controller.videoDuration?.startFresh()
+        #expect(controller.durationRecipeRefusal(nil) == nil, "Ordinary drafts without a prefix keep their existing flow")
+    }
+
     /// Render the actual capsule, including its flexible height frame. Checking
     /// only PromptTuck's alignment misses a panel centered inside that frame.
     @Test func parkedScenePromptsDoNotHideTheStillComposer() {

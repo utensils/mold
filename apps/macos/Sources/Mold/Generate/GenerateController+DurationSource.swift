@@ -2,6 +2,22 @@ import Foundation
 import MoldClient
 
 extension GenerateController {
+    var durationSourceOpeningRefusal: String? {
+        durationSourceLoading ? "Checking original video inputs…" : durationSourceError
+    }
+
+    func durationRecipeRefusal(_ recipe: GenerationRecipe?) -> String? {
+        guard videoDuration?.draft.source != nil, recipe?.temporal == nil else { return nil }
+        return "Choose a compatible video model to extend the original video."
+    }
+
+    func keepDraftAfterSourceFailure() {
+        submissionFeedback.dismiss()
+        durationSourceToken = UUID()
+        durationSourceLoading = false
+        durationSourceError = nil
+    }
+
     var durationUsesSourceEnding: Bool { videoDuration?.usesSourceEnding(plan: videoPlanner.plan) == true }
 
     var durationSourceRefusal: String? {

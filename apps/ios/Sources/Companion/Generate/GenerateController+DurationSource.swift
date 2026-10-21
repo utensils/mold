@@ -2,6 +2,17 @@ import Foundation
 import MoldClient
 
 extension GenerateController {
+    var durationSourceOpeningRefusal: String? {
+        durationSourceLoading ? "Checking original video inputs…" : durationSourceError
+    }
+
+    func keepDraftAfterSourceFailure() {
+        if durationError == durationSourceError { durationError = nil }
+        durationSourceToken = UUID()
+        durationSourceLoading = false
+        durationSourceError = nil
+    }
+
     var durationUsesSourceEnding: Bool { videoDuration?.usesSourceEnding(plan: videoPlanner.plan) == true }
 
     var durationSourceRefusal: String? {

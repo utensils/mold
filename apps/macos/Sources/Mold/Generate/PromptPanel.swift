@@ -47,6 +47,13 @@ struct PromptPanel: View {
         !durationActive || authoring?.draft.scenesEnabled != true || authoring?.draft.scenes.isEmpty != false
     }
 
+    @ViewBuilder private var sourceOpeningFailure: some View {
+        if let error = controller.durationSourceError,
+           controller.videoDuration?.draft.source == nil || !controller.usesDuration(on: host, recipe: recipe) {
+            NativeVideoSourceFailure(message: error, keepDraft: controller.keepDraftAfterSourceFailure)
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             if let steps = controller.run.steps {
@@ -58,6 +65,7 @@ struct PromptPanel: View {
             if let recipe {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
+                        sourceOpeningFailure
                         if controller.sequence.draft != nil, let temporal = recipe.temporal {
                             NativeSequenceEditor(session: controller.sequence, fps: draft.fps ?? 24,
                                 frameRange: (chainLimits?.authoring?.minFrames ?? temporal.frames.min) ... max(chainLimits?.authoring?.minFrames ?? temporal.frames.min, min(temporal.frames.max, chainLimits?.framesPerClipCap ?? temporal.frames.max)),
@@ -114,9 +122,7 @@ struct PromptPanel: View {
                         actionsHeight = $0
                     }
             } else {
-                if let sourceError = controller.durationSourceError {
-                    Text(sourceError).font(.callout)
-                }
+                sourceOpeningFailure
                 Text("Pick a model to see its controls.")
                     .foregroundStyle(.secondary)
             }

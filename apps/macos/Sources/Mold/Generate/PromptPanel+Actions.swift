@@ -120,6 +120,7 @@ extension PromptPanel {
     /// computed for the caption under the slider and then only discovered
     /// after the press, as a failure on the canvas.
     private var submitRefusal: String? {
+        if let refusal = controller.durationSourceOpeningRefusal ?? controller.durationRecipeRefusal(recipe) { return refusal }
         if let refusal = drafts.recoveryRefusal { return refusal }
         if let refusal = reuse.referenceRefusal(for: draft) { return refusal }
         if controller.sequence.draft != nil, let model {

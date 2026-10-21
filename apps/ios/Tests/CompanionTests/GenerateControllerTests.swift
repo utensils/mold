@@ -30,6 +30,18 @@ struct GenerateControllerTests {
         #expect(restored.hasVideoQueueContent)
     }
 
+    @Test func failedExtensionBlocksExistingDraftUntilExplicitAcknowledgement() async throws {
+        let (generate, _) = try await setUp()
+        let original = generate.draft, token = generate.durationSourceToken
+        generate.durationSourceError = "Original controls cannot be preserved. Use Start again or CLI."
+        generate.durationError = generate.durationSourceError
+        #expect(generate.blocker == generate.durationSourceError)
+        generate.keepDraftAfterSourceFailure()
+        #expect(generate.durationSourceError == nil && generate.durationError == nil)
+        #expect(generate.durationSourceToken != token)
+        #expect(generate.draft == original)
+    }
+
     @Test func pinnedSourceUsesItsOwnInstalledModelContract() async throws {
         let (generate, _) = try await setUp()
         let first = try #require(generate.hosts.hosts.first)
